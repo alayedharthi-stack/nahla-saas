@@ -1,4 +1,4 @@
-﻿"""Connection-safe PostgreSQL advisory locks.
+"""Connection-safe PostgreSQL advisory locks.
 
 PostgreSQL session advisory locks are bound to the physical connection that
 acquired them. SQLAlchemy `Session` operations may commit or rollback and
@@ -67,6 +67,7 @@ class DedicatedAdvisoryLock:
         self._namespace = namespace
         self._level_key = level_key
         self._conn: Optional[Connection] = None
+        self._owns_connection = False
         self._held = False
         self._invalidated = False
         self._thread_lock: Optional[threading.Lock] = None
@@ -127,7 +128,12 @@ class DedicatedAdvisoryLock:
             self._safe_close()
 
         bind = self._db.get_bind()
-        self._conn = bind.connect()
+        if isinstance(bind, Connection):
+            self._conn = bind
+            self._owns_connection = False
+        else:
+            self._conn = bind.connect()
+            self._owns_connection = True
         sql, params = self._acquire_sql()
         try:
             acquired = bool(self._conn.execute(text(sql), params).scalar())
@@ -194,24 +200,28 @@ class DedicatedAdvisoryLock:
         self._held = False
         if self._conn is None:
             return
-        try:
-            self._conn.invalidate()
-        except Exception:  # noqa: silent-ok -- invalidate cleanup must not raise
-            pass
-        try:
-            self._conn.close()
-        except Exception:  # noqa: silent-ok -- close cleanup must not raise
-            pass
+        if self._owns_connection:
+            try:
+                self._conn.invalidate()
+            except Exception:  # noqa: silent-ok -- invalidate cleanup must not raise
+                pass
+            try:
+                self._conn.close()
+            except Exception:  # noqa: silent-ok -- close cleanup must not raise
+                pass
         self._conn = None
+        self._owns_connection = False
 
     def _safe_close(self) -> None:
         if self._conn is None:
             return
-        try:
-            self._conn.close()
-        except Exception:  # noqa: silent-ok -- close cleanup must not raise
-            pass
+        if self._owns_connection:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: silent-ok -- close cleanup must not raise
+                pass
         self._conn = None
+        self._owns_connection = False
 
     def __enter__(self) -> 'DedicatedAdvisoryLock':
         if not self.try_acquire():
