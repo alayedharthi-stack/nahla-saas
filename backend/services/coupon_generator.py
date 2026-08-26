@@ -18,7 +18,7 @@ Code format (source of truth)
 This gives 36^3 = 46,656 codes per tenant - enough headroom that collision
 retries are effectively free.
 
-Legacy `NHL\d{3}` codes from before this fix are grandfathered:
+Legacy ``NHL\\d{3}`` codes from before this fix are grandfathered:
   - They are recognised by ``_is_short_coupon_code`` so existing reporting
     and pool counts keep working.
   - They are loaded into ``_reserved_codes`` so the new generator never
@@ -692,7 +692,7 @@ class CouponGeneratorService:
                 log_event(
                     EVENTS.DISPATCHER_LOOP_ERROR,
                     tenant_id=self.tenant_id,
-                    level=level,
+                    coupon_level=level,
                     context="coupon_pool_lock_held_skip",
                 )
                 continue
