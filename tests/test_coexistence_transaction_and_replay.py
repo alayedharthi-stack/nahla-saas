@@ -47,12 +47,22 @@ def _remap_jsonb(engine) -> None:
 
 
 def _session_factory():
+    from sqlalchemy import text
+
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     _remap_jsonb(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS alembic_version "
+                "(version_num VARCHAR(32) NOT NULL)"
+            )
+        )
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0101')"))
     return sessionmaker(bind=engine), engine
 
 
