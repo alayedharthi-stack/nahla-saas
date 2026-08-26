@@ -443,17 +443,17 @@ def test_exactly_one_commit_on_success_route(pg_session: Session, monkeypatch) -
 def _cleanup_pg_route_fixtures(engine: Engine) -> None:
     """Remove committed coexistence PG route tenants so graph assets stay isolated."""
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM whatsapp_oauth_nonces WHERE tenant_id >= 990877"))
+        conn.execute(text("DELETE FROM whatsapp_oauth_nonces WHERE tenant_id BETWEEN 990877 AND 990899"))
         conn.execute(
             text(
                 "DELETE FROM whatsapp_connections "
-                "WHERE tenant_id >= 990877 "
+                "WHERE tenant_id BETWEEN 990877 AND 990899 "
                 "OR whatsapp_business_account_id = :waba "
                 "OR phone_number_id = :phone"
             ),
             {"waba": ROUTE_WABA, "phone": ROUTE_PHONE},
         )
-        conn.execute(text("DELETE FROM tenants WHERE id >= 990877"))
+        conn.execute(text("DELETE FROM tenants WHERE id BETWEEN 990877 AND 990899"))
 
 def _seed_pg_tenant(SessionLocal: sessionmaker, tenant_id: int, **conn_kwargs) -> WhatsAppConnection | None:
     db = SessionLocal()
