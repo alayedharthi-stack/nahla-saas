@@ -52,6 +52,26 @@ def _run_alembic(engine, revision: str) -> None:
         os.chdir(prev)
 
 
+
+def _ensure_whatsapp_asset_unique_indexes(engine) -> None:
+    """Mirror production startup indexes required for asset race defense."""
+    stmts = (
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_conn_phone_number_id
+        ON whatsapp_connections (phone_number_id)
+        WHERE phone_number_id IS NOT NULL
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_conn_waba_id
+        ON whatsapp_connections (whatsapp_business_account_id)
+        WHERE whatsapp_business_account_id IS NOT NULL
+        """,
+    )
+    with engine.begin() as conn:
+        for stmt in stmts:
+            conn.execute(text(stmt))
+
+
 def _validation_ok():
     return SimpleNamespace(
         is_valid=True,
@@ -70,6 +90,7 @@ def pg_engine():
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         _run_alembic(engine, "0101")
+        _ensure_whatsapp_asset_unique_indexes(engine)
     except Exception as exc:  # noqa: BLE001
         if (os.getenv("A1_PG_INTEGRATION_REQUIRED") or "").strip() == "1":
             pytest.fail(f"PostgreSQL unavailable: {exc}")
