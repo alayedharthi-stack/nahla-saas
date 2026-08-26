@@ -1,4 +1,4 @@
-﻿"""Basic tests for coupon retention reporting helpers."""
+"""Basic tests for coupon retention reporting helpers."""
 from __future__ import annotations
 
 import sys
