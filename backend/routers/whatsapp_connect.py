@@ -115,6 +115,16 @@ from services.whatsapp_platform.service import (
 
 logger = logging.getLogger("nahla-backend")
 
+
+def _d360_operation_ok(result: Optional[Dict[str, Any]]) -> bool:
+    """True when a safe D360 webhook operation result indicates success."""
+    if not isinstance(result, dict):
+        return False
+    if "success" in result:
+        return bool(result.get("success"))
+    return "error" not in result
+
+
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Connection"])
 
 def _sanitize_webhook_operation_result(result: Any) -> dict[str, Any]:
@@ -2074,8 +2084,8 @@ async def coexistence_partner_connect(
         except Exception as exc:
             log_wa_direct_exception("coexistence partner waba webhook", exc, tag="coexistence")
             waba_webhook_result = d360_safe_error_payload(exc, operation="dialog360_configure_webhook")
-        channel_ok = "error" not in (webhook_result or {})
-        waba_ok    = "error" not in (waba_webhook_result or {})
+        channel_ok = _d360_operation_ok(webhook_result)
+        waba_ok = _d360_operation_ok(waba_webhook_result)
         if channel_ok or waba_ok:
             conn.webhook_verified = True
             if channel_status == "ready":
@@ -2209,8 +2219,8 @@ async def admin_activate_coexistence(
         except Exception as exc:
             log_wa_direct_exception("coexistence activate waba webhook", exc, tag="coexistence")
             waba_webhook_result = d360_safe_error_payload(exc, operation="dialog360_configure_webhook")
-        channel_ok = "error" not in (webhook_result or {})
-        waba_ok    = "error" not in (waba_webhook_result or {})
+        channel_ok = _d360_operation_ok(webhook_result)
+        waba_ok = _d360_operation_ok(waba_webhook_result)
         meta["last_webhook_setup"] = d360_safe_persist_webhook_setup(webhook_result)
         meta["last_waba_webhook_setup"] = d360_safe_persist_webhook_setup(waba_webhook_result)
         conn.extra_metadata = meta
@@ -2794,7 +2804,7 @@ async def admin_coexistence_auto_configure(
     except Exception as exc:
         log_wa_direct_exception("coexistence auto-configure", exc, tenant_id=body.tenant_id, tag="coexistence")
         result = d360_safe_error_payload(exc, secrets=[read_access_token(conn)], operation="auto_configure_channel")
-    ok = "error" not in (result or {})
+    ok = _d360_operation_ok(result)
     _log_d360_verify(
         operation="auto_configure_channel",
         tenant_id=body.tenant_id,
@@ -2839,7 +2849,7 @@ async def admin_coexistence_auto_configure(
             ),
             timeout=10.0,
         )
-        waba_ok = "error" not in (waba_result or {})
+        waba_ok = _d360_operation_ok(waba_result)
     except Exception as exc:
         log_wa_direct_exception("coexistence auto-configure waba webhook", exc, tenant_id=body.tenant_id, tag="coexistence")
         waba_result = d360_safe_error_payload(exc, secrets=[read_access_token(conn)], operation="auto_configure_waba")

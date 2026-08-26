@@ -1723,8 +1723,10 @@ async def oauth_callback(
         )
         return _oauth_callback_finish(ok=False, reason="المتجر غير موجود — أعد تسجيل الدخول.")
 
+    _nonce_bind = db.get_bind()
+    _nonce_engine = _nonce_bind.engine if hasattr(_nonce_bind, "engine") else _nonce_bind
     nonce_status = consume_oauth_nonce_durable(
-        db.get_bind(),
+        _nonce_engine,
         nonce=oauth_state.nonce,
         tenant_id=tenant_id,
         connection_mode=oauth_state.connection_mode,
