@@ -1,7 +1,8 @@
-"""PostgreSQL concurrency tests for coupon pool per-level cap."""
+﻿"""PostgreSQL concurrency tests for coupon pool per-level cap."""
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -106,13 +107,22 @@ def _all_codes(engine, tenant_id: int) -> list[str]:
 
 
 def test_concurrent_ensure_coupon_pool_bronze_capped(postgres_engine) -> None:
+    """Two independent DB connections race to refill the same tenant bronze pool."""
     tenant_id = TEST_TENANT_COUPON_A
-    results = asyncio.run(
-        asyncio.gather(
-            _ensure_pool_once(postgres_engine, tenant_id),
-            _ensure_pool_once(postgres_engine, tenant_id),
-        )
-    )
+    session, connection = _new_session(postgres_engine)
+    try:
+        _seed_tenant(session, tenant_id)
+    finally:
+        session.close()
+        connection.close()
+
+    def _run_in_thread() -> dict:
+        return asyncio.run(_ensure_pool_once(postgres_engine, tenant_id))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_run_in_thread), pool.submit(_run_in_thread)]
+        results = [f.result() for f in futures]
+
     assert len(results) == 2
     assert _bronze_count(postgres_engine, tenant_id) <= 3
     codes = _all_codes(postgres_engine, tenant_id)
@@ -153,4 +163,4 @@ def test_two_levels_do_not_corrupt_each_other(postgres_engine) -> None:
 
 
 def test_postgres_integration_required_not_skipped() -> None:
-    assert _integration_required() or True  # module import path always exercised in CI job
+    assert _integration_required() or True
