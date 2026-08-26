@@ -1,4 +1,4 @@
-"""PostgreSQL concurrency tests for coupon pool per-level cap."""
+﻿"""PostgreSQL concurrency tests for coupon pool per-level cap."""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +21,7 @@ for _entry in (str(_REPO_ROOT), str(_BACKEND), str(_DATABASE)):
 from core.pg_advisory_lock import DedicatedAdvisoryLock
 from database.models import Coupon, Tenant, TenantSettings
 from services.coupon_generator import (
+    LEVEL_TO_REPRESENTATIVE_SEGMENT,
     POOL_LOCK_NAMESPACE,
     CouponGeneratorService,
 )
@@ -147,6 +148,32 @@ def _all_codes(engine, tenant_id: int) -> list[str]:
         connection.close()
 
 
+
+
+def _add_pool_coupon(session: Session, tenant_id: int, level: str, code: str) -> None:
+    """Insert a warm-pool coupon that counts toward _count_pool_by_level."""
+    segment = LEVEL_TO_REPRESENTATIVE_SEGMENT[level]
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "source": "auto",
+        "target_segment": segment,
+        "used": "false",
+        "salla_synced": "true",
+        "active": True,
+        "coupon_level": level,
+    }
+    session.add(
+        Coupon(
+            tenant_id=tenant_id,
+            code=code,
+            discount_type="percentage",
+            discount_value="10",
+            expires_at=now + timedelta(days=2),
+            extra_metadata=metadata,
+            source_type="system",
+            coupon_level=level,
+        )
+    )
 def _pool_lock_key(tenant_id: int, level: str = "bronze") -> int:
     suffix = {"bronze": 0, "silver": 1, "gold": 2, "vip": 3}[level]
     return int(tenant_id) * 10 + suffix
@@ -158,6 +185,19 @@ def test_concurrent_ensure_coupon_pool_bronze_capped(postgres_engine) -> None:
     session, connection = _new_session(postgres_engine)
     try:
         _seed_tenant(session, tenant_id)
+        session.query(Coupon).filter(Coupon.tenant_id == tenant_id).delete()
+        session.commit()
+        for level, codes in (
+            ("silver", ["NHSL1", "NHSL2", "NHSL3"]),
+            ("gold", ["NHGD1", "NHGD2", "NHGD3"]),
+            ("vip", ["NHVP1", "NHVP2", "NHVP3"]),
+        ):
+            for code in codes:
+                _add_pool_coupon(session, tenant_id, level, code)
+        session.commit()
+        assert _bronze_count(postgres_engine, tenant_id) == 0
+        for level in ("silver", "gold", "vip"):
+            assert _level_count(postgres_engine, tenant_id, level) == 3
     finally:
         session.close()
         connection.close()
