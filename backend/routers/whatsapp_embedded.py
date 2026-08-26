@@ -2241,11 +2241,15 @@ async def select_phone(
         assert_phone_id_not_claimed(db, body.phone_number_id, tenant_id)
     except TenantIntegrityError as _tie:
         logger.error(
-            "[EmbeddedSignup] select-phone BLOCKED — phone_number_id=%s already "
-            "claimed by another tenant. tenant=%s conflict: %s",
-            redact_graph_id(body.phone_number_id), tenant_id, redact_sensitive_log_text(_tie),
+            "[EmbeddedSignup] select-phone BLOCKED — tenant=%s phone=%s conflict_tenant=%s",
+            tenant_id,
+            redact_graph_id(body.phone_number_id),
+            getattr(_tie, "conflict_tenant_id", None),
         )
-        raise HTTPException(status_code=409, detail=str(_tie)) from _tie
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "phone_id_already_claimed"},
+        ) from _tie
     try:
         evict_phone_id_from_other_tenants(db, body.phone_number_id, tenant_id)
     except NameError:
