@@ -281,8 +281,8 @@ def test_load_connection_for_update_uses_row_lock(postgres_engine: Engine) -> No
     def waiter() -> None:
         entered.wait(timeout=5)
         conn = postgres_engine.connect()
-        conn.execute(text("SET lock_timeout = '2s'"))
         trans = conn.begin()
+        conn.execute(text("SET LOCAL lock_timeout = '2s'"))
         local = sessionmaker(bind=conn, expire_on_commit=False)()
         try:
             load_connection_for_update(local, tenant_id)
