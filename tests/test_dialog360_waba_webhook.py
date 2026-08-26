@@ -201,7 +201,9 @@ class TestDialog360WabaWebhookHelpers:
                 url="https://api.nahlah.ai/webhook/whatsapp/360dialog",
             )
         )
-        assert "error" in result
+        assert result["success"] is False
+        assert result["http_status"] == 401
+        assert result.get("error_type") == "remote_error"
 
     def test_get_waba_webhook_returns_full_config(self, patch_httpx):
         patch_httpx.responses[("GET", f"{wa_service.D360_BASE}/waba_webhook")] = _FakeResp(

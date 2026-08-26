@@ -265,27 +265,28 @@ def consume_oauth_nonce_durable(
     now = now or datetime.now(timezone.utc)
     nonce_hash = hash_oauth_nonce(nonce)
     if engine.dialect.name == "postgresql":
-        with engine.begin() as conn:
-            result = conn.execute(
-                text(
-                    "UPDATE whatsapp_oauth_nonces "
-                    "SET consumed_at = :now "
-                    "WHERE nonce_hash = :nonce_hash "
-                    "AND tenant_id = :tenant_id "
-                    "AND connection_mode = :connection_mode "
-                    "AND consumed_at IS NULL "
-                    "AND expires_at > :now "
-                    "RETURNING id"
-                ),
-                {
-                    "now": now,
-                    "nonce_hash": nonce_hash,
-                    "tenant_id": int(tenant_id),
-                    "connection_mode": str(connection_mode),
-                },
-            )
-            if result.first() is not None:
-                return "consumed"
+        with engine.connect() as conn:
+            with conn.begin():
+                result = conn.execute(
+                    text(
+                        "UPDATE whatsapp_oauth_nonces "
+                        "SET consumed_at = :now "
+                        "WHERE nonce_hash = :nonce_hash "
+                        "AND tenant_id = :tenant_id "
+                        "AND connection_mode = :connection_mode "
+                        "AND consumed_at IS NULL "
+                        "AND expires_at > :now "
+                        "RETURNING id"
+                    ),
+                    {
+                        "now": now,
+                        "nonce_hash": nonce_hash,
+                        "tenant_id": int(tenant_id),
+                        "connection_mode": str(connection_mode),
+                    },
+                )
+                if result.first() is not None:
+                    return "consumed"
         with engine.connect() as conn:
             row = conn.execute(
                 text(
