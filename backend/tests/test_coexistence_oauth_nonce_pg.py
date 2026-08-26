@@ -6,6 +6,7 @@ import hashlib
 import os
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -198,42 +199,116 @@ def test_existing_salla_0100_upgrade_to_0101_creates_nonce_table(postgres_engine
     admin.dispose()
 
 
-def test_pg_advisory_xact_lock_serializes(postgres_engine: Engine, pg_session: Session) -> None:
-    pg_session.add(Tenant(id=990877, name="lock-tenant", is_active=True))
-    pg_session.commit()
-    results: list[int] = []
-    lock = threading.Lock()
+def test_pg_advisory_xact_lock_serializes(postgres_engine: Engine) -> None:
+    tenant_id = 990877
+    with postgres_engine.begin() as conn:
+        setup = sessionmaker(bind=conn, expire_on_commit=False)()
+        setup.add(Tenant(id=tenant_id, name="lock-tenant", is_active=True))
+        setup.flush()
 
-    def worker() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+    order_lock = threading.Lock()
+
+    def worker(label: str) -> None:
         conn = postgres_engine.connect()
         trans = conn.begin()
         local = sessionmaker(bind=conn, expire_on_commit=False)()
         try:
-            acquire_tenant_transaction_lock(local, 990877)
-            with lock:
-                results.append(1)
-            local.execute(text("SELECT pg_sleep(0.1)"))
+            acquire_tenant_transaction_lock(local, tenant_id)
+            with order_lock:
+                order.append(f"{label}:entered")
+            if label == "first":
+                entered.set()
+                release.wait(timeout=10)
+            else:
+                entered.wait(timeout=10)
             trans.commit()
         finally:
             local.close()
             conn.close()
 
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
+    t1 = threading.Thread(target=worker, args=("first",))
+    t2 = threading.Thread(target=worker, args=("second",))
     t1.start()
+    entered.wait(timeout=5)
     t2.start()
+    time.sleep(0.25)
+    with order_lock:
+        assert order == ["first:entered"]
+    release.set()
     t1.join(timeout=15)
     t2.join(timeout=15)
-    assert len(results) == 2
+    assert order[0] == "first:entered"
+    assert order[-1] == "second:entered"
+    assert len(order) == 2
 
 
-def test_load_connection_for_update_uses_row_lock(pg_session: Session) -> None:
-    pg_session.add(Tenant(id=990878, name="for-update", is_active=True))
-    pg_session.commit()
-    conn, existed = load_connection_for_update(pg_session, 990878)
-    assert existed is False
-    assert conn.tenant_id == 990878
-    pg_session.rollback()
+def test_load_connection_for_update_uses_row_lock(postgres_engine: Engine) -> None:
+    tenant_id = 990878
+    with postgres_engine.begin() as conn:
+        setup = sessionmaker(bind=conn, expire_on_commit=False)()
+        setup.add(Tenant(id=tenant_id, name="for-update", is_active=True))
+        setup.add(
+            WhatsAppConnection(
+                tenant_id=tenant_id,
+                status="disconnected",
+                provider="dialog360",
+                phone_number=E164,
+            )
+        )
+        setup.flush()
+
+    entered = threading.Event()
+    release = threading.Event()
+    outcomes: list[str] = []
+
+    def holder() -> None:
+        conn = postgres_engine.connect()
+        trans = conn.begin()
+        local = sessionmaker(bind=conn, expire_on_commit=False)()
+        try:
+            loaded, existed = load_connection_for_update(local, tenant_id)
+            assert existed is True
+            entered.set()
+            release.wait(timeout=10)
+            trans.commit()
+        finally:
+            local.close()
+            conn.close()
+
+    def waiter() -> None:
+        entered.wait(timeout=5)
+        conn = postgres_engine.connect()
+        conn.execute(text("SET lock_timeout = '2s'"))
+        trans = conn.begin()
+        local = sessionmaker(bind=conn, expire_on_commit=False)()
+        try:
+            load_connection_for_update(local, tenant_id)
+            outcomes.append("got_lock")
+            trans.commit()
+        except Exception:
+            outcomes.append("blocked")
+            trans.rollback()
+        finally:
+            local.close()
+            conn.close()
+
+    t1 = threading.Thread(target=holder)
+    t2 = threading.Thread(target=waiter)
+    t1.start()
+    entered.wait(timeout=5)
+    t2.start()
+    t2.join(timeout=5)
+    if t2.is_alive():
+        outcomes.append("still_blocked")
+        release.set()
+        t2.join(timeout=10)
+    else:
+        release.set()
+    t1.join(timeout=10)
+    assert "blocked" in outcomes or "still_blocked" in outcomes
 
 
 def test_atomic_nonce_consume(pg_session: Session) -> None:
@@ -261,52 +336,85 @@ def test_replay_rejected_after_consume(pg_session: Session) -> None:
     assert second == "already_consumed"
 
 
-def test_new_tenant_finalization_failure_leaves_no_row(pg_session: Session) -> None:
-    pg_session.add(Tenant(id=990881, name="new-fail", is_active=True))
-    pg_session.commit()
-    conn, existed = load_connection_for_update(pg_session, 990881)
-    assert existed is False
-    pg_session.rollback()
-    count = pg_session.query(WhatsAppConnection).filter_by(tenant_id=990881).count()
-    assert count == 0
+def test_pg_new_tenant_route_failure_leaves_no_row(postgres_engine: Engine, monkeypatch) -> None:
+    tenant_id = 990881
+    with postgres_engine.begin() as conn:
+        setup = sessionmaker(bind=conn, expire_on_commit=False)()
+        setup.add(Tenant(id=tenant_id, name="new-fail", is_active=True))
+        setup.flush()
+
+    SessionLocal = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    client, _emb, _script = _pg_route_stack(SessionLocal, monkeypatch, mode="ineligible")
+    state = _start_state(client, tenant_id)
+    resp = _callback(client, tenant_id, state)
+    assert resp.status_code == 302
+    assert "#meta=error" in resp.headers["location"]
+
+    verify = SessionLocal()
+    assert verify.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).count() == 0
+    verify.close()
 
 
-def test_existing_dialog360_snapshot_restored_on_rollback(pg_session: Session) -> None:
-    from services.coexistence_embedded_exchange import stage_coexistence_credentials
+def test_pg_dialog360_route_rollback_restores_snapshot(postgres_engine: Engine, monkeypatch) -> None:
+    from services.whatsapp_platform.wa_connection_secrets import read_access_token, store_access_token
 
-    pg_session.add(Tenant(id=990882, name="restore", is_active=True))
+    tenant_id = 990882
     connected_at = datetime(2026, 1, 10, tzinfo=timezone.utc)
-    conn = WhatsAppConnection(
-        tenant_id=990882,
-        status="disconnected",
-        provider="dialog360",
-        phone_number=E164,
-        connected_at=connected_at,
-        extra_metadata={"legacy": "pg-877"},
-    )
-    pg_session.add(conn)
-    pg_session.flush()
-    original = {
-        "provider": conn.provider,
-        "status": conn.status,
-        "phone_number": conn.phone_number,
-        "connected_at": conn.connected_at,
-        "extra_metadata": dict(conn.extra_metadata or {}),
+    live_since = datetime(2026, 1, 10, 12, 5, tzinfo=timezone.utc)
+    with postgres_engine.begin() as conn:
+        setup = sessionmaker(bind=conn, expire_on_commit=False)()
+        setup.add(Tenant(id=tenant_id, name="restore", is_active=True))
+        row = WhatsAppConnection(
+            tenant_id=tenant_id,
+            status="disconnected",
+            provider="dialog360",
+            phone_number=E164,
+            whatsapp_business_account_id=WABA,
+            phone_number_id=PHONE,
+            connected_at=connected_at,
+            whatsapp_ai_live_since=live_since,
+            extra_metadata={"legacy": "pg-877"},
+        )
+        setup.add(row)
+        setup.flush()
+        store_access_token(row, "dialog-token-pg-877")
+        setup.flush()
+
+    SessionLocal = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    snapshot = SessionLocal()
+    original = snapshot.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one()
+    original_fields = {
+        "provider": original.provider,
+        "status": original.status,
+        "phone_number": original.phone_number,
+        "whatsapp_business_account_id": original.whatsapp_business_account_id,
+        "phone_number_id": original.phone_number_id,
+        "connected_at": original.connected_at,
+        "whatsapp_ai_live_since": original.whatsapp_ai_live_since,
+        "extra_metadata": dict(original.extra_metadata or {}),
+        "access_token": read_access_token(original),
     }
-    nested = pg_session.begin_nested()
-    loaded, existed = load_connection_for_update(pg_session, 990882)
-    assert existed is True
-    stage_coexistence_credentials(loaded, waba_id=WABA, access_token=SYNTH_TOKEN, token_type="user")
-    pg_session.flush()
-    nested.rollback()
-    pg_session.expire_all()
-    restored = pg_session.query(WhatsAppConnection).filter_by(tenant_id=990882).one()
-    for key, value in original.items():
-        got = getattr(restored, key)
+    snapshot.close()
+
+    client, _emb, _script = _pg_route_stack(SessionLocal, monkeypatch, mode="webhook_fail")
+    state = _start_state(client, tenant_id)
+    resp = _callback(client, tenant_id, state)
+    assert resp.status_code == 302
+    assert "#meta=error" in resp.headers["location"]
+
+    verify = SessionLocal()
+    restored = verify.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one()
+    for key, value in original_fields.items():
+        got = read_access_token(restored) if key == "access_token" else getattr(restored, key)
         if key == "connected_at" and got is not None and value is not None:
             assert got.replace(tzinfo=timezone.utc) == value.replace(tzinfo=timezone.utc)
+        elif key == "whatsapp_ai_live_since" and got is not None and value is not None:
+            assert got.replace(tzinfo=timezone.utc) == value.replace(tzinfo=timezone.utc)
+        elif key == "extra_metadata":
+            assert dict(got or {}) == value
         else:
             assert got == value
+    verify.close()
 
 
 def test_exactly_one_commit_on_success_route(pg_session: Session, monkeypatch) -> None:
@@ -414,18 +522,31 @@ def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine) -> None
         cleanup_trans.rollback()
     finally:
         cleanup_conn.close()
-def test_pg_concurrent_callbacks_single_transition(pg_db_factory: sessionmaker, monkeypatch) -> None:
+def test_pg_concurrent_callbacks_single_transition(postgres_engine: Engine, monkeypatch) -> None:
     import asyncio
     from types import SimpleNamespace
 
     tenant_id = 990885
-    _seed_pg_tenant(pg_db_factory, tenant_id)
-    client, emb, _script = _pg_route_stack(pg_db_factory, monkeypatch)
+    with postgres_engine.begin() as conn:
+        setup = sessionmaker(bind=conn, expire_on_commit=False)()
+        setup.add(Tenant(id=tenant_id, name=f"tenant-{tenant_id}", is_active=True))
+        setup.add(
+            WhatsAppConnection(
+                tenant_id=tenant_id,
+                status="disconnected",
+                provider="dialog360",
+                phone_number=ROUTE_E164,
+            )
+        )
+        setup.flush()
+
+    SessionLocal = sessionmaker(bind=postgres_engine, expire_on_commit=False)
+    client, emb, _script = _pg_route_stack(SessionLocal, monkeypatch)
     state = _start_state(client, tenant_id)
     request = SimpleNamespace(state=SimpleNamespace(tenant_id=tenant_id), headers={})
 
     async def _one() -> str:
-        db = pg_db_factory()
+        db = SessionLocal()
         try:
             resp = await emb.oauth_callback(
                 request=request,
@@ -449,9 +570,9 @@ def test_pg_concurrent_callbacks_single_transition(pg_db_factory: sessionmaker, 
     other = [loc for loc in locations if loc not in ok]
     assert len(ok) == 1, locations
     assert len(other) == 1, locations
-    db = pg_db_factory()
-    assert db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id, status="connected").count() == 1
-    db.close()
+    verify = SessionLocal()
+    assert verify.query(WhatsAppConnection).filter_by(tenant_id=tenant_id, status="connected").count() == 1
+    verify.close()
 
 
 def test_pg_exchange_route_success(pg_db_factory: sessionmaker, monkeypatch) -> None:

@@ -15,6 +15,7 @@ from .provider_utils import (
     WHATSAPP_PROVIDER_360DIALOG,
     wa_provider,
 )
+from core.log_redaction import redact_sensitive_log_text
 from .wa_connection_secrets import read_access_token, store_access_token
 
 logger = logging.getLogger("nahla.whatsapp.token_manager")
@@ -243,7 +244,7 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
     try:
         data = await refresh_long_lived_token(plain)
     except Exception as exc:
-        logger.warning("[WA token] refresh failed with network error: %s", exc)
+        logger.warning("[WA token] refresh failed with network error: %s", redact_sensitive_log_text(exc))
         return None
     if "error" in data:
         err_code = int(data.get("error", {}).get("code") or 0)
@@ -254,7 +255,7 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
                 getattr(conn, "tenant_id", "?"),
             )
         else:
-            logger.warning("[WA token] refresh rejected by Meta: %s", data)
+            logger.warning("[WA token] refresh rejected by Meta: %s", redact_sensitive_log_text(data))
         return None
     new_token = data.get("access_token")
     if not new_token:

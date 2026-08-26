@@ -235,16 +235,16 @@ def test_meta_oauth_js_sdk_exchange_helper_does_not_inject_login_success(caplog)
         async def aclose(self):
             return None
 
-        async def post(self, url, data=None, **kwargs):
+        async def get(self, url, params=None, **kwargs):
             captured["url"] = url
-            captured["data"] = dict(data or {})
+            captured["params"] = dict(params or {})
             return _Resp()
 
     caplog.set_level(logging.INFO)
     with patch("services.meta_graph_oauth_client.httpx.AsyncClient", _Client):
         data = asyncio.run(_exchange_code_for_token("live-auth-code", None))
     assert data["access_token"] == "tok-secret"
-    assert "redirect_uri" not in captured["data"]
+    assert "redirect_uri" not in captured["params"]
     joined = " ".join(record.getMessage() for record in caplog.records)
     assert "live-auth-code" not in joined
     assert "tok-secret" not in joined
@@ -269,13 +269,13 @@ def test_meta_oauth_11_server_path_still_sends_bound_uri():
         async def aclose(self):
             return None
 
-        async def post(self, url, data=None, **kwargs):
-            captured["data"] = dict(data or {})
+        async def get(self, url, params=None, **kwargs):
+            captured["params"] = dict(params or {})
             return _Resp()
 
     with patch("services.meta_graph_oauth_client.httpx.AsyncClient", _Client):
         asyncio.run(_exchange_code_for_token("auth-code", CANONICAL))
-    assert captured["data"]["redirect_uri"] == CANONICAL
+    assert captured["params"]["redirect_uri"] == CANONICAL
 
 
 def test_meta_oauth_12_helper_has_no_brain_imports():

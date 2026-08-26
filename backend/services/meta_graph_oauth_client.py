@@ -1,9 +1,9 @@
 ﻿"""Secure Meta Graph OAuth transport shared by Cloud API and Coexistence.
 
-Meta contracts:
-- ``/oauth/access_token`` accepts POST with application/x-www-form-urlencoded body.
-- ``/debug_token`` accepts the app access token via Authorization header; the
-  inspected ``input_token`` is sent in the POST body (never in the URL).
+Meta contracts (official docs):
+- ``GET /debug_token?input_token=…`` with app access token in Authorization header.
+  ``input_token`` in the query string is the documented closed exception for this endpoint.
+- ``GET /oauth/access_token`` with grant parameters in the query string (never ``access_token``).
 """
 from __future__ import annotations
 
@@ -19,7 +19,16 @@ logger = logging.getLogger("nahla.meta_graph_oauth")
 
 GRAPH = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
 
-_SENSITIVE_PARAM_NAMES = frozenset(
+# Documented closed exception: only ``/debug_token`` may place ``input_token`` in the URL query.
+# Ref: https://developers.facebook.com/docs/graph-api/reference/debug_token/
+DEBUG_TOKEN_QUERY_EXCEPTION = frozenset({"input_token"})
+
+# Documented GET grant parameters for /oauth/access_token.
+OAUTH_ACCESS_TOKEN_QUERY_PARAMS = frozenset({
+    "client_id", "client_secret", "code", "redirect_uri", "grant_type", "fb_exchange_token",
+})
+
+_SENSITIVE_QUERY_PARAM_NAMES = frozenset(
     {
         "access_token",
         "input_token",
@@ -47,9 +56,17 @@ def _safe_oauth_log_fields(params: Mapping[str, str]) -> Dict[str, Any]:
 
 
 def assert_no_sensitive_query_params(request: httpx.Request) -> None:
-    """Test helper: OAuth secrets must not appear in URL query strings."""
-    lowered = {k.lower() for k in request.url.params.keys()}
-    leaked = lowered & _SENSITIVE_PARAM_NAMES
+    """Test helper: block undocumented token query params on Graph URLs."""
+    path = request.url.path.rstrip("/")
+    lowered = {k.lower(): k for k in request.url.params.keys()}
+    if path.endswith("/debug_token"):
+        allowed = DEBUG_TOKEN_QUERY_EXCEPTION
+    elif path.endswith("/oauth/access_token"):
+        allowed = OAUTH_ACCESS_TOKEN_QUERY_PARAMS
+    else:
+        allowed = frozenset()
+    leaked = (set(lowered) & _SENSITIVE_QUERY_PARAM_NAMES) - allowed
+    assert "access_token" not in lowered, "access_token must not appear in Graph URL query"
     assert not leaked, f"sensitive OAuth params in URL query: {sorted(leaked)}"
 
 
@@ -60,9 +77,9 @@ async def debug_token(input_token: str, *, client: Optional[httpx.AsyncClient] =
     if owns_client:
         client = httpx.AsyncClient(timeout=15)
     try:
-        resp = await client.post(
+        resp = await client.get(
             f"{GRAPH}/debug_token",
-            data={"input_token": input_token},
+            params={"input_token": input_token},
             headers={"Authorization": f"Bearer {_app_access_token()}"},
         )
         data = resp.json()
@@ -92,7 +109,7 @@ async def exchange_code_for_token(
     if owns_client:
         client = httpx.AsyncClient(timeout=15)
     try:
-        resp = await client.post(f"{GRAPH}/oauth/access_token", data=dict(params))
+        resp = await client.get(f"{GRAPH}/oauth/access_token", params=dict(params))
         return resp.json()
     except Exception as exc:
         safe = sanitize_graph_oauth_exception(exc)
@@ -110,9 +127,9 @@ async def exchange_for_long_lived_token(short_token: str, *, client: Optional[ht
     if owns_client:
         client = httpx.AsyncClient(timeout=20)
     try:
-        resp = await client.post(
+        resp = await client.get(
             f"{GRAPH}/oauth/access_token",
-            data={
+            params={
                 "grant_type": "fb_exchange_token",
                 "client_id": META_APP_ID,
                 "client_secret": META_APP_SECRET,
@@ -131,7 +148,7 @@ async def exchange_for_long_lived_token(short_token: str, *, client: Optional[ht
         err = (data.get("error") or {}) if isinstance(data, dict) else {}
         logger.warning(
             "[meta_graph_oauth] long-lived exchange failed: %s",
-            err.get("message") or "unknown",
+            sanitize_graph_oauth_exception(err.get("message") or "unknown"),
         )
         return {"access_token": short_token, "token_type": "short_lived"}
     return {
@@ -148,9 +165,9 @@ def debug_token_sync(input_token: str, *, client: Optional[httpx.Client] = None)
     if owns_client:
         client = httpx.Client(timeout=20)
     try:
-        resp = client.post(
+        resp = client.get(
             f"{GRAPH}/debug_token",
-            data={"input_token": input_token},
+            params={"input_token": input_token},
             headers={"Authorization": f"Bearer {_app_access_token()}"},
         )
         data = resp.json()
@@ -171,9 +188,9 @@ async def refresh_long_lived_token(plain: str, *, client: Optional[httpx.AsyncCl
     if owns_client:
         client = httpx.AsyncClient(timeout=20)
     try:
-        resp = await client.post(
+        resp = await client.get(
             f"{GRAPH}/oauth/access_token",
-            data={
+            params={
                 "grant_type": "fb_exchange_token",
                 "client_id": META_APP_ID,
                 "client_secret": META_APP_SECRET,
@@ -191,6 +208,8 @@ async def refresh_long_lived_token(plain: str, *, client: Optional[httpx.AsyncCl
 
 
 __all__ = [
+    "DEBUG_TOKEN_QUERY_EXCEPTION",
+    "OAUTH_ACCESS_TOKEN_QUERY_PARAMS",
     "assert_no_sensitive_query_params",
     "debug_token",
     "debug_token_sync",

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION
+from core.log_redaction import redact_graph_id, redact_sensitive_log_text
 from services.meta_graph_oauth_client import debug_token as _secure_debug_token, debug_token_sync as _secure_debug_token_sync
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
 
@@ -100,7 +101,7 @@ async def debug_meta_token(token: str) -> Dict[str, Any]:
         "[wa_token_validation] debug_token is_valid=%s type=%s app_id=%s expires_at=%s",
         info.get("is_valid"),
         info.get("type"),
-        info.get("app_id"),
+        redact_graph_id(str(info.get("app_id") or "")),
         info.get("expires_at"),
     )
     return info
@@ -276,7 +277,7 @@ def validate_meta_access_token_sync(token: str) -> TokenValidationResult:
     try:
         debug_info = _secure_debug_token_sync(token)
     except Exception as exc:
-        logger.warning("[wa_token_validation] debug_token sync error: %s", exc)
+        logger.warning("[wa_token_validation] debug_token sync error: %s", redact_sensitive_log_text(exc))
         debug_info = {"is_valid": False, "error": {"message": str(exc)}}
     if not debug_info:
         return TokenValidationResult(

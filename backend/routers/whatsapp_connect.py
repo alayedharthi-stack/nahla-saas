@@ -925,9 +925,9 @@ async def _fetch_waba_info(token: str, waba_id: str) -> dict:
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
             f"{GRAPH_BASE}/{waba_id}",
+            headers={"Authorization": f"Bearer {token}"},
             params={
                 "fields": "id,name,currency,message_template_namespace,on_behalf_of_business_info",
-                "access_token": token,
             },
         )
     if resp.status_code != 200:
@@ -940,9 +940,9 @@ async def _fetch_phone_number_info(token: str, phone_number_id: str) -> dict:
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
             f"{GRAPH_BASE}/{phone_number_id}",
+            headers={"Authorization": f"Bearer {token}"},
             params={
                 "fields": "id,display_phone_number,verified_name,code_verification_status",
-                "access_token": token,
             },
         )
     if resp.status_code != 200:

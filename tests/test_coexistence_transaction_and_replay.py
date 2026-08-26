@@ -73,11 +73,15 @@ class GraphScript:
         if method in {"DELETE", "PUT"}:
             return httpx.Response(500, json={"error": {"message": "mutation forbidden in test"}})
         if path.endswith("/oauth/access_token"):
+            if method not in {"GET", "POST"}:
+                return httpx.Response(405, json={"error": {"message": "method not allowed"}})
             return httpx.Response(
                 200,
                 json={"access_token": "user-long-token", "token_type": "bearer", "expires_in": 5183944},
             )
         if path.endswith("/debug_token"):
+            if method != "GET":
+                return httpx.Response(405, json={"error": {"message": "debug_token requires GET"}})
             return httpx.Response(
                 200,
                 json={

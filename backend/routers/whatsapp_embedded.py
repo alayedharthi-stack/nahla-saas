@@ -49,6 +49,7 @@ from core.config import (
     meta_embedded_disabled_reason,
 )
 from core.database import get_db
+from core.log_redaction import redact_graph_id, redact_sensitive_log_text
 from database.models import WhatsAppConnection
 from services.whatsapp_platform.service import graph_get_with_context, graph_post_with_context
 from services.coexistence_embedded_exchange import (
@@ -196,7 +197,7 @@ async def _exchange_code_for_token(code: str, redirect_uri: Optional[str] = None
     if "error" in data:
         raise HTTPException(
             status_code=400,
-            detail=f"فشل تبادل الكود مع Meta: {data['error'].get('message', '')}",
+            detail=_meta_embedded_error_message(data.get("error") or {}, "فشل تبادل الكود مع Meta."),
         )
     return data   # {access_token, token_type, expires_in?}
 
@@ -266,7 +267,7 @@ async def _get_waba_id_from_token(token: str, debug_info: Optional[dict] = None)
         if scope.get("scope") == "whatsapp_business_management":
             ids = scope.get("target_ids", [])
             if ids:
-                logger.info("[EmbeddedSignup] WABA found via granular_scopes: %s", ids[0])
+                logger.info("[EmbeddedSignup] WABA found via granular_scopes: %s", redact_graph_id(ids[0]))
                 return str(ids[0])
 
     # Strategy 2: list businesses, then their WABAs
@@ -279,7 +280,7 @@ async def _get_waba_id_from_token(token: str, debug_info: Optional[dict] = None)
                 params={"fields": "id,name"},
             )
             biz_data = biz_resp.json()
-        logger.info("[EmbeddedSignup] /me/businesses: %s", biz_data)
+        logger.info("[EmbeddedSignup] /me/businesses count=%s", len(biz_data.get("data") or []) if isinstance(biz_data, dict) else 0)
         for biz in biz_data.get("data", []):
             biz_id = biz["id"]
             async with httpx.AsyncClient(timeout=15) as client:
@@ -289,12 +290,12 @@ async def _get_waba_id_from_token(token: str, debug_info: Optional[dict] = None)
                     params={"fields": "id,name"},
                 )
                 wa_data = wa_resp.json()
-            logger.info("[EmbeddedSignup] WABAs for biz %s: %s", biz_id, wa_data)
+            logger.info("[EmbeddedSignup] WABAs for biz %s count=%s", redact_graph_id(biz_id), len(wa_data.get("data") or []) if isinstance(wa_data, dict) else 0)
             for waba in wa_data.get("data", []):
-                logger.info("[EmbeddedSignup] WABA found via businesses: %s", waba["id"])
+                logger.info("[EmbeddedSignup] WABA found via businesses: %s", redact_graph_id(waba["id"]))
                 return str(waba["id"])
     except Exception as e:
-        logger.warning("[EmbeddedSignup] Business lookup failed: %s", e)
+        logger.warning("[EmbeddedSignup] Business lookup failed: %s", redact_sensitive_log_text(e))
 
     # Strategy 3: direct query (some token types expose this edge)
     logger.info("[EmbeddedSignup] Trying /me/whatsapp_business_accounts direct query")
@@ -306,12 +307,12 @@ async def _get_waba_id_from_token(token: str, debug_info: Optional[dict] = None)
                 params={"fields": "id,name"},
             )
             direct_data = direct_resp.json()
-        logger.info("[EmbeddedSignup] /me/whatsapp_business_accounts: %s", direct_data)
+        logger.info("[EmbeddedSignup] /me/whatsapp_business_accounts count=%s", len(direct_data.get("data") or []) if isinstance(direct_data, dict) else 0)
         for waba in direct_data.get("data", []):
-            logger.info("[EmbeddedSignup] WABA found via direct query: %s", waba["id"])
+            logger.info("[EmbeddedSignup] WABA found via direct query: %s", redact_graph_id(waba["id"]))
             return str(waba["id"])
     except Exception as e:
-        logger.warning("[EmbeddedSignup] Direct WABA query failed: %s", e)
+        logger.warning("[EmbeddedSignup] Direct WABA query failed: %s", redact_sensitive_log_text(e))
 
     raise HTTPException(
         status_code=400,
@@ -335,7 +336,7 @@ async def _subscribe_app_to_phone(phone_number_id: str, token: str) -> None:
             json={"subscribed_fields": ["messages", "messaging_postbacks", "message_echoes"]},
         )
         data = resp.json()
-    logger.info("[EmbeddedSignup] subscribed_apps phone=%s result=%s", phone_number_id, data)
+    logger.info("[EmbeddedSignup] subscribed_apps phone=%s success=%s", redact_graph_id(phone_number_id), bool(data.get("success")) if isinstance(data, dict) else False)
 
 
 async def _get_phone_numbers(waba_id: str, token: str) -> List[dict]:
@@ -519,7 +520,7 @@ async def _get_phone_details(phone_number_id: str, token: str) -> Dict[str, Any]
             params={"fields": PHONE_FIELDS},
         )
         data = resp.json()
-    logger.info("[EmbeddedSignup] phone_details phone_id=%s result=%s", phone_number_id, data)
+    logger.info("[EmbeddedSignup] phone_details phone_id=%s has_error=%s", redact_graph_id(phone_number_id), "error" in data if isinstance(data, dict) else True)
     return data
 
 
@@ -532,7 +533,7 @@ async def _register_phone(phone_number_id: str, token: str, pin: str) -> Dict[st
             json={"messaging_product": "whatsapp", "pin": pin},
         )
         data = resp.json()
-    logger.info("[EmbeddedSignup] register phone_id=%s result=%s", phone_number_id, data)
+    logger.info("[EmbeddedSignup] register phone_id=%s success=%s", redact_graph_id(phone_number_id), bool(data.get("success")) if isinstance(data, dict) else False)
     return data
 
 
@@ -2004,7 +2005,7 @@ async def exchange_code(
 
     # 2 — Cloud API embedded signup
     waba_id = await _get_waba_id_from_token(user_token, debug_info=debug_info)
-    logger.info("[EmbeddedSignup] waba_id=%s tenant=%s coexistence=%s", waba_id, tenant_id, coexistence)
+    logger.info("[EmbeddedSignup] waba_id=%s tenant=%s coexistence=%s", redact_graph_id(waba_id), tenant_id, coexistence)
 
     from services.whatsapp_connection_service import (  # noqa: PLC0415
         begin_waba_session,
@@ -2550,7 +2551,7 @@ async def verify_phone(
     if "error" in verify_data:
         raise HTTPException(
             status_code=400,
-            detail=f"رمز التحقق غير صحيح: {verify_data['error'].get('message', '')}",
+            detail=_meta_embedded_error_message(verify_data.get("error") or {}, "رمز التحقق غير صحيح."),
         )
 
     _assign_embedded_phone_id(conn, body.phone_number_id)

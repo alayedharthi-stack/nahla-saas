@@ -16,6 +16,7 @@ for entry in (str(REPO), str(REPO / "backend")):
 
 from core.log_redaction import SecretRedactingFilter, redact_graph_id  # noqa: E402
 from services.meta_graph_oauth_client import (  # noqa: E402
+    DEBUG_TOKEN_QUERY_EXCEPTION,
     assert_no_sensitive_query_params,
     debug_token,
     exchange_code_for_token,
@@ -48,7 +49,7 @@ def _capture(requests: list[httpx.Request]):
     return httpx.MockTransport(handler)
 
 
-def test_debug_token_uses_post_body_not_query():
+def test_debug_token_uses_get_with_documented_input_token_query_exception():
     captured: list[httpx.Request] = []
     transport = _capture(captured)
     async def _run():
@@ -57,16 +58,17 @@ def test_debug_token_uses_post_body_not_query():
     asyncio.run(_run())
     assert len(captured) == 1
     req = captured[0]
-    assert req.method == "POST"
+    assert req.method == "GET"
     assert_no_sensitive_query_params(req)
-    assert SYNTH_USER not in str(req.url)
-    assert SYNTH_USER.encode() in (req.content or b"")
+    assert req.url.params.get("input_token") == SYNTH_USER
+    assert "access_token" not in req.url.params
+    assert "input_token" in DEBUG_TOKEN_QUERY_EXCEPTION
     assert req.headers.get("authorization", "").startswith("Bearer ")
     assert SYNTH_SECRET not in str(req.url)
     assert f"{SYNTH_APP}|{SYNTH_SECRET}" not in str(req.url)
 
 
-def test_code_exchange_uses_post_body_not_query():
+def test_code_exchange_uses_get_query_not_access_token():
     captured: list[httpx.Request] = []
     transport = _capture(captured)
     async def _run():
@@ -81,13 +83,13 @@ def test_code_exchange_uses_post_body_not_query():
             )
     asyncio.run(_run())
     req = captured[0]
-    assert req.method == "POST"
+    assert req.method == "GET"
     assert_no_sensitive_query_params(req)
-    assert SYNTH_CODE not in str(req.url)
-    assert SYNTH_SECRET not in str(req.url)
+    assert req.url.params.get("code") == SYNTH_CODE
+    assert "access_token" not in req.url.params
 
 
-def test_fb_exchange_uses_post_body_not_query():
+def test_fb_exchange_uses_get_query_not_access_token():
     captured: list[httpx.Request] = []
     transport = _capture(captured)
     async def _run():
@@ -95,10 +97,10 @@ def test_fb_exchange_uses_post_body_not_query():
             await exchange_for_long_lived_token(SYNTH_USER, client=client)
     asyncio.run(_run())
     req = captured[0]
-    assert req.method == "POST"
+    assert req.method == "GET"
     assert_no_sensitive_query_params(req)
-    assert SYNTH_USER not in str(req.url)
-    assert SYNTH_SECRET not in str(req.url)
+    assert req.url.params.get("fb_exchange_token") == SYNTH_USER
+    assert "access_token" not in req.url.params
 
 
 def test_oauth_success_logs_exclude_tokens(caplog):
@@ -107,7 +109,9 @@ def test_oauth_success_logs_exclude_tokens(caplog):
     caplog.set_level(logging.INFO)
     filt = SecretRedactingFilter()
     logger = logging.getLogger("nahla.meta_graph_oauth")
+    httpx_logger = logging.getLogger("httpx")
     logger.addFilter(filt)
+    httpx_logger.addFilter(filt)
     async def _run():
         async with httpx.AsyncClient(transport=transport) as client:
             await debug_token(SYNTH_USER, client=client)
@@ -116,6 +120,7 @@ def test_oauth_success_logs_exclude_tokens(caplog):
         asyncio.run(_run())
     finally:
         logger.removeFilter(filt)
+        httpx_logger.removeFilter(filt)
     combined = caplog.text
     for secret in (SYNTH_USER, SYNTH_SECRET, SYNTH_CODE, f"{SYNTH_APP}|{SYNTH_SECRET}"):
         assert secret not in combined
