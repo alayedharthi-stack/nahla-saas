@@ -1,6 +1,5 @@
-"""
-services/coupon_generator.py
-─────────────────────────────
+"""services/coupon_generator.py
+----------------------------------------
 Automatic coupon pool management.
 
 Maintains a pool of pre-generated coupons per customer segment so the AI
@@ -9,22 +8,22 @@ agent can immediately hand out a real coupon during a conversation.
 Pool size: 3 coupons per canonical level (4 levels = 12 coupons max per tenant).
 
 Code format (source of truth)
-─────────────────────────────
+----------------------------------------
     prefix   : "NH"
     body     : 3 characters drawn uniformly from A-Z 0-9
     length   : 5
     regex    : ^NH[A-Z0-9]{3}$
     examples : NH4K7, NH3A9, NH7K2
 
-This gives 36^3 = 46,656 codes per tenant — enough headroom that collision
+This gives 36^3 = 46,656 codes per tenant - enough headroom that collision
 retries are effectively free.
 
-Legacy `NHL\\d{3}` codes from before this fix are grandfathered:
-  • They are recognised by ``_is_short_coupon_code`` so existing reporting
+Legacy `NHL\d{3}` codes from before this fix are grandfathered:
+  - They are recognised by ``_is_short_coupon_code`` so existing reporting
     and pool counts keep working.
-  • They are loaded into ``_reserved_codes`` so the new generator never
+  - They are loaded into ``_reserved_codes`` so the new generator never
     reuses an old number and produces duplicates.
-  • New issuance always uses the new 5-char format.
+  - New issuance always uses the new 5-char format.
 
 Coupons are created FIRST in Salla, THEN stored locally. If the local DB
 insert fails after Salla succeeded, the Salla coupon is deleted as
@@ -64,7 +63,7 @@ DEFAULT_POOL_REFILL_THRESHOLD = 1
 # Back-compat aliases: per-segment naming retained for external callers.
 POOL_SIZE_PER_SEGMENT = POOL_SIZE_PER_LEVEL
 MAX_POOL_TARGET_PER_SEGMENT = MAX_POOL_TARGET_PER_LEVEL
-POOL_LOCK_NAMESPACE = int(os.getenv("NAHLA_COUPON_POOL_LOCK_NAMESPACE", "748103219047"))
+POOL_LOCK_NAMESPACE = int(os.getenv("NAHLA_COUPON_POOL_LOCK_NAMESPACE", "748103219"))
 LEVEL_LOCK_SUFFIX: Dict[str, int] = {
     "bronze": 0,
     "silver": 1,
@@ -440,6 +439,7 @@ class CouponGeneratorService:
             ).scalar()
             return bool(acquired)
         except Exception as exc:
+            self.db.rollback()
             log_event(
                 EVENTS.DISPATCHER_LOOP_ERROR,
                 tenant_id=self.tenant_id,
