@@ -191,13 +191,60 @@ def commit_connection(
         actor,
     )
 
-    from services.whatsapp_asset_lock import acquire_whatsapp_asset_advisory_locks  # noqa: PLC0415
+    from services.whatsapp_asset_lock import (  # noqa: PLC0415
+        acquire_whatsapp_asset_advisory_locks,
+        release_whatsapp_asset_advisory_locks,
+    )
 
-    acquire_whatsapp_asset_advisory_locks(
+    _asset_locks = acquire_whatsapp_asset_advisory_locks(
         db,
         provider=provider,
         phone_number_id=phone_number_id,
         waba_id=waba_id,
+    )
+    try:
+        return _commit_connection_with_asset_lock(
+            db,
+            tenant_id=tenant_id,
+            phone_number_id=phone_number_id,
+            waba_id=waba_id,
+            access_token=access_token,
+            connection_type=connection_type,
+            provider=provider,
+            phone_number=phone_number,
+            display_name=display_name,
+            sending_enabled=sending_enabled,
+            actor=actor,
+            skip_phone_register=skip_phone_register,
+            subscribed_fields=subscribed_fields,
+        )
+    finally:
+        release_whatsapp_asset_advisory_locks(db, _asset_locks)
+
+
+def _commit_connection_with_asset_lock(
+    db: Session,
+    *,
+    tenant_id: int,
+    phone_number_id: str,
+    waba_id: str,
+    access_token: str,
+    connection_type: str,
+    provider: str = "meta",
+    phone_number: str = "",
+    display_name: str = "",
+    sending_enabled: bool = True,
+    actor: str = "system",
+    skip_phone_register: bool = False,
+    subscribed_fields: Optional[list] = None,
+) -> ConnectionResult:
+    from database.models import WhatsAppConnection  # noqa: PLC0415
+    from core.tenant_integrity import (  # noqa: PLC0415
+        assert_phone_id_not_claimed,
+        assert_waba_id_not_claimed,
+        evict_phone_id_from_other_tenants,
+        evict_waba_id_from_other_tenants,
+        TenantIntegrityError,
     )
 
     # ── Step 1–2: Integrity checks — ALL errors are fatal (no broad except) ──

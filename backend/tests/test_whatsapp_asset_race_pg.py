@@ -55,21 +55,30 @@ def _run_alembic(engine, revision: str) -> None:
 
 def _ensure_whatsapp_asset_unique_indexes(engine) -> None:
     """Mirror production startup indexes required for asset race defense."""
-    stmts = (
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_conn_phone_number_id
-        ON whatsapp_connections (phone_number_id)
-        WHERE phone_number_id IS NOT NULL
-        """,
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_wa_conn_waba_id
-        ON whatsapp_connections (whatsapp_business_account_id)
-        WHERE whatsapp_business_account_id IS NOT NULL
-        """,
-    )
     with engine.begin() as conn:
-        for stmt in stmts:
-            conn.execute(text(stmt))
+        conn.execute(
+            text(
+                "DELETE FROM whatsapp_connections "
+                "WHERE phone_number_id = :phone OR whatsapp_business_account_id = :waba"
+            ),
+            {"phone": PHONE, "waba": WABA},
+        )
+        conn.execute(text("DROP INDEX IF EXISTS uq_wa_conn_phone_number_id"))
+        conn.execute(text("DROP INDEX IF EXISTS uq_wa_conn_waba_id"))
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_wa_conn_phone_number_id "
+                "ON whatsapp_connections (phone_number_id) "
+                "WHERE phone_number_id IS NOT NULL"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_wa_conn_waba_id "
+                "ON whatsapp_connections (whatsapp_business_account_id) "
+                "WHERE whatsapp_business_account_id IS NOT NULL"
+            )
+        )
 
 
 def _validation_ok():
