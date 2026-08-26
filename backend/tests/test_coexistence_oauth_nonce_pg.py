@@ -454,18 +454,14 @@ def test_pg_concurrent_callbacks_single_transition(pg_db_factory: sessionmaker, 
     db.close()
 
 
-def test_pg_callback_route_restores_dialog360_on_graph_failure(pg_db_factory: sessionmaker, monkeypatch) -> None:
+def test_pg_callback_route_restores_dialog360_on_finalize_failure(pg_db_factory: sessionmaker, monkeypatch) -> None:
     tenant_id = 990886
     _seed_pg_tenant(pg_db_factory, tenant_id)
-    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch, mode="boom")
+    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch, mode="webhook_fail")
     state = _start_state(client, tenant_id)
-    try:
-        resp = _callback(client, tenant_id, state)
-    except RuntimeError as exc:
-        assert "graph boom" in str(exc)
-    else:
-        assert resp.status_code == 302
-        assert "#meta=error" in resp.headers.get("location", "")
+    resp = _callback(client, tenant_id, state)
+    assert resp.status_code == 302
+    assert "#meta=error" in resp.headers["location"]
     db = pg_db_factory()
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one()
     assert conn.provider == "dialog360"
