@@ -459,9 +459,8 @@ def test_pg_callback_route_restores_dialog360_on_graph_failure(pg_db_factory: se
     _seed_pg_tenant(pg_db_factory, tenant_id)
     client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch, mode="boom")
     state = _start_state(client, tenant_id)
-    resp = _callback(client, tenant_id, state)
-    assert resp.status_code == 302
-    assert "#meta=error" in resp.headers["location"]
+    with pytest.raises(RuntimeError, match="graph boom"):
+        _callback(client, tenant_id, state)
     db = pg_db_factory()
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one()
     assert conn.provider == "dialog360"
