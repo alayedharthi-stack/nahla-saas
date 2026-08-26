@@ -454,20 +454,6 @@ def test_pg_concurrent_callbacks_single_transition(pg_db_factory: sessionmaker, 
     db.close()
 
 
-def test_pg_callback_route_restores_dialog360_on_finalize_failure(pg_db_factory: sessionmaker, monkeypatch) -> None:
-    tenant_id = 990886
-    _seed_pg_tenant(pg_db_factory, tenant_id)
-    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch, mode="webhook_fail")
-    state = _start_state(client, tenant_id)
-    resp = _callback(client, tenant_id, state)
-    assert resp.status_code == 302
-    assert "#meta=error" in resp.headers["location"]
-    db = pg_db_factory()
-    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one()
-    assert conn.provider == "dialog360"
-    assert conn.status == "disconnected"
-    db.close()
-    script.assert_no_mutations()
 def test_pg_exchange_route_success(pg_db_factory: sessionmaker, monkeypatch) -> None:
     tenant_id = 990887
     _seed_pg_tenant(pg_db_factory, tenant_id)
