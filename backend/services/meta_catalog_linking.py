@@ -134,6 +134,10 @@ def _classify_waba_product_catalogs_error(
     }
 
 
+def _auth_headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {(token or "").strip()}"}
+
+
 def _probe_catalog_exists(
     catalog_id: str,
     token: str,
@@ -143,7 +147,7 @@ def _probe_catalog_exists(
     """Lightweight read-only check that the configured catalog object exists."""
     url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
     try:
-        resp = client.get(url, params={"fields": "id", "access_token": token})
+        resp = client.get(url, params={"fields": "id"}, headers=_auth_headers(token))
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         logger.warning(
             "catalog_exists_probe_transport_error catalog_id=%s error=%s",
@@ -173,11 +177,11 @@ def _fetch_waba_product_catalogs(
 ) -> tuple[List[Dict[str, Any]], int, Optional[Dict[str, Any]]]:
     """GET /{waba_id}/product_catalogs — returns (catalogs, http_status, error_body)."""
     url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{waba_id}/product_catalogs"
-    params = {"fields": _GRAPH_FIELDS, "access_token": token}
+    params = {"fields": _GRAPH_FIELDS}
     owns_client = client is None
     http = client or httpx.Client(timeout=REQUEST_TIMEOUT)
     try:
-        resp = http.get(url, params=params)
+        resp = http.get(url, params=params, headers=_auth_headers(token))
         status = resp.status_code
         try:
             body = resp.json()

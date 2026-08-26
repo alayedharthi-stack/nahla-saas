@@ -91,6 +91,34 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/whatsapp/embedded", tags=["whatsapp-embedded"])
 
 GRAPH = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+
+def _log_select_phone_otp_result(
+    *,
+    tenant_id: int,
+    phone_number_id: str,
+    otp_data: dict,
+) -> None:
+    """Structured OTP logging — never log raw Meta payloads or identifiers."""
+    safe_phone_id = redact_graph_id(str(phone_number_id or ""))
+    if isinstance(otp_data, dict) and "error" in otp_data:
+        err = otp_data.get("error") or {}
+        logger.warning(
+            "[EmbeddedSignup] select-phone OTP request failed tenant=%s phone_id=%s "
+            "error_code=%s error_subcode=%s",
+            tenant_id,
+            safe_phone_id,
+            err.get("code"),
+            err.get("error_subcode"),
+        )
+        return
+    logger.info(
+        "[EmbeddedSignup] select-phone OTP request succeeded tenant=%s phone_id=%s",
+        tenant_id,
+        safe_phone_id,
+    )
+
+
+
 PHONE_FIELDS = (
     "id,display_phone_number,verified_name,code_verification_status,"
     "name_status,status,quality_rating,is_on_biz_app,platform_type"
@@ -2234,7 +2262,11 @@ async def select_phone(
         timeout=15,
     )
 
-    logger.info("[EmbeddedSignup] select-phone OTP request: %s", otp_data)
+    _log_select_phone_otp_result(
+        tenant_id=tenant_id,
+        phone_number_id=body.phone_number_id,
+        otp_data=otp_data,
+    )
 
     if "error" in otp_data:
         err     = otp_data["error"]
@@ -2258,8 +2290,8 @@ async def select_phone(
         )
 
     logger.info(
-        "[EmbeddedSignup] select-phone OTP sent tenant=%s phone_id=%s number=%s",
-        tenant_id, body.phone_number_id, conn.phone_number,
+        "[EmbeddedSignup] select-phone OTP sent tenant=%s phone_id=%s",
+        tenant_id, redact_graph_id(body.phone_number_id),
     )
 
     conn.last_attempt_at = datetime.now(timezone.utc)
@@ -2481,7 +2513,11 @@ async def add_phone(
             continue
         break
 
-    logger.info("[EmbeddedSignup] add-phone request_code: %s", otp_data)
+    _log_select_phone_otp_result(
+        tenant_id=tenant_id,
+        phone_number_id=phone_number_id,
+        otp_data=otp_data,
+    )
 
     if "error" in otp_data:
         err = otp_data["error"]

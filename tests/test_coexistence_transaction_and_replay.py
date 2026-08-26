@@ -73,8 +73,11 @@ class GraphScript:
         if method in {"DELETE", "PUT"}:
             return httpx.Response(500, json={"error": {"message": "mutation forbidden in test"}})
         if path.endswith("/oauth/access_token"):
-            if method not in {"GET", "POST"}:
-                return httpx.Response(405, json={"error": {"message": "method not allowed"}})
+            if method != "GET":
+                return httpx.Response(
+                    405,
+                    json={"error": {"message": "oauth/access_token requires GET"}},
+                )
             return httpx.Response(
                 200,
                 json={"access_token": "user-long-token", "token_type": "bearer", "expires_in": 5183944},
@@ -645,7 +648,8 @@ def _add_graph_log_filters():
     redact_filter = SecretRedactingFilter()
     graph_loggers = [logging.getLogger("httpx"), logging.getLogger("httpcore")]
     for graph_logger in graph_loggers:
-        graph_logger.addFilter(redact_filter)
+        if not any(isinstance(f, SecretRedactingFilter) for f in graph_logger.filters):
+            graph_logger.addFilter(redact_filter)
     return redact_filter, graph_loggers
 
 

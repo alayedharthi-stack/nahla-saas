@@ -380,3 +380,37 @@ def test_waba_link_status_route_uses_resolve_tenant_id():
     source = inspect.getsource(route.endpoint)
     assert "resolve_tenant_id" in source
     assert "Query" not in source or "tenant_id" not in source.split("Query", 1)[-1]
+
+def test_catalog_graph_reads_use_bearer_not_query_token():
+    """Regression: catalog relink reads must not put access_token in query params."""
+    captured: list[dict] = []
+    token = "EAAB-catalog-bearer-regression-token"
+
+    def _fake_get(url, **kwargs):
+        captured.append({"url": url, **kwargs})
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return {"data": [{"id": "CAT-GENERIC-001", "name": "Generic"}]}
+        return _Resp()
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = _fake_get
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+
+    from services.meta_catalog_linking import _fetch_waba_product_catalogs
+
+    catalogs, status, err = _fetch_waba_product_catalogs(
+        "WABA-GENERIC-001", token, client=mock_client,
+    )
+    assert status == 200
+    assert err is None
+    assert len(catalogs) == 1
+    assert len(captured) == 1
+    call = captured[0]
+    params = call.get("params") or {}
+    assert "access_token" not in params
+    assert token not in str(call.get("url"))
+    headers = call.get("headers") or {}
+    assert headers.get("Authorization") == f"Bearer {token}"
