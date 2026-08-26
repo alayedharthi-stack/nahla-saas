@@ -356,19 +356,29 @@ def _pg_route_stack(pg_db_factory: sessionmaker, monkeypatch, *, mode: str = "su
     return client, emb, script
 
 
-def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine, pg_session: Session) -> None:
-    pg_session.add(Tenant(id=990884, name="conc-nonce", is_active=True))
-    pg_session.commit()
+def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine) -> None:
+    tenant_id = 990884
     nonce = "pg-nonce-conc-877"
-    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
-    persist_oauth_nonce(
-        pg_session,
-        nonce=nonce,
-        tenant_id=990884,
-        connection_mode="coexistence",
-        expires_at=expires,
-    )
-    pg_session.commit()
+    setup_conn = postgres_engine.connect()
+    setup_trans = setup_conn.begin()
+    setup_session = sessionmaker(bind=setup_conn, expire_on_commit=False)()
+    try:
+        setup_session.add(Tenant(id=tenant_id, name="conc-nonce", is_active=True))
+        setup_session.commit()
+        expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+        persist_oauth_nonce(
+            setup_session,
+            nonce=nonce,
+            tenant_id=tenant_id,
+            connection_mode="coexistence",
+            expires_at=expires,
+        )
+        setup_session.commit()
+        setup_trans.commit()
+    finally:
+        setup_session.close()
+        setup_conn.close()
+
     results: list[str] = []
     lock = threading.Lock()
 
@@ -380,7 +390,7 @@ def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine, pg_sess
             outcome = consume_oauth_nonce(
                 local,
                 nonce=nonce,
-                tenant_id=990884,
+                tenant_id=tenant_id,
                 connection_mode="coexistence",
             )
             trans.commit()
@@ -399,6 +409,17 @@ def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine, pg_sess
     t1.join(timeout=15)
     t2.join(timeout=15)
     assert sorted(results) == ["already_consumed", "consumed"]
+
+    cleanup_conn = postgres_engine.connect()
+    cleanup_trans = cleanup_conn.begin()
+    try:
+        cleanup_conn.execute(text("DELETE FROM whatsapp_oauth_nonces WHERE tenant_id = :tid"), {"tid": tenant_id})
+        cleanup_conn.execute(text("DELETE FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        cleanup_trans.commit()
+    except Exception:  # noqa: BLE001
+        cleanup_trans.rollback()
+    finally:
+        cleanup_conn.close()
 def test_pg_concurrent_callbacks_single_transition(pg_db_factory: sessionmaker, monkeypatch) -> None:
     import asyncio
     from types import SimpleNamespace
