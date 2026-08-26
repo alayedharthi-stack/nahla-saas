@@ -439,6 +439,22 @@ def test_exactly_one_commit_on_success_route(pg_session: Session, monkeypatch) -
     consume_oauth_nonce(pg_session, nonce=nonce, tenant_id=990883, connection_mode="coexistence")
     pg_session.commit()
     assert commits.count("commit") == 2
+
+def _cleanup_pg_route_fixtures(engine: Engine) -> None:
+    """Remove committed coexistence PG route tenants so graph assets stay isolated."""
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM whatsapp_oauth_nonces WHERE tenant_id >= 990877"))
+        conn.execute(
+            text(
+                "DELETE FROM whatsapp_connections "
+                "WHERE tenant_id >= 990877 "
+                "OR whatsapp_business_account_id = :waba "
+                "OR phone_number_id = :phone"
+            ),
+            {"waba": ROUTE_WABA, "phone": ROUTE_PHONE},
+        )
+        conn.execute(text("DELETE FROM tenants WHERE id >= 990877"))
+
 def _seed_pg_tenant(SessionLocal: sessionmaker, tenant_id: int, **conn_kwargs) -> WhatsAppConnection | None:
     db = SessionLocal()
     db.add(Tenant(id=tenant_id, name=f"tenant-{tenant_id}", is_active=True))
@@ -523,6 +539,7 @@ def test_concurrent_nonce_consume_single_winner(postgres_engine: Engine) -> None
     finally:
         cleanup_conn.close()
 def test_pg_concurrent_callbacks_single_transition(postgres_engine: Engine, monkeypatch) -> None:
+    _cleanup_pg_route_fixtures(postgres_engine)
     import asyncio
     from types import SimpleNamespace
 
@@ -575,7 +592,8 @@ def test_pg_concurrent_callbacks_single_transition(postgres_engine: Engine, monk
     verify.close()
 
 
-def test_pg_exchange_route_success(pg_db_factory: sessionmaker, monkeypatch) -> None:
+def test_pg_exchange_route_success(postgres_engine: Engine, pg_db_factory: sessionmaker, monkeypatch) -> None:
+    _cleanup_pg_route_fixtures(postgres_engine)
     tenant_id = 990887
     _seed_pg_tenant(pg_db_factory, tenant_id)
     client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch)
@@ -601,7 +619,8 @@ def test_pg_exchange_route_success(pg_db_factory: sessionmaker, monkeypatch) -> 
     script.assert_no_mutations()
 
 
-def test_pg_select_phone_coexistence_route(pg_db_factory: sessionmaker, monkeypatch) -> None:
+def test_pg_select_phone_coexistence_route(postgres_engine: Engine, pg_db_factory: sessionmaker, monkeypatch) -> None:
+    _cleanup_pg_route_fixtures(postgres_engine)
     from services.whatsapp_platform.wa_connection_secrets import store_access_token
 
     tenant_id = 990888
@@ -631,7 +650,8 @@ def test_pg_select_phone_coexistence_route(pg_db_factory: sessionmaker, monkeypa
     assert resp.status_code == 200, resp.text
     assert resp.json().get("connected") is True
     script.assert_no_mutations()
-def test_pg_callback_graph_requests_exclude_sensitive_query_params(pg_db_factory: sessionmaker, monkeypatch) -> None:
+def test_pg_callback_graph_requests_exclude_sensitive_query_params(postgres_engine: Engine, pg_db_factory: sessionmaker, monkeypatch) -> None:
+    _cleanup_pg_route_fixtures(postgres_engine)
     from services.meta_graph_oauth_client import assert_no_sensitive_query_params
 
     tenant_id = 990889
