@@ -59,6 +59,14 @@ from core.coexistence_client_id import (
 )
 from core.database import get_db
 from core.log_redaction import redact_graph_id, redact_sensitive_log_text
+from services.d360_logging import (
+    d360_extract_remote_url,
+    d360_response_summary,
+    d360_safe_error_payload,
+    d360_safe_exception_fields,
+    d360_url_flags,
+    log_d360_verify,
+)
 from services.wa_direct_logging import (
     log_wa_direct_exception,
     log_wa_direct_graph_result,
@@ -263,28 +271,6 @@ def _dt_iso_utc(dt: Optional[datetime]) -> Optional[str]:
 # 360dialog has on file". Never log the full key. We use the last 4 chars
 # only — the same convention as the admin debug `_mask_secret_tail` helper.
 
-def _d360_key_tail(value: Optional[str]) -> str:
-    s = (value or "").strip()
-    if not s:
-        return "missing"
-    if len(s) <= 4:
-        return "***"
-    return f"***{s[-4:]} (len={len(s)})"
-
-
-def _d360_body_preview(body: Any, limit: int = 220) -> str:
-    """Compact one-line preview of the 360dialog response body so the
-    operator can tell ``invalid_api_key`` from ``url_mismatch`` from
-    ``rate_limited`` at a glance."""
-    try:
-        import json as _json  # noqa: PLC0415
-        txt = _json.dumps(body, ensure_ascii=False) if isinstance(body, (dict, list)) else str(body)
-    except Exception:
-        txt = str(body)
-    txt = txt.replace("\n", " ").strip()
-    return txt[:limit] + ("…" if len(txt) > limit else "")
-
-
 def _log_d360_verify(
     *,
     operation: str,
@@ -298,46 +284,25 @@ def _log_d360_verify(
     result: str,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Emit a single canonical structured log line so support can grep one
-    family of events when triaging "Invalid api token" vs "url_mismatch" vs
-    "network timeout". Format is stable — log analysis tooling can rely
-    on the field order.
-
-    Tag: ``[D360_WEBHOOK_VERIFY]``
-
-    Always-present fields:
-      tenant_id, connection_id, channel_id, phone_number_id, waba_id,
-      api_key_tail, operation, endpoint_used, response_status,
-      response_body_preview, parsed_channel_url, expected_channel_url,
-      result
-    """
     meta = dict(getattr(conn, "extra_metadata", None) or {}) if conn else {}
     pd = dict(meta.get("provider_details") or {})
-    channel_id = pd.get("channel_id") or pd.get("channel") or "-"
-
-    _pid = getattr(conn, "phone_number_id", None) if conn else None
-    _wid = getattr(conn, "whatsapp_business_account_id", None) if conn else None
-    fields = {
-        "tenant_id":             tenant_id,
-        "connection_id":         getattr(conn, "id", None) if conn else None,
-        "channel_id":            channel_id,
-        "phone_number_id":       redact_graph_id(_pid) if _pid else None,
-        "waba_id":               redact_graph_id(_wid) if _wid else None,
-        "api_key_tail":          _d360_key_tail(getattr(conn, "access_token", None) if conn else None),
-        "operation":             operation,
-        "endpoint_used":         endpoint_used,
-        "response_status":       response_status,
-        "response_body_preview": _d360_body_preview(response),
-        "parsed_channel_url":    parsed_url or "-",
-        "expected_channel_url":  expected_url or "-",
-        "result":                result,
-    }
-    if extra:
-        for k, v in extra.items():
-            if k not in fields:
-                fields[k] = v
-    rendered = " ".join(f"{k}={v!r}" for k, v in fields.items())
-    logger.info("[D360_WEBHOOK_VERIFY] %s", rendered)
+    channel_id = pd.get("channel_id") or pd.get("channel")
+    log_d360_verify(
+        operation=operation,
+        tenant_id=tenant_id,
+        connection_id=getattr(conn, "id", None) if conn else None,
+        channel_id=str(channel_id) if channel_id else None,
+        phone_number_id=getattr(conn, "phone_number_id", None) if conn else None,
+        waba_id=getattr(conn, "whatsapp_business_account_id", None) if conn else None,
+        api_key_present=bool(getattr(conn, "access_token", None)) if conn else False,
+        endpoint_used=endpoint_used,
+        response=response,
+        response_status=response_status,
+        parsed_url=parsed_url,
+        expected_url=expected_url,
+        result=result,
+        extra=extra,
+    )
 
 
 def _coexistence_webhook_block(conn: Optional[WhatsAppConnection]) -> Dict[str, Any]:
@@ -2607,26 +2572,22 @@ async def admin_coexistence_verify_webhook(
 
     expected_url = _coexistence_webhook_url()
     cfg: Dict[str, object] = {}
-    verify_error: Optional[str] = None
+    verify_error: bool = False
     try:
         cfg = await asyncio.wait_for(
             dialog360_get_webhook_config(api_key=read_access_token(conn), timeout=5.0),
             timeout=6.0,
         )
     except Exception as exc:
-        verify_error = f"{type(exc).__name__}: {exc}"[:400]
-        log_wa_direct_exception("coexistence verify-webhook", Exception(verify_error), tenant_id=body.tenant_id, tag="coexistence")
-        cfg = {"error": "fail_open", "detail": verify_error}
+        api_key = read_access_token(conn)
+        verify_error = True
+        log_wa_direct_exception("coexistence verify-webhook", exc, tenant_id=body.tenant_id, tag="coexistence", secrets=[api_key])
+        cfg = d360_safe_error_payload(exc, secrets=[api_key], operation="verify_webhook")
 
     remote_url = ""
     response_status: Optional[int] = None
     if isinstance(cfg, dict):
-        remote_url = (
-            str(cfg.get("url") or "")
-            or str((cfg.get("webhook") or {}).get("url") or "")
-            or str((cfg.get("data") or {}).get("url") or "")
-            or ""
-        )
+        remote_url = d360_extract_remote_url(cfg)
         # 360dialog helpers normalise error responses to `{"error": ..., "status_code": ...}`
         sc = cfg.get("status_code")
         if isinstance(sc, int):
@@ -2636,8 +2597,7 @@ async def admin_coexistence_verify_webhook(
     # ── Structured verify log ──────────────────────────────────────────
     # Single canonical line per call so support can correlate "merchant
     # sees Invalid api token in UI" with the actual remote response. The
-    # api_key_tail lets ops verify the key in DB is the one they just
-    # rotated in 360dialog without ever transmitting the full secret.
+    # Structured verify log uses api_key_present only — never key material.
     if verify_error:
         verify_result = "transport_error"
     elif isinstance(cfg, dict) and "error" in cfg:
@@ -2665,14 +2625,15 @@ async def admin_coexistence_verify_webhook(
     webhook = dict(coex.get("webhook") or {})
     if verify_error:
         webhook["channel_status"] = "failed"
-        webhook["channel_last_verify_error"] = verify_error
+        webhook["channel_last_verify_error_type"] = cfg.get("error_type") if isinstance(cfg, dict) else "transport_error"
     else:
         webhook["channel_status"] = "verified" if matches else (
             "url_mismatch" if remote_url else "unverified"
         )
         webhook.pop("channel_last_verify_error", None)
     webhook["channel_last_verified_at"] = datetime.now(timezone.utc).isoformat()
-    webhook["channel_remote_url"] = remote_url or None
+    webhook["channel_remote_url_present"] = bool(remote_url)
+    webhook["channel_url_matches"] = matches
     coex["webhook"] = webhook
     meta["coexistence"] = coex
     conn.extra_metadata = meta
@@ -2695,13 +2656,12 @@ async def admin_coexistence_verify_webhook(
         matches=matches,
         reconciled=reconciled,
     )
+    url_diag = d360_url_flags(remote_url, expected_url)
     return {
         "tenant_id":     body.tenant_id,
-        "expected_url":  expected_url,
-        "remote_url":    remote_url,
         "matches":       matches,
-        "verify_error":  verify_error,
-        "raw":           cfg,
+        **url_diag,
+        "response":      d360_response_summary(cfg),
         "webhooks":      _coexistence_webhook_block(conn),
         "status_reconciled": reconciled,
         "integration_complete": _coexistence_integration_complete(conn),
@@ -2803,7 +2763,7 @@ async def admin_coexistence_auto_configure(
         )
     except Exception as exc:
         log_wa_direct_exception("coexistence auto-configure", exc, tenant_id=body.tenant_id, tag="coexistence")
-        result = {"error": str(exc)[:500]}
+        result = d360_safe_error_payload(exc, secrets=[read_access_token(conn)], operation="auto_configure_channel")
     ok = "error" not in (result or {})
     _log_d360_verify(
         operation="auto_configure_channel",
@@ -2852,7 +2812,7 @@ async def admin_coexistence_auto_configure(
         waba_ok = "error" not in (waba_result or {})
     except Exception as exc:
         log_wa_direct_exception("coexistence auto-configure waba webhook", exc, tenant_id=body.tenant_id, tag="coexistence")
-        waba_result = {"error": str(exc)[:500]}
+        waba_result = d360_safe_error_payload(exc, secrets=[read_access_token(conn)], operation="auto_configure_waba")
     _log_d360_verify(
         operation="auto_configure_waba",
         tenant_id=body.tenant_id,
@@ -2922,8 +2882,8 @@ async def admin_coexistence_auto_configure(
         "ok":             ok and waba_ok,
         "channel_ok":     ok,
         "waba_ok":        waba_ok,
-        "channel_result": result,
-        "waba_result":    waba_result,
+        "channel_result": d360_response_summary(result),
+        "waba_result":    d360_response_summary(waba_result),
         "webhooks":       _coexistence_webhook_block(conn),
         "status_reconciled":     reconciled,
         "integration_complete":  _coexistence_integration_complete(conn),
@@ -2956,7 +2916,7 @@ async def admin_coexistence_waba_webhook_read(
         "url":                 str | null,
         "matches":             bool,
         "waba_id":             str | null,
-        "numbers_on_this_waba": [str, ...],
+        "numbers_on_this_waba_count": int,
         "raw":                 <360dialog response>,
       },
       "local_connection": {
@@ -2984,14 +2944,10 @@ async def admin_coexistence_waba_webhook_read(
             timeout=6.0,
         )
     except Exception as exc:
-        chan_cfg = {"error": f"{type(exc).__name__}: {exc}"[:400]}
+        chan_cfg = d360_safe_error_payload(exc, secrets=[read_access_token(conn)], operation="waba_webhook_read_channel")
     chan_url = ""
     if isinstance(chan_cfg, dict):
-        chan_url = (
-            str(chan_cfg.get("url") or "")
-            or str((chan_cfg.get("webhook") or {}).get("url") or "")
-            or str((chan_cfg.get("data") or {}).get("url") or "")
-        )
+        chan_url = d360_extract_remote_url(chan_cfg)
     chan_matches = bool(chan_url) and chan_url.rstrip("/") == expected_url.rstrip("/")
 
     _log_d360_verify(
@@ -3017,7 +2973,7 @@ async def admin_coexistence_waba_webhook_read(
             timeout=6.0,
         )
     except Exception as exc:
-        waba_cfg = {"error": f"{type(exc).__name__}: {exc}"[:400]}
+        waba_cfg = d360_safe_error_payload(exc, secrets=[read_access_token(conn)], operation="waba_webhook_read_waba")
     waba_url = ""
     waba_id_remote = None
     numbers_on_waba: List[str] = []
@@ -3044,7 +3000,7 @@ async def admin_coexistence_waba_webhook_read(
                   else ("url_mismatch" if waba_url else "no_remote_url"))
         ),
         extra={
-            "waba_id_remote": str(waba_id_remote) if waba_id_remote is not None else None,
+            "waba_id_remote_present": bool(waba_id_remote),
             "numbers_on_this_waba_count": len(numbers_on_waba),
         },
     )
@@ -3065,23 +3021,22 @@ async def admin_coexistence_waba_webhook_read(
     )
 
     return {
-        "tenant_id":     tenant_id,
-        "expected_url":  expected_url,
+        "tenant_id": tenant_id,
         "channel": {
-            "url":     chan_url or None,
             "matches": chan_matches,
-            "raw":     chan_cfg,
+            **d360_url_flags(chan_url, expected_url),
+            **d360_response_summary(chan_cfg),
         },
         "waba": {
-            "url":                  waba_url or None,
-            "matches":              waba_matches,
-            "waba_id":              str(waba_id_remote) if waba_id_remote is not None else None,
-            "numbers_on_this_waba": numbers_on_waba,
-            "raw":                  waba_cfg,
+            "matches": waba_matches,
+            **d360_url_flags(waba_url, expected_url),
+            "waba_id_remote_present": bool(waba_id_remote),
+            "numbers_on_this_waba_count": len(numbers_on_waba),
+            **d360_response_summary(waba_cfg),
         },
         "local_connection": {
-            "phone_number_id": local_phone,
-            "waba_id":         local_waba,
+            "phone_number_id": redact_graph_id(local_phone) if local_phone else None,
+            "waba_id": redact_graph_id(local_waba) if local_waba else None,
         },
         "phone_id_drift_with_360dialog": phone_drift,
     }
@@ -3140,7 +3095,7 @@ async def admin_coexistence_diagnose(
         "phone_number":       str | null,
         "channel_id":         str | null,
         "api_key_present":    bool,
-        "api_key_tail":       str,       # "***xxxx (len=N)" or "missing"
+        "api_key_present":    bool,
         "webhook_verified":   bool,
         "sending_enabled":    bool,
         "last_webhook_received_at":          ISO | null,
@@ -3151,20 +3106,20 @@ async def admin_coexistence_diagnose(
       "token_check": {
         "channel_endpoint_ok": bool,     # GET /v1/configs/webhook returned 2xx
         "channel_status_code": int | null,
-        "channel_body_preview": str,
+        "channel_response":     dict,
         "waba_endpoint_ok":    bool,     # GET /waba_webhook returned 2xx
         "waba_status_code":    int | null,
-        "waba_body_preview":   str,
+        "waba_response":        dict,
         "verdict":             "valid" | "rejected" | "transport_error" | "no_token",
       },
       "registration": {
         "expected_url":        str,
-        "channel_remote_url":  str | null,
+        "channel_remote_url_present": bool,
         "channel_matches":     bool,
-        "waba_remote_url":     str | null,
+        "waba_remote_url_present": bool,
         "waba_matches":        bool,
-        "waba_id_remote":      str | null,
-        "numbers_on_this_waba": [str, ...],
+        "waba_id_remote_present": bool,
+        "numbers_on_this_waba_count": int,
         "phone_id_drift":      bool,
       },
       "inbound_evidence": {
@@ -3219,12 +3174,11 @@ async def admin_coexistence_diagnose(
             "provider":                       _wa_provider(conn),
             "connection_type":                getattr(conn, "connection_type", None),
             "status":                         getattr(conn, "status", None),
-            "phone_number_id":                phone_id_local,
-            "waba_id":                        getattr(conn, "whatsapp_business_account_id", None),
-            "phone_number":                   phone_display_local,
-            "channel_id":                     channel_id_local,
+            "phone_number_id":                redact_graph_id(phone_id_local) if phone_id_local else None,
+            "waba_id":                        redact_graph_id(getattr(conn, "whatsapp_business_account_id", None)) or None,
+            "phone_number_present":           bool((phone_display_local or "").strip()),
+            "channel_id":                     redact_graph_id(channel_id_local) if channel_id_local else None,
             "api_key_present":                bool(api_key.strip()),
-            "api_key_tail":                   _d360_key_tail(api_key),
             "webhook_verified":               bool(getattr(conn, "webhook_verified", False)),
             "sending_enabled":                bool(getattr(conn, "sending_enabled", False)),
             "last_webhook_received_at":       _dt_iso_utc(getattr(conn, "last_webhook_received_at", None)),
@@ -3237,10 +3191,10 @@ async def admin_coexistence_diagnose(
     token_check: Dict[str, Any] = {
         "channel_endpoint_ok":  False,
         "channel_status_code":  None,
-        "channel_body_preview": "",
+        "channel_response":     {},
         "waba_endpoint_ok":     False,
         "waba_status_code":     None,
-        "waba_body_preview":    "",
+        "waba_response":        {},
         "verdict":              "no_token",
     }
     channel_remote_url: Optional[str] = None
@@ -3255,19 +3209,14 @@ async def admin_coexistence_diagnose(
                 timeout=6.0,
             )
         except Exception as exc:
-            chan_cfg = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+            chan_cfg = d360_safe_error_payload(exc, secrets=[api_key], operation="diagnose_channel_read")
         chan_err = isinstance(chan_cfg, dict) and "error" in chan_cfg
         chan_sc = (chan_cfg or {}).get("status_code") if isinstance(chan_cfg, dict) else None
         token_check["channel_endpoint_ok"]  = not chan_err
         token_check["channel_status_code"]  = chan_sc if isinstance(chan_sc, int) else None
-        token_check["channel_body_preview"] = _d360_body_preview(chan_cfg)
+        token_check["channel_response"] = d360_response_summary(chan_cfg)
         if isinstance(chan_cfg, dict):
-            channel_remote_url = (
-                str(chan_cfg.get("url") or "")
-                or str((chan_cfg.get("webhook") or {}).get("url") or "")
-                or str((chan_cfg.get("data") or {}).get("url") or "")
-                or None
-            )
+            channel_remote_url = d360_extract_remote_url(chan_cfg) or None
         _log_d360_verify(
             operation="diagnose_channel_read",
             tenant_id=tenant_id,
@@ -3288,12 +3237,12 @@ async def admin_coexistence_diagnose(
                 timeout=6.0,
             )
         except Exception as exc:
-            waba_cfg = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+            waba_cfg = d360_safe_error_payload(exc, secrets=[api_key], operation="diagnose_waba_read")
         waba_err = isinstance(waba_cfg, dict) and "error" in waba_cfg
         waba_sc = (waba_cfg or {}).get("status_code") if isinstance(waba_cfg, dict) else None
         token_check["waba_endpoint_ok"]  = not waba_err
         token_check["waba_status_code"]  = waba_sc if isinstance(waba_sc, int) else None
-        token_check["waba_body_preview"] = _d360_body_preview(waba_cfg)
+        token_check["waba_response"] = d360_response_summary(waba_cfg)
         if isinstance(waba_cfg, dict):
             waba_remote_url = str(waba_cfg.get("url") or "") or None
             wid_r = waba_cfg.get("waba_id")
@@ -3335,13 +3284,13 @@ async def admin_coexistence_diagnose(
         phone_id_local and numbers_on_waba and str(phone_id_local) not in numbers_on_waba
     )
     registration_block = {
-        "expected_url":         expected_url,
-        "channel_remote_url":   channel_remote_url,
+        "expected_url_present": bool((expected_url or "").strip()),
         "channel_matches":      chan_matches,
-        "waba_remote_url":      waba_remote_url,
         "waba_matches":         waba_matches,
-        "waba_id_remote":       waba_id_remote,
-        "numbers_on_this_waba": numbers_on_waba,
+        "channel_remote_url_present": bool(channel_remote_url),
+        "waba_remote_url_present": bool(waba_remote_url),
+        "waba_id_remote_present": bool(waba_id_remote),
+        "numbers_on_this_waba_count": len(numbers_on_waba),
         "phone_id_drift":       phone_drift,
     }
 
@@ -3388,9 +3337,9 @@ async def admin_coexistence_diagnose(
             "status":           getattr(row, "status", None),
             "provider":         _wa_provider(row),
             "connection_type":  getattr(row, "connection_type", None),
-            "phone_number_id":  getattr(row, "phone_number_id", None),
-            "phone_number":     getattr(row, "phone_number", None),
-            "channel_id":       pd_.get("channel_id") or pd_.get("channel"),
+            "phone_number_id":  redact_graph_id(getattr(row, "phone_number_id", None)) or None,
+            "phone_number_present": bool((getattr(row, "phone_number", None) or "").strip()),
+            "channel_id":       redact_graph_id(pd_.get("channel_id") or pd_.get("channel")) or None,
             "is_this_tenant":   row.tenant_id == tenant_id,
         }
 
