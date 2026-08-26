@@ -50,6 +50,7 @@ from core.config import (
 )
 from core.database import get_db
 from core.log_redaction import redact_graph_id, redact_sensitive_log_text
+from services.whatsapp_connection_service import connection_conflict_http_detail
 from database.models import WhatsAppConnection
 from services.whatsapp_platform.service import graph_get_with_context, graph_post_with_context
 from services.coexistence_embedded_exchange import (
@@ -1015,7 +1016,7 @@ async def _finalize_coexistence_exchange(
             phone_number_id=phone_id,
         )
     except TenantIntegrityError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=connection_conflict_http_detail(exc)) from exc
 
     eligible, phone_data, eligibility_err = verify_coexistence_phone(phone_id, user_token, tenant_id)
     display = phone_data.get("display_phone_number") or chosen.get("display_phone_number")
@@ -1313,14 +1314,14 @@ async def sync_embedded_connection_from_meta(
             logger.info(
                 "[EmbeddedSignup] webhook subscribed on finalise — "
                 "tenant=%s phone=%s waba=%s",
-                conn.tenant_id, conn.phone_number_id, conn.whatsapp_business_account_id,
+                conn.tenant_id, redact_graph_id(conn.phone_number_id), redact_graph_id(conn.whatsapp_business_account_id),
             )
         else:
             logger.warning(
                 "[EmbeddedSignup] webhook subscription FAILED on finalise — "
                 "tenant=%s phone=%s waba=%s err=%r",
-                conn.tenant_id, conn.phone_number_id,
-                conn.whatsapp_business_account_id, wh_err,
+                conn.tenant_id, redact_graph_id(conn.phone_number_id),
+                redact_graph_id(conn.whatsapp_business_account_id), wh_err,
             )
         meta = dict(conn.extra_metadata or {})
         meta["webhook_subscription_error"] = wh_err
@@ -2070,9 +2071,9 @@ async def exchange_code(
             actor="embedded_exchange",
         )
     except WhatsAppConnectionConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=connection_conflict_http_detail(exc)) from exc
     except WhatsAppConnectionError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=connection_conflict_http_detail(exc)) from exc
 
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn:
@@ -2242,7 +2243,7 @@ async def select_phone(
         logger.error(
             "[EmbeddedSignup] select-phone BLOCKED — phone_number_id=%s already "
             "claimed by another tenant. tenant=%s conflict: %s",
-            body.phone_number_id, tenant_id, _tie,
+            redact_graph_id(body.phone_number_id), tenant_id, redact_sensitive_log_text(_tie),
         )
         raise HTTPException(status_code=409, detail=str(_tie)) from _tie
     try:
@@ -2459,11 +2460,11 @@ async def add_phone(
     """
     tenant_id = resolve_tenant_id(request)
     logger.info(
-        "[EmbeddedSignup] add-phone START tenant=%s origin=%s cc=%s phone=%s",
+        "[EmbeddedSignup] add-phone START tenant=%s origin=%s phone_present=%s cc_present=%s",
         tenant_id,
         request.headers.get("origin", ""),
-        body.country_code,
-        body.phone_number,
+        bool(body.phone_number),
+        bool(body.country_code),
     )
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).first()
     if not conn or not conn.whatsapp_business_account_id:

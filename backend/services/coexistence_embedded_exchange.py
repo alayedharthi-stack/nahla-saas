@@ -9,6 +9,21 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database.models import WhatsAppConnection, WhatsAppOAuthNonce
+from scripts.operators.bootstrap_migration_contract import (
+    COEXISTENCE_NONCE_TABLE,
+    assert_coexistence_nonce_migration_applied,
+)
+
+
+def assert_coexistence_nonce_storage_ready(db: Session) -> None:
+    bind = db.get_bind()
+    try:
+        assert_coexistence_nonce_migration_applied(bind)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Coexistence OAuth nonce storage is not ready ({COEXISTENCE_NONCE_TABLE} missing). "
+            "Run alembic upgrade 0101 before embedded signup exchange."
+        ) from exc
 
 
 COEXISTENCE_TENANT_LOCK_CLASS = 877001
@@ -42,6 +57,7 @@ def persist_oauth_nonce(
     connection_mode: str,
     expires_at: datetime,
 ) -> None:
+    assert_coexistence_nonce_storage_ready(db)
     db.add(
         WhatsAppOAuthNonce(
             nonce_hash=hash_oauth_nonce(nonce),
@@ -62,6 +78,7 @@ def consume_oauth_nonce(
     connection_mode: str,
     now: Optional[datetime] = None,
 ) -> str:
+    assert_coexistence_nonce_storage_ready(db)
     """Atomically consume a persisted nonce.
 
     Returns:

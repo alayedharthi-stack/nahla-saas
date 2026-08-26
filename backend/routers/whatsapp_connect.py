@@ -59,7 +59,9 @@ from core.coexistence_client_id import (
 )
 from core.database import get_db
 from core.log_redaction import redact_graph_id, redact_sensitive_log_text
+from services.whatsapp_connection_service import connection_conflict_http_detail
 from services.d360_logging import (
+    d360_sanitize_live_verify_probe,
     d360_extract_remote_url,
     d360_response_summary,
     d360_safe_error_payload,
@@ -112,6 +114,30 @@ from services.whatsapp_platform.service import (
 logger = logging.getLogger("nahla-backend")
 
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp Connection"])
+
+def _sanitize_webhook_operation_result(result: Any) -> dict[str, Any]:
+    if result is None:
+        return {}
+    if not isinstance(result, dict):
+        return d360_response_summary({"error": "invalid_response"})
+    payload = dict(result)
+    payload.setdefault("status_code", payload.get("status_code"))
+    return d360_response_summary(payload)
+
+
+def _safe_meta_refresh_payload(data: Any, http_status: int | None) -> dict[str, Any]:
+    err_code = None
+    if isinstance(data, dict):
+        err = data.get("error") or {}
+        if isinstance(err, dict):
+            err_code = err.get("code")
+    return {
+        "updated": False,
+        "http_status": http_status,
+        "error_code": err_code,
+        "message": "تعذّر قراءة حالة الرقم من Meta.",
+    }
+
 
 GRAPH_BASE = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
 _TENANT_FEATURES_KEY = "tenant_features"
@@ -1137,7 +1163,7 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
                     except Exception:
                         provider_detail = resp.text[:200]
         except Exception as exc:
-            provider_detail = f"network_error: {exc}"
+            provider_detail = f"network_error: {type(exc).__name__}"
             provider_reachable = False
             if provider == WHATSAPP_PROVIDER_360DIALOG and (webhook_active or bool(waba_id)):
                 provider_reachable = True
@@ -1206,7 +1232,7 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
         "[WA live-verify] tenant=%s provider=%s db_status=%s "
         "waba=%s phone=%s token=%s webhook_active=%s probe_http=%s probe_summary=%s "
         "code=%s truly_connected=%s",
-        tenant_id, provider, db_status, bool(waba_id), bool(phone_id),
+        tenant_id, provider, db_status, redact_graph_id(waba_id) if waba_id else "-", redact_graph_id(phone_id) if phone_id else "-",
         has_token, webhook_active, provider_status_code,
         (provider_probe or {}).get("summary") if provider_probe else "-",
         reason_code, truly_connected,
@@ -1231,7 +1257,7 @@ async def live_verify_connection(request: Request, db: Session = Depends(get_db)
             "provider":        provider,
             "db_status":       db_status,
             "verified_at":     now_iso,
-            "provider_probe":  provider_probe,
+            "provider_probe":  d360_sanitize_live_verify_probe(provider_probe) if provider_probe else None,
         },
     )
 
@@ -1325,10 +1351,10 @@ async def embedded_signup_callback(
                 actor           = "oauth_callback",
             )
         except WhatsAppConnectionConflict as _exc:
-            raise HTTPException(status_code=409, detail=str(_exc)) from _exc
+            raise HTTPException(status_code=409, detail=connection_conflict_http_detail(_exc)) from _exc
         except WhatsAppConnectionError as _exc:
             raise HTTPException(
-                status_code=502, detail=f"Meta callback failed: {_exc}"
+                status_code=502, detail="Meta callback failed."
             ) from _exc
 
         # Update Meta-specific metadata that lives outside the service's scope
@@ -1662,9 +1688,9 @@ async def manual_connect(
             actor           = str(actor_user_id),
         )
     except WhatsAppConnectionConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=connection_conflict_http_detail(exc)) from exc
     except WhatsAppConnectionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail="WhatsApp connection write failed.") from exc
 
     log_wa_direct_stage(stage="manual connect done", tenant_id=tenant_id, success=True, phone_number_id=pid, waba_id=wid, tag="manual_connect")
     return result.to_api_dict()
@@ -2028,7 +2054,7 @@ async def coexistence_partner_connect(
             )
         except Exception as exc:
             log_wa_direct_exception("coexistence partner webhook configure", exc, tag="coexistence")
-            webhook_result = {"error": str(exc)[:500]}
+            webhook_result = d360_safe_error_payload(exc, operation="dialog360_configure_webhook")
         # ALSO set the WABA-level webhook (override_all=True) — this is the
         # only scope that guarantees inbound delivery when 360dialog rotates
         # phone_number_id during a re-bind. Channel scope alone has been
@@ -2043,7 +2069,7 @@ async def coexistence_partner_connect(
             )
         except Exception as exc:
             log_wa_direct_exception("coexistence partner waba webhook", exc, tag="coexistence")
-            waba_webhook_result = {"error": str(exc)[:500]}
+            waba_webhook_result = d360_safe_error_payload(exc, operation="dialog360_configure_webhook")
         channel_ok = "error" not in (webhook_result or {})
         waba_ok    = "error" not in (waba_webhook_result or {})
         if channel_ok or waba_ok:
@@ -2167,7 +2193,7 @@ async def admin_activate_coexistence(
             )
         except Exception as exc:
             log_wa_direct_exception("coexistence activate webhook configure", exc, tag="coexistence")
-            webhook_result = {"error": str(exc)[:500]}
+            webhook_result = d360_safe_error_payload(exc, operation="dialog360_configure_webhook")
         try:
             waba_webhook_result = await dialog360_set_waba_webhook(
                 api_key=body.api_key,
@@ -2178,7 +2204,7 @@ async def admin_activate_coexistence(
             )
         except Exception as exc:
             log_wa_direct_exception("coexistence activate waba webhook", exc, tag="coexistence")
-            waba_webhook_result = {"error": str(exc)[:500]}
+            waba_webhook_result = d360_safe_error_payload(exc, operation="dialog360_configure_webhook")
         channel_ok = "error" not in (webhook_result or {})
         waba_ok    = "error" not in (waba_webhook_result or {})
         meta["last_webhook_setup"] = webhook_result
@@ -2224,7 +2250,7 @@ async def admin_activate_coexistence(
 
     return {
         "status": conn.status,
-        "webhook_result": webhook_result,
+        "webhook_result": _sanitize_webhook_operation_result(webhook_result) if webhook_result else None,
         "request_id": request_id,
         **_coexistence_status_payload(conn),
     }
@@ -4628,11 +4654,7 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
     if "error" in data:
         err = data["error"]
         log_wa_direct_graph_result(stage="refresh meta error", tenant_id=tenant_id, response=data, http_status=resp_status, phone_number_id=phone_id, tag="WA refresh")
-        return {
-            "updated": False,
-            "meta_response": data,
-            "message": f"Meta: {err.get('message', 'خطأ غير معروف')}",
-        }
+        return _safe_meta_refresh_payload(data, resp_status)
 
     verification_status = data.get("code_verification_status", "")
     display_phone       = data.get("display_phone_number", conn.phone_number or "")
@@ -4673,7 +4695,6 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
             db.commit()
             return {
                 "updated": False,
-                "meta_response": data,
                 "message": "تم الربط جزئياً. جارٍ تهيئة مزامنة تطبيق واتساب الأعمال.",
                 **_build_wa_status(conn),
             }
@@ -4694,7 +4715,6 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
         logger.info("[WA refresh] CONNECTED tenant=%s", tenant_id)
         return {
             "updated": True,
-            "meta_response": data,
             "message": "✅ تم التحقق من الرقم في Meta وتم تحديث حالة الاتصال.",
             **_build_wa_status(conn),
         }
@@ -4716,7 +4736,6 @@ async def refresh_status_from_meta(request: Request, db: Session = Depends(get_d
     return {
         "updated":      False,
         "meta_status":  verification_status,
-        "meta_response": data,
         "status": conn.status,
         "sending_enabled": conn.sending_enabled,
         "message": sync_state.get("message") or (

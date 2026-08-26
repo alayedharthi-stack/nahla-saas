@@ -2661,7 +2661,8 @@ async def admin_force_connect_whatsapp(
             actor           = "admin_force_connect",
         )
     except WhatsAppConnectionConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        from services.whatsapp_connection_service import connection_conflict_http_detail  # noqa: PLC0415
+        raise HTTPException(status_code=409, detail=connection_conflict_http_detail(exc)) from exc
     except WhatsAppConnectionError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

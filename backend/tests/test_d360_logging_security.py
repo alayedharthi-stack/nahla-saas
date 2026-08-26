@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import asyncio
 import httpx
 import pytest
 
@@ -230,3 +231,43 @@ def test_numbers_on_this_waba_count_only(caplog, func_name):
     _assert_absent(caplog.text)
     assert PHONE_ID not in caplog.text
     assert "numbers_on_this_waba_count=2" in caplog.text
+
+def test_dialog360_configure_webhook_logs_summary_only(caplog, monkeypatch):
+    from services.whatsapp_platform import service as wa_service
+
+    caplog.set_level(logging.INFO, logger="nahla.whatsapp.service")
+
+    class _Resp:
+        status_code = 400
+        text = PAYLOAD
+
+        @staticmethod
+        def json():
+            return {"error": {"message": PAYLOAD, "code": 100}, "url": URL, "waba_id": WABA}
+
+    async def _post(*args, **kwargs):
+        return _Resp()
+
+    monkeypatch.setattr(wa_service.httpx.AsyncClient, "post", _post)
+    asyncio.run(wa_service.dialog360_configure_webhook(api_key=API_KEY, url=URL))
+    _assert_absent(caplog.text)
+    assert "summary=" in caplog.text
+
+
+def test_dialog360_live_verify_probe_sanitized():
+    from services.whatsapp_platform.service import dialog360_live_verify_probes
+
+    probe = asyncio.run(dialog360_live_verify_probes(
+        tenant_id=TENANT,
+        api_key=API_KEY,
+        phone_number_id=PHONE_ID,
+        waba_id=WABA,
+        channel_id=CHANNEL,
+        connection_type="coexistence",
+        partner_id=None,
+        timeout=0.01,
+    ))
+    rendered = str(probe)
+    _assert_absent(rendered)
+    assert "body_preview" not in rendered
+    assert "url" not in str(probe.get("steps") or [])

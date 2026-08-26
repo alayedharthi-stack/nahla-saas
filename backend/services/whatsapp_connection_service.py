@@ -55,6 +55,14 @@ logger = logging.getLogger("nahla.wa_conn_svc")
 class WhatsAppConnectionConflict(Exception):
     """phone_number_id or waba_id is actively owned by another tenant (HTTP 409)."""
 
+    def __init__(self, message: str, *, code: str = "CONFLICT_ASSET_CLAIMED") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def connection_conflict_http_detail(exc: WhatsAppConnectionConflict) -> dict:
+    return {"code": exc.code, "message": str(exc)}
+
 
 class WhatsAppConnectionError(Exception):
     """Unexpected internal failure during the connection write."""
@@ -176,7 +184,20 @@ def commit_connection(
 
     logger.info(
         "[WASvc] commit START — tenant=%s phone=%s waba=%s type=%s actor=%s",
-        tenant_id, phone_number_id, waba_id, connection_type, actor,
+        tenant_id,
+        redact_graph_id(phone_number_id),
+        redact_graph_id(waba_id),
+        connection_type,
+        actor,
+    )
+
+    from services.whatsapp_asset_lock import acquire_whatsapp_asset_advisory_locks  # noqa: PLC0415
+
+    acquire_whatsapp_asset_advisory_locks(
+        db,
+        provider=provider,
+        phone_number_id=phone_number_id,
+        waba_id=waba_id,
     )
 
     # ── Step 1–2: Integrity checks — ALL errors are fatal (no broad except) ──
@@ -184,13 +205,13 @@ def commit_connection(
         assert_phone_id_not_claimed(db, phone_number_id, tenant_id)
     except TenantIntegrityError as exc:
         logger.error("[WASvc] BLOCKED phone conflict tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
-        raise WhatsAppConnectionConflict(str(exc)) from exc
+        raise WhatsAppConnectionConflict(str(exc), code="CONFLICT_PHONE_CLAIMED") from exc
 
     try:
         assert_waba_id_not_claimed(db, waba_id, tenant_id)
     except TenantIntegrityError as exc:
         logger.error("[WASvc] BLOCKED waba conflict tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
-        raise WhatsAppConnectionConflict(str(exc)) from exc
+        raise WhatsAppConnectionConflict(str(exc), code="CONFLICT_WABA_CLAIMED") from exc
 
     # ── Step 3: Evict stale disconnected rows (non-fatal if eviction fails) ──
     try:
@@ -208,9 +229,8 @@ def commit_connection(
     )
     if not match:
         raise WhatsAppConnectionConflict(
-            f"phone_number_id {phone_number_id} belongs to WABA {resolved_waba}, "
-            f"not to the supplied waba_id {waba_id}. "
-            f"يرجى إدخال الـ WABA ID الصحيح: {resolved_waba}"
+            "phone_number_id belongs to a different WABA than supplied.",
+            code="CONFLICT_PHONE_WABA_MISMATCH",
         )
 
     # ── Step 5: Write ─────────────────────────────────────────────────────────
@@ -320,17 +340,37 @@ def commit_connection(
                 conn.phone_number, conn.business_display_name,
             )
 
+    from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+
     try:
         db.commit()
         db.refresh(conn)
+    except IntegrityError as exc:
+        db.rollback()
+        logger.error(
+            "[WASvc] DB commit race tenant=%s phone=%s waba=%s: %s",
+            tenant_id,
+            redact_graph_id(phone_number_id),
+            redact_graph_id(waba_id),
+            redact_sensitive_log_text(exc),
+        )
+        raise WhatsAppConnectionConflict(
+            "WhatsApp asset is already claimed by another tenant.",
+            code="CONFLICT_ASSET_RACE",
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         logger.error("[WASvc] DB commit FAILED tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
-        raise WhatsAppConnectionError(f"DB write failed: {exc}") from exc
+        raise WhatsAppConnectionError("DB write failed.") from exc
 
     logger.info(
         "[WASvc] COMMITTED (%s) — tenant=%s phone=%s waba=%s conn_id=%s actor=%s",
-        action, tenant_id, phone_number_id, waba_id, conn.id, actor,
+        action,
+        tenant_id,
+        redact_graph_id(phone_number_id),
+        redact_graph_id(waba_id),
+        conn.id,
+        actor,
     )
 
     result = ConnectionResult(
@@ -355,7 +395,7 @@ def commit_connection(
         result.phone_registered = True
         logger.info(
             "[WASvc] Cloud /register not required — coexistence/skip tenant=%s phone=%s",
-            tenant_id, phone_number_id,
+            tenant_id, redact_graph_id(phone_number_id),
         )
     else:
         reg_ok, reg_err = register_phone_number(phone_number_id, access_token, tenant_id)
@@ -384,7 +424,7 @@ def commit_connection(
         conn.webhook_verified = True
         logger.info(
             "[WASvc] webhook subscribed — tenant=%s phone=%s waba=%s",
-            tenant_id, phone_number_id, waba_id,
+            tenant_id, redact_graph_id(phone_number_id), redact_graph_id(waba_id),
         )
     else:
         logger.warning(
@@ -489,7 +529,7 @@ def begin_waba_session(
         assert_waba_id_not_claimed(db, waba_id, tenant_id)
     except TenantIntegrityError as exc:
         logger.error("[WASvc] BLOCKED waba conflict tenant=%s: %s", tenant_id, redact_sensitive_log_text(exc))
-        raise WhatsAppConnectionConflict(str(exc)) from exc
+        raise WhatsAppConnectionConflict(str(exc), code="CONFLICT_WABA_CLAIMED") from exc
 
     try:
         evict_waba_id_from_other_tenants(db, waba_id, tenant_id)
@@ -565,18 +605,16 @@ def fetch_phone_metadata(
         url  = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{phone_number_id}"
         resp = httpx.get(
             url,
-            params={
-                "fields":       "id,display_phone_number,verified_name,whatsapp_business_account",
-                "access_token": access_token,
-            },
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"fields": "id,display_phone_number,verified_name,whatsapp_business_account"},
             timeout=10,
         )
         data = resp.json() if resp.content else {}
         if resp.status_code != 200:
             err = (data.get("error") or {}).get("message", f"HTTP {resp.status_code}")
             logger.warning(
-                "[WhatsApp] fetch_phone_metadata FAILED — tenant=%s phone=%s err=%r",
-                tenant_id, phone_number_id, err,
+                "[WhatsApp] fetch_phone_metadata FAILED — tenant=%s phone=%s status=%s",
+                tenant_id, redact_graph_id(phone_number_id), resp.status_code,
             )
             return out
 
@@ -590,8 +628,8 @@ def fetch_phone_metadata(
         return out
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[WhatsApp] fetch_phone_metadata exception — tenant=%s phone=%s: %s",
-            tenant_id, phone_number_id, exc,
+            "[WhatsApp] fetch_phone_metadata exception — tenant=%s phone=%s error_type=%s",
+            tenant_id, redact_graph_id(phone_number_id), type(exc).__name__,
         )
         return out
 
@@ -617,10 +655,8 @@ def resolve_waba_for_phone(
         url  = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{phone_number_id}"
         resp = httpx.get(
             url,
-            params={
-                "fields":       "id,display_phone_number,verified_name,whatsapp_business_account",
-                "access_token": access_token,
-            },
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"fields": "id,display_phone_number,verified_name,whatsapp_business_account"},
             timeout=10,
         )
         data = resp.json()
@@ -628,10 +664,10 @@ def resolve_waba_for_phone(
         if resp.status_code != 200:
             err = (data.get("error") or {}).get("message", f"HTTP {resp.status_code}")
             logger.warning(
-                "[WhatsApp] resolve_waba_for_phone FAILED — tenant=%s phone=%s err=%r",
-                tenant_id, phone_number_id, err,
+                "[WhatsApp] resolve_waba_for_phone FAILED — tenant=%s phone=%s status=%s",
+                tenant_id, redact_graph_id(phone_number_id), resp.status_code,
             )
-            return None, err
+            return None, "graph_http_error"
 
         wba = data.get("whatsapp_business_account")
         if isinstance(wba, dict):
@@ -650,10 +686,10 @@ def resolve_waba_for_phone(
 
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "[WhatsApp] resolve_waba_for_phone exception — tenant=%s phone=%s: %s",
-            tenant_id, phone_number_id, exc,
+            "[WhatsApp] resolve_waba_for_phone exception — tenant=%s phone=%s error_type=%s",
+            tenant_id, redact_graph_id(phone_number_id), type(exc).__name__,
         )
-        return None, str(exc)
+        return None, "graph_transport_error"
 
 
 def validate_phone_waba_match(
@@ -695,7 +731,8 @@ def validate_phone_waba_match(
     if not match:
         logger.error(
             "[WhatsApp] MISMATCH — phone %s belongs to WABA %s, not %s — tenant=%s",
-            phone_number_id, resolved_waba_id, input_waba_id, tenant_id,
+            redact_graph_id(phone_number_id), redact_graph_id(resolved_waba_id),
+            redact_graph_id(input_waba_id), tenant_id,
         )
 
     return match, resolved_waba_id, None
@@ -736,7 +773,7 @@ def register_phone_number(
         if resp.status_code == 200 and data.get("success"):
             logger.info(
                 "[WhatsApp] phone registration success — tenant=%s phone_number_id=%s",
-                tenant_id, phone_number_id,
+                tenant_id, redact_graph_id(phone_number_id),
             )
             return True, None
 
@@ -747,22 +784,22 @@ def register_phone_number(
         if err.get("code") == 80007:
             logger.info(
                 "[WhatsApp] phone already registered (80007) — tenant=%s phone_number_id=%s",
-                tenant_id, phone_number_id,
+                tenant_id, redact_graph_id(phone_number_id),
             )
             return True, None
 
         logger.warning(
             "[WhatsApp] phone registration failed — tenant=%s phone_number_id=%s error=%r",
-            tenant_id, phone_number_id, msg,
+            tenant_id, redact_graph_id(phone_number_id), msg,
         )
         return False, msg
 
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[WhatsApp] phone registration exception — tenant=%s phone_number_id=%s: %s",
-            tenant_id, phone_number_id, exc,
+            tenant_id, redact_graph_id(phone_number_id), redact_sensitive_log_text(exc),
         )
-        return False, str(exc)
+        return False, "graph_transport_error"
 
 
 def subscribe_phone_webhook(

@@ -30,3 +30,26 @@ def build_normal_bootstrap_upgrade_argv(*, python_executable: str) -> list[str]:
     if INTEGRATION_BOOTSTRAP_TARGET in FORBIDDEN_BOOTSTRAP_LITERALS:
         raise ValueError("bootstrap_target_forbidden")
     return [python_executable, "-m", "alembic", "upgrade", INTEGRATION_BOOTSTRAP_TARGET]
+
+COEXISTENCE_NONCE_MIGRATION_TARGET = "0101"
+COEXISTENCE_NONCE_TABLE = "whatsapp_oauth_nonces"
+
+
+def build_coexistence_nonce_upgrade_argv(*, python_executable: str) -> list[str]:
+    if COEXISTENCE_NONCE_MIGRATION_TARGET in FORBIDDEN_BOOTSTRAP_LITERALS:
+        raise ValueError("bootstrap_target_forbidden")
+    return [python_executable, "-m", "alembic", "upgrade", COEXISTENCE_NONCE_MIGRATION_TARGET]
+
+
+def assert_coexistence_nonce_migration_applied(bind) -> None:
+    from sqlalchemy import inspect
+
+    if COEXISTENCE_NONCE_TABLE not in inspect(bind).get_table_names():
+        raise RuntimeError(f"missing_table:{COEXISTENCE_NONCE_TABLE}")
+
+
+def assert_coexistence_nonce_migration_missing(bind) -> None:
+    from sqlalchemy import inspect
+
+    if COEXISTENCE_NONCE_TABLE in inspect(bind).get_table_names():
+        raise RuntimeError(f"unexpected_table:{COEXISTENCE_NONCE_TABLE}")

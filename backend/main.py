@@ -807,6 +807,93 @@ async def on_startup() -> None:
                     _elapsed,
                 )
 
+                # ── Step D: Coexistence OAuth nonce table (0101) ─────────────
+                from sqlalchemy import inspect as _sqla_inspect  # noqa: PLC0415
+                from scripts.operators.bootstrap_migration_contract import (  # noqa: PLC0415
+                    COEXISTENCE_NONCE_MIGRATION_TARGET, COEXISTENCE_NONCE_TABLE, assert_coexistence_nonce_migration_applied, build_coexistence_nonce_upgrade_argv,
+                )
+
+                _nonce_missing = False
+                try:
+                    _eng_d = create_engine(_db_url, pool_pre_ping=True)
+                    with _eng_d.connect() as _conn_d:
+                        _nonce_missing = COEXISTENCE_NONCE_TABLE not in _sqla_inspect(_conn_d).get_table_names()
+                    _eng_d.dispose()
+                except Exception as _d_probe_exc:
+                    logger.warning(
+                        "[BOOT/db] Step D: nonce table probe failed (non-fatal): %s",
+                        _d_probe_exc,
+                    )
+
+                if _nonce_missing:
+                    _nonce_upgrade_cmd = build_coexistence_nonce_upgrade_argv(
+                        python_executable=sys.executable,
+                    )
+                    logger.info(
+                        "[BOOT/db] Step D: alembic upgrade %s (timeout=%ds)",
+                        COEXISTENCE_NONCE_MIGRATION_TARGET,
+                        _T_UPGRADE,
+                    )
+                    _t0d = _t.monotonic()
+                    try:
+                        _alembic_d = subprocess.run(
+                            _nonce_upgrade_cmd,
+                            cwd=_DATABASE_DIR,
+                            check=False,
+                            env=os.environ.copy(),
+                            capture_output=True,
+                            text=True,
+                            timeout=_T_UPGRADE,
+                        )
+                    except subprocess.TimeoutExpired as _to_d:
+                        logger.error(
+                            "[BOOT/db] Step D TIMEOUT after %ds — nonce migration did NOT run. err=%s",
+                            _T_UPGRADE,
+                            _to_d,
+                        )
+                        return
+                    _elapsed_d = _t.monotonic() - _t0d
+                    if _alembic_d.stdout:
+                        logger.info(
+                            "[BOOT/db] Step D stdout (rc=%d, elapsed=%.1fs):
+%s",
+                            _alembic_d.returncode,
+                            _elapsed_d,
+                            _alembic_d.stdout.strip(),
+                        )
+                    if _alembic_d.returncode != 0:
+                        logger.error(
+                            "[BOOT/db] Step D FAILED rc=%d elapsed=%.1fs
+--- stderr ---
+%s
+--- stdout ---
+%s",
+                            _alembic_d.returncode,
+                            _elapsed_d,
+                            (_alembic_d.stderr or "").strip(),
+                            (_alembic_d.stdout or "").strip(),
+                        )
+                        return
+                    try:
+                        _eng_chk = create_engine(_db_url, pool_pre_ping=True)
+                        with _eng_chk.connect() as _c_chk:
+                            assert_coexistence_nonce_migration_applied(_c_chk)
+                        _eng_chk.dispose()
+                    except Exception as _d_assert_exc:
+                        logger.error("[BOOT/db] Step D post-check FAILED: %s", _d_assert_exc)
+                        return
+                    logger.info(
+                        "[BOOT/db] Step D: alembic upgrade %s OK rc=0 elapsed=%.1fs",
+                        COEXISTENCE_NONCE_TABLE,
+                        _elapsed_d,
+                    )
+                else:
+                    logger.info(
+                        "[BOOT/db] Step D: skipped (%s already present)",
+                        COEXISTENCE_NONCE_TABLE,
+                    )
+
+
             async def _bootstrap_db_schema_bg() -> None:
                 """
                 Background bootstrap runner.

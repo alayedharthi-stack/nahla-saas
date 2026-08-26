@@ -194,3 +194,57 @@ def log_d360_verify(
     }
     rendered = " ".join(f"{k}={v!r}" for k, v in fields.items())
     logger.info("[D360_WEBHOOK_VERIFY] %s", rendered)
+
+def d360_live_verify_step_record(
+    name: str,
+    method: str,
+    *,
+    status_code: Optional[int],
+    ok_http: bool,
+    uses_channel_key: bool,
+    error_type: Optional[str] = None,
+) -> dict[str, Any]:
+    """Safe per-step record for live-verify probes (no URLs, bodies, or raw IDs)."""
+    return {
+        "step": name,
+        "method": str(method or "").upper(),
+        "status_code": status_code,
+        "ok": bool(ok_http),
+        "uses_channel_key": bool(uses_channel_key),
+        "error_type": error_type,
+    }
+
+
+def d360_sanitize_live_verify_probe(probe: Any) -> dict[str, Any]:
+    """Return an API-safe live-verify probe without raw URLs, bodies, or Graph IDs."""
+    if not isinstance(probe, dict):
+        return {
+            "coexistence_mode": False,
+            "composite_alive": False,
+            "channel_auth_revoked": False,
+            "steps": [],
+            "summary": "",
+        }
+
+    safe_steps: list[dict[str, Any]] = []
+    for step in probe.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        safe_steps.append(
+            d360_live_verify_step_record(
+                str(step.get("step") or "unknown"),
+                str(step.get("method") or "GET"),
+                status_code=step.get("status_code") if isinstance(step.get("status_code"), int) else None,
+                ok_http=bool(step.get("ok")),
+                uses_channel_key=bool(step.get("uses_channel_key")),
+                error_type=step.get("error_type"),
+            )
+        )
+
+    return {
+        "coexistence_mode": bool(probe.get("coexistence_mode")),
+        "composite_alive": bool(probe.get("composite_alive")),
+        "channel_auth_revoked": bool(probe.get("channel_auth_revoked")),
+        "steps": safe_steps,
+        "summary": str(probe.get("summary") or ""),
+    }

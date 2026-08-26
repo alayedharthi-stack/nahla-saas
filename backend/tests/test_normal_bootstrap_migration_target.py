@@ -99,3 +99,24 @@ def test_alembic_revision_ids_are_unique() -> None:
             seen.append(rid)
     assert duplicates == [], f"duplicate Alembic revision identifiers: {duplicates}"
 
+def test_build_coexistence_nonce_upgrade_argv_pins_0101() -> None:
+    from scripts.operators.bootstrap_migration_contract import (
+        COEXISTENCE_NONCE_MIGRATION_TARGET,
+        build_coexistence_nonce_upgrade_argv,
+    )
+
+    assert COEXISTENCE_NONCE_MIGRATION_TARGET == "0101"
+    assert build_coexistence_nonce_upgrade_argv(python_executable="python") == [
+        "python",
+        "-m",
+        "alembic",
+        "upgrade",
+        "0101",
+    ]
+
+
+def test_main_has_step_d_nonce_guard() -> None:
+    main_source = (_REPO / "backend" / "main.py").read_text(encoding="utf-8")
+    assert "Step D:" in main_source
+    assert "build_coexistence_nonce_upgrade_argv" in main_source
+    assert "COEXISTENCE_NONCE_TABLE" in main_source
