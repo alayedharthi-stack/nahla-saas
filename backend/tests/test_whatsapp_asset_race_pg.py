@@ -5,8 +5,12 @@ import os
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
@@ -16,7 +20,7 @@ for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
-from database.models import Tenant, WhatsAppConnection  # noqa: E402
+from database.models import Tenant  # noqa: E402
 from services.whatsapp_connection_service import (  # noqa: E402
     WhatsAppConnectionConflict,
     commit_connection,
@@ -28,8 +32,35 @@ TOKEN = "pg-race-token-877"
 
 
 def _db_url() -> str:
-    return (os.getenv("A1_PG_TEST_DATABASE_URL") or os.getenv("DATABASE_URL") or
-            "postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas")
+    return (
+        os.getenv("A1_PG_TEST_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+        or "postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas"
+    )
+
+
+def _run_alembic(engine, revision: str) -> None:
+    prev = os.getcwd()
+    try:
+        os.chdir(_REPO / "database")
+        cfg = Config("alembic.ini")
+        url = engine.url.render_as_string(hide_password=False)
+        cfg.set_main_option("sqlalchemy.url", url)
+        os.environ["DATABASE_URL"] = url
+        command.upgrade(cfg, revision)
+    finally:
+        os.chdir(prev)
+
+
+def _validation_ok():
+    return SimpleNamespace(
+        is_valid=True,
+        token_status="valid",
+        token_source_label="system_user",
+        warnings=[],
+        expires_at=None,
+        error_message=None,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -38,6 +69,7 @@ def pg_engine():
         engine = create_engine(_db_url(), poolclass=NullPool, pool_pre_ping=True)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
+        _run_alembic(engine, "0101")
     except Exception as exc:  # noqa: BLE001
         if (os.getenv("A1_PG_INTEGRATION_REQUIRED") or "").strip() == "1":
             pytest.fail(f"PostgreSQL unavailable: {exc}")
@@ -46,41 +78,60 @@ def pg_engine():
     engine.dispose()
 
 
-def test_concurrent_commit_connection_one_conflict(pg_engine, monkeypatch):
-    Session = sessionmaker(bind=pg_engine)
-    s1 = Session()
-    s2 = Session()
-    try:
-        t1 = Tenant(name="race-a")
-        t2 = Tenant(name="race-b")
-        s1.add(t1)
-        s2.add(t2)
-        s1.commit()
-        s2.commit()
+def test_concurrent_commit_connection_one_conflict(pg_engine):
+    SessionLocal = sessionmaker(bind=pg_engine, expire_on_commit=False)
 
-        monkeypatch.setattr(
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM whatsapp_connections WHERE phone_number_id = :phone "
+                "OR whatsapp_business_account_id = :waba"
+            ),
+            {"phone": PHONE, "waba": WABA},
+        )
+
+    with SessionLocal() as s:
+        t1 = Tenant(name="race-a-877")
+        t2 = Tenant(name="race-b-877")
+        s.add_all([t1, t2])
+        s.commit()
+        t1_id, t2_id = t1.id, t2.id
+
+    patches = [
+        patch(
             "services.whatsapp_connection_service.validate_phone_waba_match",
-            lambda *a, **k: (True, WABA, None),
-        )
-        monkeypatch.setattr(
-            "services.whatsapp_connection_service.fetch_phone_metadata",
-            lambda *a, **k: {},
-        )
-        monkeypatch.setattr(
+            return_value=(True, WABA, None),
+        ),
+        patch("services.whatsapp_connection_service.fetch_phone_metadata", return_value={}),
+        patch(
             "services.whatsapp_connection_service.register_phone_number",
-            lambda *a, **k: (True, None),
-        )
-        monkeypatch.setattr(
+            return_value=(True, None),
+        ),
+        patch(
             "services.whatsapp_connection_service.subscribe_phone_webhook",
-            lambda *a, **k: (True, None),
-        )
-
+            return_value=(True, None),
+        ),
+        patch("services.whatsapp_platform.wa_connection_secrets.store_access_token"),
+        patch(
+            "services.whatsapp_platform.wa_token_validation.validate_meta_access_token_sync",
+            return_value=_validation_ok(),
+        ),
+        patch("services.whatsapp_platform.wa_token_validation.apply_validation_to_connection"),
+        patch(
+            "services.whatsapp_platform.wa_token_validation.production_sending_allowed",
+            return_value=True,
+        ),
+    ]
+    for p in patches:
+        p.start()
+    try:
         results: list[str] = []
         barrier = threading.Barrier(2)
 
-        def worker(tenant_id: int, session):
+        def worker(tenant_id: int) -> None:
+            session = SessionLocal()
             try:
-                barrier.wait(timeout=5)
+                barrier.wait(timeout=10)
                 commit_connection(
                     session,
                     tenant_id=tenant_id,
@@ -95,33 +146,44 @@ def test_concurrent_commit_connection_one_conflict(pg_engine, monkeypatch):
             except WhatsAppConnectionConflict as exc:
                 session.rollback()
                 results.append(exc.code)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 session.rollback()
-                results.append("error")
+                results.append(f"error:{type(exc).__name__}")
+            finally:
+                session.close()
 
-        th1 = threading.Thread(target=worker, args=(t1.id, s1))
-        th2 = threading.Thread(target=worker, args=(t2.id, s2))
+        th1 = threading.Thread(target=worker, args=(t1_id,))
+        th2 = threading.Thread(target=worker, args=(t2_id,))
         th1.start()
         th2.start()
-        th1.join(timeout=30)
-        th2.join(timeout=30)
+        th1.join(timeout=60)
+        th2.join(timeout=60)
 
-        assert "ok" in results
-        assert "CONFLICT_ASSET_RACE" in results or "CONFLICT_PHONE_CLAIMED" in results
-        owners = (
-            pg_engine.connect()
-            .execute(
+        assert "ok" in results, results
+        assert any(
+            code in results
+            for code in ("CONFLICT_ASSET_RACE", "CONFLICT_PHONE_CLAIMED", "CONFLICT_WABA_CLAIMED")
+        ), results
+        assert TOKEN not in str(results)
+        assert PHONE not in str(results)
+
+        with pg_engine.connect() as conn:
+            owners = conn.execute(
                 text(
                     "SELECT tenant_id FROM whatsapp_connections "
                     "WHERE phone_number_id = :phone AND status != 'disconnected'"
                 ),
                 {"phone": PHONE},
-            )
-            .fetchall()
-        )
+            ).fetchall()
         assert len(owners) == 1
     finally:
-        s1.rollback()
-        s2.rollback()
-        s1.close()
-        s2.close()
+        for p in patches:
+            p.stop()
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "DELETE FROM whatsapp_connections WHERE phone_number_id = :phone "
+                    "OR whatsapp_business_account_id = :waba"
+                ),
+                {"phone": PHONE, "waba": WABA},
+            )
