@@ -227,6 +227,11 @@ _ALLOWED_CHANNEL_IDS = frozenset({"ai", "campaign", "autopilot", "shared"})
 _VALIDITY_PRESETS = frozenset({"3h", "6h", "24h", "custom"})
 _POOL_MODES = frozenset({"pool_first", "pool_only", "on_demand_only"})
 
+DEFAULT_WARM_POOL: Dict[str, Any] = {
+    "target_per_level": 3,
+    "refill_threshold": 1,
+}
+
 
 class CouponRuleIn(BaseModel):
     id: str
@@ -304,12 +309,18 @@ class AiPolicyIn(BaseModel):
     pool_mode:           Optional[str]  = None
 
 
+class WarmPoolIn(BaseModel):
+    target_per_level: Optional[int] = None
+    refill_threshold: Optional[int] = None
+
+
 class CouponDashboardSettingsIn(BaseModel):
     rules: List[CouponRuleIn]
     vip_tiers: Optional[List[VipTierIn]] = None
     levels: Optional[List[CouponLevelIn]] = None
     global_defaults: Optional[GlobalDefaultsIn] = None
     ai_policy: Optional[AiPolicyIn] = None
+    warm_pool: Optional[WarmPoolIn] = None
 
 
 _ALLOWED_DISCOUNT_TYPES = {"percentage", "fixed"}
@@ -427,6 +438,25 @@ def _normalise_ai_policy(raw: Any) -> Dict[str, Any]:
         pass
     mode = str(raw.get("pool_mode") or base["pool_mode"]).lower()
     base["pool_mode"] = mode if mode in _POOL_MODES else "pool_first"
+    return base
+
+
+def _normalise_warm_pool(raw: Any) -> Dict[str, Any]:
+    base = dict(DEFAULT_WARM_POOL)
+    if not isinstance(raw, dict):
+        return base
+    try:
+        target = int(raw.get("target_per_level", base["target_per_level"]))
+    except (ValueError, TypeError):
+        target = base["target_per_level"]
+    target = max(0, min(3, target))
+    try:
+        refill = int(raw.get("refill_threshold", base["refill_threshold"]))
+    except (ValueError, TypeError):
+        refill = base["refill_threshold"]
+    refill = max(0, min(refill, target))
+    base["target_per_level"] = target
+    base["refill_threshold"] = refill
     return base
 
 
@@ -766,6 +796,7 @@ async def save_coupon_dashboard_settings(
         "levels":    _normalise_levels([l.dict() for l in body.levels]) if body.levels else _normalise_levels(existing.get("levels")),
         "global_defaults": _normalise_global_defaults(body.global_defaults.dict() if body.global_defaults else existing.get("global_defaults")),
         "ai_policy":       _normalise_ai_policy(body.ai_policy.dict() if body.ai_policy else existing.get("ai_policy")),
+        "warm_pool": _normalise_warm_pool(body.warm_pool.dict()) if body.warm_pool is not None else (existing.get("warm_pool") or dict(DEFAULT_WARM_POOL)),
     }
     meta["coupons_dashboard"] = new_block
     settings.extra_metadata = meta

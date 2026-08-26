@@ -106,7 +106,10 @@ def normalize_salla_coupon_push_dates(
     *,
     now: Optional[datetime] = None,
 ) -> tuple[str, Optional[str]]:
-    """Build Salla coupon push dates: YYYY-MM-DD only; start not before today."""
+    """Build Salla coupon push dates: YYYY-MM-DD only; start not before today.
+
+    Naive datetimes are treated as UTC before conversion to Asia/Riyadh calendar dates.
+    """
     now = now or datetime.now(timezone.utc)
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=timezone.utc)
@@ -122,7 +125,7 @@ def normalize_salla_coupon_push_dates(
             expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
         else:
             expiry_dt = expiry_dt.astimezone(timezone.utc)
-        expiry_day = expiry_dt.date()
+        expiry_day = expiry_dt.astimezone(_riyadh_tz()).date()
         if expiry_day < start_day:
             expiry_day = start_day
 

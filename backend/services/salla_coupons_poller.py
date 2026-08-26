@@ -11,8 +11,10 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from core.coupon_log_privacy import hash_identifier, safe_exception_class
+from core.pg_advisory_lock import DedicatedAdvisoryLock
 
 logger = logging.getLogger("nahla.salla_coupons_poller")
 
@@ -102,19 +104,21 @@ async def _run_one_tick() -> Dict[str, Any]:
     logger.info("[Salla Coupons Poller] tick started at=%s", started_at.isoformat())
 
     db: Session = SessionLocal()
-    lock_acquired = False
+    lock = DedicatedAdvisoryLock(db, key=ADVISORY_LOCK_KEY)
     try:
         try:
-            row = db.execute(
-                text("SELECT pg_try_advisory_lock(:k)"),
-                {"k": ADVISORY_LOCK_KEY},
-            ).scalar()
-            lock_acquired = bool(row)
+            acquired = lock.try_acquire()
         except Exception as lock_exc:
-            logger.debug("[Salla Coupons Poller] advisory lock unsupported (%s)", lock_exc)
-            lock_acquired = True
+            logger.warning(
+                "[Salla Coupons Poller] advisory lock acquire failed error_class=%s",
+                safe_exception_class(lock_exc),
+            )
+            _state["last_tick_at"] = started_at.isoformat()
+            _state["last_tick_skipped_reason"] = "advisory_lock_unavailable"
+            _state["ticks_total"] += 1
+            return {"skipped": True, "reason": "advisory_lock_unavailable"}
 
-        if not lock_acquired:
+        if not acquired:
             _state["last_tick_at"] = started_at.isoformat()
             _state["last_tick_skipped_reason"] = "advisory_lock_held_by_other_worker"
             _state["ticks_total"] += 1
@@ -189,9 +193,9 @@ async def _run_one_tick() -> Dict[str, Any]:
                 updated_total += stats["updated"]
                 tenant_state.update({"result": "ok", "stats": stats})
                 logger.info(
-                    "[Salla Coupons Poller] tenant=%s store=%s items_seen=%d created=%d updated=%d duration_ms=%d fetch_ok=%s partial=%s",
+                    "[Salla Coupons Poller] tenant=%s store_hash=%s items_seen=%d created=%d updated=%d duration_ms=%d fetch_ok=%s partial=%s",
                     tenant_id,
-                    store_id,
+                    hash_identifier(store_id),
                     stats["items_seen"],
                     stats["created"],
                     stats["updated"],
@@ -204,10 +208,10 @@ async def _run_one_tick() -> Dict[str, Any]:
                 tenant_state["result"] = "error"
                 tenant_state["error"] = type(exc).__name__
                 logger.exception(
-                    "[Salla Coupons Poller] tenant=%s store=%s error=%s",
+                    "[Salla Coupons Poller] tenant=%s store_hash=%s error_class=%s",
                     tenant_id,
-                    store_id,
-                    type(exc).__name__,
+                    hash_identifier(store_id),
+                    safe_exception_class(exc),
                 )
                 try:
                     db.rollback()
@@ -248,16 +252,13 @@ async def _run_one_tick() -> Dict[str, Any]:
             "duration_ms": duration_ms,
         }
     finally:
-        if lock_acquired:
-            try:
-                db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
-                db.commit()
-            except Exception:  # noqa: silent-ok — advisory unlock cleanup is best-effort
-                pass
+        if lock.held:
+            lock.release()
         try:
             db.close()
-        except Exception:  # noqa: silent-ok — session close cleanup is best-effort
+        except Exception:  # noqa: silent-ok
             pass
+
 
 
 async def _poll_integration(db: Session, intg: Any) -> Dict[str, Any]:

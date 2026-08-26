@@ -3937,6 +3937,7 @@ class SallaAdapter(BaseStoreAdapter):
         """
         self._last_coupon_create_error = None
         self._require_auth("create_coupon")
+        from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
         from core.salla_order_fidelity import _riyadh_tz  # noqa: PLC0415
         start_dt = datetime.now(_riyadh_tz())
         expiry_dt = start_dt + timedelta(days=expiry_days)
@@ -3977,7 +3978,11 @@ class SallaAdapter(BaseStoreAdapter):
                 data["data"].setdefault("expiry_date", expiry)
             elif isinstance(data, dict):
                 data.setdefault("expires_at", expiry_dt.isoformat())
-            logger.info("Salla coupon created: %s | tenant=%s", code, self._tenant_id)
+            logger.info(
+                "Salla coupon created code_hash=%s tenant_hash=%s",
+                hash_identifier(code),
+                hash_identifier(self._tenant_id),
+            )
             return data.get("data", data)
         except httpx.HTTPStatusError as exc:
             self._log_error("create_coupon", exc)
@@ -3995,6 +4000,18 @@ class SallaAdapter(BaseStoreAdapter):
 
     def get_last_coupon_create_error(self) -> Optional[str]:
         return getattr(self, "_last_coupon_create_error", None)
+
+
+    async def delete_coupon_by_id(self, coupon_id: str) -> bool:
+        """Delete a Salla coupon by provider ID. Returns True only on success."""
+        provider_id = str(coupon_id or "").strip()
+        if not provider_id:
+            return False
+        try:
+            return await self._delete(f"/coupons/{provider_id}")
+        except Exception as exc:
+            self._log_error("delete_coupon_by_id", exc)
+            return False
 
     async def delete_coupon_by_code(self, code: str) -> bool:
         """

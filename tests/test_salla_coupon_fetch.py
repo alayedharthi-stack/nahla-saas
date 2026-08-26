@@ -1,4 +1,4 @@
-﻿"""Tests for Salla coupon fetch SLA + exception classification."""
+"""Tests for Salla coupon fetch SLA + exception classification."""
 from __future__ import annotations
 
 import sys
@@ -53,3 +53,18 @@ def test_classify_fetch_exception_needs_reauth():
 
 def test_tenant_poll_due_without_meta_is_immediate():
     assert tenant_poll_due(None) is True
+
+def test_expiry_riyadh_midnight_boundary():
+  from datetime import datetime, timezone
+
+  from services.coupon_salla_push import normalize_salla_coupon_push_dates
+
+  now = datetime(2026, 8, 25, 21, 0, tzinfo=timezone.utc)
+  just_before_midnight = datetime(2026, 8, 26, 20, 59, tzinfo=timezone.utc)
+  just_after_midnight = datetime(2026, 8, 26, 21, 0, tzinfo=timezone.utc)
+
+  _start, expiry_before = normalize_salla_coupon_push_dates(now, just_before_midnight, now=now)
+  _start2, expiry_after = normalize_salla_coupon_push_dates(now, just_after_midnight, now=now)
+
+  assert expiry_before == "2026-08-26"
+  assert expiry_after == "2026-08-27"

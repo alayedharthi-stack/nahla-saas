@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from sqlalchemy import JSON, create_engine, event
@@ -118,6 +119,27 @@ def _add_pool_coupon(db, tenant_id: int, code: str, segment: str, **meta_overrid
     return row
 
 
+
+
+class _AlwaysAcquireLock:
+    def __init__(self, *args, **kwargs):
+        self.held = False
+
+    def try_acquire(self) -> bool:
+        self.held = True
+        return True
+
+    def release(self) -> bool:
+        self.held = False
+        return True
+
+
+@contextmanager
+def _patch_sqlite_pool_lock():
+    with patch("backend.services.coupon_generator.DedicatedAdvisoryLock", _AlwaysAcquireLock):
+        yield
+
+
 def _run_pool(svc: CouponGeneratorService):
     svc._get_adapter = lambda: _fake_adapter()
     return asyncio.run(svc.ensure_coupon_pool())
@@ -137,6 +159,7 @@ def test_pick_coupon_marks_sent_time_and_expiry_text():
             discount_value="10",
             expires_at=expires_at,
             extra_metadata=_pool_meta(segment="active"),
+            source_type="system",
         )
         db.add(coupon)
         db.commit()
@@ -423,7 +446,7 @@ def test_scenario_05_level_with_one_eligible_creates_two():
 
 
 def test_scenario_06_level_with_two_eligible_creates_one():
-    db, tenant_id, engine = _make_db()
+    db, tenant_id, engine = _make_db(warm_pool={"refill_threshold": 2})
     try:
         _add_pool_coupon(db, tenant_id, "NHS01", "active", level="silver")
         _add_pool_coupon(db, tenant_id, "NHS02", "active", level="silver")
@@ -674,7 +697,7 @@ def test_scenario_19_legacy_null_coupon_level_uses_target_segment_mapping():
         db.add(
             Coupon(
                 tenant_id=tenant_id,
-                code="NHL01",
+                code="NHL042",
                 discount_type="percentage",
                 discount_value="10",
                 expires_at=datetime.now(timezone.utc) + timedelta(days=2),
@@ -694,7 +717,7 @@ def test_scenario_19_legacy_null_coupon_level_uses_target_segment_mapping():
         assert svc._count_pool_by_level("vip") == 1
         picked = svc.pick_coupon_for_segment("inactive", for_channel="autopilot")
         assert picked is not None
-        assert picked.code == "NHL01"
+        assert picked.code == "NHL042"
     finally:
         db.close()
         engine.dispose()
@@ -738,6 +761,150 @@ def test_scenario_22_small_catalog_poller_interval_remains_sixty_seconds():
     assert POLL_INTERVAL_SECONDS == 60
     state = get_poller_state()
     assert state["config"]["adaptive_sla"]["small_catalog_seconds"] == 60
+
+
+def test_refill_threshold_boundaries_target_three_threshold_one():
+    cases = (
+        (3, 0),
+        (2, 0),
+        (1, 2),
+        (0, 3),
+    )
+    for existing, expected_created in cases:
+        db, tenant_id, engine = _make_db(warm_pool={"target_per_level": 3, "refill_threshold": 1})
+        try:
+            ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).one()
+            ts.extra_metadata = {
+                "coupons_dashboard": {
+                    "warm_pool": {"target_per_level": 3, "refill_threshold": 1},
+                    "levels": [
+                        {"id": "silver", "enabled": False},
+                        {"id": "gold", "enabled": False},
+                        {"id": "vip", "enabled": False},
+                    ],
+                }
+            }
+            db.commit()
+            for i in range(existing):
+                _add_pool_coupon(db, tenant_id, f"NHX0{i}", "new", level="bronze")
+            svc = CouponGeneratorService(db, tenant_id)
+            calls: list[str] = []
+
+            async def tracked_create(code, discount_type, discount_value, expiry_days):
+                calls.append(code)
+                return {
+                    "id": f"salla-{len(calls)}",
+                    "code": code,
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(days=expiry_days)).isoformat(),
+                }
+
+            svc._get_adapter = lambda: SimpleNamespace(
+                create_coupon=tracked_create,
+                delete_coupon_by_id=lambda _id: True,
+                delete_coupon_by_code=lambda _c: True,
+            )
+            with _patch_sqlite_pool_lock():
+                created = asyncio.run(svc.ensure_coupon_pool())
+            assert created["bronze"] == expected_created
+            assert len(calls) == expected_created
+        finally:
+            db.close()
+            engine.dispose()
+
+
+def test_vip_level_economics_share_quota_and_use_level_discount():
+    db, tenant_id, engine = _make_db()
+    try:
+        ts = db.query(TenantSettings).filter_by(tenant_id=tenant_id).one()
+        ts.extra_metadata = {
+            "coupons_dashboard": {
+                "levels": [{"id": "vip", "discount_default": 30}],
+            }
+        }
+        db.commit()
+
+        _add_pool_coupon(db, tenant_id, "NHR01", "at_risk", level="vip")
+        _add_pool_coupon(db, tenant_id, "NHR02", "inactive", level="vip")
+        svc = CouponGeneratorService(db, tenant_id)
+        assert svc._count_pool_by_level("vip") == 2
+        assert svc._count_pool("at_risk") == 2
+        assert svc._count_pool("inactive") == 2
+
+        with _patch_sqlite_pool_lock():
+            created = _run_pool(svc)
+        assert created["vip"] == 0
+
+        db.query(Coupon).filter(Coupon.tenant_id == tenant_id).delete()
+        db.commit()
+        svc = CouponGeneratorService(db, tenant_id)
+        with _patch_sqlite_pool_lock():
+            created = _run_pool(svc)
+        assert created["vip"] == 3
+        vip_rows = (
+            db.query(Coupon)
+            .filter(Coupon.tenant_id == tenant_id, Coupon.coupon_level == "vip")
+            .all()
+        )
+        assert len(vip_rows) == 3
+        assert all(str(row.discount_value) == "30" for row in vip_rows)
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_create_one_coupon_failure_logs_redacted_code_not_raw():
+    db, tenant_id, engine = _make_db()
+    try:
+        svc = CouponGeneratorService(db, tenant_id)
+        leaked_codes: list[str] = []
+        logged_fields: list[dict] = []
+
+        async def fake_create(code, discount_type, discount_value, expiry_days):
+            leaked_codes.append(code)
+            return {
+                "id": "remote-99",
+                "code": code,
+                "expires_at": "2026-12-31T00:00:00+00:00",
+            }
+
+        svc._get_adapter = lambda: SimpleNamespace(
+            create_coupon=fake_create,
+            delete_coupon_by_id=lambda _id: True,
+            delete_coupon_by_code=lambda _c: True,
+        )
+
+        original_commit = svc.db.commit
+
+        def boom_commit():
+            raise RuntimeError("disk on fire")
+
+        svc.db.commit = boom_commit
+
+        def _capture_event(_name, **fields):
+            logged_fields.append(dict(fields))
+
+        try:
+            with patch("backend.services.coupon_generator.log_event", side_effect=_capture_event):
+                result = asyncio.run(
+                    svc._create_one_coupon(
+                        segment="new",
+                        discount=15,
+                        expiry_days=1,
+                        reserved_codes=set(),
+                        adapter=svc._get_adapter(),
+                    )
+                )
+        finally:
+            svc.db.commit = original_commit
+
+        assert result is None
+        assert leaked_codes
+        raw_code = leaked_codes[0]
+        assert raw_code not in str(logged_fields)
+        assert any("coupon_hash=" in str(item.get("code_redacted", "")) for item in logged_fields)
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_level_to_segments_covers_all_canonical_levels():
