@@ -64,7 +64,13 @@ def _parse_abandoned_at_naive_utc(value):
         if dt is None:
             try:
                 dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except Exception:
+            except Exception as exc:
+                from core.obs import EVENTS, log_event  # noqa: PLC0415
+                log_event(
+                    EVENTS.ORDER_UPSERT_ERROR,
+                    err=exc,
+                    context="cart_recovery_abandoned_at_iso_parse",
+                )
                 return None
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)

@@ -97,8 +97,14 @@ async def _run_one_tick() -> Dict[str, Any]:
                 errors += 1
                 try:
                     db.rollback()
-                except Exception:
-                    pass
+                except Exception as rb_exc:
+                    from core.obs import EVENTS, log_event  # noqa: PLC0415
+                    log_event(
+                        EVENTS.ORDER_UPSERT_ERROR,
+                        err=rb_exc,
+                        tenant_id=tenant_id,
+                        context="commerce_reconcile_rollback",
+                    )
                 tenant_state.update({"result": "error", "error": repr(exc)})
             _state["tenants"][tenant_id] = tenant_state
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -115,12 +121,22 @@ async def _run_one_tick() -> Dict[str, Any]:
         if lock_acquired:
             try:
                 db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
-            except Exception:
-                pass
+            except Exception as unlock_exc:
+                from core.obs import EVENTS, log_event  # noqa: PLC0415
+                log_event(
+                    EVENTS.DISPATCHER_LOOP_ERROR,
+                    err=unlock_exc,
+                    context="commerce_reconcile_advisory_unlock",
+                )
         try:
             db.close()
-        except Exception:
-            pass
+        except Exception as close_exc:
+            from core.obs import EVENTS, log_event  # noqa: PLC0415
+            log_event(
+                EVENTS.DISPATCHER_LOOP_ERROR,
+                err=close_exc,
+                context="commerce_reconcile_db_close",
+            )
 
 
 async def _reconcile_integration(db: Session, intg: Any) -> Dict[str, Any]:
