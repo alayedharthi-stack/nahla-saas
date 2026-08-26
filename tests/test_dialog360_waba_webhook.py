@@ -326,8 +326,9 @@ class TestAdminCoexistenceWabaWebhookRead:
 
         assert out["channel"]["matches"] is True
         assert out["waba"]["matches"]    is True
-        assert out["waba"]["numbers_on_this_waba"] == ["100543193146977"]
-        assert out["local_connection"]["phone_number_id"] == "1061057720431678"
+        assert out["waba"]["numbers_on_this_waba_count"] == 1
+        assert out["waba"]["waba_id_remote_present"] is True
+        assert "numbers_on_this_waba" not in out["waba"]
         assert out["phone_id_drift_with_360dialog"] is True
 
     def test_read_no_drift_when_local_phone_listed(self, patch_httpx):
