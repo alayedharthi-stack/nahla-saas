@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
+from dataclasses import dataclass
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -58,38 +60,53 @@ CANARIES = (
 )
 
 
-class _LogCollector(logging.Handler):
+@dataclass
+class _LoggerState:
+    level: int
+    disabled: bool
+    propagate: bool
+
+
+BOUNDED_LOGGER_NAMES = (
+    "nahla.adapter.salla",
+    "nahla.salla_alerts",
+    "nahla.salla_token_lock",
+)
+
+
+class _RecordingHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__(level=logging.DEBUG)
-        self.messages: list[str] = []
+        self.records: list[logging.LogRecord] = []
+        self.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.messages.append(record.getMessage())
+        self.records.append(record)
 
 
 @contextmanager
-def _capture_bounded_logs() -> Iterator[_LogCollector]:
-    collector = _LogCollector()
-    loggers = [
-        salla_adapter_mod.logger,
-        logging.getLogger("nahla.adapter.salla"),
-        logging.getLogger("nahla.salla_alerts"),
-        logging.getLogger("nahla.salla_token_lock"),
-    ]
-    for lg in loggers:
-        lg.addHandler(collector)
-        lg.setLevel(logging.DEBUG)
+def _capture_bounded_logs() -> Iterator[_RecordingHandler]:
+    handler = _RecordingHandler()
+    saved: dict[str, _LoggerState] = {}
+    original_disable = logging.root.manager.disable
     try:
-        from core.salla_token_lock import _locks
-
-        _locks.clear()
-    except Exception:  # noqa: silent-ok - lock table may be unavailable during import
-        pass
-    try:
-        yield collector
+        logging.disable(logging.NOTSET)
+        for name in BOUNDED_LOGGER_NAMES:
+            lg = logging.getLogger(name)
+            saved[name] = _LoggerState(lg.level, lg.disabled, lg.propagate)
+            lg.disabled = False
+            lg.propagate = True
+            lg.setLevel(logging.DEBUG)
+            lg.addHandler(handler)
+        yield handler
     finally:
-        for lg in loggers:
-            lg.removeHandler(collector)
+        logging.disable(original_disable)
+        for name, state in saved.items():
+            lg = logging.getLogger(name)
+            lg.removeHandler(handler)
+            lg.setLevel(state.level)
+            lg.disabled = state.disabled
+            lg.propagate = state.propagate
 
 
 if not _integration_required():
@@ -98,8 +115,26 @@ if not _integration_required():
         allow_module_level=True,
     )
 
-pytestmark = pytest.mark.usefixtures("postgres_engine")
+pytestmark = pytest.mark.usefixtures("postgres_engine", "clear_salla_token_locks")
 
+
+
+
+@pytest.fixture(autouse=True)
+def clear_salla_token_locks():
+    try:
+        from core.salla_token_lock import _locks
+
+        _locks.clear()
+    except Exception:  # noqa: silent-ok - lock table may be unavailable during import
+        pass
+    yield
+    try:
+        from core.salla_token_lock import _locks
+
+        _locks.clear()
+    except Exception:  # noqa: silent-ok - lock table may be unavailable during import
+        pass
 
 @pytest.fixture(scope="module")
 def postgres_engine():
@@ -109,12 +144,34 @@ def postgres_engine():
     engine.dispose()
 
 
-def _log_text(collector: _LogCollector) -> str:
-    return "\n".join(collector.messages)
+def _formatted_log_text(handler: _RecordingHandler) -> str:
+    lines: list[str] = []
+    for record in handler.records:
+        lines.append(handler.format(record))
+        if record.exc_info:
+            lines.append("".join(traceback.format_exception(*record.exc_info)))
+    return "\n".join(lines)
 
-def _caplog_text(caplog) -> str:
-    return "\n".join(r.getMessage() for r in caplog.records)
 
+def _structured_log_text(handler: _RecordingHandler) -> str:
+    parts: list[str] = []
+    for record in handler.records:
+        for key, value in record.__dict__.items():
+            if key in {"msg", "args", "message", "asctime", "msecs"}:
+                continue
+            parts.append(f"{key}={value!r}")
+    return "\n".join(parts)
+
+
+def _combined_log_text(handler: _RecordingHandler) -> str:
+    return _formatted_log_text(handler) + "\n" + _structured_log_text(handler)
+
+
+def _assert_logger_identity() -> None:
+    module_logger = salla_adapter_mod.logger
+    named_logger = logging.getLogger("nahla.adapter.salla")
+    assert module_logger is named_logger
+    assert module_logger.name == "nahla.adapter.salla"
 
 
 def _assert_no_canaries(text: str) -> None:
@@ -321,7 +378,8 @@ def _session_factory_with_lookup_fault(engine):
     return _FaultFactory()
 
 
-def test_proactive_freshness_success_emits_safe_events(postgres_engine, caplog):
+def test_proactive_freshness_success_emits_safe_events(postgres_engine):
+    _assert_logger_identity()
     now = datetime.now(timezone.utc)
     expired_at = _iso(now - timedelta(minutes=30))
     integration_id = _seed_integration(
@@ -330,13 +388,14 @@ def test_proactive_freshness_success_emits_safe_events(postgres_engine, caplog):
     )
     adapter = _adapter_for_integration(integration_id, postgres_engine)
     adapter._expires_at = expired_at
-    post_calls = {"count": 0}
+    http_trace: list[tuple[str, str]] = []
 
     async def delete_handler(url, **_kwargs):
+        http_trace.append(("DELETE", str(url)))
         return _make_http_response(200)
 
     async def post_handler(url, **_kwargs):
-        post_calls["count"] += 1
+        http_trace.append(("POST", str(url)))
         return _make_http_response(
             200,
             json_data={
@@ -350,43 +409,46 @@ def test_proactive_freshness_success_emits_safe_events(postgres_engine, caplog):
     factory = _session_factory(postgres_engine)
 
     async def _run():
-        with _capture_bounded_logs() as collector:
-            with caplog.at_level(logging.DEBUG):
-                with patch.dict(
-                    os.environ,
-                    {
-                        "SALLA_CLIENT_ID": "oauth-client-id",
-                        "SALLA_CLIENT_SECRET": "oauth-client-secret",
-                    },
-                    clear=False,
-                ):
-                    with patch("database.session.SessionLocal", factory):
-                        with patch(
-                            "store_adapters.salla_adapter.httpx.AsyncClient",
-                            _HttpClientFactory(client),
-                        ):
-                            ok = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
-            return ok, collector
+        with _capture_bounded_logs() as log_handler:
+            with patch.dict(
+                os.environ,
+                {
+                    "SALLA_CLIENT_ID": "oauth-client-id",
+                    "SALLA_CLIENT_SECRET": "oauth-client-secret",
+                },
+                clear=False,
+            ):
+                with patch("database.session.SessionLocal", factory):
+                    with patch(
+                        "store_adapters.salla_adapter.httpx.AsyncClient",
+                        _HttpClientFactory(client),
+                    ):
+                        ok = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
+            return ok, log_handler
 
     try:
-        ok, collector = asyncio.run(_run())
+        ok, log_handler = asyncio.run(_run())
     finally:
         factory.cleanup()
 
-    handler_text = _log_text(collector)
-    cap_text = _caplog_text(caplog)
-    log_text = handler_text + "\n" + cap_text
+    log_text = _combined_log_text(log_handler)
     assert ok is True
-    assert post_calls["count"] >= 1
+    assert len(http_trace) >= 2
+    assert http_trace[0][0] == "POST"
+    assert http_trace[1][0] == "DELETE"
+    assert "oauth2/token" in http_trace[0][1]
+    assert "/coupons/" in http_trace[1][1]
     assert "event=salla_token_freshness_due" in log_text
     assert "event=salla_token_freshness_refresh_success" in log_text
     assert "event=salla_token_freshness_refresh_failed" not in log_text
     assert "event=salla_token_refresh_success" in log_text
+    assert any(r.name == "nahla.adapter.salla" for r in log_handler.records)
     assert str(TEST_TENANT_ID) not in log_text
     _assert_no_canaries(log_text)
 
 
-def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine, caplog):
+def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine):
+    _assert_logger_identity()
     integration_id = _seed_integration(
         postgres_engine,
         expires_at=CANARY_INVALID_EXPIRY,
@@ -396,22 +458,23 @@ def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine, cap
         postgres_engine,
         expires_at=CANARY_INVALID_EXPIRY,
     )
-    async def _run():
-        with _capture_bounded_logs() as collector:
-            with caplog.at_level(logging.DEBUG):
-                await adapter._ensure_token_fresh()
-            return collector
 
-    collector = asyncio.run(_run())
-    log_text = _log_text(collector) + "\n" + _caplog_text(caplog)
+    async def _run():
+        with _capture_bounded_logs() as log_handler:
+            await adapter._ensure_token_fresh()
+            return log_handler
+
+    log_handler = asyncio.run(_run())
+    log_text = _combined_log_text(log_handler)
     assert "event=salla_token_freshness_parse_failed" in log_text
     assert "error_class=" in log_text
     assert "tenant_hash=" in log_text
+    assert any(r.name == "nahla.adapter.salla" for r in log_handler.records)
     assert CANARY_INVALID_EXPIRY not in log_text
     _assert_no_canaries(log_text)
 
 
-def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_engine, caplog):
+def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_engine):
     now = datetime.now(timezone.utc)
     integration_id = _seed_integration(
         postgres_engine,
@@ -421,7 +484,6 @@ def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_en
     lock_held = asyncio.Event()
     release_lock = asyncio.Event()
     contender_started = asyncio.Event()
-    collector = _LogCollector()
 
     async def delete_handler(url, **_kwargs):
         contender_started.set()
@@ -457,32 +519,31 @@ def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_en
                     return await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
 
     async def _run():
-        with _capture_bounded_logs() as active_collector:
-            with caplog.at_level(logging.DEBUG):
-                holder_task = asyncio.create_task(holder())
-                await lock_held.wait()
-                result = await contender()
-                release_lock.set()
-                await holder_task
-            collector.messages.extend(active_collector.messages)
-            return result
+        with _capture_bounded_logs() as log_handler:
+            holder_task = asyncio.create_task(holder())
+            await lock_held.wait()
+            result = await contender()
+            release_lock.set()
+            await holder_task
+            return result, log_handler
 
     try:
-        result = asyncio.run(_run())
+        result, log_handler = asyncio.run(_run())
     finally:
         factory.cleanup()
 
-    log_text = _log_text(collector) + "\n" + _caplog_text(caplog)
+    log_text = _combined_log_text(log_handler)
     assert result is False
     assert contender_started.is_set()
     assert "event=salla_token_refresh_lock_held" in log_text
     assert "event=salla_token_refresh_deferred" in log_text
     assert "integration_hash=" in log_text
+    assert any(r.name == "nahla.salla_token_lock" for r in log_handler.records)
     assert str(integration_id) not in log_text
     _assert_no_canaries(log_text)
 
 
-def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_engine, caplog):
+def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_engine):
     """Database-boundary fault injection on superseding-integration lookup only."""
     now = datetime.now(timezone.utc)
     integration_id = _seed_integration(
@@ -490,7 +551,6 @@ def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_eng
         expires_at=_iso(now + timedelta(days=7)),
     )
     adapter = _adapter_for_integration(integration_id, postgres_engine)
-    collector = _LogCollector()
     factory = _session_factory_with_lookup_fault(postgres_engine)
 
     async def delete_handler(url, **_kwargs):
@@ -502,37 +562,36 @@ def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_eng
     client = _RoutingHttpClient(delete_handler, post_handler)
 
     async def _run():
-        with _capture_bounded_logs() as active_collector:
-            with caplog.at_level(logging.DEBUG):
-                with patch.dict(
-                    os.environ,
-                    {
-                        "SALLA_CLIENT_ID": "oauth-client-id",
-                        "SALLA_CLIENT_SECRET": "oauth-client-secret",
-                    },
-                    clear=False,
-                ):
-                    with patch("database.session.SessionLocal", factory):
-                        with patch(
-                            "store_adapters.salla_adapter.httpx.AsyncClient",
-                            _HttpClientFactory(client),
-                        ):
-                            result = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
-            collector.messages.extend(active_collector.messages)
-            return result
+        with _capture_bounded_logs() as log_handler:
+            with patch.dict(
+                os.environ,
+                {
+                    "SALLA_CLIENT_ID": "oauth-client-id",
+                    "SALLA_CLIENT_SECRET": "oauth-client-secret",
+                },
+                clear=False,
+            ):
+                with patch("database.session.SessionLocal", factory):
+                    with patch(
+                        "store_adapters.salla_adapter.httpx.AsyncClient",
+                        _HttpClientFactory(client),
+                    ):
+                        result = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
+            return result, log_handler
 
     try:
         factory.reset()
-        result = asyncio.run(_run())
+        result, log_handler = asyncio.run(_run())
     finally:
         factory.cleanup()
 
-    log_text = _log_text(collector) + "\n" + _caplog_text(caplog)
+    log_text = _combined_log_text(log_handler)
     assert result is False
     assert "event=salla_token_refresh_failed" in log_text
     assert "reason=invalid_grant" in log_text
     assert "event=salla_superseded_lookup_failed" in log_text
     assert "error_class=RuntimeError" in log_text
+    assert any(r.name == "nahla.salla_alerts" for r in log_handler.records)
     assert CANARY_LOOKUP_FAULT not in log_text
     assert CANARY_OAUTH_BODY not in log_text
     _assert_no_canaries(log_text)
