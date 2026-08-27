@@ -1019,14 +1019,23 @@ def _flatten_salla_datetime(value: Any) -> str:
 
 
 def _extract_abandoned_at_iso(raw: Any) -> str:
-    """Recovery anchor from official Salla abandoned-cart fields.
+    """Return an explicit abandonment timestamp only.
 
-    Merchant webhook schema (doc-433812) and List Abandoned Carts API
-    (api-5394138) expose ``created_at``, ``updated_at``, and
-    ``age_in_minutes`` — not ``abandoned_at``. ``age_in_minutes`` is the
-    documented difference between cart ``created_at`` and provider *now*;
-    inverting yields the provider observation instant for this payload.
+    Official Salla fields (Merchant webhook doc-433812, List Abandoned
+    Carts API api-5394138):
 
+    * `created_at` — cart creation timestamp
+    * `updated_at` — last cart-info update
+    * `age_in_minutes` — "the time difference between cart's
+      created_at and time now in minutes"
+
+    Therefore `created_at + age_in_minutes` is the provider observation
+    instant, not an abandonment instant. Observing the same cart later
+    with a larger age moves that sum. This helper does not store or
+    return that sum as abandoned_at.
+
+    Compat: `abandoned_at` / `abandonedAt` / `left_at` are used
+    unchanged when a payload actually carries them.
     """
     if not isinstance(raw, dict):
         return ""
@@ -1034,16 +1043,6 @@ def _extract_abandoned_at_iso(raw: Any) -> str:
         iso = salla_datetime_to_utc_iso(raw.get(key))
         if iso:
             return iso
-    created = parse_salla_datetime_to_utc(raw.get("created_at"))
-    age_raw = raw.get("age_in_minutes")
-    if created is not None and age_raw not in (None, ""):
-        try:
-            anchor = created + timedelta(minutes=int(age_raw))
-            if anchor.tzinfo is not None:
-                anchor = anchor.astimezone(timezone.utc).replace(tzinfo=None)
-            return anchor.isoformat(sep=" ", timespec="seconds")
-        except (TypeError, ValueError):
-            return ""
     return ""
 
 
@@ -2284,6 +2283,7 @@ class StoreSyncService:
     #      A transient 401 / empty-page response must never wipe the
     #      dashboard.
     async def sync_abandoned_carts(self) -> Dict[str, int]:
+        from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
         adapter = self._get_adapter()
         result = {
             "salla_count":     0,
@@ -2407,62 +2407,26 @@ class StoreSyncService:
 
             seen_external_ids.add(ext_id)
             try:
-                existing = existing_carts.get(ext_id) or (
-                    self.db.query(Order)
-                    .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
-                    .first()
+                was_existing = ext_id in existing_carts
+                cart_row = self._upsert_abandoned_cart_row(
+                    normalised,
+                    payload_keys=_abandoned_cart_payload_keys(raw) if isinstance(raw, dict) else None,
+                    event_kind="created",
+                    commit=True,
                 )
-
-                if existing:
-                    existing.status                = normalised["status"]
-                    existing.total                 = normalised["total"]
-                    existing.customer_info         = normalised["customer_info"]
-                    existing.line_items            = normalised["line_items"]
-                    existing.is_abandoned          = True
-                    existing.checkout_url          = normalised["checkout_url"]
-                    existing.external_order_number = normalised["external_order_number"]
-                    if normalised["customer_name"]:
-                        existing.customer_name = normalised["customer_name"]
-                    existing.source = "salla"
-                    meta = dict(existing.extra_metadata or {})
-                    meta["created_at"]    = normalised.get("created_at") or meta.get("created_at")
-                    if normalised.get("abandoned_at"):
-                        meta["abandoned_at"] = normalised.get("abandoned_at")
-                    meta["last_synced_at"] = datetime.now(timezone.utc).isoformat()
-                    meta["source_kind"]   = "abandoned_cart"
-                    meta["raw_cart_id"]   = normalised.get("raw_cart_id")
-                    existing.extra_metadata = meta
+                existing_carts[ext_id] = cart_row
+                if was_existing:
                     result["updated"] += 1
                     logger.info(
                         "[StoreSync] tenant=%s UPDATED_abandoned_cart "
                         "ext_id=%s order_id=%s items=%d total=%s "
                         "customer=%s",
-                        self.tenant_id, ext_id, existing.id,
+                        self.tenant_id, ext_id, getattr(cart_row, "id", None),
                         len(normalised["line_items"] or []),
                         normalised["total"],
                         bool(normalised["customer_info"]),
                     )
                 else:
-                    self.db.add(Order(
-                        tenant_id             = self.tenant_id,
-                        external_id           = ext_id,
-                        external_order_number = normalised["external_order_number"],
-                        status                = normalised["status"],
-                        total                 = normalised["total"],
-                        customer_name         = normalised["customer_name"] or None,
-                        customer_info         = normalised["customer_info"],
-                        line_items            = normalised["line_items"],
-                        checkout_url          = normalised["checkout_url"],
-                        is_abandoned          = True,
-                        source                = "salla",
-                        extra_metadata        = {
-                            "created_at":     normalised.get("created_at"),
-                            "abandoned_at":   normalised.get("abandoned_at"),
-                            "last_synced_at": datetime.now(timezone.utc).isoformat(),
-                            "source_kind":    "abandoned_cart",
-                            "raw_cart_id":    normalised.get("raw_cart_id"),
-                        },
-                    ))
                     result["saved"] += 1
                     logger.info(
                         "[StoreSync] tenant=%s SAVED_abandoned_cart "
@@ -2474,18 +2438,19 @@ class StoreSyncService:
                         bool(normalised["customer_info"]),
                         bool(normalised["checkout_url"]),
                     )
+            except IntegrityError:
+                self.db.rollback()
+                raise
             except Exception as exc:
                 result["save_errors"] += 1
                 self.db.rollback()
                 logger.exception(
-                    "[StoreSync] tenant=%s SAVE_FAILED ext_id=%s — "
+                    "[StoreSync] tenant=%s SAVE_FAILED ext_id=%s -- "
                     "rolling back this cart only, continuing batch | "
-                    "error=%s",
-                    self.tenant_id, ext_id, exc,
+                    "error_class=%s",
+                    self.tenant_id, ext_id, type(exc).__name__,
                 )
 
-        # ── Reconcile: clear is_abandoned on rows Salla no longer lists ─
-        # The customer either resumed → became a real order, or Salla aged
         # the cart out. Either way the dashboard must stop showing it.
         for ext_id, row in existing_carts.items():
             if ext_id in seen_external_ids:
@@ -3587,14 +3552,30 @@ class StoreSyncService:
                 extra_metadata=create_meta,
             )
             self.db.add(cart_row)
-        if commit:
-            try:
+        from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
+        try:
+            if commit:
                 self.db.commit()
-            except Exception:
-                self.db.rollback()
+            else:
+                self.db.flush()
+        except IntegrityError:
+            self.db.rollback()
+            winner = (
+                self.db.query(Order)
+                .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+                .first()
+            )
+            if winner is None:
                 raise
-        else:
-            self.db.flush()
+            return self._upsert_abandoned_cart_row(
+                normalised,
+                payload_keys=payload_keys,
+                event_kind=event_kind,
+                commit=commit,
+            )
+        except Exception:
+            self.db.rollback()
+            raise
         return cart_row
 
     def _cancel_abandoned_cart_recovery_for_cart(self, *, cart_row: Any, normalised: Dict[str, Any], reason: str) -> Dict[str, int]:

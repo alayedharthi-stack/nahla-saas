@@ -33,7 +33,10 @@ if not _integration_required():
         allow_module_level=True,
     )
 
-pytestmark = pytest.mark.usefixtures("postgres_engine")
+pytestmark = [
+    pytest.mark.usefixtures("postgres_engine"),
+    pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning"),
+]
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +55,7 @@ def _new_session(engine):
 
 
 def _seed_cart(engine):
+
     session, connection, trans = _new_session(engine)
     try:
         if session.get(Tenant, TEST_TENANT) is None:
@@ -156,6 +160,7 @@ def test_poller_emit_visible_from_fresh_session(postgres_engine):
       "total": {"amount": 90, "currency": "SAR"},
       "checkout_url": "https://example/cart",
       "age_in_minutes": 15,
+      "abandoned_at": "2026-04-19T09:00:00",
       "created_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
       "updated_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
       "customer": {"mobile": "+966500700700", "name": "PG Shopper"},
@@ -228,6 +233,7 @@ def test_webhook_and_poller_emit_single_event(postgres_engine):
         "total": {"amount": 90, "currency": "SAR"},
         "checkout_url": "https://example/cart",
         "age_in_minutes": 20,
+        "abandoned_at": "2026-04-19T09:00:00",
         "created_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
         "updated_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
         "customer": {"mobile": "+966500711711", "name": "PG Shopper"},
@@ -238,12 +244,17 @@ def test_webhook_and_poller_emit_single_event(postgres_engine):
         s = Session(); s.add(Tenant(id=TEST_TENANT, name="Cart Recovery PG")); s.commit(); s.close()
     barrier = threading.Barrier(2)
 
+    errors = {}
+
     def _webhook():
         session = Session()
         try:
             svc = StoreSyncService(session, TEST_TENANT)
             barrier.wait(timeout=5)
             asyncio.run(svc.handle_abandoned_cart_webhook(raw, event_kind="created", webhook_event_type="abandoned.cart"))
+            errors["webhook"] = {"ok": True}
+        except Exception as exc:
+            errors["webhook"] = {"ok": False, "exc": exc}
         finally:
             session.close()
 
@@ -256,12 +267,17 @@ def test_webhook_and_poller_emit_single_event(postgres_engine):
             svc._adapter = adapter
             barrier.wait(timeout=5)
             asyncio.run(svc.sync_abandoned_carts())
+            errors["poller"] = {"ok": True}
+        except Exception as exc:
+            errors["poller"] = {"ok": False, "exc": exc}
         finally:
             session.close()
 
     t1 = threading.Thread(target=_webhook)
     t2 = threading.Thread(target=_poller)
     t1.start(); t2.start(); t1.join(); t2.join()
+    assert errors.get("webhook", {}).get("ok") is True, errors.get("webhook")
+    assert errors.get("poller", {}).get("ok") is True, errors.get("poller")
 
     verify = Session()
     try:

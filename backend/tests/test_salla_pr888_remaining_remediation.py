@@ -20,7 +20,7 @@ for p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from database.models import AutomationEvent, AutomationExecution, Base, Customer, Order, Product, Promotion, StoreKnowledgeSnapshot, Tenant, WebhookEvent
+from database.models import AutomationEvent, AutomationExecution, Base, Customer, Integration, Order, Product, Promotion, StoreKnowledgeSnapshot, Tenant, WebhookEvent
 from services.store_sync import StoreSyncService, _extract_abandoned_at_iso
 
 
@@ -129,39 +129,43 @@ class TestH2AdapterPaginationFailure:
 
 
 class TestH4OfficialTimestampContract:
-    def test_anchor_from_created_at_and_age_in_minutes(self):
+    def test_created_plus_age_is_observation_and_moves(self):
         from services.salla_datetime import parse_salla_datetime_to_utc
 
-        raw = _official_abandoned_cart_payload()
-        anchor = _extract_abandoned_at_iso(raw)
-        created = parse_salla_datetime_to_utc(raw["created_at"])
-        expected = created + timedelta(minutes=83)
-        if expected.tzinfo is not None:
-            expected = expected.astimezone(timezone.utc).replace(tzinfo=None)
-        assert anchor.startswith(expected.isoformat(sep=" ", timespec="seconds")[:16])
+        first = _official_abandoned_cart_payload(age=83)
+        later = _official_abandoned_cart_payload(age=200)
+        created = parse_salla_datetime_to_utc(first["created_at"])
+        obs_first = created + timedelta(minutes=83)
+        obs_later = created + timedelta(minutes=200)
+        assert obs_first != obs_later
+        assert _extract_abandoned_at_iso(first) == ""
+        assert _extract_abandoned_at_iso(later) == ""
 
-    def test_official_webhook_emits_with_provider_anchor(self):
+    def test_official_cart_two_observations_do_not_invent_abandoned_at(self):
         db, tenant_id, engine = _make_db()
         try:
             svc = StoreSyncService(db, tenant_id)
             with patch("core.automation_engine.emit_automation_event") as emit_mock:
-                emit_mock.side_effect = lambda db, **kw: AutomationEvent(
-                    tenant_id=kw["tenant_id"],
-                    customer_id=kw["customer_id"],
-                    event_type=kw["event_type"],
-                    payload=kw["payload"],
-                    processed=False,
-                    created_at=kw.get("created_at"),
-                )
                 _run(svc.handle_abandoned_cart_webhook(
-                    _official_abandoned_cart_payload("501"),
+                    _official_abandoned_cart_payload("501", age=83),
                     event_kind="created",
                     webhook_event_type="abandoned.cart",
                 ))
-                emit_mock.assert_called_once()
-                assert emit_mock.call_args.kwargs.get("created_at") is not None
-            cart = db.query(Order).filter_by(external_id="cart-501").one()
-            assert cart.extra_metadata.get("abandoned_at")
+                emit_mock.assert_not_called()
+                cart = db.query(Order).filter_by(external_id="cart-501").one()
+                created_first = cart.extra_metadata.get("created_at")
+                assert created_first
+                assert not cart.extra_metadata.get("abandoned_at")
+                _run(svc.handle_abandoned_cart_webhook(
+                    _official_abandoned_cart_payload("501", age=200),
+                    event_kind="created",
+                    webhook_event_type="abandoned.cart",
+                ))
+                emit_mock.assert_not_called()
+            db.refresh(cart)
+            assert cart.extra_metadata.get("created_at") == created_first
+            assert not cart.extra_metadata.get("abandoned_at")
+            assert db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").count() == 0
         finally:
             db.close(); engine.dispose()
 
@@ -225,8 +229,84 @@ class TestH7ProductFailureMatrix:
             svc = StoreSyncService(db, tenant_id)
             svc._adapter = None
             with pytest.raises(RuntimeError, match="product_hydration_failed"):
-                _run(svc.handle_product_webhook({"id": "new-1"}, webhook_event_type="product.deleted"))
+                _run(svc.handle_product_webhook({"id": "new-1"}, webhook_event_type="product.price.updated"))
             assert db.query(Product).filter_by(external_id="new-1").count() == 0
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestH7ProcessEventHydrationMatrix:
+    @pytest.mark.parametrize("existing,adapter_mode", [
+        (True, "exception"),
+        (True, "none"),
+        (True, "missing"),
+        (False, "exception"),
+        (False, "none"),
+        (False, "missing"),
+    ])
+    def test_partial_product_via_process_event(self, existing, adapter_mode):
+        from core.webhook_dispatcher import _process_event
+        from core.webhook_events import claim_next_batch, persist_event
+        from commerce_scenario_fixtures import make_scenario_db, seed_tenant
+
+        db, engine = make_scenario_db()
+        try:
+            tenant = seed_tenant(db, name="Generic Store")
+            store_id = f"STORE-H7-{adapter_mode}-{'ex' if existing else 'nw'}"
+            db.add(Integration(
+                tenant_id=tenant.id,
+                provider="salla",
+                external_store_id=store_id,
+                config={"api_key": "k", "store_id": store_id},
+                enabled=True,
+            ))
+            db.commit()
+            product_id = f"p-{adapter_mode}-{'ex' if existing else 'nw'}"
+            if existing:
+                db.add(Product(
+                    tenant_id=tenant.id,
+                    external_id=product_id,
+                    title="Rich Product",
+                    price="99",
+                    extra_metadata={"kept": True},
+                ))
+                db.commit()
+            if adapter_mode == "exception":
+                adapter = MagicMock()
+                adapter.get_product = AsyncMock(side_effect=RuntimeError("http down"))
+            elif adapter_mode == "none":
+                adapter = MagicMock()
+                adapter.get_product = AsyncMock(return_value=None)
+            else:
+                adapter = None
+            parsed = {
+                "event": "product.price.updated",
+                "merchant": store_id,
+                "data": {"id": product_id, "price": 50},
+            }
+            persist_event(
+                db,
+                provider="salla",
+                raw_body="{}",
+                parsed_payload=parsed,
+                event_type="product.price.updated",
+                external_event_id=f"evt-{product_id}",
+                store_id=store_id,
+            )
+            batch = claim_next_batch(db, limit=1)
+            assert batch
+            with patch.object(StoreSyncService, "_get_adapter", return_value=adapter):
+                _run(_process_event(db, batch[0]))
+            ev = db.query(WebhookEvent).filter_by(external_event_id=f"evt-{product_id}").one()
+            assert ev.status == "failed"
+            assert ev.next_retry_at is not None
+            assert ev.status != "processed"
+            if existing:
+                row = db.query(Product).filter_by(tenant_id=tenant.id, external_id=product_id).one()
+                assert row.title == "Rich Product"
+                assert row.price == "99"
+            else:
+                assert db.query(Product).filter_by(tenant_id=tenant.id, external_id=product_id).count() == 0
         finally:
             db.close(); engine.dispose()
 
@@ -313,7 +393,9 @@ class TestH3PollerCommit:
         tenant_id = tenant.id
         svc = StoreSyncService(db, tenant_id)
         adapter = MagicMock()
-        adapter.get_abandoned_carts = AsyncMock(return_value=[_official_abandoned_cart_payload("pol-1")])
+        payload = _official_abandoned_cart_payload("pol-1")
+        payload["abandoned_at"] = "2026-04-19T09:00:00"
+        adapter.get_abandoned_carts = AsyncMock(return_value=[payload])
         svc._adapter = adapter
         _run(svc.sync_abandoned_carts())
         db.close()
