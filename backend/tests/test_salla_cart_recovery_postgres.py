@@ -1,3 +1,4 @@
+import uuid
 """PostgreSQL concurrency tests for cart recovery emission (PR #888 H3/H5)."""
 from __future__ import annotations
 
