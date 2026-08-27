@@ -12,7 +12,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,6 +58,34 @@ CANARIES = (
     CANARY_PROVIDER_ID,
 )
 
+
+class _LogCollector(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+@contextmanager
+def _capture_salla_logs() -> Iterator[_LogCollector]:
+    collector = _LogCollector()
+    loggers = [logging.getLogger(name) for name in ("nahla.adapter.salla", "nahla.salla_alerts")]
+    for lg in loggers:
+        lg.addHandler(collector)
+        lg.setLevel(logging.DEBUG)
+    try:
+        from core.salla_token_lock import _locks
+        _locks.clear()
+    except Exception:
+        pass
+    try:
+        yield collector
+    finally:
+        for lg in loggers:
+            lg.removeHandler(collector)
+
 FORBIDDEN_PATCH_TARGETS = (
     "_ensure_token_fresh",
     "_refresh_access_token",
@@ -78,22 +107,6 @@ if not _integration_required():
 pytestmark = pytest.mark.usefixtures("postgres_engine")
 
 
-@pytest.fixture(autouse=True)
-def _capture_salla_loggers(caplog):
-    """Ensure adapter + alert loggers propagate into caplog."""
-    import logging
-
-    caplog.set_level(logging.DEBUG)
-    for name in ("nahla.adapter.salla", "nahla.salla_alerts"):
-        lg = logging.getLogger(name)
-        lg.propagate = True
-        lg.setLevel(logging.DEBUG)
-    try:
-        from core.salla_token_lock import _locks
-        _locks.clear()
-    except Exception:
-        pass
-
 
 @pytest.fixture(scope="module")
 def postgres_engine():
@@ -101,6 +114,10 @@ def postgres_engine():
     _ensure_a1_schema(engine)
     yield engine
     engine.dispose()
+
+
+def _log_text(collector: _LogCollector) -> str:
+    return "\n".join(collector.messages)
 
 
 def _assert_no_canaries(text: str) -> None:
@@ -251,30 +268,38 @@ def _run_delete_401_flow(
     *,
     delete_handler,
     post_handler,
+    integration_id: int | None = None,
 ):
-    integration_id = _seed_integration(engine)
+    if integration_id is None:
+        integration_id = _seed_integration(engine)
+    else:
+        _seed_integration(engine)
     adapter = _adapter_for_integration(integration_id, engine)
     client = _RoutingHttpClient(delete_handler, post_handler)
     factory = _session_factory(engine)
+    collector = _LogCollector()
 
     async def _run():
-        with patch.dict(
-            os.environ,
-            {
-                "SALLA_CLIENT_ID": "oauth-client-id",
-                "SALLA_CLIENT_SECRET": "oauth-client-secret",
-            },
-            clear=False,
-        ):
-            with patch("database.session.SessionLocal", factory):
-                with patch(
-                    "store_adapters.salla_adapter.httpx.AsyncClient",
-                    _HttpClientFactory(client),
-                ):
-                    return await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
+        with _capture_salla_logs() as active_collector:
+            with patch.dict(
+                os.environ,
+                {
+                    "SALLA_CLIENT_ID": "oauth-client-id",
+                    "SALLA_CLIENT_SECRET": "oauth-client-secret",
+                },
+                clear=False,
+            ):
+                with patch("database.session.SessionLocal", factory):
+                    with patch(
+                        "store_adapters.salla_adapter.httpx.AsyncClient",
+                        _HttpClientFactory(client),
+                    ):
+                        result = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
+            collector.messages.extend(active_collector.messages)
+            return result
 
     try:
-        return asyncio.run(_run())
+        return asyncio.run(_run()), collector
     finally:
         factory.cleanup()
 
@@ -300,7 +325,7 @@ def test_source_uses_transport_only_http_mock() -> None:
     assert "store_adapters.salla_adapter.httpx.AsyncClient" in source
 
 
-def test_successful_refresh_retry_persists_and_returns_true(postgres_engine, caplog):
+def test_successful_refresh_retry_persists_and_returns_true(postgres_engine):
     delete_calls = {"count": 0}
 
     async def delete_handler(url, **_kwargs):
@@ -320,11 +345,13 @@ def test_successful_refresh_retry_persists_and_returns_true(postgres_engine, cap
         )
 
     integration_id = _seed_integration(postgres_engine)
-    ok = _run_delete_401_flow(
+    ok, logs = _run_delete_401_flow(
         postgres_engine,
         delete_handler=delete_handler,
         post_handler=post_handler,
+        integration_id=integration_id,
     )
+    log_text = _log_text(logs)
     assert ok is True
     assert delete_calls["count"] == 2
 
@@ -334,14 +361,14 @@ def test_successful_refresh_retry_persists_and_returns_true(postgres_engine, cap
     assert cfg.get("token_refresh_status") == "success"
     assert cfg.get("token_refresh_attempts") == 0
 
-    assert "salla_delete_unauthorized" in caplog.text
-    assert "salla_token_refresh_success" in caplog.text
-    assert "salla_delete_completed" in caplog.text
-    assert "event=salla_token_refresh_success" in caplog.text
-    _assert_no_canaries(caplog.text)
+    assert "salla_delete_unauthorized" in log_text
+    assert "salla_token_refresh_success" in log_text
+    assert "salla_delete_completed" in log_text
+    assert "event=salla_token_refresh_success" in log_text
+    _assert_no_canaries(log_text)
 
 
-def test_oauth_http_failure_records_safe_metrics(postgres_engine, caplog):
+def test_oauth_http_failure_records_safe_metrics(postgres_engine):
     integration_id = _seed_integration(postgres_engine)
 
     async def delete_handler(url, **_kwargs):
@@ -356,17 +383,17 @@ def test_oauth_http_failure_records_safe_metrics(postgres_engine, caplog):
         post_handler=post_handler,
     )
     assert ok is False
-    assert "salla_token_refresh_failed" in caplog.text
-    assert "oauth_http_error" in caplog.text
-    assert "event=salla_token_refresh_failed" in caplog.text
-    _assert_no_canaries(caplog.text)
+    assert "salla_token_refresh_failed" in log_text
+    assert "oauth_http_error" in log_text
+    assert "event=salla_token_refresh_failed" in log_text
+    _assert_no_canaries(log_text)
 
     cfg = _reload_integration_config(postgres_engine, integration_id)
     assert int(cfg.get("token_refresh_attempts") or 0) >= 1
     assert cfg.get("token_refresh_status") == "failed"
 
 
-def test_refresh_transport_exception_logs_safe_class_only(postgres_engine, caplog):
+def test_refresh_transport_exception_logs_safe_class_only(postgres_engine):
     _seed_integration(postgres_engine)
 
     async def delete_handler(url, **_kwargs):
@@ -384,14 +411,14 @@ def test_refresh_transport_exception_logs_safe_class_only(postgres_engine, caplo
         post_handler=post_handler,
     )
     assert ok is False
-    assert "salla_token_refresh_failed" in caplog.text
-    assert "transport_exception" in caplog.text
-    assert "RuntimeError" in caplog.text
-    assert "Traceback" not in caplog.text
-    _assert_no_canaries(caplog.text)
+    assert "salla_token_refresh_failed" in log_text
+    assert "transport_exception" in log_text
+    assert "RuntimeError" in log_text
+    assert "Traceback" not in log_text
+    _assert_no_canaries(log_text)
 
 
-def test_needs_reauth_metric_uses_hashed_correlation(postgres_engine, caplog):
+def test_needs_reauth_metric_uses_hashed_correlation(postgres_engine):
     now = datetime.now(timezone.utc)
     integration_id = _seed_integration(
         postgres_engine,
@@ -412,10 +439,10 @@ def test_needs_reauth_metric_uses_hashed_correlation(postgres_engine, caplog):
         post_handler=post_handler,
     )
     assert ok is False
-    assert "event=salla_token_refresh_needs_reauth" in caplog.text
-    assert str(TEST_TENANT_ID) not in caplog.text
-    assert TEST_STORE_ID not in caplog.text
-    _assert_no_canaries(caplog.text)
+    assert "event=salla_token_refresh_needs_reauth" in log_text
+    assert str(TEST_TENANT_ID) not in log_text
+    assert TEST_STORE_ID not in log_text
+    _assert_no_canaries(log_text)
 
     cfg = _reload_integration_config(postgres_engine, integration_id)
     assert cfg.get("needs_reauth") is True
