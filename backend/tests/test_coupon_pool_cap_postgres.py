@@ -1,4 +1,4 @@
-﻿"""PostgreSQL concurrency tests for coupon pool per-level cap."""
+"""PostgreSQL concurrency tests for coupon pool per-level cap."""
 from __future__ import annotations
 
 import asyncio
@@ -159,7 +159,7 @@ def _add_pool_coupon(session: Session, tenant_id: int, level: str, code: str) ->
         "target_segment": segment,
         "used": "false",
         "salla_synced": "true",
-        "active": True,
+        "active": "true",
         "coupon_level": level,
     }
     session.add(
@@ -265,7 +265,7 @@ def test_pool_provenance_jsonb_postgres(postgres_engine) -> None:
             "target_segment": CrmStatus.NEW,
             "used": "false",
             "salla_synced": "true",
-            "active": True,
+            "active": "true",
             "coupon_level": "bronze",
         }
 
@@ -307,7 +307,7 @@ def test_pool_provenance_jsonb_postgres(postgres_engine) -> None:
                 discount_value="10",
                 expires_at=now + timedelta(days=2),
                 extra_metadata={**base_meta, "source": "auto"},
-                source_type=None,
+                source_type="",
                 coupon_level="bronze",
             ),
             Coupon(

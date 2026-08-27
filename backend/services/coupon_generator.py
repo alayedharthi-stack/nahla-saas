@@ -417,6 +417,7 @@ class CouponGeneratorService:
         return (
             Coupon.tenant_id == self.tenant_id,
             source_clause,
+            ~Coupon.source_type.in_(("manual", "imported")),
             or_(
                 (Coupon.code.like(f"{SHORT_CODE_PREFIX}___"))
                 & (func.length(Coupon.code) == SHORT_CODE_LENGTH),
@@ -426,7 +427,7 @@ class CouponGeneratorService:
             Coupon.extra_metadata["used"].astext != "true",
             or_(
                 Coupon.extra_metadata["active"].astext == "true",
-                Coupon.extra_metadata["active"].as_boolean().is_(True),
+                Coupon.extra_metadata["active"].as_boolean() == True,
                 Coupon.extra_metadata["active"].is_(None),
             ),
             or_(
