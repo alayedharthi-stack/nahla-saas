@@ -176,3 +176,101 @@ def test_poller_emit_visible_from_fresh_session(postgres_engine):
     assert any(e.id == cart.extra_metadata.get("recovery_event_id") for e in events)
   finally:
     verify_session.close()
+
+
+def test_purchase_blocks_emit(postgres_engine):
+    import asyncio
+    from services.cart_recovery_emitter import emit_cart_abandoned_if_new
+    from services.store_sync import StoreSyncService
+
+    Session = sessionmaker(bind=postgres_engine)
+    session = Session()
+    try:
+        if session.get(Tenant, TEST_TENANT) is None:
+            session.add(Tenant(id=TEST_TENANT, name="Cart Recovery PG"))
+            session.commit()
+        cart = Order(
+            tenant_id=TEST_TENANT,
+            external_id="cart-pg-purchased",
+            status="purchased",
+            total="50",
+            is_abandoned=False,
+            customer_info={"mobile": "+966500700700"},
+            extra_metadata={"abandoned_at": "2026-04-19T09:00:00", "cart_status": "purchased"},
+        )
+        session.add(cart)
+        session.commit()
+        normalised = {
+            "external_id": "cart-pg-purchased",
+            "raw_cart_id": "pg-purchased",
+            "customer_info": {"mobile": "+966500700700"},
+            "abandoned_at": "2026-04-19T09:00:00",
+        }
+        event_id = emit_cart_abandoned_if_new(
+            session, tenant_id=TEST_TENANT, cart_row=cart, normalised=normalised, commit=True,
+        )
+        assert event_id is None
+        events = session.query(AutomationEvent).filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned").all()
+        assert not any((e.payload or {}).get("cart_external_id") == "cart-pg-purchased" for e in events)
+    finally:
+        session.close()
+
+
+def test_webhook_and_poller_emit_single_event(postgres_engine):
+    import asyncio
+    import threading
+    from services.store_sync import StoreSyncService
+
+    cart_token = f"pgboth{uuid.uuid4().hex[:8]}"
+    external_id = f"cart-{cart_token}"
+    raw = {
+        "id": cart_token,
+        "total": {"amount": 90, "currency": "SAR"},
+        "checkout_url": "https://example/cart",
+        "age_in_minutes": 20,
+        "created_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+        "updated_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+        "customer": {"mobile": "+966500711711", "name": "PG Shopper"},
+        "items": [{"name": "Shoe", "qty": 1}],
+    }
+    Session = sessionmaker(bind=postgres_engine)
+    if Session().get(Tenant, TEST_TENANT) is None:
+        s = Session(); s.add(Tenant(id=TEST_TENANT, name="Cart Recovery PG")); s.commit(); s.close()
+    barrier = threading.Barrier(2)
+
+    def _webhook():
+        session = Session()
+        try:
+            svc = StoreSyncService(session, TEST_TENANT)
+            barrier.wait(timeout=5)
+            asyncio.run(svc.handle_abandoned_cart_webhook(raw, event_kind="created", webhook_event_type="abandoned.cart"))
+        finally:
+            session.close()
+
+    def _poller():
+        session = Session()
+        try:
+            svc = StoreSyncService(session, TEST_TENANT)
+            adapter = MagicMock()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[raw])
+            svc._adapter = adapter
+            barrier.wait(timeout=5)
+            asyncio.run(svc.sync_abandoned_carts())
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_webhook)
+    t2 = threading.Thread(target=_poller)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    verify = Session()
+    try:
+        cart = verify.query(Order).filter_by(tenant_id=TEST_TENANT, external_id=external_id).one()
+        marker = cart.extra_metadata.get("recovery_event_id")
+        assert marker
+        events = verify.query(AutomationEvent).filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned").all()
+        matched = [e for e in events if (e.payload or {}).get("cart_external_id") == external_id]
+        assert len(matched) == 1
+        assert matched[0].id == marker
+    finally:
+        verify.close()
