@@ -271,6 +271,7 @@ jobs:
             backend/tests/test_coupon_pool_cap_postgres.py \
             backend/tests/test_salla_coupons_poller_race_postgres.py \
             backend/tests/test_salla_delete_401_refresh_postgres.py \
+            backend/tests/test_salla_delete_401_branch_closure_postgres.py \
             backend/tests/test_customer_conditional_coupon_a1_pg_e2e.py \
             backend/tests/test_legacy_migration_drift_0020_0024_pg.py \
             backend/tests/test_legacy_migration_drift_0025_0030_pg.py \

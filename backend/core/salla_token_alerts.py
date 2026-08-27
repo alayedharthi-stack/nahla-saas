@@ -151,7 +151,13 @@ def find_superseding_integration(db, intg) -> Optional[Any]:
             .all()
         )
     except Exception as exc:
-        logger.debug("[SALLA ALERT] superseded lookup failed: %s", exc)
+        from core.coupon_log_privacy import hash_identifier, safe_exception_class  # noqa: PLC0415
+
+        logger.warning(
+            "[SALLA ALERT] superseded_lookup_failed event=salla_superseded_lookup_failed error_class=%s integration_hash=%s",
+            safe_exception_class(exc),
+            hash_identifier(getattr(intg, "id", None)),
+        )
         return None
 
     for cand in candidates:

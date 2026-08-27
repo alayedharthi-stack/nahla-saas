@@ -731,11 +731,12 @@ class SallaAdapter(BaseStoreAdapter):
         successful refresh) so no extra DB query is needed on the hot path.
         Only runs when both refresh_token and expires_at are known.
 
-        Logs [SALLA TOKEN] access token refreshed before API call on success.
-        Silent on error — reactive 401 handling in _get/_post acts as fallback.
+        Emits safe freshness events only. Reactive 401 handling in _get/_post
+        acts as fallback when proactive refresh is skipped or fails.
         """
         if not self._refresh_token or not self._expires_at:
             return
+        tenant_hash = hash_identifier(self._tenant_id)
         try:
             _exp_dt = datetime.fromisoformat(self._expires_at.replace("Z", "+00:00"))
             if _exp_dt.tzinfo is None:
@@ -743,13 +744,27 @@ class SallaAdapter(BaseStoreAdapter):
             _days_until = (_exp_dt - datetime.now(timezone.utc)).total_seconds() / 86400
             if _days_until < 1:
                 logger.info(
-                    "[SALLA TOKEN] access token refreshed before API call | "
-                    "tenant=%s days_until_expiry=%.2f",
-                    self._tenant_id, _days_until,
+                    "[SALLA TOKEN] freshness_due event=salla_token_freshness_due tenant_hash=%s days_until_expiry=%.2f",
+                    tenant_hash,
+                    _days_until,
                 )
-                await self._refresh_access_token()
+                refreshed = await self._refresh_access_token()
+                if refreshed:
+                    logger.info(
+                        "[SALLA TOKEN] freshness_success event=salla_token_freshness_refresh_success tenant_hash=%s",
+                        tenant_hash,
+                    )
+                else:
+                    logger.warning(
+                        "[SALLA TOKEN] freshness_failed event=salla_token_freshness_refresh_failed tenant_hash=%s",
+                        tenant_hash,
+                    )
         except Exception as exc:
-            logger.debug("[Salla Token] _ensure_token_fresh error (non-fatal): %s", exc)
+            logger.warning(
+                "[Salla Token] freshness_parse_failed event=salla_token_freshness_parse_failed error_class=%s tenant_hash=%s",
+                safe_exception_class(exc),
+                tenant_hash,
+            )
 
     def _mark_needs_reauth(self, reason: str = "unknown") -> None:
         """Mark integration as `needs_reauth=True` and stop syncing.
