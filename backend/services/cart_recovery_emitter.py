@@ -207,10 +207,13 @@ def emit_cart_abandoned_if_new(
         )
         return None
 
+    # Keep the cart FOR UPDATE transaction open. A mid-emit commit would
+    # release the row lock before the event exists, letting a purchase
+    # cancel miss the event and leave recovery sendable.
     customer_id = _resolve_customer_id(
         db, tenant_id=tenant_id, phone=phone,
         name=normalised.get("customer_name") or None,
-        commit=commit,
+        commit=False,
     )
     if customer_id is None:
         logger.warning(

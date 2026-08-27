@@ -3506,6 +3506,7 @@ class StoreSyncService:
         cart_row = (
             self.db.query(Order)
             .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
+            .with_for_update()
             .first()
         )
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -3619,6 +3620,14 @@ class StoreSyncService:
         counters = {"events_cancelled": 0, "parent_events_marked": 0, "executions_stamped": 0, "carts_recovered": 0}
         if cart_row is None:
             return counters
+        cart_id = getattr(cart_row, "id", None)
+        if cart_id is not None:
+            cart_row = (
+                self.db.query(Order)
+                .filter(Order.tenant_id == self.tenant_id, Order.id == cart_id)
+                .with_for_update()
+                .one()
+            )
         ext_id = normalised.get("external_id") or getattr(cart_row, "external_id", "")
         now_iso = datetime.now(timezone.utc).isoformat()
         cart_row.is_abandoned = False
@@ -3651,24 +3660,23 @@ class StoreSyncService:
                 matched_cart_external_id=ext_id,
                 commit=False,
             ))
-        else:
-            from models import AutomationEvent
-            raw_cart_id = str(normalised.get("raw_cart_id") or "")
-            for ev in self.db.query(AutomationEvent).filter(
-                AutomationEvent.tenant_id == self.tenant_id,
-                AutomationEvent.event_type == "cart_abandoned",
-                AutomationEvent.processed == False,
-            ).all():
-                payload = dict(ev.payload or {})
-                if payload.get("recovery_converted_at"):
-                    continue
-                if str(payload.get("cart_external_id") or "") == ext_id or str(payload.get("cart_id") or "") == raw_cart_id:
-                    payload["recovery_converted_at"] = now_iso
-                    payload["recovery_cancel_reason"] = reason
-                    ev.payload = payload
-                    flag_modified(ev, "payload")
-                    ev.processed = True
-                    counters["events_cancelled"] += 1
+        from models import AutomationEvent
+        raw_cart_id = str(normalised.get("raw_cart_id") or "")
+        for ev in self.db.query(AutomationEvent).filter(
+            AutomationEvent.tenant_id == self.tenant_id,
+            AutomationEvent.event_type == "cart_abandoned",
+            AutomationEvent.processed == False,
+        ).all():
+            payload = dict(ev.payload or {})
+            if payload.get("recovery_converted_at"):
+                continue
+            if str(payload.get("cart_external_id") or "") == ext_id or str(payload.get("cart_id") or "") == raw_cart_id:
+                payload["recovery_converted_at"] = now_iso
+                payload["recovery_cancel_reason"] = reason
+                ev.payload = payload
+                flag_modified(ev, "payload")
+                ev.processed = True
+                counters["events_cancelled"] += 1
         try:
             self.db.commit()
         except Exception:
@@ -3702,18 +3710,22 @@ class StoreSyncService:
         normalised["observation_candidate_source"] = candidate_source
         needs_emit = event_kind == "created"
         has_valid_anchor = bool(candidate_iso)
+        from services.salla_realtime_events import is_terminal_abandoned_cart_status
+        will_cancel = event_kind == "purchased" or (
+            event_kind == "status_changed"
+            and is_terminal_abandoned_cart_status(normalised.get("cart_status"))
+        )
         cart_row = self._upsert_abandoned_cart_row(
             normalised,
             payload_keys=payload_keys,
             event_kind=event_kind,
-            commit=not (needs_emit and has_valid_anchor),
+            commit=not ((needs_emit and has_valid_anchor) or will_cancel),
         )
         logger.info("tenant=%s abandoned_cart upserted external_id=%s kind=%s event=%s", self.tenant_id, ext_id, event_kind, webhook_event_type)
         if event_kind == "purchased":
             self._cancel_abandoned_cart_recovery_for_cart(cart_row=cart_row, normalised=normalised, reason="abandoned_cart_purchased")
             return
         if event_kind == "status_changed":
-            from services.salla_realtime_events import is_terminal_abandoned_cart_status
 
             if is_terminal_abandoned_cart_status(normalised.get("cart_status")):
                 self._cancel_abandoned_cart_recovery_for_cart(

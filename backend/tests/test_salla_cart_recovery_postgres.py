@@ -463,7 +463,7 @@ def test_purchase_during_emit_window_cancels_recovery(postgres_engine, monkeypat
             )
             errors["emit"] = {"ok": True, "id": event_id}
         except Exception as exc:
-            errors["emit"] = {"ok": False, "exc": exc}
+            errors["emit"] = {"ok": False, "exc": f"{type(exc).__name__}: {exc}"}
         finally:
             s.close()
 
@@ -484,7 +484,7 @@ def test_purchase_during_emit_window_cancels_recovery(postgres_engine, monkeypat
             ))
             errors["purchase"] = {"ok": True}
         except Exception as exc:
-            errors["purchase"] = {"ok": False, "exc": exc}
+            errors["purchase"] = {"ok": False, "exc": f"{type(exc).__name__}: {exc}"}
         finally:
             s.close()
 
@@ -510,6 +510,7 @@ def test_purchase_during_emit_window_cancels_recovery(postgres_engine, monkeypat
         ]
         assert len(events) == 1
         assert events[0].processed is True
+        assert (events[0].payload or {}).get("recovery_converted_at")
         assert cart.extra_metadata.get("recovery_event_id") == events[0].id
     finally:
         verify.close()
@@ -555,7 +556,7 @@ def test_purchase_first_two_connections_skips_emit(postgres_engine):
             ))
             errors["purchase"] = {"ok": True}
         except Exception as exc:
-            errors["purchase"] = {"ok": False, "exc": exc}
+            errors["purchase"] = {"ok": False, "exc": f"{type(exc).__name__}: {exc}"}
         finally:
             s.close()
         barrier.wait(timeout=8)
@@ -577,7 +578,7 @@ def test_purchase_first_two_connections_skips_emit(postgres_engine):
             )
             errors["emit"] = {"ok": True, "id": event_id}
         except Exception as exc:
-            errors["emit"] = {"ok": False, "exc": exc}
+            errors["emit"] = {"ok": False, "exc": f"{type(exc).__name__}: {exc}"}
         finally:
             s.close()
 
