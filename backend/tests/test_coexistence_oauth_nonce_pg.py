@@ -691,19 +691,23 @@ def test_pg_callback_graph_requests_exclude_sensitive_query_params(postgres_engi
         assert "user-long-token" not in str(req.url)
         assert req.headers.get("authorization") == "Bearer user-long-token"
 
-def test_durable_nonce_consume_survives_session_rollback(pg_session: Session, postgres_engine) -> None:
+def test_durable_nonce_consume_survives_session_rollback(postgres_engine: Engine) -> None:
     tenant_id = 990890
-    pg_session.add(Tenant(id=tenant_id, name="durable", is_active=True))
-    pg_session.commit()
     nonce = "pg-nonce-durable-877"
-    persist_oauth_nonce(
-        pg_session,
-        nonce=nonce,
-        tenant_id=tenant_id,
-        connection_mode="coexistence",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
-    )
-    pg_session.commit()
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    with postgres_engine.begin() as conn:
+        setup = sessionmaker(bind=conn, expire_on_commit=False)()
+        setup.add(Tenant(id=tenant_id, name="durable", is_active=True))
+        setup.flush()
+        persist_oauth_nonce(
+            setup,
+            nonce=nonce,
+            tenant_id=tenant_id,
+            connection_mode="coexistence",
+            expires_at=expires,
+        )
+        setup.flush()
+
     assert (
         consume_oauth_nonce_durable(
             postgres_engine,
@@ -713,7 +717,16 @@ def test_durable_nonce_consume_survives_session_rollback(pg_session: Session, po
         )
         == "consumed"
     )
-    pg_session.rollback()
+
+    rollback_conn = postgres_engine.connect()
+    rollback_trans = rollback_conn.begin()
+    rollback_session = sessionmaker(bind=rollback_conn, expire_on_commit=False)()
+    rollback_session.query(WhatsAppOAuthNonce).filter_by(tenant_id=tenant_id).first()
+    rollback_session.rollback()
+    rollback_session.close()
+    rollback_trans.rollback()
+    rollback_conn.close()
+
     assert (
         consume_oauth_nonce_durable(
             postgres_engine,
@@ -723,6 +736,10 @@ def test_durable_nonce_consume_survives_session_rollback(pg_session: Session, po
         )
         == "already_consumed"
     )
+
+    with postgres_engine.begin() as conn:
+        conn.execute(text("DELETE FROM whatsapp_oauth_nonces WHERE tenant_id = :tid"), {"tid": tenant_id})
+        conn.execute(text("DELETE FROM tenants WHERE id = :tid"), {"tid": tenant_id})
 
 
 def test_concurrent_durable_nonce_consume_single_winner(postgres_engine: Engine) -> None:
