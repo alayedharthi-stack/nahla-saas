@@ -108,18 +108,81 @@ def test_h6_1_scheduler_tick_crash_logs_no_sensitive_data(caplog):
     _assert_no_canaries(caplog.text)
 
 
+CANARY_PROVIDER_ID = "canary-provider-coupon-id-12345"
+
+
+class _FakeAsyncClient:
+    def __init__(self, *args, **kwargs):
+        self._client = kwargs.pop("_client")
+
+    async def __aenter__(self):
+        return self._client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _transport_delete_boom(*_args, **_kwargs):
+    raise _sensitive_error()
+
+
 def test_h6_2_delete_coupon_by_id_failure_logs_no_sensitive_data(caplog):
-    adapter = SallaAdapter(api_key="adapter-key", store_id="safe-store", tenant_id=1)
-    adapter._delete = AsyncMock(side_effect=_sensitive_error())
+  adapter = SallaAdapter(
+      api_key=CANARY_TOKEN,
+      store_id=CANARY_STORE,
+      tenant_id=CANARY_TENANT,
+  )
+  provider_id = CANARY_PROVIDER_ID
+  mock_client = MagicMock()
+  mock_client.delete = AsyncMock(side_effect=_transport_delete_boom)
 
-    async def _run():
-        with caplog.at_level(logging.WARNING, logger="nahla.adapter.salla"):
-            return await adapter.delete_coupon_by_id("provider-coupon-id")
+  async def _run():
+      with patch.object(adapter, "_ensure_token_fresh", new=AsyncMock()):
+          with patch(
+              "store_adapters.salla_adapter.httpx.AsyncClient",
+              lambda *args, **kwargs: _FakeAsyncClient(_client=mock_client, **kwargs),
+          ):
+              with caplog.at_level(logging.WARNING):
+                  return await adapter.delete_coupon_by_id(provider_id)
 
-    ok = asyncio.run(_run())
-    assert ok is False
-    assert "delete_coupon_by_id_failed" in caplog.text
-    _assert_no_canaries(caplog.text)
+  ok = asyncio.run(_run())
+  assert ok is False
+  assert "SallaAdapter._delete_failed" in caplog.text
+  assert "RuntimeError" in caplog.text
+  _assert_no_canaries(caplog.text)
+  assert provider_id not in caplog.text
+  assert f"/coupons/{provider_id}" not in caplog.text
+
+
+def test_h6_2_delete_success_logs_no_raw_path_or_provider_id(caplog):
+  adapter = SallaAdapter(
+      api_key=CANARY_TOKEN,
+      store_id=CANARY_STORE,
+      tenant_id=CANARY_TENANT,
+  )
+  provider_id = CANARY_PROVIDER_ID
+  raw_path = f"/coupons/{provider_id}"
+  mock_resp = MagicMock()
+  mock_resp.status_code = 200
+  mock_client = MagicMock()
+  mock_client.delete = AsyncMock(return_value=mock_resp)
+
+  async def _run():
+      with patch.object(adapter, "_ensure_token_fresh", new=AsyncMock()):
+          with patch(
+              "store_adapters.salla_adapter.httpx.AsyncClient",
+              lambda *args, **kwargs: _FakeAsyncClient(_client=mock_client, **kwargs),
+          ):
+              with caplog.at_level(logging.INFO):
+                  return await adapter.delete_coupon_by_id(provider_id)
+
+  ok = asyncio.run(_run())
+  assert ok is True
+  assert "salla_delete_completed" in caplog.text
+  assert raw_path not in caplog.text
+  assert provider_id not in caplog.text
+  assert str(CANARY_TENANT) not in caplog.text
+  assert CANARY_STORE not in caplog.text
 
 
 def test_h6_3_per_tenant_poll_failure_isolates_and_redacts_logs(caplog):

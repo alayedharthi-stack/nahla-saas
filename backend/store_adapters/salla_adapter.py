@@ -20,7 +20,7 @@ import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.catalog_image import coerce_image_url, extract_sync_product_image
-from core.coupon_log_privacy import safe_exception_class
+from core.coupon_log_privacy import hash_identifier, safe_exception_class
 from core.phone_coerce import coerce_phone_str
 from store_integration.models import (
     NormalizedOffer,
@@ -1213,26 +1213,43 @@ class SallaAdapter(BaseStoreAdapter):
         )
         await self._ensure_token_fresh()
         url = f"{SALLA_API_BASE}{path}"
+        tenant_hash = hash_identifier(self._tenant_id)
         try:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                 resp = await client.delete(url, headers=self._headers())
                 if resp.status_code == 401:
                     logger.warning(
-                        "[Salla Token] 401 detected tenant=%s path=%s method=DELETE",
-                        self._tenant_id, path,
+                        "[Salla Token] unauthorized event=salla_delete_unauthorized tenant_hash=%s operation=delete",
+                        tenant_hash,
                     )
                     if await self._refresh_access_token():
                         logger.info(
-                            "[Salla Token] retry original request tenant=%s path=%s method=DELETE",
-                            self._tenant_id, path,
+                            "[Salla Token] delete_retry_after_refresh event=salla_delete_retry tenant_hash=%s operation=delete",
+                            tenant_hash,
                         )
                         resp = await client.delete(url, headers=self._headers())
                 logger.info(
-                    "[Salla API] DELETE %s → %d | tenant=%s", path, resp.status_code, self._tenant_id,
+                    "[Salla API] delete_completed event=salla_delete_completed http_status=%s tenant_hash=%s operation=delete",
+                    resp.status_code,
+                    tenant_hash,
                 )
                 return 200 <= resp.status_code < 300 or resp.status_code == 404
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            retryable = bool(status is not None and status >= 500)
+            logger.warning(
+                "SallaAdapter._delete_failed operation=delete http_status=%s error_class=HTTPStatusError retryable=%s tenant_hash=%s",
+                status,
+                retryable,
+                tenant_hash,
+            )
+            return False
         except Exception as exc:
-            self._log_error("_delete", exc)
+            logger.warning(
+                "SallaAdapter._delete_failed operation=delete error_class=%s tenant_hash=%s",
+                safe_exception_class(exc),
+                tenant_hash,
+            )
             return False
 
     def _log_error(self, method: str, exc: Exception) -> None:
