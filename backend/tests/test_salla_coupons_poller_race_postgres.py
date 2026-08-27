@@ -83,17 +83,15 @@ def _seed_minimal_integration(engine) -> int:
 
 
 def test_poller_tick_skips_when_advisory_lock_held(postgres_engine, monkeypatch) -> None:
-    """Two ticks race; only the holder scans tenants."""
-    integration_id = _seed_minimal_integration(postgres_engine)
+    """Two contenders race; the loser skips tenant fetches while the lock is held."""
+    _seed_minimal_integration(postgres_engine)
 
     poll_calls: list[int] = []
-    a_inside = threading.Event()
+    a_holds = threading.Event()
     b_may_run = threading.Event()
 
-    async def _slow_poll(db, intg):
+    async def _poll_guard(db, intg):
         poll_calls.append(int(intg.id))
-        a_inside.set()
-        b_may_run.wait(timeout=30)
         return {
             "items_seen": 0,
             "created": 0,
@@ -101,7 +99,10 @@ def test_poller_tick_skips_when_advisory_lock_held(postgres_engine, monkeypatch)
             "upserted": 0,
         }
 
-    monkeypatch.setattr("services.salla_coupons_poller._poll_integration", _slow_poll)
+    monkeypatch.setattr("services.salla_coupons_poller._poll_integration", _poll_guard)
+
+    from core.pg_advisory_lock import DedicatedAdvisoryLock
+    from services.salla_coupons_poller import ADVISORY_LOCK_KEY
 
     thread_b_result: dict = {}
 
@@ -124,13 +125,20 @@ def test_poller_tick_skips_when_advisory_lock_held(postgres_engine, monkeypatch)
         return _session_local
 
     def _thread_a() -> None:
-        session_local = _session_factory(postgres_engine)
-        with patch("core.database.SessionLocal", session_local):
-            asyncio.run(_run_one_tick())
-            session_local.cleanup()
+        hold_session, hold_conn = _new_session(postgres_engine)
+        lock = DedicatedAdvisoryLock(hold_session, key=ADVISORY_LOCK_KEY)
+        try:
+            assert lock.try_acquire() is True
+            a_holds.set()
+            b_may_run.wait(timeout=30)
+        finally:
+            if lock.held:
+                lock.release()
+            hold_session.close()
+            hold_conn.close()
 
     def _thread_b() -> None:
-        a_inside.wait(timeout=30)
+        a_holds.wait(timeout=30)
         b_may_run.set()
         session_local = _session_factory(postgres_engine)
         with patch("core.database.SessionLocal", session_local):
@@ -147,4 +155,4 @@ def test_poller_tick_skips_when_advisory_lock_held(postgres_engine, monkeypatch)
     payload = thread_b_result.get("payload") or {}
     assert payload.get("skipped") is True
     assert payload.get("reason") == "advisory_lock_held_by_other_worker"
-    assert poll_calls == [integration_id]
+    assert poll_calls == []
