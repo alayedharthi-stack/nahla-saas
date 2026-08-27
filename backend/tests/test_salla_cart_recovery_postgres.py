@@ -275,35 +275,63 @@ def test_webhook_and_poller_emit_single_event(postgres_engine):
     finally:
         verify.close()
 
-def test_marker_failure_rolls_back_event_then_retry_succeeds(postgres_engine, monkeypatch):
-    """H3: event+marker atomicity — marker persist failure rolls back event; retry succeeds."""
-    from sqlalchemy.orm import attributes
-
-    customer_id, cart_id = _seed_cart(postgres_engine)
-    attempts = {"n": 0}
-    real_flag_modified = attributes.flag_modified
-
-    def _flaky_flag_modified(*args, **kwargs):
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            raise RuntimeError("simulated marker persist failure")
-        return real_flag_modified(*args, **kwargs)
-
-    monkeypatch.setattr(attributes, "flag_modified", _flaky_flag_modified)
-
+def test_marker_failure_rolls_back_event_then_retry_succeeds(postgres_engine):
+    """H3: event+marker atomicity — commit failure rolls back event; retry succeeds."""
     Session = sessionmaker(bind=postgres_engine)
     session = Session()
     try:
-        cart = session.get(Order, cart_id)
-        normalised = {
-            "external_id": "cart-pg-1",
-            "raw_cart_id": "pg-1",
-            "customer_info": {"mobile": "+966500700700"},
-            "customer_name": "PG Shopper",
-            "abandoned_at": "2026-04-19T09:00:00",
-        }
+        if session.get(Tenant, TEST_TENANT) is None:
+            session.add(Tenant(id=TEST_TENANT, name="Cart Recovery PG"))
+            session.commit()
+        customer = Customer(
+            tenant_id=TEST_TENANT,
+            phone="+966500700722",
+            normalized_phone="966500700722",
+            name="PG Shopper Rollback",
+        )
+        session.add(customer)
+        session.flush()
+        customer_id = customer.id
+        cart_token = f"pgroll{uuid.uuid4().hex[:8]}"
+        external_id = f"cart-{cart_token}"
+        cart = Order(
+            tenant_id=TEST_TENANT,
+            external_id=external_id,
+            status="abandoned",
+            total="90",
+            is_abandoned=True,
+            customer_info={"mobile": "+966500700722"},
+            extra_metadata={"abandoned_at": "2026-04-19T09:00:00"},
+        )
+        session.add(cart)
+        session.commit()
+        cart_id = cart.id
+    finally:
+        session.close()
+
+    normalised = {
+        "external_id": external_id,
+        "raw_cart_id": cart_token,
+        "customer_info": {"mobile": "+966500700722"},
+        "customer_name": "PG Shopper Rollback",
+        "abandoned_at": "2026-04-19T09:00:00",
+    }
+
+    fail_session = Session()
+    commit_calls = {"n": 0}
+    real_commit = fail_session.commit
+
+    def _flaky_commit():
+        commit_calls["n"] += 1
+        if commit_calls["n"] == 1:
+            raise RuntimeError("simulated marker persist failure")
+        return real_commit()
+
+    fail_session.commit = _flaky_commit  # type: ignore[method-assign]
+    try:
+        cart = fail_session.get(Order, cart_id)
         first = emit_cart_abandoned_if_new(
-            session,
+            fail_session,
             tenant_id=TEST_TENANT,
             cart_row=cart,
             normalised=normalised,
@@ -312,7 +340,7 @@ def test_marker_failure_rolls_back_event_then_retry_succeeds(postgres_engine, mo
         )
         assert first is None
     finally:
-        session.close()
+        fail_session.close()
 
     verify = Session()
     try:
@@ -330,13 +358,6 @@ def test_marker_failure_rolls_back_event_then_retry_succeeds(postgres_engine, mo
     retry = Session()
     try:
         cart = retry.get(Order, cart_id)
-        normalised = {
-            "external_id": "cart-pg-1",
-            "raw_cart_id": "pg-1",
-            "customer_info": {"mobile": "+966500700700"},
-            "customer_name": "PG Shopper",
-            "abandoned_at": "2026-04-19T09:00:00",
-        }
         second = emit_cart_abandoned_if_new(
             retry,
             tenant_id=TEST_TENANT,
