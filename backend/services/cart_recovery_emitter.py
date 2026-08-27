@@ -161,6 +161,7 @@ def emit_cart_abandoned_if_new(
                 db.query(Order)
                 .filter(Order.tenant_id == tenant_id, Order.id == cart_id)
                 .with_for_update()
+                .populate_existing()
                 .one()
             )
         except Exception:
