@@ -78,6 +78,23 @@ if not _integration_required():
 pytestmark = pytest.mark.usefixtures("postgres_engine")
 
 
+@pytest.fixture(autouse=True)
+def _capture_salla_loggers(caplog):
+    """Ensure adapter + alert loggers propagate into caplog."""
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    for name in ("nahla.adapter.salla", "nahla.salla_alerts"):
+        lg = logging.getLogger(name)
+        lg.propagate = True
+        lg.setLevel(logging.DEBUG)
+    try:
+        from core.salla_token_lock import _locks
+        _locks.clear()
+    except Exception:
+        pass
+
+
 @pytest.fixture(scope="module")
 def postgres_engine():
     engine = _connect_engine()
@@ -234,8 +251,6 @@ def _run_delete_401_flow(
     *,
     delete_handler,
     post_handler,
-    caplog,
-    log_level: int = logging.INFO,
 ):
     integration_id = _seed_integration(engine)
     adapter = _adapter_for_integration(integration_id, engine)
@@ -256,8 +271,7 @@ def _run_delete_401_flow(
                     "store_adapters.salla_adapter.httpx.AsyncClient",
                     _HttpClientFactory(client),
                 ):
-                    with caplog.at_level(log_level):
-                        return await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
+                    return await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
 
     try:
         return asyncio.run(_run())
@@ -310,7 +324,6 @@ def test_successful_refresh_retry_persists_and_returns_true(postgres_engine, cap
         postgres_engine,
         delete_handler=delete_handler,
         post_handler=post_handler,
-        caplog=caplog,
     )
     assert ok is True
     assert delete_calls["count"] == 2
@@ -341,8 +354,6 @@ def test_oauth_http_failure_records_safe_metrics(postgres_engine, caplog):
         postgres_engine,
         delete_handler=delete_handler,
         post_handler=post_handler,
-        caplog=caplog,
-        log_level=logging.WARNING,
     )
     assert ok is False
     assert "salla_token_refresh_failed" in caplog.text
@@ -371,8 +382,6 @@ def test_refresh_transport_exception_logs_safe_class_only(postgres_engine, caplo
         postgres_engine,
         delete_handler=delete_handler,
         post_handler=post_handler,
-        caplog=caplog,
-        log_level=logging.WARNING,
     )
     assert ok is False
     assert "salla_token_refresh_failed" in caplog.text
@@ -401,8 +410,6 @@ def test_needs_reauth_metric_uses_hashed_correlation(postgres_engine, caplog):
         postgres_engine,
         delete_handler=delete_handler,
         post_handler=post_handler,
-        caplog=caplog,
-        log_level=logging.CRITICAL,
     )
     assert ok is False
     assert "event=salla_token_refresh_needs_reauth" in caplog.text
