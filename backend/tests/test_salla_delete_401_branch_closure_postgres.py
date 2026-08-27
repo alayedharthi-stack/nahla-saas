@@ -72,6 +72,7 @@ def _capture_bounded_logs() -> Iterator[_LogCollector]:
     collector = _LogCollector()
     loggers = [
         salla_adapter_mod.logger,
+        logging.getLogger("nahla.adapter.salla"),
         logging.getLogger("nahla.salla_alerts"),
         logging.getLogger("nahla.salla_token_lock"),
     ]
@@ -323,7 +324,10 @@ def test_proactive_freshness_success_emits_safe_events(postgres_engine):
         expires_at=_iso(now + timedelta(hours=2)),
     )
     adapter = _adapter_for_integration(integration_id, postgres_engine)
-    collector = _LogCollector()
+    adapter._expires_at = _iso(now + timedelta(hours=2))
+
+    async def delete_handler(url, **_kwargs):
+        return _make_http_response(200)
 
     async def post_handler(url, **_kwargs):
         return _make_http_response(
@@ -335,14 +339,11 @@ def test_proactive_freshness_success_emits_safe_events(postgres_engine):
             },
         )
 
-    client = _RoutingHttpClient(
-        lambda url, **_kwargs: _make_http_response(200),
-        post_handler,
-    )
+    client = _RoutingHttpClient(delete_handler, post_handler)
     factory = _session_factory(postgres_engine)
 
     async def _run():
-        with _capture_bounded_logs() as active_collector:
+        with _capture_bounded_logs() as collector:
             with patch.dict(
                 os.environ,
                 {
@@ -356,15 +357,16 @@ def test_proactive_freshness_success_emits_safe_events(postgres_engine):
                         "store_adapters.salla_adapter.httpx.AsyncClient",
                         _HttpClientFactory(client),
                     ):
-                        await adapter._ensure_token_fresh()
-            collector.messages.extend(active_collector.messages)
+                        ok = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
+            return ok, collector
 
     try:
-        asyncio.run(_run())
+        ok, collector = asyncio.run(_run())
     finally:
         factory.cleanup()
 
     log_text = _log_text(collector)
+    assert ok is True
     assert "event=salla_token_freshness_due" in log_text
     assert "event=salla_token_freshness_refresh_success" in log_text
     assert "event=salla_token_freshness_refresh_failed" not in log_text
@@ -382,14 +384,12 @@ def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine):
         postgres_engine,
         expires_at=CANARY_INVALID_EXPIRY,
     )
-    collector = _LogCollector()
-
     async def _run():
-        with _capture_bounded_logs() as active_collector:
+        with _capture_bounded_logs() as collector:
             await adapter._ensure_token_fresh()
-            collector.messages.extend(active_collector.messages)
+            return collector
 
-    asyncio.run(_run())
+    collector = asyncio.run(_run())
     log_text = _log_text(collector)
     assert "event=salla_token_freshness_parse_failed" in log_text
     assert "error_class=" in log_text
