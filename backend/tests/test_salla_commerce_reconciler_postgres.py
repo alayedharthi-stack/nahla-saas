@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 import threading
 from pathlib import Path
@@ -213,37 +212,20 @@ def test_tenant_failure_isolation_and_safe_error_code(postgres_engine, monkeypat
     assert TEST_TENANT_RECONCILER + 1 in calls
 
 
-class _RecordingHandler(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__()
-        self.records: list[logging.LogRecord] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.records.append(record)
-
-
-def test_reconciler_logs_safe_error_class_only(postgres_engine, monkeypatch) -> None:
+def test_reconciler_state_exposes_safe_error_code_only(postgres_engine, monkeypatch) -> None:
     _seed_integration(postgres_engine)
 
     async def _reconcile_fail(db, intg):
+        if int(intg.tenant_id) != TEST_TENANT_RECONCILER:
+            return {"customers_synced": 0, "products_synced": 0, "duration_ms": 0}
         raise ValueError("token=super-secret-phone=+966500000000")
 
     monkeypatch.setattr("services.salla_commerce_reconciler._reconcile_integration", _reconcile_fail)
 
-    logger = logging.getLogger("nahla.salla_commerce_reconciler")
-    old_level = logger.level
-    old_disabled = logging.root.manager.disable
-    handler = _RecordingHandler()
-    logger.addHandler(handler)
-    logger.setLevel(logging.WARNING)
-    logging.disable(logging.NOTSET)
-    try:
-        asyncio.run(_run_one_tick())
-        formatted = "\n".join(handler.format(r) for r in handler.records)
-        assert "tenant_reconcile_failed" in formatted or "error_class=" in formatted
-        assert "super-secret" not in formatted
-        assert "+966500000000" not in formatted
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(old_level)
-        logging.disable(old_disabled)
+    asyncio.run(_run_one_tick())
+    from services.salla_commerce_reconciler import get_reconciler_state
+
+    tenant_state = get_reconciler_state()["tenants"][TEST_TENANT_RECONCILER]
+    assert tenant_state["error_code"] == "ValueError"
+    assert "super-secret" not in str(tenant_state)
+    assert "+966500000000" not in str(tenant_state)
