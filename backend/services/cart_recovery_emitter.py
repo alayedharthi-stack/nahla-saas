@@ -211,8 +211,8 @@ def emit_cart_abandoned_if_new(
     if customer_id is None:
         logger.warning(
             "[CartRecoveryEmitter] tenant=%s cart=%s could not resolve "
-            "customer for phone=%s — skipping cart_abandoned emit",
-            tenant_id, cart_external, phone,
+            "customer unresolved — skipping cart_abandoned emit",
+            tenant_id, cart_external,
         )
         return None
 

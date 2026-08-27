@@ -80,6 +80,19 @@ _PURCHASE_STATUSES_POSITIVE = frozenset({
 })
 
 
+
+
+def _recovery_event_matches_cart(payload: Dict[str, Any], matched_cart_external_id: Optional[str]) -> bool:
+    if not matched_cart_external_id:
+        return True
+    ev_cart = str(payload.get("cart_external_id") or "").strip()
+    ev_raw = str(payload.get("cart_id") or "").strip()
+    wanted = str(matched_cart_external_id).strip()
+    wanted_raw = wanted.replace("cart-", "", 1) if wanted.startswith("cart-") else wanted
+    if not ev_cart and not ev_raw:
+        return False
+    return ev_cart == wanted or ev_raw == wanted_raw
+
 def cancel_recovery_for_customer(
     db: Session,
     *,
@@ -197,6 +210,8 @@ def cancel_recovery_for_customer(
             continue
         if payload.get("recovery_converted_at"):
             continue
+        if matched_cart_external_id and not _recovery_event_matches_cart(payload, matched_cart_external_id):
+            continue
 
         progress = list(payload.get("recovery_followups") or [])
         seen = {int(p.get("step_idx", -1)) for p in progress}
@@ -235,7 +250,10 @@ def cancel_recovery_for_customer(
     # from ``action_taken``. Without this stamp the recovery flow looks
     # like it gave up on its own rather than being short-circuited by a
     # real purchase, which makes the conversion-rate column lie.
-    parent_event_ids = [p.id for p in parent_events]
+    parent_event_ids = [
+        p.id for p in parent_events
+        if _recovery_event_matches_cart(dict(p.payload or {}), matched_cart_external_id)
+    ]
     if parent_event_ids:
         executions = (
             db.query(AutomationExecution)

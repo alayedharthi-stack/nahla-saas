@@ -1,0 +1,332 @@
+# -*- coding: utf-8 -*-
+"""PR #888 remaining Sol remediation regression tests."""
+from __future__ import annotations
+
+import asyncio
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from sqlalchemy import JSON, create_engine, event, text as sa_text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import sessionmaker
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_DIR = REPO_ROOT / "backend"
+DATABASE_DIR = REPO_ROOT / "database"
+for p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+from database.models import AutomationEvent, AutomationExecution, Base, Customer, Order, Product, Promotion, StoreKnowledgeSnapshot, Tenant, WebhookEvent
+from services.store_sync import StoreSyncService, _extract_abandoned_at_iso
+
+
+@event.listens_for(Base.metadata, "before_create")
+def _remap_jsonb(target, connection, **kw):
+    for table in target.sorted_tables:
+        for col in table.columns:
+            if isinstance(col.type, JSONB):
+                col.type = JSON()
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+
+
+def _official_abandoned_cart_payload(cart_id: str = "1097962121", age: int = 83):
+    return {
+        "id": int(cart_id) if str(cart_id).isdigit() else cart_id,
+        "total": {"amount": 100, "currency": "SAR"},
+        "checkout_url": f"https://salla.sa/example/checkout/{cart_id}",
+        "age_in_minutes": age,
+        "created_at": {"date": "2025-01-21 17:09:39.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+        "updated_at": {"date": "2025-01-21 17:09:39.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+        "customer": {"name": "User", "mobile": "+966500111222"},
+        "items": [{"id": 1, "product_id": 99, "quantity": 1}],
+    }
+
+def _make_db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    tenant = Tenant(name="Generic Store", is_active=True)
+    session.add(tenant)
+    session.commit()
+    return session, tenant.id, engine
+
+
+class TestH1OrderStatusSlug:
+    def test_status_updated_prefers_order_slug_over_outer_label(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            db.add(Order(
+                tenant_id=tenant_id,
+                external_id="629263027",
+                status="pending",
+                total="200.00",
+                line_items=[{"name": "Sports Shoe", "qty": 1}],
+                customer_info={"mobile": "+966500111222"},
+            ))
+            db.commit()
+            payload = {
+                "id": 198290473,
+                "status": "completed-label-ar",
+                "order": {
+                    "id": 629263027,
+                    "status": {"slug": "completed", "name": "done"},
+                    "total": {"amount": 200},
+                },
+            }
+            _run(svc.handle_order_webhook(payload, webhook_event_type="order.status.updated"))
+            row = db.query(Order).filter_by(tenant_id=tenant_id, external_id="629263027").one()
+            assert row.status == "completed"
+            assert row.total == "200"
+            assert row.line_items
+            assert db.query(Order).filter_by(external_id="198290473").first() is None
+        finally:
+            db.close(); engine.dispose()
+
+
+
+class TestH2AdapterPaginationFailure:
+    def test_get_customers_propagates_partial_pagination(self):
+        from store_adapters.salla_adapter import SallaAdapter
+        from store_adapters.salla_pagination import SallaPaginatedFetchIncomplete
+
+        adapter = SallaAdapter(api_key="test-key", store_id="store-1")
+        adapter._get_all_pages_strict = AsyncMock(side_effect=SallaPaginatedFetchIncomplete(
+            partial=True, items=[{"id": "c1"}], pages_fetched=1,
+        ))
+        with pytest.raises(SallaPaginatedFetchIncomplete):
+            _run(adapter.get_customers())
+
+    def test_sync_customers_strict_blocks_watermark(self):
+        from store_adapters.salla_pagination import SallaPaginatedFetchIncomplete
+
+        db, tenant_id, engine = _make_db()
+        try:
+            db.add(StoreKnowledgeSnapshot(tenant_id=tenant_id, policy_summary={}))
+            db.commit()
+            svc = StoreSyncService(db, tenant_id)
+            adapter = MagicMock()
+            adapter.platform = "salla"
+            adapter.get_customers = AsyncMock(side_effect=SallaPaginatedFetchIncomplete(
+                partial=True, items=[{"id": "c1"}], pages_fetched=1,
+            ))
+            svc._adapter = adapter
+            with pytest.raises(RuntimeError, match="customer_sync_failed"):
+                _run(svc.sync_customers(incremental=True, strict=True))
+            assert svc._commerce_reconcile_watermarks()["customers"] == ""
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestH4OfficialTimestampContract:
+    def test_anchor_from_created_at_and_age_in_minutes(self):
+        from services.salla_datetime import parse_salla_datetime_to_utc
+
+        raw = _official_abandoned_cart_payload()
+        anchor = _extract_abandoned_at_iso(raw)
+        created = parse_salla_datetime_to_utc(raw["created_at"])
+        expected = created + timedelta(minutes=83)
+        if expected.tzinfo is not None:
+            expected = expected.astimezone(timezone.utc).replace(tzinfo=None)
+        assert anchor.startswith(expected.isoformat(sep=" ", timespec="seconds")[:16])
+
+    def test_official_webhook_emits_with_provider_anchor(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            with patch("core.automation_engine.emit_automation_event") as emit_mock:
+                emit_mock.side_effect = lambda db, **kw: AutomationEvent(
+                    tenant_id=kw["tenant_id"],
+                    customer_id=kw["customer_id"],
+                    event_type=kw["event_type"],
+                    payload=kw["payload"],
+                    processed=False,
+                    created_at=kw.get("created_at"),
+                )
+                _run(svc.handle_abandoned_cart_webhook(
+                    _official_abandoned_cart_payload("501"),
+                    event_kind="created",
+                    webhook_event_type="abandoned.cart",
+                ))
+                emit_mock.assert_called_once()
+                assert emit_mock.call_args.kwargs.get("created_at") is not None
+            cart = db.query(Order).filter_by(external_id="cart-501").one()
+            assert cart.extra_metadata.get("abandoned_at")
+        finally:
+            db.close(); engine.dispose()
+
+    def test_missing_age_skips_recovery(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            payload = {
+                "id": "88",
+                "total": {"amount": 10, "currency": "SAR"},
+                "customer": {"mobile": "+966500900900"},
+                "items": [],
+                "created_at": "2026-04-19 10:00:00",
+            }
+            with patch("core.automation_engine.emit_automation_event") as emit_mock:
+                _run(svc.handle_abandoned_cart_webhook(payload, event_kind="created", webhook_event_type="abandoned.cart"))
+                emit_mock.assert_not_called()
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestH6UnrelatedCartSnapshot:
+    def test_cancel_preserves_unrelated_cart_state(self):
+        from services.cart_recovery_cancel import cancel_recovery_for_customer
+
+        db, tenant_id, engine = _make_db()
+        try:
+            customer = Customer(tenant_id=tenant_id, phone="+966500111000", normalized_phone="966500111000", name="Buyer")
+            db.add(customer)
+            db.flush()
+            ev_b = AutomationEvent(
+                tenant_id=tenant_id,
+                customer_id=customer.id,
+                event_type="cart_abandoned",
+                payload={"cart_external_id": "cart-B", "cart_id": "B", "step_idx": 0, "recovery_followups": []},
+                processed=False,
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            db.add(ev_b)
+            db.flush()
+            db.commit()
+            before = {
+                "processed": ev_b.processed,
+                "payload": dict(ev_b.payload or {}),
+            }
+            cancel_recovery_for_customer(
+                db, tenant_id=tenant_id, customer_id=customer.id,
+                matched_cart_external_id="cart-A", reason="customer_purchased",
+            )
+            db.refresh(ev_b)
+            assert ev_b.processed == before["processed"]
+            assert dict(ev_b.payload or {}) == before["payload"]
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestH7ProductFailureMatrix:
+    def test_partial_new_product_without_adapter_fails(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            svc._adapter = None
+            with pytest.raises(RuntimeError, match="product_hydration_failed"):
+                _run(svc.handle_product_webhook({"id": "new-1"}, webhook_event_type="product.deleted"))
+            assert db.query(Product).filter_by(external_id="new-1").count() == 0
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestH9UnsupportedOfferTransition:
+    def test_percentage_to_unsupported_clears_discount(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            _run(svc.handle_special_offer_webhook({
+                "id": "offer-9", "offer_type": "special", "message": "10pct",
+                "expiry_date": "2026-12-31", "get": {"discount_type": "percentage", "discount_amount": 10},
+            }, webhook_event_type="specialoffer.created"))
+            row = db.query(Promotion).filter_by(tenant_id=tenant_id).one()
+            assert str(row.discount_value) in ("10", "10.00", "10.0")
+            _run(svc.handle_special_offer_webhook({
+                "id": "offer-9", "offer_type": "free_shipping", "message": "ship",
+                "expiry_date": "2026-12-31", "get": {},
+            }, webhook_event_type="specialoffer.updated"))
+            db.refresh(row)
+            assert row.discount_value is None
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestH11LoggingSafety:
+    def test_mark_failed_log_is_safe(self, caplog):
+        import logging
+        from core.webhook_events import mark_failed
+
+        db, tenant_id, engine = _make_db()
+        try:
+            ev = WebhookEvent(
+                tenant_id=tenant_id, provider="salla", event_type="order.created",
+                status="processing", raw_body="{}", parsed_payload={},
+            )
+            db.add(ev); db.commit()
+            caplog.set_level(logging.ERROR)
+            mark_failed(db, ev, RuntimeError("secret-token +966500111222"))
+            db.refresh(ev)
+            assert ev.last_error == "RuntimeError"
+            logged = " ".join(r.message for r in caplog.records)
+            assert "secret-token" not in logged
+            assert "966500111222" not in logged
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestM2ExplicitCurrencyUpdate:
+    def test_explicit_currency_update_via_webhook(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            base = _official_abandoned_cart_payload("cur-1")
+            _run(svc.handle_abandoned_cart_webhook(base, event_kind="created", webhook_event_type="abandoned.cart"))
+            cart = db.query(Order).filter_by(external_id="cart-cur-1").one()
+            assert cart.extra_metadata.get("currency") == "SAR"
+            partial = dict(base); partial["total"] = {"amount": 55}
+            _run(svc.handle_abandoned_cart_webhook(partial, event_kind="updated", webhook_event_type="abandoned.cart"))
+            db.refresh(cart)
+            assert cart.extra_metadata.get("currency") == "SAR"
+            explicit = dict(base); explicit["total"] = {"amount": 60, "currency": "USD"}
+            _run(svc.handle_abandoned_cart_webhook(explicit, event_kind="updated", webhook_event_type="abandoned.cart"))
+            db.refresh(cart)
+            assert cart.extra_metadata.get("currency") == "USD"
+            assert cart.line_items
+        finally:
+            db.close(); engine.dispose()
+
+
+class TestH3PollerCommit:
+    def test_sync_abandoned_carts_emit_survives_session_close(self, tmp_path):
+        import tempfile
+        from sqlalchemy.orm import sessionmaker
+
+        db_path = tmp_path / "cart_emit.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        tenant = Tenant(name="Poller Store", is_active=True)
+        db.add(tenant)
+        db.commit()
+        tenant_id = tenant.id
+        svc = StoreSyncService(db, tenant_id)
+        adapter = MagicMock()
+        adapter.get_abandoned_carts = AsyncMock(return_value=[_official_abandoned_cart_payload("pol-1")])
+        svc._adapter = adapter
+        _run(svc.sync_abandoned_carts())
+        db.close()
+        engine.dispose()
+
+        engine2 = create_engine(f"sqlite:///{db_path}")
+        Session2 = sessionmaker(bind=engine2)
+        db2 = Session2()
+        try:
+            cart = db2.query(Order).filter_by(tenant_id=tenant_id, external_id="cart-pol-1").one()
+            assert cart.extra_metadata.get("recovery_event_id")
+            events = db2.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").all()
+            assert len(events) == 1
+            assert events[0].id == cart.extra_metadata.get("recovery_event_id")
+        finally:
+            db2.close(); engine2.dispose()

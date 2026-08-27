@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,44 @@ def test_concurrent_emit_creates_single_event(postgres_engine, monkeypatch):
         cart = verify_session.get(Order, cart_id)
         assert cart.extra_metadata.get("recovery_event_id") == events[0].id
         assert results.count(None) >= 1 or len(set(results)) == 1
+    finally:
+        trans.commit()
+        verify_session.close()
+        connection.close()
+
+
+def test_poller_emit_visible_from_fresh_session(postgres_engine, monkeypatch):
+    customer_id, cart_id = _seed_cart(postgres_engine)
+    session, connection, trans = _new_session(postgres_engine)
+    try:
+        tenant = session.get(Tenant, TEST_TENANT)
+        svc = __import__("services.store_sync", fromlist=["StoreSyncService"]).StoreSyncService(session, TEST_TENANT)
+        raw = {
+            "id": "pg-pol-2",
+            "total": {"amount": 90, "currency": "SAR"},
+            "checkout_url": "https://example/cart",
+            "age_in_minutes": 15,
+            "created_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+            "updated_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+            "customer": {"mobile": "+966500700700", "name": "PG Shopper"},
+            "items": [{"name": "Shoe", "qty": 1}],
+        }
+        adapter = MagicMock()
+        adapter.get_abandoned_carts = AsyncMock(return_value=[raw])
+        svc._adapter = adapter
+        import asyncio
+        asyncio.run(svc.sync_abandoned_carts())
+    finally:
+        trans.commit()
+        session.close()
+        connection.close()
+
+    verify_session, connection, trans = _new_session(postgres_engine)
+    try:
+        cart = verify_session.query(Order).filter_by(tenant_id=TEST_TENANT, external_id="cart-pg-pol-2").one()
+        assert cart.extra_metadata.get("recovery_event_id")
+        events = verify_session.query(AutomationEvent).filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned").all()
+        assert any(e.id == cart.extra_metadata.get("recovery_event_id") for e in events)
     finally:
         trans.commit()
         verify_session.close()

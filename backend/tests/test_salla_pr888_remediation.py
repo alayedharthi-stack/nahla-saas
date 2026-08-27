@@ -74,6 +74,19 @@ def _riyadh_abandoned():
     }
 
 
+def _official_abandoned_cart_payload(cart_id: str = "1097962121", age: int = 83):
+    return {
+        "id": int(cart_id) if str(cart_id).isdigit() else cart_id,
+        "total": {"amount": 100, "currency": "SAR"},
+        "checkout_url": f"https://salla.sa/example/checkout/{cart_id}",
+        "age_in_minutes": age,
+        "created_at": {"date": "2025-01-21 17:09:39.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+        "updated_at": {"date": "2025-01-21 17:09:39.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+        "customer": {"name": "User", "mobile": "+966500800800"},
+        "items": [{"name": "Perfume", "qty": 1}],
+    }
+
+
 class TestH2PaginationWatermark:
     def test_products_partial_page_does_not_advance_watermark(self):
         db, tenant_id, engine = _make_db()
@@ -151,7 +164,9 @@ class TestH4H5CartLifecycle:
                 "total": {"amount": 80, "currency": "SAR"},
                 "customer": {"mobile": "+966500800800"},
                 "items": [{"name": "Perfume", "qty": 1}],
-                "abandoned_at": _riyadh_abandoned(),
+                "age_in_minutes": 30,
+                "created_at": _riyadh_abandoned(),
+                "updated_at": _riyadh_abandoned(),
             }
             _run(svc.handle_abandoned_cart_webhook(base, event_kind="created", webhook_event_type="abandoned.cart"))
             _run(svc.handle_abandoned_cart_webhook({**base, "status": "purchased"}, event_kind="purchased", webhook_event_type="abandoned.cart.purchased"))
@@ -344,7 +359,9 @@ class TestM2CartCurrency:
                 "total": {"amount": 120, "currency": "SAR"},
                 "customer": {"mobile": "+966500333111"},
                 "items": [{"name": "Shoe"}],
-                "abandoned_at": _riyadh_abandoned(),
+                "age_in_minutes": 30,
+                "created_at": _riyadh_abandoned(),
+                "updated_at": _riyadh_abandoned(),
             }
             _run(svc.handle_abandoned_cart_webhook(full, event_kind="created", webhook_event_type="abandoned.cart"))
             _run(svc.handle_abandoned_cart_webhook({"id": "31", "status": "active"}, event_kind="status_changed", webhook_event_type="abandoned.cart.status.changed"))

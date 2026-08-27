@@ -1263,7 +1263,13 @@ class SallaAdapter(BaseStoreAdapter):
             return False
 
     def _log_error(self, method: str, exc: Exception) -> None:
-        logger.error(f"SallaAdapter.{method} failed: {exc}", exc_info=True)
+        from core.webhook_error_codes import classify_webhook_failure  # noqa: PLC0415
+
+        logger.error(
+            "[SallaAdapter] method=%s error_code=%s",
+            method,
+            classify_webhook_failure(exc),
+        )
 
     # ── Pagination helper ────────────────────────────────────────────────────
 
@@ -1397,7 +1403,7 @@ class SallaAdapter(BaseStoreAdapter):
             return [self._normalize_product(p) for p in raw_list]
         except httpx.HTTPStatusError as exc:
             self._log_error("get_products", exc)
-            logger.error(f"Salla get_products HTTP error {exc.response.status_code}: {exc.response.text[:200]}")
+            logger.error("[SallaAdapter] get_products http_status=%s", exc.response.status_code)
             raise
         except Exception as exc:
             self._log_error("get_products", exc)
@@ -3884,14 +3890,18 @@ class SallaAdapter(BaseStoreAdapter):
 
     async def get_customers(self, updated_since: Optional[str] = None) -> List[Dict[str, Any]]:
         """Fetch all customers from Salla across all pages until exhaustion."""
+        from store_adapters.salla_pagination import SallaPaginatedFetchIncomplete  # noqa: PLC0415
+
         try:
             extra: Optional[Dict[str, Any]] = None
             if updated_since:
                 extra = {"updated_at_min": updated_since}
             return await self._get_all_pages_strict("/customers", label="customers", extra_params=extra)
+        except SallaPaginatedFetchIncomplete:
+            raise
         except Exception as exc:
             self._log_error("get_customers", exc)
-            return []
+            raise
 
     # ── Offers / Coupons ──────────────────────────────────────────────────────
 

@@ -329,7 +329,7 @@ def mark_failed(db: Session, event: WebhookEvent, err: BaseException | str) -> N
             provider=event.provider,
             event_type=event.event_type,
             attempts=event.attempts,
-            err=err,
+            err=classify_webhook_failure(err),
         )
         return
 
@@ -346,7 +346,7 @@ def mark_failed(db: Session, event: WebhookEvent, err: BaseException | str) -> N
         event_type=event.event_type,
         attempts=event.attempts,
         next_retry_at=event.next_retry_at.isoformat(),
-        err=err,
+        err=classify_webhook_failure(err),
     )
 
 

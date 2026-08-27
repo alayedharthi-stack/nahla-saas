@@ -121,14 +121,19 @@ class TestOrderWebhookExpandedEvents:
           svc.db.commit()
           status_payload = {
               "id": 555001,
-              "status": "processing",
-              "order": {"id": 9001, "reference_id": "ORD-9001", "total": {"amount": 150}},
+              "status": "processing-label",
+              "order": {
+                  "id": 9001,
+                  "status": {"slug": "processing", "name": "Processing"},
+                  "reference_id": "ORD-9001",
+                  "total": {"amount": 150},
+              },
           }
           _run(svc.handle_order_webhook(status_payload, webhook_event_type="order.status.updated"))
           _run(svc.handle_order_webhook({
               "id": 555002,
-              "status": "shipped",
-              "order": {"id": 9001},
+              "status": "shipped-label",
+              "order": {"id": 9001, "status": {"slug": "shipped", "name": "Shipped"}},
           }, webhook_event_type="order.status.updated"))
           rows = db.query(Order).filter_by(tenant_id=tenant_id, external_id="9001").all()
           assert len(rows) == 1

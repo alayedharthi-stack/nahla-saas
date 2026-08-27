@@ -250,7 +250,7 @@ async def _run_one_tick() -> Dict[str, Any]:
             except Exception as exc:
                 errors += 1
                 tenant_state["result"] = "error"
-                tenant_state["error"]  = repr(exc)
+                tenant_state["error"]  = type(exc).__name__
                 logger.exception(
                     "[Salla Orders Poller] tenant scanned tenant_id=%s store_id=%s "
                     "result=error error=%s",
@@ -360,7 +360,7 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
                         tenant_id, adapter_exc,
                     )
                 else:
-                    api_error = repr(adapter_exc)
+                    api_error = type(adapter_exc).__name__
                     logger.warning(
                         "[Salla Orders Poller] tenant=%s salla_api_response error=%s",
                         tenant_id, adapter_exc,
@@ -599,7 +599,7 @@ async def run_once_for_tenant(
                     db.rollback()
                 except Exception:
                     pass
-                per_integration.append({"ok": False, "reason": "exception", "error": repr(exc), **ctx})
+                per_integration.append({"ok": False, "reason": "exception", "error": type(exc).__name__, **ctx})
 
         result = {
             "ok": errors == 0,

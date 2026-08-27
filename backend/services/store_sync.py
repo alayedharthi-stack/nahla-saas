@@ -712,6 +712,33 @@ def _order_webhook_payload_keys(raw: Any) -> frozenset[str]:
     return frozenset(str(k) for k in raw.keys())
 
 
+def _extract_order_status_from_status_updated(
+    payload: Dict[str, Any],
+    order_block: Dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Return (canonical_slug, history_label) for order.status.updated."""
+    slug: str | None = None
+    history_label: str | None = None
+    order_status = order_block.get("status")
+    if isinstance(order_status, dict):
+        raw_slug = order_status.get("slug")
+        if raw_slug not in (None, ""):
+            slug = str(raw_slug).strip()
+        history_label = str(order_status.get("name") or "").strip() or None
+    elif isinstance(order_status, str) and order_status.strip():
+        slug = order_status.strip()
+
+    outer = payload.get("status")
+    if isinstance(outer, dict):
+        history_label = history_label or str(outer.get("name") or "").strip() or None
+        if not slug and outer.get("slug") not in (None, ""):
+            slug = str(outer.get("slug")).strip()
+    elif isinstance(outer, str) and outer.strip():
+        history_label = history_label or outer.strip()
+
+    return slug, history_label
+
+
 def _unwrap_salla_order_webhook_payload(
     payload: Dict[str, Any],
     webhook_event_type: str | None = None,
@@ -721,10 +748,16 @@ def _unwrap_salla_order_webhook_payload(
         order_block = payload.get("order")
         if isinstance(order_block, dict):
             merged = dict(order_block)
-            status_val = payload.get("status")
-            if status_val is not None:
-                merged["status"] = status_val
-            order_keys = _order_webhook_payload_keys(order_block) | frozenset({"status"})
+            slug, history_label = _extract_order_status_from_status_updated(payload, order_block)
+            if slug:
+                merged["status"] = slug
+            if history_label:
+                merged["status_history_label"] = history_label
+            order_keys = _order_webhook_payload_keys(order_block)
+            if slug:
+                order_keys = order_keys | frozenset({"status"})
+            if history_label:
+                order_keys = order_keys | frozenset({"status_history_label"})
             return merged, order_keys
     return payload, keys
 
@@ -986,12 +1019,31 @@ def _flatten_salla_datetime(value: Any) -> str:
 
 
 def _extract_abandoned_at_iso(raw: Any) -> str:
+    """Recovery anchor from official Salla abandoned-cart fields.
+
+    Merchant webhook schema (doc-433812) and List Abandoned Carts API
+    (api-5394138) expose ``created_at``, ``updated_at``, and
+    ``age_in_minutes`` — not ``abandoned_at``. ``age_in_minutes`` is the
+    documented difference between cart ``created_at`` and provider *now*;
+    inverting yields the provider observation instant for this payload.
+
+    """
     if not isinstance(raw, dict):
         return ""
     for key in ("abandoned_at", "abandonedAt", "left_at"):
         iso = salla_datetime_to_utc_iso(raw.get(key))
         if iso:
             return iso
+    created = parse_salla_datetime_to_utc(raw.get("created_at"))
+    age_raw = raw.get("age_in_minutes")
+    if created is not None and age_raw not in (None, ""):
+        try:
+            anchor = created + timedelta(minutes=int(age_raw))
+            if anchor.tzinfo is not None:
+                anchor = anchor.astimezone(timezone.utc).replace(tzinfo=None)
+            return anchor.isoformat(sep=" ", timespec="seconds")
+        except (TypeError, ValueError):
+            return ""
     return ""
 
 
@@ -1059,13 +1111,9 @@ def _normalise_abandoned_cart(raw: Any) -> Dict:
     # ``str(value)`` on whatever is at ``raw["created_at"]`` and would
     # otherwise produce a literal "{'date': ...}" string that no parser
     # accepts. We mutate a copy so we never alter the adapter's payload.
-    cart_dt = (
-        parse_salla_datetime_to_utc(raw.get("abandoned_at"))
-        or parse_salla_datetime_to_utc(raw.get("created_at"))
-        or parse_salla_datetime_to_utc(raw.get("updated_at"))
-    )
     flat_created = salla_datetime_to_utc_iso(raw.get("created_at"))
     flat_updated = salla_datetime_to_utc_iso(raw.get("updated_at"))
+    abandoned_anchor = _extract_abandoned_at_iso(raw)
 
     return {
         "external_id":           external_id,
@@ -1078,8 +1126,10 @@ def _normalise_abandoned_cart(raw: Any) -> Dict:
         "checkout_url":          raw.get("checkout_url", "") or raw.get("url", ""),
         "is_abandoned":          True,
         "source":                "salla",
-        "created_at":            cart_dt.isoformat() if cart_dt else (flat_created or flat_updated),
-        "abandoned_at":          _extract_abandoned_at_iso(raw),
+        "created_at":            flat_created or "",
+        "updated_at":            flat_updated or "",
+        "age_in_minutes":        raw.get("age_in_minutes"),
+        "abandoned_at":          abandoned_anchor,
         "raw_cart_id":           cart_id,
         "cart_status":           str(raw.get("status") or raw.get("cart_status") or "abandoned").lower(),
         "currency":              _extract_cart_currency(raw_total),
@@ -1128,6 +1178,17 @@ def _normalise_special_offer(raw: Any) -> Dict[str, Any]:
         discount_value = str(discount_amount) if discount_amount not in (None, "") else None
     elif discount_type == "free-product":
         promotion_type = "free_product"
+    supported_discount_types = {"percentage", "percent", "fixed", "amount", "free-product"}
+    if discount_type and discount_type not in supported_discount_types:
+        promotion_type = None
+        discount_value = None
+        discount_supported = False
+    elif promotion_type is not None:
+        discount_supported = True
+    elif offer_type and not discount_type:
+        discount_supported = False
+    else:
+        discount_supported = False
     status_raw = str(raw.get("status") or "active").lower()
     status = "active" if status_raw in ("active", "enabled", "published") else "draft"
     from services.coupon_salla_push import parse_salla_datetime
@@ -1160,6 +1221,7 @@ def _normalise_special_offer(raw: Any) -> Dict[str, Any]:
         "status": status,
         "conditions": {},
         "usage_limit": raw.get("usage_limit") or raw.get("maximum_uses"),
+        "discount_supported": discount_supported,
     }
 
 def _normalise_coupon(raw: Any) -> Dict:
@@ -2364,7 +2426,8 @@ class StoreSyncService:
                     existing.source = "salla"
                     meta = dict(existing.extra_metadata or {})
                     meta["created_at"]    = normalised.get("created_at") or meta.get("created_at")
-                    meta["abandoned_at"]  = meta.get("abandoned_at") or normalised.get("created_at")
+                    if normalised.get("abandoned_at"):
+                        meta["abandoned_at"] = normalised.get("abandoned_at")
                     meta["last_synced_at"] = datetime.now(timezone.utc).isoformat()
                     meta["source_kind"]   = "abandoned_cart"
                     meta["raw_cart_id"]   = normalised.get("raw_cart_id")
@@ -2394,7 +2457,7 @@ class StoreSyncService:
                         source                = "salla",
                         extra_metadata        = {
                             "created_at":     normalised.get("created_at"),
-                            "abandoned_at":   normalised.get("created_at"),
+                            "abandoned_at":   normalised.get("abandoned_at"),
                             "last_synced_at": datetime.now(timezone.utc).isoformat(),
                             "source_kind":    "abandoned_cart",
                             "raw_cart_id":    normalised.get("raw_cart_id"),
@@ -2481,6 +2544,7 @@ class StoreSyncService:
                         cart_row=cart_row,
                         normalised=emit_normalised,
                         source="store_sync",
+                        commit=True,
                     )
                     if new_id is not None and (cart_row.extra_metadata or {}).get(
                         "recovery_event_id"
@@ -3334,37 +3398,36 @@ class StoreSyncService:
         """Process a single product update from a platform webhook."""
         full_payload_events = {"product.created", "product.updated"}
         product_id = str(payload.get("id") or payload.get("external_id") or "").strip()
-        if (
+        needs_hydration = (
             webhook_event_type
             and webhook_event_type not in full_payload_events
             and product_id
             and not (payload.get("title") or payload.get("name"))
-        ):
-            stored = (
-                self.db.query(Product)
-                .filter_by(tenant_id=self.tenant_id, external_id=product_id)
-                .first()
-            )
+        )
+        if needs_hydration:
             adapter = self._get_adapter()
-            if adapter and hasattr(adapter, "get_product"):
-                try:
-                    fetched = await adapter.get_product(product_id)
-                except Exception as exc:
-                    logger.warning(
-                        "tenant=%s partial product webhook fetch failed id=%s event=%s: %s",
-                        self.tenant_id, product_id, webhook_event_type, type(exc).__name__,
-                    )
-                    raise RuntimeError("product_hydration_failed") from exc
-                if fetched is not None:
-                    if hasattr(fetched, "dict"):
-                        fetched = fetched.dict()
-                    elif not isinstance(fetched, dict):
-                        fetched = dict(fetched)
-                    merged = dict(fetched)
-                    merged.update(payload)
-                    payload = merged
-                elif stored is not None:
-                    raise RuntimeError("product_hydration_failed")
+            if not adapter or not hasattr(adapter, "get_product"):
+                raise RuntimeError("product_hydration_failed")
+            try:
+                fetched = await adapter.get_product(product_id)
+            except Exception as exc:
+                logger.warning(
+                    "tenant=%s partial product webhook fetch failed product_hash=%s event=%s error_code=%s",
+                    self.tenant_id,
+                    hash(product_id) % 10_000_000,
+                    webhook_event_type,
+                    type(exc).__name__,
+                )
+                raise RuntimeError("product_hydration_failed") from exc
+            if fetched is None:
+                raise RuntimeError("product_hydration_failed")
+            if hasattr(fetched, "dict"):
+                fetched = fetched.dict()
+            elif not isinstance(fetched, dict):
+                fetched = dict(fetched)
+            merged = dict(fetched)
+            merged.update(payload)
+            payload = merged
         normalised = _normalise_product(payload)
         ext_id     = normalised["external_id"]
         if not ext_id:
@@ -3689,9 +3752,14 @@ class StoreSyncService:
         if existing is not None:
             existing.name = normalised.get("name") or existing.name
             existing.description = normalised.get("description") or existing.description
-            existing.promotion_type = normalised.get("promotion_type") or existing.promotion_type
-            if normalised.get("discount_value") is not None:
-                existing.discount_value = normalised.get("discount_value")
+            if normalised.get("discount_supported") is False:
+                existing.promotion_type = normalised.get("offer_type") or existing.promotion_type or "special_offer"
+                existing.discount_value = None
+            else:
+                if normalised.get("promotion_type"):
+                    existing.promotion_type = normalised.get("promotion_type")
+                if normalised.get("discount_value") is not None:
+                    existing.discount_value = normalised.get("discount_value")
             if normalised.get("starts_at") is not None:
                 existing.starts_at = normalised.get("starts_at")
             if normalised.get("ends_at") is not None:
