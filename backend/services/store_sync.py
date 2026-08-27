@@ -85,6 +85,8 @@ from core.catalog_image import (  # noqa: E402
     extract_sync_product_image,
 )
 
+from core.coupon_log_privacy import hash_identifier, safe_exception_class
+
 logger = logging.getLogger("nahla-backend")
 
 
@@ -2302,23 +2304,86 @@ class StoreSyncService:
         result["normalized_count"] = len(normalised_external_ids)  # type: ignore[assignment]
         return result
 
+
+
     # ── Coupons sync ───────────────────────────────────────────────────────────
 
-    async def sync_coupons(self) -> int:
+    async def sync_coupons(
+        self,
+        *,
+        triggered_by: str = "store_sync",
+        raw_list=None,
+        fetch_result=None,
+        duration_ms=None,
+    ) -> int:
         adapter = self._get_adapter()
-        if not adapter or not hasattr(adapter, "get_coupons"):
+        if raw_list is None:
+            if adapter is not None and hasattr(adapter, "fetch_coupons_paginated"):
+                fetch_result = await adapter.fetch_coupons_paginated(per_page=60)
+                raw_list = list(fetch_result.get("items") or [])
+            elif adapter is not None and hasattr(adapter, "get_coupons"):
+                try:
+                    raw_list = await adapter.get_coupons()
+                    fetch_result = {
+                        "ok": True,
+                        "items": raw_list,
+                        "pages_fetched": 1,
+                        "items_seen": len(raw_list or []),
+                        "partial": False,
+                        "http_status": None,
+                        "failure_class": None,
+                        "retry_after": None,
+                    }
+                except Exception as exc:
+                    from services.salla_coupon_fetch import classify_fetch_exception  # noqa: PLC0415
+                    info = classify_fetch_exception(exc)
+                    fetch_result = {
+                        "ok": False,
+                        "items": [],
+                        "pages_fetched": 0,
+                        "items_seen": 0,
+                        "partial": False,
+                        "http_status": info.get("http_status"),
+                        "failure_class": info.get("failure_class"),
+                        "retry_after": info.get("retry_after"),
+                    }
+                    raw_list = []
+            else:
+                self._record_coupon_sync_meta(
+                    triggered_by=triggered_by,
+                    items_seen=0,
+                    created=0,
+                    updated=0,
+                    failure_class="no_adapter",
+                    fetch_ok=False,
+                )
+                return 0
+
+        if fetch_result and not fetch_result.get("ok") and not fetch_result.get("partial"):
+            self._record_coupon_sync_meta(
+                triggered_by=triggered_by,
+                items_seen=int(fetch_result.get("items_seen") or 0),
+                created=0,
+                updated=0,
+                failure_class=fetch_result.get("failure_class"),
+                pages_fetched=fetch_result.get("pages_fetched"),
+                duration_ms=duration_ms,
+                partial=False,
+                http_status=fetch_result.get("http_status"),
+                retry_after=fetch_result.get("retry_after"),
+                fetch_ok=False,
+            )
             return 0
 
-        try:
-            raw_list = await adapter.get_coupons()
-        except Exception as exc:
-            logger.warning("tenant=%s coupons sync failed: %s", self.tenant_id, exc)
-            return 0
-
-        logger.info("tenant=%s syncing %d coupons", self.tenant_id, len(raw_list))
+        raw_list = list(raw_list or [])
+        logger.info(
+            "tenant=%s syncing %d coupons (triggered_by=%s)",
+            self.tenant_id,
+            len(raw_list),
+            triggered_by,
+        )
 
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-
         from services.coupon_sync_visibility import (  # noqa: PLC0415
             build_salla_import_metadata,
             build_salla_reconcile_metadata,
@@ -2345,25 +2410,20 @@ class StoreSyncService:
                     exp = datetime.fromisoformat(str(normalised["expires_at"]).replace("Z", "+00:00"))
                 except Exception:
                     pass
-
             synced_at = datetime.now(timezone.utc)
-
             if existing:
                 preserve_origin = is_nahla_system_coupon(
                     getattr(existing, "source_type", None),
                     existing.extra_metadata,
                 )
                 if preserve_origin:
-                    import_meta = build_salla_reconcile_metadata(
-                        raw, synced_at, existing.extra_metadata,
-                    )
+                    import_meta = build_salla_reconcile_metadata(raw, synced_at, existing.extra_metadata)
                 else:
                     import_meta = build_salla_import_metadata(raw, normalised, synced_at)
-
-                existing.description    = normalised.get("name") or normalised["description"]
-                existing.discount_type  = normalised["discount_type"]
+                existing.description = normalised.get("name") or normalised["description"]
+                existing.discount_type = normalised["discount_type"]
                 existing.discount_value = normalised["discount_value"]
-                existing.expires_at     = exp
+                existing.expires_at = exp
                 merged_meta = merge_salla_import_metadata(
                     existing.extra_metadata,
                     import_meta,
@@ -2380,22 +2440,118 @@ class StoreSyncService:
             else:
                 import_meta = build_salla_import_metadata(raw, normalised, synced_at)
                 self.db.add(Coupon(
-                    tenant_id      = self.tenant_id,
-                    code           = code,
-                    description    = normalised.get("name") or normalised["description"],
-                    discount_type  = normalised["discount_type"],
-                    discount_value = normalised["discount_value"],
-                    expires_at     = exp,
-                    source_type    = "imported",
-                    extra_metadata = import_meta,
+                    tenant_id=self.tenant_id,
+                    code=code,
+                    description=normalised.get("name") or normalised["description"],
+                    discount_type=normalised["discount_type"],
+                    discount_value=normalised["discount_value"],
+                    expires_at=exp,
+                    source_type="imported",
+                    extra_metadata=import_meta,
                 ))
                 created += 1
         self.db.flush()
         logger.info(
-            "tenant=%s coupons sync done — created=%d updated=%d",
-            self.tenant_id, created, updated,
+            "tenant=%s coupons sync done created=%d updated=%d items_seen=%d triggered_by=%s",
+            self.tenant_id, created, updated, len(raw_list), triggered_by,
+        )
+        failure_class = None
+        partial = False
+        fetch_ok = True
+        if fetch_result:
+            partial = bool(fetch_result.get("partial"))
+            fetch_ok = bool(fetch_result.get("ok"))
+            if partial:
+                failure_class = "partial_pagination"
+        self._record_coupon_sync_meta(
+            triggered_by=triggered_by,
+            items_seen=len(raw_list),
+            created=created,
+            updated=updated,
+            failure_class=failure_class,
+            pages_fetched=(fetch_result or {}).get("pages_fetched"),
+            duration_ms=duration_ms,
+            partial=partial,
+            http_status=(fetch_result or {}).get("http_status"),
+            retry_after=(fetch_result or {}).get("retry_after"),
+            fetch_ok=fetch_ok,
         )
         return created + updated
+
+    def _record_coupon_sync_meta(
+        self,
+        *,
+        triggered_by: str,
+        items_seen: int,
+        created: int,
+        updated: int,
+        failure_class: Optional[str],
+        pages_fetched: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        partial: bool = False,
+        http_status: Optional[int] = None,
+        retry_after: Optional[int] = None,
+        fetch_ok: Optional[bool] = None,
+    ) -> None:
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+        from models import Integration  # noqa: PLC0415
+        from services.salla_coupon_fetch import poll_interval_seconds_for_catalog  # noqa: PLC0415
+        from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+
+        now = datetime.now(timezone.utc)
+        intg = None
+        if self._integration_connection_id is not None:
+            intg = (
+                self.db.query(Integration)
+                .filter_by(id=int(self._integration_connection_id), tenant_id=self.tenant_id)
+                .first()
+            )
+        if intg is None:
+            intg = pick_active_salla_integration(self.db, self.tenant_id)
+        if intg is None:
+            return
+
+        cfg = dict(intg.config or {})
+        prev_meta = dict(cfg.get("coupon_sync_meta") or {})
+        prev_success = prev_meta.get("last_success_at")
+        success = fetch_ok if fetch_ok is not None else (failure_class is None and not partial)
+        meta = {
+            "last_poll_at": now.isoformat(),
+            "last_attempt_at": now.isoformat(),
+            "items_seen": items_seen,
+            "created": created,
+            "updated": updated,
+            "failure_class": failure_class,
+            "triggered_by": triggered_by,
+            "pages_fetched": pages_fetched,
+            "duration_ms": duration_ms,
+            "partial": partial,
+            "http_status": http_status,
+            "retry_after": retry_after,
+            "fetch_ok": fetch_ok,
+        }
+        if success:
+            meta["last_success_at"] = now.isoformat()
+            meta["poll_interval_seconds"] = poll_interval_seconds_for_catalog(items_seen)
+        else:
+            meta["last_success_at"] = prev_success
+        if retry_after:
+            try:
+                seconds = int(retry_after)
+                meta["retry_after_until"] = (now + timedelta(seconds=seconds)).isoformat()
+            except (TypeError, ValueError):
+                pass
+        cfg["coupon_sync_meta"] = meta
+        intg.config = cfg
+        flag_modified(intg, "config")
+        try:
+            self.db.flush()
+        except Exception as exc:
+            logger.warning(
+                'coupon_sync_meta_flush_failed event=coupon_sync_meta_flush_failed tenant_hash=%s error_class=%s',
+                hash_identifier(self.tenant_id),
+                safe_exception_class(exc),
+            )
 
     # ── Store profile sync (Pack A1 — Salla /store/info) ───────────────────────
 

@@ -151,7 +151,13 @@ def find_superseding_integration(db, intg) -> Optional[Any]:
             .all()
         )
     except Exception as exc:
-        logger.debug("[SALLA ALERT] superseded lookup failed: %s", exc)
+        from core.coupon_log_privacy import hash_identifier, safe_exception_class  # noqa: PLC0415
+
+        logger.warning(
+            "[SALLA ALERT] superseded_lookup_failed event=salla_superseded_lookup_failed error_class=%s integration_hash=%s",
+            safe_exception_class(exc),
+            hash_identifier(getattr(intg, "id", None)),
+        )
         return None
 
     for cand in candidates:
@@ -529,23 +535,34 @@ async def maybe_send_reauth_alert(
 
 def log_metric_success(tenant_id: int, store_id: str) -> None:
     """Emit a structured success metric log."""
+    from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
+
     logger.info(
-        "[SALLA METRIC] token_refresh_success tenant_id=%s store_id=%s",
-        tenant_id, store_id,
+        "[SALLA METRIC] event=salla_token_refresh_success tenant_hash=%s store_hash=%s",
+        hash_identifier(tenant_id),
+        hash_identifier(store_id),
     )
 
 
 def log_metric_failed(tenant_id: int, store_id: str, attempts: int) -> None:
     """Emit a structured failure metric log."""
+    from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
+
     logger.warning(
-        "[SALLA METRIC] token_refresh_failed tenant_id=%s store_id=%s attempts=%s",
-        tenant_id, store_id, attempts,
+        "[SALLA METRIC] event=salla_token_refresh_failed tenant_hash=%s store_hash=%s attempts=%s",
+        hash_identifier(tenant_id),
+        hash_identifier(store_id),
+        attempts,
     )
 
 
 def log_metric_needs_reauth(tenant_id: int, store_id: str, reason: str) -> None:
     """Emit a structured needs_reauth metric log (CRITICAL level)."""
+    from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
+
     logger.critical(
-        "[SALLA METRIC] token_needs_reauth tenant_id=%s store_id=%s reason=%s",
-        tenant_id, store_id, reason,
+        "[SALLA METRIC] event=salla_token_refresh_needs_reauth tenant_hash=%s store_hash=%s reason=%s",
+        hash_identifier(tenant_id),
+        hash_identifier(store_id),
+        reason,
     )

@@ -20,6 +20,7 @@ import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.catalog_image import coerce_image_url, extract_sync_product_image
+from core.coupon_log_privacy import hash_identifier, safe_exception_class
 from core.phone_coerce import coerce_phone_str
 from store_integration.models import (
     NormalizedOffer,
@@ -555,39 +556,27 @@ class SallaAdapter(BaseStoreAdapter):
         """Use refresh_token to get a new access_token from Salla.
 
         Returns True on success, False on any failure.
-
-        Refresh-token null-safety: if Salla's response does not include a new
-        refresh_token, the existing one is kept as-is — it is NEVER replaced
-        with null/empty.
-
-        Race-condition safety: acquires the in-process asyncio lock for this
-        integration_id before calling Salla's OAuth endpoint.  If another
-        coroutine is already refreshing the same integration, this call
-        returns True optimistically (the other coroutine will update the DB).
-
-        Failure escalation: after 3 consecutive failures, sets needs_reauth=True
-        and logs [SALLA TOKEN] refresh failed 3 times; needs reauth.
         """
         from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+
+        tenant_hash = hash_identifier(self._tenant_id)
+        integration_hash = hash_identifier(self._integration_id)
 
         deny_external_egress(
             egress_kind="salla_integration",
             operation="refresh_access_token",
             tenant_id=self._tenant_id,
         )
-        # Pre-condition: refresh_token must be present
         if not self._refresh_token:
-            logger.error(
-                "[Salla Token] refresh failed tenant=%s reason=no_refresh_token "
-                "(merchant must re-authorise Salla integration)",
-                self._tenant_id,
+            logger.warning(
+                "[Salla Token] refresh_failed event=salla_token_refresh_failed reason=no_refresh_token tenant_hash=%s",
+                tenant_hash,
             )
             self._mark_needs_reauth("no_refresh_token")
             return False
         if not self._tenant_id:
-            logger.error(
-                "[Salla Token] refresh failed tenant=0 reason=no_tenant_id "
-                "(adapter constructed without tenant_id)",
+            logger.warning(
+                "[Salla Token] refresh_failed event=salla_token_refresh_failed reason=no_tenant_id",
             )
             return False
 
@@ -596,108 +585,101 @@ class SallaAdapter(BaseStoreAdapter):
         cfg = self._get_integration_config()
         client_id, client_secret, client_kind = resolve_salla_oauth_client(cfg)
         if not client_id or not client_secret:
-            logger.error(
-                "[Salla Token] refresh failed tenant=%s reason=missing_oauth_env "
-                "client_kind=%s integration_id=%s",
-                self._tenant_id, client_kind, self._integration_id,
+            logger.warning(
+                "[Salla Token] refresh_failed event=salla_token_refresh_failed reason=missing_oauth_env client_kind=%s integration_hash=%s tenant_hash=%s",
+                client_kind,
+                integration_hash,
+                tenant_hash,
             )
-            # Config issue, not a token problem — don't set needs_reauth
             return False
 
-        # ── Acquire in-process lock — skip if another coroutine is already refreshing ──
         from core.salla_token_lock import salla_asyncio_lock  # noqa: PLC0415
         async with salla_asyncio_lock(self._integration_id, caller="adapter") as acquired:
             if not acquired:
-                # Another coroutine in this process is refreshing the same
-                # integration.  Return True optimistically — by the time the
-                # caller uses self.api_key, the other coroutine will have
-                # updated it in the DB and in-memory.
                 logger.info(
-                    "[Salla Token] refresh deferred to concurrent task | tenant=%s",
-                    self._tenant_id,
+                    "[Salla Token] refresh_deferred event=salla_token_refresh_deferred tenant_hash=%s",
+                    tenant_hash,
                 )
                 return True
 
             logger.info(
-                "[Salla Token] refresh started tenant=%s integration_id=%s client_kind=%s",
-                self._tenant_id, self._integration_id, client_kind,
+                "[Salla Token] refresh_started event=salla_token_refresh_started tenant_hash=%s integration_hash=%s client_kind=%s",
+                tenant_hash,
+                integration_hash,
+                client_kind,
             )
             try:
                 async with httpx.AsyncClient(timeout=15) as client:
                     resp = await client.post(
                         "https://accounts.salla.sa/oauth2/token",
                         data={
-                            "grant_type":    "refresh_token",
-                            "client_id":     client_id,
+                            "grant_type": "refresh_token",
+                            "client_id": client_id,
                             "client_secret": client_secret,
                             "refresh_token": self._refresh_token,
                         },
                         headers={
-                            "Accept":       "application/json",
+                            "Accept": "application/json",
                             "Content-Type": "application/x-www-form-urlencoded",
                         },
                     )
                     if resp.status_code != 200:
-                        resp_text = resp.text[:300]
-                        # invalid_grant = token permanently revoked by Salla
-                        if resp.status_code == 400 and "invalid_grant" in resp_text:
-                            logger.error(
-                                "[Salla Token] refresh failed tenant=%s reason=invalid_grant "
-                                "(refresh_token revoked by Salla — merchant must re-authorise)",
-                                self._tenant_id,
-                            )
-                            self._mark_needs_reauth("invalid_grant")
-                            raise SallaTokenRevokedException(
-                                f"Salla refresh_token revoked for tenant={self._tenant_id} (invalid_grant)"
-                            )
-                        # For all other failures: record + maybe escalate
-                        err_msg = f"HTTP {resp.status_code}: {resp_text}"
-                        if 400 <= resp.status_code < 500:
-                            logger.error(
-                                "[Salla Token] refresh failed tenant=%s reason=oauth_%d response=%s",
-                                self._tenant_id, resp.status_code, resp_text,
-                            )
-                        else:
-                            logger.error(
-                                "[Salla Token] refresh failed tenant=%s reason=oauth_%d (transient) response=%s",
-                                self._tenant_id, resp.status_code, resp_text,
-                            )
-                        self._record_refresh_failure(err_msg)
+                        if resp.status_code == 400:
+                            try:
+                                body_text = resp.text or ""
+                            except Exception:
+                                body_text = ""
+                            if "invalid_grant" in body_text:
+                                logger.warning(
+                                    "[Salla Token] refresh_failed event=salla_token_refresh_failed reason=invalid_grant tenant_hash=%s",
+                                    tenant_hash,
+                                )
+                                self._mark_needs_reauth("invalid_grant")
+                                raise SallaTokenRevokedException("salla_refresh_token_revoked")
+                        retryable = bool(resp.status_code >= 500)
+                        logger.warning(
+                            "[Salla Token] refresh_failed event=salla_token_refresh_failed reason=oauth_http_error http_status=%s retryable=%s tenant_hash=%s",
+                            resp.status_code,
+                            retryable,
+                            tenant_hash,
+                        )
+                        self._record_refresh_failure(f"HTTP {resp.status_code}")
                         return False
 
-                    data        = resp.json()
-                    new_access  = data.get("access_token", "")
-                    # Guard: never overwrite refresh_token with null/empty
-                    _raw_rt     = data.get("refresh_token")
+                    data = resp.json()
+                    new_access = data.get("access_token", "")
+                    _raw_rt = data.get("refresh_token")
                     new_refresh = _raw_rt if _raw_rt else self._refresh_token
-                    expires_in  = data.get("expires_in")
+                    expires_in = data.get("expires_in")
                     if not new_access:
-                        logger.error(
-                            "[Salla Token] refresh failed tenant=%s reason=empty_access_token",
-                            self._tenant_id,
+                        logger.warning(
+                            "[Salla Token] refresh_failed event=salla_token_refresh_failed reason=empty_access_token tenant_hash=%s",
+                            tenant_hash,
                         )
                         self._record_refresh_failure("empty_access_token")
                         return False
 
-                    # Update in-memory + persist
-                    self.api_key        = new_access
+                    self.api_key = new_access
                     self._refresh_token = new_refresh
                     self._persist_refreshed_tokens(new_access, new_refresh, expires_in)
                     logger.info(
-                        "[Salla Token] refresh success tenant=%s expires_in=%s",
-                        self._tenant_id, expires_in,
+                        "[Salla Token] refresh_success event=salla_token_refresh_success tenant_hash=%s expires_in=%s",
+                        tenant_hash,
+                        expires_in,
                     )
                     return True
 
             except SallaTokenRevokedException:
                 raise
             except Exception as exc:
-                logger.exception(
-                    "[Salla Token] refresh failed tenant=%s reason=exception err=%s",
-                    self._tenant_id, exc,
+                logger.warning(
+                    "[Salla Token] refresh_failed event=salla_token_refresh_failed reason=transport_exception error_class=%s tenant_hash=%s",
+                    safe_exception_class(exc),
+                    tenant_hash,
                 )
-                self._record_refresh_failure(str(exc)[:400])
+                self._record_refresh_failure(safe_exception_class(exc))
                 return False
+
 
     def _require_auth(self, operation: str = "API call") -> None:
         """Preflight check before write operations.
@@ -749,11 +731,12 @@ class SallaAdapter(BaseStoreAdapter):
         successful refresh) so no extra DB query is needed on the hot path.
         Only runs when both refresh_token and expires_at are known.
 
-        Logs [SALLA TOKEN] access token refreshed before API call on success.
-        Silent on error — reactive 401 handling in _get/_post acts as fallback.
+        Emits safe freshness events only. Reactive 401 handling in _get/_post
+        acts as fallback when proactive refresh is skipped or fails.
         """
         if not self._refresh_token or not self._expires_at:
             return
+        tenant_hash = hash_identifier(self._tenant_id)
         try:
             _exp_dt = datetime.fromisoformat(self._expires_at.replace("Z", "+00:00"))
             if _exp_dt.tzinfo is None:
@@ -761,13 +744,27 @@ class SallaAdapter(BaseStoreAdapter):
             _days_until = (_exp_dt - datetime.now(timezone.utc)).total_seconds() / 86400
             if _days_until < 1:
                 logger.info(
-                    "[SALLA TOKEN] access token refreshed before API call | "
-                    "tenant=%s days_until_expiry=%.2f",
-                    self._tenant_id, _days_until,
+                    "[SALLA TOKEN] freshness_due event=salla_token_freshness_due tenant_hash=%s days_until_expiry=%.2f",
+                    tenant_hash,
+                    _days_until,
                 )
-                await self._refresh_access_token()
+                refreshed = await self._refresh_access_token()
+                if refreshed:
+                    logger.info(
+                        "[SALLA TOKEN] freshness_success event=salla_token_freshness_refresh_success tenant_hash=%s",
+                        tenant_hash,
+                    )
+                else:
+                    logger.warning(
+                        "[SALLA TOKEN] freshness_failed event=salla_token_freshness_refresh_failed tenant_hash=%s",
+                        tenant_hash,
+                    )
         except Exception as exc:
-            logger.debug("[Salla Token] _ensure_token_fresh error (non-fatal): %s", exc)
+            logger.warning(
+                "[Salla Token] freshness_parse_failed event=salla_token_freshness_parse_failed error_class=%s tenant_hash=%s",
+                safe_exception_class(exc),
+                tenant_hash,
+            )
 
     def _mark_needs_reauth(self, reason: str = "unknown") -> None:
         """Mark integration as `needs_reauth=True` and stop syncing.
@@ -821,9 +818,10 @@ class SallaAdapter(BaseStoreAdapter):
                             cfg.pop("needs_reauth_at", None)
                             intg.enabled = False
                             logger.warning(
-                                "[Salla Token] tenant=%s integration_id=%s superseded by "
-                                "newer integration_id=%s — needs_reauth suppressed",
-                                self._tenant_id, intg.id, superseder.id,
+                                "[Salla Token] superseded event=salla_token_needs_reauth_superseded tenant_hash=%s integration_hash=%s superseder_hash=%s",
+                                hash_identifier(self._tenant_id),
+                                hash_identifier(intg.id),
+                                hash_identifier(superseder.id),
                             )
                         except Exception:
                             pass
@@ -834,17 +832,20 @@ class SallaAdapter(BaseStoreAdapter):
                     intg.config = cfg
                     _db.commit()
                     logger.warning(
-                        "[Salla Token] needs_reauth=%s tenant=%s integration_id=%s "
-                        "reason=%s attempts=%s — sync paused until merchant re-authorises",
-                        bool(cfg.get("needs_reauth")), self._tenant_id, intg.id,
-                        reason, cfg.get("token_refresh_attempts"),
+                        "[Salla Token] needs_reauth_set event=salla_token_needs_reauth_set needs_reauth=%s tenant_hash=%s integration_hash=%s reason=%s attempts=%s",
+                        bool(cfg.get("needs_reauth")),
+                        hash_identifier(self._tenant_id),
+                        hash_identifier(intg.id),
+                        reason,
+                        cfg.get("token_refresh_attempts"),
                     )
             finally:
                 _db.close()
         except Exception as exc:
             logger.warning(
-                "[Salla Token] failed to persist needs_reauth tenant=%s: %s",
-                self._tenant_id, exc,
+                "[Salla Token] needs_reauth_persist_failed event=salla_token_needs_reauth_persist_failed error_class=%s tenant_hash=%s",
+                safe_exception_class(exc),
+                hash_identifier(self._tenant_id),
             )
 
     def _record_refresh_failure(self, error_msg: str) -> None:
@@ -893,9 +894,10 @@ class SallaAdapter(BaseStoreAdapter):
                     cfg["token_refresh_attempts"]  = new_attempts
 
                     logger.warning(
-                        "[SALLA TOKEN] refresh failed | tenant=%s integration_id=%s "
-                        "attempts=%s error=%s",
-                        self._tenant_id, self._integration_id, new_attempts, error_msg,
+                        "[SALLA TOKEN] refresh_recorded event=salla_token_refresh_recorded tenant_hash=%s integration_hash=%s attempts=%s",
+                        hash_identifier(self._tenant_id),
+                        hash_identifier(self._integration_id),
+                        new_attempts,
                     )
                     log_metric_failed(self._tenant_id or 0, cfg.get("store_id", "?"), new_attempts)
 
@@ -906,9 +908,11 @@ class SallaAdapter(BaseStoreAdapter):
                         cfg["needs_reauth_reason"] = reason
                         cfg["needs_reauth_at"]     = _now_iso
                         logger.critical(
-                            "[SALLA TOKEN] refresh failed 3 times; needs reauth | "
-                            "tenant=%s integration_id=%s attempts=%s reason=%s",
-                            self._tenant_id, self._integration_id, new_attempts, reason,
+                            "[SALLA TOKEN] refresh_escalated event=salla_token_refresh_needs_reauth tenant_hash=%s integration_hash=%s attempts=%s reason=%s",
+                            hash_identifier(self._tenant_id),
+                            hash_identifier(self._integration_id),
+                            new_attempts,
+                            reason,
                         )
                         log_metric_needs_reauth(
                             self._tenant_id or 0, cfg.get("store_id", "?"), reason or "unknown"
@@ -925,8 +929,9 @@ class SallaAdapter(BaseStoreAdapter):
                 _db.close()
         except Exception as exc:
             logger.warning(
-                "[Salla Token] failed to record refresh failure tenant=%s: %s",
-                self._tenant_id, exc,
+                "[Salla Token] refresh_record_failed event=salla_token_refresh_record_failed error_class=%s tenant_hash=%s",
+                safe_exception_class(exc),
+                hash_identifier(self._tenant_id),
             )
 
     def _persist_refreshed_tokens(
@@ -995,13 +1000,19 @@ class SallaAdapter(BaseStoreAdapter):
                     intg.config = cfg
                     db.commit()
                     logger.info(
-                        "[Salla Token] tokens persisted → integration_id=%s tenant=%s",
-                        intg.id, self._tenant_id,
+                        "[Salla Token] tokens_persisted event=salla_token_refresh_persisted tenant_hash=%s integration_hash=%s",
+                        hash_identifier(self._tenant_id),
+                        hash_identifier(intg.id),
                     )
             finally:
                 db.close()
         except Exception as exc:
-            logger.warning("[Salla Token] failed to persist refreshed tokens: %s", exc)
+            logger.warning(
+                "[Salla Token] persist_failed event=salla_token_refresh_persist_failed error_class=%s tenant_hash=%s integration_hash=%s",
+                safe_exception_class(exc),
+                hash_identifier(self._tenant_id),
+                hash_identifier(self._integration_id),
+            )
 
     async def _get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
@@ -1212,26 +1223,43 @@ class SallaAdapter(BaseStoreAdapter):
         )
         await self._ensure_token_fresh()
         url = f"{SALLA_API_BASE}{path}"
+        tenant_hash = hash_identifier(self._tenant_id)
         try:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
                 resp = await client.delete(url, headers=self._headers())
                 if resp.status_code == 401:
                     logger.warning(
-                        "[Salla Token] 401 detected tenant=%s path=%s method=DELETE",
-                        self._tenant_id, path,
+                        "[Salla Token] unauthorized event=salla_delete_unauthorized tenant_hash=%s operation=delete",
+                        tenant_hash,
                     )
                     if await self._refresh_access_token():
                         logger.info(
-                            "[Salla Token] retry original request tenant=%s path=%s method=DELETE",
-                            self._tenant_id, path,
+                            "[Salla Token] delete_retry_after_refresh event=salla_delete_retry tenant_hash=%s operation=delete",
+                            tenant_hash,
                         )
                         resp = await client.delete(url, headers=self._headers())
                 logger.info(
-                    "[Salla API] DELETE %s → %d | tenant=%s", path, resp.status_code, self._tenant_id,
+                    "[Salla API] delete_completed event=salla_delete_completed http_status=%s tenant_hash=%s operation=delete",
+                    resp.status_code,
+                    tenant_hash,
                 )
                 return 200 <= resp.status_code < 300 or resp.status_code == 404
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            retryable = bool(status is not None and status >= 500)
+            logger.warning(
+                "SallaAdapter._delete_failed operation=delete http_status=%s error_class=HTTPStatusError retryable=%s tenant_hash=%s",
+                status,
+                retryable,
+                tenant_hash,
+            )
+            return False
         except Exception as exc:
-            self._log_error("_delete", exc)
+            logger.warning(
+                "SallaAdapter._delete_failed operation=delete error_class=%s tenant_hash=%s",
+                safe_exception_class(exc),
+                tenant_hash,
+            )
             return False
 
     def _log_error(self, method: str, exc: Exception) -> None:
@@ -1306,6 +1334,91 @@ class SallaAdapter(BaseStoreAdapter):
             tag, self._tenant_id, len(all_items), page,
         )
         return all_items
+
+    async def _fetch_all_pages_result(
+        self,
+        path: str,
+        *,
+        per_page: int = 60,
+        extra_params: Optional[Dict[str, Any]] = None,
+        label: str = "",
+    ) -> Dict[str, Any]:
+        from services.salla_coupon_fetch import classify_fetch_exception, empty_fetch_result  # noqa: PLC0415
+
+        tag = label or path.strip("/")
+        all_items: List[Dict[str, Any]] = []
+        page = 1
+        pages_fetched = 0
+
+        def _partial_result(info: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "ok": False,
+                "items": all_items,
+                "pages_fetched": pages_fetched,
+                "items_seen": len(all_items),
+                "partial": True,
+                "http_status": info.get("http_status"),
+                "failure_class": "partial_pagination",
+                "retry_after": info.get("retry_after"),
+            }
+
+        while True:
+            params: Dict[str, Any] = {"per_page": per_page, "page": page}
+            if extra_params:
+                params.update(extra_params)
+            try:
+                data = await self._get(path, params)
+                pages_fetched += 1
+            except SallaTokenRevokedException:
+                info = {"http_status": 401, "failure_class": "needs_reauth", "retry_after": None}
+                if page == 1:
+                    return empty_fetch_result(**info)
+                return _partial_result(info)
+            except Exception as exc:
+                info = classify_fetch_exception(exc)
+                if page == 1:
+                    return empty_fetch_result(
+                        failure_class=str(info.get("failure_class") or type(exc).__name__),
+                        http_status=info.get("http_status"),
+                        retry_after=info.get("retry_after"),
+                    )
+                return _partial_result(info)
+
+            items = data.get("data") or []
+            all_items.extend(items)
+            pagination = data.get("pagination") or data.get("meta") or {}
+            total_pages_hint = pagination.get(
+                "totalPages",
+                pagination.get("last_page", pagination.get("total_pages", None)),
+            )
+            logger.info(
+                "[Salla:%s] tenant=%s page %d fetched %d items cumulative=%d%s",
+                tag, self._tenant_id, page, len(items), len(all_items),
+                f" total_pages={total_pages_hint}" if total_pages_hint else "",
+            )
+            if not items:
+                break
+            if total_pages_hint and page >= total_pages_hint:
+                break
+            if len(items) < per_page:
+                break
+            page += 1
+
+        return {
+            "ok": True,
+            "items": all_items,
+            "pages_fetched": pages_fetched,
+            "items_seen": len(all_items),
+            "partial": False,
+            "http_status": None,
+            "failure_class": None,
+            "retry_after": None,
+        }
+
+    async def fetch_coupons_paginated(self, *, per_page: int = 60) -> Dict[str, Any]:
+        self._require_auth("fetch_coupons_paginated")
+        return await self._fetch_all_pages_result("/coupons", per_page=per_page, label="coupons")
+
 
     # ── Products ───────────────────────────────────────────────────────────────
 
@@ -3817,7 +3930,10 @@ class SallaAdapter(BaseStoreAdapter):
     async def get_coupons(self) -> List[Dict[str, Any]]:
         """Return raw coupon dicts from Salla across all pages until exhaustion."""
         try:
-            return await self._get_all_pages("/coupons", label="coupons")
+            result = await self.fetch_coupons_paginated(per_page=60)
+            if result.get("ok") or result.get("partial"):
+                return list(result.get("items") or [])
+            return []
         except Exception as exc:
             self._log_error("get_coupons", exc)
             return []
@@ -3849,7 +3965,9 @@ class SallaAdapter(BaseStoreAdapter):
         """
         self._last_coupon_create_error = None
         self._require_auth("create_coupon")
-        start_dt = datetime.now(timezone.utc)
+        from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
+        from core.salla_order_fidelity import _riyadh_tz  # noqa: PLC0415
+        start_dt = datetime.now(_riyadh_tz())
         expiry_dt = start_dt + timedelta(days=expiry_days)
         from services.coupon_salla_push import coerce_salla_coupon_date_string  # noqa: PLC0415
 
@@ -3888,7 +4006,11 @@ class SallaAdapter(BaseStoreAdapter):
                 data["data"].setdefault("expiry_date", expiry)
             elif isinstance(data, dict):
                 data.setdefault("expires_at", expiry_dt.isoformat())
-            logger.info("Salla coupon created: %s | tenant=%s", code, self._tenant_id)
+            logger.info(
+                "Salla coupon created code_hash=%s tenant_hash=%s",
+                hash_identifier(code),
+                hash_identifier(self._tenant_id),
+            )
             return data.get("data", data)
         except httpx.HTTPStatusError as exc:
             self._log_error("create_coupon", exc)
@@ -3906,6 +4028,30 @@ class SallaAdapter(BaseStoreAdapter):
 
     def get_last_coupon_create_error(self) -> Optional[str]:
         return getattr(self, "_last_coupon_create_error", None)
+
+
+    async def delete_coupon_by_id(self, coupon_id: str) -> bool:
+        """Delete a Salla coupon by provider ID. Returns True only on success."""
+        provider_id = str(coupon_id or "").strip()
+        if not provider_id:
+            return False
+        try:
+            return await self._delete(f"/coupons/{provider_id}")
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            retryable = bool(status is not None and status >= 500)
+            logger.warning(
+                "SallaAdapter.delete_coupon_by_id_failed operation=delete_coupon_by_id http_status=%s error_class=HTTPStatusError retryable=%s",
+                status,
+                retryable,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "SallaAdapter.delete_coupon_by_id_failed operation=delete_coupon_by_id error_class=%s",
+                safe_exception_class(exc),
+            )
+            return False
 
     async def delete_coupon_by_code(self, code: str) -> bool:
         """

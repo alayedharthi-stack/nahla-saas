@@ -1281,11 +1281,16 @@ async def on_startup() -> None:
     # template sync, daily report) sit at the back of the queue. Each
     # registration is wrapped in its own try/except so an import error
     # in one scheduler can never take the rest of them down.
+    from core.background_tasks import (  # noqa: PLC0415
+        get_background_task,
+        register_background_task,
+    )
     from core.runtime_perf import schedule_with_delay  # noqa: PLC0415
 
     def _start(name: str, factory, delay_s: float) -> None:
         try:
-            schedule_with_delay(factory, name=name, delay_seconds=delay_s)
+            task = schedule_with_delay(factory, name=name, delay_seconds=delay_s)
+            register_background_task(name, task)
             logger.info("[Scheduler] %s queued (delay=%.0fs).", name, delay_s)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[Scheduler] %s could not start: %s", name, exc)
@@ -1300,6 +1305,16 @@ async def on_startup() -> None:
         from services.salla_orders_poller import run_salla_orders_poller_scheduler  # noqa: PLC0415
         return run_salla_orders_poller_scheduler()
     _start("salla_orders_poller", _f_salla_poller, 5)
+
+    def _f_salla_coupons_poller():
+        from services.salla_coupons_poller import run_salla_coupons_poller_scheduler  # noqa: PLC0415
+        return run_salla_coupons_poller_scheduler()
+
+    _existing_coupons_poller = get_background_task("salla_coupons_poller")
+    if _existing_coupons_poller is not None and not _existing_coupons_poller.done():
+        logger.info("[Scheduler] salla_coupons_poller already registered; skipping duplicate.")
+    else:
+        _start("salla_coupons_poller", _f_salla_coupons_poller, 6)
 
     # Tier 2 (≤ 15s) — periodic business loops
     def _f_scheduler():
@@ -1424,6 +1439,14 @@ async def on_startup() -> None:
         "startup_complete and begin dispatching HTTP.",
         _bt.monotonic() - _t_lifespan,
     )
+
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    from core.background_tasks import shutdown_background_tasks  # noqa: PLC0415
+
+    await shutdown_background_tasks(timeout_seconds=10)
 
 
 def _raw_asgi_should_log(scope: dict) -> bool:

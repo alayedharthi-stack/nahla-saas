@@ -149,7 +149,7 @@ def test_normalize_push_dates_use_date_only_and_clamp_start_to_today():
         now=now,
     )
     assert start == "2026-07-03"
-    assert expiry == "2026-12-31"
+    assert expiry == "2027-01-01"
 
 
 def test_coerce_salla_coupon_date_string_strips_time():
@@ -220,7 +220,7 @@ def test_create_coupon_calls_salla_when_adapter_ready(monkeypatch):
     assert adapter.last_kwargs["usage_limit"] == 5
     assert len(adapter.last_kwargs["start_date"]) == 10
     assert adapter.last_kwargs["start_date"].count("-") == 2
-    assert adapter.last_kwargs["expiry_date"] == "2026-12-31"
+    assert adapter.last_kwargs["expiry_date"] == "2027-01-01"
 
     row = db.query(Coupon).filter_by(tenant_id=tenant_id, code="PUSH01").one()
     assert row.source_type == "manual"

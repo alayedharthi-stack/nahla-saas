@@ -52,6 +52,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
+from core.coupon_log_privacy import hash_identifier
+
 logger = logging.getLogger("nahla.salla_token_lock")
 
 # How long a DB flag is considered "fresh" before it can be overridden
@@ -249,9 +251,9 @@ async def salla_asyncio_lock(
     lock = _get_asyncio_lock(integration_id)
     if lock.locked():
         logger.info(
-            "[SALLA TOKEN] refresh skipped (in-process lock held) | "
-            "integration_id=%s caller=%s",
-            integration_id, caller,
+            "[SALLA TOKEN] refresh_lock_held event=salla_token_refresh_lock_held integration_hash=%s caller=%s",
+            hash_identifier(integration_id),
+            caller,
         )
         yield False
         return

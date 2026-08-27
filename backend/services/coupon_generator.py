@@ -1,30 +1,29 @@
-"""
-services/coupon_generator.py
-─────────────────────────────
+"""services/coupon_generator.py
+----------------------------------------
 Automatic coupon pool management.
 
 Maintains a pool of pre-generated coupons per customer segment so the AI
 agent can immediately hand out a real coupon during a conversation.
 
-Pool size: 15 coupons per segment (5 segments = 75 coupons max per tenant).
+Pool size: 3 coupons per canonical level (4 levels = 12 coupons max per tenant).
 
 Code format (source of truth)
-─────────────────────────────
+----------------------------------------
     prefix   : "NH"
     body     : 3 characters drawn uniformly from A-Z 0-9
     length   : 5
     regex    : ^NH[A-Z0-9]{3}$
     examples : NH4K7, NH3A9, NH7K2
 
-This gives 36^3 = 46,656 codes per tenant — enough headroom that collision
+This gives 36^3 = 46,656 codes per tenant - enough headroom that collision
 retries are effectively free.
 
-Legacy `NHL\\d{3}` codes from before this fix are grandfathered:
-  • They are recognised by ``_is_short_coupon_code`` so existing reporting
+Legacy ``NHL\\d{3}`` codes from before this fix are grandfathered:
+  - They are recognised by ``_is_short_coupon_code`` so existing reporting
     and pool counts keep working.
-  • They are loaded into ``_reserved_codes`` so the new generator never
+  - They are loaded into ``_reserved_codes`` so the new generator never
     reuses an old number and produces duplicates.
-  • New issuance always uses the new 5-char format.
+  - New issuance always uses the new 5-char format.
 
 Coupons are created FIRST in Salla, THEN stored locally. If the local DB
 insert fails after Salla succeeded, the Salla coupon is deleted as
@@ -40,7 +39,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -53,11 +52,49 @@ for _p in (_THIS, _DB):
 
 from models import Coupon, Tenant, TenantSettings  # noqa: E402
 from core.obs import EVENTS, log_event  # noqa: E402
+from core.pg_advisory_lock import DedicatedAdvisoryLock  # noqa: E402
+from core.coupon_log_privacy import hash_identifier, redact_coupon_code, safe_exception_class  # noqa: E402
+from services.coupon_remote_compensation import record_unresolved_compensation, retry_pending_compensations  # noqa: E402
+from services.coupon_sync_visibility import extract_salla_coupon_id  # noqa: E402
 
 logger = logging.getLogger("nahla-backend")
 
 # ── Code format ───────────────────────────────────────────────────────────────
-POOL_SIZE_PER_SEGMENT = 15
+CANONICAL_COUPON_LEVELS = ("bronze", "silver", "gold", "vip")
+CANONICAL_LEVEL_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "bronze": {
+        "discount_default": 5,
+        "validity_hours": 24,
+    },
+    "silver": {
+        "discount_default": 10,
+        "validity_hours": 48,
+    },
+    "gold": {
+        "discount_default": 20,
+        "validity_hours": 72,
+    },
+    "vip": {
+        "discount_default": 30,
+        "validity_hours": 72,
+    },
+}
+
+_LEGACY_POOL_META_SOURCES = frozenset({"auto", "pool", "automation", "system", "promotion"})
+
+POOL_SIZE_PER_LEVEL = 3
+MAX_POOL_TARGET_PER_LEVEL = 3
+DEFAULT_POOL_REFILL_THRESHOLD = 1
+# Back-compat aliases: per-segment naming retained for external callers.
+POOL_SIZE_PER_SEGMENT = POOL_SIZE_PER_LEVEL
+MAX_POOL_TARGET_PER_SEGMENT = MAX_POOL_TARGET_PER_LEVEL
+POOL_LOCK_NAMESPACE = int(os.getenv("NAHLA_COUPON_POOL_LOCK_NAMESPACE", "748103219"))
+LEVEL_LOCK_SUFFIX: Dict[str, int] = {
+    "bronze": 0,
+    "silver": 1,
+    "gold": 2,
+    "vip": 3,
+}
 
 SHORT_CODE_PREFIX = "NH"
 SHORT_CODE_BODY_LEN = 3
@@ -119,6 +156,19 @@ SEGMENT_TO_LEVEL: Dict[str, str] = {
     CrmStatus.VIP:      "gold",
     CrmStatus.AT_RISK:  "vip",
     CrmStatus.INACTIVE: "vip",
+}
+
+LEVEL_TO_SEGMENTS: Dict[str, tuple] = {
+    "bronze": (CrmStatus.NEW,),
+    "silver": (CrmStatus.ACTIVE,),
+    "gold": (CrmStatus.VIP,),
+    "vip": (CrmStatus.AT_RISK, CrmStatus.INACTIVE),
+}
+LEVEL_TO_REPRESENTATIVE_SEGMENT: Dict[str, str] = {
+    "bronze": CrmStatus.NEW,
+    "silver": CrmStatus.ACTIVE,
+    "gold": CrmStatus.VIP,
+    "vip": CrmStatus.AT_RISK,
 }
 
 
@@ -272,6 +322,30 @@ def _get_levels_config(db: Session, tenant_id: int) -> Dict[str, Dict[str, Any]]
     return out
 
 
+
+def _get_warm_pool_config(db: Session, tenant_id: int) -> Dict[str, int]:
+    block = _get_coupon_dashboard_block(db, tenant_id)
+    warm = dict(block.get("warm_pool") or {})
+    raw_target = warm.get("target_per_level")
+    if raw_target is None:
+        raw_target = warm.get("target_per_segment")
+    if raw_target is None:
+        target = POOL_SIZE_PER_LEVEL
+    else:
+        target = int(raw_target)
+    target = max(0, min(target, MAX_POOL_TARGET_PER_LEVEL))
+    raw_refill = warm.get("refill_threshold")
+    if raw_refill is None:
+        refill = DEFAULT_POOL_REFILL_THRESHOLD
+    else:
+        refill = int(raw_refill)
+    refill = max(0, min(refill, target))
+    return {
+        "target_per_level": target,
+        "target_per_segment": target,
+        "refill_threshold": refill,
+    }
+
 def _get_ai_policy(db: Session, tenant_id: int) -> Dict[str, Any]:
     """Return the merchant's AI coupon policy with safe defaults."""
     block = _get_coupon_dashboard_block(db, tenant_id)
@@ -292,6 +366,7 @@ class CouponGeneratorService:
     def __init__(self, db: Session, tenant_id: int):
         self.db = db
         self.tenant_id = tenant_id
+        self._last_pool_outcomes: Dict[str, str] = {}
 
     def _reserved_codes(self) -> set[str]:
         """All existing coupon codes for this tenant (both new and legacy)."""
@@ -324,28 +399,153 @@ class CouponGeneratorService:
         if commit:
             self.db.commit()
 
-    def _pool_filter(self, segment: str):
-        """SQLAlchemy filter matching both NH*** and NHL### codes for a segment."""
-        segment = _canonical_segment(segment)
+    def _pool_base_filters(self):
+        """Shared eligibility filters for warm-pool automatic coupons."""
         now = datetime.now(timezone.utc)
+        legacy_meta_sources = tuple(_LEGACY_POOL_META_SOURCES)
+        legacy_source_clause = and_(
+            or_(
+                Coupon.source_type.is_(None),
+                Coupon.source_type == "",
+            ),
+            Coupon.extra_metadata["source"].astext.in_(legacy_meta_sources),
+        )
+        source_clause = or_(
+            Coupon.source_type == "system",
+            legacy_source_clause,
+        )
         return (
             Coupon.tenant_id == self.tenant_id,
+            source_clause,
+            ~Coupon.source_type.in_(("manual", "imported")),
             or_(
                 (Coupon.code.like(f"{SHORT_CODE_PREFIX}___"))
                 & (func.length(Coupon.code) == SHORT_CODE_LENGTH),
                 (Coupon.code.like(f"{LEGACY_PREFIX}___"))
                 & (func.length(Coupon.code) == LEGACY_LENGTH),
             ),
-            Coupon.extra_metadata["source"].astext == "auto",
-            Coupon.extra_metadata["target_segment"].astext == segment,
             Coupon.extra_metadata["used"].astext != "true",
-            Coupon.extra_metadata["salla_synced"].astext == "true",
+            or_(
+                Coupon.extra_metadata["active"].astext == "true",
+                Coupon.extra_metadata["active"].as_boolean() == True,
+                Coupon.extra_metadata["active"].is_(None),
+            ),
+            or_(
+                Coupon.extra_metadata["salla_synced"].astext == "true",
+                Coupon.extra_metadata["salla_synced"].as_boolean().is_(True),
+            ),
             (Coupon.expires_at == None) | (Coupon.expires_at > now),  # noqa: E711
         )
 
+    def _level_match_clause(self, level: str):
+        """Match coupons by canonical level, with legacy null-level fallback."""
+        canonical_level = str(level or "").lower()
+        segments = LEVEL_TO_SEGMENTS.get(canonical_level, ())
+        segment_filters = [
+            Coupon.extra_metadata["target_segment"].astext == seg for seg in segments
+        ]
+        if segment_filters:
+            legacy_clause = and_(Coupon.coupon_level == None, or_(*segment_filters))  # noqa: E711
+            return or_(func.lower(Coupon.coupon_level) == canonical_level, legacy_clause)
+        return func.lower(Coupon.coupon_level) == canonical_level
+
+    def _pool_filter_by_level(self, level: str):
+        """SQLAlchemy filter for unused auto-coupons in a canonical level pool."""
+        return (*self._pool_base_filters(), self._level_match_clause(level))
+
+    def _count_pool_by_level(self, level: str) -> int:
+        """Count unused auto-coupons for a canonical coupon level."""
+        return self.db.query(Coupon).filter(*self._pool_filter_by_level(level)).count()
+
+    def _pool_filter(self, segment: str):
+        """Backward-compatible wrapper: segment maps to its canonical coupon level."""
+        return self._pool_filter_by_level(_segment_to_level(segment))
+
     def _count_pool(self, segment: str) -> int:
-        """Count unused auto-coupons for a segment that haven't expired."""
-        return self.db.query(Coupon).filter(*self._pool_filter(segment)).count()
+        """Backward-compatible wrapper counting by canonical coupon level."""
+        return self._count_pool_by_level(_segment_to_level(segment))
+
+    def _pool_lock_key(self, level: str) -> int:
+        suffix = LEVEL_LOCK_SUFFIX.get(str(level).lower(), 0)
+        return int(self.tenant_id) * 10 + suffix
+
+    def _resolve_level_economics(
+        self,
+        level: str,
+        levels_cfg: Dict[str, Dict[str, Any]],
+        limits: Dict[str, int],
+    ) -> tuple[int, int]:
+        """Return (discount_pct, expiry_days) from canonical level defaults."""
+        level_key = str(level or "").lower()
+        level_cfg = levels_cfg.get(level_key) or {}
+        defaults = CANONICAL_LEVEL_DEFAULTS.get(level_key, CANONICAL_LEVEL_DEFAULTS["silver"])
+        base_discount = int(level_cfg.get("discount_default") or defaults["discount_default"])
+        discount = _clamp(
+            base_discount,
+            int(level_cfg.get("discount_min") or limits["min_discount"]),
+            int(level_cfg.get("discount_max") or limits["max_discount"]),
+        )
+        validity_hours = int(level_cfg.get("validity_hours") or defaults["validity_hours"])
+        expiry_days = max(1, (validity_hours + 23) // 24)
+        return discount, expiry_days
+
+    async def _compensate_remote_coupon(
+        self,
+        adapter,
+        salla_coupon_id: Optional[str],
+        code: str,
+        idempotency_key: str,
+    ) -> bool:
+        """Delete a remote coupon created before a failed local insert."""
+        if adapter is None:
+            return False
+
+        deleted = False
+        error_class = "unknown"
+
+        if salla_coupon_id:
+            try:
+                deleted = bool(await adapter.delete_coupon_by_id(salla_coupon_id))
+                if not deleted:
+                    error_class = "delete_by_id_false"
+            except Exception as exc:
+                error_class = safe_exception_class(exc)
+                deleted = False
+
+        if not deleted:
+            try:
+                deleted = bool(await adapter.delete_coupon_by_code(code))
+                if not deleted:
+                    error_class = "delete_by_code_false"
+            except Exception as exc:
+                error_class = safe_exception_class(exc)
+                deleted = False
+
+        if deleted:
+            return True
+
+        if salla_coupon_id:
+            try:
+                record_unresolved_compensation(
+                    self.db,
+                    self.tenant_id,
+                    salla_coupon_id=salla_coupon_id,
+                    code_hash=hash_identifier(code),
+                    error_class=error_class,
+                    idempotency_key=idempotency_key,
+                )
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+        return False
+
+    async def retry_remote_compensations(self) -> Dict[str, int]:
+        adapter = self._get_adapter()
+        if adapter is None:
+            return {"attempted": 0, "resolved": 0, "failed": 0}
+        result = await retry_pending_compensations(self.db, self.tenant_id, adapter)
+        self.db.commit()
+        return result
 
     async def _create_one_coupon(
         self,
@@ -383,7 +583,7 @@ class CouponGeneratorService:
                     EVENTS.COUPON_POOL_EXHAUSTED,
                     tenant_id=self.tenant_id,
                     segment=canonical_segment,
-                    err=exc,
+                    error_class=safe_exception_class(exc),
                 )
                 return None
 
@@ -391,7 +591,7 @@ class CouponGeneratorService:
                 EVENTS.COUPON_AUTOGEN_TRIGGERED,
                 tenant_id=self.tenant_id,
                 segment=canonical_segment,
-                code=code,
+                code_redacted=redact_coupon_code(code),
                 discount=discount,
                 attempt=outer_attempt + 1,
             )
@@ -402,8 +602,8 @@ class CouponGeneratorService:
                     EVENTS.COUPON_AUTOGEN_FAILED,
                     tenant_id=self.tenant_id,
                     segment=canonical_segment,
-                    code=code,
-                    err="no_salla_adapter",
+                    code_redacted=redact_coupon_code(code),
+                    error_class="no_salla_adapter",
                 )
                 return None
 
@@ -419,9 +619,9 @@ class CouponGeneratorService:
                     EVENTS.COUPON_AUTOGEN_FAILED,
                     tenant_id=self.tenant_id,
                     segment=canonical_segment,
-                    code=code,
+                    code_redacted=redact_coupon_code(code),
                     stage="salla_create",
-                    err=exc,
+                    error_class=safe_exception_class(exc),
                 )
                 return None
 
@@ -430,11 +630,15 @@ class CouponGeneratorService:
                     EVENTS.COUPON_AUTOGEN_FAILED,
                     tenant_id=self.tenant_id,
                     segment=canonical_segment,
-                    code=code,
+                    code_redacted=redact_coupon_code(code),
                     stage="salla_create",
-                    err="salla_returned_none",
+                    error_class="salla_returned_none",
                 )
                 return None
+
+            salla_raw = salla_result if isinstance(salla_result, dict) else {}
+            salla_coupon_id = extract_salla_coupon_id(salla_raw)
+            idempotency_key = f"{self.tenant_id}:{hash_identifier(code)}:{outer_attempt + 1}"
 
             # Salla has the coupon now — insert into our DB.
             expires_at = _resolve_coupon_expiry(
@@ -481,23 +685,32 @@ class CouponGeneratorService:
                     EVENTS.COUPON_AUTOGEN_COLLISION,
                     tenant_id=self.tenant_id,
                     segment=canonical_segment,
-                    code=code,
+                    code_redacted=redact_coupon_code(code),
                     attempt=outer_attempt + 1,
-                    err=exc,
+                    error_class=safe_exception_class(exc),
                 )
-                try:
-                    await adapter.delete_coupon_by_code(code)
+                compensated = await self._compensate_remote_coupon(
+                    adapter,
+                    salla_coupon_id,
+                    code,
+                    idempotency_key,
+                )
+                if compensated:
                     log_event(
                         EVENTS.COUPON_AUTOGEN_ROLLED_BACK,
                         tenant_id=self.tenant_id,
                         segment=canonical_segment,
-                        code=code,
+                        code_redacted=redact_coupon_code(code),
                         reason="db_integrity_error",
                     )
-                except Exception as comp_exc:
-                    logger.exception(
-                        "[CouponGenerator] Salla compensation delete failed tenant=%s code=%s: %s",
-                        self.tenant_id, code, comp_exc,
+                else:
+                    log_event(
+                        EVENTS.COUPON_AUTOGEN_FAILED,
+                        tenant_id=self.tenant_id,
+                        segment=canonical_segment,
+                        code_redacted=redact_coupon_code(code),
+                        stage="remote_compensation",
+                        error_class="compensation_failed",
                     )
                 # Refresh reserved_codes from DB so we don't hand out the
                 # colliding code again in subsequent attempts.
@@ -511,23 +724,32 @@ class CouponGeneratorService:
                     EVENTS.COUPON_AUTOGEN_FAILED,
                     tenant_id=self.tenant_id,
                     segment=canonical_segment,
-                    code=code,
+                    code_redacted=redact_coupon_code(code),
                     stage="db_insert",
-                    err=exc,
+                    error_class=safe_exception_class(exc),
                 )
-                try:
-                    await adapter.delete_coupon_by_code(code)
+                compensated = await self._compensate_remote_coupon(
+                    adapter,
+                    salla_coupon_id,
+                    code,
+                    idempotency_key,
+                )
+                if compensated:
                     log_event(
                         EVENTS.COUPON_AUTOGEN_ROLLED_BACK,
                         tenant_id=self.tenant_id,
                         segment=canonical_segment,
-                        code=code,
+                        code_redacted=redact_coupon_code(code),
                         reason="db_error",
                     )
-                except Exception as comp_exc:
-                    logger.exception(
-                        "[CouponGenerator] Salla compensation delete failed tenant=%s code=%s: %s",
-                        self.tenant_id, code, comp_exc,
+                else:
+                    log_event(
+                        EVENTS.COUPON_AUTOGEN_FAILED,
+                        tenant_id=self.tenant_id,
+                        segment=canonical_segment,
+                        code_redacted=redact_coupon_code(code),
+                        stage="remote_compensation",
+                        error_class="compensation_failed",
                     )
                 return None
 
@@ -535,7 +757,7 @@ class CouponGeneratorService:
                 EVENTS.COUPON_AUTOGEN_CREATED,
                 tenant_id=self.tenant_id,
                 segment=canonical_segment,
-                code=code,
+                code_redacted=redact_coupon_code(code),
                 coupon_id=coupon.id,
                 discount=discount,
             )
@@ -546,75 +768,111 @@ class CouponGeneratorService:
             EVENTS.COUPON_AUTOGEN_FAILED,
             tenant_id=self.tenant_id,
             segment=canonical_segment,
-            err="persistent_collision",
+            error_class="persistent_collision",
         )
         return None
 
     async def ensure_coupon_pool(self) -> Dict[str, int]:
-        """Top up the coupon pool for all segments. Returns counts created per segment.
+        """Top up the warm pool for every canonical coupon level below target.
 
-        Per-level overrides (discount_default, validity_hours) come from
-        the merchant's coupon dashboard settings (``coupons_dashboard.levels``).
-        Falls back to ``SEGMENT_DEFAULTS`` when no level config exists.
+        Returns a dict mapping canonical level -> coupons created in this run.
+        Respects per-level dashboard settings and canonical level defaults.
         """
+        ai_policy = _get_ai_policy(self.db, self.tenant_id)
+        if ai_policy.get("pool_mode") == "on_demand_only":
+            self._last_pool_outcomes = {level: "on_demand_only" for level in CANONICAL_COUPON_LEVELS}
+            return {level: 0 for level in CANONICAL_COUPON_LEVELS}
+
         limits = _get_merchant_limits(self.db, self.tenant_id)
         adapter = self._get_adapter()
         levels_cfg = _get_levels_config(self.db, self.tenant_id)
-        created: Dict[str, int] = {}
+        warm_cfg = _get_warm_pool_config(self.db, self.tenant_id)
+        target_per_level = warm_cfg["target_per_level"]
+        refill_threshold = warm_cfg["refill_threshold"]
+        created: Dict[str, int] = {level: 0 for level in CANONICAL_COUPON_LEVELS}
+        outcomes: Dict[str, str] = {}
         reserved_codes = self._reserved_codes()
 
-        for segment, defaults in SEGMENT_DEFAULTS.items():
-            current = self._count_pool(segment)
-            needed = POOL_SIZE_PER_SEGMENT - current
-            if needed <= 0:
-                created[segment] = 0
-                continue
-
-            level_id = _segment_to_level(segment)
-            level_cfg = levels_cfg.get(level_id) or {}
-            if level_cfg and level_cfg.get("enabled") is False:
-                created[segment] = 0
-                continue
-
-            base_discount = int(level_cfg.get("discount_default") or defaults["discount_pct"])
-            discount = _clamp(
-                base_discount,
-                int(level_cfg.get("discount_min") or limits["min_discount"]),
-                int(level_cfg.get("discount_max") or limits["max_discount"]),
+        for level in CANONICAL_COUPON_LEVELS:
+            lock_key = self._pool_lock_key(level)
+            lock = DedicatedAdvisoryLock(
+                self.db,
+                namespace=POOL_LOCK_NAMESPACE,
+                level_key=lock_key,
             )
-            validity_hours = int(level_cfg.get("validity_hours") or (defaults["expiry_days"] * 24))
-            expiry_days = max(1, (validity_hours + 23) // 24)
+            try:
+                try:
+                    acquired = lock.try_acquire()
+                except Exception as exc:
+                    log_event(
+                        EVENTS.DISPATCHER_LOOP_ERROR,
+                        tenant_id=self.tenant_id,
+                        coupon_level=level,
+                        error_class=safe_exception_class(exc),
+                        context="coupon_pool_lock_error",
+                    )
+                    outcomes[level] = "lock_error"
+                    continue
+                if not acquired:
+                    log_event(
+                        EVENTS.DISPATCHER_LOOP_ERROR,
+                        tenant_id=self.tenant_id,
+                        coupon_level=level,
+                        context="coupon_pool_lock_held_skip",
+                    )
+                    outcomes[level] = "lock_held"
+                    continue
 
-            channel = "shared"
-            allowed = level_cfg.get("allowed_channels") or []
-            if allowed:
-                # Pool coupons are pre-generated for any allowed channel; if
-                # the merchant restricted a level to AI-only, tag the pool
-                # entries accordingly so the campaign dispatcher won't grab
-                # them.
-                channel = allowed[0] if len(allowed) == 1 else "shared"
+                current = self._count_pool_by_level(level)
+                if current > refill_threshold:
+                    outcomes[level] = "above_threshold"
+                    continue
 
-            count = 0
-            for _ in range(needed):
-                coupon = await self._create_one_coupon(
-                    segment=segment,
-                    discount=discount,
-                    expiry_days=expiry_days,
-                    reserved_codes=reserved_codes,
-                    adapter=adapter,
-                    coupon_level=level_id,
-                    allocation_channel=channel,
-                    source_type="system",
-                )
-                if coupon is not None:
-                    count += 1
-            created[segment] = count
+                needed = target_per_level - current
+                if needed <= 0:
+                    outcomes[level] = "at_target"
+                    continue
 
+                level_cfg = levels_cfg.get(level) or {}
+                if level_cfg and level_cfg.get("enabled") is False:
+                    outcomes[level] = "disabled"
+                    continue
+
+                rep_segment = LEVEL_TO_REPRESENTATIVE_SEGMENT[level]
+                discount, expiry_days = self._resolve_level_economics(level, levels_cfg, limits)
+
+                channel = "shared"
+                allowed = level_cfg.get("allowed_channels") or []
+                if allowed:
+                    channel = allowed[0] if len(allowed) == 1 else "shared"
+
+                count = 0
+                for _ in range(needed):
+                    coupon = await self._create_one_coupon(
+                        segment=rep_segment,
+                        discount=discount,
+                        expiry_days=expiry_days,
+                        reserved_codes=reserved_codes,
+                        adapter=adapter,
+                        coupon_level=level,
+                        allocation_channel=channel,
+                        source_type="system",
+                    )
+                    if coupon is not None:
+                        count += 1
+                created[level] = count
+                outcomes[level] = "refilled" if count else "refill_failed"
+            finally:
+                if lock.held:
+                    lock.release()
+
+        self._last_pool_outcomes = outcomes
         total = sum(created.values())
         if total:
             logger.info(
-                "tenant=%s coupon pool topped up: %s",
-                self.tenant_id, created,
+                "tenant_id=%s coupon pool topped up counts=%s",
+                self.tenant_id,
+                created,
             )
         return created
 
@@ -649,9 +907,10 @@ class CouponGeneratorService:
         else:
             min_remaining_hours = 0
 
+        pool_level = _segment_to_level(canonical_segment)
         candidates = (
             self.db.query(Coupon)
-            .filter(*self._pool_filter(canonical_segment))
+            .filter(*self._pool_filter_by_level(pool_level))
             .order_by(Coupon.id.asc())
             .limit(50)
             .all()

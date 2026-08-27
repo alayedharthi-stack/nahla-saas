@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
+from core.salla_order_fidelity import _riyadh_tz
 from models import Coupon
 from services.coupon_sync_visibility import extract_salla_coupon_id
 
@@ -93,21 +94,30 @@ def format_salla_coupon_date(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def salla_coupon_today(now: Optional[datetime] = None) -> date:
+    """Calendar date Salla uses for coupon start_date validation (Asia/Riyadh)."""
+    now = now or datetime.now(timezone.utc)
+    return now.astimezone(_riyadh_tz()).date()
+
+
 def normalize_salla_coupon_push_dates(
     start_dt: datetime,
     expiry_dt: Optional[datetime],
     *,
     now: Optional[datetime] = None,
 ) -> tuple[str, Optional[str]]:
-    """Build Salla coupon push dates: YYYY-MM-DD only; start not before today."""
+    """Build Salla coupon push dates: YYYY-MM-DD only; start not before today.
+
+    Naive datetimes are treated as UTC before conversion to Asia/Riyadh calendar dates.
+    """
     now = now or datetime.now(timezone.utc)
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=timezone.utc)
     else:
         start_dt = start_dt.astimezone(timezone.utc)
 
-    today = now.astimezone(timezone.utc).date()
-    start_day = max(start_dt.date(), today)
+    today = salla_coupon_today(now)
+    start_day = max(start_dt.astimezone(_riyadh_tz()).date(), today)
 
     expiry_day: Optional[date] = None
     if expiry_dt is not None:
@@ -115,7 +125,7 @@ def normalize_salla_coupon_push_dates(
             expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
         else:
             expiry_dt = expiry_dt.astimezone(timezone.utc)
-        expiry_day = expiry_dt.date()
+        expiry_day = expiry_dt.astimezone(_riyadh_tz()).date()
         if expiry_day < start_day:
             expiry_day = start_day
 
