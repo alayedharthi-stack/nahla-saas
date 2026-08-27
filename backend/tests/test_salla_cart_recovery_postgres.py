@@ -1,4 +1,4 @@
-﻿"""PostgreSQL concurrency tests for cart recovery emission (PR #888 H3/H5)."""
+"""PostgreSQL concurrency tests for cart recovery emission (PR #888 H3/H5)."""
 from __future__ import annotations
 
 import sys
@@ -137,12 +137,14 @@ def test_concurrent_emit_creates_single_event(postgres_engine, monkeypatch):
         connection.close()
 
 
-def test_poller_emit_visible_from_fresh_session(postgres_engine, monkeypatch):
-    customer_id, cart_id = _seed_cart(postgres_engine)
-    session, connection, trans = _new_session(postgres_engine)
+def test_poller_emit_visible_from_fresh_session(postgres_engine):
+    _seed_cart(postgres_engine)
+    Session = sessionmaker(bind=postgres_engine)
+    session = Session()
     try:
-        tenant = session.get(Tenant, TEST_TENANT)
-        svc = __import__("services.store_sync", fromlist=["StoreSyncService"]).StoreSyncService(session, TEST_TENANT)
+        from services.store_sync import StoreSyncService
+
+        svc = StoreSyncService(session, TEST_TENANT)
         raw = {
             "id": "pg-pol-2",
             "total": {"amount": 90, "currency": "SAR"},
@@ -159,17 +161,13 @@ def test_poller_emit_visible_from_fresh_session(postgres_engine, monkeypatch):
         import asyncio
         asyncio.run(svc.sync_abandoned_carts())
     finally:
-        trans.commit()
         session.close()
-        connection.close()
 
-    verify_session, connection, trans = _new_session(postgres_engine)
+    verify_session = Session()
     try:
         cart = verify_session.query(Order).filter_by(tenant_id=TEST_TENANT, external_id="cart-pg-pol-2").one()
         assert cart.extra_metadata.get("recovery_event_id")
         events = verify_session.query(AutomationEvent).filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned").all()
         assert any(e.id == cart.extra_metadata.get("recovery_event_id") for e in events)
     finally:
-        trans.commit()
         verify_session.close()
-        connection.close()
