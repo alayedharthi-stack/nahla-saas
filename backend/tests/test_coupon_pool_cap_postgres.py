@@ -93,6 +93,12 @@ def _seed_tenant(session: Session, tenant_id: int) -> None:
     session.commit()
 
 
+def _clear_tenant_coupons(session: Session, tenant_id: int) -> None:
+    """Delete all coupons for a tenant so pool tests start from a clean slate."""
+    session.query(Coupon).filter(Coupon.tenant_id == tenant_id).delete()
+    session.commit()
+
+
 def _new_session(engine):
     connection = engine.connect()
     session = sessionmaker(bind=connection, expire_on_commit=False)()
@@ -185,8 +191,7 @@ def test_concurrent_ensure_coupon_pool_bronze_capped(postgres_engine) -> None:
     session, connection = _new_session(postgres_engine)
     try:
         _seed_tenant(session, tenant_id)
-        session.query(Coupon).filter(Coupon.tenant_id == tenant_id).delete()
-        session.commit()
+        _clear_tenant_coupons(session, tenant_id)
         for level, codes in (
             ("silver", ["NHSL1", "NHSL2", "NHSL3"]),
             ("gold", ["NHGD1", "NHGD2", "NHGD3"]),
@@ -332,6 +337,15 @@ def test_pool_provenance_jsonb_postgres(postgres_engine) -> None:
 
 
 def test_cross_tenant_pool_isolation(postgres_engine) -> None:
+    session, connection = _new_session(postgres_engine)
+    try:
+        for tenant_id in (TEST_TENANT_COUPON_A, TEST_TENANT_COUPON_B):
+            _seed_tenant(session, tenant_id)
+            _clear_tenant_coupons(session, tenant_id)
+    finally:
+        session.close()
+        connection.close()
+
     adapter_a: list[dict] = []
     adapter_b: list[dict] = []
     lock_a = threading.Lock()
@@ -355,6 +369,14 @@ def test_cross_tenant_pool_isolation(postgres_engine) -> None:
 
 def test_two_levels_do_not_corrupt_each_other(postgres_engine) -> None:
     tenant_id = TEST_TENANT_COUPON_TWO_LEVEL
+    session, connection = _new_session(postgres_engine)
+    try:
+        _seed_tenant(session, tenant_id)
+        _clear_tenant_coupons(session, tenant_id)
+    finally:
+        session.close()
+        connection.close()
+
     adapter_calls: list[dict] = []
     calls_lock = threading.Lock()
     asyncio.run(_ensure_pool_once(postgres_engine, tenant_id, adapter_calls, calls_lock))
