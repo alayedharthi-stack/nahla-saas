@@ -74,6 +74,7 @@ from models import (  # noqa: E402
     StoreKnowledgeSnapshot,
     TenantSettings,
 )
+from services.salla_datetime import parse_salla_datetime_to_utc, salla_datetime_to_utc_iso
 from services.customer_intelligence import (  # noqa: E402
     CustomerIntelligenceService,
     extract_order_datetime as intelligence_extract_order_datetime,
@@ -897,33 +898,17 @@ def _merge_order_extra_metadata(
 
 
 def _flatten_salla_datetime(value: Any) -> str:
-    """
-    Salla's abandoned-cart payload returns timestamps as a nested object:
-
-        {"date": "2026-04-19 10:00:00.000000", "timezone_type": 3,
-         "timezone": "Asia/Riyadh"}
-
-    Older endpoints (and a few storefront webhooks) still send a flat
-    string. We accept either shape and always return a string the
-    downstream parser can read. Returning "" rather than None keeps the
-    column non-NULL and the dashboard timestamp formatter happy.
-    """
-    if not value:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return str(value.get("date") or value.get("iso") or value.get("formatted") or "")
-    return str(value)
+    """Flatten Salla timestamps to naive UTC ISO for persisted metadata."""
+    return salla_datetime_to_utc_iso(value)
 
 
 def _extract_abandoned_at_iso(raw: Any) -> str:
     if not isinstance(raw, dict):
         return ""
     for key in ("abandoned_at", "abandonedAt", "left_at", "updated_at", "created_at"):
-        flat = _flatten_salla_datetime(raw.get(key))
-        if flat:
-            return flat
+        iso = salla_datetime_to_utc_iso(raw.get(key))
+        if iso:
+            return iso
     return ""
 
 
@@ -991,14 +976,13 @@ def _normalise_abandoned_cart(raw: Any) -> Dict:
     # ``str(value)`` on whatever is at ``raw["created_at"]`` and would
     # otherwise produce a literal "{'date': ...}" string that no parser
     # accepts. We mutate a copy so we never alter the adapter's payload.
-    raw_for_dt = dict(raw)
-    flat_created = _flatten_salla_datetime(raw.get("created_at"))
-    flat_updated = _flatten_salla_datetime(raw.get("updated_at"))
-    if flat_created:
-        raw_for_dt["created_at"] = flat_created
-    if flat_updated:
-        raw_for_dt["updated_at"] = flat_updated
-    cart_dt = _extract_order_datetime(raw_for_dt)
+    cart_dt = (
+        parse_salla_datetime_to_utc(raw.get("abandoned_at"))
+        or parse_salla_datetime_to_utc(raw.get("created_at"))
+        or parse_salla_datetime_to_utc(raw.get("updated_at"))
+    )
+    flat_created = salla_datetime_to_utc_iso(raw.get("created_at"))
+    flat_updated = salla_datetime_to_utc_iso(raw.get("updated_at"))
 
     return {
         "external_id":           external_id,
@@ -1111,6 +1095,17 @@ def _normalise_coupon(raw: Any) -> Dict:
 
 
 # ── Sync service ──────────────────────────────────────────────────────────────
+
+
+def _abandoned_cart_payload_keys(raw: Any) -> frozenset[str]:
+    if not isinstance(raw, dict):
+        return frozenset()
+    return frozenset(str(k) for k in raw.keys())
+
+
+def _abandoned_cart_field_present(keys: frozenset[str], *names: str) -> bool:
+    return any(name in keys for name in names)
+
 
 class StoreSyncService:
     """
@@ -1376,6 +1371,47 @@ class StoreSyncService:
             return snap.last_full_sync_at.isoformat()
         return None
 
+
+    def _commerce_reconcile_watermarks(self) -> Dict[str, str]:
+        snap = (
+            self.db.query(StoreKnowledgeSnapshot)
+            .filter_by(tenant_id=self.tenant_id)
+            .first()
+        )
+        policy = dict((snap.policy_summary if snap is not None else None) or {})
+        reconcile = dict(policy.get("commerce_reconcile") or {})
+        return {
+            "customers": str(reconcile.get("customers_last_sync_at") or ""),
+            "products": str(reconcile.get("products_last_sync_at") or ""),
+        }
+
+    def _advance_commerce_reconcile_watermark(self, domain: str) -> None:
+        snap = (
+            self.db.query(StoreKnowledgeSnapshot)
+            .filter_by(tenant_id=self.tenant_id)
+            .first()
+        )
+        if snap is None:
+            snap = StoreKnowledgeSnapshot(tenant_id=self.tenant_id)
+            self.db.add(snap)
+        policy = dict(snap.policy_summary or {})
+        reconcile = dict(policy.get("commerce_reconcile") or {})
+        reconcile[f"{domain}_last_sync_at"] = datetime.now(timezone.utc).isoformat()
+        policy["commerce_reconcile"] = reconcile
+        snap.policy_summary = policy
+        snap.last_incremental_sync_at = datetime.now(timezone.utc)
+        snap.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+
+    def _commerce_reconcile_since(self, domain: str, *, incremental: bool) -> Optional[str]:
+        if not incremental:
+            return None
+        watermarks = self._commerce_reconcile_watermarks()
+        domain_wm = watermarks.get(domain) or ""
+        if domain_wm:
+            return domain_wm
+        return self._last_sync_timestamp()
+
     # ── Products sync ──────────────────────────────────────────────────────────
 
     async def _enrich_normalised_variants_from_adapter(
@@ -1610,7 +1646,7 @@ class StoreSyncService:
         report["nahla_product_id"] = apply_result["product_id"]
         return report
 
-    async def sync_products(self, incremental: bool = False) -> int:
+    async def sync_products(self, incremental: bool = False, *, strict: bool = False) -> int:
         """Fetch products from the store adapter and upsert into DB.
 
         If incremental=True and a previous full sync exists, only fetch
@@ -1622,12 +1658,14 @@ class StoreSyncService:
 
         updated_since = None
         if incremental:
-            updated_since = self._last_sync_timestamp()
+            updated_since = self._commerce_reconcile_since("products", incremental=True)
 
         try:
             raw_list = await adapter.get_products(updated_since=updated_since)
         except Exception as exc:
             logger.warning("tenant=%s product sync failed: %s", self.tenant_id, exc)
+            if strict:
+                raise RuntimeError("product_sync_failed") from exc
             return 0
 
         logger.info(
@@ -1699,6 +1737,8 @@ class StoreSyncService:
             "tenant=%s products sync done — created=%d updated=%d total_upserted=%d restocked=%d",
             self.tenant_id, created, updated, created + updated, len(restocked),
         )
+        if incremental:
+            self._advance_commerce_reconcile_watermark("products")
         return created + updated
 
     def _fan_out_back_in_stock(self, restocked: List[Dict[str, Any]]) -> None:
@@ -2955,7 +2995,7 @@ class StoreSyncService:
                 link_outcome="profile_side_effect_failed",
             )
 
-    async def sync_customers(self, incremental: bool = False) -> int:
+    async def sync_customers(self, incremental: bool = False, *, strict: bool = False) -> int:
         adapter = self._get_adapter()
         if not adapter or not hasattr(adapter, "get_customers"):
             return 0
@@ -2964,12 +3004,14 @@ class StoreSyncService:
 
         updated_since = None
         if incremental:
-            updated_since = self._last_sync_timestamp()
+            updated_since = self._commerce_reconcile_since("customers", incremental=True)
 
         try:
             raw_list = await adapter.get_customers(updated_since=updated_since)
         except Exception as exc:
             logger.warning("tenant=%s customers sync failed: %s", self.tenant_id, exc)
+            if strict:
+                raise RuntimeError("customer_sync_failed") from exc
             return 0
 
         logger.info(
@@ -3003,6 +3045,8 @@ class StoreSyncService:
             "tenant=%s customers sync done — created=%d updated=%d",
             self.tenant_id, created, updated,
         )
+        if incremental:
+            self._advance_commerce_reconcile_watermark("customers")
         return created + updated
 
     # ── Customer profile builder ─────────────────────────────────────────────
@@ -3248,7 +3292,12 @@ class StoreSyncService:
 
     # ── Incremental order update (called by webhook) ────────────────────────
 
-    def _upsert_abandoned_cart_row(self, normalised: Dict[str, Any]):
+    def _upsert_abandoned_cart_row(
+        self,
+        normalised: Dict[str, Any],
+        *,
+        payload_keys: frozenset[str] | None = None,
+    ):
         ext_id = normalised["external_id"]
         cart_row = (
             self.db.query(Order)
@@ -3257,21 +3306,34 @@ class StoreSyncService:
         )
         now_iso = datetime.now(timezone.utc).isoformat()
         abandoned_iso = normalised.get("abandoned_at") or normalised.get("created_at") or now_iso
+        keys = payload_keys or frozenset()
         if cart_row is not None:
             cart_row.status = normalised["status"]
-            cart_row.total = normalised["total"]
-            cart_row.customer_info = normalised["customer_info"]
-            cart_row.line_items = normalised["line_items"]
+            if _abandoned_cart_field_present(keys, "total", "sub_total", "amount", "amounts") or not keys:
+                cart_row.total = normalised["total"]
+            if _abandoned_cart_field_present(keys, "customer") or not keys:
+                cart_row.customer_info = normalised["customer_info"]
+            if _abandoned_cart_field_present(keys, "items", "line_items") or not keys:
+                cart_row.line_items = normalised["line_items"]
             cart_row.is_abandoned = True
-            cart_row.checkout_url = normalised["checkout_url"] or cart_row.checkout_url
-            cart_row.external_order_number = normalised["external_order_number"]
-            if normalised["customer_name"]:
+            if _abandoned_cart_field_present(keys, "checkout_url", "url") or not keys:
+                cart_row.checkout_url = normalised["checkout_url"] or cart_row.checkout_url
+            if _abandoned_cart_field_present(keys, "reference_id", "number", "code") or not keys:
+                cart_row.external_order_number = normalised["external_order_number"]
+            if normalised["customer_name"] and (
+                _abandoned_cart_field_present(keys, "customer", "customer_name") or not keys
+            ):
                 cart_row.customer_name = normalised["customer_name"]
             cart_row.source = "salla"
             meta = dict(cart_row.extra_metadata or {})
-            meta["created_at"] = normalised.get("created_at") or meta.get("created_at")
-            meta["abandoned_at"] = meta.get("abandoned_at") or abandoned_iso
-            meta["cart_status"] = normalised.get("cart_status") or meta.get("cart_status")
+            if _abandoned_cart_field_present(keys, "created_at") or not keys:
+                meta["created_at"] = normalised.get("created_at") or meta.get("created_at")
+            if _abandoned_cart_field_present(
+                keys, "abandoned_at", "abandonedAt", "left_at", "created_at", "updated_at"
+            ) or not keys:
+                meta["abandoned_at"] = abandoned_iso or meta.get("abandoned_at")
+            if _abandoned_cart_field_present(keys, "status", "cart_status") or not keys:
+                meta["cart_status"] = normalised.get("cart_status") or meta.get("cart_status")
             meta["last_synced_at"] = now_iso
             meta["source_kind"] = "abandoned_cart"
             meta["raw_cart_id"] = normalised.get("raw_cart_id")
@@ -3383,10 +3445,21 @@ class StoreSyncService:
         if not ext_id:
             logger.info("tenant=%s abandoned_cart webhook ignored event=%s", self.tenant_id, webhook_event_type)
             return
-        cart_row = self._upsert_abandoned_cart_row(normalised)
+        payload_keys = _abandoned_cart_payload_keys(payload)
+        cart_row = self._upsert_abandoned_cart_row(normalised, payload_keys=payload_keys)
         logger.info("tenant=%s abandoned_cart upserted external_id=%s kind=%s event=%s", self.tenant_id, ext_id, event_kind, webhook_event_type)
-        if event_kind in ("purchased", "status_changed"):
-            self._cancel_abandoned_cart_recovery_for_cart(cart_row=cart_row, normalised=normalised, reason=f"abandoned_cart_{event_kind}")
+        if event_kind == "purchased":
+            self._cancel_abandoned_cart_recovery_for_cart(cart_row=cart_row, normalised=normalised, reason="abandoned_cart_purchased")
+            return
+        if event_kind == "status_changed":
+            from services.salla_realtime_events import is_terminal_abandoned_cart_status
+
+            if is_terminal_abandoned_cart_status(normalised.get("cart_status")):
+                self._cancel_abandoned_cart_recovery_for_cart(
+                    cart_row=cart_row,
+                    normalised=normalised,
+                    reason="abandoned_cart_status_terminal",
+                )
             return
         if event_kind == "updated":
             return

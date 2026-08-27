@@ -1,4 +1,4 @@
-"""
+﻿"""
 services/salla_commerce_reconciler.py
 Periodic incremental sync for Salla customers + products (not coupons).
 """
@@ -11,8 +11,10 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from core.coupon_log_privacy import hash_identifier, safe_exception_class
+from core.pg_advisory_lock import DedicatedAdvisoryLock
 
 logger = logging.getLogger("nahla.salla_commerce_reconciler")
 
@@ -60,7 +62,10 @@ async def run_salla_commerce_reconciler_scheduler() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("[Salla Commerce Reconciler] tick crashed: %s", exc)
+            logger.exception(
+                "[Salla Commerce Reconciler] tick crashed error_class=%s",
+                safe_exception_class(exc),
+            )
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -70,25 +75,67 @@ async def _run_one_tick() -> Dict[str, Any]:
     started = time.monotonic()
     started_at = datetime.now(timezone.utc)
     db: Session = SessionLocal()
-    lock_acquired = False
+    lock = DedicatedAdvisoryLock(db, key=ADVISORY_LOCK_KEY)
     try:
         try:
-            lock_acquired = bool(db.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": ADVISORY_LOCK_KEY}).scalar())
-        except Exception:
-            lock_acquired = True
-        if not lock_acquired:
+            acquired = lock.try_acquire()
+        except Exception as lock_exc:
+            logger.warning(
+                "[Salla Commerce Reconciler] advisory lock acquire failed error_class=%s",
+                safe_exception_class(lock_exc),
+            )
+            _state["last_tick_at"] = started_at.isoformat()
+            _state["last_tick_skipped_reason"] = "advisory_lock_unavailable"
+            _state["ticks_total"] += 1
+            return {"skipped": True, "reason": "advisory_lock_unavailable"}
+
+        if not acquired:
             _state["last_tick_at"] = started_at.isoformat()
             _state["last_tick_skipped_reason"] = "advisory_lock_held_by_other_worker"
             _state["ticks_total"] += 1
-            return {"skipped": True}
+            return {"skipped": True, "reason": "advisory_lock_held_by_other_worker"}
+
         from models import Integration
-        from store_integration.registry import adapter_for_integration
-        integrations = db.query(Integration).filter(Integration.provider == "salla", Integration.enabled == True).order_by(Integration.id.asc()).all()
-        integrations = [i for i in integrations if bool((i.config or {}).get("api_key")) and not bool((i.config or {}).get("needs_reauth")) and adapter_for_integration(i) is not None]
+        from store_integration.registry import pick_active_salla_integration
+
+        tenant_ids = sorted({
+            int(row.tenant_id)
+            for row in db.query(Integration).filter_by(provider="salla", enabled=True).all()
+            if row.tenant_id is not None
+        })
+
         scanned = errors = 0
-        for intg in integrations:
-            tenant_id = int(intg.tenant_id)
-            tenant_state = {"tenant_id": tenant_id, "integration_id": intg.id, "scanned_at": datetime.now(timezone.utc).isoformat()}
+        for tenant_id in tenant_ids:
+            intg = pick_active_salla_integration(db, tenant_id)
+            cfg = (intg.config or {}) if intg is not None else {}
+            store_id = (
+                cfg.get("store_id")
+                or cfg.get("merchant_id")
+                or (intg.external_store_id if intg is not None else None)
+            )
+            tenant_state: Dict[str, Any] = {
+                "tenant_hash": hash_identifier(tenant_id),
+                "integration_id": intg.id if intg is not None else None,
+                "store_hash": hash_identifier(store_id) if store_id else "",
+                "scanned_at": datetime.now(timezone.utc).isoformat(),
+                "result": None,
+                "error_code": None,
+                "stats": None,
+            }
+
+            if intg is None:
+                tenant_state["result"] = "skipped_no_integration"
+                _state["tenants"][tenant_id] = tenant_state
+                continue
+            if bool(cfg.get("needs_reauth")):
+                tenant_state["result"] = "skipped_needs_reauth"
+                _state["tenants"][tenant_id] = tenant_state
+                continue
+            if not cfg.get("api_key"):
+                tenant_state["result"] = "skipped_no_api_key"
+                _state["tenants"][tenant_id] = tenant_state
+                continue
+
             try:
                 stats = await _reconcile_integration(db, intg)
                 scanned += 1
@@ -98,15 +145,23 @@ async def _run_one_tick() -> Dict[str, Any]:
                 try:
                     db.rollback()
                 except Exception as rb_exc:
-                    from core.obs import EVENTS, log_event  # noqa: PLC0415
-                    log_event(
-                        EVENTS.ORDER_UPSERT_ERROR,
-                        err=rb_exc,
-                        tenant_id=tenant_id,
-                        context="commerce_reconcile_rollback",
+                    logger.warning(
+                        "[Salla Commerce Reconciler] rollback_failed tenant_hash=%s error_class=%s",
+                        hash_identifier(tenant_id),
+                        safe_exception_class(rb_exc),
                     )
-                tenant_state.update({"result": "error", "error": repr(exc)})
+                tenant_state.update({
+                    "result": "error",
+                    "error_code": safe_exception_class(exc),
+                })
+                logger.warning(
+                    "[Salla Commerce Reconciler] tenant_reconcile_failed tenant_hash=%s store_hash=%s error_class=%s",
+                    hash_identifier(tenant_id),
+                    hash_identifier(store_id),
+                    safe_exception_class(exc),
+                )
             _state["tenants"][tenant_id] = tenant_state
+
         duration_ms = int((time.monotonic() - started) * 1000)
         _state.update({
             "last_tick_at": started_at.isoformat(),
@@ -118,24 +173,14 @@ async def _run_one_tick() -> Dict[str, Any]:
         })
         return {"scanned": scanned, "errors": errors, "duration_ms": duration_ms}
     finally:
-        if lock_acquired:
-            try:
-                db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
-            except Exception as unlock_exc:
-                from core.obs import EVENTS, log_event  # noqa: PLC0415
-                log_event(
-                    EVENTS.DISPATCHER_LOOP_ERROR,
-                    err=unlock_exc,
-                    context="commerce_reconcile_advisory_unlock",
-                )
+        if lock.held:
+            lock.release()
         try:
             db.close()
         except Exception as close_exc:
-            from core.obs import EVENTS, log_event  # noqa: PLC0415
-            log_event(
-                EVENTS.DISPATCHER_LOOP_ERROR,
-                err=close_exc,
-                context="commerce_reconcile_db_close",
+            logger.warning(
+                "[Salla Commerce Reconciler] db_close_failed error_class=%s",
+                safe_exception_class(close_exc),
             )
 
 
@@ -144,8 +189,8 @@ async def _reconcile_integration(db: Session, intg: Any) -> Dict[str, Any]:
 
     started = time.monotonic()
     svc = StoreSyncService(db, int(intg.tenant_id))
-    customers_synced = await svc.sync_customers(incremental=True)
-    products_synced = await svc.sync_products(incremental=True)
+    customers_synced = await svc.sync_customers(incremental=True, strict=True)
+    products_synced = await svc.sync_products(incremental=True, strict=True)
     return {
         "customers_synced": customers_synced,
         "products_synced": products_synced,

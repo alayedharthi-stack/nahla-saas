@@ -323,3 +323,223 @@ class TestWebhookFastAckPattern:
       db.refresh(ev)
       assert ev.status == "processed"
       assert db.query(Order).filter_by(tenant_id=tenant.id, external_id="7001").count() == 1
+
+class TestSallaDatetimeParsing:
+    def test_riyadh_nested_timestamp_converts_to_utc_anchor(self):
+        from services.salla_datetime import parse_salla_datetime_to_utc, salla_datetime_to_naive_utc
+
+        nested = {
+            "date": "2026-04-19 12:00:00.000000",
+            "timezone_type": 3,
+            "timezone": "Asia/Riyadh",
+        }
+        aware = parse_salla_datetime_to_utc(nested)
+        assert aware is not None
+        assert aware.hour == 9 and aware.minute == 0
+        naive = salla_datetime_to_naive_utc(nested)
+        assert naive == aware.replace(tzinfo=None)
+
+    def test_explicit_offset_honored(self):
+        from services.salla_datetime import parse_salla_datetime_to_utc
+
+        dt = parse_salla_datetime_to_utc("2026-04-19T12:00:00+02:00")
+        assert dt is not None
+        assert dt.hour == 10
+
+    def test_invalid_input_returns_none(self):
+        from services.salla_datetime import salla_datetime_to_naive_utc
+
+        assert salla_datetime_to_naive_utc({"date": "not-a-date", "timezone": "Asia/Riyadh"}) is None
+
+
+class TestAbandonedCartDelayContract:
+    @patch("core.automation_engine.emit_automation_event")
+    def test_emitter_stores_anchor_and_engine_defers_until_plus_30(self, emit_mock):
+        from core.automation_engine import _try_execute
+        from services.cart_recovery_emitter import emit_cart_abandoned_if_new
+
+        db, tenant_id, _, engine = _make_db()
+        try:
+            customer = Customer(
+                tenant_id=tenant_id,
+                phone="+966500333444",
+                normalized_phone="966500333444",
+                name="Shopper",
+            )
+            db.add(customer)
+            db.commit()
+            payload = {
+                "id": "88",
+                "total": {"amount": 120, "currency": "SAR"},
+                "customer": {"name": "Generic Shopper", "mobile": "+966500333444"},
+                "items": [{"name": "Sports Shoe White", "quantity": 1}],
+                "checkout_url": "https://shop.example/cart/88",
+                "created_at": {
+                    "date": "2026-04-19 12:00:00.000000",
+                    "timezone_type": 3,
+                    "timezone": "Asia/Riyadh",
+                },
+            }
+            svc = StoreSyncService(db, tenant_id)
+            emit_mock.return_value = SimpleNamespace(id=501)
+            _run(svc.handle_abandoned_cart_webhook(payload, event_kind="created", webhook_event_type="abandoned.cart"))
+            cart = db.query(Order).filter_by(tenant_id=tenant_id, external_id="cart-88").one()
+            assert cart.extra_metadata.get("abandoned_at", "").startswith("2026-04-19T09:00:00")
+            emit_mock.assert_called_once()
+            created_at = emit_mock.call_args.kwargs.get("created_at")
+            assert created_at.hour == 9 and created_at.minute == 0
+            ev = AutomationEvent(
+                tenant_id=tenant_id,
+                event_type="cart_abandoned",
+                customer_id=customer.id,
+                payload={"cart_external_id": "cart-88"},
+                processed=False,
+                created_at=created_at,
+            )
+            db.add(ev)
+            automation = SimpleNamespace(id=9, automation_type="abandoned_cart", config={"steps": [{"delay_minutes": 30}]}, enabled=True)
+            now_before = datetime(2026, 4, 19, 9, 15, 0)
+            assert _run(_try_execute(db, tenant_id, ev, automation, now_before)) == "delay"
+            now_due = datetime(2026, 4, 19, 9, 31, 0)
+            with patch("core.automation_engine._evaluate_conditions", return_value=(False, "test_skip")):
+                assert _run(_try_execute(db, tenant_id, ev, automation, now_due)) == "skipped"
+        finally:
+            db.close()
+            engine.dispose()
+
+
+class TestPartialCartPreservation:
+    def test_partial_status_payload_preserves_line_items_and_customer(self):
+        db, tenant_id, _, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            full = _cart_payload("21")
+            _run(svc.handle_abandoned_cart_webhook(full, event_kind="created", webhook_event_type="abandoned.cart"))
+            partial = {"id": "21", "status": "active"}
+            _run(svc.handle_abandoned_cart_webhook(partial, event_kind="status_changed", webhook_event_type="abandoned.cart.status.changed"))
+            cart = db.query(Order).filter_by(tenant_id=tenant_id, external_id="cart-21").one()
+            assert cart.line_items
+            assert cart.customer_info.get("mobile")
+            assert cart.total == "120"
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_non_terminal_status_does_not_cancel_recovery(self):
+        db, tenant_id, _, engine = _make_db()
+        try:
+            customer = Customer(tenant_id=tenant_id, phone="+966500333444", normalized_phone="966500333444", name="Shopper")
+            db.add(customer)
+            db.commit()
+            svc = StoreSyncService(db, tenant_id)
+            _run(svc.handle_abandoned_cart_webhook(_cart_payload("22"), event_kind="created", webhook_event_type="abandoned.cart"))
+            ev = AutomationEvent(
+                tenant_id=tenant_id,
+                event_type="cart_abandoned",
+                customer_id=customer.id,
+                payload={"cart_external_id": "cart-22", "cart_id": "22"},
+                processed=False,
+                created_at=datetime.utcnow(),
+            )
+            db.add(ev)
+            db.commit()
+            _run(svc.handle_abandoned_cart_webhook({"id": "22", "status": "active"}, event_kind="status_changed", webhook_event_type="abandoned.cart.status.changed"))
+            db.refresh(ev)
+            assert ev.processed is False
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_replayed_purchase_cancels_once(self):
+        db, tenant_id, _, engine = _make_db()
+        try:
+            customer = Customer(tenant_id=tenant_id, phone="+966500333444", normalized_phone="966500333444", name="Shopper")
+            db.add(customer)
+            db.commit()
+            svc = StoreSyncService(db, tenant_id)
+            payload = _cart_payload("23")
+            _run(svc.handle_abandoned_cart_webhook(payload, event_kind="created", webhook_event_type="abandoned.cart"))
+            ev = AutomationEvent(
+                tenant_id=tenant_id,
+                event_type="cart_abandoned",
+                customer_id=customer.id,
+                payload={"cart_external_id": "cart-23", "cart_id": "23"},
+                processed=False,
+                created_at=datetime.utcnow(),
+            )
+            db.add(ev)
+            db.commit()
+            purchased = {"id": "23", "status": "purchased"}
+            _run(svc.handle_abandoned_cart_webhook(purchased, event_kind="purchased", webhook_event_type="abandoned.cart.purchased"))
+            _run(svc.handle_abandoned_cart_webhook(purchased, event_kind="purchased", webhook_event_type="abandoned.cart.purchased"))
+            db.refresh(ev)
+            assert ev.processed is True
+            cart = db.query(Order).filter_by(tenant_id=tenant_id, external_id="cart-23").one()
+            assert cart.line_items
+        finally:
+            db.close()
+            engine.dispose()
+
+
+class TestEventRegistryContract:
+    def test_activation_checklist_excludes_compat_and_app_functions_only(self):
+        from services.salla_realtime_events import (
+            SALLA_MERCHANT_WEBHOOK_ACTIVATION_CHECKLIST,
+            SALLA_WEBHOOK_COMPATIBILITY_ALIASES,
+            event_registry_contract,
+        )
+
+        contract = event_registry_contract()
+        checklist = set(SALLA_MERCHANT_WEBHOOK_ACTIVATION_CHECKLIST)
+        assert "cart.abandoned" not in checklist
+        assert "abandoned_cart" not in checklist
+        assert "abandoned.cart.updated" not in checklist
+        assert "customer.login" in checklist
+        assert set(contract["compatibility_aliases"]) == set(SALLA_WEBHOOK_COMPATIBILITY_ALIASES)
+
+
+class TestRealtimeCommerceDiagnostics:
+    def test_diag_hashes_store_and_strips_raw_errors(self):
+        from services.salla_commerce_reconciler import _state as reconciler_state
+        from services.salla_realtime_observability import build_realtime_commerce_diag
+
+        db, tenant_id, _, engine = _make_db()
+        try:
+            _seed_integration(db, tenant_id, "STORE-DIAG-1")
+            reconciler_state["tenants"][tenant_id] = {
+                "tenant_hash": "abc",
+                "integration_id": 1,
+                "store_hash": "def",
+                "result": "error",
+                "error_code": "RuntimeError",
+                "error": "secret token=leak",
+            }
+            diag = build_realtime_commerce_diag(db, tenant_id)
+            assert diag["integration"]["store_hash"]
+            assert "store_id" not in diag["integration"]
+            tenant = diag["reconciler"]["tenant"]
+            assert tenant["error_code"] == "RuntimeError"
+            assert "error" not in tenant
+            assert "secret" not in str(diag)
+        finally:
+            reconciler_state["tenants"].pop(tenant_id, None)
+            db.close()
+            engine.dispose()
+
+    def test_admin_diag_route_requires_admin_dependency(self):
+        from routers.admin import router as admin_router
+
+        def _dep_callable_names(route):
+            names = set()
+            deps = list(getattr(route, "dependant", None).dependencies) if getattr(route, "dependant", None) else []
+            for dep in deps:
+                call = getattr(dep, "call", None)
+                if call is not None:
+                    names.add(getattr(call, "__name__", repr(call)))
+            return names
+
+        route = next(
+            r for r in admin_router.routes
+            if getattr(r, "path", "") == "/admin/salla/realtime-commerce/diag"
+        )
+        assert "require_admin" in _dep_callable_names(route)

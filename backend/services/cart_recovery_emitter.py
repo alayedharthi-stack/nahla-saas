@@ -48,33 +48,9 @@ logger = logging.getLogger("nahla.cart_recovery_emitter")
 
 def _parse_abandoned_at_naive_utc(value):
     """Parse Salla abandonment timestamp to naive UTC for AutomationEvent.created_at."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        raw = str(value).strip()
-        if not raw:
-            return None
-        try:
-            from services.customer_intelligence import extract_order_datetime
-            dt = extract_order_datetime({"created_at": raw})
-        except Exception:
-            dt = None
-        if dt is None:
-            try:
-                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except Exception as exc:
-                from core.obs import EVENTS, log_event  # noqa: PLC0415
-                log_event(
-                    EVENTS.ORDER_UPSERT_ERROR,
-                    err=exc,
-                    context="cart_recovery_abandoned_at_iso_parse",
-                )
-                return None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+    from services.salla_datetime import salla_datetime_to_naive_utc
+
+    return salla_datetime_to_naive_utc(value)
 
 
 
@@ -247,6 +223,13 @@ def emit_cart_abandoned_if_new(
             or payload.get("abandoned_at")
         )
         event_created_at = _parse_abandoned_at_naive_utc(abandoned_at_raw)
+        if event_created_at is None:
+            logger.warning(
+                "[CartRecoveryEmitter] tenant=%s cart=%s invalid abandoned_at anchor — skipping emit",
+                tenant_id,
+                cart_external,
+            )
+            return None
         event = emit_automation_event(
             db,
             tenant_id=tenant_id,
