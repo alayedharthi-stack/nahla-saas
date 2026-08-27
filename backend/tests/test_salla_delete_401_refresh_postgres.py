@@ -27,6 +27,7 @@ for _entry in (str(_REPO_ROOT), str(_BACKEND), str(_DATABASE)):
         sys.path.insert(0, _entry)
 
 from database.models import Integration, Tenant
+import store_adapters.salla_adapter as salla_adapter_mod
 from store_adapters.salla_adapter import SallaAdapter
 from tests.order_customer_identity_postgres_fixtures import (
     _connect_engine,
@@ -71,7 +72,7 @@ class _LogCollector(logging.Handler):
 @contextmanager
 def _capture_salla_logs() -> Iterator[_LogCollector]:
     collector = _LogCollector()
-    loggers = [logging.getLogger(name) for name in ("nahla.adapter.salla", "nahla.salla_alerts")]
+    loggers = [salla_adapter_mod.logger, logging.getLogger("nahla.salla_alerts")]
     for lg in loggers:
         lg.addHandler(collector)
         lg.setLevel(logging.DEBUG)
