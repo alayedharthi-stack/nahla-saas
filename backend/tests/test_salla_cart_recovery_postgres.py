@@ -138,36 +138,40 @@ def test_concurrent_emit_creates_single_event(postgres_engine, monkeypatch):
 
 
 def test_poller_emit_visible_from_fresh_session(postgres_engine):
-    _seed_cart(postgres_engine)
-    Session = sessionmaker(bind=postgres_engine)
-    session = Session()
-    try:
-        from services.store_sync import StoreSyncService
+  import asyncio
+  from services.store_sync import StoreSyncService
 
-        svc = StoreSyncService(session, TEST_TENANT)
-        raw = {
-            "id": "pg-pol-2",
-            "total": {"amount": 90, "currency": "SAR"},
-            "checkout_url": "https://example/cart",
-            "age_in_minutes": 15,
-            "created_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
-            "updated_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
-            "customer": {"mobile": "+966500700700", "name": "PG Shopper"},
-            "items": [{"name": "Shoe", "qty": 1}],
-        }
-        adapter = MagicMock()
-        adapter.get_abandoned_carts = AsyncMock(return_value=[raw])
-        svc._adapter = adapter
-        import asyncio
-        asyncio.run(svc.sync_abandoned_carts())
-    finally:
-        session.close()
+  cart_token = f"pgpol{uuid.uuid4().hex[:8]}"
+  external_id = f"cart-{cart_token}"
+  Session = sessionmaker(bind=postgres_engine)
+  session = Session()
+  try:
+    if session.get(Tenant, TEST_TENANT) is None:
+      session.add(Tenant(id=TEST_TENANT, name="Cart Recovery PG"))
+      session.commit()
+    svc = StoreSyncService(session, TEST_TENANT)
+    raw = {
+      "id": cart_token,
+      "total": {"amount": 90, "currency": "SAR"},
+      "checkout_url": "https://example/cart",
+      "age_in_minutes": 15,
+      "created_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+      "updated_at": {"date": "2026-04-19 09:00:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"},
+      "customer": {"mobile": "+966500700700", "name": "PG Shopper"},
+      "items": [{"name": "Shoe", "qty": 1}],
+    }
+    adapter = MagicMock()
+    adapter.get_abandoned_carts = AsyncMock(return_value=[raw])
+    svc._adapter = adapter
+    asyncio.run(svc.sync_abandoned_carts())
+  finally:
+    session.close()
 
-    verify_session = Session()
-    try:
-        cart = verify_session.query(Order).filter_by(tenant_id=TEST_TENANT, external_id="cart-pg-pol-2").one()
-        assert cart.extra_metadata.get("recovery_event_id")
-        events = verify_session.query(AutomationEvent).filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned").all()
-        assert any(e.id == cart.extra_metadata.get("recovery_event_id") for e in events)
-    finally:
-        verify_session.close()
+  verify_session = Session()
+  try:
+    cart = verify_session.query(Order).filter_by(tenant_id=TEST_TENANT, external_id=external_id).one()
+    assert cart.extra_metadata.get("recovery_event_id")
+    events = verify_session.query(AutomationEvent).filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned").all()
+    assert any(e.id == cart.extra_metadata.get("recovery_event_id") for e in events)
+  finally:
+    verify_session.close()
