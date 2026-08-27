@@ -85,6 +85,8 @@ from core.catalog_image import (  # noqa: E402
     extract_sync_product_image,
 )
 
+from core.coupon_log_privacy import hash_identifier, safe_exception_class
+
 logger = logging.getLogger("nahla-backend")
 
 
@@ -2545,7 +2547,11 @@ class StoreSyncService:
         try:
             self.db.flush()
         except Exception as exc:
-            logger.debug("tenant=%s coupon_sync_meta flush skipped: %s", self.tenant_id, exc)
+            logger.warning(
+                'coupon_sync_meta_flush_failed event=coupon_sync_meta_flush_failed tenant_hash=%s error_class=%s',
+                hash_identifier(self.tenant_id),
+                safe_exception_class(exc),
+            )
 
     # ── Store profile sync (Pack A1 — Salla /store/info) ───────────────────────
 

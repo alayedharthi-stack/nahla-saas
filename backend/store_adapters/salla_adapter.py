@@ -20,6 +20,7 @@ import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.catalog_image import coerce_image_url, extract_sync_product_image
+from core.coupon_log_privacy import safe_exception_class
 from core.phone_coerce import coerce_phone_str
 from store_integration.models import (
     NormalizedOffer,
@@ -4009,8 +4010,20 @@ class SallaAdapter(BaseStoreAdapter):
             return False
         try:
             return await self._delete(f"/coupons/{provider_id}")
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            retryable = bool(status is not None and status >= 500)
+            logger.warning(
+                "SallaAdapter.delete_coupon_by_id_failed operation=delete_coupon_by_id http_status=%s error_class=HTTPStatusError retryable=%s",
+                status,
+                retryable,
+            )
+            return False
         except Exception as exc:
-            self._log_error("delete_coupon_by_id", exc)
+            logger.warning(
+                "SallaAdapter.delete_coupon_by_id_failed operation=delete_coupon_by_id error_class=%s",
+                safe_exception_class(exc),
+            )
             return False
 
     async def delete_coupon_by_code(self, code: str) -> bool:

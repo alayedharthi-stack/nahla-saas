@@ -92,7 +92,10 @@ async def run_salla_coupons_poller_scheduler() -> None:
             logger.info("[Salla Coupons Poller] cancelled")
             raise
         except Exception as exc:
-            logger.exception("[Salla Coupons Poller] tick crashed: %s", exc)
+            logger.warning(
+                '[Salla Coupons Poller] tick_failed event=coupon_poller_tick_failed error_class=%s',
+                safe_exception_class(exc),
+            )
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -153,9 +156,10 @@ async def _run_one_tick() -> Dict[str, Any]:
                 or (intg.external_store_id if intg is not None else None)
             )
             tenant_state: Dict[str, Any] = {
-                "tenant_id": tenant_id,
+                "tenant_hash": hash_identifier(tenant_id),
                 "integration_id": intg.id if intg is not None else None,
-                "store_id": store_id,
+                "store_present": bool(store_id),
+                "store_hash": hash_identifier(store_id) if store_id else "",
                 "scanned_at": datetime.now(timezone.utc).isoformat(),
                 "result": None,
                 "error": None,
@@ -193,8 +197,8 @@ async def _run_one_tick() -> Dict[str, Any]:
                 updated_total += stats["updated"]
                 tenant_state.update({"result": "ok", "stats": stats})
                 logger.info(
-                    "[Salla Coupons Poller] tenant=%s store_hash=%s items_seen=%d created=%d updated=%d duration_ms=%d fetch_ok=%s partial=%s",
-                    tenant_id,
+                    "[Salla Coupons Poller] tenant_poll_ok event=coupon_poller_tenant_ok tenant_hash=%s store_hash=%s items_seen=%d created=%d updated=%d duration_ms=%d fetch_ok=%s partial=%s",
+                    hash_identifier(tenant_id),
                     hash_identifier(store_id),
                     stats["items_seen"],
                     stats["created"],
@@ -206,10 +210,10 @@ async def _run_one_tick() -> Dict[str, Any]:
             except Exception as exc:
                 errors += 1
                 tenant_state["result"] = "error"
-                tenant_state["error"] = type(exc).__name__
-                logger.exception(
-                    "[Salla Coupons Poller] tenant=%s store_hash=%s error_class=%s",
-                    tenant_id,
+                tenant_state["error"] = safe_exception_class(exc)
+                logger.warning(
+                    '[Salla Coupons Poller] tenant_poll_failed event=coupon_poller_tenant_failed tenant_hash=%s store_hash=%s error_class=%s',
+                    hash_identifier(tenant_id),
                     hash_identifier(store_id),
                     safe_exception_class(exc),
                 )
