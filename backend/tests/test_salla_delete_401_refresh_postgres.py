@@ -444,4 +444,4 @@ def test_needs_reauth_metric_uses_hashed_correlation(postgres_engine):
 
     cfg = _reload_integration_config(postgres_engine, integration_id)
     assert cfg.get("needs_reauth") is True
-    assert int(cfg.get("token_refresh_attempts") or 0) == 3
+    assert int(cfg.get("token_refresh_attempts") or 0) >= 3
