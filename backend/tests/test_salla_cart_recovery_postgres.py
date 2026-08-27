@@ -274,3 +274,93 @@ def test_webhook_and_poller_emit_single_event(postgres_engine):
         assert matched[0].id == marker
     finally:
         verify.close()
+
+def test_marker_failure_rolls_back_event_then_retry_succeeds(postgres_engine, monkeypatch):
+    """H3: event+marker atomicity — marker persist failure rolls back event; retry succeeds."""
+    from sqlalchemy.orm import attributes
+
+    customer_id, cart_id = _seed_cart(postgres_engine)
+    attempts = {"n": 0}
+    real_flag_modified = attributes.flag_modified
+
+    def _flaky_flag_modified(*args, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("simulated marker persist failure")
+        return real_flag_modified(*args, **kwargs)
+
+    monkeypatch.setattr(attributes, "flag_modified", _flaky_flag_modified)
+
+    Session = sessionmaker(bind=postgres_engine)
+    session = Session()
+    try:
+        cart = session.get(Order, cart_id)
+        normalised = {
+            "external_id": "cart-pg-1",
+            "raw_cart_id": "pg-1",
+            "customer_info": {"mobile": "+966500700700"},
+            "customer_name": "PG Shopper",
+            "abandoned_at": "2026-04-19T09:00:00",
+        }
+        first = emit_cart_abandoned_if_new(
+            session,
+            tenant_id=TEST_TENANT,
+            cart_row=cart,
+            normalised=normalised,
+            source="postgres_test",
+            commit=True,
+        )
+        assert first is None
+    finally:
+        session.close()
+
+    verify = Session()
+    try:
+        cart = verify.get(Order, cart_id)
+        assert not cart.extra_metadata.get("recovery_event_id")
+        events = (
+            verify.query(AutomationEvent)
+            .filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned", customer_id=customer_id)
+            .all()
+        )
+        assert events == []
+    finally:
+        verify.close()
+
+    retry = Session()
+    try:
+        cart = retry.get(Order, cart_id)
+        normalised = {
+            "external_id": "cart-pg-1",
+            "raw_cart_id": "pg-1",
+            "customer_info": {"mobile": "+966500700700"},
+            "customer_name": "PG Shopper",
+            "abandoned_at": "2026-04-19T09:00:00",
+        }
+        second = emit_cart_abandoned_if_new(
+            retry,
+            tenant_id=TEST_TENANT,
+            cart_row=cart,
+            normalised=normalised,
+            source="postgres_test",
+            commit=True,
+        )
+        assert second is not None
+    finally:
+        retry.close()
+
+    final = Session()
+    try:
+        cart = final.get(Order, cart_id)
+        marker = cart.extra_metadata.get("recovery_event_id")
+        assert marker == second
+        events = (
+            final.query(AutomationEvent)
+            .filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned", customer_id=customer_id)
+            .all()
+        )
+        assert len(events) == 1
+        assert events[0].id == marker
+    finally:
+        final.close()
+
