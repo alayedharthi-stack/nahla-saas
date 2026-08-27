@@ -719,12 +719,11 @@ def test_durable_nonce_consume_survives_session_rollback(postgres_engine: Engine
     )
 
     rollback_conn = postgres_engine.connect()
-    rollback_trans = rollback_conn.begin()
     rollback_session = sessionmaker(bind=rollback_conn, expire_on_commit=False)()
+    rollback_session.begin()
     rollback_session.query(WhatsAppOAuthNonce).filter_by(tenant_id=tenant_id).first()
     rollback_session.rollback()
     rollback_session.close()
-    rollback_trans.rollback()
     rollback_conn.close()
 
     assert (
