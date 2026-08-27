@@ -112,6 +112,10 @@ def postgres_engine():
 def _log_text(collector: _LogCollector) -> str:
     return "\n".join(collector.messages)
 
+def _caplog_text(caplog) -> str:
+    return "\n".join(r.getMessage() for r in caplog.records)
+
+
 
 def _assert_no_canaries(text: str) -> None:
     for canary in CANARIES:
@@ -317,19 +321,22 @@ def _session_factory_with_lookup_fault(engine):
     return _FaultFactory()
 
 
-def test_proactive_freshness_success_emits_safe_events(postgres_engine):
+def test_proactive_freshness_success_emits_safe_events(postgres_engine, caplog):
     now = datetime.now(timezone.utc)
+    expired_at = _iso(now - timedelta(minutes=30))
     integration_id = _seed_integration(
         postgres_engine,
-        expires_at=_iso(now + timedelta(hours=2)),
+        expires_at=expired_at,
     )
     adapter = _adapter_for_integration(integration_id, postgres_engine)
-    adapter._expires_at = _iso(now + timedelta(hours=2))
+    adapter._expires_at = expired_at
+    post_calls = {"count": 0}
 
     async def delete_handler(url, **_kwargs):
         return _make_http_response(200)
 
     async def post_handler(url, **_kwargs):
+        post_calls["count"] += 1
         return _make_http_response(
             200,
             json_data={
@@ -344,20 +351,21 @@ def test_proactive_freshness_success_emits_safe_events(postgres_engine):
 
     async def _run():
         with _capture_bounded_logs() as collector:
-            with patch.dict(
-                os.environ,
-                {
-                    "SALLA_CLIENT_ID": "oauth-client-id",
-                    "SALLA_CLIENT_SECRET": "oauth-client-secret",
-                },
-                clear=False,
-            ):
-                with patch("database.session.SessionLocal", factory):
-                    with patch(
-                        "store_adapters.salla_adapter.httpx.AsyncClient",
-                        _HttpClientFactory(client),
-                    ):
-                        ok = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
+            with caplog.at_level(logging.DEBUG):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "SALLA_CLIENT_ID": "oauth-client-id",
+                        "SALLA_CLIENT_SECRET": "oauth-client-secret",
+                    },
+                    clear=False,
+                ):
+                    with patch("database.session.SessionLocal", factory):
+                        with patch(
+                            "store_adapters.salla_adapter.httpx.AsyncClient",
+                            _HttpClientFactory(client),
+                        ):
+                            ok = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
             return ok, collector
 
     try:
@@ -365,16 +373,20 @@ def test_proactive_freshness_success_emits_safe_events(postgres_engine):
     finally:
         factory.cleanup()
 
-    log_text = _log_text(collector)
+    handler_text = _log_text(collector)
+    cap_text = _caplog_text(caplog)
+    log_text = handler_text + "\n" + cap_text
     assert ok is True
+    assert post_calls["count"] >= 1
     assert "event=salla_token_freshness_due" in log_text
     assert "event=salla_token_freshness_refresh_success" in log_text
     assert "event=salla_token_freshness_refresh_failed" not in log_text
+    assert "event=salla_token_refresh_success" in log_text
     assert str(TEST_TENANT_ID) not in log_text
     _assert_no_canaries(log_text)
 
 
-def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine):
+def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine, caplog):
     integration_id = _seed_integration(
         postgres_engine,
         expires_at=CANARY_INVALID_EXPIRY,
@@ -386,11 +398,12 @@ def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine):
     )
     async def _run():
         with _capture_bounded_logs() as collector:
-            await adapter._ensure_token_fresh()
+            with caplog.at_level(logging.DEBUG):
+                await adapter._ensure_token_fresh()
             return collector
 
     collector = asyncio.run(_run())
-    log_text = _log_text(collector)
+    log_text = _log_text(collector) + "\n" + _caplog_text(caplog)
     assert "event=salla_token_freshness_parse_failed" in log_text
     assert "error_class=" in log_text
     assert "tenant_hash=" in log_text
@@ -398,7 +411,7 @@ def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine):
     _assert_no_canaries(log_text)
 
 
-def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_engine):
+def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_engine, caplog):
     now = datetime.now(timezone.utc)
     integration_id = _seed_integration(
         postgres_engine,
@@ -445,11 +458,12 @@ def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_en
 
     async def _run():
         with _capture_bounded_logs() as active_collector:
-            holder_task = asyncio.create_task(holder())
-            await lock_held.wait()
-            result = await contender()
-            release_lock.set()
-            await holder_task
+            with caplog.at_level(logging.DEBUG):
+                holder_task = asyncio.create_task(holder())
+                await lock_held.wait()
+                result = await contender()
+                release_lock.set()
+                await holder_task
             collector.messages.extend(active_collector.messages)
             return result
 
@@ -458,7 +472,7 @@ def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_en
     finally:
         factory.cleanup()
 
-    log_text = _log_text(collector)
+    log_text = _log_text(collector) + "\n" + _caplog_text(caplog)
     assert result is False
     assert contender_started.is_set()
     assert "event=salla_token_refresh_lock_held" in log_text
@@ -468,7 +482,7 @@ def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_en
     _assert_no_canaries(log_text)
 
 
-def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_engine):
+def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_engine, caplog):
     """Database-boundary fault injection on superseding-integration lookup only."""
     now = datetime.now(timezone.utc)
     integration_id = _seed_integration(
@@ -489,20 +503,21 @@ def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_eng
 
     async def _run():
         with _capture_bounded_logs() as active_collector:
-            with patch.dict(
-                os.environ,
-                {
-                    "SALLA_CLIENT_ID": "oauth-client-id",
-                    "SALLA_CLIENT_SECRET": "oauth-client-secret",
-                },
-                clear=False,
-            ):
-                with patch("database.session.SessionLocal", factory):
-                    with patch(
-                        "store_adapters.salla_adapter.httpx.AsyncClient",
-                        _HttpClientFactory(client),
-                    ):
-                        result = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
+            with caplog.at_level(logging.DEBUG):
+                with patch.dict(
+                    os.environ,
+                    {
+                        "SALLA_CLIENT_ID": "oauth-client-id",
+                        "SALLA_CLIENT_SECRET": "oauth-client-secret",
+                    },
+                    clear=False,
+                ):
+                    with patch("database.session.SessionLocal", factory):
+                        with patch(
+                            "store_adapters.salla_adapter.httpx.AsyncClient",
+                            _HttpClientFactory(client),
+                        ):
+                            result = await adapter.delete_coupon_by_id(CANARY_PROVIDER_ID)
             collector.messages.extend(active_collector.messages)
             return result
 
@@ -512,7 +527,7 @@ def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_eng
     finally:
         factory.cleanup()
 
-    log_text = _log_text(collector)
+    log_text = _log_text(collector) + "\n" + _caplog_text(caplog)
     assert result is False
     assert "event=salla_token_refresh_failed" in log_text
     assert "reason=invalid_grant" in log_text
