@@ -2615,7 +2615,7 @@ async def admin_coexistence_verify_webhook(
     verify_error: bool = False
     try:
         cfg = await asyncio.wait_for(
-            dialog360_get_webhook_config(api_key=read_access_token(conn), timeout=5.0),
+            dialog360_get_webhook_config(api_key=read_access_token(conn), timeout=5.0, expected_url=expected_url),
             timeout=6.0,
         )
     except Exception as exc:
@@ -2980,15 +2980,13 @@ async def admin_coexistence_waba_webhook_read(
     # Channel read
     try:
         chan_cfg = await asyncio.wait_for(
-            dialog360_get_webhook_config(api_key=read_access_token(conn), timeout=5.0),
+            dialog360_get_webhook_config(api_key=read_access_token(conn), timeout=5.0, expected_url=expected_url),
             timeout=6.0,
         )
     except Exception as exc:
         chan_cfg = d360_safe_error_payload(exc, secrets=[read_access_token(conn)], operation="waba_webhook_read_channel")
-    chan_url = ""
-    if isinstance(chan_cfg, dict):
-        chan_url = d360_extract_remote_url(chan_cfg)
-    chan_matches = bool(chan_url) and chan_url.rstrip("/") == expected_url.rstrip("/")
+    chan_matches = bool((chan_cfg or {}).get("url_matches_expected")) if isinstance(chan_cfg, dict) else False
+    chan_url = expected_url if chan_matches else ""
 
     _log_d360_verify(
         operation="waba_webhook_read_channel",
@@ -3009,21 +3007,25 @@ async def admin_coexistence_waba_webhook_read(
     # WABA read
     try:
         waba_cfg = await asyncio.wait_for(
-            dialog360_get_waba_webhook(api_key=read_access_token(conn), timeout=5.0),
+            dialog360_get_waba_webhook(
+                api_key=read_access_token(conn),
+                timeout=5.0,
+                expected_url=expected_url,
+                local_phone_number_id=str(getattr(conn, "phone_number_id", "") or "") or None,
+            ),
             timeout=6.0,
         )
     except Exception as exc:
         waba_cfg = d360_safe_error_payload(exc, secrets=[read_access_token(conn)], operation="waba_webhook_read_waba")
-    waba_url = ""
-    waba_id_remote = None
+    waba_matches = bool((waba_cfg or {}).get("url_matches_expected")) if isinstance(waba_cfg, dict) else False
+    waba_url = expected_url if waba_matches else ""
+    waba_id_remote_present = False
     numbers_on_waba: List[str] = []
     if isinstance(waba_cfg, dict):
-        waba_url = str(waba_cfg.get("url") or "")
-        waba_id_remote = waba_cfg.get("waba_id")
-        nums = waba_cfg.get("numbers_on_this_waba")
-        if isinstance(nums, list):
-            numbers_on_waba = [str(n) for n in nums]
-    waba_matches = bool(waba_url) and waba_url.rstrip("/") == expected_url.rstrip("/")
+        waba_id_remote_present = bool(waba_cfg.get("has_waba_id"))
+        count = waba_cfg.get("numbers_count")
+        if isinstance(count, int) and count > 0:
+            numbers_on_waba = ["*"] * count
 
     _log_d360_verify(
         operation="waba_webhook_read_waba",
@@ -3040,7 +3042,7 @@ async def admin_coexistence_waba_webhook_read(
                   else ("url_mismatch" if waba_url else "no_remote_url"))
         ),
         extra={
-            "waba_id_remote_present": bool(waba_id_remote),
+            "waba_id_remote_present": waba_id_remote_present if isinstance(waba_cfg, dict) else False,
             "numbers_on_this_waba_count": len(numbers_on_waba),
         },
     )
@@ -3048,7 +3050,9 @@ async def admin_coexistence_waba_webhook_read(
     local_phone = str(getattr(conn, "phone_number_id", "") or "") or None
     local_waba  = str(getattr(conn, "whatsapp_business_account_id", "") or "") or None
     phone_drift = bool(
-        local_phone and numbers_on_waba and local_phone not in numbers_on_waba
+        isinstance(waba_cfg, dict)
+        and waba_cfg.get("numbers_count")
+        and waba_cfg.get("local_phone_listed") is False
     )
 
     audit(
@@ -3070,7 +3074,7 @@ async def admin_coexistence_waba_webhook_read(
         "waba": {
             "matches": waba_matches,
             **d360_url_flags(waba_url, expected_url),
-            "waba_id_remote_present": bool(waba_id_remote),
+            "waba_id_remote_present": waba_id_remote_present,
             "numbers_on_this_waba_count": len(numbers_on_waba),
             **d360_response_summary(waba_cfg),
         },

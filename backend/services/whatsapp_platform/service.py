@@ -23,6 +23,8 @@ from .provider_utils import (
     wa_provider,
 )
 from services.d360_logging import (
+    d360_extract_remote_url,
+    d360_url_flags,
     d360_live_verify_step_record,
     d360_response_summary,
     d360_safe_webhook_result,
@@ -1013,10 +1015,41 @@ async def dialog360_configure_webhook(
     return d360_safe_webhook_result(resp.status_code, data)
 
 
+
+
+
+def _enrich_safe_d360_webhook_read(
+    data: object,
+    http_status: int,
+    *,
+    expected_url: Optional[str] = None,
+    local_phone_number_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    safe = d360_safe_webhook_result(http_status, data if isinstance(data, dict) else {})
+    if isinstance(data, dict):
+        remote = d360_extract_remote_url(data)
+        flags = d360_url_flags(remote, expected_url)
+        safe.update(
+            {
+                "remote_url_present": flags["remote_url_present"],
+                "expected_url_present": flags["expected_url_present"],
+                "url_matches_expected": flags["url_matches_expected"],
+            }
+        )
+        if data.get("waba_id"):
+            safe["has_waba_id"] = True
+        nums = data.get("numbers_on_this_waba")
+        if isinstance(nums, list):
+            safe["numbers_count"] = len(nums)
+            if local_phone_number_id:
+                safe["local_phone_listed"] = str(local_phone_number_id) in [str(n) for n in nums]
+    return safe
+
 async def dialog360_get_webhook_config(
     *,
     api_key: str,
     timeout: float = 5,
+    expected_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Read back the currently configured channel webhook from 360dialog.
 
@@ -1035,7 +1068,7 @@ async def dialog360_get_webhook_config(
     logger.info("[WA dialog360 webhook] read status=%s summary=%s", resp.status_code, summary)
     if resp.status_code >= 400:
         return {"error": data, "status_code": resp.status_code}
-    return d360_safe_webhook_result(resp.status_code, data)
+    return _enrich_safe_d360_webhook_read(data, resp.status_code, expected_url=expected_url)
 
 
 # ── 360dialog WABA-level webhook (Coexistence) ────────────────────────────────
@@ -1062,6 +1095,8 @@ async def dialog360_get_waba_webhook(
     *,
     api_key: str,
     timeout: float = 5,
+    expected_url: Optional[str] = None,
+    local_phone_number_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Read the current WABA-level webhook config from 360dialog.
 
@@ -1077,8 +1112,17 @@ async def dialog360_get_waba_webhook(
     summary = d360_response_summary({"status_code": resp.status_code, **(data if isinstance(data, dict) else {})})
     logger.info("[WA dialog360 waba_webhook] read status=%s summary=%s", resp.status_code, summary)
     if resp.status_code >= 400:
-        return {"error": data, "status_code": resp.status_code}
-    return data
+        return _enrich_safe_d360_webhook_read(
+            {"error": data, "status_code": resp.status_code},
+            resp.status_code,
+            expected_url=expected_url,
+        )
+    return _enrich_safe_d360_webhook_read(
+            data,
+            resp.status_code,
+            expected_url=expected_url,
+            local_phone_number_id=local_phone_number_id,
+        )
 
 
 async def dialog360_set_waba_webhook(
@@ -1139,7 +1183,7 @@ async def dialog360_set_waba_webhook(
     )
     if resp.status_code >= 400 and "error" not in data:
         data = {"error": data, "status_code": resp.status_code}
-    return d360_safe_webhook_result(resp.status_code, data)
+    return _enrich_safe_d360_webhook_read(data, resp.status_code, expected_url=expected_url)
 
 
 def _clip_body(body: Any, limit: int = 240) -> str:
