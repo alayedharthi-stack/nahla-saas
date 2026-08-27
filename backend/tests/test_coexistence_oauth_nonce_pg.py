@@ -477,7 +477,7 @@ def _seed_pg_tenant(SessionLocal: sessionmaker, tenant_id: int, **conn_kwargs) -
         **conn_kwargs,
     )
     db.add(conn)
-    db.flush()
+    db.commit()
     db.refresh(conn)
     db.close()
     return conn
