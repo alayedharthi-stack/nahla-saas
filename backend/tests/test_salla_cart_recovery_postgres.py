@@ -1,9 +1,9 @@
-import uuid
 """PostgreSQL concurrency tests for cart recovery emission (PR #888 H3/H5)."""
 from __future__ import annotations
 
 import sys
 import threading
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
 
