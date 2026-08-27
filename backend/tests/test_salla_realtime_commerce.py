@@ -97,7 +97,11 @@ def _cart_payload(cart_id: str = "77", phone: str = "+966500333444"):
         "items": [{"name": "Sports Shoe White", "quantity": 1}],
         "checkout_url": f"https://shop.example/cart/{cart_id}",
         "created_at": "2026-04-19 10:00:00",
-        "abandoned_at": "2026-04-19 10:00:00",
+        "abandoned_at": {
+            "date": "2026-04-19 12:00:00.000000",
+            "timezone_type": 3,
+            "timezone": "Asia/Riyadh",
+        },
     }
 
 
@@ -106,12 +110,31 @@ class TestOrderWebhookExpandedEvents:
       db, tenant_id, _, engine = _make_db()
       try:
           svc = StoreSyncService(db, tenant_id)
-          payload = {"id": "ord-9001", "status": "processing", "total": "99.00", "items": []}
-          _run(svc.handle_order_webhook(payload, webhook_event_type="order.status.updated"))
-          _run(svc.handle_order_webhook({"id": "ord-9001", "status": "shipped", "total": "99.00", "items": []}, webhook_event_type="order.status.updated"))
-          rows = db.query(Order).filter_by(tenant_id=tenant_id, external_id="ord-9001").all()
+          svc.db.add(Order(
+              tenant_id=tenant_id,
+              external_id="9001",
+              status="pending",
+              total="150.00",
+              line_items=[{"name": "Sports Shoe White", "qty": 1}],
+              customer_info={"mobile": "+966500111222"},
+          ))
+          svc.db.commit()
+          status_payload = {
+              "id": 555001,
+              "status": "processing",
+              "order": {"id": 9001, "reference_id": "ORD-9001", "total": {"amount": 150}},
+          }
+          _run(svc.handle_order_webhook(status_payload, webhook_event_type="order.status.updated"))
+          _run(svc.handle_order_webhook({
+              "id": 555002,
+              "status": "shipped",
+              "order": {"id": 9001},
+          }, webhook_event_type="order.status.updated"))
+          rows = db.query(Order).filter_by(tenant_id=tenant_id, external_id="9001").all()
           assert len(rows) == 1
           assert rows[0].status == "shipped"
+          assert rows[0].total == "150"
+          assert rows[0].line_items
       finally:
           db.close(); engine.dispose()
 
@@ -257,9 +280,18 @@ class TestSpecialOfferUpsert:
       db, tenant_id, _, engine = _make_db()
       try:
           svc = StoreSyncService(db, tenant_id)
-          payload = {"id": "offer-1", "name": "Spring Sale", "type": "percentage", "percent": 15, "status": "active"}
+          payload = {
+              "id": "offer-1",
+              "name": "Spring Sale",
+              "message": "Spring Sale",
+              "offer_type": "discount",
+              "status": "active",
+              "get": {"discount_type": "percentage", "discount_amount": "15"},
+          }
           _run(svc.handle_special_offer_webhook(payload, webhook_event_type="specialoffer.created"))
-          _run(svc.handle_special_offer_webhook({**payload, "percent": 20}, webhook_event_type="specialoffer.updated"))
+          updated = dict(payload)
+          updated["get"] = {"discount_type": "percentage", "discount_amount": "20"}
+          _run(svc.handle_special_offer_webhook(updated, webhook_event_type="specialoffer.updated"))
           promos = db.query(Promotion).filter_by(tenant_id=tenant_id).all()
           assert len(promos) == 1
           assert promos[0].extra_metadata.get("salla_offer_id") == "offer-1"
@@ -375,6 +407,11 @@ class TestAbandonedCartDelayContract:
                 "items": [{"name": "Sports Shoe White", "quantity": 1}],
                 "checkout_url": "https://shop.example/cart/88",
                 "created_at": {
+                    "date": "2026-04-19 12:00:00.000000",
+                    "timezone_type": 3,
+                    "timezone": "Asia/Riyadh",
+                },
+                "abandoned_at": {
                     "date": "2026-04-19 12:00:00.000000",
                     "timezone_type": 3,
                     "timezone": "Asia/Riyadh",
@@ -496,6 +533,15 @@ class TestEventRegistryContract:
         assert "abandoned.cart.updated" not in checklist
         assert "customer.login" in checklist
         assert set(contract["compatibility_aliases"]) == set(SALLA_WEBHOOK_COMPATIBILITY_ALIASES)
+        active = set(contract["merchant_active"])
+        deprecated = set(contract["merchant_deprecated"])
+        app_only = set(contract["app_functions_only"])
+        aliases = set(contract["compatibility_aliases"])
+        assert active.isdisjoint(deprecated)
+        assert active.isdisjoint(app_only)
+        assert active.isdisjoint(aliases)
+        assert "product.updated" in deprecated
+        assert "abandoned.cart.updated" in app_only
 
 
 class TestRealtimeCommerceDiagnostics:

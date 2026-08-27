@@ -110,6 +110,12 @@ def _domain_stats(db: Session, tenant_id: int, event_types: Iterable[str]) -> Di
 def _sanitize_reconciler_tenant(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
+    stats = raw.get("stats") if isinstance(raw.get("stats"), dict) else {}
+    safe_stats = {
+        "products": stats.get("products"),
+        "customers": stats.get("customers"),
+        "duration_ms": stats.get("duration_ms"),
+    }
     return {
         "tenant_hash": raw.get("tenant_hash"),
         "integration_id": raw.get("integration_id"),
@@ -117,7 +123,41 @@ def _sanitize_reconciler_tenant(raw: Any) -> Optional[Dict[str, Any]]:
         "scanned_at": raw.get("scanned_at"),
         "result": raw.get("result"),
         "error_code": raw.get("error_code"),
-        "stats": raw.get("stats"),
+        "stats": safe_stats,
+    }
+
+
+
+
+def _sanitize_orders_poller_tenant(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    stats = raw.get("stats") if isinstance(raw.get("stats"), dict) else {}
+    safe_stats = {
+        "api_returned": stats.get("api_returned"),
+        "new_orders": stats.get("new_orders"),
+        "updated_orders": stats.get("updated_orders"),
+        "events_emitted": stats.get("events_emitted"),
+        "duration_ms": stats.get("duration_ms"),
+    }
+    err = raw.get("error")
+    error_code = None
+    if err:
+        text = str(err)
+        if "(" in text:
+            error_code = text.split("(", 1)[0].strip()[:80]
+        else:
+            error_code = text.split(":", 1)[0].strip()[:80]
+    return {
+        "tenant_id": raw.get("tenant_id"),
+        "integration_id": raw.get("integration_id"),
+        "token_present": raw.get("token_present"),
+        "needs_reauth": raw.get("needs_reauth"),
+        "scanned_at": raw.get("scanned_at"),
+        "result": raw.get("result"),
+        "error_code": error_code,
+        "duration_ms": raw.get("duration_ms"),
+        "stats": safe_stats,
     }
 
 
@@ -175,6 +215,6 @@ def build_realtime_commerce_diag(db: Session, tenant_id: int) -> Dict[str, Any]:
         "orders_poller": {
             "interval_seconds": orders_poller.get("config", {}).get("poll_interval_seconds"),
             "last_tick_at": orders_poller.get("last_tick_at"),
-            "tenant": tenant_orders,
+            "tenant": _sanitize_orders_poller_tenant(tenant_orders),
         },
     }

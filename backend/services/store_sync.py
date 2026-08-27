@@ -706,6 +706,88 @@ def _extract_amount_string(value: Any) -> str:
     return amt if amt is not None else (str(value) if value is not None else "")
 
 
+def _order_webhook_payload_keys(raw: Any) -> frozenset[str]:
+    if not isinstance(raw, dict):
+        return frozenset()
+    return frozenset(str(k) for k in raw.keys())
+
+
+def _unwrap_salla_order_webhook_payload(
+    payload: Dict[str, Any],
+    webhook_event_type: str | None = None,
+) -> tuple[Dict[str, Any], frozenset[str]]:
+    keys = _order_webhook_payload_keys(payload)
+    if webhook_event_type == "order.status.updated" and isinstance(payload, dict):
+        order_block = payload.get("order")
+        if isinstance(order_block, dict):
+            merged = dict(order_block)
+            status_val = payload.get("status")
+            if status_val is not None:
+                merged["status"] = status_val
+            order_keys = _order_webhook_payload_keys(order_block) | frozenset({"status"})
+            return merged, order_keys
+    return payload, keys
+
+
+def _order_field_present(keys: frozenset[str], *names: str) -> bool:
+    return any(name in keys for name in names)
+
+
+def _apply_order_webhook_fields(
+    order_row: Any,
+    normalised: Dict[str, Any],
+    *,
+    payload_keys: frozenset[str],
+    webhook_event_type: str | None,
+    is_new: bool,
+) -> None:
+    if is_new:
+        order_row.status = normalised["status"]
+        order_row.total = normalised["total"]
+        order_row.customer_info = normalised["customer_info"]
+        order_row.line_items = normalised["line_items"]
+        order_row.is_abandoned = normalised["is_abandoned"]
+        order_row.external_order_number = normalised["external_order_number"]
+        if normalised.get("customer_name"):
+            order_row.customer_name = normalised["customer_name"]
+        return
+
+    if webhook_event_type == "order.status.updated" or _order_field_present(payload_keys, "status"):
+        order_row.status = normalised["status"]
+    if _order_field_present(payload_keys, "total", "sub_total", "amount", "amounts"):
+        order_row.total = normalised["total"]
+    if _order_field_present(payload_keys, "items", "line_items", "products"):
+        order_row.line_items = normalised["line_items"]
+    if _order_field_present(payload_keys, "customer", "customer_info", "customer_name"):
+        order_row.customer_info = normalised["customer_info"]
+        if normalised.get("customer_name"):
+            order_row.customer_name = normalised["customer_name"]
+    if _order_field_present(payload_keys, "is_abandoned", "abandoned"):
+        order_row.is_abandoned = normalised["is_abandoned"]
+    if _order_field_present(payload_keys, "reference_id", "order_number", "number", "code", "name"):
+        order_row.external_order_number = normalised["external_order_number"]
+
+
+def _extract_cart_currency(raw_total: Any) -> str:
+    if isinstance(raw_total, dict):
+        cur = raw_total.get("currency")
+        if cur not in (None, ""):
+            return str(cur).strip().upper()
+    return ""
+
+
+def _cart_row_is_terminal(cart_row: Any, meta: Dict[str, Any]) -> bool:
+    if cart_row is None:
+        return False
+    if not getattr(cart_row, "is_abandoned", True):
+        return True
+    if meta.get("recovered_at"):
+        return True
+    if str(meta.get("cart_status") or "").strip().lower() == "purchased":
+        return True
+    return False
+
+
 def _normalise_order(raw: Any) -> Dict:
     if hasattr(raw, "dict"):
         raw = raw.dict()
@@ -777,6 +859,7 @@ def _normalise_order(raw: Any) -> Dict:
         "external_order_number": external_order_number,
         "status":                _extract_status_string(raw.get("status"), fallback="unknown"),
         "total":                 _extract_amount_string(raw_total),
+        "currency":              _extract_cart_currency(raw_total),
         "customer_name":         customer_name,
         "customer_info":         customer_info,
         "line_items":            raw.get("items", raw.get("line_items", [])),
@@ -905,7 +988,7 @@ def _flatten_salla_datetime(value: Any) -> str:
 def _extract_abandoned_at_iso(raw: Any) -> str:
     if not isinstance(raw, dict):
         return ""
-    for key in ("abandoned_at", "abandonedAt", "left_at", "updated_at", "created_at"):
+    for key in ("abandoned_at", "abandonedAt", "left_at"):
         iso = salla_datetime_to_utc_iso(raw.get(key))
         if iso:
             return iso
@@ -996,9 +1079,10 @@ def _normalise_abandoned_cart(raw: Any) -> Dict:
         "is_abandoned":          True,
         "source":                "salla",
         "created_at":            cart_dt.isoformat() if cart_dt else (flat_created or flat_updated),
-        "abandoned_at":          _extract_abandoned_at_iso(raw) or (cart_dt.isoformat() if cart_dt else (flat_created or flat_updated)),
+        "abandoned_at":          _extract_abandoned_at_iso(raw),
         "raw_cart_id":           cart_id,
         "cart_status":           str(raw.get("status") or raw.get("cart_status") or "abandoned").lower(),
+        "currency":              _extract_cart_currency(raw_total),
     }
 
 
@@ -1027,26 +1111,55 @@ def _normalise_special_offer(raw: Any) -> Dict[str, Any]:
         raw = {}
     offer_id = str(raw.get("id") or raw.get("offer_id") or "").strip()
     name = str(raw.get("name") or raw.get("title") or f"Salla offer {offer_id}").strip()
-    raw_type = str(raw.get("type") or raw.get("discount_type") or "percentage").lower()
-    promotion_type = "fixed" if raw_type in ("fixed", "amount") else "percentage"
-    discount_raw = raw.get("amount") or raw.get("percent") or raw.get("value") or raw.get("discount_value") or ""
-    if isinstance(discount_raw, dict):
-        discount_raw = discount_raw.get("amount") or discount_raw.get("value")
+    message = str(raw.get("message") or "").strip() or None
+    offer_type = str(raw.get("offer_type") or raw.get("type") or "").strip().lower() or None
+    get_block = raw.get("get") if isinstance(raw.get("get"), dict) else {}
+    discount_type = str(get_block.get("discount_type") or "").strip().lower()
+    discount_amount = get_block.get("discount_amount")
+    if discount_amount in (None, "") and get_block.get("quantity") not in (None, ""):
+        discount_amount = get_block.get("quantity")
+    promotion_type = None
+    discount_value = None
+    if discount_type in ("percentage", "percent"):
+        promotion_type = "percentage"
+        discount_value = str(discount_amount) if discount_amount not in (None, "") else None
+    elif discount_type in ("fixed", "amount"):
+        promotion_type = "fixed"
+        discount_value = str(discount_amount) if discount_amount not in (None, "") else None
+    elif discount_type == "free-product":
+        promotion_type = "free_product"
     status_raw = str(raw.get("status") or "active").lower()
     status = "active" if status_raw in ("active", "enabled", "published") else "draft"
     from services.coupon_salla_push import parse_salla_datetime
+    from services.salla_datetime import parse_salla_datetime_to_utc
+
+    def _offer_dt(value: Any):
+        if value in (None, ""):
+            return None
+        parsed = parse_salla_datetime(value)
+        if isinstance(parsed, datetime):
+            return parsed
+        if isinstance(parsed, str):
+            try:
+                return parse_salla_datetime_to_utc(parsed)
+            except Exception:  # noqa: silent-ok — invalid datetime string from provider
+                return None
+        return parse_salla_datetime_to_utc(value)
+
     return {
         "salla_offer_id": offer_id,
         "name": name,
-        "description": str(raw.get("description") or name),
+        "description": message or name,
+        "message": message,
+        "offer_type": offer_type,
         "promotion_type": promotion_type,
-        "discount_value": str(discount_raw) if discount_raw not in (None, "") else None,
-        "starts_at": parse_salla_datetime(raw.get("start_date") or raw.get("starts_at")),
-        "ends_at": parse_salla_datetime(raw.get("end_date") or raw.get("expires_at") or raw.get("expire_date")),
+        "discount_type": discount_type or None,
+        "discount_value": discount_value,
+        "starts_at": _offer_dt(raw.get("start_date") or raw.get("starts_at")),
+        "ends_at": _offer_dt(raw.get("expiry_date") or raw.get("end_date") or raw.get("expires_at")),
         "status": status,
-        "conditions": raw.get("conditions") or {},
+        "conditions": {},
         "usage_limit": raw.get("usage_limit") or raw.get("maximum_uses"),
-        "raw": raw,
     }
 
 def _normalise_coupon(raw: Any) -> Dict:
@@ -1663,7 +1776,7 @@ class StoreSyncService:
         try:
             raw_list = await adapter.get_products(updated_since=updated_since)
         except Exception as exc:
-            logger.warning("tenant=%s product sync failed: %s", self.tenant_id, exc)
+            logger.warning("tenant=%s product sync failed: %s", self.tenant_id, type(exc).__name__)
             if strict:
                 raise RuntimeError("product_sync_failed") from exc
             return 0
@@ -1675,6 +1788,7 @@ class StoreSyncService:
 
         created = 0
         updated = 0
+        row_failures = 0
         # (product_id, external_id, title) for products that just transitioned
         # from out-of-stock → in-stock. Fan-out is performed once after the
         # loop so we don't slow down each iteration with ProductInterest queries
@@ -1696,9 +1810,21 @@ class StoreSyncService:
         )
 
         for raw in raw_list:
-            normalised = _normalise_product(raw)
-            await self._enrich_normalised_variants_from_adapter(adapter, normalised)
-            apply_result = self._apply_normalised_product(normalised, adapter_source)
+            try:
+                normalised = _normalise_product(raw)
+                await self._enrich_normalised_variants_from_adapter(adapter, normalised)
+                apply_result = self._apply_normalised_product(normalised, adapter_source)
+            except Exception as exc:  # noqa: BLE001
+                row_failures += 1
+                logger.warning(
+                    "tenant=%s product sync row failed ext_id=%s: %s",
+                    self.tenant_id,
+                    raw.get("id") if isinstance(raw, dict) else None,
+                    type(exc).__name__,
+                )
+                if strict:
+                    raise RuntimeError("product_sync_row_failed") from exc
+                continue
             if apply_result["action"] == "created":
                 created += 1
             elif apply_result["action"] == "updated":
@@ -1737,7 +1863,7 @@ class StoreSyncService:
             "tenant=%s products sync done — created=%d updated=%d total_upserted=%d restocked=%d",
             self.tenant_id, created, updated, created + updated, len(restocked),
         )
-        if incremental:
+        if incremental and row_failures == 0:
             self._advance_commerce_reconcile_watermark("products")
         return created + updated
 
@@ -3009,7 +3135,7 @@ class StoreSyncService:
         try:
             raw_list = await adapter.get_customers(updated_since=updated_since)
         except Exception as exc:
-            logger.warning("tenant=%s customers sync failed: %s", self.tenant_id, exc)
+            logger.warning("tenant=%s customers sync failed: %s", self.tenant_id, type(exc).__name__)
             if strict:
                 raise RuntimeError("customer_sync_failed") from exc
             return 0
@@ -3021,6 +3147,7 @@ class StoreSyncService:
 
         created = 0
         updated = 0
+        row_failures = 0
         for raw in raw_list:
             try:
                 outcome = self._upsert_legacy_customer_from_salla_sync_payload(
@@ -3033,19 +3160,22 @@ class StoreSyncService:
                 elif outcome == "updated":
                     updated += 1
             except Exception as exc:  # noqa: BLE001
+                row_failures += 1
                 logger.warning(
                     "tenant=%s legacy customer sync row failed ext_id=%s: %s",
                     self.tenant_id,
                     raw.get("id"),
-                    exc,
+                    type(exc).__name__,
                 )
+                if strict:
+                    raise RuntimeError("customer_sync_row_failed") from exc
             self._upsert_a1_external_profile_side_effect(raw)
         self.db.flush()
         logger.info(
             "tenant=%s customers sync done — created=%d updated=%d",
             self.tenant_id, created, updated,
         )
-        if incremental:
+        if incremental and row_failures == 0:
             self._advance_commerce_reconcile_watermark("customers")
         return created + updated
 
@@ -3210,6 +3340,11 @@ class StoreSyncService:
             and product_id
             and not (payload.get("title") or payload.get("name"))
         ):
+            stored = (
+                self.db.query(Product)
+                .filter_by(tenant_id=self.tenant_id, external_id=product_id)
+                .first()
+            )
             adapter = self._get_adapter()
             if adapter and hasattr(adapter, "get_product"):
                 try:
@@ -3217,9 +3352,9 @@ class StoreSyncService:
                 except Exception as exc:
                     logger.warning(
                         "tenant=%s partial product webhook fetch failed id=%s event=%s: %s",
-                        self.tenant_id, product_id, webhook_event_type, exc,
+                        self.tenant_id, product_id, webhook_event_type, type(exc).__name__,
                     )
-                    fetched = None
+                    raise RuntimeError("product_hydration_failed") from exc
                 if fetched is not None:
                     if hasattr(fetched, "dict"):
                         fetched = fetched.dict()
@@ -3228,6 +3363,8 @@ class StoreSyncService:
                     merged = dict(fetched)
                     merged.update(payload)
                     payload = merged
+                elif stored is not None:
+                    raise RuntimeError("product_hydration_failed")
         normalised = _normalise_product(payload)
         ext_id     = normalised["external_id"]
         if not ext_id:
@@ -3297,6 +3434,8 @@ class StoreSyncService:
         normalised: Dict[str, Any],
         *,
         payload_keys: frozenset[str] | None = None,
+        event_kind: str = "created",
+        commit: bool = True,
     ):
         ext_id = normalised["external_id"]
         cart_row = (
@@ -3305,9 +3444,22 @@ class StoreSyncService:
             .first()
         )
         now_iso = datetime.now(timezone.utc).isoformat()
-        abandoned_iso = normalised.get("abandoned_at") or normalised.get("created_at") or now_iso
+        abandoned_iso = normalised.get("abandoned_at") or ""
         keys = payload_keys or frozenset()
         if cart_row is not None:
+            meta = dict(cart_row.extra_metadata or {})
+            if event_kind == "created" and _cart_row_is_terminal(cart_row, meta):
+                meta["last_synced_at"] = now_iso
+                if normalised.get("webhook_event_type"):
+                    meta["last_webhook_event_type"] = normalised.get("webhook_event_type")
+                cart_row.extra_metadata = meta
+                if commit:
+                    try:
+                        self.db.commit()
+                    except Exception:
+                        self.db.rollback()
+                        raise
+                return cart_row
             cart_row.status = normalised["status"]
             if _abandoned_cart_field_present(keys, "total", "sub_total", "amount", "amounts") or not keys:
                 cart_row.total = normalised["total"]
@@ -3315,7 +3467,8 @@ class StoreSyncService:
                 cart_row.customer_info = normalised["customer_info"]
             if _abandoned_cart_field_present(keys, "items", "line_items") or not keys:
                 cart_row.line_items = normalised["line_items"]
-            cart_row.is_abandoned = True
+            if not _cart_row_is_terminal(cart_row, meta):
+                cart_row.is_abandoned = True
             if _abandoned_cart_field_present(keys, "checkout_url", "url") or not keys:
                 cart_row.checkout_url = normalised["checkout_url"] or cart_row.checkout_url
             if _abandoned_cart_field_present(keys, "reference_id", "number", "code") or not keys:
@@ -3325,15 +3478,18 @@ class StoreSyncService:
             ):
                 cart_row.customer_name = normalised["customer_name"]
             cart_row.source = "salla"
-            meta = dict(cart_row.extra_metadata or {})
             if _abandoned_cart_field_present(keys, "created_at") or not keys:
                 meta["created_at"] = normalised.get("created_at") or meta.get("created_at")
-            if _abandoned_cart_field_present(
-                keys, "abandoned_at", "abandonedAt", "left_at", "created_at", "updated_at"
-            ) or not keys:
-                meta["abandoned_at"] = abandoned_iso or meta.get("abandoned_at")
+            if abandoned_iso and (
+                _abandoned_cart_field_present(keys, "abandoned_at", "abandonedAt", "left_at") or not keys
+            ):
+                meta["abandoned_at"] = abandoned_iso
             if _abandoned_cart_field_present(keys, "status", "cart_status") or not keys:
                 meta["cart_status"] = normalised.get("cart_status") or meta.get("cart_status")
+            if normalised.get("currency") and (
+                _abandoned_cart_field_present(keys, "total", "sub_total", "amount", "amounts") or not keys
+            ):
+                meta["currency"] = normalised.get("currency")
             meta["last_synced_at"] = now_iso
             meta["source_kind"] = "abandoned_cart"
             meta["raw_cart_id"] = normalised.get("raw_cart_id")
@@ -3341,6 +3497,18 @@ class StoreSyncService:
                 meta["last_webhook_event_type"] = normalised.get("webhook_event_type")
             cart_row.extra_metadata = meta
         else:
+            create_meta = {
+                "created_at": normalised.get("created_at") or now_iso,
+                "cart_status": normalised.get("cart_status"),
+                "last_synced_at": now_iso,
+                "source_kind": "abandoned_cart",
+                "raw_cart_id": normalised.get("raw_cart_id"),
+                "webhook_event_type": normalised.get("webhook_event_type"),
+            }
+            if abandoned_iso:
+                create_meta["abandoned_at"] = abandoned_iso
+            if normalised.get("currency"):
+                create_meta["currency"] = normalised.get("currency")
             cart_row = Order(
                 tenant_id=self.tenant_id,
                 external_id=ext_id,
@@ -3353,22 +3521,17 @@ class StoreSyncService:
                 checkout_url=normalised["checkout_url"],
                 is_abandoned=True,
                 source="salla",
-                extra_metadata={
-                    "created_at": normalised.get("created_at") or now_iso,
-                    "abandoned_at": abandoned_iso,
-                    "cart_status": normalised.get("cart_status"),
-                    "last_synced_at": now_iso,
-                    "source_kind": "abandoned_cart",
-                    "raw_cart_id": normalised.get("raw_cart_id"),
-                    "webhook_event_type": normalised.get("webhook_event_type"),
-                },
+                extra_metadata=create_meta,
             )
             self.db.add(cart_row)
-        try:
-            self.db.commit()
-        except Exception:
-            self.db.rollback()
-            raise
+        if commit:
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        else:
+            self.db.flush()
         return cart_row
 
     def _cancel_abandoned_cart_recovery_for_cart(self, *, cart_row: Any, normalised: Dict[str, Any], reason: str) -> Dict[str, int]:
@@ -3446,7 +3609,13 @@ class StoreSyncService:
             logger.info("tenant=%s abandoned_cart webhook ignored event=%s", self.tenant_id, webhook_event_type)
             return
         payload_keys = _abandoned_cart_payload_keys(payload)
-        cart_row = self._upsert_abandoned_cart_row(normalised, payload_keys=payload_keys)
+        needs_emit = event_kind == "created"
+        cart_row = self._upsert_abandoned_cart_row(
+            normalised,
+            payload_keys=payload_keys,
+            event_kind=event_kind,
+            commit=not needs_emit,
+        )
         logger.info("tenant=%s abandoned_cart upserted external_id=%s kind=%s event=%s", self.tenant_id, ext_id, event_kind, webhook_event_type)
         if event_kind == "purchased":
             self._cancel_abandoned_cart_recovery_for_cart(cart_row=cart_row, normalised=normalised, reason="abandoned_cart_purchased")
@@ -3463,11 +3632,24 @@ class StoreSyncService:
             return
         if event_kind == "updated":
             return
+        if not needs_emit:
+            return
         try:
             from services.cart_recovery_emitter import emit_cart_abandoned_if_new
-            emit_cart_abandoned_if_new(self.db, tenant_id=self.tenant_id, cart_row=cart_row, normalised=normalised, source="webhook")
+            emit_cart_abandoned_if_new(
+                self.db,
+                tenant_id=self.tenant_id,
+                cart_row=cart_row,
+                normalised=normalised,
+                source="webhook",
+                commit=True,
+            )
         except Exception:
             logger.exception("[StoreSync] cart_abandoned emit failed tenant=%s cart=%s", self.tenant_id, ext_id)
+            try:
+                self.db.rollback()
+            except Exception:  # noqa: silent-ok — best-effort rollback after emit failure
+                pass
 
     async def handle_special_offer_webhook(self, payload: Dict, *, webhook_event_type: str | None = None) -> None:
         normalised = _normalise_special_offer(payload)
@@ -3482,7 +3664,9 @@ class StoreSyncService:
             "inbound_only": True,
             "nahla_to_salla_supported": False,
             "last_webhook_event_type": webhook_event_type,
-            "raw": normalised.get("raw") or {},
+            "offer_type": normalised.get("offer_type"),
+            "message": normalised.get("message"),
+            "discount_type": normalised.get("discount_type"),
         }
         if existing is not None:
             existing.name = normalised.get("name") or existing.name
@@ -3510,7 +3694,7 @@ class StoreSyncService:
                 tenant_id=self.tenant_id,
                 name=normalised.get("name") or f"Salla offer {offer_id}",
                 description=normalised.get("description"),
-                promotion_type=normalised.get("promotion_type") or "percentage",
+                promotion_type=normalised.get("promotion_type") or normalised.get("offer_type") or "special_offer",
                 discount_value=normalised.get("discount_value"),
                 conditions=normalised.get("conditions") or {},
                 starts_at=normalised.get("starts_at"),
@@ -3545,6 +3729,16 @@ class StoreSyncService:
         from core.obs import EVENTS, log_event  # noqa: PLC0415
         from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
 
+        if webhook_event_type == "order.status.updated" and isinstance(payload, dict):
+            if not isinstance(payload.get("order"), dict):
+                log_event(
+                    EVENTS.ORDER_UPSERT_ERROR,
+                    tenant_id=self.tenant_id,
+                    reason="order_status_missing_order",
+                )
+                raise RuntimeError("order_status_missing_order")
+
+        payload, payload_keys = _unwrap_salla_order_webhook_payload(payload, webhook_event_type)
         normalised = _normalise_order(payload)
         ext_id     = normalised["external_id"]
         if not ext_id:
@@ -3574,14 +3768,13 @@ class StoreSyncService:
         if order_row is not None:
             lifecycle_prev_status = order_row.status
             prev_status = order_row.status
-            order_row.status                = normalised["status"]
-            order_row.total                 = normalised["total"]
-            order_row.customer_info         = normalised["customer_info"]
-            order_row.line_items            = normalised["line_items"]
-            order_row.is_abandoned          = normalised["is_abandoned"]
-            order_row.external_order_number = normalised["external_order_number"]
-            if normalised["customer_name"]:
-                order_row.customer_name = normalised["customer_name"]
+            _apply_order_webhook_fields(
+                order_row,
+                normalised,
+                payload_keys=payload_keys,
+                webhook_event_type=webhook_event_type,
+                is_new=False,
+            )
             order_row.source = webhook_source
             order_row.extra_metadata = _merge_order_extra_metadata(
                 order_row.extra_metadata, normalised,
@@ -3634,14 +3827,13 @@ class StoreSyncService:
                     raise
                 lifecycle_prev_status = order_row.status
                 prev_status = order_row.status
-                order_row.status                = normalised["status"]
-                order_row.total                 = normalised["total"]
-                order_row.customer_info         = normalised["customer_info"]
-                order_row.line_items            = normalised["line_items"]
-                order_row.is_abandoned          = normalised["is_abandoned"]
-                order_row.external_order_number = normalised["external_order_number"]
-                if normalised["customer_name"]:
-                    order_row.customer_name = normalised["customer_name"]
+                _apply_order_webhook_fields(
+                    order_row,
+                    normalised,
+                    payload_keys=payload_keys,
+                    webhook_event_type=webhook_event_type,
+                    is_new=False,
+                )
                 order_row.source = webhook_source
                 order_row.extra_metadata = _merge_order_extra_metadata(
                     order_row.extra_metadata, normalised,

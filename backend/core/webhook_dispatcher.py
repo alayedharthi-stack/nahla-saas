@@ -153,6 +153,7 @@ async def _dispatch_salla(db: Session, event) -> None:
     from services.salla_realtime_events import (  # noqa: PLC0415
         SALLA_CUSTOMER_LOGIN_EVENTS,
         SALLA_CUSTOMER_WEBHOOK_EVENTS,
+        SALLA_MERCHANT_WEBHOOK_DEPRECATED_EVENTS,
         SALLA_ORDER_WEBHOOK_EVENTS,
         SALLA_PRODUCT_DELETE_WEBHOOK_EVENTS,
         SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS,
@@ -175,7 +176,7 @@ async def _dispatch_salla(db: Session, event) -> None:
             logger.debug("[Dispatcher] outcome_tracker raised (non-fatal): %s", _ot_exc)
         return
 
-    if event_type in SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS:
+    if event_type in SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS | SALLA_MERCHANT_WEBHOOK_DEPRECATED_EVENTS:
         await svc.handle_product_webhook(
             data,
             webhook_event_type=event_type,

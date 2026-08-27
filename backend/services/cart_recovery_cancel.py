@@ -73,15 +73,10 @@ logger = logging.getLogger("nahla.cart_recovery_cancel")
 # this just means we'd over-stamp by a few entries.
 _MAX_RECOVERY_STAGES = 8
 
-# Statuses that count as "the customer paid / placed an order". Mirrors
-# the predicate used in `automation_emitters._customer_has_completed_order_since`
-# so both code paths agree on what conversion looks like.
-_PURCHASE_STATUSES_EXCLUDED = frozenset({
-    "cancelled", "refunded", "pending_confirmation",
-    # Pre-payment states from automation_emitters._PENDING_PAYMENT_STATUSES.
-    # An order in these states is NOT a purchase yet — keep chasing the cart.
-    "pending", "pending_payment", "payment_pending", "awaiting_payment",
-    "draft", "new",
+# Positive purchase evidence — unknown statuses are NOT purchases.
+_PURCHASE_STATUSES_POSITIVE = frozenset({
+    "completed", "delivered", "paid", "shipped", "out_for_delivery",
+    "in_progress", "processing", "ready_for_pickup", "under_review",
 })
 
 
@@ -156,6 +151,13 @@ def cancel_recovery_for_customer(
         # Idempotency: if we've already cancelled this row, leave it alone.
         if payload.get("recovery_converted_at"):
             continue
+        if matched_cart_external_id:
+            ev_cart = str(payload.get("cart_external_id") or "").strip()
+            ev_raw = str(payload.get("cart_id") or "").strip()
+            wanted = str(matched_cart_external_id).strip()
+            wanted_raw = wanted.replace("cart-", "", 1) if wanted.startswith("cart-") else wanted
+            if ev_cart and ev_cart != wanted and ev_raw != wanted_raw:
+                continue
         payload["recovery_converted_at"]   = now_iso
         payload["recovery_cancel_reason"]  = reason
         payload["recovery_cancel_order"]   = {
@@ -336,12 +338,7 @@ def cancel_recovery_for_customer(
 
 
 def order_is_a_purchase(status: Optional[str]) -> bool:
-    """
-    Cheap predicate the order webhook uses to decide whether to invoke
-    the cancel hook. We must NOT cancel on draft / pending-payment
-    statuses — those just mean the customer started checkout, not that
-    they paid. The set is the inverse of ``_PURCHASE_STATUSES_EXCLUDED``.
-    """
+    """Return True only when the status is a documented positive purchase signal."""
     if not status:
         return False
-    return status not in _PURCHASE_STATUSES_EXCLUDED
+    return str(status).strip().lower() in _PURCHASE_STATUSES_POSITIVE

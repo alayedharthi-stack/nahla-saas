@@ -141,14 +141,14 @@ SALLA_COMMERCE_WEBHOOK_REQUIRED_EVENTS = SALLA_MERCHANT_WEBHOOK_ACTIVATION_CHECK
 
 
 def event_registry_contract() -> dict[str, object]:
+    merchant_active = sorted(SALLA_MERCHANT_WEBHOOK_ACTIVATION_CHECKLIST)
+    merchant_deprecated = sorted(SALLA_MERCHANT_WEBHOOK_DEPRECATED_EVENTS)
+    app_functions_only = sorted(SALLA_APP_FUNCTIONS_ONLY_EVENTS)
+    compatibility_aliases = sorted(SALLA_WEBHOOK_COMPATIBILITY_ALIASES)
     return {
-        "merchant_active": sorted(
-            SALLA_MERCHANT_WEBHOOK_ACTIVATION_CHECKLIST
-            + tuple(sorted(SALLA_MERCHANT_WEBHOOK_DEPRECATED_EVENTS))
-            + tuple(sorted(SALLA_ABANDONED_CART_UPDATE_EVENTS))
-        ),
-        "merchant_deprecated": sorted(SALLA_MERCHANT_WEBHOOK_DEPRECATED_EVENTS),
-        "app_functions_only": sorted(SALLA_APP_FUNCTIONS_ONLY_EVENTS),
-        "compatibility_aliases": sorted(SALLA_WEBHOOK_COMPATIBILITY_ALIASES),
+        "merchant_active": merchant_active,
+        "merchant_deprecated": merchant_deprecated,
+        "app_functions_only": app_functions_only,
+        "compatibility_aliases": compatibility_aliases,
         "activation_checklist": list(SALLA_MERCHANT_WEBHOOK_ACTIVATION_CHECKLIST),
     }
