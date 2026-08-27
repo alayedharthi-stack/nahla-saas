@@ -1077,8 +1077,8 @@ class TestMetricLogs:
             log_metric_success(tenant_id=10, store_id="S-METRIC")
 
         assert any(
-            "[SALLA METRIC] token_refresh_success" in r.message
-            and "tenant_id=10" in r.message
+            "event=salla_token_refresh_success" in r.message
+            and "tenant_hash=" in r.message
             for r in caplog.records
         ), f"Expected [SALLA METRIC] token_refresh_success in logs. Got: {[r.message for r in caplog.records]}"
 
@@ -1091,8 +1091,8 @@ class TestMetricLogs:
             log_metric_failed(tenant_id=20, store_id="S-METRIC", attempts=2)
 
         assert any(
-            "[SALLA METRIC] token_refresh_failed" in r.message
-            and "tenant_id=20" in r.message
+            "event=salla_token_refresh_failed" in r.message
+            and "tenant_hash=" in r.message
             and "attempts=2" in r.message
             for r in caplog.records
         )
@@ -1109,8 +1109,8 @@ class TestMetricLogs:
             )
 
         assert any(
-            "[SALLA METRIC] token_needs_reauth" in r.message
-            and "tenant_id=30" in r.message
+            "event=salla_token_refresh_needs_reauth" in r.message
+            and "tenant_hash=" in r.message
             for r in caplog.records
         )
 
@@ -1140,10 +1140,10 @@ class TestMetricLogs:
 
         success_logs = [
             r.message for r in caplog.records
-            if "[SALLA METRIC] token_refresh_success" in r.message
+            if "event=salla_token_refresh_success" in r.message
         ]
         assert len(success_logs) >= 1, (
-            f"[SALLA METRIC] token_refresh_success not found in logs. "
+            "event=salla_token_refresh_success not found in logs. "
             f"Records: {[r.message for r in caplog.records]}"
         )
 
@@ -1168,7 +1168,7 @@ class TestMetricLogs:
             asyncio.run(_refresh_all_salla_tokens())
 
         assert any(
-            "[SALLA METRIC] token_refresh_failed" in r.message
+            "event=salla_token_refresh_failed" in r.message
             for r in caplog.records
         )
 

@@ -803,9 +803,10 @@ class SallaAdapter(BaseStoreAdapter):
                             cfg.pop("needs_reauth_at", None)
                             intg.enabled = False
                             logger.warning(
-                                "[Salla Token] tenant=%s integration_id=%s superseded by "
-                                "newer integration_id=%s — needs_reauth suppressed",
-                                self._tenant_id, intg.id, superseder.id,
+                                "[Salla Token] superseded event=salla_token_needs_reauth_superseded tenant_hash=%s integration_hash=%s superseder_hash=%s",
+                                hash_identifier(self._tenant_id),
+                                hash_identifier(intg.id),
+                                hash_identifier(superseder.id),
                             )
                         except Exception:
                             pass
@@ -816,17 +817,20 @@ class SallaAdapter(BaseStoreAdapter):
                     intg.config = cfg
                     _db.commit()
                     logger.warning(
-                        "[Salla Token] needs_reauth=%s tenant=%s integration_id=%s "
-                        "reason=%s attempts=%s — sync paused until merchant re-authorises",
-                        bool(cfg.get("needs_reauth")), self._tenant_id, intg.id,
-                        reason, cfg.get("token_refresh_attempts"),
+                        "[Salla Token] needs_reauth_set event=salla_token_needs_reauth_set needs_reauth=%s tenant_hash=%s integration_hash=%s reason=%s attempts=%s",
+                        bool(cfg.get("needs_reauth")),
+                        hash_identifier(self._tenant_id),
+                        hash_identifier(intg.id),
+                        reason,
+                        cfg.get("token_refresh_attempts"),
                     )
             finally:
                 _db.close()
         except Exception as exc:
             logger.warning(
-                "[Salla Token] failed to persist needs_reauth tenant=%s: %s",
-                self._tenant_id, exc,
+                "[Salla Token] needs_reauth_persist_failed event=salla_token_needs_reauth_persist_failed error_class=%s tenant_hash=%s",
+                safe_exception_class(exc),
+                hash_identifier(self._tenant_id),
             )
 
     def _record_refresh_failure(self, error_msg: str) -> None:
@@ -981,13 +985,19 @@ class SallaAdapter(BaseStoreAdapter):
                     intg.config = cfg
                     db.commit()
                     logger.info(
-                        "[Salla Token] tokens persisted → integration_id=%s tenant=%s",
-                        intg.id, self._tenant_id,
+                        "[Salla Token] tokens_persisted event=salla_token_refresh_persisted tenant_hash=%s integration_hash=%s",
+                        hash_identifier(self._tenant_id),
+                        hash_identifier(intg.id),
                     )
             finally:
                 db.close()
         except Exception as exc:
-            logger.warning("[Salla Token] failed to persist refreshed tokens: %s", exc)
+            logger.warning(
+                "[Salla Token] persist_failed event=salla_token_refresh_persist_failed error_class=%s tenant_hash=%s integration_hash=%s",
+                safe_exception_class(exc),
+                hash_identifier(self._tenant_id),
+                hash_identifier(self._integration_id),
+            )
 
     async def _get(self, path: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
