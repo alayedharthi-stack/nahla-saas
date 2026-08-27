@@ -273,8 +273,6 @@ def _run_delete_401_flow(
 ):
     if integration_id is None:
         integration_id = _seed_integration(engine)
-    else:
-        _seed_integration(engine)
     adapter = _adapter_for_integration(integration_id, engine)
     client = _RoutingHttpClient(delete_handler, post_handler)
     factory = _session_factory(engine)
