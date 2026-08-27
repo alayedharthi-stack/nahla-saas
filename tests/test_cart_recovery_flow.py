@@ -305,6 +305,7 @@ def test_emit_cart_abandoned_if_new_creates_event_with_checkout_url():
         "line_items":    [{"name": "فستان"}],
         "total":         "248.00",
         "created_at":    "2026-04-20T10:00:00+00:00",
+        "abandoned_at":  "2026-04-20T10:00:00+00:00",
     }
 
     event_id = emit_cart_abandoned_if_new(
@@ -344,6 +345,7 @@ def test_emit_cart_abandoned_if_new_is_idempotent():
         "line_items":    [],
         "total":         "100.00",
         "created_at":    "2026-04-20T10:00:00+00:00",
+        "abandoned_at":  "2026-04-20T10:00:00+00:00",
     }
 
     first = emit_cart_abandoned_if_new(
@@ -392,6 +394,7 @@ def test_emit_cart_abandoned_if_new_skips_carts_without_phone():
         "line_items":    [],
         "total":         "0.00",
         "created_at":    "2026-04-20T10:00:00+00:00",
+        "abandoned_at":  "2026-04-20T10:00:00+00:00",
     }
 
     event_id = emit_cart_abandoned_if_new(
@@ -421,6 +424,7 @@ def test_emit_cart_abandoned_re_emits_when_marker_points_to_purged_event():
         "line_items":    [],
         "total":         "100.00",
         "created_at":    "2026-04-20T10:00:00+00:00",
+        "abandoned_at":  "2026-04-20T10:00:00+00:00",
     }
 
     event_id = emit_cart_abandoned_if_new(
