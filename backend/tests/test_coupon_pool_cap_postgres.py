@@ -83,13 +83,19 @@ def _make_fake_adapter(adapter_calls: list[dict], calls_lock: threading.Lock):
 def _seed_tenant(session: Session, tenant_id: int) -> None:
     if session.get(Tenant, tenant_id) is None:
         session.add(Tenant(id=tenant_id, name=f"Coupon PG Tenant {tenant_id}"))
-    if session.query(TenantSettings).filter_by(tenant_id=tenant_id).first() is None:
-        session.add(
-            TenantSettings(
-                tenant_id=tenant_id,
-                ai_settings={"allowed_discount_levels": 30},
-            )
-        )
+
+    settings = session.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+    if settings is None:
+        settings = TenantSettings(tenant_id=tenant_id)
+        session.add(settings)
+
+    # Postgres integration tests reuse tenant ids; reset coupon dashboard overrides
+    # (warm_pool target 0, disabled levels, on_demand_only) left by other suites.
+    meta = dict(settings.extra_metadata or {})
+    meta.pop("coupons_dashboard", None)
+    settings.extra_metadata = meta or None
+    settings.ai_settings = {"allowed_discount_levels": 30}
+
     session.commit()
 
 
