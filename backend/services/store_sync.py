@@ -74,7 +74,7 @@ from models import (  # noqa: E402
     StoreKnowledgeSnapshot,
     TenantSettings,
 )
-from services.salla_datetime import parse_salla_datetime_to_utc, salla_datetime_to_utc_iso
+from services.salla_datetime import parse_salla_datetime_to_utc, salla_datetime_to_naive_utc, salla_datetime_to_utc_iso
 from services.customer_intelligence import (  # noqa: E402
     CustomerIntelligenceService,
     extract_order_datetime as intelligence_extract_order_datetime,
@@ -1018,24 +1018,17 @@ def _flatten_salla_datetime(value: Any) -> str:
     return salla_datetime_to_utc_iso(value)
 
 
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
 def _extract_abandoned_at_iso(raw: Any) -> str:
-    """Return an explicit abandonment timestamp only.
+    """Return an explicit provider abandonment timestamp only.
 
-    Official Salla fields (Merchant webhook doc-433812, List Abandoned
-    Carts API api-5394138):
-
-    * `created_at` — cart creation timestamp
-    * `updated_at` — last cart-info update
-    * `age_in_minutes` — "the time difference between cart's
-      created_at and time now in minutes"
-
-    Therefore `created_at + age_in_minutes` is the provider observation
-    instant, not an abandonment instant. Observing the same cart later
-    with a larger age moves that sum. This helper does not store or
-    return that sum as abandoned_at.
-
-    Compat: `abandoned_at` / `abandonedAt` / `left_at` are used
-    unchanged when a payload actually carries them.
+    Cart `created_at`, `updated_at`, and `created_at + age_in_minutes`
+    are not abandonment instants. Official Salla webhooks/API do not
+    document `abandoned_at`; this helper only reads that key when a
+    payload actually carries it (compat).
     """
     if not isinstance(raw, dict):
         return ""
@@ -1044,6 +1037,42 @@ def _extract_abandoned_at_iso(raw: Any) -> str:
         if iso:
             return iso
     return ""
+
+
+ABANDONMENT_ANCHOR_SOURCES = frozenset({
+    "provider_explicit",
+    "provider_webhook_event",
+    "first_webhook_observation",
+    "first_poller_observation",
+})
+
+
+def _resolve_first_abandoned_observation_candidate(
+    *,
+    normalised: Dict[str, Any],
+    observation_kind: str,
+    envelope_created_at: Any = None,
+    original_received_at: Any = None,
+    poller_observed_at: Any = None,
+) -> tuple[str, str]:
+    """Candidate for first verified abandoned observation. Does not claim."""
+    explicit = (normalised.get("abandoned_at") or "").strip()
+    if explicit and salla_datetime_to_naive_utc(explicit) is not None:
+        return explicit, "provider_explicit"
+    if observation_kind == "webhook":
+        envelope_iso = salla_datetime_to_utc_iso(envelope_created_at)
+        if envelope_iso:
+            return envelope_iso, "provider_webhook_event"
+        received_iso = salla_datetime_to_utc_iso(original_received_at)
+        if received_iso:
+            return received_iso, "first_webhook_observation"
+        return "", ""
+    if observation_kind == "poller":
+        observed_iso = salla_datetime_to_utc_iso(poller_observed_at)
+        if observed_iso:
+            return observed_iso, "first_poller_observation"
+        return "", ""
+    return "", ""
 
 
 def _normalise_abandoned_cart(raw: Any) -> Dict:
@@ -2304,6 +2333,7 @@ class StoreSyncService:
         try:
             raw_list = await adapter.get_abandoned_carts() or []
             result["fetched"] = True
+            poller_observed_at = _utc_now()
         except Exception as exc:
             logger.warning(
                 "tenant=%s abandoned-cart fetch failed (%s) — KEEPING existing rows visible",
@@ -2492,6 +2522,13 @@ class StoreSyncService:
                     emit_normalised = _normalise_abandoned_cart(raw)
                 except Exception:
                     continue
+                cand_iso, cand_src = _resolve_first_abandoned_observation_candidate(
+                    normalised=emit_normalised,
+                    observation_kind="poller",
+                    poller_observed_at=poller_observed_at,
+                )
+                emit_normalised["observation_candidate_iso"] = cand_iso
+                emit_normalised["observation_candidate_source"] = cand_src
                 ext_id = emit_normalised.get("external_id") or ""
                 if not ext_id or ext_id not in seen_external_ids:
                     continue
@@ -3645,6 +3682,8 @@ class StoreSyncService:
         *,
         event_kind: str = "created",
         webhook_event_type: str | None = None,
+        envelope_created_at: Any = None,
+        original_received_at: Any = None,
     ) -> None:
         normalised = _normalise_abandoned_cart(payload)
         normalised["webhook_event_type"] = webhook_event_type
@@ -3653,8 +3692,16 @@ class StoreSyncService:
             logger.info("tenant=%s abandoned_cart webhook ignored event=%s", self.tenant_id, webhook_event_type)
             return
         payload_keys = _abandoned_cart_payload_keys(payload)
+        candidate_iso, candidate_source = _resolve_first_abandoned_observation_candidate(
+            normalised=normalised,
+            observation_kind="webhook",
+            envelope_created_at=envelope_created_at,
+            original_received_at=original_received_at,
+        )
+        normalised["observation_candidate_iso"] = candidate_iso
+        normalised["observation_candidate_source"] = candidate_source
         needs_emit = event_kind == "created"
-        has_valid_anchor = bool(normalised.get("abandoned_at"))
+        has_valid_anchor = bool(candidate_iso)
         cart_row = self._upsert_abandoned_cart_row(
             normalised,
             payload_keys=payload_keys,

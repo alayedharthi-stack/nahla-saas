@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+
+from services.salla_datetime import salla_datetime_to_utc_iso
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nahla.cart_recovery_emitter")
@@ -184,6 +186,8 @@ def emit_cart_abandoned_if_new(
         return None
 
     meta = dict(getattr(cart_row, "extra_metadata", None) or {})
+    if meta.get("recovered_at") or str(meta.get("cart_status") or "").strip().lower() == "purchased":
+        return None
     existing_id = _existing_event_id(
         db, tenant_id=tenant_id, marker=meta.get("recovery_event_id"),
     )
@@ -226,6 +230,33 @@ def emit_cart_abandoned_if_new(
         )
         return None
 
+    allowed_sources = {
+        "provider_explicit",
+        "provider_webhook_event",
+        "first_webhook_observation",
+        "first_poller_observation",
+    }
+    anchor_iso = str(meta.get("first_provider_abandoned_observed_at") or "").strip()
+    anchor_source = str(meta.get("abandonment_anchor_source") or "").strip()
+    if not anchor_iso or anchor_source not in allowed_sources:
+        candidate_iso = str(normalised.get("observation_candidate_iso") or "").strip()
+        candidate_source = str(normalised.get("observation_candidate_source") or "").strip()
+        if not candidate_iso or candidate_source not in allowed_sources:
+            explicit = normalised.get("abandoned_at") or meta.get("abandoned_at")
+            candidate_iso = salla_datetime_to_utc_iso(explicit) if explicit else ""
+            candidate_source = "provider_explicit" if candidate_iso else ""
+        if not candidate_iso or candidate_source not in allowed_sources:
+            logger.warning(
+                "[CartRecoveryEmitter] tenant=%s cart=%s missing first abandoned observation — skipping emit",
+                tenant_id,
+                cart_external,
+            )
+            return None
+        meta["first_provider_abandoned_observed_at"] = candidate_iso
+        meta["abandonment_anchor_source"] = candidate_source
+        anchor_iso = candidate_iso
+        anchor_source = candidate_source
+
     payload: Dict[str, Any] = {
         "source":               source,
         "cart_id":              raw_cart_id,
@@ -235,19 +266,15 @@ def emit_cart_abandoned_if_new(
         "items":                normalised.get("line_items") or [],
         "phone":                phone,
         "customer_name":        normalised.get("customer_name") or "",
-        "abandoned_at":         meta.get("abandoned_at") or normalised.get("abandoned_at"),
+        "abandoned_at":         anchor_iso,
+        "abandonment_anchor_source": anchor_source,
     }
 
     try:
-        abandoned_at_raw = (
-            normalised.get("abandoned_at")
-            or meta.get("abandoned_at")
-            or payload.get("abandoned_at")
-        )
-        event_created_at = _parse_abandoned_at_naive_utc(abandoned_at_raw)
+        event_created_at = _parse_abandoned_at_naive_utc(anchor_iso)
         if event_created_at is None:
             logger.warning(
-                "[CartRecoveryEmitter] tenant=%s cart=%s invalid abandoned_at anchor — skipping emit",
+                "[CartRecoveryEmitter] tenant=%s cart=%s invalid first-observation anchor — skipping emit",
                 tenant_id,
                 cart_external,
             )

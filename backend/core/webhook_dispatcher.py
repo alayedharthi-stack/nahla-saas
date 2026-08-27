@@ -207,6 +207,8 @@ async def _dispatch_salla(db: Session, event) -> None:
             data,
             event_kind=cart_kind,
             webhook_event_type=event_type,
+            envelope_created_at=payload.get("created_at"),
+            original_received_at=getattr(event, "received_at", None),
         )
         return
 

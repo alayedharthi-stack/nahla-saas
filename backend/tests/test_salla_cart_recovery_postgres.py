@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
 
@@ -100,8 +102,7 @@ def test_concurrent_emit_creates_single_event(postgres_engine, monkeypatch):
                 "raw_cart_id": "pg-1",
                 "customer_info": {"mobile": "+966500700700"},
                 "customer_name": "PG Shopper",
-                "abandoned_at": "2026-04-19T09:00:00",
-            }
+                      }
             barrier.wait(timeout=5)
             event_id = emit_cart_abandoned_if_new(
                 session,
@@ -209,8 +210,7 @@ def test_purchase_blocks_emit(postgres_engine):
             "external_id": "cart-pg-purchased",
             "raw_cart_id": "pg-purchased",
             "customer_info": {"mobile": "+966500700700"},
-            "abandoned_at": "2026-04-19T09:00:00",
-        }
+            }
         event_id = emit_cart_abandoned_if_new(
             session, tenant_id=TEST_TENANT, cart_row=cart, normalised=normalised, commit=True,
         )
@@ -251,7 +251,10 @@ def test_webhook_and_poller_emit_single_event(postgres_engine):
         try:
             svc = StoreSyncService(session, TEST_TENANT)
             barrier.wait(timeout=5)
-            asyncio.run(svc.handle_abandoned_cart_webhook(raw, event_kind="created", webhook_event_type="abandoned.cart"))
+            asyncio.run(svc.handle_abandoned_cart_webhook(
+                raw, event_kind="created", webhook_event_type="abandoned.cart",
+                original_received_at=datetime(2026, 4, 19, 9, 0, tzinfo=timezone.utc),
+            ))
             errors["webhook"] = {"ok": True}
         except Exception as exc:
             errors["webhook"] = {"ok": False, "exc": exc}
@@ -400,4 +403,199 @@ def test_marker_failure_rolls_back_event_then_retry_succeeds(postgres_engine):
         assert events[0].id == marker
     finally:
         final.close()
+
+
+def test_purchase_during_emit_window_cancels_recovery(postgres_engine, monkeypatch):
+    """H3: purchase enters while emitter holds the cart lock; recovery must not stay sendable."""
+    from core.automation_engine import emit_automation_event as real_emit
+    from services.store_sync import StoreSyncService
+
+    Session = sessionmaker(bind=postgres_engine)
+    session = Session()
+    try:
+        if session.get(Tenant, TEST_TENANT) is None:
+            session.add(Tenant(id=TEST_TENANT, name="Cart Recovery PG"))
+            session.commit()
+        cart_token = f"pgwin{uuid.uuid4().hex[:8]}"
+        external_id = f"cart-{cart_token}"
+        cart = Order(
+            tenant_id=TEST_TENANT,
+            external_id=external_id,
+            status="abandoned",
+            total="90",
+            is_abandoned=True,
+            customer_info={"mobile": "+966500700733"},
+            extra_metadata={"abandoned_at": "2026-04-19T09:00:00"},
+        )
+        session.add(cart)
+        session.commit()
+        cart_id = cart.id
+    finally:
+        session.close()
+
+    locked = threading.Event()
+    resume = threading.Event()
+
+    def _gated_emit(*args, **kwargs):
+        locked.set()
+        assert resume.wait(timeout=8)
+        return real_emit(*args, **kwargs)
+
+    monkeypatch.setattr("core.automation_engine.emit_automation_event", _gated_emit)
+    errors = {}
+    normalised = {
+        "external_id": external_id,
+        "raw_cart_id": cart_token,
+        "customer_info": {"mobile": "+966500700733"},
+        "customer_name": "PG Shopper",
+        "abandoned_at": "2026-04-19T09:00:00",
+        "observation_candidate_iso": "2026-04-19T09:00:00",
+        "observation_candidate_source": "provider_explicit",
+    }
+
+    def _emit():
+        s = Session()
+        try:
+            row = s.get(Order, cart_id)
+            event_id = emit_cart_abandoned_if_new(
+                s, tenant_id=TEST_TENANT, cart_row=row, normalised=normalised,
+                source="postgres_test", commit=True,
+            )
+            errors["emit"] = {"ok": True, "id": event_id}
+        except Exception as exc:
+            errors["emit"] = {"ok": False, "exc": exc}
+        finally:
+            s.close()
+
+    def _purchase():
+        s = Session()
+        try:
+            svc = StoreSyncService(s, TEST_TENANT)
+            asyncio = __import__("asyncio")
+            asyncio.run(svc.handle_abandoned_cart_webhook(
+                {
+                    "id": cart_token,
+                    "status": "purchased",
+                    "customer": {"mobile": "+966500700733"},
+                    "total": {"amount": 90, "currency": "SAR"},
+                },
+                event_kind="purchased",
+                webhook_event_type="abandoned.cart.purchased",
+            ))
+            errors["purchase"] = {"ok": True}
+        except Exception as exc:
+            errors["purchase"] = {"ok": False, "exc": exc}
+        finally:
+            s.close()
+
+    t_emit = threading.Thread(target=_emit)
+    t_emit.start()
+    assert locked.wait(timeout=8)
+    t_buy = threading.Thread(target=_purchase)
+    t_buy.start()
+    time.sleep(0.4)
+    resume.set()
+    t_emit.join(timeout=10)
+    t_buy.join(timeout=10)
+    assert errors.get("emit", {}).get("ok") is True, errors.get("emit")
+    assert errors.get("purchase", {}).get("ok") is True, errors.get("purchase")
+
+    verify = Session()
+    try:
+        cart = verify.get(Order, cart_id)
+        assert cart.is_abandoned is False
+        events = [
+            e for e in verify.query(AutomationEvent).filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned").all()
+            if (e.payload or {}).get("cart_external_id") == external_id
+        ]
+        assert len(events) == 1
+        assert events[0].processed is True
+        assert cart.extra_metadata.get("recovery_event_id") == events[0].id
+    finally:
+        verify.close()
+
+
+def test_purchase_first_two_connections_skips_emit(postgres_engine):
+    """H3: if purchase commits first, emitter on a second connection emits nothing."""
+    from services.store_sync import StoreSyncService
+
+    Session = sessionmaker(bind=postgres_engine)
+    session = Session()
+    try:
+        if session.get(Tenant, TEST_TENANT) is None:
+            session.add(Tenant(id=TEST_TENANT, name="Cart Recovery PG"))
+            session.commit()
+        cart_token = f"pgfirst{uuid.uuid4().hex[:8]}"
+        external_id = f"cart-{cart_token}"
+        cart = Order(
+            tenant_id=TEST_TENANT,
+            external_id=external_id,
+            status="abandoned",
+            total="40",
+            is_abandoned=True,
+            customer_info={"mobile": "+966500700744"},
+            extra_metadata={"abandoned_at": "2026-04-19T09:00:00"},
+        )
+        session.add(cart)
+        session.commit()
+        cart_id = cart.id
+    finally:
+        session.close()
+
+    barrier = threading.Barrier(2)
+    errors = {}
+
+    def _purchase():
+        s = Session()
+        try:
+            svc = StoreSyncService(s, TEST_TENANT)
+            __import__("asyncio").run(svc.handle_abandoned_cart_webhook(
+                {"id": cart_token, "status": "purchased", "customer": {"mobile": "+966500700744"}},
+                event_kind="purchased", webhook_event_type="abandoned.cart.purchased",
+            ))
+            errors["purchase"] = {"ok": True}
+        except Exception as exc:
+            errors["purchase"] = {"ok": False, "exc": exc}
+        finally:
+            s.close()
+        barrier.wait(timeout=8)
+
+    def _emit():
+        barrier.wait(timeout=8)
+        s = Session()
+        try:
+            row = s.get(Order, cart_id)
+            event_id = emit_cart_abandoned_if_new(
+                s, tenant_id=TEST_TENANT, cart_row=row,
+                normalised={
+                    "external_id": external_id,
+                    "raw_cart_id": cart_token,
+                    "customer_info": {"mobile": "+966500700744"},
+                    "abandoned_at": "2026-04-19T09:00:00",
+                },
+                commit=True,
+            )
+            errors["emit"] = {"ok": True, "id": event_id}
+        except Exception as exc:
+            errors["emit"] = {"ok": False, "exc": exc}
+        finally:
+            s.close()
+
+    t1 = threading.Thread(target=_purchase)
+    t2 = threading.Thread(target=_emit)
+    t1.start(); t2.start(); t1.join(); t2.join()
+    assert errors.get("purchase", {}).get("ok") is True, errors.get("purchase")
+    assert errors.get("emit", {}).get("ok") is True, errors.get("emit")
+    assert errors["emit"]["id"] is None
+    verify = Session()
+    try:
+        cart = verify.get(Order, cart_id)
+        assert cart.is_abandoned is False
+        matched = [
+            e for e in verify.query(AutomationEvent).filter_by(tenant_id=TEST_TENANT, event_type="cart_abandoned").all()
+            if (e.payload or {}).get("cart_external_id") == external_id
+        ]
+        assert matched == []
+    finally:
+        verify.close()
 

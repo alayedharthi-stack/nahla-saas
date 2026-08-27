@@ -129,47 +129,160 @@ class TestH2AdapterPaginationFailure:
 
 
 class TestH4OfficialTimestampContract:
-    def test_created_plus_age_is_observation_and_moves(self):
-        from services.salla_datetime import parse_salla_datetime_to_utc
+    def _assert_delay(self, db, tenant_id, ev, now, expected):
+        from core.automation_engine import _try_execute
+        automation = type("A", (), {})()
+        automation.id = 9
+        automation.automation_type = "abandoned_cart"
+        automation.config = {"steps": [{"delay_minutes": 30}]}
+        automation.enabled = True
+        assert _run(_try_execute(db, tenant_id, ev, automation, now)) == expected
 
+    def test_js_envelope_converts_to_utc_without_host_tz(self):
+        from services.salla_datetime import parse_salla_js_envelope_datetime
+        dt = parse_salla_js_envelope_datetime("Tue Jan 21 2025 18:00:32 GMT+0300")
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt.hour == 15 and dt.minute == 0 and dt.second == 32
+
+    def test_created_plus_age_is_not_used_as_anchor(self):
+        from services.salla_datetime import parse_salla_datetime_to_utc
         first = _official_abandoned_cart_payload(age=83)
         later = _official_abandoned_cart_payload(age=200)
         created = parse_salla_datetime_to_utc(first["created_at"])
-        obs_first = created + timedelta(minutes=83)
-        obs_later = created + timedelta(minutes=200)
-        assert obs_first != obs_later
+        assert created + timedelta(minutes=83) != created + timedelta(minutes=200)
         assert _extract_abandoned_at_iso(first) == ""
         assert _extract_abandoned_at_iso(later) == ""
 
-    def test_official_cart_two_observations_do_not_invent_abandoned_at(self):
+    def test_official_webhook_schedules_from_envelope_then_replay_keeps_anchor(self):
         db, tenant_id, engine = _make_db()
         try:
             svc = StoreSyncService(db, tenant_id)
-            with patch("core.automation_engine.emit_automation_event") as emit_mock:
-                _run(svc.handle_abandoned_cart_webhook(
-                    _official_abandoned_cart_payload("501", age=83),
-                    event_kind="created",
-                    webhook_event_type="abandoned.cart",
-                ))
-                emit_mock.assert_not_called()
-                cart = db.query(Order).filter_by(external_id="cart-501").one()
-                created_first = cart.extra_metadata.get("created_at")
-                assert created_first
-                assert not cart.extra_metadata.get("abandoned_at")
-                _run(svc.handle_abandoned_cart_webhook(
-                    _official_abandoned_cart_payload("501", age=200),
-                    event_kind="created",
-                    webhook_event_type="abandoned.cart",
-                ))
-                emit_mock.assert_not_called()
+            envelope = "Tue Jan 21 2025 18:00:32 GMT+0300"
+            _run(svc.handle_abandoned_cart_webhook(
+                _official_abandoned_cart_payload("501", age=83),
+                event_kind="created",
+                webhook_event_type="abandoned.cart",
+                envelope_created_at=envelope,
+                original_received_at=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc),
+            ))
+            cart = db.query(Order).filter_by(external_id="cart-501").one()
+            assert cart.extra_metadata.get("abandonment_anchor_source") == "provider_webhook_event"
+            assert cart.extra_metadata.get("first_provider_abandoned_observed_at").startswith("2025-01-21T15:00:32")
+            ev = db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").one()
+            assert ev.created_at.hour == 15 and ev.created_at.minute == 0
+            self._assert_delay(db, tenant_id, ev, datetime(2025, 1, 21, 15, 15, 0), "delay")
+            with patch("core.automation_engine._evaluate_conditions", return_value=(False, "test_skip")):
+                self._assert_delay(db, tenant_id, ev, datetime(2025, 1, 21, 15, 31, 0), "skipped")
+            first_anchor = cart.extra_metadata.get("first_provider_abandoned_observed_at")
+            _run(svc.handle_abandoned_cart_webhook(
+                _official_abandoned_cart_payload("501", age=200),
+                event_kind="created",
+                webhook_event_type="abandoned.cart",
+                envelope_created_at="Wed Jan 22 2025 19:00:00 GMT+0300",
+                original_received_at=datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc),
+            ))
             db.refresh(cart)
-            assert cart.extra_metadata.get("created_at") == created_first
-            assert not cart.extra_metadata.get("abandoned_at")
-            assert db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").count() == 0
+            db.refresh(ev)
+            assert cart.extra_metadata.get("first_provider_abandoned_observed_at") == first_anchor
+            assert cart.extra_metadata.get("abandonment_anchor_source") == "provider_webhook_event"
+            assert db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").count() == 1
+            assert ev.created_at.hour == 15
         finally:
             db.close(); engine.dispose()
 
-    def test_missing_age_skips_recovery(self):
+    def test_poller_two_ages_keeps_first_observation(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            first = _official_abandoned_cart_payload("pol-1", age=15)
+            later = _official_abandoned_cart_payload("pol-1", age=200)
+            t0 = datetime(2026, 4, 19, 9, 0, tzinfo=timezone.utc)
+            t1 = datetime(2026, 4, 19, 11, 0, tzinfo=timezone.utc)
+            adapter = MagicMock()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[first])
+            svc._adapter = adapter
+            with patch("services.store_sync._utc_now", return_value=t0):
+                _run(svc.sync_abandoned_carts())
+            cart = db.query(Order).filter_by(external_id="cart-pol-1").one()
+            anchor = cart.extra_metadata.get("first_provider_abandoned_observed_at")
+            source = cart.extra_metadata.get("abandonment_anchor_source")
+            assert source == "first_poller_observation"
+            ev = db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").one()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[later])
+            with patch("services.store_sync._utc_now", return_value=t1):
+                _run(svc.sync_abandoned_carts())
+            db.refresh(cart)
+            assert cart.extra_metadata.get("first_provider_abandoned_observed_at") == anchor
+            assert db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").count() == 1
+            db.refresh(ev)
+            assert ev.created_at == ev.created_at
+        finally:
+            db.close(); engine.dispose()
+
+    def test_retry_uses_original_received_at_not_now(self):
+        from core.webhook_dispatcher import _process_event
+        from core.webhook_events import claim_next_batch, persist_event
+        from commerce_scenario_fixtures import make_scenario_db, seed_tenant
+
+        db, engine = make_scenario_db()
+        try:
+            tenant = seed_tenant(db, name="Generic Store")
+            store_id = "STORE-H4-RETRY"
+            db.add(Integration(
+                tenant_id=tenant.id, provider="salla", external_store_id=store_id,
+                config={"api_key": "k", "store_id": store_id}, enabled=True,
+            ))
+            db.commit()
+            received = datetime(2026, 4, 19, 9, 0, tzinfo=timezone.utc)
+            parsed = {
+                "event": "abandoned.cart",
+                "merchant": store_id,
+                "data": _official_abandoned_cart_payload("77", age=40),
+            }
+            persist_event(
+                db, provider="salla", raw_body="{}", parsed_payload=parsed,
+                event_type="abandoned.cart", external_event_id="evt-h4-retry", store_id=store_id,
+            )
+            row = db.query(WebhookEvent).filter_by(external_event_id="evt-h4-retry").one()
+            row.received_at = received.replace(tzinfo=None)
+            db.commit()
+            batch = claim_next_batch(db, limit=1)
+            _run(_process_event(db, batch[0]))
+            cart = db.query(Order).filter_by(external_id="cart-77").one()
+            assert cart.extra_metadata.get("abandonment_anchor_source") == "first_webhook_observation"
+            assert cart.extra_metadata.get("first_provider_abandoned_observed_at").startswith("2026-04-19T09:00:00")
+            ev = db.query(AutomationEvent).filter_by(tenant_id=tenant.id, event_type="cart_abandoned").one()
+            assert ev.created_at.hour == 9
+        finally:
+            db.close(); engine.dispose()
+
+    def test_explicit_compat_timestamp_first_claim_only(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            payload = _official_abandoned_cart_payload("88", age=10)
+            payload["abandoned_at"] = "2026-04-19T08:00:00+00:00"
+            _run(svc.handle_abandoned_cart_webhook(
+                payload, event_kind="created", webhook_event_type="abandoned.cart",
+                envelope_created_at="Tue Apr 19 2026 12:00:00 GMT+0300",
+            ))
+            cart = db.query(Order).filter_by(external_id="cart-88").one()
+            assert cart.extra_metadata.get("abandonment_anchor_source") == "provider_explicit"
+            first = cart.extra_metadata.get("first_provider_abandoned_observed_at")
+            replay = _official_abandoned_cart_payload("88", age=90)
+            replay["abandoned_at"] = "2026-04-19T10:00:00+00:00"
+            _run(svc.handle_abandoned_cart_webhook(
+                replay, event_kind="created", webhook_event_type="abandoned.cart",
+                envelope_created_at="Tue Apr 19 2026 15:00:00 GMT+0300",
+            ))
+            db.refresh(cart)
+            assert cart.extra_metadata.get("first_provider_abandoned_observed_at") == first
+            assert db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").count() == 1
+        finally:
+            db.close(); engine.dispose()
+
+    def test_cart_created_and_updated_alone_are_not_abandonment(self):
         db, tenant_id, engine = _make_db()
         try:
             svc = StoreSyncService(db, tenant_id)
@@ -177,12 +290,32 @@ class TestH4OfficialTimestampContract:
                 "id": "88",
                 "total": {"amount": 10, "currency": "SAR"},
                 "customer": {"mobile": "+966500900900"},
-                "items": [],
+                "items": [{"name": "Shirt"}],
                 "created_at": "2026-04-19 10:00:00",
+                "updated_at": "2026-04-19 10:35:00",
             }
-            with patch("core.automation_engine.emit_automation_event") as emit_mock:
-                _run(svc.handle_abandoned_cart_webhook(payload, event_kind="created", webhook_event_type="abandoned.cart"))
-                emit_mock.assert_not_called()
+            _run(svc.handle_abandoned_cart_webhook(payload, event_kind="created", webhook_event_type="abandoned.cart"))
+            cart = db.query(Order).filter_by(external_id="cart-88").one()
+            assert not cart.extra_metadata.get("first_provider_abandoned_observed_at")
+            assert db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").count() == 0
+        finally:
+            db.close(); engine.dispose()
+
+    def test_terminal_cart_is_not_scheduled(self):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            base = _official_abandoned_cart_payload("44", age=30)
+            _run(svc.handle_abandoned_cart_webhook(
+                {**base, "status": "purchased"}, event_kind="purchased",
+                webhook_event_type="abandoned.cart.purchased",
+                envelope_created_at="Tue Apr 19 2026 12:00:00 GMT+0300",
+            ))
+            _run(svc.handle_abandoned_cart_webhook(
+                base, event_kind="created", webhook_event_type="abandoned.cart",
+                envelope_created_at="Tue Apr 19 2026 12:00:00 GMT+0300",
+            ))
+            assert db.query(AutomationEvent).filter_by(tenant_id=tenant_id, event_type="cart_abandoned").count() == 0
         finally:
             db.close(); engine.dispose()
 
@@ -394,7 +527,6 @@ class TestH3PollerCommit:
         svc = StoreSyncService(db, tenant_id)
         adapter = MagicMock()
         payload = _official_abandoned_cart_payload("pol-1")
-        payload["abandoned_at"] = "2026-04-19T09:00:00"
         adapter.get_abandoned_carts = AsyncMock(return_value=[payload])
         svc._adapter = adapter
         _run(svc.sync_abandoned_carts())
