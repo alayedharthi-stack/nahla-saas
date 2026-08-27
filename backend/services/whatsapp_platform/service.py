@@ -1183,7 +1183,7 @@ async def dialog360_set_waba_webhook(
     )
     if resp.status_code >= 400 and "error" not in data:
         data = {"error": data, "status_code": resp.status_code}
-    return _enrich_safe_d360_webhook_read(data, resp.status_code, expected_url=expected_url)
+    return d360_safe_webhook_result(resp.status_code, data)
 
 
 def _clip_body(body: Any, limit: int = 240) -> str:

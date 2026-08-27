@@ -152,6 +152,13 @@ def pg_db_factory(postgres_engine: Engine) -> Iterator[sessionmaker]:
         connection.close()
 
 
+
+
+@pytest.fixture()
+def pg_route_db_factory(postgres_engine: Engine) -> Iterator[sessionmaker]:
+    """Committed sessions for route tests that use durable cross-connection nonce consume."""
+    yield sessionmaker(bind=postgres_engine, expire_on_commit=False)
+
 def _admin_engine() -> Engine:
     base = (_candidate_database_urls()[0]).rsplit("/", 1)[0]
     return create_engine(f"{base}/postgres", isolation_level="AUTOCOMMIT", poolclass=NullPool)
@@ -476,7 +483,7 @@ def _seed_pg_tenant(SessionLocal: sessionmaker, tenant_id: int, **conn_kwargs) -
     return conn
 
 
-def _pg_route_stack(pg_db_factory: sessionmaker, monkeypatch, *, mode: str = "success") -> tuple:
+def _pg_route_stack(pg_route_db_factory: sessionmaker, monkeypatch, *, mode: str = "success") -> tuple:
     script = GraphScript(mode=mode)
     _install_httpx(monkeypatch, script)
     _patch_meta_env(monkeypatch)
@@ -599,8 +606,8 @@ def test_pg_concurrent_callbacks_single_transition(postgres_engine: Engine, monk
 def test_pg_exchange_route_success(postgres_engine: Engine, pg_db_factory: sessionmaker, monkeypatch) -> None:
     _cleanup_pg_route_fixtures(postgres_engine)
     tenant_id = 990887
-    _seed_pg_tenant(pg_db_factory, tenant_id)
-    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch)
+    _seed_pg_tenant(pg_route_db_factory, tenant_id)
+    client, _emb, script = _pg_route_stack(pg_route_db_factory, monkeypatch)
     resp = client.post(
         "/whatsapp/embedded/exchange",
         headers={"X-Tenant-ID": str(tenant_id)},
@@ -643,7 +650,7 @@ def test_pg_select_phone_coexistence_route(postgres_engine: Engine, pg_db_factor
     store_access_token(conn, "user-long-token")
     db.commit()
     db.close()
-    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch)
+    client, _emb, script = _pg_route_stack(pg_route_db_factory, monkeypatch)
     with patch("core.tenant_integrity.evict_phone_id_from_other_tenants") as evict:
         resp = client.post(
             "/whatsapp/embedded/select-phone",
@@ -654,13 +661,13 @@ def test_pg_select_phone_coexistence_route(postgres_engine: Engine, pg_db_factor
     assert resp.status_code == 200, resp.text
     assert resp.json().get("connected") is True
     script.assert_no_mutations()
-def test_pg_callback_graph_requests_exclude_sensitive_query_params(postgres_engine: Engine, pg_db_factory: sessionmaker, monkeypatch) -> None:
+def test_pg_callback_graph_requests_exclude_sensitive_query_params(postgres_engine: Engine, pg_route_db_factory: sessionmaker, monkeypatch) -> None:
     _cleanup_pg_route_fixtures(postgres_engine)
     from services.meta_graph_oauth_client import assert_no_sensitive_query_params
 
     tenant_id = 990889
-    _seed_pg_tenant(pg_db_factory, tenant_id)
-    client, _emb, script = _pg_route_stack(pg_db_factory, monkeypatch)
+    _seed_pg_tenant(pg_route_db_factory, tenant_id)
+    client, _emb, script = _pg_route_stack(pg_route_db_factory, monkeypatch)
     state = _start_state(client, tenant_id)
     resp = _callback(client, tenant_id, state)
     assert resp.status_code == 302
