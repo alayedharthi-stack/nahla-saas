@@ -35,6 +35,8 @@ from tests.order_customer_identity_postgres_fixtures import (
 TEST_TENANT_COUPON_A = 991_101
 TEST_TENANT_COUPON_B = 991_102
 TEST_TENANT_COUPON_TWO_LEVEL = 991_110
+TEST_TENANT_CROSS_A = 991_301
+TEST_TENANT_CROSS_B = 991_302
 
 if not _integration_required():
     pytest.skip(
@@ -96,6 +98,10 @@ def _seed_tenant(session: Session, tenant_id: int) -> None:
     settings.extra_metadata = meta or None
     settings.ai_settings = {"allowed_discount_levels": 30}
 
+    from sqlalchemy.orm.attributes import flag_modified
+
+    flag_modified(settings, "extra_metadata")
+    flag_modified(settings, "ai_settings")
     session.commit()
 
 
@@ -263,6 +269,13 @@ def test_concurrent_ensure_coupon_pool_bronze_capped(postgres_engine) -> None:
     assert len(codes) == len(set(codes))
     assert len(adapter_calls) == 3
 
+    cleanup_session, cleanup_conn = _new_session(postgres_engine)
+    try:
+        _clear_tenant_coupons(cleanup_session, tenant_id)
+    finally:
+        cleanup_session.close()
+        cleanup_conn.close()
+
 
 def test_pool_provenance_jsonb_postgres(postgres_engine) -> None:
     """PostgreSQL JSONB provenance filters for warm-pool counting."""
@@ -345,7 +358,7 @@ def test_pool_provenance_jsonb_postgres(postgres_engine) -> None:
 def test_cross_tenant_pool_isolation(postgres_engine) -> None:
     session, connection = _new_session(postgres_engine)
     try:
-        for tenant_id in (TEST_TENANT_COUPON_A, TEST_TENANT_COUPON_B):
+        for tenant_id in (TEST_TENANT_CROSS_A, TEST_TENANT_CROSS_B):
             _seed_tenant(session, tenant_id)
             _clear_tenant_coupons(session, tenant_id)
     finally:
@@ -357,17 +370,26 @@ def test_cross_tenant_pool_isolation(postgres_engine) -> None:
     lock_a = threading.Lock()
     lock_b = threading.Lock()
 
-    asyncio.run(_ensure_pool_once(postgres_engine, TEST_TENANT_COUPON_A, adapter_a, lock_a))
-    asyncio.run(_ensure_pool_once(postgres_engine, TEST_TENANT_COUPON_B, adapter_b, lock_b))
+    created_a, outcomes_a = asyncio.run(
+        _ensure_pool_once(postgres_engine, TEST_TENANT_CROSS_A, adapter_a, lock_a)
+    )
+    created_b, outcomes_b = asyncio.run(
+        _ensure_pool_once(postgres_engine, TEST_TENANT_CROSS_B, adapter_b, lock_b)
+    )
 
-    assert _bronze_count(postgres_engine, TEST_TENANT_COUPON_A) == 3
-    assert _bronze_count(postgres_engine, TEST_TENANT_COUPON_B) == 3
-    for tenant_id in (TEST_TENANT_COUPON_A, TEST_TENANT_COUPON_B):
+    assert created_a == {"bronze": 3, "silver": 3, "gold": 3, "vip": 3}, outcomes_a
+    assert created_b == {"bronze": 3, "silver": 3, "gold": 3, "vip": 3}, outcomes_b
+    assert len(adapter_a) == 12
+    assert len(adapter_b) == 12
+
+    assert _bronze_count(postgres_engine, TEST_TENANT_CROSS_A) == 3
+    assert _bronze_count(postgres_engine, TEST_TENANT_CROSS_B) == 3
+    for tenant_id in (TEST_TENANT_CROSS_A, TEST_TENANT_CROSS_B):
         for level in ("silver", "gold", "vip"):
             assert _level_count(postgres_engine, tenant_id, level) == 3
 
-    codes_a = set(_all_codes(postgres_engine, TEST_TENANT_COUPON_A))
-    codes_b = set(_all_codes(postgres_engine, TEST_TENANT_COUPON_B))
+    codes_a = set(_all_codes(postgres_engine, TEST_TENANT_CROSS_A))
+    codes_b = set(_all_codes(postgres_engine, TEST_TENANT_CROSS_B))
     assert len(codes_a) == 12
     assert len(codes_b) == 12
     assert codes_a.isdisjoint(codes_b)

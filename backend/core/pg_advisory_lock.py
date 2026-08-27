@@ -85,6 +85,12 @@ class DedicatedAdvisoryLock:
         bind = self._db.get_bind()
         return bind.dialect.name == 'postgresql'
 
+    def _engine_from_bind(self):
+        bind = self._db.get_bind()
+        if isinstance(bind, Connection):
+            return bind.engine
+        return bind
+
     def _acquire_sql(self) -> Tuple[str, Dict[str, Any]]:
         if self._key is not None:
             return 'SELECT pg_try_advisory_lock(:k)', {'k': self._key}
@@ -127,13 +133,8 @@ class DedicatedAdvisoryLock:
         if self._conn is not None:
             self._safe_close()
 
-        bind = self._db.get_bind()
-        if isinstance(bind, Connection):
-            self._conn = bind
-            self._owns_connection = False
-        else:
-            self._conn = bind.connect()
-            self._owns_connection = True
+        self._conn = self._engine_from_bind().connect()
+        self._owns_connection = True
         sql, params = self._acquire_sql()
         try:
             acquired = bool(self._conn.execute(text(sql), params).scalar())
