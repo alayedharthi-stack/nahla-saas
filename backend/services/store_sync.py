@@ -3610,11 +3610,12 @@ class StoreSyncService:
             return
         payload_keys = _abandoned_cart_payload_keys(payload)
         needs_emit = event_kind == "created"
+        has_valid_anchor = bool(normalised.get("abandoned_at"))
         cart_row = self._upsert_abandoned_cart_row(
             normalised,
             payload_keys=payload_keys,
             event_kind=event_kind,
-            commit=not needs_emit,
+            commit=not (needs_emit and has_valid_anchor),
         )
         logger.info("tenant=%s abandoned_cart upserted external_id=%s kind=%s event=%s", self.tenant_id, ext_id, event_kind, webhook_event_type)
         if event_kind == "purchased":
@@ -3629,10 +3630,27 @@ class StoreSyncService:
                     normalised=normalised,
                     reason="abandoned_cart_status_terminal",
                 )
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
             return
         if event_kind == "updated":
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
             return
         if not needs_emit:
+            return
+        if not has_valid_anchor:
+            try:
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
             return
         try:
             from services.cart_recovery_emitter import emit_cart_abandoned_if_new
