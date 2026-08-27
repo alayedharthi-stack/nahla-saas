@@ -88,7 +88,7 @@ def test_poller_tick_skips_when_advisory_lock_held(postgres_engine, monkeypatch)
 
     poll_calls: list[int] = []
     a_holds = threading.Event()
-    b_may_run = threading.Event()
+    b_done = threading.Event()
 
     async def _poll_guard(db, intg):
         poll_calls.append(int(intg.id))
@@ -130,7 +130,7 @@ def test_poller_tick_skips_when_advisory_lock_held(postgres_engine, monkeypatch)
         try:
             assert lock.try_acquire() is True
             a_holds.set()
-            b_may_run.wait(timeout=30)
+            b_done.wait(timeout=30)
         finally:
             if lock.held:
                 lock.release()
@@ -139,11 +139,11 @@ def test_poller_tick_skips_when_advisory_lock_held(postgres_engine, monkeypatch)
 
     def _thread_b() -> None:
         a_holds.wait(timeout=30)
-        b_may_run.set()
         session_local = _session_factory(postgres_engine)
         with patch("core.database.SessionLocal", session_local):
             thread_b_result["payload"] = asyncio.run(_run_one_tick())
             session_local.cleanup()
+        b_done.set()
 
     t_a = threading.Thread(target=_thread_a)
     t_b = threading.Thread(target=_thread_b)
