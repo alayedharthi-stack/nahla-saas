@@ -174,6 +174,13 @@ def _assert_logger_identity() -> None:
     assert module_logger.name == "nahla.adapter.salla"
 
 
+
+
+def _assert_formatted_has_no_raw_values(handler: _RecordingHandler, *raw_values: str) -> None:
+    formatted = _formatted_log_text(handler)
+    for raw in raw_values:
+        assert raw not in formatted
+
 def _assert_no_canaries(text: str) -> None:
     for canary in CANARIES:
         assert canary not in text
@@ -443,8 +450,8 @@ def test_proactive_freshness_success_emits_safe_events(postgres_engine):
     assert "event=salla_token_freshness_refresh_failed" not in log_text
     assert "event=salla_token_refresh_success" in log_text
     assert any(r.name == "nahla.adapter.salla" for r in log_handler.records)
-    assert str(TEST_TENANT_ID) not in log_text
-    _assert_no_canaries(log_text)
+    _assert_formatted_has_no_raw_values(log_handler, str(TEST_TENANT_ID))
+    _assert_no_canaries(_formatted_log_text(log_handler))
 
 
 def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine):
@@ -470,8 +477,8 @@ def test_proactive_freshness_parse_failure_emits_safe_event(postgres_engine):
     assert "error_class=" in log_text
     assert "tenant_hash=" in log_text
     assert any(r.name == "nahla.adapter.salla" for r in log_handler.records)
-    assert CANARY_INVALID_EXPIRY not in log_text
-    _assert_no_canaries(log_text)
+    _assert_formatted_has_no_raw_values(log_handler, CANARY_INVALID_EXPIRY)
+    _assert_no_canaries(_formatted_log_text(log_handler))
 
 
 def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_engine):
@@ -539,8 +546,8 @@ def test_lock_contention_emits_safe_event_without_raw_integration_id(postgres_en
     assert "event=salla_token_refresh_deferred" in log_text
     assert "integration_hash=" in log_text
     assert any(r.name == "nahla.salla_token_lock" for r in log_handler.records)
-    assert str(integration_id) not in log_text
-    _assert_no_canaries(log_text)
+    _assert_formatted_has_no_raw_values(log_handler, str(integration_id))
+    _assert_no_canaries(_formatted_log_text(log_handler))
 
 
 def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_engine):
@@ -592,6 +599,5 @@ def test_invalid_grant_superseding_lookup_db_fault_emits_safe_event(postgres_eng
     assert "event=salla_superseded_lookup_failed" in log_text
     assert "error_class=RuntimeError" in log_text
     assert any(r.name == "nahla.salla_alerts" for r in log_handler.records)
-    assert CANARY_LOOKUP_FAULT not in log_text
-    assert CANARY_OAUTH_BODY not in log_text
-    _assert_no_canaries(log_text)
+    _assert_formatted_has_no_raw_values(log_handler, CANARY_LOOKUP_FAULT, CANARY_OAUTH_BODY)
+    _assert_no_canaries(_formatted_log_text(log_handler))
