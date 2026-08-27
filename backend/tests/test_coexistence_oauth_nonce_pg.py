@@ -487,7 +487,7 @@ def _pg_route_stack(pg_route_db_factory: sessionmaker, monkeypatch, *, mode: str
     script = GraphScript(mode=mode)
     _install_httpx(monkeypatch, script)
     _patch_meta_env(monkeypatch)
-    client, emb = _build_client(pg_db_factory, monkeypatch)
+    client, emb = _build_client(pg_route_db_factory, monkeypatch)
     return client, emb, script
 
 
@@ -603,7 +603,7 @@ def test_pg_concurrent_callbacks_single_transition(postgres_engine: Engine, monk
     verify.close()
 
 
-def test_pg_exchange_route_success(postgres_engine: Engine, pg_db_factory: sessionmaker, monkeypatch) -> None:
+def test_pg_exchange_route_success(postgres_engine: Engine, pg_route_db_factory: sessionmaker, monkeypatch) -> None:
     _cleanup_pg_route_fixtures(postgres_engine)
     tenant_id = 990887
     _seed_pg_tenant(pg_route_db_factory, tenant_id)
@@ -621,7 +621,7 @@ def test_pg_exchange_route_success(postgres_engine: Engine, pg_db_factory: sessi
     )
     assert resp.status_code == 200, resp.text
     assert resp.json().get("connected") is True
-    db = pg_db_factory()
+    db = pg_route_db_factory()
     conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one()
     assert conn.status == "connected"
     claim = (conn.extra_metadata or {}).get("coexistence_exchange_claim") or {}
@@ -630,12 +630,12 @@ def test_pg_exchange_route_success(postgres_engine: Engine, pg_db_factory: sessi
     script.assert_no_mutations()
 
 
-def test_pg_select_phone_coexistence_route(postgres_engine: Engine, pg_db_factory: sessionmaker, monkeypatch) -> None:
+def test_pg_select_phone_coexistence_route(postgres_engine: Engine, pg_route_db_factory: sessionmaker, monkeypatch) -> None:
     _cleanup_pg_route_fixtures(postgres_engine)
     from services.whatsapp_platform.wa_connection_secrets import store_access_token
 
     tenant_id = 990888
-    db = pg_db_factory()
+    db = pg_route_db_factory()
     db.add(Tenant(id=tenant_id, name="pg-sel", is_active=True))
     conn = WhatsAppConnection(
         tenant_id=tenant_id,

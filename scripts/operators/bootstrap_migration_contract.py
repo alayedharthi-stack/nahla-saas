@@ -26,20 +26,24 @@ def build_normal_bootstrap_upgrade_argv(*, python_executable: str) -> list[str]:
 
 
 def _alembic_versions(bind) -> set[str]:
-    try:
-        if "alembic_version" not in inspect(bind).get_table_names():
-            return set()
-    except Exception:  # noqa: silent-ok - alembic version table may be absent on fresh DB
-        return set()
+    def _read_rows(executable) -> set[str]:
+        rows = executable.execute(text("SELECT version_num FROM alembic_version"))
+        return {str(row[0]) for row in rows}
+
     try:
         from sqlalchemy.engine import Engine
 
         if isinstance(bind, Engine):
             with bind.connect() as conn:
-                rows = conn.execute(text("SELECT version_num FROM alembic_version"))
-                return {str(row[0]) for row in rows}
-        rows = bind.execute(text("SELECT version_num FROM alembic_version"))
-        return {str(row[0]) for row in rows}
+                return _read_rows(conn)
+        if hasattr(bind, "execute"):
+            return _read_rows(bind)
+    except Exception:  # noqa: silent-ok - version table may be absent on fresh DB
+        pass
+    try:
+        if "alembic_version" not in inspect(bind).get_table_names():
+            return set()
+        return _read_rows(bind)
     except Exception:
         return set()
 

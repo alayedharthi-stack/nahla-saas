@@ -216,9 +216,12 @@ class TestDialog360WabaWebhookHelpers:
             },
         )
         out = asyncio.run(wa_service.dialog360_get_waba_webhook(api_key="d360_secret_key"))
-        assert out["url"].endswith("/webhook/whatsapp/360dialog")
-        assert "100543193146977" in out["numbers_on_this_waba"]
-        assert "1061057720431678" in out["numbers_on_this_waba"]
+        assert out.get("remote_url_present") is True
+        assert out.get("numbers_count") == 2
+        assert out.get("has_waba_id") is True
+        assert "url" not in out
+        assert "numbers_on_this_waba" not in out
+        assert "headers" not in out
 
 
 # ── Admin endpoint tests ───────────────────────────────────────────────────
