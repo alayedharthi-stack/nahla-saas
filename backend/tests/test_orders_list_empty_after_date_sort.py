@@ -325,6 +325,39 @@ class TestOrdersListNewestCreatedFirst:
         after = [row["external_id"] for row in _invoke_list(db, tenant.id)["orders"]]
         assert after[:2] == ["dated-order", "undated-order"]
 
+    def test_invalid_calendar_created_at_uses_valid_draft(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        older = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+        draft = datetime(2026, 8, 28, 18, 0, tzinfo=timezone.utc)
+        db.add(
+            Order(
+                tenant_id=tenant.id,
+                external_id="feb30-with-valid-draft",
+                status="draft",
+                source="whatsapp",
+                extra_metadata={
+                    "created_at": "2026-02-30T12:00:00+00:00",
+                    "draft_created_at": draft.isoformat(),
+                    "updated_at": datetime(2026, 8, 28, 23, 0, tzinfo=timezone.utc).isoformat(),
+                },
+            )
+        )
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="plain-older",
+                created_at=older,
+                last_updated_at=older,
+            )
+        )
+        db.commit()
+        payload = _invoke_list(db, tenant.id)
+        assert [row["external_id"] for row in payload["orders"]][:2] == [
+            "feb30-with-valid-draft",
+            "plain-older",
+        ]
+
     def test_list_orders_sql_is_limited_after_created_at_rank(self) -> None:
         db, engine = _make_db()
         tenant = _seed_tenant(db)

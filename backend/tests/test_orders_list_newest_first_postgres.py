@@ -1,11 +1,14 @@
 """PostgreSQL ranking for GET /orders by actual created_at."""
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy import literal_column, text
 from sqlalchemy.orm import Session, noload, sessionmaker
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -16,7 +19,12 @@ for _entry in (str(_REPO_ROOT), str(_BACKEND), str(_DATABASE)):
         sys.path.insert(0, _entry)
 
 from database.models import Order, Tenant
-from routers.orders import ORDERS_LIST_PAGE_SIZE, _load_orders_list_page
+from routers.orders import (
+    ORDERS_LIST_PAGE_SIZE,
+    ORDERS_LIST_SORT_SQL_FAILED_EVENT,
+    OrdersListSortSqlError,
+    _load_orders_list_page,
+)
 from tests.order_customer_identity_postgres_fixtures import (
     _connect_engine,
     _ensure_a1_schema,
@@ -192,4 +200,128 @@ def test_postgres_invalid_created_at_does_not_fail_or_outrank(pg_session: Sessio
 
     after = [row.external_id for row in _ranked_page(pg_session, tenant.id)]
     assert after[:2] == ["dated-order", "undated-order"]
+    _cleanup(pg_session)
+
+def test_postgres_feb30_created_at_uses_valid_draft_and_session_stays_alive(pg_session: Session) -> None:
+    _cleanup(pg_session)
+    tenant = _seed_tenant(pg_session)
+    older = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    draft = datetime(2026, 8, 28, 18, 0, tzinfo=timezone.utc)
+    pg_session.add(
+        Order(
+            tenant_id=tenant.id,
+            external_id="feb30-with-valid-draft",
+            status="draft",
+            source="whatsapp",
+            extra_metadata={
+                "created_at": "2026-02-30T12:00:00+00:00",
+                "draft_created_at": draft.isoformat(),
+                "updated_at": "2026-08-28T23:00:00+00:00",
+            },
+        )
+    )
+    pg_session.add(
+        Order(
+            tenant_id=tenant.id,
+            external_id="plain-older",
+            status="paid",
+            source="salla",
+            extra_metadata={"created_at": older.isoformat()},
+        )
+    )
+    pg_session.commit()
+
+    rows = _ranked_page(pg_session, tenant.id)
+    assert [row.external_id for row in rows][:2] == [
+        "feb30-with-valid-draft",
+        "plain-older",
+    ]
+    assert pg_session.execute(text("SELECT 1")).scalar() == 1
+    _cleanup(pg_session)
+
+
+def test_postgres_naive_created_at_rank_stable_across_session_time_zone(pg_session: Session) -> None:
+    _cleanup(pg_session)
+    tenant = _seed_tenant(pg_session)
+    pg_session.add_all(
+        [
+            Order(
+                tenant_id=tenant.id,
+                external_id="naive-utc-wall",
+                status="paid",
+                source="salla",
+                extra_metadata={"created_at": "2026-08-28T10:00:00"},
+            ),
+            Order(
+                tenant_id=tenant.id,
+                external_id="offset-earlier-instant",
+                status="paid",
+                source="salla",
+                extra_metadata={"created_at": "2026-08-28T12:00:00+03:00"},
+            ),
+        ]
+    )
+    pg_session.commit()
+
+    ids_by_zone = {}
+    for zone in ("UTC", "Asia/Riyadh"):
+        if zone not in ("UTC", "Asia/Riyadh"):
+            raise AssertionError("unexpected test time zone")
+        pg_session.execute(text("SET TIME ZONE '" + zone + "'"))
+        ids_by_zone[zone] = [row.external_id for row in _ranked_page(pg_session, tenant.id)]
+    pg_session.execute(text("SET TIME ZONE 'UTC'"))
+
+    assert ids_by_zone["UTC"][:2] == ["naive-utc-wall", "offset-earlier-instant"]
+    assert ids_by_zone["UTC"] == ids_by_zone["Asia/Riyadh"]
+    _cleanup(pg_session)
+
+
+def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
+    pg_session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    _cleanup(pg_session)
+    tenant = _seed_tenant(pg_session)
+    pg_session.add(
+        Order(
+            tenant_id=tenant.id,
+            external_id="survives-sql-failure",
+            status="paid",
+            source="salla",
+            extra_metadata={"created_at": "2026-08-28T10:00:00+00:00"},
+        )
+    )
+    pg_session.commit()
+
+    def _failing_order(query):
+        return query.order_by(
+            literal_column("CAST('2026-02-30T00:00:00+00:00' AS timestamptz)")
+        )
+
+    caplog.set_level(logging.ERROR, logger="nahla.orders")
+    with patch("routers.orders._apply_created_at_order", side_effect=_failing_order):
+        rows = _ranked_page(pg_session, tenant.id)
+
+    assert [row.external_id for row in rows] == ["survives-sql-failure"]
+    assert pg_session.execute(text("SELECT 1")).scalar() == 1
+
+    records = [
+        rec
+        for rec in caplog.records
+        if rec.name == "nahla.orders"
+        and rec.getMessage() == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+    ]
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.levelno == logging.ERROR
+    assert rec.args in ((), None, {})
+    assert rec.exc_info is None
+    assert not rec.exc_text
+    assert getattr(rec, "event") == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+    assert getattr(rec, "error_class") == OrdersListSortSqlError.__name__
+    formatted = logging.Formatter("%(message)s").format(rec)
+    assert formatted == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+    blob = formatted + str(rec.args) + str(rec.exc_info)
+    assert "2026-02-30" not in blob
+    assert "Traceback" not in blob
+    assert "CAST" not in blob
     _cleanup(pg_session)

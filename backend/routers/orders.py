@@ -19,12 +19,13 @@ from __future__ import annotations
 import ast
 import logging
 from datetime import datetime, timezone
+import heapq
 from collections.abc import Callable
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import DateTime, case, cast, func, null, or_
+from sqlalchemy import DateTime, Integer, and_, case, cast, func, null, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -324,14 +325,29 @@ def _read_created_at(order: Order, fallback: datetime) -> datetime:
 
 
 ORDERS_LIST_PAGE_SIZE = 200
-_ISO_CREATED_AT_RE = r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+ORDERS_LIST_SORT_SQL_FAILED_EVENT = "orders.list.sort_sql_failed"
+_ISO_CREATED_AT_RE = (
+    r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+    r"([Tt ]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\.[0-9]+)?)?)?"
+    r"(Z|[+-][0-9]{2}:[0-9]{2})?$"
+)
+_HAS_EXPLICIT_OFFSET_RE = r"[+-][0-9]{2}:[0-9]{2}$"
+
+
+class OrdersListSortSqlError(Exception):
+    """Named marker for orders-list ranking SQL failure.
+
+    Only the class name is safe to log. Do not attach SQL, parameters,
+    timestamps, or exception text.
+    """
 
 
 def _list_sort_created_at(order: Order) -> datetime:
     """Actual order-creation time for /orders ranking.
 
-    Ignores last_updated/sync timestamps so a status or import touch cannot
-    promote an older order. Missing created_at sorts last, then by id.
+    First valid created_at source wins. Ignores last_updated/sync timestamps
+    so a status or import touch cannot promote an older order. Missing or
+    invalid created_at sorts last, then by id. Naive values are UTC.
     """
     meta = getattr(order, "extra_metadata", None) or {}
     catalog_meta = meta.get("catalog_order") if isinstance(meta.get("catalog_order"), dict) else {}
@@ -351,10 +367,10 @@ def _list_sort_created_at(order: Order) -> datetime:
     return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def _created_at_text_sql():
+def _created_at_candidate_sql_exprs():
     meta = Order.extra_metadata
     catalog = meta["catalog_order"]
-    return func.coalesce(
+    return (
         func.nullif(meta["created_at"].astext, ""),
         func.nullif(meta["draft_created_at"].astext, ""),
         func.nullif(meta["display_created_at"].astext, ""),
@@ -364,25 +380,69 @@ def _created_at_text_sql():
     )
 
 
-def _apply_created_at_order(query):
-    """Rank matching rows by created_at in the database, then by id.
+def _calendar_day_fits_month_sql(txt):
+    y = cast(func.substr(txt, 1, 4), Integer)
+    m = cast(func.substr(txt, 6, 2), Integer)
+    d = cast(func.substr(txt, 9, 2), Integer)
+    leap = and_(y.op("%")(4) == 0, or_(y.op("%")(100) != 0, y.op("%")(400) == 0))
+    dim = case(
+        (m.in_((1, 3, 5, 7, 8, 10, 12)), 31),
+        (m.in_((4, 6, 9, 11)), 30),
+        (and_(m == 2, leap), 29),
+        (m == 2, 28),
+        else_=0,
+    )
+    return d <= dim
 
-    Missing or non-ISO values become NULL and sort last. updated_at is never
-    a sort key. PostgreSQL compares timestamptz; SQLite uses ISO-looking text
-    (unit tests store UTC isoformat).
+
+def _pg_safe_created_at_ts(txt):
+    """First-valid created_at instant for PostgreSQL, or NULL.
+
+    Naive timestamps are stamped +00:00 before CAST so session TimeZone
+    cannot shift them. Impossible calendar dates (e.g. Feb 30) stay NULL
+    and never reach CAST.
     """
-    coalesced = _created_at_text_sql()
+    normalized = func.replace(func.replace(txt, "Z", "+00:00"), " ", "T")
+    has_offset = normalized.op("~")(_HAS_EXPLICIT_OFFSET_RE)
+    stamped = case((has_offset, normalized), else_=func.concat(normalized, "+00:00"))
+    safe = and_(txt.op("~")(_ISO_CREATED_AT_RE), _calendar_day_fits_month_sql(txt))
+    return case((safe, cast(stamped, DateTime(timezone=True))), else_=null())
+
+
+def _sqlite_safe_created_at_text(txt):
+    looks_iso = txt.like("____-__-__%")
+    safe = and_(looks_iso, _calendar_day_fits_month_sql(txt))
+    return case((safe, txt), else_=null())
+
+
+def _created_at_rank_sql(query):
+    candidates = _created_at_candidate_sql_exprs()
     bind = query.session.get_bind()
     dialect = getattr(getattr(bind, "dialect", None), "name", "") or ""
     if dialect == "postgresql":
-        normalized = func.replace(func.replace(coalesced, "Z", "+00:00"), " ", "T")
-        ts = case(
-            (coalesced.op("~")(_ISO_CREATED_AT_RE), cast(normalized, DateTime(timezone=True))),
-            else_=null(),
-        )
-        return query.order_by(ts.desc().nulls_last(), Order.id.desc())
-    iso_text = case((coalesced.like("____-__-__%"), coalesced), else_=null())
-    return query.order_by(iso_text.desc().nulls_last(), Order.id.desc())
+        return func.coalesce(*[_pg_safe_created_at_ts(expr) for expr in candidates])
+    return func.coalesce(*[_sqlite_safe_created_at_text(expr) for expr in candidates])
+
+
+def _apply_created_at_order(query):
+    """Rank matching rows by the first valid created_at, then by id.
+
+    updated_at / last_synced_at are never sort keys. Invalid or missing
+    created_at values sort last.
+    """
+    rank = _created_at_rank_sql(query)
+    return query.order_by(rank.desc().nulls_last(), Order.id.desc())
+
+
+def _log_orders_list_sort_sql_failed() -> None:
+    logger.error(
+        ORDERS_LIST_SORT_SQL_FAILED_EVENT,
+        extra={
+            "event": ORDERS_LIST_SORT_SQL_FAILED_EVENT,
+            "error_class": OrdersListSortSqlError.__name__,
+        },
+        exc_info=False,
+    )
 
 
 def _heap_newest_page(
@@ -396,8 +456,6 @@ def _heap_newest_page(
     Cost: reads the SQL-filtered tenant subset once. Memory: O(page_size)
     plus the driver batch, not the full result list.
     """
-    import heapq
-
     heap: List[Tuple[datetime, int]] = []
     held: Dict[int, Order] = {}
     stream = query.execution_options(stream_results=True).yield_per(50)
@@ -429,24 +487,26 @@ def _load_orders_list_page(
 
     Memory: the page (and a yield_per batch when Python lifecycle refine
     must skip rows). Never materializes the tenant's full order set.
+    SQL CAST failures are isolated to a savepoint so the outer transaction
+    stays usable for the bounded heap fallback and later queries.
     """
+    session = query.session
     ordered = _apply_created_at_order(query)
     try:
-        if python_match is None:
-            return list(ordered.limit(page_size))
-        rows: List[Order] = []
-        stream = ordered.execution_options(stream_results=True).yield_per(50)
-        for order in stream:
-            if not python_match(order):
-                continue
-            rows.append(order)
-            if len(rows) >= page_size:
-                break
-        return rows
+        with session.begin_nested():
+            if python_match is None:
+                return list(ordered.limit(page_size))
+            rows: List[Order] = []
+            stream = ordered.execution_options(stream_results=True).yield_per(50)
+            for order in stream:
+                if not python_match(order):
+                    continue
+                rows.append(order)
+                if len(rows) >= page_size:
+                    break
+            return rows
     except SQLAlchemyError:
-        logger.exception(
-            "orders list SQL created_at sort failed; using bounded heap fallback"
-        )
+        _log_orders_list_sort_sql_failed()
         return _heap_newest_page(query, python_match=python_match, page_size=page_size)
 
 
