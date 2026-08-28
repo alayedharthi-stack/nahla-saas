@@ -419,10 +419,11 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
     if new_ids:
         for o in post_rows:
             if o.id in new_ids:
+                from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
                 logger.info(
-                    "[Salla Orders Poller] new order detected tenant_id=%s order_id=%s "
-                    "external_id=%s status=%s",
-                    tenant_id, o.id, o.external_id, o.status,
+                    "[Salla Orders Poller] salla_orders_poller.new_order_detected "
+                    "tenant_id=%s order_id=%s external_id_hash=%s status=%s",
+                    tenant_id, o.id, hash_identifier(o.external_id), o.status,
                 )
                 if _emit_for_order(db, tenant_id, o):
                     events_emitted += 1

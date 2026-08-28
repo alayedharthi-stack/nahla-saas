@@ -2347,14 +2347,9 @@ class StoreSyncService:
         # so an operator grepping logs can confirm the adapter actually
         # delivered carts to the sync layer (separately from how many
         # we *kept* after normalization).
-        _raw_id_preview = [
-            str((c.get("id") or c.get("cart_id") or c.get("token") or "?"))
-            for c in raw_list[:5] if isinstance(c, dict)
-        ]
         logger.info(
-            "[StoreSync] ABANDONED_SYNC_FETCHED tenant=%s raw_cart_count=%d "
-            "first_ids=%s",
-            self.tenant_id, len(raw_list), _raw_id_preview,
+            "[StoreSync] store_sync.abandoned_carts_fetched tenant=%s raw_cart_count=%d",
+            self.tenant_id, len(raw_list),
         )
 
         # Track failures per stage for the end-of-run summary.
@@ -2425,10 +2420,10 @@ class StoreSyncService:
             # visibility into a real cart just because the customer
             # hasn't entered their phone yet.
             if not normalised["customer_info"] and not normalised["line_items"]:
+                from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
                 logger.info(
-                    "[StoreSync] tenant=%s PERSISTING_EMPTY_SHELL ext_id=%s "
-                    "(no customer + no items) — kept for dashboard visibility",
-                    self.tenant_id, ext_id,
+                    "[StoreSync] store_sync.abandoned_cart_empty_shell tenant=%s cart_hash=%s",
+                    self.tenant_id, hash_identifier(ext_id),
                 )
 
             seen_external_ids.add(ext_id)
@@ -2443,24 +2438,22 @@ class StoreSyncService:
                 existing_carts[ext_id] = cart_row
                 if was_existing:
                     result["updated"] += 1
+                    from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
                     logger.info(
-                        "[StoreSync] tenant=%s UPDATED_abandoned_cart "
-                        "ext_id=%s order_id=%s items=%d total=%s "
-                        "customer=%s",
-                        self.tenant_id, ext_id, getattr(cart_row, "id", None),
+                        "[StoreSync] store_sync.abandoned_cart_updated "
+                        "tenant=%s cart_hash=%s items=%d customer=%s",
+                        self.tenant_id, hash_identifier(ext_id),
                         len(normalised["line_items"] or []),
-                        normalised["total"],
                         bool(normalised["customer_info"]),
                     )
                 else:
                     result["saved"] += 1
+                    from core.coupon_log_privacy import hash_identifier  # noqa: PLC0415
                     logger.info(
-                        "[StoreSync] tenant=%s SAVED_abandoned_cart "
-                        "ext_id=%s items=%d total=%s customer=%s "
-                        "checkout_url=%s",
-                        self.tenant_id, ext_id,
+                        "[StoreSync] store_sync.abandoned_cart_saved "
+                        "tenant=%s cart_hash=%s items=%d customer=%s checkout_url=%s",
+                        self.tenant_id, hash_identifier(ext_id),
                         len(normalised["line_items"] or []),
-                        normalised["total"],
                         bool(normalised["customer_info"]),
                         bool(normalised["checkout_url"]),
                     )
@@ -2497,11 +2490,12 @@ class StoreSyncService:
         # later cart's failure cannot rollback an already-emitted one.
         try:
             self.db.commit()
-        except Exception:
+        except Exception as exc:
             self.db.rollback()
-            logger.exception(
-                "[StoreSync] tenant=%s commit before recovery emit failed",
-                self.tenant_id,
+            logger.error(
+                "[StoreSync] store_sync.abandoned_cart_commit_before_emit_failed "
+                "tenant=%s error_class=%s",
+                self.tenant_id, type(exc).__name__,
             )
 
         emit_count = 0
@@ -2550,15 +2544,18 @@ class StoreSyncService:
                         # the marker (the helper returns the existing id
                         # for already-emitted carts).
                         emit_count += 1
-                except Exception:
+                except Exception as exc:
                     emit_failures += 1
-                    logger.exception(
-                        "[StoreSync] tenant=%s cart=%s emit_cart_abandoned_if_new failed",
-                        self.tenant_id, ext_id,
+                    logger.error(
+                        "[StoreSync] store_sync.abandoned_cart_emit_failed "
+                        "tenant=%s error_class=%s",
+                        self.tenant_id, type(exc).__name__,
                     )
-        except Exception:
-            logger.exception(
-                "[StoreSync] tenant=%s recovery emit pass aborted", self.tenant_id,
+        except Exception as exc:
+            logger.error(
+                "[StoreSync] store_sync.abandoned_cart_emit_aborted "
+                "tenant=%s error_class=%s",
+                self.tenant_id, type(exc).__name__,
             )
 
         result["recovery_events_emitted"] = emit_count    # type: ignore[assignment]
@@ -2571,18 +2568,17 @@ class StoreSyncService:
         # downstream of normalize/save and the per-cart logs above will
         # tell us exactly which stage dropped the cart.
         logger.info(
-            "[StoreSync] ABANDONED_SYNC_SUMMARY tenant=%s "
+            "[StoreSync] store_sync.abandoned_carts_summary tenant=%s "
             "raw_cart_count=%d normalized_cart_count=%d "
             "saved=%d updated=%d reconciled=%d "
             "skipped_no_id=%d normalize_errors=%d save_errors=%d "
-            "previous=%d external_ids=%s",
+            "previous=%d",
             self.tenant_id,
             result["salla_count"],
             len(normalised_external_ids),
             result["saved"], result["updated"], result["reconciled"],
             result["skipped_no_id"], result["normalize_errors"], result["save_errors"],
             previous_count,
-            normalised_external_ids[:10],
         )
 
         # Surface counts in the JSON result so the debug endpoints

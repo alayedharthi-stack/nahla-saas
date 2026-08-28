@@ -857,6 +857,7 @@ H11_CANARIES = (
     "CANARY_BODY_H11_PROVIDER",
     "STORE_ID_CANARY_8889",
     "H11CANARYEXC",
+    "H11CARTIDCANARY",
 )
 
 
@@ -873,6 +874,37 @@ def _h11_blob(caplog) -> str:
             assert rec.exc_info is None, rec
             assert not rec.exc_text, rec.exc_text
     return "\n".join(chunks)
+
+
+
+def _h11_blob_for(caplog, logger_name: str) -> str:
+    formatter = logging.Formatter("%(levelname)s %(name)s %(message)s")
+    chunks = []
+    matched = 0
+    for rec in caplog.records:
+        if rec.name != logger_name:
+            continue
+        matched += 1
+        chunks.append(formatter.format(rec))
+        chunks.append(repr(rec.args))
+        extra = {k: rec.__dict__[k] for k in rec.__dict__ if k not in _H11_SKIP_ATTRS}
+        if extra:
+            chunks.append(json.dumps(extra, default=str, sort_keys=True))
+        assert rec.exc_info is None, rec
+        assert not rec.exc_text, rec.exc_text
+    assert matched, logger_name
+    return "\n".join(chunks)
+
+
+def _h11_sync_cart_payload(cart_id="H11CARTIDCANARY"):
+    payload = _official_abandoned_cart_payload(str(cart_id), age=83)
+    payload["checkout_url"] = "https://canary.example/checkout/H11"
+    payload["customer"] = {"name": "Ahmad Salem", "mobile": "+966500111222"}
+    payload["marker_canary"] = "H11CANARYMARKER"
+    payload["provider_body"] = "CANARY_BODY_H11_PROVIDER"
+    payload["store_id"] = "STORE_ID_CANARY_8889"
+    payload["token"] = "H11CANARYMARKER"
+    return payload
 
 
 def _h11_http_error():
@@ -1085,6 +1117,194 @@ class TestH11RemainingLogSites:
             assert "cart_recovery.customer_resolve_failed" in blob
             assert "error_class=RuntimeError" in blob
             _assert_no_h11_canaries(blob)
+        finally:
+            db.close()
+            engine.dispose()
+
+
+    def test_sync_abandoned_carts_first_ids_log_is_safe(self, caplog):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            adapter = MagicMock()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[_h11_sync_cart_payload()])
+            svc._adapter = adapter
+            caplog.set_level(logging.DEBUG)
+            # No mocks of sync_abandoned_carts or its logger. Adapter HTTP boundary only.
+            result = _run(svc.sync_abandoned_carts())
+            assert result["fetched"] is True
+            assert result["salla_count"] == 1
+            blob = _h11_blob_for(caplog, "nahla-backend")
+            assert "store_sync.abandoned_carts_fetched" in blob
+            assert "first_ids" not in blob
+            _assert_no_h11_canaries(blob)
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_sync_abandoned_carts_external_ids_summary_log_is_safe(self, caplog):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            adapter = MagicMock()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[_h11_sync_cart_payload()])
+            svc._adapter = adapter
+            caplog.set_level(logging.DEBUG)
+            result = _run(svc.sync_abandoned_carts())
+            assert result["saved"] + result["updated"] >= 1
+            blob = _h11_blob_for(caplog, "nahla-backend")
+            assert "store_sync.abandoned_carts_summary" in blob
+            assert "external_ids=" not in blob
+            _assert_no_h11_canaries(blob)
+            assert db.query(Order).filter_by(tenant_id=tenant_id, external_id="cart-H11CARTIDCANARY").one()
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_sync_abandoned_carts_commit_before_emit_log_is_safe(self, caplog):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            adapter = MagicMock()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[_h11_sync_cart_payload()])
+            svc._adapter = adapter
+            real_commit = db.commit
+            calls = {"n": 0}
+
+            def _flaky_commit():
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise RuntimeError(
+                        "H11CANARYEXC H11CANARYMARKER +966500111222 "
+                        "CANARY_BODY_H11_PROVIDER https://canary.example/checkout/H11"
+                    )
+                return real_commit()
+
+            db.commit = _flaky_commit
+            caplog.set_level(logging.DEBUG)
+            # Fault injection: DB commit boundary after upsert, before recovery emit.
+            result = _run(svc.sync_abandoned_carts())
+            assert result["fetched"] is True
+            blob = _h11_blob_for(caplog, "nahla-backend")
+            assert "store_sync.abandoned_cart_commit_before_emit_failed" in blob
+            assert "error_class=RuntimeError" in blob
+            _assert_no_h11_canaries(blob)
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_sync_abandoned_carts_emit_cart_failed_log_is_safe(self, caplog):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            adapter = MagicMock()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[_h11_sync_cart_payload()])
+            svc._adapter = adapter
+            caplog.set_level(logging.DEBUG)
+
+            def _boom_emit(*args, **kwargs):
+                raise RuntimeError(
+                    "H11CANARYEXC H11CANARYMARKER +966500111222 "
+                    "CANARY_BODY_H11_PROVIDER https://canary.example/checkout/H11"
+                )
+
+            # Fault injection: emit_cart_abandoned_if_new raises. Logger under test is real.
+            with patch(
+                "services.cart_recovery_emitter.emit_cart_abandoned_if_new",
+                side_effect=_boom_emit,
+            ):
+                result = _run(svc.sync_abandoned_carts())
+            assert result["saved"] + result["updated"] >= 1
+            assert result.get("recovery_emit_failures", 0) >= 1
+            blob = _h11_blob_for(caplog, "nahla-backend")
+            assert "store_sync.abandoned_cart_emit_failed" in blob
+            assert "error_class=RuntimeError" in blob
+            _assert_no_h11_canaries(blob)
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_sync_abandoned_carts_emit_pass_aborted_log_is_safe(self, caplog):
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            adapter = MagicMock()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[_h11_sync_cart_payload()])
+            svc._adapter = adapter
+            caplog.set_level(logging.DEBUG)
+
+            def _boom_anchor(*args, **kwargs):
+                raise RuntimeError(
+                    "H11CANARYEXC H11CANARYMARKER +966500111222 "
+                    "CANARY_BODY_H11_PROVIDER https://canary.example/checkout/H11"
+                )
+
+            # Fault injection: observation helper raises inside the emit pass, outside per-cart emit try.
+            with patch(
+                "services.store_sync._resolve_first_abandoned_observation_candidate",
+                side_effect=_boom_anchor,
+            ):
+                result = _run(svc.sync_abandoned_carts())
+            assert result["saved"] + result["updated"] >= 1
+            blob = _h11_blob_for(caplog, "nahla-backend")
+            assert "store_sync.abandoned_cart_emit_aborted" in blob
+            assert "error_class=RuntimeError" in blob
+            _assert_no_h11_canaries(blob)
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_orders_poller_new_order_log_hashes_external_id(self, caplog):
+        from services.salla_orders_poller import _poll_integration
+
+        db, tenant_id, engine = _make_db()
+        try:
+            intg = Integration(
+                tenant_id=tenant_id,
+                provider="salla",
+                enabled=True,
+                external_store_id="STORE_ID_CANARY_8889",
+                config={"store_id": "STORE_ID_CANARY_8889", "api_key": "test-key"},
+            )
+            db.add(intg)
+            db.commit()
+            db.refresh(intg)
+            mock_adapter = MagicMock()
+            mock_adapter.get_orders = AsyncMock(return_value=[])
+
+            async def _insert_new_order(self, *args, **kwargs):
+                self.db.add(Order(
+                    tenant_id=self.tenant_id,
+                    external_id="H11CARTIDCANARY",
+                    status="pending",
+                    total="55.00",
+                    checkout_url="https://canary.example/checkout/H11",
+                    customer_info={"mobile": "+966500111222", "name": "Ahmad Salem"},
+                    is_abandoned=False,
+                    extra_metadata={"payment_method": "mada"},
+                ))
+                self.db.flush()
+                return 1
+
+            caplog.set_level(logging.DEBUG)
+            # Fault injection: adapter_for_integration returns mock with empty get_orders.
+            # sync_orders replaced to insert one order (persist boundary).
+            # _poll_integration logging is real.
+            with patch(
+                "store_integration.registry.adapter_for_integration",
+                return_value=mock_adapter,
+            ), patch(
+                "services.store_sync.StoreSyncService.sync_orders",
+                _insert_new_order,
+            ):
+                stats = _run(_poll_integration(db, intg, "2025-01-21T15:00:00+00:00"))
+            assert stats["new_orders"] == 1
+            blob = _h11_blob_for(caplog, "nahla.salla_orders_poller")
+            assert "salla_orders_poller.new_order_detected" in blob
+            assert "external_id_hash=" in blob
+            _assert_no_h11_canaries(blob)
+            row = db.query(Order).filter_by(tenant_id=tenant_id, external_id="H11CARTIDCANARY").one()
+            assert row.status == "pending"
         finally:
             db.close()
             engine.dispose()
