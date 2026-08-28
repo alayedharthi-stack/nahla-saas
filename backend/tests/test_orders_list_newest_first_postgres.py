@@ -63,7 +63,10 @@ def _invoke_list(db: Session, tenant_id: int) -> dict:
 
     with patch("routers.orders.resolve_tenant_id", return_value=tenant_id):
         with patch("routers.orders.get_or_create_tenant"):
-            return asyncio.run(_go())
+            with patch("routers.orders._build_customer_lookup", return_value={}):
+                with patch("routers.orders._build_vip_phone_set", return_value=set()):
+                    with patch("routers.orders._build_unread_phone_set", return_value=set()):
+                        return asyncio.run(_go())
 
 
 def _cleanup(session: Session) -> None:
