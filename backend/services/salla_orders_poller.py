@@ -67,6 +67,13 @@ _state: Dict[str, Any] = {
 }
 
 
+
+def _safe_store_hash(store_id: Any) -> str:
+    from core.coupon_log_privacy import redact_store_id  # noqa: PLC0415
+
+    return redact_store_id(store_id) or ""
+
+
 def get_poller_state() -> Dict[str, Any]:
     """Return a deep-ish copy of the poller's in-memory state for diag UI."""
     try:
@@ -113,7 +120,10 @@ async def run_salla_orders_poller_scheduler() -> None:
             logger.info("[Salla Orders Poller] cancelled — exiting loop")
             raise
         except Exception as exc:
-            logger.exception("[Salla Orders Poller] tick crashed: %s", exc)
+            logger.error(
+                "[Salla Orders Poller] salla_orders_poller.tick_crashed error_class=%s",
+                type(exc).__name__,
+            )
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -139,8 +149,8 @@ async def _run_one_tick() -> Dict[str, Any]:
             lock_acquired = bool(row)
         except Exception as _lock_exc:
             logger.debug(
-                "[Salla Orders Poller] advisory lock unsupported (%s) — running anyway",
-                _lock_exc,
+                "[Salla Orders Poller] salla_orders_poller.advisory_lock_unsupported error_class=%s",
+                type(_lock_exc).__name__,
             )
             lock_acquired = True
 
@@ -200,7 +210,7 @@ async def _run_one_tick() -> Dict[str, Any]:
             tenant_state: Dict[str, Any] = {
                 "tenant_id":     tenant_id,
                 "integration_id": intg.id,
-                "store_id":      store_id,
+                "store_hash":    _safe_store_hash(store_id),
                 "token_present": bool(api_key),
                 "needs_reauth":  needs_reauth,
                 "scanned_at":    datetime.now(timezone.utc).isoformat(),
@@ -213,18 +223,18 @@ async def _run_one_tick() -> Dict[str, Any]:
 
             if needs_reauth:
                 logger.info(
-                    "[Salla Orders Poller] tenant scanned tenant_id=%s store_id=%s "
+                    "[Salla Orders Poller] tenant scanned tenant_id=%s store_hash=%s "
                     "result=skipped reason=needs_reauth",
-                    tenant_id, store_id,
+                    tenant_id, _safe_store_hash(store_id),
                 )
                 tenant_state["result"] = "skipped_needs_reauth"
                 _state["tenants"][tenant_id] = tenant_state
                 continue
             if not api_key:
                 logger.info(
-                    "[Salla Orders Poller] tenant scanned tenant_id=%s store_id=%s "
+                    "[Salla Orders Poller] tenant scanned tenant_id=%s store_hash=%s "
                     "result=skipped reason=no_api_key",
-                    tenant_id, store_id,
+                    tenant_id, _safe_store_hash(store_id),
                 )
                 tenant_state["result"] = "skipped_no_api_key"
                 _state["tenants"][tenant_id] = tenant_state
@@ -240,9 +250,9 @@ async def _run_one_tick() -> Dict[str, Any]:
                     "duration_ms": stats["duration_ms"],
                 })
                 logger.info(
-                    "[Salla Orders Poller] tenant scanned tenant_id=%s store_id=%s "
+                    "[Salla Orders Poller] tenant scanned tenant_id=%s store_hash=%s "
                     "result=ok api_returned=%d created=%d updated=%d emitted=%d duration_ms=%d",
-                    tenant_id, store_id,
+                    tenant_id, _safe_store_hash(store_id),
                     stats["api_returned"],
                     stats["new_orders"], stats["updated_orders"],
                     stats["events_emitted"], stats["duration_ms"],
@@ -251,10 +261,10 @@ async def _run_one_tick() -> Dict[str, Any]:
                 errors += 1
                 tenant_state["result"] = "error"
                 tenant_state["error"]  = type(exc).__name__
-                logger.exception(
-                    "[Salla Orders Poller] tenant scanned tenant_id=%s store_id=%s "
-                    "result=error error=%s",
-                    tenant_id, store_id, exc,
+                logger.error(
+                    "[Salla Orders Poller] salla_orders_poller.tenant_scan_failed "
+                    "tenant_id=%s store_hash=%s result=error error_class=%s",
+                    tenant_id, _safe_store_hash(store_id), type(exc).__name__,
                 )
                 try:
                     db.rollback()
@@ -356,14 +366,16 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
                     needs_reauth_raised = True
                     api_error = "needs_reauth: token refresh failed or revoked"
                     logger.warning(
-                        "[Salla Orders Poller] tenant=%s sync stopped — needs_reauth (%s)",
-                        tenant_id, adapter_exc,
+                        "[Salla Orders Poller] salla_orders_poller.needs_reauth "
+                        "tenant=%s error_class=%s",
+                        tenant_id, type(adapter_exc).__name__,
                     )
                 else:
                     api_error = type(adapter_exc).__name__
                     logger.warning(
-                        "[Salla Orders Poller] tenant=%s salla_api_response error=%s",
-                        tenant_id, adapter_exc,
+                        "[Salla Orders Poller] salla_orders_poller.salla_api_response_failed "
+                        "tenant=%s error_class=%s",
+                        tenant_id, type(adapter_exc).__name__,
                     )
     except Exception:
         pass
@@ -506,9 +518,10 @@ def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
         db.commit()
         return True
     except Exception as exc:
-        logger.exception(
-            "[Salla Orders Poller] emit failed tenant_id=%s order_id=%s: %s",
-            tenant_id, getattr(order, "id", "?"), exc,
+        logger.error(
+            "[Salla Orders Poller] salla_orders_poller.emit_failed "
+            "tenant_id=%s error_class=%s",
+            tenant_id, type(exc).__name__,
         )
         try:
             db.rollback()
@@ -578,8 +591,8 @@ async def run_once_for_tenant(
                 "tenant_id":             tenant_id,
                 "integration_id":        intg.id,
                 "enabled":               intg.enabled,
-                "store_id":              cfg.get("store_id") or cfg.get("merchant_id"),
-                "external_store_id":     getattr(intg, "external_store_id", None),
+                "store_hash":            _safe_store_hash(cfg.get("store_id") or cfg.get("merchant_id")),
+                "external_store_hash":   _safe_store_hash(getattr(intg, "external_store_id", None)),
                 "token_present":         bool(cfg.get("api_key")),
                 "refresh_token_present": bool(cfg.get("refresh_token")),
                 "needs_reauth":          bool(cfg.get("needs_reauth")),
@@ -591,9 +604,10 @@ async def run_once_for_tenant(
                 per_integration.append({"ok": True, **ctx, **stats})
             except Exception as exc:
                 errors += 1
-                logger.exception(
-                    "[Salla Orders Poller] run_once tenant_id=%s integration_id=%s — %s",
-                    tenant_id, intg.id, exc,
+                logger.error(
+                    "[Salla Orders Poller] salla_orders_poller.run_once_failed "
+                    "tenant_id=%s error_class=%s",
+                    tenant_id, type(exc).__name__,
                 )
                 try:
                     db.rollback()

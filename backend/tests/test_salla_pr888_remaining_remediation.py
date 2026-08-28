@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
+import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,7 +23,7 @@ for p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from database.models import AutomationEvent, AutomationExecution, Base, Customer, Integration, Order, Product, Promotion, StoreKnowledgeSnapshot, Tenant, WebhookEvent
+from database.models import AutomationEvent, AutomationExecution, Base, Customer, Integration, Order, Product, Promotion, SmartAutomation, StoreKnowledgeSnapshot, Tenant, WebhookEvent
 from services.store_sync import StoreSyncService, _extract_abandoned_at_iso
 
 
@@ -516,7 +519,7 @@ class TestH3PollerCommit:
         from sqlalchemy.orm import sessionmaker
 
         db_path = tmp_path / "cart_emit.db"
-        engine = create_engine(f"sqlite:///{db_path}")
+        engine = create_engine(f"sqlite:///{db_path.as_posix()}")
         Base.metadata.create_all(engine)
         Session = sessionmaker(bind=engine)
         db = Session()
@@ -544,3 +547,544 @@ class TestH3PollerCommit:
             assert events[0].id == cart.extra_metadata.get("recovery_event_id")
         finally:
             db2.close(); engine2.dispose()
+
+
+def _file_db(tmp_path, name="h6.db"):
+    db_path = tmp_path / name
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    tenant = Tenant(name="Generic Commerce Store", is_active=True)
+    db.add(tenant)
+    db.commit()
+    return db, tenant.id, engine, db_path
+
+
+def _reopen_db(db_path, db=None, engine=None):
+    if db is not None:
+        db.close()
+    if engine is not None:
+        engine.dispose()
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    Session = sessionmaker(bind=engine)
+    return Session(), engine
+
+
+def _seed_recovery_automation(db, tenant_id):
+    auto = SmartAutomation(
+        tenant_id=tenant_id,
+        automation_type="abandoned_cart",
+        name="Cart recovery",
+        enabled=True,
+        engine="recovery",
+        config={"steps": [
+            {"delay_minutes": 0, "enabled": True},
+            {"delay_minutes": 0, "enabled": True},
+        ]},
+    )
+    db.add(auto)
+    db.flush()
+    return auto
+
+
+def _create_abandoned_via_handler(db, tenant_id, cart_id, phone="+966500111222"):
+    payload = _official_abandoned_cart_payload(str(cart_id), age=83)
+    payload["customer"] = {"name": "Ahmad Salem", "mobile": phone}
+    svc = StoreSyncService(db, tenant_id)
+    _run(svc.handle_abandoned_cart_webhook(
+        payload,
+        event_kind="created",
+        webhook_event_type="abandoned.cart",
+        envelope_created_at="Tue Jan 21 2025 18:00:32 GMT+0300",
+        original_received_at=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc),
+    ))
+    return db.query(Order).filter_by(tenant_id=tenant_id, external_id=f"cart-{cart_id}").one()
+
+
+def _promote_parent_and_execution(db, tenant_id, cart_external_id, automation_id):
+    from sqlalchemy.orm.attributes import flag_modified
+
+    matches = [
+        ev for ev in db.query(AutomationEvent).filter_by(
+            tenant_id=tenant_id, event_type="cart_abandoned",
+        ).all()
+        if (ev.payload or {}).get("cart_external_id") == cart_external_id
+        and int((ev.payload or {}).get("step_idx") or 0) == 0
+    ]
+    assert len(matches) == 1
+    parent = matches[0]
+    parent.processed = True
+    parent.created_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+    payload = dict(parent.payload or {})
+    payload["recovery_followups"] = []
+    parent.payload = payload
+    flag_modified(parent, "payload")
+    execution = AutomationExecution(
+        tenant_id=tenant_id,
+        automation_id=automation_id,
+        event_id=parent.id,
+        customer_id=parent.customer_id,
+        status="sent",
+        action_taken={"metrics": {"sent": True}},
+    )
+    db.add(execution)
+    db.flush()
+    return parent, execution
+
+
+def _cart_state(cart):
+    return {
+        "is_abandoned": cart.is_abandoned,
+        "status": cart.status,
+        "total": cart.total,
+        "customer_info": copy.deepcopy(dict(cart.customer_info or {})),
+        "extra_metadata": copy.deepcopy(dict(cart.extra_metadata or {})),
+        "checkout_url": cart.checkout_url,
+        "line_items": copy.deepcopy(list(cart.line_items or [])),
+    }
+
+
+def _followups_for(db, tenant_id, cart_external_id):
+    return [
+        ev for ev in db.query(AutomationEvent).filter_by(
+            tenant_id=tenant_id, event_type="cart_abandoned",
+        ).all()
+        if (ev.payload or {}).get("cart_external_id") == cart_external_id
+        and int((ev.payload or {}).get("step_idx") or 0) > 0
+    ]
+
+
+def _parent_for(db, tenant_id, cart_external_id):
+    matches = [
+        ev for ev in db.query(AutomationEvent).filter_by(
+            tenant_id=tenant_id, event_type="cart_abandoned",
+        ).all()
+        if (ev.payload or {}).get("cart_external_id") == cart_external_id
+        and int((ev.payload or {}).get("step_idx") or 0) == 0
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+class TestH6PartialPurchaseCancelsFullChain:
+    def _run_scenario(self, tmp_path, *, clear_stored_phone: bool, unresolved_customer: bool):
+        from core.automation_emitters import scan_abandoned_cart_followups
+        from sqlalchemy.orm.attributes import flag_modified
+
+        db, tenant_id, engine, db_path = _file_db(tmp_path)
+        try:
+            auto = _seed_recovery_automation(db, tenant_id)
+            if unresolved_customer:
+                cart_a = Order(
+                    tenant_id=tenant_id,
+                    external_id="cart-801",
+                    status="abandoned",
+                    total="80.00",
+                    is_abandoned=True,
+                    customer_info={},
+                    line_items=[{"name": "White sports shoe", "qty": 1}],
+                    extra_metadata={"source_kind": "abandoned_cart", "raw_cart_id": "801"},
+                )
+                db.add(cart_a)
+                db.flush()
+                parent_a = AutomationEvent(
+                    tenant_id=tenant_id,
+                    customer_id=None,
+                    event_type="cart_abandoned",
+                    processed=True,
+                    created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1),
+                    payload={
+                        "cart_external_id": "cart-801",
+                        "cart_id": "801",
+                        "step_idx": 0,
+                        "recovery_followups": [],
+                    },
+                )
+                db.add(parent_a)
+                db.flush()
+                exec_a = AutomationExecution(
+                    tenant_id=tenant_id,
+                    automation_id=auto.id,
+                    event_id=parent_a.id,
+                    customer_id=None,
+                    status="sent",
+                    action_taken={"metrics": {"sent": True}},
+                )
+                db.add(exec_a)
+                db.flush()
+                cart_b = Order(
+                    tenant_id=tenant_id,
+                    external_id="cart-802",
+                    status="abandoned",
+                    total="40.00",
+                    is_abandoned=True,
+                    customer_info={},
+                    line_items=[{"name": "Blue cotton shirt", "qty": 1}],
+                    extra_metadata={"source_kind": "abandoned_cart", "raw_cart_id": "802"},
+                )
+                db.add(cart_b)
+                db.flush()
+                parent_b = AutomationEvent(
+                    tenant_id=tenant_id,
+                    customer_id=None,
+                    event_type="cart_abandoned",
+                    processed=True,
+                    created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1),
+                    payload={
+                        "cart_external_id": "cart-802",
+                        "cart_id": "802",
+                        "step_idx": 0,
+                        "recovery_followups": [],
+                    },
+                )
+                db.add(parent_b)
+                db.flush()
+                exec_b = AutomationExecution(
+                    tenant_id=tenant_id,
+                    automation_id=auto.id,
+                    event_id=parent_b.id,
+                    customer_id=None,
+                    status="sent",
+                    action_taken={"metrics": {"sent": True}},
+                )
+                db.add(exec_b)
+                db.commit()
+                id_a, id_b = "801", "802"
+            else:
+                cart_a = _create_abandoned_via_handler(db, tenant_id, "701")
+                cart_b = _create_abandoned_via_handler(db, tenant_id, "702")
+                parent_a, exec_a = _promote_parent_and_execution(db, tenant_id, "cart-701", auto.id)
+                parent_b, exec_b = _promote_parent_and_execution(db, tenant_id, "cart-702", auto.id)
+                if clear_stored_phone:
+                    cart_a.customer_info = {"name": "Ahmad Salem"}
+                    flag_modified(cart_a, "customer_info")
+                db.commit()
+                id_a, id_b = "701", "702"
+
+            before_b = {
+                "cart": _cart_state(cart_b),
+                "parent": copy.deepcopy(dict(parent_b.payload or {})),
+                "processed": parent_b.processed,
+                "execution": copy.deepcopy(dict(exec_b.action_taken or {})),
+                "followups": len(_followups_for(db, tenant_id, f"cart-{id_b}")),
+            }
+            svc = StoreSyncService(db, tenant_id)
+            _run(svc.handle_abandoned_cart_webhook(
+                {"id": int(id_a)},
+                event_kind="purchased",
+                webhook_event_type="abandoned.cart.purchased",
+            ))
+        finally:
+            db.close()
+            engine.dispose()
+
+        db, engine = _reopen_db(db_path)
+        try:
+            parent_a = _parent_for(db, tenant_id, f"cart-{id_a}")
+            parent_b = _parent_for(db, tenant_id, f"cart-{id_b}")
+            exec_a = db.query(AutomationExecution).filter_by(tenant_id=tenant_id, event_id=parent_a.id).one()
+            exec_b = db.query(AutomationExecution).filter_by(tenant_id=tenant_id, event_id=parent_b.id).one()
+            cart_a = db.query(Order).filter_by(tenant_id=tenant_id, external_id=f"cart-{id_a}").one()
+            cart_b = db.query(Order).filter_by(tenant_id=tenant_id, external_id=f"cart-{id_b}").one()
+            payload_a = dict(parent_a.payload or {})
+            assert payload_a.get("recovery_converted_at")
+            skipped = {
+                int(item.get("step_idx"))
+                for item in (payload_a.get("recovery_followups") or [])
+                if item.get("skipped")
+            }
+            assert 1 in skipped
+            metrics = dict((exec_a.action_taken or {}).get("metrics") or {})
+            assert metrics.get("converted") is True
+            assert metrics.get("remaining_steps_skipped") is True
+            assert metrics.get("skip_reason") == "abandoned_cart_purchased"
+            assert cart_a.is_abandoned is False
+            assert dict(parent_b.payload or {}) == before_b["parent"]
+            assert parent_b.processed == before_b["processed"]
+            assert dict(exec_b.action_taken or {}) == before_b["execution"]
+            assert _cart_state(cart_b) == before_b["cart"]
+            assert len(_followups_for(db, tenant_id, f"cart-{id_b}")) == before_b["followups"]
+
+            emitted = scan_abandoned_cart_followups(db, tenant_id)
+            assert _followups_for(db, tenant_id, f"cart-{id_a}") == []
+            follow_b = _followups_for(db, tenant_id, f"cart-{id_b}")
+            assert follow_b, emitted
+            after_scan_b_payload = copy.deepcopy(dict(parent_b.payload or {}))
+            after_scan_b_followups = [
+                (ev.id, copy.deepcopy(dict(ev.payload or {})), ev.processed) for ev in follow_b
+            ]
+            svc = StoreSyncService(db, tenant_id)
+            _run(svc.handle_abandoned_cart_webhook(
+                {"id": int(id_a)},
+                event_kind="purchased",
+                webhook_event_type="abandoned.cart.purchased",
+            ))
+            db.expire_all()
+            parent_a = _parent_for(db, tenant_id, f"cart-{id_a}")
+            parent_b = _parent_for(db, tenant_id, f"cart-{id_b}")
+            assert dict(parent_a.payload or {}).get("recovery_converted_at")
+            assert dict(parent_b.payload or {}) == after_scan_b_payload
+            replay_follow_b = _followups_for(db, tenant_id, f"cart-{id_b}")
+            assert [
+                (ev.id, dict(ev.payload or {}), ev.processed) for ev in replay_follow_b
+            ] == after_scan_b_followups
+            assert _followups_for(db, tenant_id, f"cart-{id_a}") == []
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_purchased_without_phone_uses_stored_cart_phone(self, tmp_path):
+        self._run_scenario(tmp_path, clear_stored_phone=False, unresolved_customer=False)
+
+    def test_purchased_without_phone_uses_matching_parent_event(self, tmp_path):
+        self._run_scenario(tmp_path, clear_stored_phone=True, unresolved_customer=False)
+
+    def test_purchased_without_phone_stamps_chain_when_customer_unresolved(self, tmp_path):
+        self._run_scenario(tmp_path, clear_stored_phone=True, unresolved_customer=True)
+
+
+_H11_SKIP_ATTRS = {
+    "name", "msg", "args", "levelname", "levelno", "pathname", "filename", "module",
+    "exc_info", "exc_text", "stack_info", "lineno", "funcName", "created", "msecs",
+    "relativeCreated", "thread", "threadName", "processName", "process", "message",
+    "taskName", "color_message",
+}
+H11_CANARIES = (
+    "+966500111222",
+    "tok_H11_SECRET_CANARY",
+    "https://canary.example/checkout/H11",
+    "CANARY_BODY_H11_PROVIDER",
+    "STORE_ID_CANARY_8889",
+    "CANARY_EXC_H11_SECRET_BODY",
+)
+
+
+def _h11_blob(caplog) -> str:
+    formatter = logging.Formatter("%(levelname)s %(name)s %(message)s")
+    chunks = []
+    for rec in caplog.records:
+        chunks.append(formatter.format(rec))
+        chunks.append(repr(rec.args))
+        extra = {k: rec.__dict__[k] for k in rec.__dict__ if k not in _H11_SKIP_ATTRS}
+        if extra:
+            chunks.append(json.dumps(extra, default=str, sort_keys=True))
+        if str(getattr(rec, "name", "")).startswith("nahla"):
+            assert rec.exc_info is None, rec
+            assert not rec.exc_text, rec.exc_text
+    return "\n".join(chunks)
+
+
+def _h11_http_error():
+    import httpx
+
+    request = httpx.Request("GET", "https://canary.example/checkout/H11")
+    response = httpx.Response(
+        500,
+        text="CANARY_BODY_H11_PROVIDER tok_H11_SECRET_CANARY +966500111222 STORE_ID_CANARY_8889",
+        request=request,
+    )
+    return httpx.HTTPStatusError(
+        "CANARY_EXC_H11_SECRET_BODY",
+        request=request,
+        response=response,
+    )
+
+
+def _assert_no_h11_canaries(blob: str, diagnostic=None):
+    haystacks = [blob]
+    if diagnostic is not None:
+        haystacks.append(json.dumps(diagnostic, default=str))
+    for haystack in haystacks:
+        for canary in H11_CANARIES:
+            assert canary not in haystack, canary
+
+
+class TestH11RemainingLogSites:
+    def test_orders_poller_logs_and_diagnostic_state_are_safe(self, caplog, tmp_path):
+        import httpx
+        from services.salla_orders_poller import _run_one_tick, _state, get_poller_state
+
+        db, tenant_id, engine, db_path = _file_db(tmp_path, "h11-poller.db")
+        try:
+            db.add(Integration(
+                tenant_id=tenant_id,
+                provider="salla",
+                enabled=True,
+                external_store_id="STORE_ID_CANARY_8889",
+                config={
+                    "store_id": "STORE_ID_CANARY_8889",
+                    "merchant_id": "STORE_ID_CANARY_8889",
+                    "api_key": "tok_H11_SECRET_CANARY",
+                },
+            ))
+            db.commit()
+        finally:
+            db.close()
+            engine.dispose()
+
+        Session = sessionmaker(bind=create_engine(f"sqlite:///{db_path.as_posix()}"))
+        mock_adapter = MagicMock()
+        mock_adapter.get_orders = AsyncMock(side_effect=_h11_http_error())
+        _state["tenants"].clear()
+        caplog.set_level(logging.DEBUG)
+        # Fault injection: HTTP boundary = adapter.get_orders HTTPStatusError.
+        # Persist boundary = StoreSyncService.sync_orders raises RuntimeError.
+        # SessionLocal is patched to the sqlite session factory.
+        # adapter_for_integration is patched to return mock_adapter.
+        # _log helpers and poller log statements are real.
+        with patch("core.database.SessionLocal", Session), patch(
+            "store_integration.registry.adapter_for_integration",
+            return_value=mock_adapter,
+        ), patch(
+            "services.store_sync.StoreSyncService.sync_orders",
+            new=AsyncMock(side_effect=RuntimeError(
+                "CANARY_EXC_H11_SECRET_BODY tok_H11_SECRET_CANARY +966500111222"
+            )),
+        ):
+            _run(_run_one_tick())
+        blob = _h11_blob(caplog)
+        assert "salla_orders_poller.tenant_scan_failed" in blob
+        assert "salla_orders_poller.salla_api_response_failed" in blob
+        assert "error_class=HTTPStatusError" in blob or "HTTPStatusError" in blob
+        assert "error_class=RuntimeError" in blob
+        diagnostic = get_poller_state()
+        _assert_no_h11_canaries(blob, diagnostic)
+        dumped = json.dumps(diagnostic, default=str)
+        assert "store_hash=" in dumped
+        assert "STORE_ID_CANARY_8889" not in dumped
+        tenants = diagnostic.get("tenants") or {}
+        assert tenants, diagnostic
+        for row in tenants.values():
+            assert "store_id" not in row
+            assert row.get("error") == "RuntimeError"
+
+    def test_adapter_get_abandoned_carts_log_is_safe(self, caplog):
+        from store_adapters.salla_adapter import SallaAdapter
+
+        adapter = SallaAdapter(api_key="tok_H11_SECRET_CANARY", store_id="STORE_ID_CANARY_8889")
+        # Fault injection: HTTP boundary = instance _get_all_pages raises HTTPStatusError.
+        # _log_error is not mocked.
+        adapter._get_all_pages = AsyncMock(side_effect=_h11_http_error())
+        caplog.set_level(logging.DEBUG)
+        result = _run(adapter.get_abandoned_carts())
+        assert result == []
+        blob = _h11_blob(caplog)
+        assert "method=get_abandoned_carts" in blob
+        assert "salla_adapter.get_abandoned_carts_failed" in blob
+        assert "http_status=500" in blob
+        _assert_no_h11_canaries(blob)
+
+    def test_sync_abandoned_carts_logs_are_safe(self, caplog):
+        class _Boom:
+            def dict(self):
+                raise RuntimeError(
+                    "CANARY_EXC_H11_SECRET_BODY tok_H11_SECRET_CANARY +966500111222"
+                    " CANARY_BODY_H11_PROVIDER https://canary.example/checkout/H11"
+                )
+
+        db, tenant_id, engine = _make_db()
+        try:
+            svc = StoreSyncService(db, tenant_id)
+            adapter = MagicMock()
+            adapter.get_abandoned_carts = AsyncMock(return_value=[
+                {
+                    "customer": {"name": "Ahmad Salem", "mobile": "+966500111222"},
+                    "checkout_url": "https://canary.example/checkout/H11",
+                    "access_token": "tok_H11_SECRET_CANARY",
+                    "provider_body": "CANARY_BODY_H11_PROVIDER",
+                    "store_id": "STORE_ID_CANARY_8889",
+                },
+                _Boom(),
+                {
+                    "id": "h11-save",
+                    "customer": {"name": "Noura Abdullah", "mobile": "+966500111222"},
+                    "checkout_url": "https://canary.example/checkout/H11",
+                    "access_token": "tok_H11_SECRET_CANARY",
+                    "provider_body": "CANARY_BODY_H11_PROVIDER",
+                },
+            ])
+            svc._adapter = adapter
+            caplog.set_level(logging.DEBUG)
+
+            def _boom_upsert(self, normalised, *args, **kwargs):
+                raise RuntimeError(
+                    "CANARY_EXC_H11_SECRET_BODY tok_H11_SECRET_CANARY +966500111222"
+                )
+
+            # Fault injection: persist boundary = _upsert_abandoned_cart_row raises.
+            # get_abandoned_carts mock returns canary payloads including a .dict() boom.
+            # Logging statements under test are real.
+            with patch.object(StoreSyncService, "_upsert_abandoned_cart_row", _boom_upsert):
+                _run(svc.sync_abandoned_carts())
+            blob = _h11_blob(caplog)
+            assert "store_sync.abandoned_cart_missing_id" in blob
+            assert "store_sync.abandoned_cart_normalize_failed" in blob
+            assert "store_sync.abandoned_cart_save_failed" in blob
+            _assert_no_h11_canaries(blob)
+        finally:
+            db.close()
+            engine.dispose()
+
+    def test_resolve_customer_id_log_is_safe(self, caplog):
+        from services.cart_recovery_emitter import emit_cart_abandoned_if_new
+
+        db, tenant_id, engine = _make_db()
+        try:
+            cart = Order(
+                tenant_id=tenant_id,
+                external_id="cart-h11-resolve",
+                status="abandoned",
+                total="25.00",
+                is_abandoned=True,
+                customer_info={"mobile": "+966500111222", "name": "Ahmad Salem"},
+                line_items=[{"name": "Rose perfume 100ml", "qty": 1}],
+                extra_metadata={
+                    "first_provider_abandoned_observed_at": "2025-01-21T15:00:32+00:00",
+                    "abandonment_anchor_source": "provider_webhook_event",
+                    "raw_cart_id": "h11-resolve",
+                },
+            )
+            db.add(cart)
+            db.commit()
+            db.refresh(cart)
+            normalised = {
+                "external_id": "cart-h11-resolve",
+                "raw_cart_id": "h11-resolve",
+                "customer_info": {"mobile": "+966500111222", "name": "Ahmad Salem"},
+                "customer_name": "Ahmad Salem",
+                "checkout_url": "https://canary.example/checkout/H11",
+                "total": "25.00",
+                "line_items": [{"name": "Rose perfume 100ml", "qty": 1}],
+                "observation_candidate_iso": "2025-01-21T15:00:32+00:00",
+                "observation_candidate_source": "provider_webhook_event",
+            }
+            caplog.set_level(logging.DEBUG)
+
+            def _boom(self, *args, **kwargs):
+                raise RuntimeError(
+                    "CANARY_EXC_H11_SECRET_BODY tok_H11_SECRET_CANARY +966500111222"
+                )
+
+            # Fault injection: customer DB lookup/upsert raises.
+            # emit_cart_abandoned_if_new and _resolve_customer_id are real.
+            with patch(
+                "services.customer_intelligence.CustomerIntelligenceService.find_customer_by_phone",
+                _boom,
+            ):
+                result = emit_cart_abandoned_if_new(
+                    db,
+                    tenant_id=tenant_id,
+                    cart_row=cart,
+                    normalised=normalised,
+                    source="store_sync",
+                    commit=False,
+                )
+            assert result is None
+            blob = _h11_blob(caplog)
+            assert "cart_recovery.customer_resolve_failed" in blob
+            assert "error_class=RuntimeError" in blob
+            _assert_no_h11_canaries(blob)
+        finally:
+            db.close()
+            engine.dispose()

@@ -3721,9 +3721,10 @@ class SallaAdapter(BaseStoreAdapter):
             raise
         except httpx.HTTPStatusError as exc:
             self._log_error("get_abandoned_carts", exc)
+            http_status = getattr(getattr(exc, "response", None), "status_code", None)
             logger.error(
-                "Salla get_abandoned_carts HTTP %s: %s",
-                exc.response.status_code, exc.response.text[:300],
+                "[SallaAdapter] salla_adapter.get_abandoned_carts_failed http_status=%s",
+                http_status,
             )
             return []
         except Exception as exc:

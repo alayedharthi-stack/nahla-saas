@@ -599,4 +599,3 @@ def test_purchase_first_two_connections_skips_emit(postgres_engine):
         assert matched == []
     finally:
         verify.close()
-

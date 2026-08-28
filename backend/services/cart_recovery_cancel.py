@@ -282,7 +282,7 @@ def cancel_recovery_for_customer(
             ex.action_taken = action
             try:
                 flag_modified(ex, "action_taken")
-            except Exception:
+            except Exception:  # noqa: silent-ok - flag_modified best-effort
                 pass
             counters["executions_stamped"] += 1
 
@@ -352,6 +352,126 @@ def cancel_recovery_for_customer(
             counters["events_cancelled"], counters["parent_events_marked"],
             counters["executions_stamped"], counters["carts_recovered"],
         )
+    return counters
+
+
+
+def cancel_recovery_chain_for_cart(
+    db: Session,
+    *,
+    tenant_id: int,
+    matched_cart_external_id: str,
+    reason: str,
+    commit: bool = False,
+) -> Dict[str, int]:
+    """Stamp the full recovery chain for one cart, including processed parents.
+
+    Used when a purchase webhook may lack a phone. Tenant- and cart-scoped
+    only: never searches customers outside the tenant and never touches
+    another cart's events or executions.
+    """
+    counters = {
+        "events_cancelled": 0,
+        "parent_events_marked": 0,
+        "executions_stamped": 0,
+        "carts_recovered": 0,
+    }
+    wanted = str(matched_cart_external_id or "").strip()
+    if not wanted:
+        return counters
+
+    from models import AutomationEvent, AutomationExecution  # noqa: PLC0415
+
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    now_iso = now_naive.isoformat()
+
+    events = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type == "cart_abandoned",
+        )
+        .all()
+    )
+    matched_parents = []
+    for ev in events:
+        payload = dict(ev.payload or {})
+        if not _recovery_event_matches_cart(payload, wanted):
+            continue
+        already = bool(payload.get("recovery_converted_at"))
+        if int(payload.get("step_idx") or 0) == 0:
+            matched_parents.append(ev)
+            progress = list(payload.get("recovery_followups") or [])
+            seen = {int(p.get("step_idx", -1)) for p in progress}
+            added = False
+            for idx in range(1, _MAX_RECOVERY_STAGES):
+                if idx in seen:
+                    continue
+                progress.append({
+                    "step_idx": idx,
+                    "skipped": True,
+                    "reason": reason,
+                    "emitted_at": now_iso,
+                })
+                added = True
+            payload["recovery_followups"] = progress
+            payload["recovery_converted_at"] = payload.get("recovery_converted_at") or now_iso
+            payload["recovery_cancel_reason"] = reason
+            ev.payload = payload
+            try:
+                flag_modified(ev, "payload")
+            except Exception:  # noqa: silent-ok - flag_modified best-effort
+                pass
+            if added or not already:
+                counters["parent_events_marked"] += 1
+        if not ev.processed or not already:
+            if not already:
+                payload["recovery_converted_at"] = now_iso
+                payload["recovery_cancel_reason"] = reason
+                ev.payload = payload
+                try:
+                    flag_modified(ev, "payload")
+                except Exception:  # noqa: silent-ok - flag_modified best-effort
+                    pass
+            if not ev.processed:
+                ev.processed = True
+                counters["events_cancelled"] += 1
+
+    parent_ids = [p.id for p in matched_parents if p.id]
+    if parent_ids:
+        executions = (
+            db.query(AutomationExecution)
+            .filter(
+                AutomationExecution.tenant_id == tenant_id,
+                AutomationExecution.event_id.in_(parent_ids),
+            )
+            .all()
+        )
+        for ex in executions:
+            action = dict(ex.action_taken or {})
+            metrics = dict(action.get("metrics") or {})
+            if metrics.get("converted") and metrics.get("skip_reason") == reason:
+                continue
+            metrics["converted"] = True
+            metrics["remaining_steps_skipped"] = True
+            metrics["skip_reason"] = reason
+            metrics["converted_at"] = now_iso
+            action["metrics"] = metrics
+            action["last_outcome"] = reason
+            action["last_outcome_at"] = now_iso
+            ex.action_taken = action
+            try:
+                flag_modified(ex, "action_taken")
+            except Exception:
+                pass
+            counters["executions_stamped"] += 1
+
+    if commit:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
     return counters
 
 

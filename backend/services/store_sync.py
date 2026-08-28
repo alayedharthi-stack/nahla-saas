@@ -2336,8 +2336,8 @@ class StoreSyncService:
             poller_observed_at = _utc_now()
         except Exception as exc:
             logger.warning(
-                "tenant=%s abandoned-cart fetch failed (%s) — KEEPING existing rows visible",
-                self.tenant_id, exc,
+                "[StoreSync] store_sync.abandoned_cart_fetch_failed tenant=%s error_class=%s",
+                self.tenant_id, type(exc).__name__,
             )
             return result
 
@@ -2397,13 +2397,11 @@ class StoreSyncService:
                 normalised = _normalise_abandoned_cart(raw)
             except Exception as exc:
                 result["normalize_errors"] += 1
-                logger.exception(
-                    "[StoreSync] tenant=%s NORMALIZE_FAILED — skipping one "
-                    "cart, continuing batch | error=%s | raw_keys=%s | "
-                    "raw_preview=%s",
-                    self.tenant_id, exc,
+                logger.error(
+                    "[StoreSync] store_sync.abandoned_cart_normalize_failed tenant=%s "
+                    "error_class=%s raw_keys=%s",
+                    self.tenant_id, type(exc).__name__,
                     sorted(list(raw.keys())) if isinstance(raw, dict) else type(raw).__name__,
-                    str(raw)[:300],
                 )
                 continue
 
@@ -2411,11 +2409,9 @@ class StoreSyncService:
             if not ext_id:
                 result["skipped_no_id"] += 1
                 logger.warning(
-                    "[StoreSync] tenant=%s SKIPPED_NO_ID — abandoned cart had "
-                    "no usable id field | raw_keys=%s | raw_preview=%s",
+                    "[StoreSync] store_sync.abandoned_cart_missing_id tenant=%s raw_keys=%s",
                     self.tenant_id,
                     sorted(list(raw.keys())) if isinstance(raw, dict) else type(raw).__name__,
-                    str(raw)[:300],
                 )
                 continue
 
@@ -2474,11 +2470,10 @@ class StoreSyncService:
             except Exception as exc:
                 result["save_errors"] += 1
                 self.db.rollback()
-                logger.exception(
-                    "[StoreSync] tenant=%s SAVE_FAILED ext_id=%s -- "
-                    "rolling back this cart only, continuing batch | "
+                logger.error(
+                    "[StoreSync] store_sync.abandoned_cart_save_failed tenant=%s "
                     "error_class=%s",
-                    self.tenant_id, ext_id, type(exc).__name__,
+                    self.tenant_id, type(exc).__name__,
                 )
 
         # the cart out. Either way the dashboard must stop showing it.
@@ -3617,6 +3612,45 @@ class StoreSyncService:
             raise
         return cart_row
 
+
+    def _resolve_recovery_customer_id_for_cart(self, *, cart_row: Any, normalised: Dict[str, Any], ext_id: str) -> Optional[int]:
+        """Resolve customer_id from payload phone, stored cart phone, or matching parent event."""
+        from services.cart_recovery_cancel import _recovery_event_matches_cart
+
+        phone = _extract_phone_from_normalised_cart(normalised)
+        if not phone:
+            info = getattr(cart_row, "customer_info", None) or {}
+            if isinstance(info, dict):
+                phone = str(info.get("mobile") or info.get("phone") or "").strip()
+        if phone:
+            try:
+                from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
+                svc = CustomerIntelligenceService(self.db, self.tenant_id)
+                cust = svc.find_customer_by_phone(normalize_phone(phone) or phone)
+                if cust is not None:
+                    return int(cust.id)
+            except Exception as exc:
+                logger.error(
+                    "[StoreSync] cart recovery cancel customer lookup failed tenant=%s error_class=%s",
+                    self.tenant_id, type(exc).__name__,
+                )
+        from models import AutomationEvent
+        parent_id = None
+        for ev in self.db.query(AutomationEvent).filter(
+            AutomationEvent.tenant_id == self.tenant_id,
+            AutomationEvent.event_type == "cart_abandoned",
+        ).all():
+            payload = dict(ev.payload or {})
+            if not _recovery_event_matches_cart(payload, ext_id):
+                continue
+            if not ev.customer_id:
+                continue
+            if int(payload.get("step_idx") or 0) == 0:
+                return int(ev.customer_id)
+            if parent_id is None:
+                parent_id = int(ev.customer_id)
+        return parent_id
+
     def _cancel_abandoned_cart_recovery_for_cart(self, *, cart_row: Any, normalised: Dict[str, Any], reason: str) -> Dict[str, int]:
         counters = {"events_cancelled": 0, "parent_events_marked": 0, "executions_stamped": 0, "carts_recovered": 0}
         if cart_row is None:
@@ -3641,17 +3675,9 @@ class StoreSyncService:
         from sqlalchemy.orm.attributes import flag_modified
         flag_modified(cart_row, "extra_metadata")
         counters["carts_recovered"] = 1
-        customer_id = None
-        phone = _extract_phone_from_normalised_cart(normalised)
-        if phone:
-            try:
-                from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
-                svc = CustomerIntelligenceService(self.db, self.tenant_id)
-                cust = svc.find_customer_by_phone(normalize_phone(phone) or phone)
-                if cust is not None:
-                    customer_id = cust.id
-            except Exception:
-                logger.exception("[StoreSync] cart recovery cancel customer lookup failed tenant=%s cart=%s", self.tenant_id, ext_id)
+        customer_id = self._resolve_recovery_customer_id_for_cart(
+            cart_row=cart_row, normalised=normalised, ext_id=ext_id,
+        )
         if customer_id:
             from services.cart_recovery_cancel import cancel_recovery_for_customer
             counters.update(cancel_recovery_for_customer(
@@ -3662,23 +3688,17 @@ class StoreSyncService:
                 matched_cart_external_id=ext_id,
                 commit=False,
             ))
-        from models import AutomationEvent
-        raw_cart_id = str(normalised.get("raw_cart_id") or "")
-        for ev in self.db.query(AutomationEvent).filter(
-            AutomationEvent.tenant_id == self.tenant_id,
-            AutomationEvent.event_type == "cart_abandoned",
-            AutomationEvent.processed == False,
-        ).all():
-            payload = dict(ev.payload or {})
-            if payload.get("recovery_converted_at"):
-                continue
-            if str(payload.get("cart_external_id") or "") == ext_id or str(payload.get("cart_id") or "") == raw_cart_id:
-                payload["recovery_converted_at"] = now_iso
-                payload["recovery_cancel_reason"] = reason
-                ev.payload = payload
-                flag_modified(ev, "payload")
-                ev.processed = True
-                counters["events_cancelled"] += 1
+        from services.cart_recovery_cancel import cancel_recovery_chain_for_cart
+        chain = cancel_recovery_chain_for_cart(
+            self.db,
+            tenant_id=self.tenant_id,
+            matched_cart_external_id=ext_id,
+            reason=reason,
+            commit=False,
+        )
+        counters["events_cancelled"] += chain.get("events_cancelled", 0)
+        counters["parent_events_marked"] += chain.get("parent_events_marked", 0)
+        counters["executions_stamped"] += chain.get("executions_stamped", 0)
         try:
             self.db.commit()
         except Exception:

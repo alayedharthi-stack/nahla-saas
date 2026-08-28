@@ -95,11 +95,11 @@ def _resolve_customer_id(
             CustomerIntelligenceService,
             normalize_phone,
         )
-    except Exception:
-        logger.exception(
-            "[CartRecoveryEmitter] customer_intelligence import failed "
-            "tenant=%s — skipping customer resolution",
-            tenant_id,
+    except Exception as exc:
+        logger.error(
+            "[CartRecoveryEmitter] cart_recovery.customer_intelligence_import_failed "
+            "tenant=%s error_class=%s",
+            tenant_id, type(exc).__name__,
         )
         return None
 
@@ -117,10 +117,11 @@ def _resolve_customer_id(
             commit=commit,
         )
         return lead.id if lead else None
-    except Exception:
-        logger.exception(
-            "[CartRecoveryEmitter] customer upsert failed tenant=%s phone=%s",
-            tenant_id, normalized,
+    except Exception as exc:
+        logger.error(
+            "[CartRecoveryEmitter] cart_recovery.customer_resolve_failed "
+            "tenant=%s error_class=%s",
+            tenant_id, type(exc).__name__,
         )
         return None
 
