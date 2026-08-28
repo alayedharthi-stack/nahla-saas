@@ -1,14 +1,12 @@
 """PostgreSQL ranking for GET /orders by actual created_at."""
 from __future__ import annotations
 
-import asyncio
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, noload, sessionmaker
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO_ROOT / "backend"
@@ -18,7 +16,7 @@ for _entry in (str(_REPO_ROOT), str(_BACKEND), str(_DATABASE)):
         sys.path.insert(0, _entry)
 
 from database.models import Order, Tenant
-from routers.orders import ORDERS_LIST_PAGE_SIZE, list_orders
+from routers.orders import ORDERS_LIST_PAGE_SIZE, _load_orders_list_page
 from tests.order_customer_identity_postgres_fixtures import (
     _connect_engine,
     _ensure_a1_schema,
@@ -55,25 +53,18 @@ def pg_session(postgres_engine) -> Session:
         session.close()
 
 
-def _invoke_list(db: Session, tenant_id: int) -> dict:
-    request = MagicMock()
-
-    async def _go() -> dict:
-        return await list_orders(request, db, lifecycle_filter=None, source=None)
-
-    with patch("routers.orders.resolve_tenant_id", return_value=tenant_id):
-        with patch("routers.orders.get_or_create_tenant"):
-            with patch("routers.orders._build_customer_lookup", return_value={}):
-                with patch("routers.orders._build_vip_phone_set", return_value=set()):
-                    with patch("routers.orders._build_unread_phone_set", return_value=set()):
-                        return asyncio.run(_go())
+def _ranked_page(db: Session, tenant_id: int):
+    q = (
+        db.query(Order)
+        .options(noload("*"))
+        .filter(Order.tenant_id == tenant_id)
+    )
+    return _load_orders_list_page(q)
 
 
 def _cleanup(session: Session) -> None:
-    session.query(Order).filter(Order.tenant_id == TEST_TENANT).delete()
-    tenant = session.get(Tenant, TEST_TENANT)
-    if tenant is not None:
-        session.delete(tenant)
+    session.query(Order).filter(Order.tenant_id == TEST_TENANT).delete(synchronize_session=False)
+    session.query(Tenant).filter(Tenant.id == TEST_TENANT).delete(synchronize_session=False)
     session.commit()
 
 
@@ -117,6 +108,7 @@ def test_postgres_oldest_pk_newest_created_survives_601_rows(pg_session: Session
 
     previous = (
         pg_session.query(Order)
+        .options(noload("*"))
         .filter(Order.tenant_id == tenant.id)
         .order_by(Order.id.desc())
         .limit(400)
@@ -124,8 +116,8 @@ def test_postgres_oldest_pk_newest_created_survives_601_rows(pg_session: Session
     )
     assert "oldest-pk-newest-created" not in {row.external_id for row in previous}
 
-    payload = _invoke_list(pg_session, tenant.id)
-    ids = [row["external_id"] for row in payload["orders"]]
+    rows = _ranked_page(pg_session, tenant.id)
+    ids = [row.external_id for row in rows]
     assert ids[0] == "oldest-pk-newest-created"
     assert len(ids) == ORDERS_LIST_PAGE_SIZE
     _cleanup(pg_session)
@@ -155,8 +147,8 @@ def test_postgres_compares_timestamptz_not_offset_text(pg_session: Session) -> N
     )
     pg_session.commit()
 
-    payload = _invoke_list(pg_session, tenant.id)
-    ids = [row["external_id"] for row in payload["orders"]]
+    rows = _ranked_page(pg_session, tenant.id)
+    ids = [row.external_id for row in rows]
     assert ids[:2] == ["utc-actually-newer", "offset-later-text"]
     _cleanup(pg_session)
 
@@ -187,8 +179,8 @@ def test_postgres_invalid_created_at_does_not_fail_or_outrank(pg_session: Sessio
     pg_session.add(undated)
     pg_session.commit()
 
-    payload = _invoke_list(pg_session, tenant.id)
-    ids = [row["external_id"] for row in payload["orders"]]
+    rows = _ranked_page(pg_session, tenant.id)
+    ids = [row.external_id for row in rows]
     assert ids[:2] == ["dated-order", "undated-order"]
 
     undated.status = "paid"
@@ -198,6 +190,6 @@ def test_postgres_invalid_created_at_does_not_fail_or_outrank(pg_session: Sessio
     undated.extra_metadata = meta
     pg_session.commit()
 
-    after = [row["external_id"] for row in _invoke_list(pg_session, tenant.id)["orders"]]
+    after = [row.external_id for row in _ranked_page(pg_session, tenant.id)]
     assert after[:2] == ["dated-order", "undated-order"]
     _cleanup(pg_session)
