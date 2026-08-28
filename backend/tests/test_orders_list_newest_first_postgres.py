@@ -19,6 +19,7 @@ for _entry in (str(_REPO_ROOT), str(_BACKEND), str(_DATABASE)):
         sys.path.insert(0, _entry)
 
 from database.models import Order, Tenant
+from routers import orders as orders_mod
 from routers.orders import (
     ORDERS_LIST_PAGE_SIZE,
     ORDERS_LIST_SORT_SQL_FAILED_EVENT,
@@ -297,11 +298,11 @@ def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
 
     def _failing_order(query):
         calls["n"] += 1
-        # Missing relation plus CAST so PostgreSQL must fail at execute, not
-        # by dropping a constant ORDER BY / WHERE at plan time.
+        # Per-row integer division plus CAST so PostgreSQL must error at execute.
         return query.filter(
             text(
-                "(SELECT CAST('2026-02-30' AS date)"
+                "(orders.id / 0) = orders.id"
+                " AND (SELECT CAST('2026-02-30' AS date)"
                 " FROM __nahla_orders_sort_canary_table__) IS NOT NULL"
             )
         )
@@ -320,11 +321,20 @@ def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
     previous_level = orders_log.level
     orders_log.addHandler(handler)
     orders_log.setLevel(logging.ERROR)
+    log_hits: list[bool] = []
+    orig_log = orders_mod._log_orders_list_sort_sql_failed
+
+    def _wrap_log() -> None:
+        log_hits.append(True)
+        orig_log()
+
+    orders_log.disabled = False
     bind = pg_session.get_bind()
     event.listen(bind, "before_cursor_execute", _before)
     try:
-        with patch("routers.orders._apply_created_at_order", side_effect=_failing_order):
-            rows = _ranked_page(pg_session, tenant.id)
+        with patch.object(orders_mod, "_log_orders_list_sort_sql_failed", side_effect=_wrap_log):
+            with patch.object(orders_mod, "_apply_created_at_order", side_effect=_failing_order):
+                rows = _ranked_page(pg_session, tenant.id)
     finally:
         event.remove(bind, "before_cursor_execute", _before)
         orders_log.removeHandler(handler)
@@ -332,9 +342,10 @@ def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
 
     assert calls["n"] == 1
     assert any(
-        "__nahla_orders_sort_canary_table__" in stmt or "2026-02-30" in stmt
+        "/ 0" in stmt or "__nahla_orders_sort_canary_table__" in stmt or "2026-02-30" in stmt
         for stmt in sql_seen
     ), sql_seen
+    assert log_hits == [True], (log_hits, sql_seen, orders_log.disabled, orders_log.handlers)
     assert [row.external_id for row in rows] == ["survives-sql-failure"]
     assert pg_session.execute(text("SELECT 1")).scalar() == 1
 

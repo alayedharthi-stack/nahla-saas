@@ -491,11 +491,12 @@ def _load_orders_list_page(
     """
     session = query.session
     ordered = _apply_created_at_order(query)
+    nested = session.begin_nested()
     try:
-        with session.begin_nested():
-            if python_match is None:
-                return list(ordered.limit(page_size))
-            rows: List[Order] = []
+        if python_match is None:
+            rows = list(ordered.limit(page_size))
+        else:
+            rows = []
             stream = ordered.execution_options(stream_results=True).yield_per(50)
             for order in stream:
                 if not python_match(order):
@@ -503,8 +504,11 @@ def _load_orders_list_page(
                 rows.append(order)
                 if len(rows) >= page_size:
                     break
-            return rows
+        nested.commit()
+        return rows
     except SQLAlchemyError:
+        if nested.is_active:
+            nested.rollback()
         _log_orders_list_sort_sql_failed()
         return _heap_newest_page(query, python_match=python_match, page_size=page_size)
 
