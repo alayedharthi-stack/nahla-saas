@@ -269,13 +269,6 @@ jobs:
             backend/tests/test_whatsapp_connections_provider_schema_pg.py \
             -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning
 
-      - name: Orders list newest-first PostgreSQL tests
-        run: |
-          python -m pytest \
-            backend/tests/test_orders_list_newest_first_postgres.py \
-            -v --tb=short --maxfail=1 \
-            --junitxml=/tmp/orders-list-newest-first-pg.xml
-
       - name: A1-v3.7 PostgreSQL integration
         run: |
           python -m pytest \
@@ -349,6 +342,13 @@ jobs:
       # Dedicated PG16 proof for lifecycle CAS claims. Uses a fresh database so
       # migration_0094_required stays on 0093 while CAS races upgrade to 0094.
       # Any skip (missing PG / fixtures / env) fails this step.
+      - name: Orders list newest-first PostgreSQL tests
+        run: |
+          python -m pytest \
+            backend/tests/test_orders_list_newest_first_postgres.py \
+            -v --tb=short --maxfail=1 \
+            --junitxml=/tmp/orders-list-newest-first-pg.xml
+
       - name: Commerce lifecycle CAS concurrency - PostgreSQL
         env:
           A1_PG_INTEGRATION_REQUIRED: "1"
