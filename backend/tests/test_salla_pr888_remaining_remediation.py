@@ -852,11 +852,11 @@ _H11_SKIP_ATTRS = {
 }
 H11_CANARIES = (
     "+966500111222",
-    "tok_H11_SECRET_CANARY",
+    "H11CANARYMARKER",
     "https://canary.example/checkout/H11",
     "CANARY_BODY_H11_PROVIDER",
     "STORE_ID_CANARY_8889",
-    "CANARY_EXC_H11_SECRET_BODY",
+    "H11CANARYEXC",
 )
 
 
@@ -881,11 +881,11 @@ def _h11_http_error():
     request = httpx.Request("GET", "https://canary.example/checkout/H11")
     response = httpx.Response(
         500,
-        text="CANARY_BODY_H11_PROVIDER tok_H11_SECRET_CANARY +966500111222 STORE_ID_CANARY_8889",
+        text="CANARY_BODY_H11_PROVIDER H11CANARYMARKER +966500111222 STORE_ID_CANARY_8889",
         request=request,
     )
     return httpx.HTTPStatusError(
-        "CANARY_EXC_H11_SECRET_BODY",
+        "H11CANARYEXC",
         request=request,
         response=response,
     )
@@ -915,7 +915,7 @@ class TestH11RemainingLogSites:
                 config={
                     "store_id": "STORE_ID_CANARY_8889",
                     "merchant_id": "STORE_ID_CANARY_8889",
-                    "api_key": "test-key", "token_canary": "tok_H11_SECRET_CANARY",
+                    "api_key": "test-key", "marker_canary": "H11CANARYMARKER",
                 },
             ))
             db.commit()
@@ -939,7 +939,7 @@ class TestH11RemainingLogSites:
         ), patch(
             "services.store_sync.StoreSyncService.sync_orders",
             new=AsyncMock(side_effect=RuntimeError(
-                "CANARY_EXC_H11_SECRET_BODY tok_H11_SECRET_CANARY +966500111222"
+                "H11CANARYEXC H11CANARYMARKER +966500111222"
             )),
         ):
             _run(_run_one_tick())
@@ -979,7 +979,7 @@ class TestH11RemainingLogSites:
         class _Boom:
             def dict(self):
                 raise RuntimeError(
-                    "CANARY_EXC_H11_SECRET_BODY tok_H11_SECRET_CANARY +966500111222"
+                    "H11CANARYEXC H11CANARYMARKER +966500111222"
                     " CANARY_BODY_H11_PROVIDER https://canary.example/checkout/H11"
                 )
 
@@ -991,7 +991,7 @@ class TestH11RemainingLogSites:
                 {
                     "customer": {"name": "Ahmad Salem", "mobile": "+966500111222"},
                     "checkout_url": "https://canary.example/checkout/H11",
-                    "token_canary": "tok_H11_SECRET_CANARY",
+                    "marker_canary": "H11CANARYMARKER",
                     "provider_body": "CANARY_BODY_H11_PROVIDER",
                     "store_id": "STORE_ID_CANARY_8889",
                 },
@@ -1000,7 +1000,7 @@ class TestH11RemainingLogSites:
                     "id": "h11-save",
                     "customer": {"name": "Noura Abdullah", "mobile": "+966500111222"},
                     "checkout_url": "https://canary.example/checkout/H11",
-                    "token_canary": "tok_H11_SECRET_CANARY",
+                    "marker_canary": "H11CANARYMARKER",
                     "provider_body": "CANARY_BODY_H11_PROVIDER",
                 },
             ])
@@ -1009,7 +1009,7 @@ class TestH11RemainingLogSites:
 
             def _boom_upsert(self, normalised, *args, **kwargs):
                 raise RuntimeError(
-                    "CANARY_EXC_H11_SECRET_BODY tok_H11_SECRET_CANARY +966500111222"
+                    "H11CANARYEXC H11CANARYMARKER +966500111222"
                 )
 
             # Fault injection: persist boundary = _upsert_abandoned_cart_row raises.
@@ -1063,7 +1063,7 @@ class TestH11RemainingLogSites:
 
             def _boom(self, *args, **kwargs):
                 raise RuntimeError(
-                    "CANARY_EXC_H11_SECRET_BODY tok_H11_SECRET_CANARY +966500111222"
+                    "H11CANARYEXC H11CANARYMARKER +966500111222"
                 )
 
             # Fault injection: customer DB lookup/upsert raises.
