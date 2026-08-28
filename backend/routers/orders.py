@@ -19,11 +19,14 @@ from __future__ import annotations
 import ast
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+import heapq
+from collections.abc import Callable
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import DateTime, Integer, and_, case, cast, func, null, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from core.database import get_db
@@ -319,6 +322,195 @@ def _read_created_at(order: Order, fallback: datetime) -> datetime:
         if parsed is not None:
             return parsed
     return fallback
+
+
+ORDERS_LIST_PAGE_SIZE = 200
+ORDERS_LIST_SORT_SQL_FAILED_EVENT = "orders.list.sort_sql_failed"
+_ISO_CREATED_AT_RE = (
+    r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+    r"([Tt ]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](\.[0-9]+)?)?)?"
+    r"(Z|[+-][0-9]{2}:[0-9]{2})?$"
+)
+_HAS_EXPLICIT_OFFSET_RE = r"[+-][0-9]{2}:[0-9]{2}$"
+
+
+class OrdersListSortSqlError(Exception):
+    """Named marker for orders-list ranking SQL failure.
+
+    Only the class name is safe to log. Do not attach SQL, parameters,
+    timestamps, or exception text.
+    """
+
+
+def _list_sort_created_at(order: Order) -> datetime:
+    """Actual order-creation time for /orders ranking.
+
+    First valid created_at source wins. Ignores last_updated/sync timestamps
+    so a status or import touch cannot promote an older order. Missing or
+    invalid created_at sorts last, then by id. Naive values are UTC.
+    """
+    meta = getattr(order, "extra_metadata", None) or {}
+    catalog_meta = meta.get("catalog_order") if isinstance(meta.get("catalog_order"), dict) else {}
+    candidates: List[Any] = [
+        meta.get("created_at"),
+        meta.get("draft_created_at"),
+        meta.get("display_created_at"),
+        meta.get("source_message_created_at"),
+        meta.get("first_customer_message_at"),
+        catalog_meta.get("source_message_at") if isinstance(catalog_meta, dict) else None,
+        getattr(order, "created_at", None),
+    ]
+    for cand in candidates:
+        parsed = _parse_order_timestamp(cand)
+        if parsed is not None:
+            return parsed
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _created_at_candidate_sql_exprs():
+    meta = Order.extra_metadata
+    catalog = meta["catalog_order"]
+    return (
+        func.nullif(meta["created_at"].astext, ""),
+        func.nullif(meta["draft_created_at"].astext, ""),
+        func.nullif(meta["display_created_at"].astext, ""),
+        func.nullif(meta["source_message_created_at"].astext, ""),
+        func.nullif(meta["first_customer_message_at"].astext, ""),
+        func.nullif(catalog["source_message_at"].astext, ""),
+    )
+
+
+def _calendar_day_fits_month_sql(txt):
+    y = cast(func.substr(txt, 1, 4), Integer)
+    m = cast(func.substr(txt, 6, 2), Integer)
+    d = cast(func.substr(txt, 9, 2), Integer)
+    leap = and_(y.op("%")(4) == 0, or_(y.op("%")(100) != 0, y.op("%")(400) == 0))
+    dim = case(
+        (m.in_((1, 3, 5, 7, 8, 10, 12)), 31),
+        (m.in_((4, 6, 9, 11)), 30),
+        (and_(m == 2, leap), 29),
+        (m == 2, 28),
+        else_=0,
+    )
+    return d <= dim
+
+
+def _pg_safe_created_at_ts(txt):
+    """First-valid created_at instant for PostgreSQL, or NULL.
+
+    Naive timestamps are stamped +00:00 before CAST so session TimeZone
+    cannot shift them. Impossible calendar dates (e.g. Feb 30) stay NULL
+    and never reach CAST.
+    """
+    normalized = func.replace(func.replace(txt, "Z", "+00:00"), " ", "T")
+    has_offset = normalized.op("~")(_HAS_EXPLICIT_OFFSET_RE)
+    stamped = case((has_offset, normalized), else_=func.concat(normalized, "+00:00"))
+    safe = and_(txt.op("~")(_ISO_CREATED_AT_RE), _calendar_day_fits_month_sql(txt))
+    return case((safe, cast(stamped, DateTime(timezone=True))), else_=null())
+
+
+def _sqlite_safe_created_at_text(txt):
+    looks_iso = txt.like("____-__-__%")
+    safe = and_(looks_iso, _calendar_day_fits_month_sql(txt))
+    return case((safe, txt), else_=null())
+
+
+def _created_at_rank_sql(query):
+    candidates = _created_at_candidate_sql_exprs()
+    bind = query.session.get_bind()
+    dialect = getattr(getattr(bind, "dialect", None), "name", "") or ""
+    if dialect == "postgresql":
+        return func.coalesce(*[_pg_safe_created_at_ts(expr) for expr in candidates])
+    return func.coalesce(*[_sqlite_safe_created_at_text(expr) for expr in candidates])
+
+
+def _apply_created_at_order(query):
+    """Rank matching rows by the first valid created_at, then by id.
+
+    updated_at / last_synced_at are never sort keys. Invalid or missing
+    created_at values sort last.
+    """
+    rank = _created_at_rank_sql(query)
+    return query.order_by(rank.desc().nulls_last(), Order.id.desc())
+
+
+def _log_orders_list_sort_sql_failed() -> None:
+    logger.error(
+        ORDERS_LIST_SORT_SQL_FAILED_EVENT,
+        extra={
+            "orders_list_event": ORDERS_LIST_SORT_SQL_FAILED_EVENT,
+            "orders_list_error_class": OrdersListSortSqlError.__name__,
+        },
+    )
+
+
+def _heap_newest_page(
+    query,
+    *,
+    python_match: Optional[Callable[[Order], bool]] = None,
+    page_size: int = ORDERS_LIST_PAGE_SIZE,
+) -> List[Order]:
+    """Bounded fallback: scan with yield_per, keep only page_size newest.
+
+    Cost: reads the SQL-filtered tenant subset once. Memory: O(page_size)
+    plus the driver batch, not the full result list.
+    """
+    heap: List[Tuple[datetime, int]] = []
+    held: Dict[int, Order] = {}
+    stream = query.execution_options(stream_results=True).yield_per(50)
+    for order in stream:
+        if python_match is not None and not python_match(order):
+            continue
+        created = _list_sort_created_at(order)
+        oid = int(getattr(order, "id", 0) or 0)
+        item = (created, oid)
+        if len(heap) < page_size:
+            heapq.heappush(heap, item)
+            held[oid] = order
+            continue
+        if item > heap[0]:
+            _, old_id = heapq.heapreplace(heap, item)
+            held.pop(old_id, None)
+            held[oid] = order
+    heap.sort(reverse=True)
+    return [held[oid] for _, oid in heap]
+
+
+def _load_orders_list_page(
+    query,
+    *,
+    python_match: Optional[Callable[[Order], bool]] = None,
+    page_size: int = ORDERS_LIST_PAGE_SIZE,
+) -> List[Order]:
+    """Return at most page_size orders after created_at ranking.
+
+    Memory: the page (and a yield_per batch when Python lifecycle refine
+    must skip rows). Never materializes the tenant's full order set.
+    SQL CAST failures are isolated to a savepoint so the outer transaction
+    stays usable for the bounded heap fallback and later queries.
+    """
+    session = query.session
+    ordered = _apply_created_at_order(query)
+    nested = session.begin_nested()
+    try:
+        if python_match is None:
+            rows = list(ordered.limit(page_size))
+        else:
+            rows = []
+            stream = ordered.execution_options(stream_results=True).yield_per(50)
+            for order in stream:
+                if not python_match(order):
+                    continue
+                rows.append(order)
+                if len(rows) >= page_size:
+                    break
+        nested.commit()
+        return rows
+    except SQLAlchemyError:
+        if nested.is_active:
+            nested.rollback()
+        _log_orders_list_sort_sql_failed()
+        return _heap_newest_page(query, python_match=python_match, page_size=page_size)
 
 
 def _read_last_updated_at(order: Order, *, created_at: datetime) -> datetime:
@@ -1242,23 +1434,13 @@ async def list_orders(
             q = q.filter(Order.source == src)
 
     q = _apply_lifecycle_db_filter(q, lifecycle_filter)
-    rows = q.order_by(Order.id.desc()).limit(400).all()
     now             = datetime.now(timezone.utc)
     today           = now.date()
-    rows.sort(
-        key=lambda o: (
-            _read_created_at(o, fallback=now),
-            int(getattr(o, "id", 0) or 0),
-        ),
-        reverse=True,
-    )
-
     filt = (lifecycle_filter or "").strip().lower()
+    python_match = None
     if filt in (LIFECYCLE_FILTER_NEEDS_ACTION, LIFECYCLE_FILTER_MISSING_LOCATION):
-        rows = [r for r in rows if order_matches_lifecycle_filter(r, filt)]
-        rows = rows[:200]
-    elif len(rows) > 200:
-        rows = rows[:200]
+        python_match = lambda order, current=filt: order_matches_lifecycle_filter(order, current)
+    rows = _load_orders_list_page(q, python_match=python_match)
 
     customer_lookup = _build_customer_lookup(db, tenant_id)
     vip_phones      = _build_vip_phone_set(db, tenant_id)
