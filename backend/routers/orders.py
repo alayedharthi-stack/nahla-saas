@@ -441,7 +441,6 @@ def _log_orders_list_sort_sql_failed() -> None:
             "event": ORDERS_LIST_SORT_SQL_FAILED_EVENT,
             "error_class": OrdersListSortSqlError.__name__,
         },
-        exc_info=False,
     )
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import JSON, create_engine, event
+from sqlalchemy import JSON, create_engine, event, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
@@ -24,7 +25,10 @@ from core.wa_order_lifecycle import STATUS_DRAFT, STATUS_PENDING_CUSTOMER_INFO  
 from models import Base, Order, Tenant  # noqa: E402
 from routers.orders import (  # noqa: E402
     ORDERS_LIST_PAGE_SIZE,
+    ORDERS_LIST_SORT_SQL_FAILED_EVENT,
+    OrdersListSortSqlError,
     _apply_created_at_order,
+    _load_orders_list_page,
     _read_created_at,
     _read_last_updated_at,
     _serialise_order,
@@ -357,6 +361,68 @@ class TestOrdersListNewestCreatedFirst:
             "feb30-with-valid-draft",
             "plain-older",
         ]
+
+    def test_sort_sql_failure_uses_savepoint_and_safe_log(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="survives-sql-failure",
+                created_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
+                last_updated_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
+            )
+        )
+        db.commit()
+
+        calls = {"n": 0}
+
+        def _failing_order(query):
+            calls["n"] += 1
+            return query.filter(text("(SELECT 1 FROM __nahla_orders_sort_canary_table__) = 1"))
+
+        captured: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                captured.append(record)
+
+        handler = _Capture()
+        orders_log = logging.getLogger("nahla.orders")
+        previous_level = orders_log.level
+        orders_log.addHandler(handler)
+        orders_log.setLevel(logging.ERROR)
+        try:
+            with patch("routers.orders._apply_created_at_order", side_effect=_failing_order):
+                q = db.query(Order).filter(Order.tenant_id == tenant.id)
+                rows = _load_orders_list_page(q)
+        finally:
+            orders_log.removeHandler(handler)
+            orders_log.setLevel(previous_level)
+
+        assert calls["n"] == 1
+        assert [row.external_id for row in rows] == ["survives-sql-failure"]
+        assert db.execute(text("SELECT 1")).scalar() == 1
+
+        records = [
+            rec
+            for rec in captured
+            if rec.getMessage() == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+        ]
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.levelno == logging.ERROR
+        assert rec.args in ((), None, {})
+        assert rec.exc_info is None
+        assert not rec.exc_text
+        assert getattr(rec, "event") == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+        assert getattr(rec, "error_class") == OrdersListSortSqlError.__name__
+        formatted = logging.Formatter("%(message)s").format(rec)
+        assert formatted == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+        blob = formatted + str(rec.args) + str(rec.exc_info)
+        assert "Traceback" not in blob
+        assert "__nahla_orders_sort_canary_table__" not in blob
+        assert "CAST" not in blob
 
     def test_list_orders_sql_is_limited_after_created_at_rank(self) -> None:
         db, engine = _make_db()

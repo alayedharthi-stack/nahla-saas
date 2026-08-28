@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import literal_column, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session, noload, sessionmaker
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -292,23 +292,40 @@ def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
     )
     pg_session.commit()
 
+    calls = {"n": 0}
+
     def _failing_order(query):
-        return query.order_by(
-            literal_column("CAST('2026-02-30T00:00:00+00:00' AS timestamptz)")
-        )
+        calls["n"] += 1
+        # PostgreSQL evaluates this CAST during execute and rejects Feb 30.
+        return query.filter(text("CAST('2026-02-30' AS date) IS NOT NULL"))
 
+    captured: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    handler = _Capture()
+    orders_log = logging.getLogger("nahla.orders")
+    previous_level = orders_log.level
+    orders_log.addHandler(handler)
+    orders_log.setLevel(logging.ERROR)
     caplog.set_level(logging.ERROR, logger="nahla.orders")
-    with patch("routers.orders._apply_created_at_order", side_effect=_failing_order):
-        rows = _ranked_page(pg_session, tenant.id)
+    try:
+        with patch("routers.orders._apply_created_at_order", side_effect=_failing_order):
+            rows = _ranked_page(pg_session, tenant.id)
+    finally:
+        orders_log.removeHandler(handler)
+        orders_log.setLevel(previous_level)
 
+    assert calls["n"] == 1
     assert [row.external_id for row in rows] == ["survives-sql-failure"]
     assert pg_session.execute(text("SELECT 1")).scalar() == 1
 
     records = [
         rec
-        for rec in caplog.records
-        if rec.name == "nahla.orders"
-        and rec.getMessage() == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+        for rec in captured
+        if rec.getMessage() == ORDERS_LIST_SORT_SQL_FAILED_EVENT
     ]
     assert len(records) == 1
     rec = records[0]
