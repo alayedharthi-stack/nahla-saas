@@ -321,6 +321,30 @@ def _read_created_at(order: Order, fallback: datetime) -> datetime:
     return fallback
 
 
+def _list_sort_created_at(order: Order) -> datetime:
+    """Actual order-creation time for /orders ranking.
+
+    Ignores last_updated/sync timestamps so a status or import touch cannot
+    promote an older order. Missing created_at sorts last, then by id.
+    """
+    meta = getattr(order, "extra_metadata", None) or {}
+    catalog_meta = meta.get("catalog_order") if isinstance(meta.get("catalog_order"), dict) else {}
+    candidates: List[Any] = [
+        meta.get("created_at"),
+        meta.get("draft_created_at"),
+        meta.get("display_created_at"),
+        meta.get("source_message_created_at"),
+        meta.get("first_customer_message_at"),
+        catalog_meta.get("source_message_at") if isinstance(catalog_meta, dict) else None,
+        getattr(order, "created_at", None),
+    ]
+    for cand in candidates:
+        parsed = _parse_order_timestamp(cand)
+        if parsed is not None:
+            return parsed
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _read_last_updated_at(order: Order, *, created_at: datetime) -> datetime:
     """Last operational sync or status change — not the list display date."""
     meta = getattr(order, "extra_metadata", None) or {}
@@ -1242,12 +1266,14 @@ async def list_orders(
             q = q.filter(Order.source == src)
 
     q = _apply_lifecycle_db_filter(q, lifecycle_filter)
-    rows = q.order_by(Order.id.desc()).limit(400).all()
+    # Rank the full filtered set by created_at before capping the page.
+    # Limiting by id first dropped newer-created rows that happened to have older pks.
+    rows = q.all()
     now             = datetime.now(timezone.utc)
     today           = now.date()
     rows.sort(
         key=lambda o: (
-            _read_created_at(o, fallback=now),
+            _list_sort_created_at(o),
             int(getattr(o, "id", 0) or 0),
         ),
         reverse=True,

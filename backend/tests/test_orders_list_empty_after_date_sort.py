@@ -112,7 +112,7 @@ class TestOrdersListEmptyRegression:
         assert len(payload["orders"]) == 1
         assert payload["orders"][0]["external_id"] == "list-regression-1"
 
-    def test_orders_list_orders_by_updated_at_but_displays_created_at(self) -> None:
+    def test_orders_list_orders_by_created_at_not_updated_at(self) -> None:
         db, _ = _make_db()
         tenant = _seed_tenant(db)
         now = datetime.now(timezone.utc)
@@ -140,12 +140,212 @@ class TestOrdersListEmptyRegression:
 
         payload = _invoke_list(db, tenant.id)
         assert len(payload["orders"]) == 2
+        # Same created_at: stable secondary is higher id first (sort-fresh inserted last).
         assert payload["orders"][0]["external_id"] == "sort-fresh"
         assert payload["orders"][0]["display_created_at"].startswith("2024-03-01")
         assert payload["orders"][0]["createdAt"].startswith("2024-03-01")
         assert payload["orders"][0]["last_updated_at"].startswith(
             fresh_touch.date().isoformat()
         )
+
+
+class TestOrdersListNewestCreatedFirst:
+    def test_newest_created_first_regardless_of_insert_order(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        older = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+        newer = datetime(2026, 8, 28, 18, 0, tzinfo=timezone.utc)
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="inserted-first-but-newer",
+                created_at=newer,
+                last_updated_at=older,
+            )
+        )
+        db.commit()
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="inserted-second-but-older",
+                created_at=older,
+                last_updated_at=newer,
+            )
+        )
+        db.commit()
+
+        payload = _invoke_list(db, tenant.id)
+        ids = [row["external_id"] for row in payload["orders"]]
+        assert ids[:2] == ["inserted-first-but-newer", "inserted-second-but-older"]
+
+    def test_refresh_places_newer_order_first_without_duplicate(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        t0 = datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc)
+        t1 = datetime(2026, 8, 28, 21, 0, tzinfo=timezone.utc)
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="existing",
+                created_at=t0,
+                last_updated_at=t0,
+            )
+        )
+        db.commit()
+        first = _invoke_list(db, tenant.id)
+        assert [row["external_id"] for row in first["orders"]] == ["existing"]
+
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="arrived-later",
+                created_at=t1,
+                last_updated_at=t1,
+            )
+        )
+        db.commit()
+        second = _invoke_list(db, tenant.id)
+        ids = [row["external_id"] for row in second["orders"]]
+        assert ids == ["arrived-later", "existing"]
+
+    def test_equal_created_at_uses_stable_id_desc_across_page_cap(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        created = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+        older_created = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+        # Oldest pk but newest created_at must survive the page cap even if
+        # many newer pks exist with older created_at.
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="oldest-pk-newest-created",
+                created_at=datetime(2026, 8, 28, 23, 0, tzinfo=timezone.utc),
+                last_updated_at=created,
+            )
+        )
+        db.commit()
+        for idx in range(210):
+            db.add(
+                _wa_draft(
+                    tenant_id=tenant.id,
+                    external_id=f"older-created-{idx:03d}",
+                    created_at=older_created,
+                    last_updated_at=created,
+                )
+            )
+        db.commit()
+        # Two rows sharing created_at: higher id first.
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="tie-a",
+                created_at=created,
+                last_updated_at=created,
+            )
+        )
+        db.commit()
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="tie-b",
+                created_at=created,
+                last_updated_at=created,
+            )
+        )
+        db.commit()
+
+        payload = _invoke_list(db, tenant.id)
+        ids = [row["external_id"] for row in payload["orders"]]
+        assert ids[0] == "oldest-pk-newest-created"
+        assert len(ids) == 200
+        tie_pos = ids.index("tie-b")
+        assert ids[tie_pos + 1] == "tie-a"
+        assert "older-created-000" not in ids or ids.index("tie-a") < ids.index("older-created-000")
+
+    def test_status_update_does_not_promote_old_order(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        old_created = datetime(2026, 1, 10, 8, 0, tzinfo=timezone.utc)
+        new_created = datetime(2026, 8, 28, 8, 0, tzinfo=timezone.utc)
+        old = _wa_draft(
+            tenant_id=tenant.id,
+            external_id="old-order",
+            created_at=old_created,
+            last_updated_at=old_created,
+            status="pending_payment",
+        )
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="new-order",
+                created_at=new_created,
+                last_updated_at=new_created,
+            )
+        )
+        db.add(old)
+        db.commit()
+
+        before = [row["external_id"] for row in _invoke_list(db, tenant.id)["orders"]]
+        assert before[:2] == ["new-order", "old-order"]
+
+        old.status = "paid"
+        meta = dict(old.extra_metadata or {})
+        touched = datetime(2026, 8, 28, 22, 0, tzinfo=timezone.utc)
+        meta["last_updated_at"] = touched.isoformat()
+        meta["updated_at"] = touched.isoformat()
+        meta["status_changed_at"] = touched.isoformat()
+        old.extra_metadata = meta
+        db.commit()
+
+        after = [row["external_id"] for row in _invoke_list(db, tenant.id)["orders"]]
+        assert after[:2] == ["new-order", "old-order"]
+
+    def test_filters_and_tenant_isolation_preserved(self) -> None:
+        db, _ = _make_db()
+        tenant_a = _seed_tenant(db)
+        tenant_b = Tenant(name="T-B", is_active=True)
+        db.add(tenant_b)
+        db.commit()
+        db.refresh(tenant_b)
+        now = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+        db.add_all(
+            [
+                _wa_draft(
+                    tenant_id=tenant_a.id,
+                    external_id="a-wa",
+                    created_at=now,
+                    last_updated_at=now,
+                ),
+                Order(
+                    tenant_id=tenant_a.id,
+                    external_id="a-salla",
+                    status="paid",
+                    source="salla",
+                    total="50.00 SAR",
+                    extra_metadata={
+                        "created_at": (now - timedelta(hours=1)).isoformat(),
+                    },
+                ),
+                _wa_draft(
+                    tenant_id=tenant_b.id,
+                    external_id="b-wa",
+                    created_at=now + timedelta(hours=2),
+                    last_updated_at=now,
+                ),
+            ]
+        )
+        db.commit()
+
+        all_a = _invoke_list(db, tenant_a.id)
+        ids_a = {row["external_id"] for row in all_a["orders"]}
+        assert ids_a == {"a-wa", "a-salla"}
+        assert all_a["orders"][0]["external_id"] == "a-wa"
+
+        wa_only = _invoke_list(db, tenant_a.id, source="whatsapp")
+        assert [row["external_id"] for row in wa_only["orders"]] == ["a-wa"]
+
+        paid = _invoke_list(db, tenant_a.id, lifecycle_filter="paid")
+        assert [row["external_id"] for row in paid["orders"]] == ["a-salla"]
 
     def test_orders_list_includes_whatsapp_drafts(self) -> None:
         db, _ = _make_db()
