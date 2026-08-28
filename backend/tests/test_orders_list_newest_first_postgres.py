@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.orm import Session, noload, sessionmaker
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -293,11 +293,21 @@ def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
     pg_session.commit()
 
     calls = {"n": 0}
+    sql_seen: list[str] = []
 
     def _failing_order(query):
         calls["n"] += 1
-        # PostgreSQL evaluates this CAST during execute and rejects Feb 30.
-        return query.filter(text("CAST('2026-02-30' AS date) IS NOT NULL"))
+        # Missing relation plus CAST so PostgreSQL must fail at execute, not
+        # by dropping a constant ORDER BY / WHERE at plan time.
+        return query.filter(
+            text(
+                "(SELECT CAST('2026-02-30' AS date)"
+                " FROM __nahla_orders_sort_canary_table__) IS NOT NULL"
+            )
+        )
+
+    def _before(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        sql_seen.append(str(statement))
 
     captured: list[logging.LogRecord] = []
 
@@ -311,14 +321,21 @@ def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
     orders_log.addHandler(handler)
     orders_log.setLevel(logging.ERROR)
     caplog.set_level(logging.ERROR, logger="nahla.orders")
+    bind = pg_session.get_bind()
+    event.listen(bind, "before_cursor_execute", _before)
     try:
         with patch("routers.orders._apply_created_at_order", side_effect=_failing_order):
             rows = _ranked_page(pg_session, tenant.id)
     finally:
+        event.remove(bind, "before_cursor_execute", _before)
         orders_log.removeHandler(handler)
         orders_log.setLevel(previous_level)
 
     assert calls["n"] == 1
+    assert any(
+        "__nahla_orders_sort_canary_table__" in stmt or "2026-02-30" in stmt
+        for stmt in sql_seen
+    ), sql_seen
     assert [row.external_id for row in rows] == ["survives-sql-failure"]
     assert pg_session.execute(text("SELECT 1")).scalar() == 1
 
@@ -333,8 +350,8 @@ def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
     assert rec.args in ((), None, {})
     assert rec.exc_info is None
     assert not rec.exc_text
-    assert getattr(rec, "event") == ORDERS_LIST_SORT_SQL_FAILED_EVENT
-    assert getattr(rec, "error_class") == OrdersListSortSqlError.__name__
+    assert getattr(rec, "orders_list_event") == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+    assert getattr(rec, "orders_list_error_class") == OrdersListSortSqlError.__name__
     formatted = logging.Formatter("%(message)s").format(rec)
     assert formatted == ORDERS_LIST_SORT_SQL_FAILED_EVENT
     blob = formatted + str(rec.args) + str(rec.exc_info)

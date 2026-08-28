@@ -415,8 +415,8 @@ class TestOrdersListNewestCreatedFirst:
         assert rec.args in ((), None, {})
         assert rec.exc_info is None
         assert not rec.exc_text
-        assert getattr(rec, "event") == ORDERS_LIST_SORT_SQL_FAILED_EVENT
-        assert getattr(rec, "error_class") == OrdersListSortSqlError.__name__
+        assert getattr(rec, "orders_list_event") == ORDERS_LIST_SORT_SQL_FAILED_EVENT
+        assert getattr(rec, "orders_list_error_class") == OrdersListSortSqlError.__name__
         formatted = logging.Formatter("%(message)s").format(rec)
         assert formatted == ORDERS_LIST_SORT_SQL_FAILED_EVENT
         blob = formatted + str(rec.args) + str(rec.exc_info)

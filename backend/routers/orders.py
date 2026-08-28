@@ -438,8 +438,8 @@ def _log_orders_list_sort_sql_failed() -> None:
     logger.error(
         ORDERS_LIST_SORT_SQL_FAILED_EVENT,
         extra={
-            "event": ORDERS_LIST_SORT_SQL_FAILED_EVENT,
-            "error_class": OrdersListSortSqlError.__name__,
+            "orders_list_event": ORDERS_LIST_SORT_SQL_FAILED_EVENT,
+            "orders_list_error_class": OrdersListSortSqlError.__name__,
         },
     )
 
