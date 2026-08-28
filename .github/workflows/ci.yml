@@ -45,6 +45,13 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
+      - name: Orders list newest-first tests
+        run: |
+          python -m pytest \
+            backend/tests/test_orders_list_empty_after_date_sort.py \
+            -v --tb=short --maxfail=1 \
+            --junitxml=/tmp/orders-list-newest-first.xml
+
       - name: Salla PR 888 remediation unit tests
         run: |
           python -m pytest \
@@ -261,6 +268,13 @@ jobs:
           python -m pytest \
             backend/tests/test_whatsapp_connections_provider_schema_pg.py \
             -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning
+
+      - name: Orders list newest-first PostgreSQL tests
+        run: |
+          python -m pytest \
+            backend/tests/test_orders_list_newest_first_postgres.py \
+            -v --tb=short --maxfail=1 \
+            --junitxml=/tmp/orders-list-newest-first-pg.xml
 
       - name: A1-v3.7 PostgreSQL integration
         run: |

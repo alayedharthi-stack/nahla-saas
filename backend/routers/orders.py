@@ -19,11 +19,13 @@ from __future__ import annotations
 import ast
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import DateTime, case, cast, func, null, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from core.database import get_db
@@ -321,6 +323,10 @@ def _read_created_at(order: Order, fallback: datetime) -> datetime:
     return fallback
 
 
+ORDERS_LIST_PAGE_SIZE = 200
+_ISO_CREATED_AT_RE = r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+
+
 def _list_sort_created_at(order: Order) -> datetime:
     """Actual order-creation time for /orders ranking.
 
@@ -343,6 +349,105 @@ def _list_sort_created_at(order: Order) -> datetime:
         if parsed is not None:
             return parsed
     return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _created_at_text_sql():
+    meta = Order.extra_metadata
+    catalog = meta["catalog_order"]
+    return func.coalesce(
+        func.nullif(meta["created_at"].astext, ""),
+        func.nullif(meta["draft_created_at"].astext, ""),
+        func.nullif(meta["display_created_at"].astext, ""),
+        func.nullif(meta["source_message_created_at"].astext, ""),
+        func.nullif(meta["first_customer_message_at"].astext, ""),
+        func.nullif(catalog["source_message_at"].astext, ""),
+    )
+
+
+def _apply_created_at_order(query):
+    """Rank matching rows by created_at in the database, then by id.
+
+    Missing or non-ISO values become NULL and sort last. updated_at is never
+    a sort key. PostgreSQL compares timestamptz; SQLite uses ISO-looking text
+    (unit tests store UTC isoformat).
+    """
+    coalesced = _created_at_text_sql()
+    bind = query.session.get_bind()
+    dialect = getattr(getattr(bind, "dialect", None), "name", "") or ""
+    if dialect == "postgresql":
+        normalized = func.replace(func.replace(coalesced, "Z", "+00:00"), " ", "T")
+        ts = case(
+            (coalesced.op("~")(_ISO_CREATED_AT_RE), cast(normalized, DateTime(timezone=True))),
+            else_=null(),
+        )
+        return query.order_by(ts.desc().nulls_last(), Order.id.desc())
+    iso_text = case((coalesced.like("____-__-__%"), coalesced), else_=null())
+    return query.order_by(iso_text.desc().nulls_last(), Order.id.desc())
+
+
+def _heap_newest_page(
+    query,
+    *,
+    python_match: Optional[Callable[[Order], bool]] = None,
+    page_size: int = ORDERS_LIST_PAGE_SIZE,
+) -> List[Order]:
+    """Bounded fallback: scan with yield_per, keep only page_size newest.
+
+    Cost: reads the SQL-filtered tenant subset once. Memory: O(page_size)
+    plus the driver batch, not the full result list.
+    """
+    import heapq
+
+    heap: List[Tuple[datetime, int]] = []
+    held: Dict[int, Order] = {}
+    stream = query.execution_options(stream_results=True).yield_per(50)
+    for order in stream:
+        if python_match is not None and not python_match(order):
+            continue
+        created = _list_sort_created_at(order)
+        oid = int(getattr(order, "id", 0) or 0)
+        item = (created, oid)
+        if len(heap) < page_size:
+            heapq.heappush(heap, item)
+            held[oid] = order
+            continue
+        if item > heap[0]:
+            _, old_id = heapq.heapreplace(heap, item)
+            held.pop(old_id, None)
+            held[oid] = order
+    heap.sort(reverse=True)
+    return [held[oid] for _, oid in heap]
+
+
+def _load_orders_list_page(
+    query,
+    *,
+    python_match: Optional[Callable[[Order], bool]] = None,
+    page_size: int = ORDERS_LIST_PAGE_SIZE,
+) -> List[Order]:
+    """Return at most page_size orders after created_at ranking.
+
+    Memory: the page (and a yield_per batch when Python lifecycle refine
+    must skip rows). Never materializes the tenant's full order set.
+    """
+    ordered = _apply_created_at_order(query)
+    try:
+        if python_match is None:
+            return list(ordered.limit(page_size))
+        rows: List[Order] = []
+        stream = ordered.execution_options(stream_results=True).yield_per(50)
+        for order in stream:
+            if not python_match(order):
+                continue
+            rows.append(order)
+            if len(rows) >= page_size:
+                break
+        return rows
+    except SQLAlchemyError:
+        logger.exception(
+            "orders list SQL created_at sort failed; using bounded heap fallback"
+        )
+        return _heap_newest_page(query, python_match=python_match, page_size=page_size)
 
 
 def _read_last_updated_at(order: Order, *, created_at: datetime) -> datetime:
@@ -1266,25 +1371,13 @@ async def list_orders(
             q = q.filter(Order.source == src)
 
     q = _apply_lifecycle_db_filter(q, lifecycle_filter)
-    # Rank the full filtered set by created_at before capping the page.
-    # Limiting by id first dropped newer-created rows that happened to have older pks.
-    rows = q.all()
     now             = datetime.now(timezone.utc)
     today           = now.date()
-    rows.sort(
-        key=lambda o: (
-            _list_sort_created_at(o),
-            int(getattr(o, "id", 0) or 0),
-        ),
-        reverse=True,
-    )
-
     filt = (lifecycle_filter or "").strip().lower()
+    python_match = None
     if filt in (LIFECYCLE_FILTER_NEEDS_ACTION, LIFECYCLE_FILTER_MISSING_LOCATION):
-        rows = [r for r in rows if order_matches_lifecycle_filter(r, filt)]
-        rows = rows[:200]
-    elif len(rows) > 200:
-        rows = rows[:200]
+        python_match = lambda order, current=filt: order_matches_lifecycle_filter(order, current)
+    rows = _load_orders_list_page(q, python_match=python_match)
 
     customer_lookup = _build_customer_lookup(db, tenant_id)
     vip_phones      = _build_vip_phone_set(db, tenant_id)

@@ -9,7 +9,7 @@ from typing import Any, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import JSON, create_engine
+from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
@@ -23,6 +23,8 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 from core.wa_order_lifecycle import STATUS_DRAFT, STATUS_PENDING_CUSTOMER_INFO  # noqa: E402
 from models import Base, Order, Tenant  # noqa: E402
 from routers.orders import (  # noqa: E402
+    ORDERS_LIST_PAGE_SIZE,
+    _apply_created_at_order,
     _read_created_at,
     _read_last_updated_at,
     _serialise_order,
@@ -208,33 +210,10 @@ class TestOrdersListNewestCreatedFirst:
         ids = [row["external_id"] for row in second["orders"]]
         assert ids == ["arrived-later", "existing"]
 
-    def test_equal_created_at_uses_stable_id_desc_across_page_cap(self) -> None:
+    def test_equal_created_at_uses_stable_id_desc(self) -> None:
         db, _ = _make_db()
         tenant = _seed_tenant(db)
         created = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
-        older_created = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
-        # Oldest pk but newest created_at must survive the page cap even if
-        # many newer pks exist with older created_at.
-        db.add(
-            _wa_draft(
-                tenant_id=tenant.id,
-                external_id="oldest-pk-newest-created",
-                created_at=datetime(2026, 8, 28, 23, 0, tzinfo=timezone.utc),
-                last_updated_at=created,
-            )
-        )
-        db.commit()
-        for idx in range(210):
-            db.add(
-                _wa_draft(
-                    tenant_id=tenant.id,
-                    external_id=f"older-created-{idx:03d}",
-                    created_at=older_created,
-                    last_updated_at=created,
-                )
-            )
-        db.commit()
-        # Two rows sharing created_at: higher id first.
         db.add(
             _wa_draft(
                 tenant_id=tenant.id,
@@ -256,11 +235,126 @@ class TestOrdersListNewestCreatedFirst:
 
         payload = _invoke_list(db, tenant.id)
         ids = [row["external_id"] for row in payload["orders"]]
+        assert ids == ["tie-b", "tie-a"]
+
+    def _seed_oldest_pk_newest_created(self, db, tenant_id: int, older_count: int = 600):
+        newest = datetime(2026, 8, 28, 23, 0, tzinfo=timezone.utc)
+        older = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+        db.add(
+            _wa_draft(
+                tenant_id=tenant_id,
+                external_id="oldest-pk-newest-created",
+                created_at=newest,
+                last_updated_at=older,
+            )
+        )
+        db.commit()
+        batch = [
+            _wa_draft(
+                tenant_id=tenant_id,
+                external_id=f"older-created-{idx:04d}",
+                created_at=older,
+                last_updated_at=older,
+            )
+            for idx in range(older_count)
+        ]
+        db.add_all(batch)
+        db.commit()
+        return older_count + 1
+
+    def test_id_limit_400_before_sort_hides_oldest_pk_newest_created(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        total = self._seed_oldest_pk_newest_created(db, tenant.id, older_count=600)
+        assert total == 601
+
+        previous = (
+            db.query(Order)
+            .filter(Order.tenant_id == tenant.id)
+            .order_by(Order.id.desc())
+            .limit(400)
+            .all()
+        )
+        previous_ids = {row.external_id for row in previous}
+        assert "oldest-pk-newest-created" not in previous_ids
+        assert len(previous) == 400
+
+        payload = _invoke_list(db, tenant.id)
+        ids = [row["external_id"] for row in payload["orders"]]
         assert ids[0] == "oldest-pk-newest-created"
-        assert len(ids) == 200
-        tie_pos = ids.index("tie-b")
-        assert ids[tie_pos + 1] == "tie-a"
-        assert "older-created-000" not in ids or ids.index("tie-a") < ids.index("older-created-000")
+        assert len(ids) == ORDERS_LIST_PAGE_SIZE
+
+    def test_missing_created_at_not_promoted_by_status_or_updated_at(self) -> None:
+        db, _ = _make_db()
+        tenant = _seed_tenant(db)
+        dated = datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc)
+        touched = datetime(2026, 8, 28, 22, 0, tzinfo=timezone.utc)
+        db.add(
+            _wa_draft(
+                tenant_id=tenant.id,
+                external_id="dated-order",
+                created_at=dated,
+                last_updated_at=dated,
+            )
+        )
+        undated = Order(
+            tenant_id=tenant.id,
+            external_id="undated-order",
+            status="pending_payment",
+            source="whatsapp",
+            extra_metadata={
+                "created_at": "not-a-date",
+                "updated_at": dated.isoformat(),
+                "last_updated_at": dated.isoformat(),
+            },
+        )
+        db.add(undated)
+        db.commit()
+
+        before = [row["external_id"] for row in _invoke_list(db, tenant.id)["orders"]]
+        assert before[:2] == ["dated-order", "undated-order"]
+
+        undated.status = "paid"
+        meta = dict(undated.extra_metadata or {})
+        meta["updated_at"] = touched.isoformat()
+        meta["last_updated_at"] = touched.isoformat()
+        meta["status_changed_at"] = touched.isoformat()
+        undated.extra_metadata = meta
+        db.commit()
+
+        after = [row["external_id"] for row in _invoke_list(db, tenant.id)["orders"]]
+        assert after[:2] == ["dated-order", "undated-order"]
+
+    def test_list_orders_sql_is_limited_after_created_at_rank(self) -> None:
+        db, engine = _make_db()
+        tenant = _seed_tenant(db)
+        self._seed_oldest_pk_newest_created(db, tenant.id, older_count=20)
+        captured: list[str] = []
+
+        def _before(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+            captured.append(str(statement))
+
+        event.listen(engine, "before_cursor_execute", _before)
+        try:
+            payload = _invoke_list(db, tenant.id)
+        finally:
+            event.remove(engine, "before_cursor_execute", _before)
+
+        assert payload["orders"][0]["external_id"] == "oldest-pk-newest-created"
+        order_selects = [
+            stmt for stmt in captured
+            if "from orders" in stmt.lower() and "select" in stmt.lower()
+        ]
+        assert order_selects, captured
+        assert any("limit" in stmt.lower() for stmt in order_selects)
+
+        q = db.query(Order).filter(Order.tenant_id == tenant.id)
+        compiled = str(
+            _apply_created_at_order(q).limit(ORDERS_LIST_PAGE_SIZE).statement.compile(
+                dialect=engine.dialect
+            )
+        )
+        assert "LIMIT" in compiled.upper()
 
     def test_status_update_does_not_promote_old_order(self) -> None:
         db, _ = _make_db()
