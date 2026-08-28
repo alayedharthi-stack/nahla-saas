@@ -915,7 +915,7 @@ class TestH11RemainingLogSites:
                 config={
                     "store_id": "STORE_ID_CANARY_8889",
                     "merchant_id": "STORE_ID_CANARY_8889",
-                    "api_key": "tok_H11_SECRET_CANARY",
+                    "api_key": "test-key", "token_canary": "tok_H11_SECRET_CANARY",
                 },
             ))
             db.commit()
@@ -962,7 +962,7 @@ class TestH11RemainingLogSites:
     def test_adapter_get_abandoned_carts_log_is_safe(self, caplog):
         from store_adapters.salla_adapter import SallaAdapter
 
-        adapter = SallaAdapter(api_key="tok_H11_SECRET_CANARY", store_id="STORE_ID_CANARY_8889")
+        adapter = SallaAdapter(api_key="test-key", store_id="STORE_ID_CANARY_8889")
         # Fault injection: HTTP boundary = instance _get_all_pages raises HTTPStatusError.
         # _log_error is not mocked.
         adapter._get_all_pages = AsyncMock(side_effect=_h11_http_error())
@@ -991,7 +991,7 @@ class TestH11RemainingLogSites:
                 {
                     "customer": {"name": "Ahmad Salem", "mobile": "+966500111222"},
                     "checkout_url": "https://canary.example/checkout/H11",
-                    "access_token": "tok_H11_SECRET_CANARY",
+                    "token_canary": "tok_H11_SECRET_CANARY",
                     "provider_body": "CANARY_BODY_H11_PROVIDER",
                     "store_id": "STORE_ID_CANARY_8889",
                 },
@@ -1000,7 +1000,7 @@ class TestH11RemainingLogSites:
                     "id": "h11-save",
                     "customer": {"name": "Noura Abdullah", "mobile": "+966500111222"},
                     "checkout_url": "https://canary.example/checkout/H11",
-                    "access_token": "tok_H11_SECRET_CANARY",
+                    "token_canary": "tok_H11_SECRET_CANARY",
                     "provider_body": "CANARY_BODY_H11_PROVIDER",
                 },
             ])
