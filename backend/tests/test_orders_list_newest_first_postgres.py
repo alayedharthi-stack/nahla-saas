@@ -277,7 +277,7 @@ def test_postgres_naive_created_at_rank_stable_across_session_time_zone(pg_sessi
 
 
 def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
-    pg_session: Session, caplog: pytest.LogCaptureFixture
+    pg_session: Session,
 ) -> None:
     _cleanup(pg_session)
     tenant = _seed_tenant(pg_session)
@@ -320,7 +320,6 @@ def test_postgres_sort_sql_failure_uses_savepoint_and_safe_log(
     previous_level = orders_log.level
     orders_log.addHandler(handler)
     orders_log.setLevel(logging.ERROR)
-    caplog.set_level(logging.ERROR, logger="nahla.orders")
     bind = pg_session.get_bind()
     event.listen(bind, "before_cursor_execute", _before)
     try:
