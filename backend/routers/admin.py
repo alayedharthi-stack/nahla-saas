@@ -4269,6 +4269,29 @@ async def admin_test_email(
 #
 # Both are admin-only.
 
+@router.get("/admin/salla/realtime-commerce/diag")
+async def salla_realtime_commerce_diag(
+    tenant_id: int = Query(..., description="Tenant whose Salla realtime commerce health to inspect"),
+    db: Session = Depends(get_db),
+    admin_user: Dict[str, Any] = Depends(require_admin),
+):
+  """Return webhook + reconciler diagnostics for Salla near-real-time commerce."""
+  from core.auth import is_platform_admin_role
+  from services.salla_realtime_observability import build_realtime_commerce_diag
+
+  is_support = bool(admin_user.get("impersonation")) and admin_user.get("role") == "support_impersonation"
+  if is_support:
+      session_tenant = admin_user.get("tenant_id")
+      if session_tenant is None or int(session_tenant) != int(tenant_id):
+          raise HTTPException(status_code=403, detail="support_tenant_mismatch")
+  elif not is_platform_admin_role(admin_user.get("role")):
+      raise HTTPException(status_code=403, detail="forbidden")
+
+  diag = build_realtime_commerce_diag(db, tenant_id)
+  audit("admin_salla_realtime_commerce_diag", tenant_id=tenant_id)
+  return {"ok": True, "diag": diag}
+
+
 @router.get("/admin/salla/orders-poller/diag")
 async def salla_orders_poller_diag(
     tenant_id: int = Query(..., description="Tenant whose Salla integration to inspect"),

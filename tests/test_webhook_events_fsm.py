@@ -177,12 +177,13 @@ def test_mark_failed_schedules_retry_then_dead_letters():
             assert ev.status == we.STATUS_FAILED
             assert ev.attempts == attempt
             assert ev.next_retry_at is not None
-            assert ev.last_error and "boom" in ev.last_error
+            assert ev.last_error == "RuntimeError"
 
         # Final failure → dead_letter
         we.mark_failed(db, ev, "final")
         db.refresh(ev)
         assert ev.status == we.STATUS_DEAD_LETTER
+        assert ev.last_error == "final"
         assert ev.attempts == we.MAX_ATTEMPTS
         assert ev.next_retry_at is None
     finally:

@@ -1263,7 +1263,13 @@ class SallaAdapter(BaseStoreAdapter):
             return False
 
     def _log_error(self, method: str, exc: Exception) -> None:
-        logger.error(f"SallaAdapter.{method} failed: {exc}", exc_info=True)
+        from core.webhook_error_codes import classify_webhook_failure  # noqa: PLC0415
+
+        logger.error(
+            "[SallaAdapter] method=%s error_code=%s",
+            method,
+            classify_webhook_failure(exc),
+        )
 
     # ── Pagination helper ────────────────────────────────────────────────────
 
@@ -1273,67 +1279,33 @@ class SallaAdapter(BaseStoreAdapter):
         per_page: int = 50,
         extra_params: Optional[Dict[str, Any]] = None,
         label: str = "",
-    ) -> List[Dict[str, Any]]:
-        """Fetch ALL pages from a paginated Salla endpoint until data is exhausted.
+    ) -> Dict[str, Any]:
+        """Fetch ALL pages from a paginated Salla endpoint.
 
-        No hard page limit — continues until:
-          1. API returns an empty page, OR
-          2. Current page >= total pages reported by API, OR
-          3. A single page returns fewer items than per_page (last page).
+        Returns a structured result dict (see ``_fetch_all_pages_result``).
+        Callers that need only the item list on full success should use
+        ``_get_all_pages_strict`` instead.
         """
-        tag = label or path.strip("/")
-        all_items: List[Dict[str, Any]] = []
-        page = 1
-        total_pages_hint = None
-
-        while True:
-            params: Dict[str, Any] = {"per_page": per_page, "page": page}
-            if extra_params:
-                params.update(extra_params)
-
-            try:
-                data = await self._get(path, params)
-            except SallaTokenRevokedException:
-                raise  # propagate — callers must handle this as a hard stop
-            except Exception as exc:
-                logger.error(
-                    "[Salla:%s] tenant=%s page %d FAILED — stopping pagination: %s",
-                    tag, self._tenant_id, page, exc,
-                )
-                break
-
-            items = data.get("data") or []
-            all_items.extend(items)
-
-            pagination = data.get("pagination") or data.get("meta") or {}
-            total_pages_hint = pagination.get(
-                "totalPages",
-                pagination.get("last_page", pagination.get("total_pages", None)),
-            )
-            total_items_hint = pagination.get(
-                "total", pagination.get("count", None),
-            )
-
-            logger.info(
-                "[Salla:%s] tenant=%s page %d → %d items (cumulative=%d%s)",
-                tag, self._tenant_id, page, len(items), len(all_items),
-                f", total_pages={total_pages_hint}" if total_pages_hint else "",
-            )
-
-            if not items:
-                break
-            if total_pages_hint and page >= total_pages_hint:
-                break
-            if len(items) < per_page:
-                break
-
-            page += 1
-
-        logger.info(
-            "[Salla:%s] tenant=%s pagination complete — %d total items across %d pages",
-            tag, self._tenant_id, len(all_items), page,
+        return await self._fetch_all_pages_result(
+            path,
+            per_page=per_page,
+            extra_params=extra_params,
+            label=label,
         )
-        return all_items
+
+    async def _get_all_pages_strict(
+        self,
+        path: str,
+        per_page: int = 50,
+        extra_params: Optional[Dict[str, Any]] = None,
+        label: str = "",
+    ) -> List[Dict[str, Any]]:
+        from store_adapters.salla_pagination import SallaPaginatedFetchIncomplete  # noqa: PLC0415
+
+        result = await self._get_all_pages(path, per_page=per_page, extra_params=extra_params, label=label)
+        if not result.get("ok"):
+            raise SallaPaginatedFetchIncomplete.from_result(result)
+        return list(result.get("items") or [])
 
     async def _fetch_all_pages_result(
         self,
@@ -1427,11 +1399,11 @@ class SallaAdapter(BaseStoreAdapter):
             extra: Optional[Dict[str, Any]] = None
             if updated_since:
                 extra = {"updated_at_min": updated_since}
-            raw_list = await self._get_all_pages("/products", label="products", extra_params=extra)
+            raw_list = await self._get_all_pages_strict("/products", label="products", extra_params=extra)
             return [self._normalize_product(p) for p in raw_list]
         except httpx.HTTPStatusError as exc:
             self._log_error("get_products", exc)
-            logger.error(f"Salla get_products HTTP error {exc.response.status_code}: {exc.response.text[:200]}")
+            logger.error("[SallaAdapter] get_products http_status=%s", exc.response.status_code)
             raise
         except Exception as exc:
             self._log_error("get_products", exc)
@@ -3683,7 +3655,8 @@ class SallaAdapter(BaseStoreAdapter):
             date_only = str(updated_since).split("T", 1)[0]
             extra = {"from_date": date_only}
         try:
-            raw_list = await self._get_all_pages("/orders", label="orders", extra_params=extra)
+            result = await self._get_all_pages("/orders", label="orders", extra_params=extra)
+            raw_list = list(result.get("items") or [])
             return [self._normalize_order(o, None) for o in raw_list]
         except httpx.HTTPStatusError as exc:
             self._log_error("get_orders", exc)
@@ -3740,16 +3713,18 @@ class SallaAdapter(BaseStoreAdapter):
         an empty list on any error so the orders sync pipeline keeps moving.
         """
         try:
-            return await self._get_all_pages(
+            result = await self._get_all_pages(
                 "/carts/abandoned", label="abandoned_carts",
             )
+            return list(result.get("items") or [])
         except SallaTokenRevokedException:
             raise
         except httpx.HTTPStatusError as exc:
             self._log_error("get_abandoned_carts", exc)
+            http_status = getattr(getattr(exc, "response", None), "status_code", None)
             logger.error(
-                "Salla get_abandoned_carts HTTP %s: %s",
-                exc.response.status_code, exc.response.text[:300],
+                "[SallaAdapter] salla_adapter.get_abandoned_carts_failed http_status=%s",
+                http_status,
             )
             return []
         except Exception as exc:
@@ -3916,14 +3891,18 @@ class SallaAdapter(BaseStoreAdapter):
 
     async def get_customers(self, updated_since: Optional[str] = None) -> List[Dict[str, Any]]:
         """Fetch all customers from Salla across all pages until exhaustion."""
+        from store_adapters.salla_pagination import SallaPaginatedFetchIncomplete  # noqa: PLC0415
+
         try:
             extra: Optional[Dict[str, Any]] = None
             if updated_since:
                 extra = {"updated_at_min": updated_since}
-            return await self._get_all_pages("/customers", label="customers", extra_params=extra)
+            return await self._get_all_pages_strict("/customers", label="customers", extra_params=extra)
+        except SallaPaginatedFetchIncomplete:
+            raise
         except Exception as exc:
             self._log_error("get_customers", exc)
-            return []
+            raise
 
     # ── Offers / Coupons ──────────────────────────────────────────────────────
 

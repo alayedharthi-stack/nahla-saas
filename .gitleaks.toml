@@ -8,3 +8,7 @@ description = "A1 evidence fixture contract uses metadata field name constants, 
 paths = [
   '''backend/services/order_customer_identity_evidence_fixture_contract\.py''',
 ]
+regexes = [
+  # Historical PR #888 H11 test canary; not a live credential.
+  '''tok_H11_SECRET_CANARY''',
+]

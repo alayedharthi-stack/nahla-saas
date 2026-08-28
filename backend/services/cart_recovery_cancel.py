@@ -73,17 +73,25 @@ logger = logging.getLogger("nahla.cart_recovery_cancel")
 # this just means we'd over-stamp by a few entries.
 _MAX_RECOVERY_STAGES = 8
 
-# Statuses that count as "the customer paid / placed an order". Mirrors
-# the predicate used in `automation_emitters._customer_has_completed_order_since`
-# so both code paths agree on what conversion looks like.
-_PURCHASE_STATUSES_EXCLUDED = frozenset({
-    "cancelled", "refunded", "pending_confirmation",
-    # Pre-payment states from automation_emitters._PENDING_PAYMENT_STATUSES.
-    # An order in these states is NOT a purchase yet — keep chasing the cart.
-    "pending", "pending_payment", "payment_pending", "awaiting_payment",
-    "draft", "new",
+# Positive purchase evidence — unknown statuses are NOT purchases.
+_PURCHASE_STATUSES_POSITIVE = frozenset({
+    "completed", "delivered", "paid", "shipped", "out_for_delivery",
+    "in_progress", "processing", "ready_for_pickup", "under_review",
 })
 
+
+
+
+def _recovery_event_matches_cart(payload: Dict[str, Any], matched_cart_external_id: Optional[str]) -> bool:
+    if not matched_cart_external_id:
+        return True
+    ev_cart = str(payload.get("cart_external_id") or "").strip()
+    ev_raw = str(payload.get("cart_id") or "").strip()
+    wanted = str(matched_cart_external_id).strip()
+    wanted_raw = wanted.replace("cart-", "", 1) if wanted.startswith("cart-") else wanted
+    if not ev_cart and not ev_raw:
+        return False
+    return ev_cart == wanted or ev_raw == wanted_raw
 
 def cancel_recovery_for_customer(
     db: Session,
@@ -156,6 +164,13 @@ def cancel_recovery_for_customer(
         # Idempotency: if we've already cancelled this row, leave it alone.
         if payload.get("recovery_converted_at"):
             continue
+        if matched_cart_external_id:
+            ev_cart = str(payload.get("cart_external_id") or "").strip()
+            ev_raw = str(payload.get("cart_id") or "").strip()
+            wanted = str(matched_cart_external_id).strip()
+            wanted_raw = wanted.replace("cart-", "", 1) if wanted.startswith("cart-") else wanted
+            if ev_cart and ev_cart != wanted and ev_raw != wanted_raw:
+                continue
         payload["recovery_converted_at"]   = now_iso
         payload["recovery_cancel_reason"]  = reason
         payload["recovery_cancel_order"]   = {
@@ -195,6 +210,8 @@ def cancel_recovery_for_customer(
             continue
         if payload.get("recovery_converted_at"):
             continue
+        if matched_cart_external_id and not _recovery_event_matches_cart(payload, matched_cart_external_id):
+            continue
 
         progress = list(payload.get("recovery_followups") or [])
         seen = {int(p.get("step_idx", -1)) for p in progress}
@@ -233,7 +250,10 @@ def cancel_recovery_for_customer(
     # from ``action_taken``. Without this stamp the recovery flow looks
     # like it gave up on its own rather than being short-circuited by a
     # real purchase, which makes the conversion-rate column lie.
-    parent_event_ids = [p.id for p in parent_events]
+    parent_event_ids = [
+        p.id for p in parent_events
+        if _recovery_event_matches_cart(dict(p.payload or {}), matched_cart_external_id)
+    ]
     if parent_event_ids:
         executions = (
             db.query(AutomationExecution)
@@ -262,7 +282,7 @@ def cancel_recovery_for_customer(
             ex.action_taken = action
             try:
                 flag_modified(ex, "action_taken")
-            except Exception:
+            except Exception:  # noqa: silent-ok - flag_modified best-effort
                 pass
             counters["executions_stamped"] += 1
 
@@ -335,13 +355,128 @@ def cancel_recovery_for_customer(
     return counters
 
 
+
+def cancel_recovery_chain_for_cart(
+    db: Session,
+    *,
+    tenant_id: int,
+    matched_cart_external_id: str,
+    reason: str,
+    commit: bool = False,
+) -> Dict[str, int]:
+    """Stamp the full recovery chain for one cart, including processed parents.
+
+    Used when a purchase webhook may lack a phone. Tenant- and cart-scoped
+    only: never searches customers outside the tenant and never touches
+    another cart's events or executions.
+    """
+    counters = {
+        "events_cancelled": 0,
+        "parent_events_marked": 0,
+        "executions_stamped": 0,
+        "carts_recovered": 0,
+    }
+    wanted = str(matched_cart_external_id or "").strip()
+    if not wanted:
+        return counters
+
+    from models import AutomationEvent, AutomationExecution  # noqa: PLC0415
+
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    now_iso = now_naive.isoformat()
+
+    events = (
+        db.query(AutomationEvent)
+        .filter(
+            AutomationEvent.tenant_id == tenant_id,
+            AutomationEvent.event_type == "cart_abandoned",
+        )
+        .all()
+    )
+    matched_parents = []
+    for ev in events:
+        payload = dict(ev.payload or {})
+        if not _recovery_event_matches_cart(payload, wanted):
+            continue
+        already = bool(payload.get("recovery_converted_at"))
+        if int(payload.get("step_idx") or 0) == 0:
+            matched_parents.append(ev)
+            progress = list(payload.get("recovery_followups") or [])
+            seen = {int(p.get("step_idx", -1)) for p in progress}
+            added = False
+            for idx in range(1, _MAX_RECOVERY_STAGES):
+                if idx in seen:
+                    continue
+                progress.append({
+                    "step_idx": idx,
+                    "skipped": True,
+                    "reason": reason,
+                    "emitted_at": now_iso,
+                })
+                added = True
+            payload["recovery_followups"] = progress
+            payload["recovery_converted_at"] = payload.get("recovery_converted_at") or now_iso
+            payload["recovery_cancel_reason"] = reason
+            ev.payload = payload
+            try:
+                flag_modified(ev, "payload")
+            except Exception:  # noqa: silent-ok - flag_modified best-effort
+                pass
+            if added or not already:
+                counters["parent_events_marked"] += 1
+        if not ev.processed or not already:
+            if not already:
+                payload["recovery_converted_at"] = now_iso
+                payload["recovery_cancel_reason"] = reason
+                ev.payload = payload
+                try:
+                    flag_modified(ev, "payload")
+                except Exception:  # noqa: silent-ok - flag_modified best-effort
+                    pass
+            if not ev.processed:
+                ev.processed = True
+                counters["events_cancelled"] += 1
+
+    parent_ids = [p.id for p in matched_parents if p.id]
+    if parent_ids:
+        executions = (
+            db.query(AutomationExecution)
+            .filter(
+                AutomationExecution.tenant_id == tenant_id,
+                AutomationExecution.event_id.in_(parent_ids),
+            )
+            .all()
+        )
+        for ex in executions:
+            action = dict(ex.action_taken or {})
+            metrics = dict(action.get("metrics") or {})
+            if metrics.get("converted") and metrics.get("skip_reason") == reason:
+                continue
+            metrics["converted"] = True
+            metrics["remaining_steps_skipped"] = True
+            metrics["skip_reason"] = reason
+            metrics["converted_at"] = now_iso
+            action["metrics"] = metrics
+            action["last_outcome"] = reason
+            action["last_outcome_at"] = now_iso
+            ex.action_taken = action
+            try:
+                flag_modified(ex, "action_taken")
+            except Exception:
+                pass
+            counters["executions_stamped"] += 1
+
+    if commit:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    return counters
+
+
 def order_is_a_purchase(status: Optional[str]) -> bool:
-    """
-    Cheap predicate the order webhook uses to decide whether to invoke
-    the cancel hook. We must NOT cancel on draft / pending-payment
-    statuses — those just mean the customer started checkout, not that
-    they paid. The set is the inverse of ``_PURCHASE_STATUSES_EXCLUDED``.
-    """
+    """Return True only when the status is a documented positive purchase signal."""
     if not status:
         return False
-    return status not in _PURCHASE_STATUSES_EXCLUDED
+    return str(status).strip().lower() in _PURCHASE_STATUSES_POSITIVE

@@ -312,7 +312,9 @@ def mark_failed(db: Session, event: WebhookEvent, err: BaseException | str) -> N
     """
     now = _utcnow()
     event.attempts = int(event.attempts or 0) + 1
-    event.last_error = _format_error(err)[:4000]
+    from core.webhook_error_codes import classify_webhook_failure  # noqa: PLC0415
+
+    event.last_error = classify_webhook_failure(err)[:4000]
     event.last_error_at = now
     event.updated_at = now
 
@@ -327,7 +329,7 @@ def mark_failed(db: Session, event: WebhookEvent, err: BaseException | str) -> N
             provider=event.provider,
             event_type=event.event_type,
             attempts=event.attempts,
-            err=err,
+            err=classify_webhook_failure(err),
         )
         return
 
@@ -344,7 +346,7 @@ def mark_failed(db: Session, event: WebhookEvent, err: BaseException | str) -> N
         event_type=event.event_type,
         attempts=event.attempts,
         next_retry_at=event.next_retry_at.isoformat(),
-        err=err,
+        err=classify_webhook_failure(err),
     )
 
 

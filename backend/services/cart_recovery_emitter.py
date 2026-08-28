@@ -42,9 +42,19 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+
+from services.salla_datetime import salla_datetime_to_utc_iso
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nahla.cart_recovery_emitter")
+
+def _parse_abandoned_at_naive_utc(value):
+    """Parse Salla abandonment timestamp to naive UTC for AutomationEvent.created_at."""
+    from services.salla_datetime import salla_datetime_to_naive_utc
+
+    return salla_datetime_to_naive_utc(value)
+
+
 
 
 def _extract_phone(normalised: Dict[str, Any]) -> Optional[str]:
@@ -78,18 +88,18 @@ def _existing_event_id(db: Any, *, tenant_id: int, marker: Any) -> Optional[int]
 
 
 def _resolve_customer_id(
-    db: Any, *, tenant_id: int, phone: str, name: Optional[str],
+    db: Any, *, tenant_id: int, phone: str, name: Optional[str], commit: bool = True,
 ) -> Optional[int]:
     try:
         from services.customer_intelligence import (  # noqa: PLC0415
             CustomerIntelligenceService,
             normalize_phone,
         )
-    except Exception:
-        logger.exception(
-            "[CartRecoveryEmitter] customer_intelligence import failed "
-            "tenant=%s — skipping customer resolution",
-            tenant_id,
+    except Exception as exc:
+        logger.error(
+            "[CartRecoveryEmitter] cart_recovery.customer_intelligence_import_failed "
+            "tenant=%s error_class=%s",
+            tenant_id, type(exc).__name__,
         )
         return None
 
@@ -104,13 +114,14 @@ def _resolve_customer_id(
             name=name or normalized,
             source="abandoned_cart_emitter",
             extra_metadata={"origin_event": "cart_abandoned"},
-            commit=True,
+            commit=commit,
         )
         return lead.id if lead else None
-    except Exception:
-        logger.exception(
-            "[CartRecoveryEmitter] customer upsert failed tenant=%s phone=%s",
-            tenant_id, normalized,
+    except Exception as exc:
+        logger.error(
+            "[CartRecoveryEmitter] cart_recovery.customer_resolve_failed "
+            "tenant=%s error_class=%s",
+            tenant_id, type(exc).__name__,
         )
         return None
 
@@ -122,6 +133,7 @@ def emit_cart_abandoned_if_new(
     cart_row: Any,
     normalised: Dict[str, Any],
     source: str = "store_sync",
+    commit: bool = False,
 ) -> Optional[int]:
     """
     Idempotently emit a ``cart_abandoned`` AutomationEvent for the given
@@ -141,6 +153,29 @@ def emit_cart_abandoned_if_new(
     if cart_row is None:
         return None
 
+    cart_id = getattr(cart_row, "id", None)
+    if cart_id is not None:
+        try:
+            from models import Order  # noqa: PLC0415
+
+            cart_row = (
+                db.query(Order)
+                .filter(Order.tenant_id == tenant_id, Order.id == cart_id)
+                .with_for_update()
+                .populate_existing()
+                .one()
+            )
+        except Exception:
+            logger.exception(
+                "[CartRecoveryEmitter] tenant=%s could not lock cart row id=%s",
+                tenant_id,
+                cart_id,
+            )
+            return None
+
+    if not getattr(cart_row, "is_abandoned", True):
+        return None
+
     cart_external = normalised.get("external_id") or getattr(cart_row, "external_id", "")
     raw_cart_id = normalised.get("raw_cart_id") or (
         cart_external.replace("cart-", "", 1) if str(cart_external).startswith("cart-") else cart_external
@@ -153,6 +188,8 @@ def emit_cart_abandoned_if_new(
         return None
 
     meta = dict(getattr(cart_row, "extra_metadata", None) or {})
+    if meta.get("recovered_at") or str(meta.get("cart_status") or "").strip().lower() == "purchased":
+        return None
     existing_id = _existing_event_id(
         db, tenant_id=tenant_id, marker=meta.get("recovery_event_id"),
     )
@@ -172,15 +209,19 @@ def emit_cart_abandoned_if_new(
         )
         return None
 
+    # Keep the cart FOR UPDATE transaction open. A mid-emit commit would
+    # release the row lock before the event exists, letting a purchase
+    # cancel miss the event and leave recovery sendable.
     customer_id = _resolve_customer_id(
         db, tenant_id=tenant_id, phone=phone,
         name=normalised.get("customer_name") or None,
+        commit=False,
     )
     if customer_id is None:
         logger.warning(
             "[CartRecoveryEmitter] tenant=%s cart=%s could not resolve "
-            "customer for phone=%s — skipping cart_abandoned emit",
-            tenant_id, cart_external, phone,
+            "customer unresolved — skipping cart_abandoned emit",
+            tenant_id, cart_external,
         )
         return None
 
@@ -194,6 +235,33 @@ def emit_cart_abandoned_if_new(
         )
         return None
 
+    allowed_sources = {
+        "provider_explicit",
+        "provider_webhook_event",
+        "first_webhook_observation",
+        "first_poller_observation",
+    }
+    anchor_iso = str(meta.get("first_provider_abandoned_observed_at") or "").strip()
+    anchor_source = str(meta.get("abandonment_anchor_source") or "").strip()
+    if not anchor_iso or anchor_source not in allowed_sources:
+        candidate_iso = str(normalised.get("observation_candidate_iso") or "").strip()
+        candidate_source = str(normalised.get("observation_candidate_source") or "").strip()
+        if not candidate_iso or candidate_source not in allowed_sources:
+            explicit = normalised.get("abandoned_at") or meta.get("abandoned_at")
+            candidate_iso = salla_datetime_to_utc_iso(explicit) if explicit else ""
+            candidate_source = "provider_explicit" if candidate_iso else ""
+        if not candidate_iso or candidate_source not in allowed_sources:
+            logger.warning(
+                "[CartRecoveryEmitter] tenant=%s cart=%s missing first abandoned observation — skipping emit",
+                tenant_id,
+                cart_external,
+            )
+            return None
+        meta["first_provider_abandoned_observed_at"] = candidate_iso
+        meta["abandonment_anchor_source"] = candidate_source
+        anchor_iso = candidate_iso
+        anchor_source = candidate_source
+
     payload: Dict[str, Any] = {
         "source":               source,
         "cart_id":              raw_cart_id,
@@ -203,19 +271,27 @@ def emit_cart_abandoned_if_new(
         "items":                normalised.get("line_items") or [],
         "phone":                phone,
         "customer_name":        normalised.get("customer_name") or "",
-        "abandoned_at":         meta.get("abandoned_at")
-                                 or normalised.get("created_at")
-                                 or datetime.now(timezone.utc).isoformat(),
+        "abandoned_at":         anchor_iso,
+        "abandonment_anchor_source": anchor_source,
     }
 
     try:
+        event_created_at = _parse_abandoned_at_naive_utc(anchor_iso)
+        if event_created_at is None:
+            logger.warning(
+                "[CartRecoveryEmitter] tenant=%s cart=%s invalid first-observation anchor — skipping emit",
+                tenant_id,
+                cart_external,
+            )
+            return None
         event = emit_automation_event(
             db,
             tenant_id=tenant_id,
             event_type=AutomationTrigger.CART_ABANDONED.value,
             customer_id=customer_id,
             payload=payload,
-            commit=True,
+            commit=False,
+            created_at=event_created_at,
         )
     except Exception:
         logger.exception(
@@ -242,18 +318,21 @@ def emit_cart_abandoned_if_new(
         cart_row.extra_metadata = meta
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
         flag_modified(cart_row, "extra_metadata")
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
     except Exception:
         logger.exception(
             "[CartRecoveryEmitter] tenant=%s cart=%s — failed to persist "
-            "recovery_event_id marker (event already emitted, idempotency "
-            "downgraded for this row)",
+            "recovery_event_id marker",
             tenant_id, cart_external,
         )
         try:
             db.rollback()
         except Exception:
             pass
+        return None
 
     logger.info(
         "[CartRecoveryEmitter] tenant=%s cart=%s emitted cart_abandoned "

@@ -45,6 +45,15 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
+      - name: Salla PR 888 remediation unit tests
+        run: |
+          python -m pytest \
+            backend/tests/test_salla_pr888_remaining_remediation.py \
+            backend/tests/test_salla_pr888_remediation.py \
+            backend/tests/test_salla_realtime_commerce.py \
+            -v --tb=short --maxfail=1 \
+            --junitxml=/tmp/salla-pr888-remediation.xml
+
       - name: Customer conditional coupon Layer 0 consumer tests
         run: |
           python -m pytest \
@@ -270,6 +279,8 @@ jobs:
             backend/tests/test_conversation_a1_subject_read_bridge_postgres.py \
             backend/tests/test_coupon_pool_cap_postgres.py \
             backend/tests/test_salla_coupons_poller_race_postgres.py \
+            backend/tests/test_salla_commerce_reconciler_postgres.py \
+            backend/tests/test_salla_cart_recovery_postgres.py \
             backend/tests/test_salla_delete_401_refresh_postgres.py \
             backend/tests/test_salla_delete_401_branch_closure_postgres.py \
             backend/tests/test_customer_conditional_coupon_a1_pg_e2e.py \
@@ -289,7 +300,37 @@ jobs:
             backend/tests/test_tenant_merchant_clone_operator.py \
             backend/tests/test_salla_integration_resolver_ambiguity.py \
             "backend/tests/test_customer_commerce_ledger.py::TestLedgerOrderingPostgres" \
-            -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning
+            -q --maxfail=1 -W error::sqlalchemy.exc.SAWarning \
+            --junitxml=/tmp/a1-postgres.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          xml_path = Path("/tmp/a1-postgres.xml")
+          if not xml_path.exists():
+              raise SystemExit("missing A1 JUnit file; cannot prove H3 case names")
+          print("H3 PostgreSQL case names from test_salla_cart_recovery_postgres.py:")
+          found = 0
+          for tc in ET.parse(xml_path).getroot().iter("testcase"):
+              classname = tc.get("classname") or ""
+              name = tc.get("name") or ""
+              file_attr = tc.get("file") or ""
+              hay = classname + " " + file_attr
+              if "salla_cart_recovery_postgres" not in hay:
+                  continue
+              found += 1
+              if tc.find("failure") is not None:
+                  status = "FAILED"
+              elif tc.find("error") is not None:
+                  status = "ERROR"
+              elif tc.find("skipped") is not None:
+                  status = "SKIPPED"
+              else:
+                  status = "PASSED"
+              print(f"  {status} {classname}::{name}")
+          if found == 0:
+              raise SystemExit("A1 JUnit contained no cart-recovery postgres cases")
+          PY
 
       # Dedicated PG16 proof for lifecycle CAS claims. Uses a fresh database so
       # migration_0094_required stays on 0093 while CAS races upgrade to 0094.
