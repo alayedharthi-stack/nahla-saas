@@ -11,14 +11,14 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
 from sqlalchemy.orm.attributes import flag_modified
 
-from core.catalog import is_meta_export_eligible
+from core.catalog import is_whatsapp_channel_publish_eligible
 from services.meta_catalog_access import select_catalog_graph_token
 from services.meta_catalog_import import _select_graph_token
 from services.meta_catalog_linking import (
@@ -31,6 +31,9 @@ from services.meta_catalog_linking import (
 logger = logging.getLogger("nahla.meta_catalog_reconnect")
 
 _BIND_META_KEY = "meta_catalog_bind"
+_RECONNECT_EXECUTOR: ThreadPoolExecutor | None = None
+_RECONNECT_COALESCER = None
+RECONNECT_QUEUE_MAX = 32
 
 
 def catalog_config_changes_require_reconcile(changes: Optional[Dict[str, Any]]) -> bool:
@@ -84,7 +87,7 @@ def _eligible_product_ids(db: Any, tenant_id: int) -> List[int]:
     for row in rows:
         if int(getattr(row, "tenant_id", 0) or 0) != int(tenant_id):
             continue
-        if not is_meta_export_eligible(row):
+        if not is_whatsapp_channel_publish_eligible(row):
             continue
         pid = getattr(row, "id", None)
         if pid is None:
@@ -271,6 +274,14 @@ def reconcile_meta_catalog_after_whatsapp_change(
         out["dry_run"] = True
         return out
 
+    from services.whatsapp_catalog_sync import whatsapp_catalog_auto_sync_enabled  # noqa: PLC0415
+
+    if not whatsapp_catalog_auto_sync_enabled():
+        out["ok"] = True
+        out["skipped"] = len(product_ids)
+        out["error"] = "auto_sync_disabled"
+        return out
+
     for pid in product_ids:
         try:
             sync = attempt_native_meta_sync(
@@ -322,6 +333,37 @@ def run_meta_catalog_reconnect_background(tenant_id: int) -> None:
         db.close()
 
 
+def get_meta_catalog_reconnect_executor() -> ThreadPoolExecutor:
+    global _RECONNECT_EXECUTOR
+    if _RECONNECT_EXECUTOR is None:
+        _RECONNECT_EXECUTOR = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="meta-catalog-reconnect",
+        )
+    return _RECONNECT_EXECUTOR
+
+
+def _reconnect_coalescer():
+    global _RECONNECT_COALESCER
+    if _RECONNECT_COALESCER is None:
+        from services.whatsapp_catalog_sync import TenantWorkCoalescer  # noqa: PLC0415
+
+        _RECONNECT_COALESCER = TenantWorkCoalescer(
+            max_queued=RECONNECT_QUEUE_MAX,
+            max_overflow=RECONNECT_QUEUE_MAX,
+            get_executor=get_meta_catalog_reconnect_executor,
+            runner=run_meta_catalog_reconnect_background,
+        )
+    return _RECONNECT_COALESCER
+
+
+def reset_meta_catalog_reconnect_scheduler_for_tests() -> None:
+    global _RECONNECT_COALESCER
+    if _RECONNECT_COALESCER is not None:
+        _RECONNECT_COALESCER.reset_for_tests()
+    _RECONNECT_COALESCER = None
+
+
 def schedule_meta_catalog_reconnect_best_effort(tenant_id: int) -> None:
     """Fire-and-forget. Must never fail WhatsApp connect. No-op under pytest."""
     if tenant_id <= 0:
@@ -334,19 +376,7 @@ def schedule_meta_catalog_reconnect_best_effort(tenant_id: int) -> None:
         )
         return
 
-    def _run() -> None:
-        try:
-            run_meta_catalog_reconnect_background(int(tenant_id))
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "[META_CATALOG_RECONNECT] thread failed tenant=%s", tenant_id,
-            )
-
-    threading.Thread(
-        target=_run,
-        daemon=True,
-        name=f"meta-catalog-reconnect-{tenant_id}",
-    ).start()
+    _reconnect_coalescer().submit(int(tenant_id))
 
 
 def current_waba_link_snapshot(db: Any, tenant_id: int) -> Dict[str, Any]:
@@ -360,4 +390,6 @@ __all__ = [
     "reconcile_meta_catalog_after_whatsapp_change",
     "run_meta_catalog_reconnect_background",
     "schedule_meta_catalog_reconnect_best_effort",
+    "get_meta_catalog_reconnect_executor",
+    "reset_meta_catalog_reconnect_scheduler_for_tests",
 ]

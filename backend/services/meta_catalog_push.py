@@ -26,7 +26,9 @@ from services.meta_catalog_import import _select_graph_token
 logger = logging.getLogger("nahla.meta_catalog_push")
 
 REQUEST_TIMEOUT: float = 45.0
-GRAPH_FIELDS = "id,retailer_id,name"
+# Graph Catalog Product Item fields used after a push. Identity plus
+# the content fields this API version exposes on GET.
+GRAPH_FIELDS = "id,retailer_id,name,price,currency,availability"
 
 
 class MetaCatalogPushError(RuntimeError):
@@ -179,6 +181,7 @@ def find_meta_catalog_item_by_retailer_id(
             return None, lookup
         first = rows[0] or {}
         meta_id = str(first.get("id") or "").strip() or None
+        lookup["item"] = first
         if meta_id:
             lookup["matched"] = True
         return meta_id, lookup

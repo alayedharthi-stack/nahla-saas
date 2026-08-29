@@ -1,4 +1,4 @@
-import { CheckCircle2, Clock, Download, Loader2, MoreHorizontal, Package, Plus } from 'lucide-react'
+import { CheckCircle2, Clock, MoreHorizontal, Package, Plus } from 'lucide-react'
 import { useState } from 'react'
 import type { CatalogDiagnostics } from '../../api/catalog'
 import { useLanguage } from '../../i18n/context'
@@ -109,19 +109,6 @@ export default function CatalogSummaryCard(props: {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {props.showMetaImport && (
-            <button
-              type="button"
-              onClick={props.onImportMeta}
-              disabled={props.metaImportBusy}
-              className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-semibold px-4 py-2.5 rounded-xl text-sm transition shadow-sm"
-            >
-              {props.metaImportBusy
-                ? <Loader2 className="w-4 h-4 animate-spin" />
-                : <Download className="w-4 h-4" />}
-              {tStatic(tr => tr.catalogMgmt.page.importFromMeta)}
-            </button>
-          )}
           <button
             type="button"
             onClick={props.onAddManual}
@@ -141,7 +128,7 @@ export default function CatalogSummaryCard(props: {
               {copy.moreActions}
             </button>
             {menuOpen && (
-              <div className="absolute end-0 mt-1 z-10 min-w-[10rem] bg-white border border-slate-200 rounded-xl shadow-lg py-1 text-sm">
+              <div className="absolute end-0 mt-1 z-10 min-w-[16rem] bg-white border border-slate-200 rounded-xl shadow-lg py-1 text-sm">
                 <button
                   type="button"
                   className="w-full text-start px-3 py-2 hover:bg-slate-50 text-slate-700"
@@ -149,6 +136,16 @@ export default function CatalogSummaryCard(props: {
                 >
                   {tStatic(tr => tr.catalogMgmt.advanced.title)}
                 </button>
+                {props.showMetaImport && (
+                  <button
+                    type="button"
+                    disabled={props.metaImportBusy}
+                    className="w-full text-start px-3 py-2 hover:bg-slate-50 text-slate-600 disabled:text-slate-400"
+                    onClick={() => { setMenuOpen(false); props.onImportMeta() }}
+                  >
+                    {tStatic(tr => tr.catalogMgmt.page.importFromMetaSecondary)}
+                  </button>
+                )}
               </div>
             )}
           </div>

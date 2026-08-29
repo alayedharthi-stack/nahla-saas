@@ -299,6 +299,67 @@ export interface ProductPublicationStatus {
   visible_in_whatsapp:     boolean
 }
 
+export type WhatsappCatalogSyncPhase =
+  | 'idle'
+  | 'queued'
+  | 'syncing'
+  | 'published'
+  | 'pending_verification'
+  | 'needs_attention'
+  | 'blocked'
+
+export interface WhatsappCatalogSyncCounts {
+  eligible: number
+  pending: number
+  syncing: number
+  synced: number
+  failed: number
+  blocked: number
+  pending_verification?: number
+  skipped_ineligible: number
+}
+
+export interface WhatsappCatalogSyncFailure {
+  product_id: number
+  title: string
+  sync_status: string
+  error_summary: string
+}
+
+export interface WhatsappCatalogSyncStatus {
+  ok: boolean
+  tenant_id: number
+  ready: boolean
+  blocker_code: string | null
+  message_ar: string | null
+  action_ar: string | null
+  phase: WhatsappCatalogSyncPhase
+  counts: WhatsappCatalogSyncCounts
+  last_success_at: string | null
+  failures: WhatsappCatalogSyncFailure[]
+  auto_sync_enabled?: boolean
+  auto_sync_flag?: string
+  verification?: {
+    lookup_fields: string[]
+    identity_fields?: string[]
+    content_fields?: string[]
+    not_verified_fields: string[]
+    note_ar?: string
+  }
+}
+
+export interface WhatsappCatalogSyncEnqueueResponse {
+  ok: boolean
+  queued: boolean
+  phase: WhatsappCatalogSyncPhase | 'blocked'
+  trigger: string
+  enqueued: number
+  eligible: number
+  blocker_code?: string | null
+  message_ar?: string | null
+  action_ar?: string | null
+}
+
 export interface StudioProduct {
   id:                          number
   tenant_id:                   number
@@ -735,6 +796,15 @@ export const catalogApi = {
       `/merchant/catalog/products/${id}/meta-sync/retry`,
       { method: 'POST' },
     )
+  },
+  whatsappSyncStatus(): Promise<WhatsappCatalogSyncStatus> {
+    return apiCall<WhatsappCatalogSyncStatus>('/merchant/catalog/whatsapp-sync/status')
+  },
+  enqueueWhatsappSync(force = true): Promise<WhatsappCatalogSyncEnqueueResponse> {
+    return apiCall<WhatsappCatalogSyncEnqueueResponse>('/merchant/catalog/whatsapp-sync', {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    })
   },
   // Import from Meta — Path 4. Pulls products from Meta Commerce
   // Manager into the Nahla catalog. Idempotent.

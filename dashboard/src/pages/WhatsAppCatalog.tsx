@@ -51,6 +51,7 @@ import {
 import ProductStudio from './ProductStudio'
 import WabaCatalogLinkStatusCard from '../components/catalog/WabaCatalogLinkStatusCard'
 import CatalogSummaryCard from '../components/catalog/CatalogSummaryCard'
+import CatalogWhatsAppSyncCard from '../components/catalog/CatalogWhatsAppSyncCard'
 import CatalogChannelsCard from '../components/catalog/CatalogChannelsCard'
 import CatalogAdvancedSection, { AdvancedSubSection } from '../components/catalog/CatalogAdvancedSection'
 import ManualProductModal from '../components/catalog/ManualProductModal'
@@ -397,6 +398,8 @@ export default function WhatsAppCatalog() {
           onOpenAdvanced={openAdvanced}
         />
       )}
+
+      <CatalogWhatsAppSyncCard />
 
       {diagnostics && (
         <ManualProductModal

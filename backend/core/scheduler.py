@@ -22,6 +22,9 @@ logger = logging.getLogger("nahla-scheduler")
 
 _CHECK_INTERVAL_HOURS = 12   # subscription/trial checks every 12 hours
 _SYNC_INTERVAL_SECONDS = 3600  # full store sync every 1 hour
+_WHATSAPP_CATALOG_DRAIN_SECONDS = int(
+    os.environ.get("NAHLA_WHATSAPP_CATALOG_DRAIN_SEC", "120")
+)
 _COUPON_GEN_INTERVAL_SECONDS = 6 * 3600  # coupon pool refresh every 6 hours
 _TOKEN_REFRESH_INTERVAL_SECONDS = 12 * 3600  # WhatsApp token refresh every 12 hours
 _WA_TOKEN_HEALTH_INTERVAL_SECONDS = 6 * 3600  # Meta token health every 6 hours
@@ -781,6 +784,51 @@ async def run_store_sync_scheduler() -> None:
         except Exception as exc:
             logger.error("[StoreSync Scheduler] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_SYNC_INTERVAL_SECONDS)
+
+
+async def run_whatsapp_catalog_sync_scheduler() -> None:
+    """Drain pending WhatsApp/Meta catalog publishes for catalog-enabled tenants.
+
+    Requires ``NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1``. Otherwise this loop
+    logs once and exits so a deploy does not start production Graph pushes.
+    Stop: unset the flag (or set ``NAHLA_DISABLE_SCHEDULERS=1``) and restart.
+    """
+    from services.whatsapp_catalog_sync import whatsapp_catalog_auto_sync_enabled  # noqa: PLC0415
+
+    if not whatsapp_catalog_auto_sync_enabled():
+        logger.info(
+            "[WhatsApp Catalog Sync] Not started — set NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1 "
+            "to enable automatic drains. NAHLA_DISABLE_SCHEDULERS=1 also stops this worker."
+        )
+        return
+    await asyncio.sleep(45)
+    logger.info(
+        "[WhatsApp Catalog Sync] Started — draining every %ss",
+        _WHATSAPP_CATALOG_DRAIN_SECONDS,
+    )
+    while True:
+        try:
+            from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                get_whatsapp_catalog_drain_executor,
+                run_whatsapp_catalog_drain_tick,
+            )
+
+            loop = asyncio.get_running_loop()
+            summary = await loop.run_in_executor(
+                get_whatsapp_catalog_drain_executor(),
+                run_whatsapp_catalog_drain_tick,
+            )
+            if summary.get("processed"):
+                logger.info(
+                    "[WhatsApp Catalog Sync] tenants=%s processed=%s synced=%s failed=%s",
+                    summary.get("tenants"),
+                    summary.get("processed"),
+                    summary.get("synced"),
+                    summary.get("failed"),
+                )
+        except Exception as exc:
+            logger.error("[WhatsApp Catalog Sync] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_WHATSAPP_CATALOG_DRAIN_SECONDS)
 
 
 # NOTE: The fast incremental order sweeper that used to live here was

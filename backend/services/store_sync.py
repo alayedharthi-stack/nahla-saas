@@ -171,6 +171,64 @@ def _preserve_existing_product_images(
             normalised["additional_images"] = list(previous_extra)
 
 
+def preserve_local_sync_meta(source_meta: Dict[str, Any], existing_meta: Any) -> Dict[str, Any]:
+    """Keep local lease/sync state when Salla source metadata replaces extra_metadata.
+
+    Does not change product ownership or convert a Salla row into a native row.
+    """
+    merged = dict(source_meta) if isinstance(source_meta, dict) else {}
+    if isinstance(existing_meta, dict):
+        previous = existing_meta.get("sync_meta")
+        if isinstance(previous, dict) and previous:
+            merged["sync_meta"] = dict(previous)
+    return merged
+
+
+def apply_salla_source_metadata(existing: Any, normalised: Dict[str, Any]) -> None:
+    """Write Salla source fields onto extra_metadata without wiping sync_meta."""
+    _preserve_existing_product_images(normalised, getattr(existing, "extra_metadata", None))
+    existing.extra_metadata = preserve_local_sync_meta(
+        normalised,
+        getattr(existing, "extra_metadata", None),
+    )
+
+
+def _lock_product_row_for_catalog_write(db: Any, existing: Any) -> Any:
+    """Lock and refresh committed columns before applying a Salla payload.
+
+    Must run before local catalog fields are mutated so ``populate_existing``
+    cannot wipe unflushed price/stock updates.
+    """
+    if existing is None:
+        return None
+    pid = getattr(existing, "id", None)
+    tid = getattr(existing, "tenant_id", None)
+    if pid is None or tid is None:
+        return existing
+    try:
+        locked = (
+            db.query(Product)
+            .filter(Product.id == int(pid), Product.tenant_id == int(tid))
+            .with_for_update()
+            .populate_existing()
+            .first()
+        )
+        try:
+            locked_id = int(getattr(locked, "id", 0) or 0)
+        except (TypeError, ValueError):
+            locked_id = 0
+        if locked is not None and locked_id == int(pid):
+            return locked
+    except Exception:
+        return existing
+    return existing
+
+
+def _external_adapter_source(adapter: Any, fallback: str = "salla") -> str:
+    platform = str(getattr(adapter, "platform", None) or fallback or "").strip().lower()
+    return platform or fallback
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Parent / variant catalog layer (migration 0064 — Phase 2)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1673,6 +1731,16 @@ class StoreSyncService:
             .first()
         )
         restocked: Optional[Dict[str, Any]] = None
+        previous_fp = None
+        if existing:
+            existing = _lock_product_row_for_catalog_write(self.db, existing)
+            try:
+                from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                    channel_content_fingerprint,
+                )
+                previous_fp = channel_content_fingerprint(existing)
+            except Exception:  # noqa: BLE001
+                previous_fp = None
 
         if existing:
             try:
@@ -1708,10 +1776,13 @@ class StoreSyncService:
             existing.sku = normalised["sku"]
             existing.in_stock = new_in_stock
             existing.stock_quantity = new_qty
-            _preserve_existing_product_images(normalised, existing.extra_metadata)
-            existing.extra_metadata = normalised
+            apply_salla_source_metadata(existing, normalised)
             if (existing.source or "").lower() != "manual":
                 existing.source = row_source
+            if not getattr(existing, "ownership_mode", None):
+                from core.catalog import OWNERSHIP_EXTERNAL_MANAGED  # noqa: PLC0415
+
+                existing.ownership_mode = OWNERSHIP_EXTERNAL_MANAGED
             try:
                 from core.catalog import assign_canonical_retailer_id  # noqa: PLC0415
                 assign_canonical_retailer_id(existing)
@@ -1734,6 +1805,8 @@ class StoreSyncService:
                     "title": normalised["title"],
                 }
         else:
+            from core.catalog import OWNERSHIP_EXTERNAL_MANAGED  # noqa: PLC0415
+
             product_row = Product(
                 tenant_id=self.tenant_id,
                 external_id=ext_id,
@@ -1745,6 +1818,7 @@ class StoreSyncService:
                 stock_quantity=new_qty,
                 extra_metadata=normalised,
                 source=row_source,
+                ownership_mode=OWNERSHIP_EXTERNAL_MANAGED,
             )
             self.db.add(product_row)
             self.db.flush()
@@ -1757,6 +1831,22 @@ class StoreSyncService:
                     self.tenant_id, product_row.id,
                 )
             action = "created"
+
+        try:
+            from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                mark_product_pending_after_catalog_write,
+            )
+            mark_product_pending_after_catalog_write(
+                self.db,
+                product_row,
+                previous_fingerprint=previous_fp,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "[StoreSync] whatsapp catalog pending mark skipped tenant=%s product=%s",
+                self.tenant_id,
+                getattr(product_row, "id", None),
+            )
 
         return {
             "action": action,
@@ -3355,6 +3445,17 @@ class StoreSyncService:
                     "tenant=%s ✅ %s sync completed — products=%d orders=%d coupons=%d customers=%d profiles=%d",
                     self.tenant_id, sync_type.upper(), products_n, orders_n, coupons_n, customers_n, profiles_n,
                 )
+            if products_n > 0:
+                try:
+                    from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                        schedule_whatsapp_catalog_drain,
+                    )
+                    schedule_whatsapp_catalog_drain(int(self.tenant_id))
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "[StoreSync] whatsapp catalog drain schedule skipped tenant=%s",
+                        self.tenant_id,
+                    )
 
             result = {
                 "status":                   "completed",
@@ -3429,21 +3530,35 @@ class StoreSyncService:
         adapter = self._get_adapter()
         if adapter:
             await self._enrich_normalised_variants_from_adapter(adapter, normalised)
+        row_source = _external_adapter_source(adapter, "salla")
+        from core.catalog import OWNERSHIP_EXTERNAL_MANAGED  # noqa: PLC0415
 
         existing = (
             self.db.query(Product)
             .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
             .first()
         )
+        previous_fp = None
         if existing:
+            existing = _lock_product_row_for_catalog_write(self.db, existing)
+            try:
+                from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                    channel_content_fingerprint,
+                )
+                previous_fp = channel_content_fingerprint(existing)
+            except Exception:  # noqa: BLE001
+                previous_fp = None
             existing.title         = normalised["title"]
             existing.price         = normalised["price"]
             existing.description   = normalised.get("description", existing.description)
             existing.sku           = normalised.get("sku", existing.sku)
             existing.in_stock      = bool(normalised.get("in_stock", True))
             existing.stock_quantity = _coerce_int(normalised.get("stock_qty"))
-            _preserve_existing_product_images(normalised, existing.extra_metadata)
-            existing.extra_metadata = normalised
+            apply_salla_source_metadata(existing, normalised)
+            if (existing.source or "").lower() != "manual":
+                existing.source = row_source
+            if not getattr(existing, "ownership_mode", None):
+                existing.ownership_mode = OWNERSHIP_EXTERNAL_MANAGED
             product_row = existing
         else:
             product_row = Product(
@@ -3456,6 +3571,8 @@ class StoreSyncService:
                 in_stock       = bool(normalised.get("in_stock", True)),
                 stock_quantity = _coerce_int(normalised.get("stock_qty")),
                 extra_metadata = normalised,
+                source         = row_source,
+                ownership_mode = OWNERSHIP_EXTERNAL_MANAGED,
             )
             self.db.add(product_row)
         self.db.flush()
@@ -3467,7 +3584,32 @@ class StoreSyncService:
                 "upsert failed",
                 self.tenant_id, ext_id,
             )
+
+        try:
+            from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                mark_product_pending_after_catalog_write,
+            )
+            mark_product_pending_after_catalog_write(
+                self.db,
+                product_row,
+                previous_fingerprint=previous_fp,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "[StoreSync] whatsapp catalog pending mark skipped tenant=%s",
+                self.tenant_id,
+            )
         self.db.commit()
+        try:
+            from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                schedule_whatsapp_catalog_drain,
+            )
+            schedule_whatsapp_catalog_drain(int(self.tenant_id))
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "[StoreSync] whatsapp catalog webhook drain skipped tenant=%s",
+                self.tenant_id,
+            )
 
         # Rebuild snapshot counts (lightweight)
         snap = (

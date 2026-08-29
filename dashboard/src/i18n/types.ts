@@ -1856,6 +1856,7 @@ export interface Translations {
       productCount:   string
       intro:          string
       importFromMeta: string
+      importFromMetaSecondary: string
       addManual:      string
       resync:         string
     }
@@ -1870,6 +1871,29 @@ export interface Translations {
       statusEmpty:      string
       lastImportNever:  string
       moreActions:      string
+    }
+    whatsappSync: {
+      title:            string
+      button:           string
+      queued:           string
+      syncing:          string
+      lastSuccess:      string
+      lastSuccessNever: string
+      pending:          string
+      failed:           string
+      synced:           string
+      eligible:         string
+      phaseQueued:      string
+      phaseSyncing:     string
+      phasePublished:   string
+      phasePendingVerification: string
+      phaseIdle:        string
+      phaseBlocked:     string
+      phaseNeedsAttention: string
+      verifyNote:       string
+      loadFailed:       string
+      enqueueFailed:    string
+      autoSyncOff:      string
     }
     channels: {
       title:              string
