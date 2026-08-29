@@ -3451,10 +3451,11 @@ class StoreSyncService:
                         schedule_whatsapp_catalog_drain,
                     )
                     schedule_whatsapp_catalog_drain(int(self.tenant_id))
-                except Exception:  # noqa: BLE001
-                    logger.debug(
-                        "[StoreSync] whatsapp catalog drain schedule skipped tenant=%s",
+                except Exception as exc:
+                    logger.warning(
+                        "[StoreSync] whatsapp catalog drain schedule failed tenant=%s err=%s",
                         self.tenant_id,
+                        type(exc).__name__,
                     )
 
             result = {

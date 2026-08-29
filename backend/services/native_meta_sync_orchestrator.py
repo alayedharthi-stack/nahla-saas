@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm.attributes import flag_modified, get_history, set_committed_value
 
 from core.catalog import (
@@ -449,8 +450,11 @@ def _lease_held(db: Any, product: Any, lease: int) -> bool:
 def _abandon_stale_lease(db: Any) -> Dict[str, Any]:
     try:
         db.rollback()
-    except Exception:
-        pass
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "[NATIVE_META_SYNC] rollback after stale lease failed err=%s",
+            type(exc).__name__,
+        )
     return {"ok": False, "skipped": True, "error_code": "stale_lease"}
 
 
@@ -550,8 +554,11 @@ def _run_in_savepoint(db: Any, fn: Callable[[], Any]) -> Any:
     except Exception:
         try:
             nested.rollback()
-        except Exception:
-            pass
+        except SQLAlchemyError as rollback_exc:
+            logger.warning(
+                "[NATIVE_META_SYNC] savepoint rollback failed err=%s",
+                type(rollback_exc).__name__,
+            )
         raise
 
 
@@ -787,8 +794,11 @@ def mark_native_meta_sync_pending(db: Any, product: Any, *, bump_content: bool =
 def _release_acquire_tx(db: Any) -> None:
     try:
         db.rollback()
-    except Exception:
-        pass
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "[NATIVE_META_SYNC] acquire-path rollback failed err=%s",
+            type(exc).__name__,
+        )
 
 
 def _try_acquire_sync_lock(db: Any, tenant_id: int, product_id: int) -> Optional[Any]:
@@ -979,8 +989,12 @@ def _collect_retailer_ids(db: Any, parent: Any, fallback: Optional[str]) -> list
                 rid = str(getattr(row, "retailer_id", "") or "").strip()
                 if rid:
                     ids.append(rid)
-    except Exception:  # noqa: BLE001
-        logger.debug("[NATIVE_META_SYNC] variant id collection fell back to parent")
+    except (AttributeError, TypeError, ValueError, SQLAlchemyError) as exc:
+        logger.warning(
+            "[NATIVE_META_SYNC] variant id collection failed product=%s err=%s; using parent retailer_id",
+            getattr(parent, "id", None),
+            type(exc).__name__,
+        )
     fb = str(fallback or "").strip()
     if fb and fb not in ids:
         ids.append(fb)

@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from core.catalog import is_whatsapp_channel_publish_eligible
 from core.plan_entitlements import get_entitlements
 from services.native_meta_sync_orchestrator import (
@@ -109,8 +111,13 @@ def evaluate_whatsapp_catalog_sync_readiness(db: Any, tenant_id: int) -> Dict[st
         ent = get_entitlements(db, int(tenant_id))
         if not ent.has_feature("meta_catalog_sync"):
             return _blocker("feature_locked")
-    except Exception:  # noqa: BLE001
-        logger.debug("[WA_CATALOG_SYNC] entitlement check skipped tenant=%s", tenant_id)
+    except Exception as exc:
+        logger.warning(
+            "[WA_CATALOG_SYNC] entitlement check failed tenant=%s err=%s",
+            int(tenant_id),
+            type(exc).__name__,
+        )
+        return _blocker("feature_locked")
 
     conn = _load_connection(db, tenant_id)
     if conn is None:
@@ -516,8 +523,22 @@ def drain_whatsapp_catalog_sync(
                 if blocked_row is not None:
                     _stamp_readiness_on_block(blocked_row, readiness)
                     db.commit()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "[WA_CATALOG_SYNC] readiness stamp failed tenant=%s product=%s err=%s",
+                    int(tenant_id),
+                    pid,
+                    type(exc).__name__,
+                )
+                try:
+                    db.rollback()
+                except SQLAlchemyError as rollback_exc:
+                    logger.warning(
+                        "[WA_CATALOG_SYNC] readiness-stamp rollback failed tenant=%s product=%s err=%s",
+                        int(tenant_id),
+                        pid,
+                        type(rollback_exc).__name__,
+                    )
         elif str(result.get("sync_status") or "") == "pending_verification":
             out["pending_verification"] = int(out.get("pending_verification") or 0) + 1
         else:
@@ -732,8 +753,11 @@ def run_whatsapp_catalog_drain_tick() -> Dict[str, Any]:
         logger.exception("[WA_CATALOG_SYNC] periodic drain tick failed")
         try:
             db.rollback()
-        except Exception:
-            pass
+        except SQLAlchemyError as rollback_exc:
+            logger.warning(
+                "[WA_CATALOG_SYNC] drain-tick rollback failed err=%s",
+                type(rollback_exc).__name__,
+            )
         return {"tenants": 0, "processed": 0, "synced": 0, "failed": 0, "error": True}
     finally:
         db.close()

@@ -134,6 +134,18 @@ def test_hidden_product_is_not_channel_publish_eligible():
     assert is_whatsapp_channel_publish_eligible(row) is False
 
 
+@patch(
+    "services.whatsapp_catalog_sync.get_entitlements",
+    side_effect=RuntimeError("entitlement store unavailable"),
+)
+def test_readiness_fail_closed_when_entitlement_check_raises(_ent):
+    db = MagicMock()
+    ready = evaluate_whatsapp_catalog_sync_readiness(db, 9)
+    assert ready["ready"] is False
+    assert ready["blocker_code"] == "feature_locked"
+    db.query.assert_not_called()
+
+
 @patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
 def test_readiness_blocks_when_catalog_unlinked():
     db = _db_with_conn(_conn(catalog_enabled=False, meta_catalog_id=None, access_token=""))

@@ -118,6 +118,18 @@ def postgres_engine() -> Engine:
     engine.dispose()
 
 
+def _rollback_sessions(*sessions: Session) -> None:
+    """Test cleanup must succeed; a failed rollback means a dirty isolated DB."""
+    errors: list[str] = []
+    for sess in sessions:
+        try:
+            sess.rollback()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+    if errors:
+        pytest.fail("session rollback failed during test cleanup: " + "; ".join(errors))
+
+
 def _Session(engine: Engine):
     """Match production SessionLocal: autoflush off, no implicit autocommit."""
     return sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -235,14 +247,7 @@ def test_try_acquire_skips_row_locked_by_other_session(postgres_engine: Engine) 
         assert still is not None
         assert str(still.sync_status or "") == "pending"
     finally:
-        try:
-            holder.rollback()
-        except Exception:
-            pass
-        try:
-            contender.rollback()
-        except Exception:
-            pass
+        _rollback_sessions(holder, contender)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -305,10 +310,7 @@ def test_try_acquire_rejects_live_syncing_without_resetting_backoff(
         assert int(meta.get("retry_count") or 0) == 4
         assert int(meta.get("lock_generation") or 0) == 3
     finally:
-        try:
-            db.rollback()
-        except Exception:
-            pass
+        _rollback_sessions(db)
         _cleanup_lock_rows(db)
         db.close()
 
@@ -359,10 +361,7 @@ def test_two_sessions_load_then_only_one_acquires(postgres_engine: Engine) -> No
         assert int(meta.get("lock_generation") or 0) == 1
     finally:
         for sess in (s1, s2, setup):
-            try:
-                sess.rollback()
-            except Exception:
-                pass
+            _rollback_sessions(sess)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -433,10 +432,7 @@ def test_stale_worker_cannot_stamp_after_newer_lease(postgres_engine: Engine) ->
             check.close()
     finally:
         for sess in (worker_old, worker_new, setup):
-            try:
-                sess.rollback()
-            except Exception:
-                pass
+            _rollback_sessions(sess)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -490,10 +486,7 @@ def test_stamp_does_not_lose_dirty_update(postgres_engine: Engine) -> None:
             check.close()
     finally:
         for sess in (worker, updater, setup):
-            try:
-                sess.rollback()
-            except Exception:
-                pass
+            _rollback_sessions(sess)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -528,10 +521,7 @@ def test_acquire_releases_row_lock_before_graph(postgres_engine: Engine) -> None
         observer.rollback()
     finally:
         for sess in (worker, observer, setup):
-            try:
-                sess.rollback()
-            except Exception:
-                pass
+            _rollback_sessions(sess)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -710,10 +700,7 @@ def test_webhook_stale_session_does_not_rewind_newer_lease(postgres_engine: Engi
             final.close()
     finally:
         for sess in (web, worker, setup):
-            try:
-                sess.rollback()
-            except Exception:
-                pass
+            _rollback_sessions(sess)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -774,10 +761,7 @@ def test_webhook_create_stamps_salla_ownership(postgres_engine: Engine) -> None:
         assert is_merchant_editable_product(row) is False
         assert is_whatsapp_channel_publish_eligible(row) is True
     finally:
-        try:
-            db.rollback()
-        except Exception:
-            pass
+        _rollback_sessions(db)
         _cleanup_lock_rows(db)
         db.close()
 
@@ -809,10 +793,7 @@ def test_ineligible_acquire_releases_row_lock(postgres_engine: Engine) -> None:
         observer.rollback()
     finally:
         for sess in (worker, observer, setup):
-            try:
-                sess.rollback()
-            except Exception:
-                pass
+            _rollback_sessions(sess)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -921,10 +902,7 @@ def test_failed_locked_sync_read_does_not_write_stale_or_hold_lock(postgres_engi
             finally:
                 resumed.close()
         finally:
-            try:
-                db.rollback()
-            except Exception:
-                pass
+            _rollback_sessions(db)
             db.close()
             observer.close()
     finally:
@@ -1033,10 +1011,7 @@ def test_complete_sync_read_failure_does_not_write_stale_sync_meta(postgres_engi
             finally:
                 resumed.close()
         finally:
-            try:
-                db.rollback()
-            except Exception:
-                pass
+            _rollback_sessions(db)
             db.close()
             observer.close()
     finally:
@@ -1138,8 +1113,8 @@ def test_unlocked_fallback_read_does_not_clobber_newer_lease(postgres_engine: En
                     outcome["error"] = exc
                     try:
                         session_a.rollback()
-                    except Exception:
-                        pass
+                    except Exception as rollback_exc:
+                        outcome["cleanup_error"] = rollback_exc
 
             worker = threading.Thread(target=_run_a, daemon=True)
             worker.start()
@@ -1161,6 +1136,7 @@ def test_unlocked_fallback_read_does_not_clobber_newer_lease(postgres_engine: En
             worker.join(timeout=5)
             assert worker.is_alive() is False
             assert "error" not in outcome
+            assert "cleanup_error" not in outcome
 
             locked = (
                 observer.query(Product)
@@ -1200,11 +1176,8 @@ def test_unlocked_fallback_read_does_not_clobber_newer_lease(postgres_engine: En
                 stale.close()
         finally:
             write_gate.set()
+            _rollback_sessions(session_a, session_b, observer)
             for sess in (session_a, session_b, observer):
-                try:
-                    sess.rollback()
-                except Exception:
-                    pass
                 sess.close()
     finally:
         cleanup = Session()
