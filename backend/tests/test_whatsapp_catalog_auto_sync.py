@@ -366,6 +366,140 @@ def test_whatsapp_sync_post_confirmed_lock_remains_403():
     assert "upgrade_required" in str(caught.value.detail) or "feature" in str(caught.value.detail).lower()
 
 
+def _gift_slug_outage_patches(*, recover=False):
+    from sqlalchemy.exc import OperationalError
+
+    slug_error = OperationalError("SELECT gift slug", {}, Exception("gift metadata timeout"))
+    return (
+        patch("core.billing.get_tenant_subscription", return_value=None),
+        patch("core.manual_billing_grant.is_manual_gift_grant_active", return_value=True),
+        patch(
+            "core.manual_billing_grant.get_manual_gift_grant_plan_slug",
+            return_value="growth" if recover else None,
+            side_effect=None if recover else slug_error,
+        ),
+    )
+
+
+def _override_slug_outage_patches(*, recover=False):
+    from sqlalchemy.exc import OperationalError
+
+    slug_error = OperationalError("SELECT override slug", {}, Exception("override metadata timeout"))
+    return (
+        patch("core.billing_override.is_partner_testing_override_active", return_value=True),
+        patch(
+            "core.billing_override.get_partner_testing_override_plan_slug",
+            return_value="growth" if recover else None,
+            side_effect=None if recover else slug_error,
+        ),
+    )
+
+
+def _post_whatsapp_sync(db):
+    import asyncio
+    from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync
+
+    request = MagicMock()
+    with patch("routers.catalog.resolve_tenant_id", return_value=9), patch(
+        "services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain",
+    ) as drain_sched:
+        try:
+            result = asyncio.run(
+                merchant_whatsapp_catalog_sync(
+                    _WhatsappCatalogSyncBody(),
+                    request,
+                    db,
+                    {"sub": "t"},
+                )
+            )
+        except Exception:
+            drain_sched.assert_not_called()
+            raise
+    drain_sched.assert_not_called()
+    return result
+
+
+def _get_whatsapp_sync_status(db):
+    import asyncio
+    from routers.catalog import merchant_whatsapp_catalog_sync_status
+
+    request = MagicMock()
+    with patch("routers.catalog.resolve_tenant_id", return_value=9):
+        return asyncio.run(merchant_whatsapp_catalog_sync_status(request, db, {"sub": "t"}))
+
+
+@patch("services.whatsapp_catalog_sync.attempt_native_meta_sync")
+def test_gift_slug_read_failure_is_unavailable_not_500(attempt_mock):
+    from fastapi import HTTPException
+
+    pending = _product(id=201, sync_status="pending")
+    db = _db_with_conn(_conn())
+    patches = _gift_slug_outage_patches()
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(HTTPException) as posted:
+            _post_whatsapp_sync(db)
+        status = _get_whatsapp_sync_status(db)
+        queued = enqueue_whatsapp_catalog_sync(db, 9, force=True, trigger="manual")
+    assert posted.value.status_code == 503
+    detail = posted.value.detail if isinstance(posted.value.detail, dict) else {}
+    assert detail.get("blocker_code") == "entitlement_unavailable" or detail.get("error") == "entitlement_unavailable"
+    assert "feature_locked" not in str(posted.value.detail)
+    assert "رقِّ" not in str(posted.value.detail)
+    assert status["blocker_code"] == "entitlement_unavailable"
+    assert status["phase"] == "retrying"
+    assert _upgrade_copy_present(status) is False
+    assert queued["blocker_code"] == "entitlement_unavailable"
+    attempt_mock.assert_not_called()
+
+    recover = _gift_slug_outage_patches(recover=True)
+    with recover[0], recover[1], recover[2], patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=[pending],
+    ):
+        queued_ok = enqueue_whatsapp_catalog_sync(db, 9, force=True, trigger="manual")
+        status_ok = build_whatsapp_catalog_sync_status(db, 9)
+    assert queued_ok["queued"] is True
+    assert queued_ok["blocker_code"] is None
+    assert status_ok["ready"] is True
+    assert status_ok["phase"] != "blocked"
+
+
+@patch("services.whatsapp_catalog_sync.attempt_native_meta_sync")
+def test_override_slug_read_failure_is_unavailable_not_500(attempt_mock):
+    from fastapi import HTTPException
+
+    pending = _product(id=201, sync_status="pending")
+    db = _db_with_conn(_conn())
+    patches = _override_slug_outage_patches()
+    with patches[0], patches[1]:
+        with pytest.raises(HTTPException) as posted:
+            _post_whatsapp_sync(db)
+        status = _get_whatsapp_sync_status(db)
+        queued = enqueue_whatsapp_catalog_sync(db, 9, force=True, trigger="manual")
+    assert posted.value.status_code == 503
+    detail = posted.value.detail if isinstance(posted.value.detail, dict) else {}
+    assert detail.get("blocker_code") == "entitlement_unavailable" or detail.get("error") == "entitlement_unavailable"
+    assert "feature_locked" not in str(posted.value.detail)
+    assert "رقِّ" not in str(posted.value.detail)
+    assert status["blocker_code"] == "entitlement_unavailable"
+    assert status["phase"] == "retrying"
+    assert _upgrade_copy_present(status) is False
+    assert queued["blocker_code"] == "entitlement_unavailable"
+    attempt_mock.assert_not_called()
+
+    recover = _override_slug_outage_patches(recover=True)
+    with recover[0], recover[1], patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=[pending],
+    ):
+        queued_ok = enqueue_whatsapp_catalog_sync(db, 9, force=True, trigger="manual")
+        status_ok = build_whatsapp_catalog_sync_status(db, 9)
+    assert queued_ok["queued"] is True
+    assert queued_ok["blocker_code"] is None
+    assert status_ok["ready"] is True
+    assert status_ok["phase"] != "blocked"
+
+
 def test_ui_keeps_polling_retrying_and_has_no_upgrade_copy_in_card():
     from pathlib import Path
 

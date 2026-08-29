@@ -657,6 +657,42 @@ class TestEntitlementLookupFailures:
             with pytest.raises(EntitlementLookupUnavailable):
                 get_entitlements(db, 9, strict_lookup=True)
 
+    def test_strict_lookup_wraps_active_gift_slug_read(self):
+        from sqlalchemy.exc import OperationalError
+        from core.plan_entitlements import EntitlementLookupUnavailable
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        slug_error = OperationalError("SELECT gift slug", {}, Exception("gift metadata timeout"))
+        with patch("core.billing.get_tenant_subscription", return_value=None), patch(
+            "core.manual_billing_grant.is_manual_gift_grant_active",
+            return_value=True,
+        ), patch(
+            "core.manual_billing_grant.get_manual_gift_grant_plan_slug",
+            side_effect=slug_error,
+        ):
+            with pytest.raises(OperationalError):
+                get_entitlements(db, 9)
+            with pytest.raises(EntitlementLookupUnavailable) as caught:
+                get_entitlements(db, 9, strict_lookup=True)
+        assert caught.value.source == "gift_slug"
+
+    def test_strict_lookup_wraps_active_override_slug_read(self):
+        from sqlalchemy.exc import OperationalError
+        from core.plan_entitlements import EntitlementLookupUnavailable
+
+        db = MagicMock()
+        slug_error = OperationalError("SELECT override slug", {}, Exception("override metadata timeout"))
+        with patch("core.billing_override.is_partner_testing_override_active", return_value=True), patch(
+            "core.billing_override.get_partner_testing_override_plan_slug",
+            side_effect=slug_error,
+        ):
+            with pytest.raises(OperationalError):
+                get_entitlements(db, 1)
+            with pytest.raises(EntitlementLookupUnavailable) as caught:
+                get_entitlements(db, 1, strict_lookup=True)
+        assert caught.value.source == "partner_override_slug"
+
 
 if __name__ == "__main__":
     import traceback

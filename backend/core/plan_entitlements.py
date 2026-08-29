@@ -449,6 +449,16 @@ def _resolve_plan_slug(slug_or_name: str) -> str:
     return _SLUG_MAP.get(key, key)
 
 
+def _call_entitlement_lookup(strict_lookup: bool, source: str, fn, *args, **kwargs):
+    """Re-raise lookup failures as EntitlementLookupUnavailable only in strict mode."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        if strict_lookup:
+            raise EntitlementLookupUnavailable(source) from exc
+        raise
+
+
 def get_entitlements(db: Session, tenant_id: int, *, strict_lookup: bool = False) -> PlanEntitlements:
     """
     Resolve the current entitlements for a tenant.
@@ -480,7 +490,13 @@ def get_entitlements(db: Session, tenant_id: int, *, strict_lookup: bool = False
 
     if override_active:
         log_billing_override_grant(tenant_id, reason=PARTNER_TESTING_REASON)
-        override_slug = get_partner_testing_override_plan_slug(db, tenant_id)
+        override_slug = _call_entitlement_lookup(
+            strict_lookup,
+            "partner_override_slug",
+            get_partner_testing_override_plan_slug,
+            db,
+            tenant_id,
+        )
         effective_slug = (
             override_slug if override_slug in PLAN_DEFINITIONS else DEFAULT_OVERRIDE_PLAN_SLUG
         )
@@ -598,7 +614,13 @@ def get_entitlements(db: Session, tenant_id: int, *, strict_lookup: bool = False
         raise
 
     if gift_active:
-        gift_slug = get_manual_gift_grant_plan_slug(db, tenant_id)
+        gift_slug = _call_entitlement_lookup(
+            strict_lookup,
+            "gift_slug",
+            get_manual_gift_grant_plan_slug,
+            db,
+            tenant_id,
+        )
         gift_slug = gift_slug if gift_slug in PLAN_DEFINITIONS else DEFAULT_GIFT_PLAN_SLUG
         log_manual_gift_grant(tenant_id)
         gift_def = PLAN_DEFINITIONS[gift_slug]
