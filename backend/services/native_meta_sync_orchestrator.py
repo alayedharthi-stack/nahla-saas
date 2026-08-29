@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -359,25 +361,68 @@ def classify_block_code(code: Optional[str]) -> str:
     return "product"
 
 
+_ARABIC_INDIC_DIGITS = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+    "01234567890123456789",
+)
+_BIDI_AND_SPACE_CHARS = (
+    "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+    "\u2066\u2067\u2068\u2069\xa0\u00a0\u202f\u2007"
+)
+_CURRENCY_MARKERS = re.compile(
+    r"(?:SAR|USD|EUR|AED|﷼|ر\.?\s*س\.?)",
+    re.IGNORECASE,
+)
+_NUMBER_TOKEN = re.compile(r"-?\d+(?:\.\d+)?")
+
+
 def _price_minor(value: Any) -> Optional[int]:
+    """Normalize a Meta price field to integer minor units.
+
+    Raw ``int`` values stay minor units (Graph/payload contract).
+    Formatted display strings are major units, including Arabic-Indic
+    digits and Arabic decimal/thousands separators.
+    """
     if value is None or value == "":
         return None
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
         return int(value)
-    text = str(value).strip().upper().replace(",", "")
-    for token in ("SAR", "USD", "EUR", "AED"):
-        text = text.replace(token, "")
-    text = text.strip()
+    if not isinstance(value, str):
+        return None
+
+    text = value.translate({ord(ch): " " for ch in _BIDI_AND_SPACE_CHARS})
+    text = text.translate(_ARABIC_INDIC_DIGITS)
+    text = text.replace("٫", ".").replace("٬", "")
+    text = _CURRENCY_MARKERS.sub(" ", text)
+    text = text.replace(",", "")
+    text = " ".join(text.split())
     if not text:
         return None
-    try:
-        if "." in text:
-            return int(round(float(text.split()[0]) * 100))
-        return int(float(text.split()[0]))
-    except (TypeError, ValueError):
+
+    tokens = _NUMBER_TOKEN.findall(text)
+    if len(tokens) != 1:
         return None
+    leftover = _NUMBER_TOKEN.sub(" ", text).strip()
+    leftover = leftover.replace(".", "").strip()
+    if leftover:
+        return None
+
+    token = tokens[0]
+    if token.startswith("-"):
+        return None
+    try:
+        amount = Decimal(token)
+    except InvalidOperation:
+        return None
+    if "." in token:
+        minor = amount * Decimal(100)
+        integral = minor.to_integral_value()
+        if minor != integral:
+            return None
+        return int(integral)
+    return int(amount)
 
 
 def _norm_availability(value: Any) -> str:

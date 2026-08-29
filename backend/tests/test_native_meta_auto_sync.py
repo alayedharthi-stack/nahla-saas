@@ -206,6 +206,94 @@ def test_identity_only_lookup_stays_pending_verification(
 @patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
 @patch("services.meta_catalog_sync_confirm.ensure_native_default_variant")
 @patch("services.native_meta_sync_orchestrator.preview_native_meta_sync")
+def test_pending_verification_arabic_price_promotes_existing_item_to_synced(
+    preview_mock,
+    ensure_mock,
+    push_mock,
+    lookup_mock,
+    waba_mock,
+    lock_mock,
+):
+    """Re-verify an existing Meta item with a localized SAR price; do not create another."""
+    retailer_id = "sku-generic-perfume"
+    sibling = _generic_native_parent(id=33, tenant_id=9, sync_status="syncing", title="منتج آخر")
+    sibling_before = dict(sibling.__dict__)
+    parent = _generic_native_parent(
+        id=177,
+        title="عطر ورد 100ml",
+        meta_retailer_id=retailer_id,
+        sync_status="pending_verification",
+        extra_metadata={
+            "currency": "SAR",
+            "image_url": "https://cdn.example/perfume.webp",
+            "product_url": "https://example.test/p/sku-generic-perfume",
+            "sync_meta": {
+                "expected_payloads_by_retailer_id": {
+                    retailer_id: {
+                        "price": 100,
+                        "currency": "SAR",
+                        "availability": "in stock",
+                    },
+                },
+                "last_pushed_payload": {
+                    "price": 100,
+                    "currency": "SAR",
+                    "availability": "in stock",
+                    "url": "https://example.test/p/sku-generic-perfume",
+                    "image_url": "https://cdn.example/perfume.webp",
+                    "name": "عطر ورد 100ml",
+                    "retailer_id": retailer_id,
+                },
+                "verify_retry_count": 1,
+                "content_generation": 1,
+                "expected_content_generation": 1,
+                "lock_generation": 1,
+            },
+        },
+    )
+    db = MagicMock()
+    lock_mock.return_value = parent
+    preview_mock.return_value = {
+        "eligible": True,
+        "retailer_id": retailer_id,
+        "fatal_errors": [],
+        "warnings": [],
+    }
+    ensure_mock.return_value = (SimpleNamespace(retailer_id=retailer_id), False)
+    lookup_mock.return_value = ("META-EXISTING", {
+        "matched": True,
+        "item": {
+            "id": "META-EXISTING",
+            "retailer_id": retailer_id,
+            "name": "عطر ورد 100ml",
+            "price": "١٫٠٠ ر.س",
+            "currency": "SAR",
+            "availability": "in stock",
+            "url": "https://example.test/p/sku-generic-perfume",
+            "image_url": "https://cdn.example/perfume.webp",
+        },
+    })
+    waba_mock.return_value = {"ok": True, "expected_catalog_linked": True}
+
+    result = attempt_native_meta_sync(db, 9, 177)
+
+    push_mock.assert_not_called()
+    assert lookup_mock.call_count == 1
+    assert result["ok"] is True
+    assert result["skipped_push"] is True
+    assert result["sync_status"] == "synced"
+    assert parent.sync_status == "synced"
+    assert parent.meta_item_id == "META-EXISTING"
+    assert result["verification"]["content_matched"] is True
+    assert sibling.__dict__ == sibling_before
+
+
+@patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
+@patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
+@patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+@patch("services.meta_catalog_sync_confirm.ensure_native_default_variant")
+@patch("services.native_meta_sync_orchestrator.preview_native_meta_sync")
 def test_stale_worker_does_not_stamp_newer_lease(
     preview_mock,
     ensure_mock,
