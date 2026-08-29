@@ -120,8 +120,14 @@ def preview_native_meta_sync(
     db: Any,
     tenant_id: int,
     product_id: int,
+    *,
+    channel_publish: bool = False,
 ) -> Dict[str, Any]:
-    """Build a dry-run Meta sync preview for one Nahla-native product."""
+    """Build a dry-run Meta sync preview for one catalog product.
+
+    ``channel_publish=True`` uses WhatsApp channel-copy eligibility
+    (Salla/Zid/native). The default remains native-only for Product Studio.
+    """
     parent = _load_product(db, tenant_id, product_id)
     if parent is None:
         return {
@@ -130,7 +136,11 @@ def preview_native_meta_sync(
             "message_ar": "المنتج غير موجود.",
         }
 
-    rejection = meta_export_rejection_detail(parent)
+    if channel_publish:
+        from core.catalog import whatsapp_channel_publish_rejection_detail  # noqa: PLC0415
+        rejection = whatsapp_channel_publish_rejection_detail(parent)
+    else:
+        rejection = meta_export_rejection_detail(parent)
     if rejection is not None:
         return dict(rejection)
 

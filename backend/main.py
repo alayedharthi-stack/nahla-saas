@@ -1362,6 +1362,21 @@ async def on_startup() -> None:
         return run_store_sync_scheduler()
     _start("store_sync", _f_store_sync, 20)
 
+    def _f_whatsapp_catalog_sync():
+        from core.scheduler import run_whatsapp_catalog_sync_scheduler  # noqa: PLC0415
+        return run_whatsapp_catalog_sync_scheduler()
+    try:
+        from services.whatsapp_catalog_sync import whatsapp_catalog_auto_sync_enabled  # noqa: PLC0415
+        if whatsapp_catalog_auto_sync_enabled():
+            _start("whatsapp_catalog_sync", _f_whatsapp_catalog_sync, 22)
+        else:
+            logger.info(
+                "[Scheduler] whatsapp_catalog_sync not queued — "
+                "set NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1 after ops approval."
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Scheduler] whatsapp_catalog_sync gate check failed: %s", exc)
+
     def _f_emitters():
         from core.scheduler import run_automation_emitters_scheduler  # noqa: PLC0415
         return run_automation_emitters_scheduler()

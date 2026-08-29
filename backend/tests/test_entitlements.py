@@ -613,6 +613,87 @@ class TestToDictSerialisation:
 # Standalone runner (no pytest required)
 # ─────────────────────────────────────────────────────────────────────────────
 
+class TestEntitlementLookupFailures:
+    """Catalog sync must not treat a lookup outage as plan=none. Default
+    get_entitlements keeps the historical fallback for other consumers."""
+
+    def _db_salla_lookup_down(self):
+        from sqlalchemy.exc import OperationalError
+
+        db = MagicMock()
+
+        def _query(model):
+            q = MagicMock()
+            name = getattr(model, "__name__", str(model))
+            if name == "Integration":
+                q.filter.return_value.first.side_effect = OperationalError(
+                    "SELECT integrations", {}, Exception("catalog entitlement store timeout")
+                )
+                return q
+            q.filter.return_value.first.return_value = None
+            return q
+
+        db.query.side_effect = _query
+        return db
+
+    def test_default_lookup_still_falls_back_to_none(self):
+        db = self._db_salla_lookup_down()
+        with patch("core.billing.get_tenant_subscription", return_value=None), patch(
+            "core.manual_billing_grant.is_manual_gift_grant_active",
+            return_value=False,
+        ):
+            ent = get_entitlements(db, 9)
+        assert ent.plan_slug == "none"
+        assert ent.has_feature("meta_catalog_sync") is False
+
+    def test_strict_lookup_does_not_collapse_outage_to_none(self):
+        from core.plan_entitlements import EntitlementLookupUnavailable
+
+        db = self._db_salla_lookup_down()
+        with patch("core.billing.get_tenant_subscription", return_value=None), patch(
+            "core.manual_billing_grant.is_manual_gift_grant_active",
+            return_value=False,
+        ):
+            with pytest.raises(EntitlementLookupUnavailable):
+                get_entitlements(db, 9, strict_lookup=True)
+
+    def test_strict_lookup_wraps_active_gift_slug_read(self):
+        from sqlalchemy.exc import OperationalError
+        from core.plan_entitlements import EntitlementLookupUnavailable
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        slug_error = OperationalError("SELECT gift slug", {}, Exception("gift metadata timeout"))
+        with patch("core.billing.get_tenant_subscription", return_value=None), patch(
+            "core.manual_billing_grant.is_manual_gift_grant_active",
+            return_value=True,
+        ), patch(
+            "core.manual_billing_grant.get_manual_gift_grant_plan_slug",
+            side_effect=slug_error,
+        ):
+            with pytest.raises(OperationalError):
+                get_entitlements(db, 9)
+            with pytest.raises(EntitlementLookupUnavailable) as caught:
+                get_entitlements(db, 9, strict_lookup=True)
+        assert caught.value.source == "gift_slug"
+
+    def test_strict_lookup_wraps_active_override_slug_read(self):
+        from sqlalchemy.exc import OperationalError
+        from core.plan_entitlements import EntitlementLookupUnavailable
+
+        db = MagicMock()
+        slug_error = OperationalError("SELECT override slug", {}, Exception("override metadata timeout"))
+        with patch("core.billing_override.is_partner_testing_override_active", return_value=True), patch(
+            "core.billing_override.get_partner_testing_override_plan_slug",
+            side_effect=slug_error,
+        ):
+            with pytest.raises(OperationalError):
+                get_entitlements(db, 1)
+            with pytest.raises(EntitlementLookupUnavailable) as caught:
+                get_entitlements(db, 1, strict_lookup=True)
+        assert caught.value.source == "partner_override_slug"
+
+
 if __name__ == "__main__":
     import traceback
 

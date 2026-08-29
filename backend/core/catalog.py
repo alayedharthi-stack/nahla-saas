@@ -460,6 +460,67 @@ def meta_export_rejection_detail(product: Any) -> Optional[Dict[str, str]]:
     }
 
 
+def is_whatsapp_channel_publish_eligible(product: Any) -> bool:
+    """True when a Nahla catalog row may be published as a WhatsApp/Meta copy.
+
+    Distinct from merchant-edit and from native-only Meta export.
+    External-platform rows (Salla/Zid/Shopify) stay ``external_managed``;
+    this only allows pushing a channel copy. Out-of-stock rows remain
+    eligible so availability can be updated on the channel.
+    """
+    if product is None:
+        return False
+    if getattr(product, "merchant_hidden_at", None):
+        return False
+    if isinstance(product, dict) and product.get("merchant_hidden_at"):
+        return False
+    if catalog_status_of(product) != CATALOG_STATUS_ACTIVE:
+        return False
+    mode = infer_ownership_mode(product)
+    if mode in (
+        OWNERSHIP_META_READONLY,
+        OWNERSHIP_NAHLA_MANAGED_META,
+        OWNERSHIP_ARCHIVED_OR_DISCONNECTED,
+    ):
+        return False
+    src = normalize_source(getattr(product, "source", None))
+    if src in META_EXISTING_SOURCES or src == SOURCE_NAHLA_MANAGED_META:
+        return False
+    if mode in (OWNERSHIP_NAHLA_MANAGED, OWNERSHIP_EXTERNAL_MANAGED):
+        return True
+    if src in NAHLA_NATIVE_SOURCES or src in EXTERNAL_PLATFORM_SOURCES:
+        return True
+    return False
+
+
+def whatsapp_channel_publish_rejection_detail(product: Any) -> Optional[Dict[str, str]]:
+    """Structured rejection when WhatsApp channel publish must skip a row."""
+    if is_whatsapp_channel_publish_eligible(product):
+        return None
+    mode = infer_ownership_mode(product)
+    src = normalize_source(getattr(product, "source", None) if product is not None else None)
+    if mode == OWNERSHIP_META_READONLY or src in META_EXISTING_SOURCES:
+        return {
+            "eligible": False,
+            "error_code": "product_already_meta_managed",
+            "message_ar": "هذا المنتج مُدار من كتالوج Meta ولا يُعاد نشره كنسخة جديدة.",
+        }
+    if product is not None and (
+        getattr(product, "merchant_hidden_at", None)
+        or catalog_status_of(product) != CATALOG_STATUS_ACTIVE
+    ):
+        return {
+            "eligible": False,
+            "error_code": "product_not_active_in_catalog",
+            "message_ar": "المنتج غير نشط في كتالوج نحلة، لذلك لا يُنشر إلى واتساب.",
+        }
+    return {
+        "eligible": False,
+        "error_code": "product_not_channel_publish_eligible",
+        "message_ar": "هذا المنتج غير مؤهل للنشر إلى كتالوج واتساب.",
+    }
+
+
 PRICE_MUST_BE_NUMERIC_AR = (
     "السعر يجب أن يكون رقماً فقط، بدون كتابة العملة. مثال: 199"
 )
@@ -969,6 +1030,10 @@ __all__: List[str] = [
     "evaluate_tenant_catalog_send_readiness",
     "is_catalog_eligible",
     "is_catalog_active",
+    "is_meta_export_eligible",
+    "is_whatsapp_channel_publish_eligible",
+    "meta_export_rejection_detail",
+    "whatsapp_channel_publish_rejection_detail",
     "catalog_status_of",
     "apply_active_catalog_query_filters",
     "CATALOG_STATUS_ACTIVE",

@@ -412,6 +412,56 @@ jobs:
 
           echo "4 passed, 0 skipped"
 
+  whatsapp-catalog-sync-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wa_catalog
+          POSTGRES_PASSWORD: wa_catalog_itest
+          POSTGRES_DB: wa_catalog_sync_itest
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U wa_catalog -d wa_catalog_sync_itest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      WA_CATALOG_SYNC_PG_REQUIRED: "1"
+      WA_CATALOG_SYNC_PG_TEST_DATABASE_URL: postgresql+psycopg2://wa_catalog:wa_catalog_itest@127.0.0.1:5434/wa_catalog_sync_itest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+          pip install pytest
+
+      - name: WhatsApp catalog sync PostgreSQL locks
+        run: |
+          set -euo pipefail
+          unset DATABASE_URL || true
+          python -m pytest \
+            backend/tests/test_whatsapp_catalog_sync_postgres_locks.py \
+            -q --tb=short --maxfail=1 \
+            --junitxml=/tmp/wa-catalog-pg.xml
+          python scripts/check_junit_clean.py /tmp/wa-catalog-pg.xml
+
   # Dashboard Route/Nav/Page Metadata + product identity + platform telemetry/flags.
   # Source-level regression scripts (tsx via npx); no npm ci / full build.
   # Does not run AI, backend, migrations, or deploy steps.

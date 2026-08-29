@@ -293,7 +293,8 @@ def test_zero_eligible_products_still_binds():
     sync.assert_not_called()
 
 
-def test_reconnect_retries_synced_eligible_products():
+def test_reconnect_retries_synced_eligible_products(monkeypatch):
+    monkeypatch.setenv("NAHLA_WHATSAPP_CATALOG_AUTO_SYNC", "1")
     conn = _conn()
     products = [_native(id=501), _native(id=502, title="حذاء رياضي أبيض")]
     db = _db(conn, products=products)
@@ -370,7 +371,7 @@ def test_eligible_ids_are_tenant_scoped_and_skip_external_meta():
     db = MagicMock()
     db.query.return_value.filter.return_value.all.return_value = rows
     ids = _eligible_product_ids(db, 9)
-    assert ids == [1]
+    assert ids == [1, 3]
     assert is_meta_export_eligible(rows[2]) is False
     assert is_meta_export_eligible(rows[3]) is False
 

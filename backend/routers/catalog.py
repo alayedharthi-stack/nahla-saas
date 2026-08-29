@@ -89,7 +89,9 @@ from core.catalog import (
 from core.database import get_db
 from core.plan_entitlements import (
     EntitlementError,
+    EntitlementLookupUnavailable,
     entitlement_http_error,
+    entitlement_unavailable_http_error,
     get_entitlements,
     require_feature,
 )
@@ -662,8 +664,10 @@ def _enforce_catalog_feature(db: Session, tenant_id: int) -> None:
     bypass this — they manage configuration on behalf of merchants
     regardless of plan."""
     try:
-        ent = get_entitlements(db, tenant_id)
+        ent = get_entitlements(db, tenant_id, strict_lookup=True)
         require_feature(ent, _FEATURE_KEY)
+    except EntitlementLookupUnavailable as exc:
+        entitlement_unavailable_http_error(exc)
     except EntitlementError as exc:
         entitlement_http_error(exc)
 
@@ -2789,6 +2793,72 @@ async def merchant_catalog_meta_sync_retry(
         **build_sync_response_fields(p),
         "publication": _publication_for_product(db, tenant_id, p),
     }
+
+
+class _WhatsappCatalogSyncBody(BaseModel):
+    force: bool = True
+
+
+@merchant_router.get("/whatsapp-sync/status")
+async def merchant_whatsapp_catalog_sync_status(
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Publish-queue snapshot. Never claims Meta success from local enqueue."""
+    from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+        build_whatsapp_catalog_sync_status,
+    )
+
+    tenant_id = resolve_tenant_id(request)
+    return build_whatsapp_catalog_sync_status(db, tenant_id)
+
+
+def _raise_whatsapp_catalog_sync_http(result: Dict[str, Any]) -> None:
+    """Map structured enqueue blockers to HTTP without treating all as 409."""
+    blocker = result.get("blocker_code")
+    if blocker == "entitlement_unavailable":
+        raise HTTPException(status_code=503, detail=result)
+    if blocker == "feature_locked":
+        raise HTTPException(status_code=403, detail=result)
+    raise HTTPException(status_code=409, detail=result)
+
+
+@merchant_router.post("/whatsapp-sync")
+async def merchant_whatsapp_catalog_sync(
+    body: _WhatsappCatalogSyncBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Enqueue a WhatsApp catalog publish using the same auto-sync drain.
+
+    Returns ``phase=queued`` — not a Meta publish confirmation.
+    Graph drain runs only when ``NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1``.
+    """
+    from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+        enqueue_whatsapp_catalog_sync,
+        schedule_whatsapp_catalog_drain,
+    )
+
+    tenant_id = resolve_tenant_id(request)
+    _enforce_catalog_feature(db, tenant_id)
+    result = enqueue_whatsapp_catalog_sync(
+        db,
+        tenant_id,
+        force=bool(body.force),
+        trigger="manual",
+    )
+    if not result.get("queued"):
+        _raise_whatsapp_catalog_sync_http(result)
+    schedule_whatsapp_catalog_drain(int(tenant_id))
+    audit(
+        "merchant_whatsapp_catalog_sync_enqueued",
+        tenant_id=tenant_id,
+        enqueued=result.get("enqueued"),
+        eligible=result.get("eligible"),
+    )
+    return result
 
 
 @merchant_router.get("/products/{product_id}")

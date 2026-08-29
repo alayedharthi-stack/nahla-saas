@@ -449,7 +449,17 @@ def _resolve_plan_slug(slug_or_name: str) -> str:
     return _SLUG_MAP.get(key, key)
 
 
-def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
+def _call_entitlement_lookup(strict_lookup: bool, source: str, fn, *args, **kwargs):
+    """Re-raise lookup failures as EntitlementLookupUnavailable only in strict mode."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        if strict_lookup:
+            raise EntitlementLookupUnavailable(source) from exc
+        raise
+
+
+def get_entitlements(db: Session, tenant_id: int, *, strict_lookup: bool = False) -> PlanEntitlements:
     """
     Resolve the current entitlements for a tenant.
 
@@ -471,9 +481,22 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
         PARTNER_TESTING_REASON,
     )
 
-    if is_partner_testing_override_active(db, tenant_id):
+    try:
+        override_active = is_partner_testing_override_active(db, tenant_id)
+    except Exception as exc:
+        if strict_lookup:
+            raise EntitlementLookupUnavailable("partner_override") from exc
+        raise
+
+    if override_active:
         log_billing_override_grant(tenant_id, reason=PARTNER_TESTING_REASON)
-        override_slug = get_partner_testing_override_plan_slug(db, tenant_id)
+        override_slug = _call_entitlement_lookup(
+            strict_lookup,
+            "partner_override_slug",
+            get_partner_testing_override_plan_slug,
+            db,
+            tenant_id,
+        )
         effective_slug = (
             override_slug if override_slug in PLAN_DEFINITIONS else DEFAULT_OVERRIDE_PLAN_SLUG
         )
@@ -508,6 +531,8 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
                 plan_slug      = _resolve_plan_slug(raw_slug)
                 billing_status = raw_status
     except Exception as exc:
+        if strict_lookup:
+            raise EntitlementLookupUnavailable("salla_lookup") from exc
         logger.debug("[Entitlements] Salla lookup error tenant=%s: %s", tenant_id, exc)
 
     # ── 2. Nahla BillingSubscription ──────────────────────────────────────────
@@ -544,6 +569,8 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
                 plan_slug      = "none"
                 billing_status = "cancelled"
         except Exception as exc:
+            if strict_lookup:
+                raise EntitlementLookupUnavailable("billing_lookup") from exc
             logger.debug("[Entitlements] BillingSubscription lookup error tenant=%s: %s", tenant_id, exc)
 
     # ── 3. Determine effective plan ───────────────────────────────────────────
@@ -579,8 +606,21 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
         log_manual_gift_grant,
     )
 
-    if is_manual_gift_grant_active(db, tenant_id):
-        gift_slug = get_manual_gift_grant_plan_slug(db, tenant_id)
+    try:
+        gift_active = is_manual_gift_grant_active(db, tenant_id)
+    except Exception as exc:
+        if strict_lookup:
+            raise EntitlementLookupUnavailable("gift_lookup") from exc
+        raise
+
+    if gift_active:
+        gift_slug = _call_entitlement_lookup(
+            strict_lookup,
+            "gift_slug",
+            get_manual_gift_grant_plan_slug,
+            db,
+            tenant_id,
+        )
         gift_slug = gift_slug if gift_slug in PLAN_DEFINITIONS else DEFAULT_GIFT_PLAN_SLUG
         log_manual_gift_grant(tenant_id)
         gift_def = PLAN_DEFINITIONS[gift_slug]
@@ -610,6 +650,14 @@ def get_entitlements(db: Session, tenant_id: int) -> PlanEntitlements:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Enforcement helpers
 # ═══════════════════════════════════════════════════════════════════════════════
+
+class EntitlementLookupUnavailable(RuntimeError):
+    """Transient failure reading plan entitlements; not a confirmed denial."""
+
+    def __init__(self, source: str):
+        self.source = source
+        super().__init__(f"entitlement lookup unavailable ({source})")
+
 
 class EntitlementError(Exception):
     def __init__(
@@ -709,6 +757,22 @@ def require_limit_not_exceeded(
                 f"رقِّ باقتك إلى {_PLAN_LABELS.get(required, required)} للاستمرار."
             ),
         )
+
+
+def entitlement_unavailable_http_error(exc: EntitlementLookupUnavailable) -> None:
+    """Temporary entitlement-store outage: 503, not a plan-upgrade 403."""
+    from fastapi import HTTPException  # noqa: PLC0415
+
+    message = "تعذّر التحقق من أهلية المزامنة مؤقتًا، وسيعاد المحاولة."
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "error": "entitlement_unavailable",
+            "blocker_code": "entitlement_unavailable",
+            "message": message,
+            "message_ar": message,
+        },
+    ) from exc
 
 
 def entitlement_http_error(exc: EntitlementError) -> None:
