@@ -1889,6 +1889,7 @@ export interface Translations {
       phasePendingVerification: string
       phaseIdle:        string
       phaseBlocked:     string
+      phaseRetrying:    string
       phaseNeedsAttention: string
       verifyNote:       string
       loadFailed:       string

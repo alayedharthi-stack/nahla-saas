@@ -307,6 +307,7 @@ export type WhatsappCatalogSyncPhase =
   | 'pending_verification'
   | 'needs_attention'
   | 'blocked'
+  | 'retrying'
 
 export interface WhatsappCatalogSyncCounts {
   eligible: number
@@ -351,7 +352,7 @@ export interface WhatsappCatalogSyncStatus {
 export interface WhatsappCatalogSyncEnqueueResponse {
   ok: boolean
   queued: boolean
-  phase: WhatsappCatalogSyncPhase | 'blocked'
+  phase: WhatsappCatalogSyncPhase | 'blocked' | 'retrying'
   trigger: string
   enqueued: number
   eligible: number

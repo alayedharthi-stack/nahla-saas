@@ -27,11 +27,13 @@ from services.native_meta_sync_orchestrator import (
     LOOKUP_UNVERIFIED_FIELDS,
     MAX_VERIFY_LAG_RETRIES,
     attempt_native_meta_sync,
+    CatalogSyncSessionUnusable,
     classify_block_code,
     mark_native_meta_sync_pending,
     retry_is_due,
     sync_error_summary,
     verify_retry_is_due,
+    _invalidate_sync_session,
     _syncing_is_stale,
 )
 
@@ -60,6 +62,10 @@ _BLOCKERS_AR = {
     "feature_locked": (
         "مزامنة كتالوج واتساب غير مضمّنة في خطتك الحالية.",
         "رقِّ الخطة لتفعيل مزامنة الكتالوج مع واتساب.",
+    ),
+    "entitlement_unavailable": (
+        "تعذّر التحقق من أهلية المزامنة مؤقتًا، وسيعاد المحاولة.",
+        "انتظر لحظات ثم حدّث الحالة؛ لا حاجة لتعديل المنتج أو إعادة الربط.",
     ),
     "connection_not_found": (
         "لا يوجد ربط واتساب لهذا المتجر.",
@@ -111,13 +117,20 @@ def evaluate_whatsapp_catalog_sync_readiness(db: Any, tenant_id: int) -> Dict[st
         ent = get_entitlements(db, int(tenant_id))
         if not ent.has_feature("meta_catalog_sync"):
             return _blocker("feature_locked")
+    except (SQLAlchemyError, TimeoutError, OSError, ConnectionError) as exc:
+        logger.warning(
+            "[WA_CATALOG_SYNC] entitlement check unavailable tenant=%s err=%s",
+            int(tenant_id),
+            type(exc).__name__,
+        )
+        return _blocker("entitlement_unavailable")
     except Exception as exc:
         logger.warning(
             "[WA_CATALOG_SYNC] entitlement check failed tenant=%s err=%s",
             int(tenant_id),
             type(exc).__name__,
         )
-        return _blocker("feature_locked")
+        return _blocker("entitlement_unavailable")
 
     conn = _load_connection(db, tenant_id)
     if conn is None:
@@ -364,6 +377,12 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
         phase = "idle"
 
     auto_on = whatsapp_catalog_auto_sync_enabled()
+    if readiness.get("ready"):
+        status_phase = phase
+    elif readiness.get("blocker_code") == "entitlement_unavailable":
+        status_phase = "retrying"
+    else:
+        status_phase = "blocked"
     return {
         "ok": True,
         "tenant_id": int(tenant_id),
@@ -371,7 +390,7 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
         "blocker_code": readiness.get("blocker_code"),
         "message_ar": readiness.get("message_ar"),
         "action_ar": readiness.get("action_ar"),
-        "phase": phase if readiness.get("ready") else "blocked",
+        "phase": status_phase,
         "counts": counts,
         "last_success_at": last_success_at,
         "failures": failures,
@@ -401,10 +420,15 @@ def enqueue_whatsapp_catalog_sync(
     """Mark eligible products pending. Does not claim Meta publish success."""
     readiness = evaluate_whatsapp_catalog_sync_readiness(db, tenant_id)
     if not readiness.get("ready"):
+        phase = (
+            "retrying"
+            if readiness.get("blocker_code") == "entitlement_unavailable"
+            else "blocked"
+        )
         return {
             "ok": False,
             "queued": False,
-            "phase": "blocked",
+            "phase": phase,
             "trigger": trigger,
             "enqueued": 0,
             "eligible": 0,
@@ -496,6 +520,17 @@ def drain_whatsapp_catalog_sync(
             result = attempt_native_meta_sync(
                 db, int(tenant_id), pid, client=client,
             )
+        except CatalogSyncSessionUnusable:
+            logger.exception(
+                "[WA_CATALOG_SYNC] session unusable tenant=%s product=%s; stopping drain",
+                tenant_id,
+                pid,
+            )
+            out["ok"] = False
+            out["failed"] += 1
+            out["processed"] += 1
+            out["session_unusable"] = True
+            raise
         except Exception:  # noqa: BLE001
             logger.exception(
                 "[WA_CATALOG_SYNC] drain failed tenant=%s product=%s",
@@ -539,6 +574,12 @@ def drain_whatsapp_catalog_sync(
                         pid,
                         type(rollback_exc).__name__,
                     )
+                    _invalidate_sync_session(db)
+                    raise CatalogSyncSessionUnusable(
+                        operation="readiness_stamp_rollback",
+                        original_code="readiness_stamp_failed",
+                        original_exc=exc,
+                    ) from rollback_exc
         elif str(result.get("sync_status") or "") == "pending_verification":
             out["pending_verification"] = int(out.get("pending_verification") or 0) + 1
         else:
@@ -735,9 +776,22 @@ def run_whatsapp_catalog_drain_background(tenant_id: int) -> None:
     db = SessionLocal()
     try:
         drain_whatsapp_catalog_sync(db, int(tenant_id))
+    except CatalogSyncSessionUnusable:
+        logger.exception(
+            "[WA_CATALOG_SYNC] background drain session unusable tenant=%s",
+            tenant_id,
+        )
     except Exception:  # noqa: BLE001
         logger.exception("[WA_CATALOG_SYNC] background drain failed tenant=%s", tenant_id)
-        db.rollback()
+        try:
+            db.rollback()
+        except SQLAlchemyError as rollback_exc:
+            logger.warning(
+                "[WA_CATALOG_SYNC] background drain rollback failed tenant=%s err=%s",
+                tenant_id,
+                type(rollback_exc).__name__,
+            )
+            _invalidate_sync_session(db)
     finally:
         db.close()
 
@@ -749,6 +803,16 @@ def run_whatsapp_catalog_drain_tick() -> Dict[str, Any]:
     db = SessionLocal()
     try:
         return drain_ready_tenants(db)
+    except CatalogSyncSessionUnusable:
+        logger.exception("[WA_CATALOG_SYNC] periodic drain tick session unusable")
+        return {
+            "tenants": 0,
+            "processed": 0,
+            "synced": 0,
+            "failed": 0,
+            "error": True,
+            "session_unusable": True,
+        }
     except Exception:  # noqa: BLE001
         logger.exception("[WA_CATALOG_SYNC] periodic drain tick failed")
         try:
@@ -758,6 +822,7 @@ def run_whatsapp_catalog_drain_tick() -> Dict[str, Any]:
                 "[WA_CATALOG_SYNC] drain-tick rollback failed err=%s",
                 type(rollback_exc).__name__,
             )
+            _invalidate_sync_session(db)
         return {"tenants": 0, "processed": 0, "synced": 0, "failed": 0, "error": True}
     finally:
         db.close()

@@ -2131,6 +2131,7 @@ const ar: Translations = {
       phasePendingVerification: 'بانتظار التحقق',
       phaseIdle:        'لا يوجد ما ينتظر المزامنة',
       phaseBlocked:     'غير جاهز للمزامنة',
+      phaseRetrying:    'جارٍ إعادة التحقق',
       phaseNeedsAttention: 'يحتاج متابعة',
       verifyNote:       'النشر يُختم بعد تطابق السعر والعملة والتوفر. المعرّف وحده لا يكفي، وظهور واتساب اختبار حي منفصل.',
       loadFailed:       'تعذّر جلب حالة مزامنة واتساب.',

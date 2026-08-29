@@ -119,15 +119,91 @@ def postgres_engine() -> Engine:
 
 
 def _rollback_sessions(*sessions: Session) -> None:
-    """Test cleanup must succeed; a failed rollback means a dirty isolated DB."""
+    """Rollback and close every session even if an earlier one fails.
+
+    An original test exception stays primary; cleanup errors are attached as notes.
+    Cleanup-only failures still fail the test.
+    """
     errors: list[str] = []
     for sess in sessions:
+        if sess is None:
+            continue
         try:
             sess.rollback()
         except Exception as exc:
-            errors.append(f"{type(exc).__name__}: {exc}")
-    if errors:
-        pytest.fail("session rollback failed during test cleanup: " + "; ".join(errors))
+            errors.append(f"rollback {type(exc).__name__}: {exc}")
+        try:
+            sess.close()
+        except Exception as exc:
+            errors.append(f"close {type(exc).__name__}: {exc}")
+    if not errors:
+        return
+    detail = "session cleanup failed: " + "; ".join(errors)
+    original = sys.exc_info()[1]
+    if original is not None:
+        if hasattr(original, "add_note"):
+            original.add_note(detail)
+        return
+    pytest.fail(detail)
+
+
+class _ControlledSession:
+    """Fake session for cleanup-helper tests (no engine)."""
+
+    def __init__(self, name: str, *, fail_rollback: bool = False, fail_close: bool = False) -> None:
+        self.name = name
+        self.rollback_calls = 0
+        self.close_calls = 0
+        self.fail_rollback = fail_rollback
+        self.fail_close = fail_close
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+        if self.fail_rollback:
+            raise RuntimeError(f"{self.name}-rollback")
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.fail_close:
+            raise RuntimeError(f"{self.name}-close")
+
+
+def test_rollback_sessions_cleans_all_and_keeps_original_failure() -> None:
+    failing_rollback = _ControlledSession("a", fail_rollback=True)
+    failing_close = _ControlledSession("b", fail_close=True)
+    healthy = _ControlledSession("c")
+    with pytest.raises(ValueError, match="primary test failure") as caught:
+        try:
+            raise ValueError("primary test failure")
+        finally:
+            _rollback_sessions(failing_rollback, failing_close, healthy)
+    assert failing_rollback.rollback_calls == 1
+    assert failing_rollback.close_calls == 1
+    assert failing_close.rollback_calls == 1
+    assert failing_close.close_calls == 1
+    assert healthy.rollback_calls == 1
+    assert healthy.close_calls == 1
+    notes = getattr(caught.value, "__notes__", [])
+    joined = " ".join(notes)
+    assert "a-rollback" in joined
+    assert "b-close" in joined
+
+
+def test_rollback_sessions_fails_on_cleanup_when_test_passed() -> None:
+    failing_rollback = _ControlledSession("a", fail_rollback=True)
+    failing_close = _ControlledSession("b", fail_close=True)
+    healthy = _ControlledSession("c")
+    with pytest.raises(pytest.fail.Exception) as caught:
+        _rollback_sessions(failing_rollback, failing_close, healthy)
+    assert failing_rollback.rollback_calls == 1
+    assert failing_rollback.close_calls == 1
+    assert failing_close.rollback_calls == 1
+    assert failing_close.close_calls == 1
+    assert healthy.rollback_calls == 1
+    assert healthy.close_calls == 1
+    message = str(caught.value)
+    assert "a-rollback" in message
+    assert "b-close" in message
 
 
 def _Session(engine: Engine):
@@ -311,8 +387,11 @@ def test_try_acquire_rejects_live_syncing_without_resetting_backoff(
         assert int(meta.get("lock_generation") or 0) == 3
     finally:
         _rollback_sessions(db)
-        _cleanup_lock_rows(db)
-        db.close()
+        cleanup = Session()
+        try:
+            _cleanup_lock_rows(cleanup)
+        finally:
+            cleanup.close()
 
 
 def _seed_lock_product(session: Session, **overrides) -> int:
@@ -360,8 +439,7 @@ def test_two_sessions_load_then_only_one_acquires(postgres_engine: Engine) -> No
         meta = (first.extra_metadata or {}).get("sync_meta") or {}
         assert int(meta.get("lock_generation") or 0) == 1
     finally:
-        for sess in (s1, s2, setup):
-            _rollback_sessions(sess)
+        _rollback_sessions(s1, s2, setup)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -431,8 +509,7 @@ def test_stale_worker_cannot_stamp_after_newer_lease(postgres_engine: Engine) ->
         finally:
             check.close()
     finally:
-        for sess in (worker_old, worker_new, setup):
-            _rollback_sessions(sess)
+        _rollback_sessions(worker_old, worker_new, setup)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -485,8 +562,7 @@ def test_stamp_does_not_lose_dirty_update(postgres_engine: Engine) -> None:
         finally:
             check.close()
     finally:
-        for sess in (worker, updater, setup):
-            _rollback_sessions(sess)
+        _rollback_sessions(worker, updater, setup)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -520,8 +596,7 @@ def test_acquire_releases_row_lock_before_graph(postgres_engine: Engine) -> None
         assert locked.sync_status == "syncing"
         observer.rollback()
     finally:
-        for sess in (worker, observer, setup):
-            _rollback_sessions(sess)
+        _rollback_sessions(worker, observer, setup)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -699,8 +774,7 @@ def test_webhook_stale_session_does_not_rewind_newer_lease(postgres_engine: Engi
         finally:
             final.close()
     finally:
-        for sess in (web, worker, setup):
-            _rollback_sessions(sess)
+        _rollback_sessions(web, worker, setup)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -762,8 +836,11 @@ def test_webhook_create_stamps_salla_ownership(postgres_engine: Engine) -> None:
         assert is_whatsapp_channel_publish_eligible(row) is True
     finally:
         _rollback_sessions(db)
-        _cleanup_lock_rows(db)
-        db.close()
+        cleanup = Session()
+        try:
+            _cleanup_lock_rows(cleanup)
+        finally:
+            cleanup.close()
 
 
 def test_ineligible_acquire_releases_row_lock(postgres_engine: Engine) -> None:
@@ -792,8 +869,7 @@ def test_ineligible_acquire_releases_row_lock(postgres_engine: Engine) -> None:
         assert locked is not None
         observer.rollback()
     finally:
-        for sess in (worker, observer, setup):
-            _rollback_sessions(sess)
+        _rollback_sessions(worker, observer, setup)
         cleanup = Session()
         try:
             _cleanup_lock_rows(cleanup)
@@ -902,9 +978,7 @@ def test_failed_locked_sync_read_does_not_write_stale_or_hold_lock(postgres_engi
             finally:
                 resumed.close()
         finally:
-            _rollback_sessions(db)
-            db.close()
-            observer.close()
+            _rollback_sessions(db, observer)
     finally:
         cleanup = Session()
         try:
@@ -1011,9 +1085,7 @@ def test_complete_sync_read_failure_does_not_write_stale_sync_meta(postgres_engi
             finally:
                 resumed.close()
         finally:
-            _rollback_sessions(db)
-            db.close()
-            observer.close()
+            _rollback_sessions(db, observer)
     finally:
         cleanup = Session()
         try:
@@ -1185,4 +1257,332 @@ def test_unlocked_fallback_read_does_not_clobber_newer_lease(postgres_engine: En
             _cleanup_lock_rows(cleanup)
         finally:
             cleanup.close()
+            setup.close()
+
+
+def test_variant_query_failure_retries_all_retailer_ids(postgres_engine: Engine) -> None:
+    """A real variants-table failure must not push the parent, then recover all SKUs."""
+    from types import SimpleNamespace
+
+    from database.models import Product, ProductVariant
+    from services.native_meta_sync_orchestrator import attempt_native_meta_sync
+
+    _ensure_orm_tables(postgres_engine)
+    Session = _Session(postgres_engine)
+    setup = Session()
+    worker = Session()
+    admin = Session()
+    pushed: list[str] = []
+    renamed = False
+    try:
+        product_id = _seed_lock_product(
+            setup,
+            extra_metadata={
+                "currency": "SAR",
+                "image_url": "https://cdn.example/shirt.webp",
+                "product_url": "https://example.test/p",
+            },
+        )
+        for rid, price in (("sku-blue", "77"), ("sku-white", "83")):
+            setup.add(
+                ProductVariant(
+                    tenant_id=_TEST_TENANT,
+                    product_id=product_id,
+                    retailer_id=rid,
+                    sku=rid,
+                    price=price,
+                    currency="SAR",
+                    in_stock=True,
+                )
+            )
+        setup.commit()
+
+        def _push(_db, _tid, retailer_id, **_kwargs):
+            pushed.append(str(retailer_id))
+            return {
+                "ok": True,
+                "payload": {"price": 8300, "currency": "SAR", "availability": "in stock"},
+            }
+
+        def _lookup(_conn, _catalog_id, retailer_id, client=None):
+            return (
+                f"META-{retailer_id}",
+                {
+                    "matched": True,
+                    "item": {
+                        "price": 8300,
+                        "currency": "SAR",
+                        "availability": "in stock",
+                    },
+                },
+            )
+
+        admin.execute(text("ALTER TABLE product_variants RENAME TO product_variants_hidden"))
+        admin.commit()
+        renamed = True
+
+        graph_patches = (
+            patch(
+                "services.native_meta_sync_orchestrator.preview_native_meta_sync",
+                return_value={
+                    "eligible": True,
+                    "retailer_id": "sku-blue",
+                    "fatal_errors": [],
+                    "warnings": [],
+                },
+            ),
+            patch(
+                "services.meta_catalog_sync_confirm.ensure_native_default_variant",
+                return_value=(SimpleNamespace(retailer_id="sku-blue"), False),
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator._resolve_connection",
+                return_value=SimpleNamespace(
+                    catalog_enabled=True,
+                    meta_catalog_id="CAT-ITEST",
+                    access_token="EAAB-test",
+                ),
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.push_one_meta_catalog_item",
+                side_effect=_push,
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id",
+                side_effect=_lookup,
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.get_waba_catalog_link_status",
+                return_value={"ok": True, "expected_catalog_linked": True},
+            ),
+        )
+        with graph_patches[0], graph_patches[1], graph_patches[2], graph_patches[3], graph_patches[4], graph_patches[5]:
+            first = attempt_native_meta_sync(worker, _TEST_TENANT, product_id)
+            assert first.get("error_code") == "variant_discovery_failed"
+            row = worker.get(Product, product_id)
+            assert str(row.sync_status or "") == "failed"
+            sm = (row.extra_metadata or {}).get("sync_meta") or {}
+            assert int(sm.get("retry_count") or 0) == 1
+            assert sm.get("next_retry_at")
+            assert pushed == []
+
+            admin.execute(text("ALTER TABLE product_variants_hidden RENAME TO product_variants"))
+            admin.commit()
+            renamed = False
+
+            second = attempt_native_meta_sync(worker, _TEST_TENANT, product_id)
+            assert str(worker.get(Product, product_id).sync_status or "") != "syncing"
+            assert "sku-blue" in pushed
+            assert "sku-white" in pushed
+            assert second.get("ok") is True or str(second.get("sync_status") or "") in {
+                "synced",
+                "pending_verification",
+            }
+    finally:
+        if renamed:
+            try:
+                admin.execute(text("ALTER TABLE product_variants_hidden RENAME TO product_variants"))
+                admin.commit()
+            except Exception as exc:
+                pytest.fail(f"could not restore product_variants table: {type(exc).__name__}: {exc}")
+        _rollback_sessions(worker, setup, admin)
+        cleanup = Session()
+        try:
+            _cleanup_lock_rows(cleanup)
+        finally:
+            cleanup.close()
+            worker.close()
+            setup.close()
+            admin.close()
+
+
+def test_acquire_rollback_failure_releases_row_lock(postgres_engine: Engine) -> None:
+    """A failed acquire rollback must invalidate the session and drop the row lock."""
+    from sqlalchemy.exc import OperationalError
+    from database.models import Product
+    from services.native_meta_sync_orchestrator import (
+        CatalogSyncSessionUnusable,
+        _try_acquire_sync_lock,
+    )
+
+    _ensure_orm_tables(postgres_engine)
+    Session = _Session(postgres_engine)
+    setup = Session()
+    worker = Session()
+    observer = Session()
+    orig_rollback = worker.rollback
+    try:
+        product_id = _seed_lock_product(
+            setup,
+            catalog_status="archived",
+            sync_status="pending",
+        )
+
+        def _failing_rollback() -> None:
+            raise OperationalError("ROLLBACK", {}, Exception("injected rollback failure"))
+
+        worker.rollback = _failing_rollback  # type: ignore[method-assign]
+        with pytest.raises(CatalogSyncSessionUnusable) as caught:
+            _try_acquire_sync_lock(worker, _TEST_TENANT, product_id)
+        assert caught.value.operation == "release_acquire_tx"
+        assert caught.value.original_code == "sync_lock_not_acquired"
+        assert caught.value.__cause__ is not None
+        worker.rollback = orig_rollback  # type: ignore[method-assign]
+
+        locked = (
+            observer.query(Product)
+            .filter(Product.id == product_id, Product.tenant_id == _TEST_TENANT)
+            .with_for_update(skip_locked=True)
+            .first()
+        )
+        assert locked is not None
+        observer.rollback()
+
+        healthy = Session()
+        try:
+            again = _try_acquire_sync_lock(healthy, _TEST_TENANT, product_id)
+            assert again is None
+        finally:
+            healthy.close()
+    finally:
+        worker.rollback = orig_rollback  # type: ignore[method-assign]
+        _rollback_sessions(worker, observer, setup)
+        cleanup = Session()
+        try:
+            _cleanup_lock_rows(cleanup)
+        finally:
+            cleanup.close()
+            worker.close()
+            observer.close()
+            setup.close()
+
+
+def test_drain_stops_on_rollback_failure_then_healthy_session_recovers(
+    postgres_engine: Engine,
+) -> None:
+    """Rollback failure must stop the batch; a later healthy session can recover."""
+    from types import SimpleNamespace
+    from sqlalchemy.exc import OperationalError
+    from database.models import Product
+    from services.native_meta_sync_orchestrator import CatalogSyncSessionUnusable
+    from services.whatsapp_catalog_sync import drain_whatsapp_catalog_sync
+
+    _ensure_orm_tables(postgres_engine)
+    Session = _Session(postgres_engine)
+    setup = Session()
+    holder = Session()
+    worker = Session()
+    orig_rollback = worker.rollback
+    pushed: list[str] = []
+    try:
+        extras = {
+            "currency": "SAR",
+            "image_url": "https://cdn.example/shirt.webp",
+            "product_url": "https://example.test/p",
+        }
+        first_id = _seed_lock_product(setup, extra_metadata=extras)
+        second_id = _seed_lock_product(setup, extra_metadata=extras)
+        held = (
+            holder.query(Product)
+            .filter(Product.id == first_id, Product.tenant_id == _TEST_TENANT)
+            .with_for_update()
+            .first()
+        )
+        assert held is not None
+
+        def _failing_rollback() -> None:
+            raise OperationalError("ROLLBACK", {}, Exception("injected rollback failure"))
+
+        worker.rollback = _failing_rollback  # type: ignore[method-assign]
+
+        def _push(_db, _tid, retailer_id, **_kwargs):
+            pushed.append(str(retailer_id))
+            return {
+                "ok": True,
+                "payload": {"price": 8300, "currency": "SAR", "availability": "in stock"},
+            }
+
+        graph_patches = (
+            patch(
+                "services.whatsapp_catalog_sync.evaluate_whatsapp_catalog_sync_readiness",
+                return_value={"ready": True, "blocker_code": None},
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.preview_native_meta_sync",
+                return_value={
+                    "eligible": True,
+                    "retailer_id": "nahla_p_recover",
+                    "fatal_errors": [],
+                    "warnings": [],
+                },
+            ),
+            patch(
+                "services.meta_catalog_sync_confirm.ensure_native_default_variant",
+                return_value=(SimpleNamespace(retailer_id="nahla_p_recover"), False),
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator._resolve_connection",
+                return_value=SimpleNamespace(
+                    catalog_enabled=True,
+                    meta_catalog_id="CAT-ITEST",
+                    access_token="EAAB-test",
+                ),
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.push_one_meta_catalog_item",
+                side_effect=_push,
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id",
+                return_value=(
+                    "META-recover",
+                    {
+                        "matched": True,
+                        "item": {
+                            "price": 8300,
+                            "currency": "SAR",
+                            "availability": "in stock",
+                        },
+                    },
+                ),
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.get_waba_catalog_link_status",
+                return_value={"ok": True, "expected_catalog_linked": True},
+            ),
+        )
+        with graph_patches[0], graph_patches[1], graph_patches[2], graph_patches[3], graph_patches[4], graph_patches[5], graph_patches[6]:
+            with pytest.raises(CatalogSyncSessionUnusable) as caught:
+                drain_whatsapp_catalog_sync(worker, _TEST_TENANT)
+            assert caught.value.original_code == "sync_lock_not_acquired"
+            assert caught.value.__cause__ is not None
+            assert pushed == []
+            worker.rollback = orig_rollback  # type: ignore[method-assign]
+            holder.rollback()
+
+            healthy = Session()
+            try:
+                recovered = drain_whatsapp_catalog_sync(healthy, _TEST_TENANT)
+            finally:
+                healthy.close()
+            assert recovered.get("session_unusable") is not True
+            assert pushed
+            second = Session()
+            try:
+                row = second.get(Product, second_id)
+                assert row is not None
+                assert str(row.sync_status or "") != "syncing"
+            finally:
+                second.close()
+    finally:
+        holder.rollback()
+        worker.rollback = orig_rollback  # type: ignore[method-assign]
+        _rollback_sessions(worker, holder, setup)
+        cleanup = Session()
+        try:
+            _cleanup_lock_rows(cleanup)
+        finally:
+            cleanup.close()
+            worker.close()
+            holder.close()
             setup.close()

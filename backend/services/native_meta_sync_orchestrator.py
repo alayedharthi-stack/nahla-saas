@@ -31,6 +31,23 @@ from services.meta_catalog_sync_preview import preview_native_meta_sync
 
 logger = logging.getLogger("nahla.native_meta_sync")
 
+
+class VariantDiscoveryError(RuntimeError):
+    """Variant query failed; parent retailer_id is not a known-empty catalog."""
+
+
+class CatalogSyncSessionUnusable(RuntimeError):
+    """Session rollback/cleanup failed; the current batch must stop."""
+
+    def __init__(self, *, operation: str, original_code: str, original_exc: BaseException | None = None):
+        self.operation = operation
+        self.original_code = original_code
+        self.original_exc = original_exc
+        detail = f"{operation} rollback failed after {original_code}"
+        super().__init__(detail)
+        if original_exc is not None and hasattr(self, "add_note"):
+            self.add_note(f"original {type(original_exc).__name__}: {original_exc}")
+
 SYNC_STALE_TTL = timedelta(minutes=12)
 MAX_AUTO_RETRIES = 5
 RETRY_BACKOFF_SECONDS = (60, 300, 900, 1800, 3600)
@@ -43,6 +60,7 @@ TRANSIENT_ERROR_CODES = frozenset({
     "access_token_missing",
     "connection_not_found",
     "catalog_id_missing",
+    "variant_discovery_failed",
 })
 IDENTITY_LOOKUP_FIELDS = ("id", "retailer_id", "name")
 CONTENT_LOOKUP_FIELDS = ("price", "currency", "availability")
@@ -447,14 +465,47 @@ def _lease_held(db: Any, product: Any, lease: int) -> bool:
     return current == int(lease or 0)
 
 
-def _abandon_stale_lease(db: Any) -> Dict[str, Any]:
+def _invalidate_sync_session(db: Any) -> None:
+    for method_name in ("invalidate", "close"):
+        method = getattr(db, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method()
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "[NATIVE_META_SYNC] session %s failed err=%s",
+                method_name,
+                type(exc).__name__,
+            )
+
+
+def _rollback_or_raise_unusable(
+    db: Any,
+    *,
+    operation: str,
+    original_code: str,
+    original_exc: BaseException | None = None,
+) -> None:
     try:
         db.rollback()
-    except SQLAlchemyError as exc:
+    except SQLAlchemyError as rollback_exc:
         logger.warning(
-            "[NATIVE_META_SYNC] rollback after stale lease failed err=%s",
-            type(exc).__name__,
+            "[NATIVE_META_SYNC] %s rollback failed err=%s original=%s",
+            operation,
+            type(rollback_exc).__name__,
+            original_code,
         )
+        _invalidate_sync_session(db)
+        raise CatalogSyncSessionUnusable(
+            operation=operation,
+            original_code=original_code,
+            original_exc=original_exc,
+        ) from rollback_exc
+
+
+def _abandon_stale_lease(db: Any) -> Dict[str, Any]:
+    _rollback_or_raise_unusable(db, operation="abandon_stale_lease", original_code="stale_lease")
     return {"ok": False, "skipped": True, "error_code": "stale_lease"}
 
 
@@ -792,13 +843,11 @@ def mark_native_meta_sync_pending(db: Any, product: Any, *, bump_content: bool =
 
 
 def _release_acquire_tx(db: Any) -> None:
-    try:
-        db.rollback()
-    except SQLAlchemyError as exc:
-        logger.warning(
-            "[NATIVE_META_SYNC] acquire-path rollback failed err=%s",
-            type(exc).__name__,
-        )
+    _rollback_or_raise_unusable(
+        db,
+        operation="release_acquire_tx",
+        original_code="sync_lock_not_acquired",
+    )
 
 
 def _try_acquire_sync_lock(db: Any, tenant_id: int, product_id: int) -> Optional[Any]:
@@ -989,12 +1038,27 @@ def _collect_retailer_ids(db: Any, parent: Any, fallback: Optional[str]) -> list
                 rid = str(getattr(row, "retailer_id", "") or "").strip()
                 if rid:
                     ids.append(rid)
-    except (AttributeError, TypeError, ValueError, SQLAlchemyError) as exc:
+    except (SQLAlchemyError, AttributeError, TypeError, ValueError) as exc:
         logger.warning(
-            "[NATIVE_META_SYNC] variant id collection failed product=%s err=%s; using parent retailer_id",
+            "[NATIVE_META_SYNC] variant id collection failed product=%s err=%s",
             getattr(parent, "id", None),
             type(exc).__name__,
         )
+        try:
+            db.rollback()
+        except SQLAlchemyError as rollback_exc:
+            logger.warning(
+                "[NATIVE_META_SYNC] variant-discovery rollback failed product=%s err=%s",
+                getattr(parent, "id", None),
+                type(rollback_exc).__name__,
+            )
+            _invalidate_sync_session(db)
+            raise CatalogSyncSessionUnusable(
+                operation="variant_discovery_rollback",
+                original_code="variant_discovery_failed",
+                original_exc=exc,
+            ) from rollback_exc
+        raise VariantDiscoveryError(type(exc).__name__) from exc
     fb = str(fallback or "").strip()
     if fb and fb not in ids:
         ids.append(fb)
@@ -1156,6 +1220,8 @@ def attempt_native_meta_sync(
             client=client,
             fail=_fail,
         )
+    except CatalogSyncSessionUnusable:
+        raise
     except TypeError as exc:
         logger.exception(
             "[NATIVE_META_SYNC] type error after acquire tenant=%s product=%s",
@@ -1230,7 +1296,13 @@ def _attempt_acquired_body(
         or preview.get("retailer_id")
         or canonical_retailer_id(parent, fallback_to_synthetic=True)
     )
-    retailer_ids = _collect_retailer_ids(db, parent, fallback_rid)
+    try:
+        retailer_ids = _collect_retailer_ids(db, parent, fallback_rid)
+    except VariantDiscoveryError as exc:
+        return fail(
+            "variant_discovery_failed",
+            f"variant_discovery_failed: {exc}"[:500],
+        )
     if not retailer_ids:
         return fail("missing_retailer_id", "missing_retailer_id")
 

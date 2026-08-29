@@ -12,6 +12,7 @@ const FOLLOW_PHASES = new Set<WhatsappCatalogSyncPhase>([
   'queued',
   'syncing',
   'pending_verification',
+  'retrying',
 ])
 const POLL_MS_FAST = 2500
 const POLL_MS_SLOW = 15000
@@ -43,6 +44,7 @@ function phaseLabel(
   if (phase === 'published') return copy.phasePublished
   if (phase === 'pending_verification') return copy.phasePendingVerification
   if (phase === 'blocked') return copy.phaseBlocked
+  if (phase === 'retrying') return copy.phaseRetrying
   if (phase === 'needs_attention') return copy.phaseNeedsAttention
   return copy.phaseIdle
 }

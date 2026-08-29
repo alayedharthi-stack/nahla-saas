@@ -2127,6 +2127,7 @@ const en: Translations = {
       phasePendingVerification: 'Awaiting verification',
       phaseIdle:        'Nothing waiting to sync',
       phaseBlocked:     'Not ready to sync',
+      phaseRetrying:    'Rechecking eligibility',
       phaseNeedsAttention: 'Needs attention',
       verifyNote:       'Publish is stamped only after price, currency, and availability match. A retailer_id alone is not enough, and WhatsApp storefront visibility is a separate live test.',
       loadFailed:       'Could not load WhatsApp catalog sync status.',
