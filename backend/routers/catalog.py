@@ -2814,6 +2814,16 @@ async def merchant_whatsapp_catalog_sync_status(
     return build_whatsapp_catalog_sync_status(db, tenant_id)
 
 
+def _raise_whatsapp_catalog_sync_http(result: Dict[str, Any]) -> None:
+    """Map structured enqueue blockers to HTTP without treating all as 409."""
+    blocker = result.get("blocker_code")
+    if blocker == "entitlement_unavailable":
+        raise HTTPException(status_code=503, detail=result)
+    if blocker == "feature_locked":
+        raise HTTPException(status_code=403, detail=result)
+    raise HTTPException(status_code=409, detail=result)
+
+
 @merchant_router.post("/whatsapp-sync")
 async def merchant_whatsapp_catalog_sync(
     body: _WhatsappCatalogSyncBody,
@@ -2840,7 +2850,7 @@ async def merchant_whatsapp_catalog_sync(
         trigger="manual",
     )
     if not result.get("queued"):
-        raise HTTPException(status_code=409, detail=result)
+        _raise_whatsapp_catalog_sync_http(result)
     schedule_whatsapp_catalog_drain(int(tenant_id))
     audit(
         "merchant_whatsapp_catalog_sync_enqueued",

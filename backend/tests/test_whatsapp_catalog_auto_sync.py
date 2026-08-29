@@ -143,6 +143,15 @@ def _not_entitled(*_args, **_kwargs):
     )
 
 
+def _gate_entitled(*_args, **_kwargs):
+    return SimpleNamespace(
+        has_feature=lambda key: key == "meta_catalog_sync",
+        is_blocked=False,
+        is_active=True,
+        plan_slug="growth",
+    )
+
+
 def _upgrade_copy_present(payload: dict) -> bool:
     blob = " ".join(
         str(payload.get(key) or "")
@@ -364,6 +373,161 @@ def test_whatsapp_sync_post_confirmed_lock_remains_403():
             )
     assert caught.value.status_code == 403
     assert "upgrade_required" in str(caught.value.detail) or "feature" in str(caught.value.detail).lower()
+
+
+@patch("services.whatsapp_catalog_sync.attempt_native_meta_sync")
+def test_whatsapp_sync_post_second_lookup_outage_is_503_not_409(attempt_mock):
+    """Gate lookup succeeds; enqueue strict lookup fails → 503, not 409."""
+    from fastapi import HTTPException
+    from sqlalchemy.exc import OperationalError
+    from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync
+
+    pending = _product(id=201, sync_status="pending")
+    db = _db_with_conn(_conn())
+    request = MagicMock()
+    lookup_error = OperationalError(
+        "SELECT entitlements",
+        {},
+        Exception("second strict lookup timeout"),
+    )
+
+    with patch("routers.catalog.resolve_tenant_id", return_value=9), patch(
+        "routers.catalog.get_entitlements",
+        _gate_entitled,
+    ), patch(
+        "services.whatsapp_catalog_sync.get_entitlements",
+        side_effect=lookup_error,
+    ), patch(
+        "services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain",
+    ) as drain_sched:
+        with pytest.raises(HTTPException) as posted:
+            import asyncio
+
+            asyncio.run(
+                merchant_whatsapp_catalog_sync(
+                    _WhatsappCatalogSyncBody(),
+                    request,
+                    db,
+                    {"sub": "t"},
+                )
+            )
+        status = _get_whatsapp_sync_status(db)
+
+    assert posted.value.status_code == 503
+    detail = posted.value.detail if isinstance(posted.value.detail, dict) else {}
+    assert detail.get("blocker_code") == "entitlement_unavailable"
+    assert detail.get("phase") == "retrying"
+    assert "feature_locked" not in str(posted.value.detail)
+    assert "رقِّ" not in str(posted.value.detail)
+    assert _upgrade_copy_present(detail) is False
+    assert status["blocker_code"] == "entitlement_unavailable"
+    assert status["phase"] == "retrying"
+    assert _upgrade_copy_present(status) is False
+    drain_sched.assert_not_called()
+    attempt_mock.assert_not_called()
+
+    with patch("routers.catalog.resolve_tenant_id", return_value=9), patch(
+        "routers.catalog.get_entitlements",
+        _gate_entitled,
+    ), patch(
+        "services.whatsapp_catalog_sync.get_entitlements",
+        _entitled,
+    ), patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=[pending],
+    ), patch(
+        "services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain",
+    ) as drain_ok:
+        recovered = _post_whatsapp_sync_allow_drain(db)
+    assert recovered["queued"] is True
+    assert recovered["blocker_code"] is None
+    assert recovered["phase"] == "queued"
+    drain_ok.assert_called_once_with(9)
+    attempt_mock.assert_not_called()
+
+
+@patch("services.whatsapp_catalog_sync.attempt_native_meta_sync")
+def test_whatsapp_sync_post_second_lookup_confirmed_lock_is_403(attempt_mock):
+    from fastapi import HTTPException
+    from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync
+
+    db = _db_with_conn(_conn())
+    request = MagicMock()
+    with patch("routers.catalog.resolve_tenant_id", return_value=9), patch(
+        "routers.catalog.get_entitlements",
+        _gate_entitled,
+    ), patch(
+        "services.whatsapp_catalog_sync.get_entitlements",
+        _not_entitled,
+    ), patch(
+        "services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain",
+    ) as drain_sched:
+        with pytest.raises(HTTPException) as posted:
+            import asyncio
+
+            asyncio.run(
+                merchant_whatsapp_catalog_sync(
+                    _WhatsappCatalogSyncBody(),
+                    request,
+                    db,
+                    {"sub": "t"},
+                )
+            )
+    assert posted.value.status_code == 403
+    detail = posted.value.detail if isinstance(posted.value.detail, dict) else {}
+    assert detail.get("blocker_code") == "feature_locked"
+    drain_sched.assert_not_called()
+    attempt_mock.assert_not_called()
+
+
+@patch("services.whatsapp_catalog_sync.attempt_native_meta_sync")
+def test_whatsapp_sync_post_catalog_disabled_remains_409(attempt_mock):
+    from fastapi import HTTPException
+    from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync
+
+    db = _db_with_conn(_conn(catalog_enabled=False))
+    request = MagicMock()
+    with patch("routers.catalog.resolve_tenant_id", return_value=9), patch(
+        "routers.catalog.get_entitlements",
+        _gate_entitled,
+    ), patch(
+        "services.whatsapp_catalog_sync.get_entitlements",
+        _entitled,
+    ), patch(
+        "services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain",
+    ) as drain_sched:
+        with pytest.raises(HTTPException) as posted:
+            import asyncio
+
+            asyncio.run(
+                merchant_whatsapp_catalog_sync(
+                    _WhatsappCatalogSyncBody(),
+                    request,
+                    db,
+                    {"sub": "t"},
+                )
+            )
+    assert posted.value.status_code == 409
+    detail = posted.value.detail if isinstance(posted.value.detail, dict) else {}
+    assert detail.get("blocker_code") == "catalog_disabled"
+    assert detail.get("blocker_code") != "entitlement_unavailable"
+    drain_sched.assert_not_called()
+    attempt_mock.assert_not_called()
+
+
+def _post_whatsapp_sync_allow_drain(db):
+    import asyncio
+    from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync
+
+    request = MagicMock()
+    return asyncio.run(
+        merchant_whatsapp_catalog_sync(
+            _WhatsappCatalogSyncBody(),
+            request,
+            db,
+            {"sub": "t"},
+        )
+    )
 
 
 def _gift_slug_outage_patches(*, recover=False):
