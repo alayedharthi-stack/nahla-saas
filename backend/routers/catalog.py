@@ -89,7 +89,9 @@ from core.catalog import (
 from core.database import get_db
 from core.plan_entitlements import (
     EntitlementError,
+    EntitlementLookupUnavailable,
     entitlement_http_error,
+    entitlement_unavailable_http_error,
     get_entitlements,
     require_feature,
 )
@@ -662,8 +664,10 @@ def _enforce_catalog_feature(db: Session, tenant_id: int) -> None:
     bypass this — they manage configuration on behalf of merchants
     regardless of plan."""
     try:
-        ent = get_entitlements(db, tenant_id)
+        ent = get_entitlements(db, tenant_id, strict_lookup=True)
         require_feature(ent, _FEATURE_KEY)
+    except EntitlementLookupUnavailable as exc:
+        entitlement_unavailable_http_error(exc)
     except EntitlementError as exc:
         entitlement_http_error(exc)
 

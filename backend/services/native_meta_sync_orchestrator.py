@@ -877,16 +877,22 @@ def _try_acquire_sync_lock(db: Any, tenant_id: int, product_id: int) -> Optional
     sync_meta = _read_sync_meta(row)
 
     if status == "syncing" and not _syncing_is_stale(sync_meta, now):
-        db.rollback()
+        _rollback_or_raise_unusable(
+            db, operation="release_live_syncing", original_code="sync_lock_not_acquired"
+        )
         return None
 
     if status == "synced":
-        db.rollback()
+        _rollback_or_raise_unusable(
+            db, operation="release_synced_row", original_code="sync_lock_not_acquired"
+        )
         return None
 
     if status not in _ACQUIRABLE_STATUSES and status != "syncing":
         if row.sync_status is not None:
-            db.rollback()
+            _rollback_or_raise_unusable(
+                db, operation="release_non_acquirable", original_code="sync_lock_not_acquired"
+            )
             return None
 
     row.sync_status = "syncing"
@@ -1020,6 +1026,29 @@ def verify_retry_is_due(product: Any, now: Optional[datetime] = None) -> bool:
     return (now or _now()) >= nxt
 
 
+def _raise_variant_discovery_failed(db: Any, parent: Any, exc: BaseException) -> None:
+    logger.warning(
+        "[NATIVE_META_SYNC] variant discovery failed product=%s err=%s",
+        getattr(parent, "id", None),
+        type(exc).__name__,
+    )
+    try:
+        db.rollback()
+    except SQLAlchemyError as rollback_exc:
+        logger.warning(
+            "[NATIVE_META_SYNC] variant-discovery rollback failed product=%s err=%s",
+            getattr(parent, "id", None),
+            type(rollback_exc).__name__,
+        )
+        _invalidate_sync_session(db)
+        raise CatalogSyncSessionUnusable(
+            operation="variant_discovery_rollback",
+            original_code="variant_discovery_failed",
+            original_exc=exc,
+        ) from rollback_exc
+    raise VariantDiscoveryError(type(exc).__name__) from exc
+
+
 def _collect_retailer_ids(db: Any, parent: Any, fallback: Optional[str]) -> list[str]:
     ids: list[str] = []
     try:
@@ -1039,26 +1068,7 @@ def _collect_retailer_ids(db: Any, parent: Any, fallback: Optional[str]) -> list
                 if rid:
                     ids.append(rid)
     except (SQLAlchemyError, AttributeError, TypeError, ValueError) as exc:
-        logger.warning(
-            "[NATIVE_META_SYNC] variant id collection failed product=%s err=%s",
-            getattr(parent, "id", None),
-            type(exc).__name__,
-        )
-        try:
-            db.rollback()
-        except SQLAlchemyError as rollback_exc:
-            logger.warning(
-                "[NATIVE_META_SYNC] variant-discovery rollback failed product=%s err=%s",
-                getattr(parent, "id", None),
-                type(rollback_exc).__name__,
-            )
-            _invalidate_sync_session(db)
-            raise CatalogSyncSessionUnusable(
-                operation="variant_discovery_rollback",
-                original_code="variant_discovery_failed",
-                original_exc=exc,
-            ) from rollback_exc
-        raise VariantDiscoveryError(type(exc).__name__) from exc
+        _raise_variant_discovery_failed(db, parent, exc)
     fb = str(fallback or "").strip()
     if fb and fb not in ids:
         ids.append(fb)
@@ -1290,13 +1300,16 @@ def _attempt_acquired_body(
 
     from services.meta_catalog_sync_confirm import ensure_native_default_variant  # noqa: PLC0415
 
-    _variant, _variant_created = ensure_native_default_variant(db, parent)
-    fallback_rid = (
-        getattr(_variant, "retailer_id", None)
-        or preview.get("retailer_id")
-        or canonical_retailer_id(parent, fallback_to_synthetic=True)
-    )
     try:
+        try:
+            _variant, _variant_created = ensure_native_default_variant(db, parent)
+        except (SQLAlchemyError, AttributeError, TypeError, ValueError) as exc:
+            _raise_variant_discovery_failed(db, parent, exc)
+        fallback_rid = (
+            getattr(_variant, "retailer_id", None)
+            or preview.get("retailer_id")
+            or canonical_retailer_id(parent, fallback_to_synthetic=True)
+        )
         retailer_ids = _collect_retailer_ids(db, parent, fallback_rid)
     except VariantDiscoveryError as exc:
         return fail(

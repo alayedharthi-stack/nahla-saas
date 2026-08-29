@@ -298,7 +298,7 @@ def test_graph_failure_keeps_product_failed(
     assert retry_allowed_for_status(parent.sync_status) is True
 
 
-def _variant_query_db(*, rows=None, error=None):
+def _variant_query_db(*, rows=None, error=None, first_error=None):
     db = MagicMock()
 
     def _query(model):
@@ -306,10 +306,17 @@ def _variant_query_db(*, rows=None, error=None):
         q = MagicMock()
         if name == "ProductVariant":
             filtered = MagicMock()
-            if error is not None:
+            ordered = MagicMock()
+            if first_error is not None:
+                ordered.first.side_effect = first_error
+            elif error is not None:
+                ordered.first.side_effect = error
                 filtered.all.side_effect = error
             else:
-                filtered.all.return_value = list(rows or [])
+                listed = list(rows or [])
+                ordered.first.return_value = listed[0] if listed else None
+                filtered.all.return_value = listed
+            filtered.order_by.return_value = ordered
             q.filter.return_value = filtered
         return q
 
@@ -393,6 +400,38 @@ def test_empty_variant_query_still_pushes_parent_only(
     assert push_mock.call_args.args[2] == "nahla_p_501"
 
 
+@patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
+@patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
+@patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+@patch("services.native_meta_sync_orchestrator.preview_native_meta_sync")
+def test_ensure_default_variant_query_error_does_not_push(
+    preview_mock,
+    push_mock,
+    lookup_mock,
+    waba_mock,
+    lock_mock,
+):
+    from sqlalchemy.exc import OperationalError
+
+    parent = _generic_native_parent()
+    lock_mock.return_value = parent
+    preview_mock.return_value = _preview_ok()
+    db = _variant_query_db(
+        first_error=OperationalError("SELECT product_variants", {}, Exception("variants relation missing")),
+    )
+    result = attempt_native_meta_sync(db, 9, 501)
+    assert result["ok"] is False
+    assert result["error_code"] == "variant_discovery_failed"
+    assert parent.sync_status == "failed"
+    assert parent.sync_status != "syncing"
+    assert parent.sync_status != "synced"
+    assert int(parent.extra_metadata["sync_meta"].get("retry_count") or 0) == 1
+    assert parent.extra_metadata["sync_meta"].get("next_retry_at")
+    push_mock.assert_not_called()
+    lookup_mock.assert_not_called()
+
+
 def test_abandon_stale_lease_raises_when_rollback_fails():
     from sqlalchemy.exc import OperationalError
     from services.native_meta_sync_orchestrator import (
@@ -421,6 +460,80 @@ def test_release_acquire_tx_raises_when_rollback_fails():
     with pytest.raises(CatalogSyncSessionUnusable) as caught:
         _release_acquire_tx(db)
     assert caught.value.original_code == "sync_lock_not_acquired"
+    db.close.assert_called()
+
+
+def _acquire_lock_db(row):
+    db = MagicMock()
+
+    def _query(model):
+        q = MagicMock()
+        name = getattr(model, "__name__", str(model))
+        if name == "Product":
+            filtered = MagicMock()
+            filtered.with_for_update.return_value.populate_existing.return_value.first.return_value = row
+            filtered.first.return_value = row
+            q.filter.return_value = filtered
+            return q
+        q.filter.return_value.first.return_value = None
+        return q
+
+    db.query.side_effect = _query
+    return db
+
+
+def test_acquire_live_syncing_rollback_failure_raises_unusable():
+    from sqlalchemy.exc import OperationalError
+    from services.native_meta_sync_orchestrator import (
+        CatalogSyncSessionUnusable,
+        _try_acquire_sync_lock,
+    )
+
+    parent = _generic_native_parent(
+        sync_status="syncing",
+        extra_metadata={
+            "currency": "SAR",
+            "image_url": "https://cdn.example/item.webp",
+            "product_url": "https://api.example.com/public/items/nahla_p_501",
+            "sync_meta": {"syncing_started_at": datetime.now(timezone.utc).isoformat()},
+        },
+    )
+    db = _acquire_lock_db(parent)
+    db.rollback.side_effect = OperationalError("ROLLBACK", {}, Exception("connection lost"))
+    with pytest.raises(CatalogSyncSessionUnusable) as caught:
+        result = _try_acquire_sync_lock(db, 9, 501)
+        assert result is None  # must not return skipped on rollback failure
+    assert caught.value.original_code == "sync_lock_not_acquired"
+    db.close.assert_called()
+
+
+def test_acquire_synced_rollback_failure_raises_unusable():
+    from sqlalchemy.exc import OperationalError
+    from services.native_meta_sync_orchestrator import (
+        CatalogSyncSessionUnusable,
+        _try_acquire_sync_lock,
+    )
+
+    parent = _generic_native_parent(sync_status="synced")
+    db = _acquire_lock_db(parent)
+    db.rollback.side_effect = OperationalError("ROLLBACK", {}, Exception("connection lost"))
+    with pytest.raises(CatalogSyncSessionUnusable):
+        _try_acquire_sync_lock(db, 9, 501)
+    db.close.assert_called()
+
+
+def test_acquire_non_acquirable_rollback_failure_raises_unusable():
+    from sqlalchemy.exc import OperationalError
+    from services.native_meta_sync_orchestrator import (
+        CatalogSyncSessionUnusable,
+        _try_acquire_sync_lock,
+    )
+
+    parent = _generic_native_parent(sync_status="paused")
+    db = _acquire_lock_db(parent)
+    db.rollback.side_effect = OperationalError("ROLLBACK", {}, Exception("connection lost"))
+    with pytest.raises(CatalogSyncSessionUnusable):
+        _try_acquire_sync_lock(db, 9, 501)
     db.close.assert_called()
 
 

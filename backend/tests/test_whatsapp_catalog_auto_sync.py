@@ -135,7 +135,12 @@ def test_hidden_product_is_not_channel_publish_eligible():
 
 
 def _not_entitled(*_args, **_kwargs):
-    return SimpleNamespace(has_feature=lambda key: False)
+    return SimpleNamespace(
+        has_feature=lambda key: False,
+        is_blocked=False,
+        is_active=True,
+        plan_slug="starter",
+    )
 
 
 def _upgrade_copy_present(payload: dict) -> bool:
@@ -211,6 +216,170 @@ def test_confirmed_missing_entitlement_still_feature_locked():
     assert status["phase"] == "blocked"
     assert _upgrade_copy_present(queued) is True
     assert _upgrade_copy_present(status) is True
+
+
+def _db_salla_entitlement_outage(conn=None, *, products=None):
+    from sqlalchemy.exc import OperationalError
+
+    db = MagicMock()
+    rows = list(products or [])
+
+    def _query(model):
+        q = MagicMock()
+        name = getattr(model, "__name__", str(model))
+        if name == "Integration":
+            q.filter.return_value.first.side_effect = OperationalError(
+                "SELECT integrations", {}, Exception("catalog entitlement store timeout")
+            )
+            return q
+        if name == "WhatsAppConnection":
+            q.filter.return_value.first.return_value = conn or _conn()
+            return q
+        if name == "Product":
+            filtered = MagicMock()
+            filtered.order_by.return_value.offset.return_value.limit.return_value.all.return_value = rows
+            filtered.first.return_value = rows[0] if rows else None
+            q.filter.return_value = filtered
+            return q
+        q.filter.return_value.first.return_value = None
+        q.filter.return_value.all.return_value = []
+        return q
+
+    db.query.side_effect = _query
+    return db
+
+
+def test_swallowed_entitlement_lookup_does_not_lock_plan_or_upgrade():
+    pending = _product(id=201, sync_status="pending")
+    db = _db_salla_entitlement_outage(products=[pending])
+    with patch("core.billing.get_tenant_subscription", return_value=None), patch(
+        "core.manual_billing_grant.is_manual_gift_grant_active",
+        return_value=False,
+    ), patch("services.whatsapp_catalog_sync.attempt_native_meta_sync") as attempt_mock:
+        queued = enqueue_whatsapp_catalog_sync(db, 9, force=True, trigger="manual")
+        status = build_whatsapp_catalog_sync_status(db, 9)
+        drained = drain_whatsapp_catalog_sync(db, 9)
+    assert queued["blocker_code"] == "entitlement_unavailable"
+    assert queued["phase"] == "retrying"
+    assert _upgrade_copy_present(queued) is False
+    assert status["blocker_code"] == "entitlement_unavailable"
+    assert status["phase"] == "retrying"
+    assert _upgrade_copy_present(status) is False
+    assert "تعذر" in (status.get("message_ar") or "") or "تعذّر" in (status.get("message_ar") or "")
+    assert drained.get("skipped") is True
+    attempt_mock.assert_not_called()
+    assert pending.sync_status == "pending"
+
+    with patch("services.whatsapp_catalog_sync.get_entitlements", _entitled), patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=[pending],
+    ), patch("services.whatsapp_catalog_sync.attempt_native_meta_sync") as recovered:
+        recovered.return_value = {"ok": True, "sync_status": "synced"}
+        queued_ok = enqueue_whatsapp_catalog_sync(db, 9, force=True, trigger="manual")
+        status_ok = build_whatsapp_catalog_sync_status(db, 9)
+        drained_ok = drain_whatsapp_catalog_sync(db, 9)
+    assert queued_ok["queued"] is True
+    assert queued_ok["blocker_code"] is None
+    assert status_ok["ready"] is True
+    assert status_ok["phase"] != "blocked"
+    assert drained_ok.get("skipped") is not True
+    recovered.assert_called()
+
+
+def test_status_returns_retrying_when_product_scan_would_also_fail():
+    from sqlalchemy.exc import OperationalError
+
+    db = MagicMock()
+
+    def _query(model):
+        raise OperationalError("SELECT", {}, Exception("session poisoned after entitlement lookup"))
+
+    db.query.side_effect = _query
+    with patch("core.billing.get_tenant_subscription", return_value=None), patch(
+        "core.manual_billing_grant.is_manual_gift_grant_active",
+        return_value=False,
+    ):
+        status = build_whatsapp_catalog_sync_status(db, 9)
+    assert status["blocker_code"] == "entitlement_unavailable"
+    assert status["phase"] == "retrying"
+    assert status["ok"] is True
+    assert _upgrade_copy_present(status) is False
+
+
+def test_whatsapp_sync_post_transient_is_503_not_upgrade():
+    from fastapi import HTTPException
+    from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync
+
+    db = _db_salla_entitlement_outage()
+    request = MagicMock()
+    with patch("routers.catalog.resolve_tenant_id", return_value=9), patch(
+        "core.billing.get_tenant_subscription",
+        return_value=None,
+    ), patch(
+        "core.manual_billing_grant.is_manual_gift_grant_active",
+        return_value=False,
+    ), patch(
+        "services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain",
+    ) as drain_sched:
+        with pytest.raises(HTTPException) as caught:
+            import asyncio
+
+            asyncio.run(
+                merchant_whatsapp_catalog_sync(
+                    _WhatsappCatalogSyncBody(),
+                    request,
+                    db,
+                    {"sub": "t"},
+                )
+            )
+    assert caught.value.status_code == 503
+    detail = caught.value.detail
+    blob = detail if isinstance(detail, dict) else {}
+    assert blob.get("blocker_code") == "entitlement_unavailable" or blob.get("error") == "entitlement_unavailable"
+    assert "feature_locked" not in str(detail)
+    assert "رقِّ" not in str(detail)
+    drain_sched.assert_not_called()
+
+
+def test_whatsapp_sync_post_confirmed_lock_remains_403():
+    from fastapi import HTTPException
+    from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync
+
+    db = _db_with_conn(_conn())
+    request = MagicMock()
+    with patch("routers.catalog.resolve_tenant_id", return_value=9), patch(
+        "routers.catalog.get_entitlements",
+        _not_entitled,
+    ):
+        with pytest.raises(HTTPException) as caught:
+            import asyncio
+
+            asyncio.run(
+                merchant_whatsapp_catalog_sync(
+                    _WhatsappCatalogSyncBody(),
+                    request,
+                    db,
+                    {"sub": "t"},
+                )
+            )
+    assert caught.value.status_code == 403
+    assert "upgrade_required" in str(caught.value.detail) or "feature" in str(caught.value.detail).lower()
+
+
+def test_ui_keeps_polling_retrying_and_has_no_upgrade_copy_in_card():
+    from pathlib import Path
+
+    card = (
+        Path(__file__).resolve().parents[2]
+        / "dashboard"
+        / "src"
+        / "components"
+        / "catalog"
+        / "CatalogWhatsAppSyncCard.tsx"
+    ).read_text(encoding="utf-8")
+    assert "'retrying'" in card
+    assert "FOLLOW_PHASES" in card
+    assert "رقِّ الخطة" not in card
 
 
 @patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
@@ -322,6 +491,93 @@ def test_readiness_stamp_rollback_failure_stops_batch(attempt_mock):
     assert caught.value.__cause__ is not None
     assert attempt_mock.call_count == 1
     db.close.assert_called()
+
+
+def _drain_acquire_db(row):
+    db = _db_with_conn(_conn())
+    inner = db.query.side_effect
+
+    def _query(model):
+        name = getattr(model, "__name__", str(model))
+        if name == "Product":
+            q = MagicMock()
+            filtered = MagicMock()
+            filtered.with_for_update.return_value.populate_existing.return_value.first.return_value = row
+            filtered.first.return_value = row
+            q.filter.return_value = filtered
+            return q
+        return inner(model)
+
+    db.query.side_effect = _query
+    return db
+
+
+@patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+def test_drain_stops_when_live_syncing_rollback_fails(push_mock):
+    from sqlalchemy.exc import OperationalError
+    from services.native_meta_sync_orchestrator import CatalogSyncSessionUnusable
+
+    listed_first = _product(id=201, sync_status="pending")
+    second = _product(id=202, sync_status="pending")
+    locked = _product(
+        id=201,
+        sync_status="syncing",
+        extra_metadata={
+            "sync_meta": {"syncing_started_at": datetime.now(timezone.utc).isoformat()},
+        },
+    )
+    db = _drain_acquire_db(locked)
+    db.rollback.side_effect = OperationalError("ROLLBACK", {}, Exception("dead session"))
+    with patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=[listed_first, second],
+    ):
+        with pytest.raises(CatalogSyncSessionUnusable) as caught:
+            drain_whatsapp_catalog_sync(db, 9)
+    assert caught.value.original_code == "sync_lock_not_acquired"
+    push_mock.assert_not_called()
+    db.close.assert_called()
+
+
+@patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+def test_drain_stops_when_synced_rollback_fails(push_mock):
+    from sqlalchemy.exc import OperationalError
+    from services.native_meta_sync_orchestrator import CatalogSyncSessionUnusable
+
+    listed_first = _product(id=201, sync_status="pending")
+    second = _product(id=202, sync_status="pending")
+    locked = _product(id=201, sync_status="synced")
+    db = _drain_acquire_db(locked)
+    db.rollback.side_effect = OperationalError("ROLLBACK", {}, Exception("dead session"))
+    with patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=[listed_first, second],
+    ):
+        with pytest.raises(CatalogSyncSessionUnusable):
+            drain_whatsapp_catalog_sync(db, 9)
+    push_mock.assert_not_called()
+
+
+@patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+def test_drain_stops_when_non_acquirable_rollback_fails(push_mock):
+    from sqlalchemy.exc import OperationalError
+    from services.native_meta_sync_orchestrator import CatalogSyncSessionUnusable
+
+    listed_first = _product(id=201, sync_status="pending")
+    second = _product(id=202, sync_status="pending")
+    locked = _product(id=201, sync_status="paused")
+    db = _drain_acquire_db(locked)
+    db.rollback.side_effect = OperationalError("ROLLBACK", {}, Exception("dead session"))
+    with patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=[listed_first, second],
+    ):
+        with pytest.raises(CatalogSyncSessionUnusable):
+            drain_whatsapp_catalog_sync(db, 9)
+    push_mock.assert_not_called()
 
 
 @patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)

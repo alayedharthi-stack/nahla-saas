@@ -20,7 +20,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set
 from sqlalchemy.exc import SQLAlchemyError
 
 from core.catalog import is_whatsapp_channel_publish_eligible
-from core.plan_entitlements import get_entitlements
+from core.plan_entitlements import EntitlementLookupUnavailable, get_entitlements
 from services.native_meta_sync_orchestrator import (
     CONTENT_LOOKUP_FIELDS,
     IDENTITY_LOOKUP_FIELDS,
@@ -114,9 +114,16 @@ def _load_connection(db: Any, tenant_id: int) -> Any:
 def evaluate_whatsapp_catalog_sync_readiness(db: Any, tenant_id: int) -> Dict[str, Any]:
     """Local readiness for enqueue. Does not call Graph."""
     try:
-        ent = get_entitlements(db, int(tenant_id))
+        ent = get_entitlements(db, int(tenant_id), strict_lookup=True)
         if not ent.has_feature("meta_catalog_sync"):
             return _blocker("feature_locked")
+    except EntitlementLookupUnavailable as exc:
+        logger.warning(
+            "[WA_CATALOG_SYNC] entitlement check unavailable tenant=%s source=%s",
+            int(tenant_id),
+            exc.source,
+        )
+        return _blocker("entitlement_unavailable")
     except (SQLAlchemyError, TimeoutError, OSError, ConnectionError) as exc:
         logger.warning(
             "[WA_CATALOG_SYNC] entitlement check unavailable tenant=%s err=%s",
@@ -305,9 +312,8 @@ def _belongs_to_tenant(product: Any, tenant_id: int) -> bool:
     return int(getattr(product, "tenant_id", 0) or 0) == int(tenant_id)
 
 
-def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any]:
-    readiness = evaluate_whatsapp_catalog_sync_readiness(db, tenant_id)
-    counts = {
+def _empty_sync_counts() -> Dict[str, int]:
+    return {
         "eligible": 0,
         "pending": 0,
         "syncing": 0,
@@ -317,51 +323,66 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
         "pending_verification": 0,
         "skipped_ineligible": 0,
     }
+
+
+def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any]:
+    readiness = evaluate_whatsapp_catalog_sync_readiness(db, tenant_id)
+    counts = _empty_sync_counts()
     last_success_at = None
     failures: List[Dict[str, Any]] = []
 
-    for row in iter_tenant_products(db, tenant_id):
-        if not _belongs_to_tenant(row, tenant_id):
-            continue
-        if not is_whatsapp_channel_publish_eligible(row):
-            counts["skipped_ineligible"] += 1
-            continue
-        counts["eligible"] += 1
-        status = _status_of(row)
-        sm = _sync_meta(row)
-        verify_exhausted = (
-            status == "pending_verification"
-            and int(sm.get("verify_retry_count") or 0) >= MAX_VERIFY_LAG_RETRIES
-        )
-        if status == "pending" or status == "":
-            counts["pending"] += 1
-        elif status == "syncing":
-            counts["syncing"] += 1
-        elif status == "synced":
-            counts["synced"] += 1
-        elif status == "pending_verification" and not verify_exhausted:
-            counts["pending_verification"] += 1
-        elif status == "failed" or verify_exhausted:
-            counts["failed"] += 1
-        elif status == "blocked":
-            counts["blocked"] += 1
-        else:
-            counts["pending"] += 1
+    if readiness.get("blocker_code") == "entitlement_unavailable":
+        try:
+            db.rollback()
+        except SQLAlchemyError as rollback_exc:
+            logger.warning(
+                "[WA_CATALOG_SYNC] status rollback after entitlement outage tenant=%s err=%s",
+                int(tenant_id),
+                type(rollback_exc).__name__,
+            )
+    else:
+        for row in iter_tenant_products(db, tenant_id):
+            if not _belongs_to_tenant(row, tenant_id):
+                continue
+            if not is_whatsapp_channel_publish_eligible(row):
+                counts["skipped_ineligible"] += 1
+                continue
+            counts["eligible"] += 1
+            status = _status_of(row)
+            sm = _sync_meta(row)
+            verify_exhausted = (
+                status == "pending_verification"
+                and int(sm.get("verify_retry_count") or 0) >= MAX_VERIFY_LAG_RETRIES
+            )
+            if status == "pending" or status == "":
+                counts["pending"] += 1
+            elif status == "syncing":
+                counts["syncing"] += 1
+            elif status == "synced":
+                counts["synced"] += 1
+            elif status == "pending_verification" and not verify_exhausted:
+                counts["pending_verification"] += 1
+            elif status == "failed" or verify_exhausted:
+                counts["failed"] += 1
+            elif status == "blocked":
+                counts["blocked"] += 1
+            else:
+                counts["pending"] += 1
 
-        synced_at = getattr(row, "last_synced_at", None)
-        if synced_at is not None:
-            iso = synced_at.isoformat() if hasattr(synced_at, "isoformat") else str(synced_at)
-            if last_success_at is None or iso > last_success_at:
-                last_success_at = iso
+            synced_at = getattr(row, "last_synced_at", None)
+            if synced_at is not None:
+                iso = synced_at.isoformat() if hasattr(synced_at, "isoformat") else str(synced_at)
+                if last_success_at is None or iso > last_success_at:
+                    last_success_at = iso
 
-        if (status in ("failed", "blocked") or verify_exhausted) and len(failures) < FAILURE_SAMPLE_LIMIT:
-            summary = sync_error_summary(row) or ("verification_exhausted" if verify_exhausted else status)
-            failures.append({
-                "product_id": int(row.id),
-                "title": str(getattr(row, "title", "") or "")[:120],
-                "sync_status": status,
-                "error_summary": str(summary)[:240],
-            })
+            if (status in ("failed", "blocked") or verify_exhausted) and len(failures) < FAILURE_SAMPLE_LIMIT:
+                summary = sync_error_summary(row) or ("verification_exhausted" if verify_exhausted else status)
+                failures.append({
+                    "product_id": int(row.id),
+                    "title": str(getattr(row, "title", "") or "")[:120],
+                    "sync_status": status,
+                    "error_summary": str(summary)[:240],
+                })
 
     if counts["syncing"] > 0:
         phase = "syncing"

@@ -1332,10 +1332,6 @@ def test_variant_query_failure_retries_all_retailer_ids(postgres_engine: Engine)
                 },
             ),
             patch(
-                "services.meta_catalog_sync_confirm.ensure_native_default_variant",
-                return_value=(SimpleNamespace(retailer_id="sku-blue"), False),
-            ),
-            patch(
                 "services.native_meta_sync_orchestrator._resolve_connection",
                 return_value=SimpleNamespace(
                     catalog_enabled=True,
@@ -1356,7 +1352,7 @@ def test_variant_query_failure_retries_all_retailer_ids(postgres_engine: Engine)
                 return_value={"ok": True, "expected_catalog_linked": True},
             ),
         )
-        with graph_patches[0], graph_patches[1], graph_patches[2], graph_patches[3], graph_patches[4], graph_patches[5]:
+        with graph_patches[0], graph_patches[1], graph_patches[2], graph_patches[3], graph_patches[4]:
             first = attempt_native_meta_sync(worker, _TEST_TENANT, product_id)
             assert first.get("error_code") == "variant_discovery_failed"
             row = worker.get(Product, product_id)
@@ -1585,4 +1581,195 @@ def test_drain_stops_on_rollback_failure_then_healthy_session_recovers(
             cleanup.close()
             worker.close()
             holder.close()
+            setup.close()
+
+
+def test_empty_variants_creates_single_default_and_is_idempotent(postgres_engine: Engine) -> None:
+    from types import SimpleNamespace
+    from database.models import Product, ProductVariant
+    from services.native_meta_sync_orchestrator import attempt_native_meta_sync
+
+    _ensure_orm_tables(postgres_engine)
+    Session = _Session(postgres_engine)
+    setup = Session()
+    worker = Session()
+    pushed: list[str] = []
+    try:
+        product_id = _seed_lock_product(
+            setup,
+            extra_metadata={
+                "currency": "SAR",
+                "image_url": "https://cdn.example/shirt.webp",
+                "product_url": "https://example.test/p",
+            },
+        )
+
+        def _push(_db, _tid, retailer_id, **_kwargs):
+            pushed.append(str(retailer_id))
+            return {
+                "ok": True,
+                "payload": {"price": 8300, "currency": "SAR", "availability": "in stock"},
+            }
+
+        graph_patches = (
+            patch(
+                "services.native_meta_sync_orchestrator.preview_native_meta_sync",
+                return_value={
+                    "eligible": True,
+                    "retailer_id": f"nahla_p_{product_id}",
+                    "fatal_errors": [],
+                    "warnings": [],
+                },
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator._resolve_connection",
+                return_value=SimpleNamespace(
+                    catalog_enabled=True,
+                    meta_catalog_id="CAT-ITEST",
+                    access_token="EAAB-test",
+                ),
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.push_one_meta_catalog_item",
+                side_effect=_push,
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id",
+                return_value=(
+                    "META-default",
+                    {
+                        "matched": True,
+                        "item": {
+                            "price": 8300,
+                            "currency": "SAR",
+                            "availability": "in stock",
+                        },
+                    },
+                ),
+            ),
+            patch(
+                "services.native_meta_sync_orchestrator.get_waba_catalog_link_status",
+                return_value={"ok": True, "expected_catalog_linked": True},
+            ),
+        )
+        with graph_patches[0], graph_patches[1], graph_patches[2], graph_patches[3], graph_patches[4]:
+            first = attempt_native_meta_sync(worker, _TEST_TENANT, product_id)
+            variants = (
+                worker.query(ProductVariant)
+                .filter(
+                    ProductVariant.tenant_id == _TEST_TENANT,
+                    ProductVariant.product_id == product_id,
+                )
+                .all()
+            )
+            assert len(variants) == 1
+            assert variants[0].is_default is True
+            assert pushed
+            assert str(worker.get(Product, product_id).sync_status or "") != "syncing"
+            assert first.get("ok") is True or str(first.get("sync_status") or "") in {
+                "synced",
+                "pending_verification",
+            }
+
+            pushed.clear()
+            worker.expire_all()
+            second = attempt_native_meta_sync(worker, _TEST_TENANT, product_id)
+            variants_again = (
+                worker.query(ProductVariant)
+                .filter(
+                    ProductVariant.tenant_id == _TEST_TENANT,
+                    ProductVariant.product_id == product_id,
+                )
+                .all()
+            )
+            assert len(variants_again) == 1
+            assert second.get("error_code") != "unexpected_sync_error"
+            assert str(worker.get(Product, product_id).sync_status or "") != "syncing"
+    finally:
+        _rollback_sessions(worker, setup)
+        cleanup = Session()
+        try:
+            _cleanup_lock_rows(cleanup)
+        finally:
+            cleanup.close()
+            worker.close()
+            setup.close()
+
+
+@pytest.mark.parametrize(
+    "sync_status,extra_metadata",
+    [
+        (
+            "syncing",
+            {
+                "currency": "SAR",
+                "image_url": "https://cdn.example/shirt.webp",
+                "sync_meta": {"syncing_started_at": datetime.now(timezone.utc).isoformat()},
+            },
+        ),
+        ("synced", {"currency": "SAR", "image_url": "https://cdn.example/shirt.webp"}),
+        ("paused", {"currency": "SAR", "image_url": "https://cdn.example/shirt.webp"}),
+    ],
+)
+def test_acquire_status_rollback_failure_releases_row_lock(
+    postgres_engine: Engine,
+    sync_status: str,
+    extra_metadata: dict,
+) -> None:
+    from sqlalchemy.exc import OperationalError
+    from database.models import Product
+    from services.native_meta_sync_orchestrator import (
+        CatalogSyncSessionUnusable,
+        _try_acquire_sync_lock,
+    )
+
+    _ensure_orm_tables(postgres_engine)
+    Session = _Session(postgres_engine)
+    setup = Session()
+    worker = Session()
+    observer = Session()
+    orig_rollback = worker.rollback
+    try:
+        product_id = _seed_lock_product(
+            setup,
+            sync_status=sync_status,
+            extra_metadata=extra_metadata,
+        )
+
+        def _failing_rollback() -> None:
+            raise OperationalError("ROLLBACK", {}, Exception("injected rollback failure"))
+
+        worker.rollback = _failing_rollback  # type: ignore[method-assign]
+        with pytest.raises(CatalogSyncSessionUnusable) as caught:
+            _try_acquire_sync_lock(worker, _TEST_TENANT, product_id)
+        assert caught.value.original_code == "sync_lock_not_acquired"
+        assert caught.value.__cause__ is not None
+        worker.rollback = orig_rollback  # type: ignore[method-assign]
+
+        locked = (
+            observer.query(Product)
+            .filter(Product.id == product_id, Product.tenant_id == _TEST_TENANT)
+            .with_for_update(skip_locked=True)
+            .first()
+        )
+        assert locked is not None
+        observer.rollback()
+
+        healthy = Session()
+        try:
+            again = _try_acquire_sync_lock(healthy, _TEST_TENANT, product_id)
+            if sync_status in {"syncing", "synced", "paused"}:
+                assert again is None
+        finally:
+            healthy.close()
+    finally:
+        worker.rollback = orig_rollback  # type: ignore[method-assign]
+        _rollback_sessions(worker, observer, setup)
+        cleanup = Session()
+        try:
+            _cleanup_lock_rows(cleanup)
+        finally:
+            cleanup.close()
+            worker.close()
+            observer.close()
             setup.close()
