@@ -249,20 +249,31 @@ def _settings_billing_blob(db: Session, tenant_id: int) -> Dict[str, Any]:
 
 
 def _gift_grant_is_active(blob: Optional[Dict[str, Any]]) -> bool:
+    """Match canonical gift activity, including never-expiring grants."""
     if not isinstance(blob, dict) or not blob.get("enabled") or blob.get("revoked_at"):
         return False
     now = datetime.now(timezone.utc)
     starts = blob.get("starts_at")
-    ends = blob.get("ends_at")
     try:
         if starts:
             start_dt = _coerce_utc(datetime.fromisoformat(str(starts).replace("Z", "+00:00")))
             if start_dt and start_dt > now:
                 return False
-        if ends:
-            end_dt = _coerce_utc(datetime.fromisoformat(str(ends).replace("Z", "+00:00")))
-            if end_dt and end_dt <= now:
-                return False
+    except (TypeError, ValueError):
+        return False
+
+    from core.manual_billing_grant import is_permanent_gift_blob  # noqa: PLC0415
+
+    if is_permanent_gift_blob(blob):
+        return True
+
+    ends = blob.get("ends_at")
+    try:
+        if not ends:
+            return False
+        end_dt = _coerce_utc(datetime.fromisoformat(str(ends).replace("Z", "+00:00")))
+        if not end_dt or end_dt <= now:
+            return False
     except (TypeError, ValueError):
         return False
     return True
