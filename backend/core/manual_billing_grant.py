@@ -10,7 +10,8 @@ Stored in ``TenantSettings.extra_metadata`` (DB column ``metadata``):
         "grant_type": "gift",
         "plan_slug": "starter",
         "starts_at": "...",
-        "ends_at": "...",
+        "ends_at": "... | null",   # null = permanent (no expiry)
+        "permanent": false,
         "reason": "...",
         "granted_by": "...",
         "granted_at": "...",
@@ -101,8 +102,27 @@ def has_active_paid_subscription(db: Session, tenant_id: int) -> bool:
     return status == "active"
 
 
+def is_permanent_gift_blob(blob: Optional[Dict[str, Any]]) -> bool:
+    """True when the grant has no expiry.
+
+    Permanence is ``permanent is True``, a missing ``ends_at`` key, or JSON
+    ``null``. Empty strings and the literal ``"null"`` are not permanence.
+    """
+    if not blob:
+        return False
+    if blob.get("permanent") is True:
+        return True
+    if "ends_at" not in blob:
+        return True
+    return blob.get("ends_at") is None
+
+
 def is_manual_gift_grant_active(db: Session, tenant_id: int) -> bool:
-    """True when tenant has an enabled, unexpired, unrevoked manual gift grant."""
+    """True when tenant has an enabled, unexpired, unrevoked manual gift grant.
+
+    A missing/null ``ends_at`` (or ``permanent=true``) is a documented
+    never-expiring grant. Timed grants still expire when ``ends_at`` elapses.
+    """
     blob = _read_grant_blob(db, tenant_id)
     if not blob or not blob.get("enabled"):
         return False
@@ -116,9 +136,10 @@ def is_manual_gift_grant_active(db: Session, tenant_id: int) -> bool:
     if starts_at and starts_at > now:
         return False
 
-    ends_at = _parse_dt(blob.get("ends_at"))
-    if not ends_at or ends_at <= now:
-        return False
+    if not is_permanent_gift_blob(blob):
+        ends_at = _parse_dt(blob.get("ends_at"))
+        if not ends_at or ends_at <= now:
+            return False
 
     plan_slug = str(blob.get("plan_slug") or DEFAULT_GIFT_PLAN_SLUG).strip().lower()
     return plan_slug in ALLOWED_GIFT_PLAN_SLUGS
@@ -137,7 +158,13 @@ def manual_gift_grant_status(db: Session, tenant_id: int) -> Dict[str, Any]:
     return {
         "manual_gift_grant_active": active,
         "manual_gift_grant_headline_ar": (
-            "باقة هدية مفعلة لهذا المتجر" if active else None
+            (
+                "باقة هدية دائمة مفعلة لهذا المتجر"
+                if is_permanent_gift_blob(blob)
+                else "باقة هدية مفعلة لهذا المتجر"
+            )
+            if active
+            else None
         ),
         "manual_gift_grant_reason": (
             str(blob.get("reason") or "") if active and blob else None
@@ -147,6 +174,9 @@ def manual_gift_grant_status(db: Session, tenant_id: int) -> Dict[str, Any]:
         ),
         "manual_gift_grant_ends_at": (
             blob.get("ends_at") if active and blob else None
+        ),
+        "manual_gift_grant_permanent": (
+            is_permanent_gift_blob(blob) if active and blob else False
         ),
         "manual_gift_grant_billing_status": "gift" if active else None,
     }
@@ -253,9 +283,12 @@ def compact_billing_display_for_admin(
 
     if gift_active:
         plan_label = _PLAN_DISPLAY_AR.get(gift_plan_slug or "", (gift_plan_slug or "Starter").title())
-        label = f"هدية — {plan_label}"
-        if gift_ends_dt:
-            label = f"{label} — حتى {_format_ar_short_date(gift_ends_dt)}"
+        if is_permanent_gift_blob(gift_blob):
+            label = f"هدية دائمة — {plan_label}"
+        else:
+            label = f"هدية — {plan_label}"
+            if gift_ends_dt:
+                label = f"{label} — حتى {_format_ar_short_date(gift_ends_dt)}"
         return {
             "billing_access_kind": "gift",
             "billing_access_label_ar": label,
@@ -428,22 +461,31 @@ def apply_manual_gift_grant(
     db: Session,
     tenant_id: int,
     *,
-    days: int,
+    days: Optional[int] = None,
+    permanent: bool = False,
     plan_slug: str = DEFAULT_GIFT_PLAN_SLUG,
     reason: str,
     granted_by: str,
     force: bool = False,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Create or replace a manual gift grant. Never touches subscription/payment rows."""
+    """Create or replace a manual gift grant. Never touches subscription/payment rows.
+
+    Permanent grants store ``ends_at=null`` (and ``permanent=true``). A 365-day
+    timed grant is not a substitute for permanence.
+    """
     from models import Tenant  # noqa: PLC0415
 
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
         raise ManualGiftGrantError(f"Tenant {tenant_id} not found", code="tenant_not_found")
 
-    if days < 1 or days > 365:
-        raise ManualGiftGrantError("days must be between 1 and 365", code="invalid_days")
+    if permanent:
+        resolved_days: Optional[int] = None
+    else:
+        resolved_days = 30 if days is None else int(days)
+        if resolved_days < 1 or resolved_days > 365:
+            raise ManualGiftGrantError("days must be between 1 and 365", code="invalid_days")
 
     slug = _validate_plan_slug(plan_slug)
     reason_clean = (reason or "").strip()
@@ -467,13 +509,16 @@ def apply_manual_gift_grant(
         )
 
     now = datetime.now(timezone.utc)
-    ends_at = (now + timedelta(days=days)).replace(microsecond=0)
+    ends_at_iso: Optional[str] = None
+    if not permanent:
+        ends_at_iso = (now + timedelta(days=int(resolved_days))).replace(microsecond=0).isoformat()
     blob = {
         "enabled": True,
         "grant_type": GIFT_GRANT_TYPE,
         "plan_slug": slug,
+        "permanent": bool(permanent),
         "starts_at": now.replace(microsecond=0).isoformat(),
-        "ends_at": ends_at.isoformat(),
+        "ends_at": ends_at_iso,
         "reason": reason_clean,
         "granted_by": granted_by_clean,
         "granted_at": now.replace(microsecond=0).isoformat(),
@@ -486,8 +531,10 @@ def apply_manual_gift_grant(
         "action": "grant",
         "dry_run": dry_run,
         "plan_slug": slug,
+        "permanent": bool(permanent),
         "starts_at": blob["starts_at"],
         "ends_at": blob["ends_at"],
+        "days": resolved_days,
         "reason": reason_clean,
         "granted_by": granted_by_clean,
     }
@@ -508,6 +555,7 @@ def apply_manual_gift_grant(
             "action": "grant",
             "at": now.isoformat(),
             "plan_slug": slug,
+            "permanent": bool(permanent),
             "starts_at": blob["starts_at"],
             "ends_at": blob["ends_at"],
             "reason": reason_clean,

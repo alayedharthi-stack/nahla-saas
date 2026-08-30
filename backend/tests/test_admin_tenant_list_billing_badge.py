@@ -128,7 +128,27 @@ class TestAdminTenantListBillingBadge:
         assert display["billing_plan_slug"] == "starter"
         assert "هدية" in display["billing_access_label_ar"]
         assert "Starter" in display["billing_access_label_ar"]
+        assert "دائمة" not in display["billing_access_label_ar"]
         assert _billing_row_counts(db, TENANT_GIFT) == before
+
+    def test_permanent_gift_summary_shows_no_expiry_badge(self, db):
+        from core.manual_billing_grant import apply_manual_gift_grant
+        from routers.admin import _tenant_summary_payload
+
+        tenant = _seed_tenant(db, TENANT_GIFT)
+        apply_manual_gift_grant(
+            db,
+            TENANT_GIFT,
+            permanent=True,
+            reason="permanent starter",
+            granted_by="ops@nahla",
+        )
+        display = _tenant_summary_payload(db, tenant)["billing_display"]
+        assert display["billing_access_kind"] == "gift"
+        assert display["gift_active"] is True
+        assert display["billing_ends_at"] is None
+        assert display["gift_ends_at"] is None
+        assert display["billing_access_label_ar"] == "هدية دائمة — Starter"
 
     def test_paid_subscription_wins_over_gift_metadata(self, db):
         from routers.admin import _tenant_summary_payload

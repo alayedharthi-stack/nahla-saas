@@ -249,20 +249,31 @@ def _settings_billing_blob(db: Session, tenant_id: int) -> Dict[str, Any]:
 
 
 def _gift_grant_is_active(blob: Optional[Dict[str, Any]]) -> bool:
+    """Match canonical gift activity, including never-expiring grants."""
     if not isinstance(blob, dict) or not blob.get("enabled") or blob.get("revoked_at"):
         return False
     now = datetime.now(timezone.utc)
     starts = blob.get("starts_at")
-    ends = blob.get("ends_at")
     try:
         if starts:
             start_dt = _coerce_utc(datetime.fromisoformat(str(starts).replace("Z", "+00:00")))
             if start_dt and start_dt > now:
                 return False
-        if ends:
-            end_dt = _coerce_utc(datetime.fromisoformat(str(ends).replace("Z", "+00:00")))
-            if end_dt and end_dt <= now:
-                return False
+    except (TypeError, ValueError):
+        return False
+
+    from core.manual_billing_grant import is_permanent_gift_blob  # noqa: PLC0415
+
+    if is_permanent_gift_blob(blob):
+        return True
+
+    ends = blob.get("ends_at")
+    try:
+        if not ends:
+            return False
+        end_dt = _coerce_utc(datetime.fromisoformat(str(ends).replace("Z", "+00:00")))
+        if not end_dt or end_dt <= now:
+            return False
     except (TypeError, ValueError):
         return False
     return True
@@ -876,6 +887,7 @@ def _lifecycle_headline_ar(
     trial_end: Optional[str],
     subscription_end: Optional[str],
     gift_end: Optional[str] = None,
+    gift_permanent: bool = False,
 ) -> str:
     trial_date = (trial_end or "")[:10] or "—"
     sub_date = (subscription_end or "")[:10] or "—"
@@ -889,6 +901,8 @@ def _lifecycle_headline_ar(
     if lifecycle_status == "trial_expired":
         return f"انتهت تجربتك المجانية بتاريخ: {trial_date} — اختر خطة للاشتراك ومتابعة تشغيل موظف المبيعات الذكي"
     if lifecycle_status == "gift_active":
+        if gift_permanent or not gift_end:
+            return f"تم تفعيل باقة {plan} كهدية دائمة بلا تاريخ انتهاء."
         return (
             f"تم تفعيل باقة {plan} كهدية حتى {gift_date}"
             " — يمكنك استخدام مزايا الباقة خلال فترة الهدية."
@@ -934,6 +948,7 @@ def resolve_billing_lifecycle(
     sub_ends = _effective_sub_ends_at(record_sub) if record_sub else None
     sub_expired = bool(sub_ends and sub_ends <= now) if record_sub else False
     gift_end_iso: Optional[str] = None
+    gift_permanent = False
 
     if active_sub:
         lifecycle_status = "paid_active"
@@ -948,6 +963,7 @@ def resolve_billing_lifecycle(
             _read_grant_blob,
             get_manual_gift_grant_plan_slug,
             is_manual_gift_grant_active,
+            is_permanent_gift_blob,
         )
         from core.plan_entitlements import PLAN_DEFINITIONS  # noqa: PLC0415
 
@@ -958,9 +974,12 @@ def resolve_billing_lifecycle(
             plan_slug = gift_plan_slug
             blob = _read_grant_blob(db, tenant_id) or {}
             gift_end_iso = blob.get("ends_at")
+            gift_permanent = is_permanent_gift_blob(blob)
             gift_ends_dt = _coerce_utc(gift_end_iso) if gift_end_iso else None
             lifecycle_status = "gift_active"
-            days_remaining = _days_until(gift_ends_dt) if gift_ends_dt else 0
+            days_remaining = (
+                0 if gift_permanent else (_days_until(gift_ends_dt) if gift_ends_dt else 0)
+            )
             warning_level = "none"
             is_trial = False
             trial_expired = False
@@ -1020,6 +1039,7 @@ def resolve_billing_lifecycle(
         trial_end=trial_info.get("trial_end"),
         subscription_end=_iso(sub_ends),
         gift_end=gift_end_iso,
+        gift_permanent=gift_permanent,
     )
 
     expired_since_days = 0

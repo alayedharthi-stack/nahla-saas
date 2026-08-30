@@ -214,6 +214,25 @@ class TestAdminManualGiftGrant:
         revoke_manual_gift_grant(db, TENANT_ID, granted_by="admin@test")
         assert is_manual_gift_grant_active(db, TENANT_ID) is False
 
+    def test_apply_permanent_grant_via_admin_helper(self, db):
+        from core.manual_billing_grant import apply_manual_gift_grant, is_manual_gift_grant_active
+        from core.plan_entitlements import get_entitlements
+
+        _seed_tenant(db)
+        result = apply_manual_gift_grant(
+            db,
+            TENANT_ID,
+            permanent=True,
+            reason="admin permanent starter",
+            granted_by="admin@test",
+        )
+        assert result["permanent"] is True
+        assert result["ends_at"] is None
+        assert is_manual_gift_grant_active(db, TENANT_ID) is True
+        ent = get_entitlements(db, TENANT_ID)
+        assert ent.plan_slug == "starter"
+        assert ent.billing_status == "gift"
+
     def test_get_route_requires_admin(self):
         deps = _route_dep_names("/admin/tenants/{tenant_id}/manual-gift-grant", "GET")
         assert "require_admin" in deps

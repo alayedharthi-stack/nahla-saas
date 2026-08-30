@@ -4,9 +4,9 @@ grant_manual_billing.py
 Grant or revoke a tenant-scoped manual gift billing grant (metadata only).
 
 Usage (Railway shell):
-    python backend/scripts/grant_manual_billing.py --tenant 42 --days 30 \\
-        --plan starter --reason "gift for merchant community member" \\
-        --granted-by "ops@nahla"
+    python backend/scripts/grant_manual_billing.py --tenant 42 --permanent \\
+        --plan starter --reason "permanent starter gift" \\
+        --granted-by "ops@nahla" --force
 
     python backend/scripts/grant_manual_billing.py --tenant 42 --revoke \\
         --granted-by "ops@nahla"
@@ -46,7 +46,8 @@ log = logging.getLogger("grant_manual_billing")
 def main() -> int:
     ap = argparse.ArgumentParser(description="Grant or revoke a manual gift billing grant.")
     ap.add_argument("--tenant", type=int, required=True, help="Tenant ID")
-    ap.add_argument("--days", type=int, default=30, help="Grant duration in days (default: 30)")
+    ap.add_argument("--days", type=int, default=30, help="Grant duration in days (default: 30; ignored with --permanent)")
+    ap.add_argument("--permanent", action="store_true", help="Never-expiring grant (ends_at=null). Not a 365-day stand-in.")
     ap.add_argument("--plan", type=str, default="starter", help="Plan slug (v1: starter only)")
     ap.add_argument("--reason", type=str, default="", help="Audit reason (required for grant)")
     ap.add_argument("--granted-by", type=str, required=True, help="Admin identity for audit trail")
@@ -76,14 +77,15 @@ def main() -> int:
         result = apply_manual_gift_grant(
             db,
             args.tenant,
-            days=args.days,
+            days=None if args.permanent else args.days,
+            permanent=bool(args.permanent),
             plan_slug=args.plan,
             reason=args.reason,
             granted_by=args.granted_by,
             force=args.force,
             dry_run=args.dry_run,
         )
-        log.info("✓ grant tenant=%s dry_run=%s plan=%s", args.tenant, args.dry_run, result["plan_slug"])
+        log.info("✓ grant tenant=%s dry_run=%s plan=%s permanent=%s", args.tenant, args.dry_run, result["plan_slug"], result.get("permanent"))
         log.info("  starts_at  : %s", result.get("starts_at"))
         log.info("  ends_at    : %s", result.get("ends_at"))
         log.info("  reason     : %s", result.get("reason"))

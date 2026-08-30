@@ -73,6 +73,7 @@ export interface BillingStatus {
   manual_gift_grant_headline_ar?: string | null
   manual_gift_grant_plan_slug?: string | null
   manual_gift_grant_ends_at?: string | null
+  manual_gift_grant_permanent?: boolean
   manual_gift_grant_billing_status?: string | null
   manual_replies_allowed?: boolean
   campaigns_automations_allowed?: boolean

@@ -357,6 +357,76 @@ class TestProtectedLifecyclesUnchanged:
         assert result["reason"] == RECONCILE_SKIP_GIFT
         assert t.trial_started_at is None
 
+    def test_permanent_gift_grant_unchanged(self, db):
+        t = _tenant(db)
+        _wa(db, t.id)
+        now = datetime.now(timezone.utc)
+        db.add(TenantSettings(
+            tenant_id=t.id,
+            extra_metadata={
+                "billing": {
+                    "manual_gift_grant": {
+                        "enabled": True,
+                        "permanent": True,
+                        "ends_at": None,
+                        "starts_at": now.isoformat(),
+                    }
+                }
+            },
+        ))
+        db.commit()
+        result = reconcile_missing_trial_after_whatsapp_connect(db, t.id)
+        db.refresh(t)
+        assert result["applied"] is False
+        assert result["reason"] == RECONCILE_SKIP_GIFT
+        assert t.trial_started_at is None
+
+    def test_permanent_flag_with_stale_ends_at_still_skips(self, db):
+        t = _tenant(db)
+        _wa(db, t.id)
+        now = datetime.now(timezone.utc)
+        db.add(TenantSettings(
+            tenant_id=t.id,
+            extra_metadata={
+                "billing": {
+                    "manual_gift_grant": {
+                        "enabled": True,
+                        "permanent": True,
+                        "ends_at": (now - timedelta(days=1)).isoformat(),
+                        "starts_at": (now - timedelta(days=400)).isoformat(),
+                    }
+                }
+            },
+        ))
+        db.commit()
+        result = reconcile_missing_trial_after_whatsapp_connect(db, t.id)
+        db.refresh(t)
+        assert result["applied"] is False
+        assert result["reason"] == RECONCILE_SKIP_GIFT
+        assert t.trial_started_at is None
+
+    def test_malformed_gift_ends_at_does_not_skip_as_gift(self, db):
+        now = datetime.now(timezone.utc)
+        for raw in ("", "null"):
+            t = _tenant(db, name=f"متجر تجريبي عام {raw or 'empty'}")
+            _wa(db, t.id, phone_number_id=f"phone-{raw or 'empty'}-{t.id}")
+            db.add(TenantSettings(
+                tenant_id=t.id,
+                extra_metadata={
+                    "billing": {
+                        "manual_gift_grant": {
+                            "enabled": True,
+                            "permanent": False,
+                            "ends_at": raw,
+                            "starts_at": now.isoformat(),
+                        }
+                    }
+                },
+            ))
+            db.commit()
+            result = reconcile_missing_trial_after_whatsapp_connect(db, t.id)
+            assert result["reason"] != RECONCILE_SKIP_GIFT, raw
+
 
 class TestIdempotencyAndEvidence:
     def test_reconnect_does_not_grant_new_trial(self, db):
