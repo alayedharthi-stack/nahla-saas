@@ -38,6 +38,9 @@ from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: E402
     has_structured_catalog_identity,
     set_product_focus,
 )
+from modules.ai.brain.commerce.identity_collaboration_guard import (  # noqa: E402
+    try_identity_collaboration_decision,
+)
 from modules.ai.brain.commerce.product_breadth_policy import (  # noqa: E402
     resolve_kb_active_product_ids,
 )
@@ -46,6 +49,9 @@ from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_SEARCH_PRODUCTS,
 )
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
+from modules.ai.brain.execution.search import (  # noqa: E402
+    resolve_search_result_product_for_focus,
+)
 from modules.ai.brain.product_discovery_gate import (  # noqa: E402
     preserve_canonical_referent_over_category_browse,
     try_category_price_browse_decision,
@@ -307,6 +313,32 @@ class TestEstablishedReferentFollowup:
 
 
 class TestReferentPreserved:
+    def test_explicit_product_subject_yields_identity_guard_and_binds_unique_match(self) -> None:
+        state = _state()
+        message = "أنا نحال وأبغى أعرف عن عسل صيفي 1 كيلو"
+        ctx = _ctx(
+            message,
+            state=state,
+            facts=_facts(_SUMMER_HONEY_1KG, _UNRELATED_TALH_1KG),
+            merchant_context={},
+        )
+        ctx.intent = Intent(
+            name=INTENT_ASK_PRODUCT,
+            confidence=0.9,
+            slots={"product_query": _SUMMER_HONEY_1KG["title"]},
+            raw_message=message,
+        )
+
+        assert try_identity_collaboration_decision(ctx) is None
+        selected = resolve_search_result_product_for_focus(
+            products=[dict(_SUMMER_HONEY_1KG)],
+            catalog_fact_products=[],
+            query=_SUMMER_HONEY_1KG["title"],
+        )
+        assert selected is not None
+        set_product_focus(state, selected, reason="test_explicit_product_match", turn=3)
+        assert canonical_product_referent(state)["id"] == 154
+
     def test_historical_141_then_154_does_not_select_unrelated_ranker_winner(self) -> None:
         state = _state(_SUMMER_HONEY_250G)
         set_product_focus(state, dict(_SUMMER_HONEY_1KG), reason="ai_d03_later_focus", turn=3)

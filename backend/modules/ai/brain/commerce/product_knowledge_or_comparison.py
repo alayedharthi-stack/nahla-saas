@@ -158,6 +158,7 @@ class ProductKnowledgeKind(str, Enum):
     BATCH = "batch"
     VALUE = "value"
     FEATURES = "features"
+    ATTRIBUTE = "attribute"
     MEANING = "meaning"
     HEALTH = "health"
     SEASON = "season"
@@ -301,6 +302,117 @@ def classify_product_knowledge_kind(message: str) -> Optional[ProductKnowledgeKi
         return ProductKnowledgeKind.SEASON
 
     return None
+
+
+def _canonical_product_factual_followup(
+    ctx: Any,
+    message: str,
+) -> Dict[str, Any]:
+    """Return a catalog-confirmed referent for an unclassified factual follow-up.
+
+    This is intentionally driven by the existing intent, referent, catalog, and
+    commerce-boundary owners. It does not classify customer attribute language.
+    """
+    intent = getattr(ctx, "intent", None)
+    if str(getattr(intent, "name", "") or "") != "ask_product":
+        return {}
+    if _is_price_query_not_knowledge(message):
+        return {}
+
+    try:
+        from modules.ai.brain.postprocess.availability_guard_policy import (  # noqa: PLC0415
+            inbound_asks_stock_or_orderability,
+        )
+        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+            _explicit_category_scope_broadening,
+            _turn_scoped_to_canonical_referent,
+        )
+
+        if (
+            inbound_asks_stock_or_orderability(message)
+            or _explicit_category_scope_broadening(message)
+        ):
+            return {}
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing boundary owners fail closed
+        return {}
+
+    try:
+        from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            ensure_canonical_referent_catalog_projection,
+        )
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — no verified referent, no fact route
+        return {}
+
+    state = getattr(ctx, "state", None)
+    referent = canonical_product_referent(state)
+    if not isinstance(referent, dict) or not referent:
+        return {}
+    if _structured_catalog_product_switches_referent(ctx, referent):
+        return {}
+    if not _turn_scoped_to_canonical_referent(message, referent, state=state):
+        return {}
+
+    projected = ensure_canonical_referent_catalog_projection(
+        db=getattr(ctx, "_db", None),
+        tenant_id=getattr(ctx, "tenant_id", None),
+        state=state,
+        facts=getattr(ctx, "facts", None),
+        merchant_context=getattr(ctx, "merchant_context", None),
+        bind_to_merchant_context=True,
+    )
+    return dict(projected) if isinstance(projected, dict) and projected else {}
+
+
+def _structured_catalog_product_switches_referent(
+    ctx: Any,
+    referent: Dict[str, Any],
+) -> bool:
+    """True only when an extracted subject exactly identifies another catalog row."""
+    intent = getattr(ctx, "intent", None)
+    slots = getattr(intent, "slots", None)
+    if not isinstance(slots, dict):
+        return False
+
+    candidate_id = slots.get("product_id")
+    candidate_query = str(
+        slots.get("product_query") or slots.get("product_name") or ""
+    ).strip()
+    if candidate_id in (None, "") and not candidate_query:
+        return False
+
+    try:
+        from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            collect_catalog_reasoning_candidates,
+        )
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            product_focus_identity,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — no catalog evidence, no switch claim
+        return False
+
+    referent_identity = product_focus_identity(referent)
+    if not referent_identity:
+        return False
+    query_norm = _norm(candidate_query)
+    for row in collect_catalog_reasoning_candidates(
+        facts=getattr(ctx, "facts", None),
+        merchant_context=getattr(ctx, "merchant_context", None),
+        state=getattr(ctx, "state", None),
+    ):
+        if not isinstance(row, dict):
+            continue
+        row_identity = product_focus_identity(row)
+        if not row_identity or row_identity == referent_identity:
+            continue
+        if candidate_id not in (None, "") and str(row.get("id") or row.get("product_id") or "") == str(candidate_id):
+            return True
+        title_norm = _norm(str(row.get("title") or row.get("name") or ""))
+        if query_norm and title_norm and query_norm == title_norm:
+            return True
+    return False
 
 
 def _is_price_query_not_knowledge(message: str) -> bool:
@@ -471,6 +583,7 @@ def _retrieve_product_kb_sections(
     *,
     subject: str,
     message: str,
+    product_id: Any = None,
     limit: int = 4,
     kinds_filter: Optional[frozenset] = None,
 ) -> List[Dict[str, Any]]:
@@ -507,6 +620,19 @@ def _retrieve_product_kb_sections(
 
     scored: List[tuple[float, Dict[str, Any]]] = []
     for row in rows:
+        linked_product_ids: set[int] = set()
+        for link in (getattr(row, "product_links", None) or []):
+            try:
+                linked_product_ids.add(int(getattr(link, "product_id", None)))
+            except (TypeError, ValueError):
+                continue
+        if linked_product_ids:
+            try:
+                subject_product_id = int(product_id)
+            except (TypeError, ValueError):
+                continue
+            if subject_product_id not in linked_product_ids:
+                continue
         title = str(getattr(row, "title", "") or "").strip()
         body = str(getattr(row, "body", "") or "").strip()
         if not title and not body:
@@ -577,6 +703,7 @@ def gather_product_knowledge_facts(
         int(getattr(ctx, "tenant_id", 0) or 0),
         subject=subject_title or comparison_ref,
         message=message,
+        product_id=subject_product.get("id") or subject_product.get("product_id"),
         kinds_filter=(
             frozenset({"product_benefit"})
             if question_kind == ProductKnowledgeKind.HEALTH
@@ -695,9 +822,13 @@ def try_product_knowledge_decision(ctx: Any) -> Optional[Any]:
     continuation = False
     kind = classify_product_knowledge_kind(message)
     anchor_message = message
+    canonical_subject: Dict[str, Any] = {}
 
     if kind is None:
-        if is_product_knowledge_continuation(message, state):
+        canonical_subject = _canonical_product_factual_followup(ctx, message)
+        if canonical_subject:
+            kind = ProductKnowledgeKind.ATTRIBUTE
+        elif is_product_knowledge_continuation(message, state):
             session = get_product_knowledge_session(state)
             kind = ProductKnowledgeKind(
                 str(session.get("question_kind") or ProductKnowledgeKind.COMPARISON.value),
@@ -714,6 +845,8 @@ def try_product_knowledge_decision(ctx: Any) -> Optional[Any]:
         ctx,
         anchor_message if continuation else message,
     )
+    if canonical_subject:
+        subject = canonical_subject
     if continuation:
         session = get_product_knowledge_session(state)
         session_subject = dict(session.get("subject_product") or {})
