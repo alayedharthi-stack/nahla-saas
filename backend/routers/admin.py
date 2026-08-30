@@ -1083,8 +1083,10 @@ def _raise_manual_gift_http(exc: Exception) -> None:
 
 
 class ManualGiftGrantMutationIn(BaseModel):
-    days:   int  = Field(default=DEFAULT_MANUAL_GIFT_DAYS, ge=1, le=365)
-    reason: str  = Field(..., min_length=1)
+    days: Optional[int] = Field(default=None, ge=1, le=365)
+    permanent: bool = False
+    force: bool = False
+    reason: str = Field(..., min_length=1)
 
 
 @router.get("/admin/tenants/{tenant_id}/manual-gift-grant")
@@ -1125,10 +1127,14 @@ async def preview_manual_gift_grant_admin(
         result = apply_manual_gift_grant(
             db,
             tenant_id,
-            days=int(body.days),
+            days=None if body.permanent else (
+                int(body.days) if body.days is not None else DEFAULT_MANUAL_GIFT_DAYS
+            ),
+            permanent=bool(body.permanent),
             plan_slug=DEFAULT_GIFT_PLAN_SLUG,
             reason=body.reason.strip(),
             granted_by=_admin_actor_label(admin),
+            force=bool(body.force),
             dry_run=True,
         )
         return {"preview": result}
@@ -1145,7 +1151,7 @@ async def apply_manual_gift_grant_admin(
     admin: Dict[str, Any] = Depends(require_admin),
     _not_impersonating: Dict[str, Any] = Depends(require_not_support_impersonation),
 ):
-    """Apply a 30-day starter gift grant (metadata only)."""
+    """Apply a starter gift grant (timed or permanent). Metadata only."""
     from core.manual_billing_grant import (  # noqa: PLC0415
         DEFAULT_GIFT_PLAN_SLUG,
         ManualGiftGrantError,
@@ -1158,10 +1164,14 @@ async def apply_manual_gift_grant_admin(
         result = apply_manual_gift_grant(
             db,
             tenant_id,
-            days=int(body.days),
+            days=None if body.permanent else (
+                int(body.days) if body.days is not None else DEFAULT_MANUAL_GIFT_DAYS
+            ),
+            permanent=bool(body.permanent),
             plan_slug=DEFAULT_GIFT_PLAN_SLUG,
             reason=body.reason.strip(),
             granted_by=granted_by,
+            force=bool(body.force),
             dry_run=False,
         )
     except ManualGiftGrantError as exc:
@@ -1171,7 +1181,8 @@ async def apply_manual_gift_grant_admin(
         "manual_gift_grant_applied",
         admin=granted_by,
         tenant_id=tenant_id,
-        days=int(body.days),
+        days=result.get("ends_at") and body.days,
+        permanent=bool(body.permanent),
         reason=body.reason.strip(),
         ends_at=result.get("ends_at"),
     )

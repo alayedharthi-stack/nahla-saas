@@ -327,6 +327,7 @@ export interface AdminManualGiftGrantSnapshot {
     manual_gift_grant_reason?: string | null
     manual_gift_grant_plan_slug?: string | null
     manual_gift_grant_ends_at?: string | null
+    manual_gift_grant_permanent?: boolean
     manual_gift_grant_billing_status?: string | null
   }
   can_grant: boolean
@@ -488,21 +489,31 @@ export const adminApi = {
   manualGiftGrantSnapshot: (tenantId: number) =>
     apiCall<AdminManualGiftGrantSnapshot>(`/admin/tenants/${tenantId}/manual-gift-grant`),
 
-  previewManualGiftGrant: (tenantId: number, body: { days?: number; reason: string }) =>
+  previewManualGiftGrant: (tenantId: number, body: { days?: number; permanent?: boolean; force?: boolean; reason: string }) =>
     apiCall<{ preview: Record<string, unknown> }>(
       `/admin/tenants/${tenantId}/manual-gift-grant/preview`,
       {
         method: 'POST',
-        body: JSON.stringify({ days: body.days ?? 30, reason: body.reason }),
+        body: JSON.stringify({
+          days: body.permanent ? undefined : (body.days ?? 30),
+          permanent: Boolean(body.permanent),
+          force: Boolean(body.force),
+          reason: body.reason,
+        }),
       },
     ),
 
-  applyManualGiftGrant: (tenantId: number, body: { days?: number; reason: string }) =>
+  applyManualGiftGrant: (tenantId: number, body: { days?: number; permanent?: boolean; force?: boolean; reason: string }) =>
     apiCall<{ grant: Record<string, unknown>; snapshot: AdminManualGiftGrantSnapshot }>(
       `/admin/tenants/${tenantId}/manual-gift-grant`,
       {
         method: 'POST',
-        body: JSON.stringify({ days: body.days ?? 30, reason: body.reason }),
+        body: JSON.stringify({
+          days: body.permanent ? undefined : (body.days ?? 30),
+          permanent: Boolean(body.permanent),
+          force: Boolean(body.force),
+          reason: body.reason,
+        }),
       },
     ),
 

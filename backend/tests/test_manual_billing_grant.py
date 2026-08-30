@@ -387,6 +387,8 @@ class TestManualGiftGrant:
         assert payload["manual_gift_grant_active"] is True
         assert payload["manual_gift_grant_plan_slug"] == "starter"
         assert payload["manual_gift_grant_billing_status"] == "gift"
+        assert payload["manual_gift_grant_permanent"] is False
+        assert payload["manual_gift_grant_ends_at"] is not None
         assert payload["lifecycle_status"] == "gift_active"
         assert payload["trial_expired"] is False
         assert payload["ai_auto_replies_allowed"] is True
@@ -463,3 +465,130 @@ class TestManualGiftGrant:
 
         revoke_manual_gift_grant(db, TENANT_GIFT, granted_by="ops@nahla")
         assert has_billing_access(db, TENANT_GIFT) is False
+
+    def test_permanent_grant_stores_null_ends_at_and_stays_active(self, db):
+        from datetime import datetime as dt, timedelta as td, timezone as tz
+
+        from core.manual_billing_grant import (
+            apply_manual_gift_grant,
+            is_manual_gift_grant_active,
+            is_permanent_gift_blob,
+        )
+        from core.plan_entitlements import get_entitlements
+
+        _seed_tenant(db, TENANT_GIFT)
+        result = apply_manual_gift_grant(
+            db,
+            TENANT_GIFT,
+            permanent=True,
+            plan_slug="starter",
+            reason="permanent starter",
+            granted_by="ops@nahla",
+        )
+        assert result["permanent"] is True
+        assert result["ends_at"] is None
+        assert is_manual_gift_grant_active(db, TENANT_GIFT) is True
+        blob = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.tenant_id == TENANT_GIFT)
+            .one()
+            .extra_metadata["billing"]["manual_gift_grant"]
+        )
+        assert blob["ends_at"] is None
+        assert blob["permanent"] is True
+        assert is_permanent_gift_blob(blob) is True
+        from core.manual_billing_grant import manual_gift_grant_status
+        status = manual_gift_grant_status(db, TENANT_GIFT)
+        assert status["manual_gift_grant_permanent"] is True
+        assert status["manual_gift_grant_ends_at"] is None
+        ent = get_entitlements(db, TENANT_GIFT)
+        assert ent.plan_slug == "starter"
+        assert ent.billing_status == "gift"
+        assert ent.has_feature("meta_catalog_sync") is True
+        assert ent.has_feature("store_brain_advanced") is False
+        # Still active far in the future — no 365-day stand-in.
+        blob["starts_at"] = (dt.now(tz.utc) - td(days=400)).isoformat()
+        assert is_permanent_gift_blob(blob) is True
+
+    def test_365_day_grant_is_not_permanent(self, db):
+        from core.manual_billing_grant import apply_manual_gift_grant, is_permanent_gift_blob
+
+        _seed_tenant(db, TENANT_GIFT)
+        result = apply_manual_gift_grant(
+            db,
+            TENANT_GIFT,
+            days=365,
+            plan_slug="starter",
+            reason="one year gift",
+            granted_by="ops@nahla",
+        )
+        assert result["permanent"] is False
+        assert result["ends_at"] is not None
+        blob = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.tenant_id == TENANT_GIFT)
+            .one()
+            .extra_metadata["billing"]["manual_gift_grant"]
+        )
+        assert blob["permanent"] is False
+        assert blob["ends_at"] is not None
+        assert is_permanent_gift_blob(blob) is False
+
+    def test_force_converts_timed_gift_to_permanent_null_ends_at(self, db):
+        from core.manual_billing_grant import apply_manual_gift_grant, is_manual_gift_grant_active
+
+        _seed_tenant(db, TENANT_GIFT)
+        apply_manual_gift_grant(
+            db,
+            TENANT_GIFT,
+            days=30,
+            plan_slug="starter",
+            reason="first timed gift",
+            granted_by="ops@nahla",
+        )
+        result = apply_manual_gift_grant(
+            db,
+            TENANT_GIFT,
+            permanent=True,
+            plan_slug="starter",
+            reason="convert to permanent starter",
+            granted_by="ops@nahla",
+            force=True,
+        )
+        assert result["permanent"] is True
+        assert result["ends_at"] is None
+        assert is_manual_gift_grant_active(db, TENANT_GIFT) is True
+        blob = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.tenant_id == TENANT_GIFT)
+            .one()
+            .extra_metadata["billing"]["manual_gift_grant"]
+        )
+        assert blob["ends_at"] is None
+
+    def test_null_ends_at_blob_without_flag_is_still_permanent(self, db):
+        from core.billing import has_billing_access
+        from core.manual_billing_grant import is_manual_gift_grant_active
+
+        _seed_tenant(db, TENANT_GIFT)
+        now = datetime.now(timezone.utc)
+        settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == TENANT_GIFT).one()
+        settings.extra_metadata = {
+            "billing": {
+                "manual_gift_grant": {
+                    "enabled": True,
+                    "grant_type": "gift",
+                    "plan_slug": "starter",
+                    "starts_at": now.isoformat(),
+                    "ends_at": None,
+                    "reason": "legacy null expiry",
+                    "granted_by": "ops",
+                    "granted_at": now.isoformat(),
+                    "revoked_at": None,
+                    "revoked_by": None,
+                }
+            }
+        }
+        db.commit()
+        assert is_manual_gift_grant_active(db, TENANT_GIFT) is True
+        assert has_billing_access(db, TENANT_GIFT) is True

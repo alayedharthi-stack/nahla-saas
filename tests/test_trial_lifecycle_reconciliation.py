@@ -357,6 +357,30 @@ class TestProtectedLifecyclesUnchanged:
         assert result["reason"] == RECONCILE_SKIP_GIFT
         assert t.trial_started_at is None
 
+    def test_permanent_gift_grant_unchanged(self, db):
+        t = _tenant(db)
+        _wa(db, t.id)
+        now = datetime.now(timezone.utc)
+        db.add(TenantSettings(
+            tenant_id=t.id,
+            extra_metadata={
+                "billing": {
+                    "manual_gift_grant": {
+                        "enabled": True,
+                        "permanent": True,
+                        "ends_at": None,
+                        "starts_at": now.isoformat(),
+                    }
+                }
+            },
+        ))
+        db.commit()
+        result = reconcile_missing_trial_after_whatsapp_connect(db, t.id)
+        db.refresh(t)
+        assert result["applied"] is False
+        assert result["reason"] == RECONCILE_SKIP_GIFT
+        assert t.trial_started_at is None
+
 
 class TestIdempotencyAndEvidence:
     def test_reconnect_does_not_grant_new_trial(self, db):

@@ -244,27 +244,47 @@ function GrantGiftModal({
   onCancel,
   busy,
   error,
+  defaultPermanent = false,
 }: {
   tenantName: string
   tenantId: number
-  onConfirm: (reason: string) => void
+  onConfirm: (reason: string, permanent: boolean) => void
   onCancel: () => void
   busy: boolean
   error: string | null
+  defaultPermanent?: boolean
 }) {
   const [reason, setReason] = useState(DEFAULT_GIFT_REASON)
+  const [permanent, setPermanent] = useState(defaultPermanent)
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" dir="rtl">
       <div className="absolute inset-0 bg-black/50" onClick={busy ? undefined : onCancel} />
       <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 space-y-4">
-        <h3 className="text-base font-black text-slate-800">منح شهر هدية للباقة الأساسية</h3>
+        <h3 className="text-base font-black text-slate-800">منح هدية للباقة الأساسية</h3>
         <p className="text-sm text-slate-600">
           المتجر: <span className="font-semibold">{tenantName}</span>
           {' '}(#{tenantId})
         </p>
+        <label className="flex items-start gap-2 text-sm text-slate-700 bg-slate-50 border border-slate-100 rounded-lg p-3">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={permanent}
+            disabled={busy}
+            onChange={e => setPermanent(e.target.checked)}
+          />
+          <span>
+            هدية دائمة بلا تاريخ انتهاء
+            <span className="block text-xs text-slate-500 mt-0.5">
+              يُحفظ ends_at=null في المنحة الإدارية. مدة 365 يومًا ليست بديلاً عن الدوام.
+            </span>
+          </span>
+        </label>
         <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg p-3">
-          سيتم فتح الباقة الأساسية لمدة 30 يوم بدون إنشاء عملية دفع أو فاتورة.
+          {permanent
+            ? 'سيتم فتح الباقة الأساسية بشكل دائم بدون إنشاء عملية دفع أو فاتورة. يمكن إلغاء الهدية لاحقًا.'
+            : 'سيتم فتح الباقة الأساسية لمدة 30 يوم بدون إنشاء عملية دفع أو فاتورة.'}
         </p>
         <div>
           <label className="block text-xs text-slate-500 mb-1">السبب (مطلوب)</label>
@@ -290,7 +310,7 @@ function GrantGiftModal({
           </button>
           <button
             type="button"
-            onClick={() => onConfirm(reason.trim())}
+            onClick={() => onConfirm(reason.trim(), permanent)}
             disabled={busy || !reason.trim()}
             className="flex-1 py-2.5 rounded-xl text-sm font-semibold bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-50 flex items-center justify-center gap-2"
           >
@@ -395,13 +415,17 @@ function TenantDrawer({
     loadGiftSnapshot()
   }, [loadGiftSnapshot])
 
-  const handleGrantConfirm = async (reason: string) => {
+  const handleGrantConfirm = async (reason: string, permanent: boolean) => {
     setGiftBusy(true)
     setGrantModalError(null)
     try {
-      const res = await adminApi.applyManualGiftGrant(tenant.id, { days: 30, reason })
+      const res = await adminApi.applyManualGiftGrant(tenant.id, {
+        reason,
+        permanent,
+        force: giftActive,
+      })
       setGiftSnapshot(res.snapshot)
-      setGiftSuccess('تم منح شهر الهدية بنجاح')
+      setGiftSuccess(permanent ? 'تم منح الهدية الدائمة بنجاح' : 'تم منح شهر الهدية بنجاح')
       setShowGrantModal(false)
       setTimeout(() => setGiftSuccess(null), 5000)
     } catch (e) {
@@ -541,7 +565,14 @@ function TenantDrawer({
                   <>
                     <DetailRow label="هدية نشطة" value="نعم" />
                     <DetailRow label="خطة الهدية" value={giftSnapshot.gift.manual_gift_grant_plan_slug || 'starter'} />
-                    <DetailRow label="تنتهي في" value={fmtDate(giftSnapshot.gift.manual_gift_grant_ends_at)} />
+                    <DetailRow
+                      label="تنتهي في"
+                      value={
+                        giftSnapshot.gift.manual_gift_grant_permanent || !giftSnapshot.gift.manual_gift_grant_ends_at
+                          ? 'دائمة — بلا تاريخ انتهاء'
+                          : fmtDate(giftSnapshot.gift.manual_gift_grant_ends_at)
+                      }
+                    />
                     <DetailRow label="السبب" value={giftSnapshot.gift.manual_gift_grant_reason || '—'} />
                     <DetailRow
                       label="منحها"
@@ -564,15 +595,28 @@ function TenantDrawer({
         {/* Footer actions */}
         <div className="sticky bottom-0 bg-white border-t border-slate-100 px-5 py-3 space-y-2">
           {giftActive ? (
-            <button
-              type="button"
-              onClick={() => { setRevokeModalError(null); setShowRevokeModal(true) }}
-              disabled={giftBusy}
-              className="w-full py-2.5 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200"
-            >
-              <Gift className="w-4 h-4" />
-              إلغاء الهدية
-            </button>
+            <>
+              {!giftSnapshot?.gift?.manual_gift_grant_permanent && giftSnapshot?.gift?.manual_gift_grant_ends_at && (
+                <button
+                  type="button"
+                  onClick={() => { setGrantModalError(null); setShowGrantModal(true) }}
+                  disabled={giftBusy}
+                  className="w-full py-2.5 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2 bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200"
+                >
+                  <Gift className="w-4 h-4" />
+                  تحويل إلى هدية دائمة
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => { setRevokeModalError(null); setShowRevokeModal(true) }}
+                disabled={giftBusy}
+                className="w-full py-2.5 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200"
+              >
+                <Gift className="w-4 h-4" />
+                إلغاء الهدية
+              </button>
+            </>
           ) : (
             <button
               type="button"
@@ -582,7 +626,7 @@ function TenantDrawer({
               className="w-full py-2.5 rounded-xl text-sm font-semibold transition flex items-center justify-center gap-2 bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Gift className="w-4 h-4" />
-              منح شهر هدية
+              منح هدية Starter
             </button>
           )}
 
@@ -624,6 +668,7 @@ function TenantDrawer({
           onCancel={() => !giftBusy && setShowGrantModal(false)}
           busy={giftBusy}
           error={grantModalError}
+          defaultPermanent={Boolean(giftActive)}
         />
       )}
       {showRevokeModal && (

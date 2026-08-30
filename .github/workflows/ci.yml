@@ -45,6 +45,14 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
+      - name: Manual gift grant permanence tests
+        run: |
+          python -m pytest \
+            backend/tests/test_manual_billing_grant.py \
+            backend/tests/test_admin_manual_gift_grant.py \
+            backend/tests/test_admin_tenant_list_billing_badge.py \
+            -v --tb=short --maxfail=1
+
       - name: Orders list newest-first tests
         run: |
           python -m pytest \
