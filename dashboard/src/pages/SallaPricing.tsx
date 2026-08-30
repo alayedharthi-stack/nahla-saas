@@ -49,6 +49,9 @@ function buildSupportUrl(planNameAr: string): string {
 interface ExtraFeature { text: string; badge?: string }
 
 const EXTRA_FEATURES: Record<string, ExtraFeature[]> = {
+  starter: [
+    { text: 'مزامنة كاتالوج ميتا (Facebook / Instagram)' },
+  ],
   growth: [
     { text: 'مزامنة كاتالوج ميتا (Facebook / Instagram)' },
   ],

@@ -6,8 +6,8 @@
  *
  * Feature Map (mirrors backend plan_entitlements.py — do NOT guess):
  *   Starter:  basic autopilot + 2-stage cart recovery + abandoned_cart_basic_coupon
- *             + templates + campaigns (monthly cap) + Salla/WA
- *   Growth:   + full autopilot + stage 3 + advanced coupons + meta_catalog_sync
+ *             + templates + campaigns (monthly cap) + Salla/WA + meta_catalog_sync
+ *   Growth:   + full autopilot + stage 3 + advanced coupons
  *             + growth engine + offers + smart_discount_popup + AI analytics
  *   Scale:    + store_brain_advanced + advanced AI + Zid + team + future integrations
  */
@@ -62,7 +62,7 @@ export interface PlanFeatures {
   smart_discount_popup:          boolean  // Growth+
 
   // Integrations
-  meta_catalog_sync:             boolean  // Growth+
+  meta_catalog_sync:             boolean  // Starter+
   zid_integration:               boolean  // Scale+
   future_integrations:           boolean  // Scale+
 
@@ -119,6 +119,7 @@ export const FEATURE_REQUIRED_PLAN: Record<keyof PlanFeatures, PlanSlug> = {
   cart_recovery_stage_2:         'starter',
   abandoned_cart_basic_coupon:   'starter',
   campaign_customer_segments:    'starter',
+  meta_catalog_sync:             'starter',
 
   // Growth+
   autopilot_full:                'growth',
@@ -136,7 +137,6 @@ export const FEATURE_REQUIRED_PLAN: Record<keyof PlanFeatures, PlanSlug> = {
   salary_offers:                 'growth',
   seasonal_calendar:             'growth',
   smart_discount_popup:          'growth',
-  meta_catalog_sync:             'growth',
   ai_performance_dashboard:      'growth',
   conversion_funnel:             'growth',
 

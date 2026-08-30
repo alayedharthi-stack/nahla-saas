@@ -227,6 +227,97 @@ def test_confirmed_missing_entitlement_still_feature_locked():
     assert _upgrade_copy_present(status) is True
 
 
+def _plan_definition_entitled(slug: str):
+    from core.plan_entitlements import PLAN_DEFINITIONS
+
+    features = PLAN_DEFINITIONS[slug].features
+    active = slug not in ("none", "failed")
+
+    def _ent(*_args, **_kwargs):
+        return SimpleNamespace(
+            has_feature=lambda key: bool(getattr(features, key, False)),
+            is_blocked=False,
+            is_active=active,
+            plan_slug=slug,
+        )
+
+    return _ent
+
+
+@patch("services.whatsapp_catalog_sync.get_entitlements", _plan_definition_entitled("starter"))
+def test_starter_plan_does_not_show_catalog_upgrade_blocker():
+    db = _db_with_conn(_conn())
+    ready = evaluate_whatsapp_catalog_sync_readiness(db, 9)
+    queued = enqueue_whatsapp_catalog_sync(db, 9, force=True, trigger="manual")
+    status = build_whatsapp_catalog_sync_status(db, 9)
+    assert ready["ready"] is True
+    assert ready["blocker_code"] is None
+    assert queued["blocker_code"] != "feature_locked"
+    assert status["blocker_code"] != "feature_locked"
+    assert _upgrade_copy_present(queued) is False
+    assert _upgrade_copy_present(status) is False
+
+
+@patch("services.whatsapp_catalog_sync.get_entitlements", _plan_definition_entitled("growth"))
+def test_growth_plan_still_entitled_for_catalog_sync():
+    db = _db_with_conn(_conn())
+    ready = evaluate_whatsapp_catalog_sync_readiness(db, 9)
+    assert ready["ready"] is True
+    assert ready["blocker_code"] is None
+
+
+@patch("services.whatsapp_catalog_sync.get_entitlements", _plan_definition_entitled("scale"))
+def test_scale_plan_still_entitled_for_catalog_sync():
+    db = _db_with_conn(_conn())
+    ready = evaluate_whatsapp_catalog_sync_readiness(db, 9)
+    assert ready["ready"] is True
+    assert ready["blocker_code"] is None
+
+
+@patch("services.whatsapp_catalog_sync.get_entitlements", _plan_definition_entitled("none"))
+def test_none_plan_still_feature_locked_until_starter_granted():
+    db = _db_with_conn(_conn())
+    ready = evaluate_whatsapp_catalog_sync_readiness(db, 9)
+    status = build_whatsapp_catalog_sync_status(db, 9)
+    assert ready["ready"] is False
+    assert ready["blocker_code"] == "feature_locked"
+    assert status["blocker_code"] == "feature_locked"
+    assert _upgrade_copy_present(status) is True
+
+
+def test_whatsapp_sync_post_starter_plan_is_not_upgrade_403():
+    from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync
+
+    pending = _product(id=201, sync_status="pending")
+    db = _db_with_conn(_conn())
+    request = MagicMock()
+    with patch("routers.catalog.resolve_tenant_id", return_value=9), patch(
+        "routers.catalog.get_entitlements",
+        _plan_definition_entitled("starter"),
+    ), patch(
+        "services.whatsapp_catalog_sync.get_entitlements",
+        _plan_definition_entitled("starter"),
+    ), patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=[pending],
+    ), patch(
+        "services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain",
+    ):
+        import asyncio
+
+        result = asyncio.run(
+            merchant_whatsapp_catalog_sync(
+                _WhatsappCatalogSyncBody(),
+                request,
+                db,
+                {"sub": "t"},
+            )
+        )
+    assert result.get("queued") is True
+    assert result.get("blocker_code") is None
+    assert _upgrade_copy_present(result) is False
+
+
 def _db_salla_entitlement_outage(conn=None, *, products=None):
     from sqlalchemy.exc import OperationalError
 
@@ -678,6 +769,20 @@ def test_ui_keeps_polling_retrying_and_has_no_upgrade_copy_in_card():
     assert "'retrying'" in card
     assert "FOLLOW_PHASES" in card
     assert "رقِّ الخطة" not in card
+
+
+def test_dashboard_catalog_sync_required_plan_is_starter():
+    from pathlib import Path
+
+    hook = (
+        Path(__file__).resolve().parents[2]
+        / "dashboard"
+        / "src"
+        / "hooks"
+        / "useEntitlements.ts"
+    ).read_text(encoding="utf-8")
+    assert "meta_catalog_sync:             'starter'" in hook
+    assert "meta_catalog_sync:             'growth'" not in hook
 
 
 @patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)

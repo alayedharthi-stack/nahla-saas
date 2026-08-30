@@ -37,8 +37,8 @@ Design contract
   chain. The test-send path is bit-for-bit identical to a real
   brain reply — no parallel implementation to drift.
 * Plan gating uses ``meta_catalog_sync`` from PlanFeatures
-  (Growth+). Merchants on Starter see a 403 with the standard
-  upgrade payload.
+  (Starter+). Tenants without an active entitled plan see a 403
+  with the standard upgrade payload.
 * Tenant isolation: merchant endpoints derive tenant_id ONLY from
   the JWT claim (``resolve_tenant_id``) — a request body field is
   never trusted. Admin endpoints take an explicit ``tenant_id``
@@ -2359,8 +2359,8 @@ async def merchant_catalog_update_manual_product(
 # preflight / auth / error-code translation.
 #
 # Plan-gated: this is a write operation that adopts Meta-side data, so a
-# merchant on a paid plan with catalog wired up is the audience. Starter
-# merchants will see the standard upgrade payload.
+# merchant on an entitled plan (Starter+) with catalog wired up is the
+# audience. Tenants without catalog entitlement see the upgrade payload.
 
 
 @merchant_router.post("/import/meta")

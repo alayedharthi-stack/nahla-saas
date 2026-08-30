@@ -7,8 +7,9 @@ Feature Map (authoritative — do NOT guess, do NOT add features not listed here
 
   Starter  →  basic autopilot + 2-stage cart recovery + abandoned_cart_basic_coupon
               + templates + basic campaigns (monthly cap) + Salla/WA integration
+              + meta_catalog_sync
   Growth   →  Starter + full autopilot + 3-stage recovery + advanced coupons
-              + meta_catalog_sync + growth engine + offers + smart_discount_popup
+              + growth engine + offers + smart_discount_popup
               + AI analytics dashboard
   Scale    →  Growth + store_brain_advanced + advanced AI + Zid + team handoff
               + full AI customization + advanced discount rules + future integrations
@@ -98,7 +99,7 @@ class PlanFeatures:
     smart_discount_popup:          bool   # Growth+: نافذة الخصم الذكية
 
     # ── Integrations ──────────────────────────────────────────────────────────
-    meta_catalog_sync:             bool   # Growth+: مزامنة كاتالوج ميتا
+    meta_catalog_sync:             bool   # Starter+: مزامنة كاتالوج ميتا / واتساب
     zid_integration:               bool   # Scale+: تكامل Zid
     future_integrations:           bool   # Scale+: تكاملات مستقبلية
 
@@ -195,7 +196,7 @@ PLAN_DEFINITIONS: Dict[str, PlanDefinition] = {
             smart_discount_popup=False,
 
             # Integrations
-            meta_catalog_sync=False,
+            meta_catalog_sync=True,
             zid_integration=False,
             future_integrations=False,
 
