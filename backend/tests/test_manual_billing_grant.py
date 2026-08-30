@@ -487,6 +487,7 @@ class TestManualGiftGrant:
         )
         assert result["permanent"] is True
         assert result["ends_at"] is None
+        assert result["days"] is None
         assert is_manual_gift_grant_active(db, TENANT_GIFT) is True
         blob = (
             db.query(TenantSettings)
@@ -524,6 +525,7 @@ class TestManualGiftGrant:
         )
         assert result["permanent"] is False
         assert result["ends_at"] is not None
+        assert result["days"] == 365
         blob = (
             db.query(TenantSettings)
             .filter(TenantSettings.tenant_id == TENANT_GIFT)
@@ -592,3 +594,99 @@ class TestManualGiftGrant:
         db.commit()
         assert is_manual_gift_grant_active(db, TENANT_GIFT) is True
         assert has_billing_access(db, TENANT_GIFT) is True
+
+    def test_malformed_ends_at_is_not_permanent_or_active(self, db):
+        from core.billing import has_billing_access
+        from core.manual_billing_grant import (
+            is_manual_gift_grant_active,
+            is_permanent_gift_blob,
+        )
+
+        _seed_tenant(db, TENANT_GIFT)
+        now = datetime.now(timezone.utc)
+        settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == TENANT_GIFT).one()
+        for raw in ("", "null"):
+            settings.extra_metadata = {
+                "billing": {
+                    "manual_gift_grant": {
+                        "enabled": True,
+                        "grant_type": "gift",
+                        "plan_slug": "starter",
+                        "permanent": False,
+                        "starts_at": now.isoformat(),
+                        "ends_at": raw,
+                        "reason": "malformed",
+                        "granted_by": "ops",
+                        "granted_at": now.isoformat(),
+                        "revoked_at": None,
+                        "revoked_by": None,
+                    }
+                }
+            }
+            db.commit()
+            blob = (
+                db.query(TenantSettings)
+                .filter(TenantSettings.tenant_id == TENANT_GIFT)
+                .one()
+                .extra_metadata["billing"]["manual_gift_grant"]
+            )
+            assert is_permanent_gift_blob(blob) is False, raw
+            assert is_manual_gift_grant_active(db, TENANT_GIFT) is False, raw
+            assert has_billing_access(db, TENANT_GIFT) is False, raw
+
+    def test_missing_ends_at_key_is_permanent(self, db):
+        from core.billing import has_billing_access
+        from core.manual_billing_grant import (
+            is_manual_gift_grant_active,
+            is_permanent_gift_blob,
+        )
+
+        _seed_tenant(db, TENANT_GIFT)
+        now = datetime.now(timezone.utc)
+        settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == TENANT_GIFT).one()
+        settings.extra_metadata = {
+            "billing": {
+                "manual_gift_grant": {
+                    "enabled": True,
+                    "grant_type": "gift",
+                    "plan_slug": "starter",
+                    "starts_at": now.isoformat(),
+                    "reason": "legacy missing expiry",
+                    "granted_by": "ops",
+                    "granted_at": now.isoformat(),
+                    "revoked_at": None,
+                    "revoked_by": None,
+                }
+            }
+        }
+        db.commit()
+        blob = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.tenant_id == TENANT_GIFT)
+            .one()
+            .extra_metadata["billing"]["manual_gift_grant"]
+        )
+        assert "ends_at" not in blob
+        assert is_permanent_gift_blob(blob) is True
+        assert is_manual_gift_grant_active(db, TENANT_GIFT) is True
+        assert has_billing_access(db, TENANT_GIFT) is True
+
+    def test_permanent_lifecycle_headline_has_no_placeholder_date(self, db):
+        from core.manual_billing_grant import apply_manual_gift_grant
+        from core.trial_lifecycle import resolve_billing_lifecycle
+
+        tenant = _seed_tenant(db, TENANT_GIFT)
+        apply_manual_gift_grant(
+            db,
+            TENANT_GIFT,
+            permanent=True,
+            plan_slug="starter",
+            reason="permanent starter",
+            granted_by="ops@nahla",
+        )
+        lifecycle = resolve_billing_lifecycle(db, TENANT_GIFT, tenant, active_sub=None)
+        assert lifecycle["lifecycle_status"] == "gift_active"
+        headline = lifecycle["headline_ar"]
+        assert "حتى —" not in headline
+        assert "دائمة" in headline
+        assert lifecycle["days_remaining"] == 0

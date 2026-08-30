@@ -998,15 +998,15 @@ export default function Billing() {
             <p className="text-xs text-amber-800 mt-1">
               {lifecycleHeadline}
             </p>
-            {status.manual_gift_grant_ends_at ? (
+            {status.manual_gift_grant_permanent || !status.manual_gift_grant_ends_at ? (
+              <p className="text-xs text-amber-700 mt-1">هدية دائمة — بلا تاريخ انتهاء</p>
+            ) : (
               <p className="text-xs text-amber-700 mt-1">
                 تنتهي الهدية بتاريخ: {fmtDate(status.manual_gift_grant_ends_at)}
                 {daysRemainingLabel !== '—' && daysRemainingLabel !== '٠'
                   ? ` · متبقي ${daysRemainingLabel} ${daysRemainingLabel === '1' ? 'يوم' : 'أيام'}`
                   : ''}
               </p>
-            ) : (
-              <p className="text-xs text-amber-700 mt-1">هدية دائمة — بلا تاريخ انتهاء</p>
             )}
           </div>
         </div>
@@ -1085,9 +1085,9 @@ export default function Billing() {
             <>
               <p className="text-base font-semibold text-amber-700">هدية — {giftPlanLabel}</p>
               <p className="text-xs text-amber-700 mt-1">
-                {status.manual_gift_grant_ends_at
-                  ? `فعّالة حتى ${fmtDate(status.manual_gift_grant_ends_at)}`
-                  : 'فعّالة بشكل دائم بلا تاريخ انتهاء'}
+                {status.manual_gift_grant_permanent || !status.manual_gift_grant_ends_at
+                  ? 'فعّالة بشكل دائم بلا تاريخ انتهاء'
+                  : `فعّالة حتى ${fmtDate(status.manual_gift_grant_ends_at)}`}
               </p>
             </>
           ) : lifecycle === 'paid_expired' ? (

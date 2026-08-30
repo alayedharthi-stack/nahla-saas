@@ -876,6 +876,7 @@ def _lifecycle_headline_ar(
     trial_end: Optional[str],
     subscription_end: Optional[str],
     gift_end: Optional[str] = None,
+    gift_permanent: bool = False,
 ) -> str:
     trial_date = (trial_end or "")[:10] or "—"
     sub_date = (subscription_end or "")[:10] or "—"
@@ -889,6 +890,8 @@ def _lifecycle_headline_ar(
     if lifecycle_status == "trial_expired":
         return f"انتهت تجربتك المجانية بتاريخ: {trial_date} — اختر خطة للاشتراك ومتابعة تشغيل موظف المبيعات الذكي"
     if lifecycle_status == "gift_active":
+        if gift_permanent or not gift_end:
+            return f"تم تفعيل باقة {plan} كهدية دائمة بلا تاريخ انتهاء."
         return (
             f"تم تفعيل باقة {plan} كهدية حتى {gift_date}"
             " — يمكنك استخدام مزايا الباقة خلال فترة الهدية."
@@ -934,6 +937,7 @@ def resolve_billing_lifecycle(
     sub_ends = _effective_sub_ends_at(record_sub) if record_sub else None
     sub_expired = bool(sub_ends and sub_ends <= now) if record_sub else False
     gift_end_iso: Optional[str] = None
+    gift_permanent = False
 
     if active_sub:
         lifecycle_status = "paid_active"
@@ -948,6 +952,7 @@ def resolve_billing_lifecycle(
             _read_grant_blob,
             get_manual_gift_grant_plan_slug,
             is_manual_gift_grant_active,
+            is_permanent_gift_blob,
         )
         from core.plan_entitlements import PLAN_DEFINITIONS  # noqa: PLC0415
 
@@ -958,9 +963,12 @@ def resolve_billing_lifecycle(
             plan_slug = gift_plan_slug
             blob = _read_grant_blob(db, tenant_id) or {}
             gift_end_iso = blob.get("ends_at")
+            gift_permanent = is_permanent_gift_blob(blob)
             gift_ends_dt = _coerce_utc(gift_end_iso) if gift_end_iso else None
             lifecycle_status = "gift_active"
-            days_remaining = _days_until(gift_ends_dt) if gift_ends_dt else 0
+            days_remaining = (
+                0 if gift_permanent else (_days_until(gift_ends_dt) if gift_ends_dt else 0)
+            )
             warning_level = "none"
             is_trial = False
             trial_expired = False
@@ -1020,6 +1028,7 @@ def resolve_billing_lifecycle(
         trial_end=trial_info.get("trial_end"),
         subscription_end=_iso(sub_ends),
         gift_end=gift_end_iso,
+        gift_permanent=gift_permanent,
     )
 
     expired_since_days = 0

@@ -138,11 +138,13 @@ export default function TrialBanner() {
           <div>
             <span className="font-bold block">
               {status.manual_gift_grant_headline_ar
-                || (giftEnd ? `لديك شهر هدية على ${giftPlan}` : `لديك هدية دائمة على ${giftPlan}`)}
+                || (giftEnd && !status.manual_gift_grant_permanent
+                  ? `لديك شهر هدية على ${giftPlan}`
+                  : `لديك هدية دائمة على ${giftPlan}`)}
             </span>
             <span className="text-amber-100 text-xs block mt-0.5">
               {status.headline_ar
-                || (giftEnd
+                || (giftEnd && !status.manual_gift_grant_permanent
                   ? `تم تفعيل الباقة الأساسية كهدية حتى ${giftEnd}`
                   : 'الباقة الأساسية مفعّلة كهدية دائمة بلا تاريخ انتهاء.')}
             </span>

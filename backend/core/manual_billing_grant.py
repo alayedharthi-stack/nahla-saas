@@ -103,15 +103,18 @@ def has_active_paid_subscription(db: Session, tenant_id: int) -> bool:
 
 
 def is_permanent_gift_blob(blob: Optional[Dict[str, Any]]) -> bool:
-    """True when the grant has no expiry. ``ends_at=null`` is the source of truth."""
+    """True when the grant has no expiry.
+
+    Permanence is ``permanent is True``, a missing ``ends_at`` key, or JSON
+    ``null``. Empty strings and the literal ``"null"`` are not permanence.
+    """
     if not blob:
         return False
     if blob.get("permanent") is True:
         return True
-    raw = blob.get("ends_at")
-    if raw in (None, "", "null"):
+    if "ends_at" not in blob:
         return True
-    return False
+    return blob.get("ends_at") is None
 
 
 def is_manual_gift_grant_active(db: Session, tenant_id: int) -> bool:
@@ -531,6 +534,7 @@ def apply_manual_gift_grant(
         "permanent": bool(permanent),
         "starts_at": blob["starts_at"],
         "ends_at": blob["ends_at"],
+        "days": resolved_days,
         "reason": reason_clean,
         "granted_by": granted_by_clean,
     }

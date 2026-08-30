@@ -1181,8 +1181,8 @@ async def apply_manual_gift_grant_admin(
         "manual_gift_grant_applied",
         admin=granted_by,
         tenant_id=tenant_id,
-        days=result.get("ends_at") and body.days,
-        permanent=bool(body.permanent),
+        days=result.get("days"),
+        permanent=bool(result.get("permanent")),
         reason=body.reason.strip(),
         ends_at=result.get("ends_at"),
     )
