@@ -177,6 +177,7 @@ class TestStarterPlan:
         "cart_recovery_stage_2",
         "abandoned_cart_basic_coupon",
         "campaign_customer_segments",
+        "meta_catalog_sync",
     ]
 
     BLOCKED = [
@@ -194,7 +195,6 @@ class TestStarterPlan:
         "salary_offers",
         "seasonal_calendar",
         "smart_discount_popup",
-        "meta_catalog_sync",
         "campaign_ai_optimization",
         "ai_performance_dashboard",
         "conversion_funnel",
@@ -234,31 +234,34 @@ class TestStarterPlan:
 
     def test_starter_campaign_limit(self):
         ent = _make_ent("starter", "active")
-        assert ent.get_limit("campaigns_per_month") == 5
+        assert ent.get_limit("campaigns_per_month") >= _UNLIMITED
 
     def test_starter_conversations_limit(self):
         ent = _make_ent("starter", "active")
-        assert ent.get_limit("monthly_conversations") == 2_000
+        assert ent.get_limit("monthly_conversations") == 5_000
 
-    def test_starter_campaign_limit_at_cap(self):
+    def test_starter_conversation_limit_at_cap(self):
         ent = _make_ent("starter", "active")
-        # At cap (5): should raise
         with pytest.raises(EntitlementError) as exc_info:
-            require_limit_not_exceeded(ent, "campaigns_per_month", current=5)
+            require_limit_not_exceeded(ent, "monthly_conversations", current=5_000)
         assert exc_info.value.error_code == "limit_exceeded"
-        assert exc_info.value.required_plan == "growth"
+        assert exc_info.value.required_plan == "scale"
 
     def test_starter_campaign_limit_below_cap(self):
         ent = _make_ent("starter", "active")
-        # Below cap (4): should pass
         require_limit_not_exceeded(ent, "campaigns_per_month", current=4)
+
+    def test_starter_allows_meta_catalog_sync(self):
+        ent = _make_ent("starter", "active")
+        assert _should_allow(ent, "meta_catalog_sync")
+        assert _error_for(ent, "meta_catalog_sync") is None
 
     def test_starter_blocked_returns_upgrade_required(self):
         ent = _make_ent("starter", "active")
-        err = _error_for(ent, "meta_catalog_sync")
+        err = _error_for(ent, "smart_discount_popup")
         assert err is not None
         assert err.error_code == "upgrade_required"
-        assert err.feature_key == "meta_catalog_sync"
+        assert err.feature_key == "smart_discount_popup"
         assert err.required_plan == "growth"
         assert "النمو" in err.message_ar
 
@@ -268,6 +271,38 @@ class TestStarterPlan:
         assert err is not None
         assert err.required_plan == "scale"
         assert "التوسع" in err.message_ar
+
+    def test_starter_scale_features_remain_blocked(self):
+        starter = PLAN_DEFINITIONS["starter"].features
+        assert starter.autopilot_full is False
+        assert starter.store_brain_advanced is False
+        assert starter.zid_integration is False
+        assert starter.team_handoff_queue is False
+        assert starter.smart_discount_popup is False
+
+    def test_higher_plans_inherit_meta_catalog_sync(self):
+        assert PLAN_DEFINITIONS["growth"].features.meta_catalog_sync is True
+        assert PLAN_DEFINITIONS["scale"].features.meta_catalog_sync is True
+
+    def test_none_and_failed_plans_do_not_include_catalog_sync(self):
+        assert PLAN_DEFINITIONS["none"].features.meta_catalog_sync is False
+        assert PLAN_DEFINITIONS["failed"].features.meta_catalog_sync is False
+
+    def test_catalog_sync_min_plan_is_starter(self):
+        assert _FEATURE_MIN_PLAN.get("meta_catalog_sync") == "starter"
+
+    def test_starter_conversation_limit_unchanged_from_definition(self):
+        assert PLAN_DEFINITIONS["starter"].limits.monthly_conversations == 5_000
+        assert PLAN_DEFINITIONS["growth"].limits.monthly_conversations != PLAN_DEFINITIONS["starter"].limits.monthly_conversations
+
+    def test_plan_limit_fields_and_queue_caps_unchanged(self):
+        assert set(PlanLimits.__dataclass_fields__) == {
+            "monthly_conversations",
+            "campaigns_per_month",
+        }
+        starter = PLAN_DEFINITIONS["starter"].limits
+        assert starter.monthly_conversations == 5_000
+        assert starter.campaigns_per_month == _UNLIMITED
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -291,7 +326,6 @@ class TestGrowthPlan:
         "salary_offers",
         "seasonal_calendar",
         "smart_discount_popup",
-        "meta_catalog_sync",
         "campaign_ai_optimization",
         "ai_performance_dashboard",
         "conversion_funnel",
@@ -328,7 +362,7 @@ class TestGrowthPlan:
 
     def test_growth_conversations_limit(self):
         ent = _make_ent("growth", "active")
-        assert ent.get_limit("monthly_conversations") == 10_000
+        assert ent.get_limit("monthly_conversations") == 15_000
 
     def test_growth_campaigns_unlimited(self):
         ent = _make_ent("growth", "active")
@@ -402,7 +436,7 @@ class TestUnknownPlan:
 class TestBillingStates:
 
     BASIC_FEATURE = "nahla_template_library"    # Starter+
-    GROWTH_FEATURE = "meta_catalog_sync"         # Growth+
+    GROWTH_FEATURE = "cart_recovery_stage_3"     # Growth+
     SCALE_FEATURE  = "store_brain_advanced"      # Scale+
 
     def test_active_starter_allows_basic(self):
@@ -477,7 +511,6 @@ class TestDowngrade:
         "seasonal_smart_offers",
         "salary_offers",
         "smart_discount_popup",
-        "meta_catalog_sync",
     ]
 
     def test_downgraded_to_starter_blocks_growth_automations(self):
@@ -512,24 +545,24 @@ class TestErrorShape:
 
     def test_upgrade_required_shape(self):
         ent = _make_ent("starter", "active")
-        err = _error_for(ent, "meta_catalog_sync")
+        err = _error_for(ent, "cart_recovery_stage_3")
         assert err is not None
         d = err.to_dict()
         assert d["error"]         == "upgrade_required"
-        assert d["feature"]       == "meta_catalog_sync"
+        assert d["feature"]       == "cart_recovery_stage_3"
         assert d["required_plan"] == "growth"
         assert isinstance(d["message"], str) and len(d["message"]) > 10
 
     def test_limit_exceeded_shape(self):
         ent = _make_ent("starter", "active")
         try:
-            require_limit_not_exceeded(ent, "campaigns_per_month", current=10)
+            require_limit_not_exceeded(ent, "monthly_conversations", current=5_000)
             assert False, "Should have raised"
         except EntitlementError as e:
             d = e.to_dict()
             assert d["error"]         == "limit_exceeded"
-            assert d["feature"]       == "campaigns_per_month"
-            assert d["required_plan"] == "growth"
+            assert d["feature"]       == "monthly_conversations"
+            assert d["required_plan"] == "scale"
             assert "5" in d["message"]   # limit value appears in message
 
     def test_billing_blocked_shape(self):
@@ -550,7 +583,7 @@ class TestErrorShape:
     def test_error_message_is_arabic(self):
         """All error messages must contain Arabic text."""
         cases = [
-            (_make_ent("starter", "active"), "meta_catalog_sync"),
+            (_make_ent("starter", "active"), "cart_recovery_stage_3"),
             (_make_ent("growth",  "failed"), "cart_recovery_stage_3"),
             (_make_ent("starter", "none"),   "campaign_customer_segments"),
         ]
@@ -588,10 +621,11 @@ class TestToDictSerialisation:
         d = ent.to_dict()
         assert d["limits"]["campaigns_per_month"] is None
 
-    def test_to_dict_starter_campaigns_limit_is_5(self):
+    def test_to_dict_starter_campaigns_unlimited(self):
         ent = _make_ent("starter", "active")
         d = ent.to_dict()
-        assert d["limits"]["campaigns_per_month"] == 5
+        assert d["limits"]["campaigns_per_month"] is None
+        assert d["limits"]["monthly_conversations"] == 5_000
 
     def test_to_dict_all_features_are_bool(self):
         for slug in ("starter", "growth", "scale"):
@@ -694,6 +728,54 @@ class TestEntitlementLookupFailures:
         assert caught.value.source == "partner_override_slug"
 
 
+class TestCatalogSyncOnStarterEntitlements:
+    def _db_no_paid_plan(self):
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        return db
+
+    def test_gift_starter_grants_catalog_sync_strict_and_default(self):
+        db = self._db_no_paid_plan()
+        with patch("core.billing_override.is_partner_testing_override_active", return_value=False), patch(
+            "core.billing.get_tenant_subscription", return_value=None,
+        ), patch(
+            "core.manual_billing_grant.is_manual_gift_grant_active", return_value=True,
+        ), patch(
+            "core.manual_billing_grant.get_manual_gift_grant_plan_slug", return_value="starter",
+        ):
+            for strict in (False, True):
+                ent = get_entitlements(db, 33, strict_lookup=strict)
+                assert ent.plan_slug == "starter"
+                assert ent.has_feature("meta_catalog_sync") is True
+                assert ent.has_feature("store_brain_advanced") is False
+                assert ent.has_feature("smart_discount_popup") is False
+
+    def test_no_plan_excludes_catalog_sync_strict_and_default(self):
+        db = self._db_no_paid_plan()
+        with patch("core.billing_override.is_partner_testing_override_active", return_value=False), patch(
+            "core.billing.get_tenant_subscription", return_value=None,
+        ), patch(
+            "core.manual_billing_grant.is_manual_gift_grant_active", return_value=False,
+        ):
+            for strict in (False, True):
+                ent = get_entitlements(db, 35, strict_lookup=strict)
+                assert ent.plan_slug == "none"
+                assert ent.has_feature("meta_catalog_sync") is False
+
+
+def test_salla_catalogue_starter_includes_catalog_sync_and_does_not_lock_it():
+    from routers.salla_subscription import PLAN_CATALOGUE
+
+    starter = next(plan for plan in PLAN_CATALOGUE if plan["slug"] == "starter")
+    locked_keys = {item["key"] for item in starter["locked_features"]}
+    assert "meta_catalog_sync" not in locked_keys
+    assert any("كتالوج" in feature for feature in starter["features"])
+    growth = next(plan for plan in PLAN_CATALOGUE if plan["slug"] == "growth")
+    scale = next(plan for plan in PLAN_CATALOGUE if plan["slug"] == "scale")
+    assert "meta_catalog_sync" not in {item["key"] for item in growth["locked_features"]}
+    assert "meta_catalog_sync" not in {item["key"] for item in scale["locked_features"]}
+
+
 if __name__ == "__main__":
     import traceback
 
@@ -713,6 +795,8 @@ if __name__ == "__main__":
         TestDowngrade,
         TestErrorShape,
         TestToDictSerialisation,
+        TestEntitlementLookupFailures,
+        TestCatalogSyncOnStarterEntitlements,
     ]
 
     passed = failed = 0
