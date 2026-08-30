@@ -22,6 +22,7 @@ from modules.ai.brain.commerce.commerce_entry_orchestrator import (  # noqa: E40
     CustomerAction,
     classify_customer_action,
 )
+from modules.ai.brain.commerce.commerce_focus_owner import set_product_focus  # noqa: E402
 from modules.ai.brain.commerce.non_catalog_availability_kb_route import (  # noqa: E402
     TOPIC_KB_AVAILABILITY_FACTS,
     try_non_catalog_availability_kb_decision,
@@ -58,6 +59,7 @@ from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
     Intent,
+    INTENT_ASK_PRODUCT,
     MerchantConversationState,
 )
 
@@ -79,7 +81,15 @@ class _StubProduct:
 
 
 class _StubKBSection:
-    def __init__(self, *, section_id: int, title: str, body: str, kind: str = "faq") -> None:
+    def __init__(
+        self,
+        *,
+        section_id: int,
+        title: str,
+        body: str,
+        kind: str = "faq",
+        product_ids: Optional[List[int]] = None,
+    ) -> None:
         self.id = section_id
         self.kind = kind
         self.title = title
@@ -89,6 +99,10 @@ class _StubKBSection:
         self.is_active = True
         self.deleted_at = None
         self.tenant_id = 33
+        self.product_links = [
+            SimpleNamespace(product_id=product_id)
+            for product_id in (product_ids or [])
+        ]
 
 
 class _Col:
@@ -200,8 +214,10 @@ def _ctx(
     state: Optional[MerchantConversationState] = None,
     db: Any = None,
     inbound_metadata: Optional[dict] = None,
+    facts: Optional[CommerceFacts] = None,
+    intent: Optional[Intent] = None,
 ) -> BrainContext:
-    intent = intent_rules.match(message) or Intent(
+    resolved_intent = intent or intent_rules.match(message) or Intent(
         name="general",
         confidence=0.5,
         raw_message=message,
@@ -210,9 +226,9 @@ def _ctx(
         tenant_id=33,
         customer_phone="966500000001",
         message=message,
-        intent=intent,
+        intent=resolved_intent,
         state=state or _state(),
-        facts=CommerceFacts(has_products=True, product_count=5, orderable=True),
+        facts=facts or CommerceFacts(has_products=True, product_count=5, orderable=True),
         profile={"inbound_metadata": dict(inbound_metadata or {})},
     )
     if db is not None:
@@ -510,6 +526,171 @@ class TestCommerceEntryProductKnowledge:
         assert result.action == "allowed_product_knowledge"
         assert result.replaced is False
         assert "فوائد صحية" not in result.reply
+
+
+class TestCanonicalProductFactualFollowup:
+    _SHOE = {
+        "id": 501,
+        "external_id": "shoe-white-501",
+        "title": "حذاء رياضي أبيض",
+        "description": "حذاء رياضي ببطانة شبكية قابلة للتنفس.",
+        "price": 249,
+    }
+    _PERFUME = {
+        "id": 502,
+        "external_id": "perfume-rose-502",
+        "title": "عطر ورد 100ml",
+        "description": "عطر ورد مختلف عن الحذاء.",
+        "price": 180,
+    }
+
+    def _bound_state(self) -> MerchantConversationState:
+        state = _state(turn=3)
+        set_product_focus(
+            state,
+            dict(self._SHOE),
+            reason="test_catalog_confirmed_product",
+            turn=2,
+        )
+        return state
+
+    def _catalog_facts(self) -> CommerceFacts:
+        return CommerceFacts(
+            has_products=True,
+            product_count=2,
+            orderable=True,
+            top_products=[dict(self._SHOE), dict(self._PERFUME)],
+            discovery_products=[dict(self._SHOE), dict(self._PERFUME)],
+        )
+
+    def test_attribute_followup_routes_to_facts_with_product_scoped_kb(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _install_kb_stubs(monkeypatch, [
+            _StubKBSection(
+                section_id=501,
+                kind="product_info",
+                title="حذاء رياضي أبيض",
+                body="الخامة شبكية قابلة للتنفس.",
+                product_ids=[501],
+            ),
+            _StubKBSection(
+                section_id=502,
+                kind="product_info",
+                title="عطر ورد 100ml",
+                body="عطر مختلف ولا يخص الحذاء.",
+                product_ids=[502],
+            ),
+        ])
+        ctx = _ctx(
+            "هل هذا مصنوع من مادة قابلة للتنفس؟",
+            state=self._bound_state(),
+            db=db,
+            facts=self._catalog_facts(),
+            intent=Intent(
+                name=INTENT_ASK_PRODUCT,
+                confidence=0.9,
+                raw_message="هل هذا مصنوع من مادة قابلة للتنفس؟",
+            ),
+        )
+
+        decision = try_product_knowledge_decision(ctx)
+
+        assert decision is not None
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == TOPIC_PRODUCT_KNOWLEDGE_FACTS
+        assert decision.args.get("question_kind") == ProductKnowledgeKind.ATTRIBUTE.value
+        subject = decision.args.get("subject_product") or {}
+        assert subject.get("id") == 501
+        allowed = decision.args.get("allowed_facts") or {}
+        assert "بطانة شبكية" in str(allowed.get("catalog_description") or "")
+        assert [s["section_id"] for s in allowed.get("kb_sections") or []] == [501]
+
+    def test_availability_followup_keeps_availability_owner(self) -> None:
+        decision = try_product_knowledge_decision(
+            _ctx(
+                "هل هذا متوفر؟",
+                state=self._bound_state(),
+                facts=self._catalog_facts(),
+                intent=Intent(
+                    name=INTENT_ASK_PRODUCT,
+                    confidence=0.9,
+                    raw_message="هل هذا متوفر؟",
+                ),
+            ),
+        )
+        assert decision is None
+
+    def test_broad_browse_keeps_catalog_browse_owner(self) -> None:
+        decision = try_product_knowledge_decision(
+            _ctx(
+                "وش أنواع الأحذية عندكم؟",
+                state=self._bound_state(),
+                facts=self._catalog_facts(),
+                intent=Intent(
+                    name=INTENT_ASK_PRODUCT,
+                    confidence=0.9,
+                    raw_message="وش أنواع الأحذية عندكم؟",
+                ),
+            ),
+        )
+        assert decision is None
+
+    def test_exact_structured_switch_does_not_trap_old_referent(self) -> None:
+        ctx = _ctx(
+            "هل هذا العطر مناسب للاستخدام اليومي؟",
+            state=self._bound_state(),
+            facts=self._catalog_facts(),
+            intent=Intent(
+                name=INTENT_ASK_PRODUCT,
+                confidence=0.9,
+                slots={"product_query": "عطر ورد 100ml", "product_id": 502},
+                raw_message="هل هذا العطر مناسب للاستخدام اليومي؟",
+            ),
+        )
+        assert try_product_knowledge_decision(ctx) is None
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action == ACTION_SEARCH_PRODUCTS
+        assert decision.args.get("query") == "عطر ورد 100ml"
+
+    def test_foreign_catalog_evidence_cannot_enrich_focused_product(self) -> None:
+        foreign_only_facts = CommerceFacts(
+            has_products=True,
+            product_count=1,
+            orderable=True,
+            top_products=[dict(self._PERFUME)],
+            discovery_products=[dict(self._PERFUME)],
+        )
+        decision = try_product_knowledge_decision(
+            _ctx(
+                "هل هذا مصنوع من مادة قابلة للتنفس؟",
+                state=self._bound_state(),
+                facts=foreign_only_facts,
+                intent=Intent(
+                    name=INTENT_ASK_PRODUCT,
+                    confidence=0.9,
+                    raw_message="هل هذا مصنوع من مادة قابلة للتنفس؟",
+                ),
+            ),
+        )
+        assert decision is None
+
+    def test_short_deictic_continuation_has_nonempty_llm_owner(self) -> None:
+        decision = try_product_knowledge_decision(
+            _ctx(
+                "هذا ينفع؟",
+                state=self._bound_state(),
+                facts=self._catalog_facts(),
+                intent=Intent(
+                    name=INTENT_ASK_PRODUCT,
+                    confidence=0.9,
+                    raw_message="هذا ينفع؟",
+                ),
+            ),
+        )
+        assert decision is not None
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == TOPIC_PRODUCT_KNOWLEDGE_FACTS
 
 
 class TestProductKnowledgeFeaturesRouting:

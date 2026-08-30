@@ -13,6 +13,23 @@ logger = logging.getLogger("nahla.brain.identity_collaboration_guard")
 TOPIC_IDENTITY_COLLABORATION = "identity_collaboration"
 
 
+def _has_structured_product_inquiry(ctx: Any) -> bool:
+    """True when upstream extraction already found a concrete product subject.
+
+    Product resolution remains owned by the tenant-scoped catalog path. This
+    merely prevents identity/collaboration from consuming that path first.
+    """
+    intent = getattr(ctx, "intent", None)
+    slots = getattr(intent, "slots", None)
+    if not isinstance(slots, dict):
+        return False
+    return bool(
+        str(slots.get("product_query") or "").strip()
+        or str(slots.get("product_name") or "").strip()
+        or slots.get("product_id") not in (None, "")
+    )
+
+
 def compose_identity_collaboration_goal() -> str:
     return (
         "identity_collaboration — The customer introduced themselves professionally "
@@ -48,6 +65,8 @@ def try_identity_collaboration_decision(ctx: Any, *, route: str = "") -> Optiona
             return None
     else:
         msg = full_msg
+    if _has_structured_product_inquiry(ctx):
+        return None
     try:
         from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
             extract_price_subject,
