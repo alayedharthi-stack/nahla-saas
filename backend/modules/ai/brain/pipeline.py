@@ -894,11 +894,18 @@ def is_structurally_global_catalog_fallback(
     decision: Any = None,
     result_data: Optional[Mapping[str, Any]] = None,
     state: Any = None,
+    message: str = "",
+    query: str = "",
+    products: Optional[Sequence[Any]] = None,
+    source: str = "",
 ) -> bool:
-    """True when catalog-navigation already owns GLOBAL no-groups top-products.
+    """True when catalog-navigation owns GLOBAL no-groups top-products.
 
-    Derived from decision/result/state ownership metadata only — never from
-    customer wording.
+    Requires both:
+    1. execution mode = no-groups top-products fallback
+    2. browse scope = structurally proven global (not category-scoped)
+
+    No-groups top fallback is not itself a global-browse proof.
     """
     data = result_data or {}
     args = getattr(decision, "args", None) or {}
@@ -931,7 +938,33 @@ def is_structurally_global_catalog_fallback(
         state=state,
     ):
         return False
-    return True
+
+    from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+        BROWSE_SCOPE_MODE_GLOBAL,
+        resolve_browse_scope_mode,
+    )
+
+    stamped = str(
+        _first_nonempty_meta(
+            data.get("browse_scope_mode"),
+            args.get("browse_scope_mode"),
+        )
+        or ""
+    ).strip().lower()
+    if stamped == "category":
+        return False
+    if stamped == BROWSE_SCOPE_MODE_GLOBAL:
+        return True
+    mode = resolve_browse_scope_mode(
+        message or "",
+        query,
+        products=products,
+        state=state,
+        source=source,
+    )
+    if isinstance(result_data, dict) and not stamped:
+        result_data["browse_scope_mode"] = mode
+    return mode == BROWSE_SCOPE_MODE_GLOBAL
 
 
 def structurally_global_catalog_fallback_skip_reason(
@@ -939,11 +972,19 @@ def structurally_global_catalog_fallback_skip_reason(
     decision: Any = None,
     result_data: Optional[Mapping[str, Any]] = None,
     state: Any = None,
+    message: str = "",
+    query: str = "",
+    products: Optional[Sequence[Any]] = None,
+    source: str = "",
 ) -> str:
     if is_structurally_global_catalog_fallback(
         decision=decision,
         result_data=result_data,
         state=state,
+        message=message,
+        query=query,
+        products=products,
+        source=source,
     ):
         return _SKIP_STRUCTURAL_GLOBAL_CATALOG_FALLBACK
     return ""
@@ -991,6 +1032,10 @@ def apply_pipeline_browse_category_filter(
         decision=decision,
         result_data=result_data,
         state=state,
+        message=message or "",
+        query=query,
+        products=items,
+        source=source,
     )
     if skip_reason:
         _stamp_pipeline_browse_category_filter_meta(

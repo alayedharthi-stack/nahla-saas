@@ -9,8 +9,11 @@ Fix is ownership-metadata skip only — no customer-language phrase lists.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
+from contextlib import ExitStack
+from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
@@ -30,8 +33,13 @@ from modules.ai.brain.catalog.navigation_signals import (  # noqa: E402
 from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: E402
     extract_browse_category_scopes,
     filter_products_for_browse_turn,
+    resolve_browse_scope_mode,
 )
 from modules.ai.brain.decision.actions import ACTION_CATALOG_NAVIGATE  # noqa: E402
+from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
+from modules.ai.brain.execution.catalog_navigate import (  # noqa: E402
+    CatalogNavigateHandler,
+)
 from modules.ai.brain.pipeline import (  # noqa: E402
     apply_pipeline_browse_category_filter,
     is_structurally_global_catalog_fallback,
@@ -40,7 +48,13 @@ from modules.ai.brain.pipeline import (  # noqa: E402
 from modules.ai.brain.persona.catalog_product_answer import (  # noqa: E402
     _build_catalog_navigation_bundle,
 )
-from modules.ai.brain.types import Decision, MerchantConversationState  # noqa: E402
+from modules.ai.brain.types import (  # noqa: E402
+    BrainContext,
+    CommerceFacts,
+    Decision,
+    Intent,
+    MerchantConversationState,
+)
 
 MSG_LIVE = "وش منتجاتكم ؟"
 MSG_JACKETS_SHOW = "ورني الجاكيتات"
@@ -75,6 +89,36 @@ _MIXED_GLOBAL = [
         "orderable": True,
         "can_checkout": True,
         "price": 120,
+    },
+]
+
+_ZERO_GROUP_CATALOG = [
+    {
+        "id": 1,
+        "title": "جاكيت",
+        "category": "جاكيتات",
+        "orderable": True,
+        "can_checkout": True,
+        "external_id": "j1",
+        "price": 169,
+    },
+    {
+        "id": 2,
+        "title": "فستان",
+        "category": "فساتين",
+        "orderable": True,
+        "can_checkout": True,
+        "external_id": "d1",
+        "price": 210,
+    },
+    {
+        "id": 3,
+        "title": "حذاء رياضي أبيض",
+        "category": "احذية",
+        "orderable": True,
+        "can_checkout": True,
+        "external_id": "s1",
+        "price": 189,
     },
 ]
 
@@ -151,6 +195,77 @@ def _orphan_only_bullet_lines(text: str) -> list[str]:
     ]
 
 
+def _zero_group_ctx(message: str, products: list[dict], *, tenant_id: int = 7) -> BrainContext:
+    ctx = BrainContext(
+        tenant_id=tenant_id,
+        customer_phone="966500000000",
+        message=message,
+        intent=Intent(name="ask_product", confidence=0.9, raw_message=message),
+        state=MerchantConversationState(greeted=True, stage="discovery"),
+        facts=CommerceFacts(
+            has_products=True,
+            product_count=len(products),
+            in_stock_count=len(products),
+            has_active_integration=True,
+            orderable=True,
+            snapshot_fresh=True,
+            store_name="متجر تجريبي عام",
+            top_products=list(products),
+            discovery_products=list(products),
+        ),
+    )
+    ctx._db = object()  # type: ignore[attr-defined]
+    return ctx
+
+
+def _run_zero_group_pipeline_6b(message: str, products: list[dict], *, tenant_id: int = 7):
+    """Real navigator → executor → pipeline 6b on a merchant with zero groups."""
+    ctx = _zero_group_ctx(message, products, tenant_id=tenant_id)
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch("modules.ai.brain.catalog.navigation._load_catalog_groups", return_value=[])
+        )
+        stack.enter_context(
+            patch(
+                "modules.ai.brain.catalog.navigation._try_native_catalog_entry_decision",
+                return_value=None,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "modules.ai.brain.commerce.commerce_entry_catalog_delivery.try_commerce_entry_catalog_decision",
+                return_value=None,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "modules.ai.brain.catalog.catalog_browse_scope_resolver.load_merchant_catalog_groups",
+                return_value=[],
+            )
+        )
+        stack.enter_context(
+            patch(
+                "modules.ai.brain.catalog.catalog_ranking_runtime.load_best_seller_catalog_products",
+                return_value=list(products),
+            )
+        )
+        decision = DefaultDecisionEngine().decide(ctx)
+        result = asyncio.run(CatalogNavigateHandler().handle(decision, ctx))
+        before = list(result.data.get("products") or products)
+        filtered = apply_pipeline_browse_category_filter(
+            before,
+            message=message,
+            query=str(result.data.get("query") or (decision.args or {}).get("query") or ""),
+            source=str((decision.args or {}).get("source") or "").strip().lower(),
+            decision=decision,
+            result_data=result.data,
+            state=ctx.state,
+        )
+        if result.data.get("products"):
+            result.data["products"] = list(filtered)
+        return ctx, decision, result, before, filtered
+
+
 class TestLexicalFalsePositiveStillPresent:
     """Guard still extracts منتجاتكم — the fix is not a phrase-list patch."""
 
@@ -184,11 +299,15 @@ class TestExactProductionRegression:
             decision=decision,
             result_data=result_data,
             state=state,
+            message=MSG_LIVE,
+            products=_MIXED_GLOBAL,
         ) is True
         assert structurally_global_catalog_fallback_skip_reason(
             decision=decision,
             result_data=result_data,
             state=state,
+            message=MSG_LIVE,
+            products=_MIXED_GLOBAL,
         ) == "structurally_global_catalog_fallback"
 
         filtered = apply_pipeline_browse_category_filter(
@@ -300,15 +419,63 @@ class TestSkipIsStructuralOnly:
         ) is False
 
 
-class TestCategoryScopedBrowseStillFilters:
-    def test_jackets_show_does_not_take_structural_skip(self) -> None:
-        decision = Decision(action=ACTION_CATALOG_NAVIGATE, args={})
-        result_data = {"products": list(_APPAREL_MIXED)}
+class TestZeroGroupNavigatorBoundary:
+    """No-groups top fallback is not equivalent to global browse."""
+
+    def test_live_global_inventory_keeps_mixed_products(self) -> None:
+        _ctx, decision, result, before, filtered = _run_zero_group_pipeline_6b(
+            MSG_LIVE,
+            _ZERO_GROUP_CATALOG,
+        )
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+        assert (decision.args or {}).get("chosen_path") == PATH_TOP_FALLBACK
+        assert bool((decision.args or {}).get("navigator_no_groups_fallback")) is True
+        assert result.data.get("navigator_no_groups_fallback") is True
+        assert resolve_browse_scope_mode(MSG_LIVE, products=before) == "global"
+        assert len(before) == 3
+        assert _ids(filtered) == [1, 2, 3]
+        assert result.data["browse_category_filter_applied"] == "no"
+        assert result.data.get("browse_scope_mode") == "global"
+
+    def test_jacket_availability_on_real_no_groups_fallback_keeps_only_jackets(self) -> None:
+        _ctx, decision, result, before, filtered = _run_zero_group_pipeline_6b(
+            MSG_JACKETS_AVAIL,
+            _ZERO_GROUP_CATALOG,
+        )
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+        assert (decision.args or {}).get("chosen_path") == PATH_TOP_FALLBACK
+        assert bool((decision.args or {}).get("navigator_no_groups_fallback")) is True
+        assert resolve_browse_scope_mode(MSG_JACKETS_AVAIL, products=before) == "category"
+        assert len(before) == 3
+        assert _ids(filtered) == [1]
+        assert result.data["browse_category_filter_applied"] == "yes"
+        assert result.data.get("browse_scope_mode") == "category"
         assert is_structurally_global_catalog_fallback(
             decision=decision,
-            result_data=result_data,
+            result_data=result.data,
+            state=_ctx.state,
+            message=MSG_JACKETS_AVAIL,
+            products=before,
         ) is False
-        apply_pipeline_browse_category_filter(
+
+    def test_jacket_have_on_real_no_groups_fallback_keeps_only_jackets(self) -> None:
+        _ctx, decision, _result, before, filtered = _run_zero_group_pipeline_6b(
+            MSG_JACKETS_HAVE,
+            _ZERO_GROUP_CATALOG,
+        )
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+        assert (decision.args or {}).get("chosen_path") == PATH_TOP_FALLBACK
+        assert bool((decision.args or {}).get("navigator_no_groups_fallback")) is True
+        assert resolve_browse_scope_mode(MSG_JACKETS_HAVE, products=before) == "category"
+        assert len(before) == 3
+        assert _ids(filtered) == [1]
+
+
+class TestCategoryScopedBrowseStillFilters:
+    def test_jackets_show_keeps_only_jackets(self) -> None:
+        decision = Decision(action=ACTION_CATALOG_NAVIGATE, args={})
+        result_data = {"products": list(_APPAREL_MIXED)}
+        filtered = apply_pipeline_browse_category_filter(
             list(_APPAREL_MIXED),
             message=MSG_JACKETS_SHOW,
             decision=decision,
@@ -316,6 +483,7 @@ class TestCategoryScopedBrowseStillFilters:
         )
         assert result_data["browse_category_filter_applied"] == "yes"
         assert result_data["browse_category_filter_skip_reason"] == ""
+        assert _ids(filtered) == [1]
 
     def test_jacket_show_selected_group_keeps_only_jackets(self) -> None:
         kept = filter_products_to_merchant_group(
