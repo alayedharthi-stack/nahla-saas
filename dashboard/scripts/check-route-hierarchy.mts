@@ -41,6 +41,10 @@ assert(resolveRouteHierarchy('/sales-channels/branches').parentPath === '/sales-
 
 assert(resolveRouteHierarchy('/overview').showBack === false, 'overview has no Back')
 assert(resolveRouteHierarchy('/conversations').showBack === false, 'conversations has no Back')
+assert(resolveRouteHierarchy('/catalog').kind === 'top_level', 'catalog is a top-level destination')
+assert(resolveRouteHierarchy('/catalog').showBack === false, 'catalog must not show Back to the products hub')
+assert(resolveRouteHierarchy('/products').showBack === false, 'products redirect must not flash a Back control')
+assert(resolveRouteHierarchy('/catalog-intelligence').showBack === false, 'catalog-intelligence redirect must not flash a Back control')
 
 assert(
   resolveRouteHierarchy('/settings/security').parentPath === '/settings-hub',

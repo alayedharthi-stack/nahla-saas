@@ -20,7 +20,9 @@ export interface HierarchyMatch {
 const TOP_LEVEL = new Set<string>([
   '/overview',
   '/conversations',
+  '/catalog',
   '/products',
+  '/catalog-intelligence',
   '/orders',
   '/customers',
   '/marketing',
@@ -34,9 +36,9 @@ const TOP_LEVEL = new Set<string>([
 /** Exact child path → canonical parent. */
 const EXACT_CHILD: Record<string, string> = {
   '/handoff-queue': '/conversations',
-  '/catalog': '/products',
-  '/whatsapp-catalog': '/products',
-  '/catalog-intelligence': '/products',
+  '/products': '/catalog',
+  '/whatsapp-catalog': '/catalog',
+  '/catalog-intelligence': '/catalog',
   '/customers/import': '/customers',
   '/campaigns': '/marketing',
   '/promotions': '/marketing',

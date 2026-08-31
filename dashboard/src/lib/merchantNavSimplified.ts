@@ -68,12 +68,11 @@ export interface SimplifiedNavDestination {
   sections?: SimplifiedNavSection[]
 }
 
-/** All merchant sidebar paths in the legacy 3-group layout (27 items). */
+/** All merchant sidebar paths in the legacy 3-group layout (26 items). */
 export const LEGACY_MERCHANT_NAV_PATHS: readonly string[] = [
   '/overview',
   '/conversations',
   '/catalog',
-  '/catalog-intelligence',
   '/orders',
   '/customers',
   '/smart-automations',
@@ -133,13 +132,12 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
     destLabel: tr => tr.nav.destinations.products,
     destIcon: 'package',
     directLink: {
-      to: '/products',
+      to: '/catalog',
       icon: 'package',
       label: tr => tr.nav.destinations.products,
     },
     children: [
       { to: '/catalog', icon: 'package', label: tr => tr.nav.items.whatsappCatalog },
-      { to: '/catalog-intelligence', icon: 'folder-tree', label: tr => tr.nav.items.catalogIntelligence },
     ],
   },
   {
