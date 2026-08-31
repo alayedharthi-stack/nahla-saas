@@ -1863,6 +1863,7 @@ export interface Translations {
     summary: {
       title:            string
       productCount:     string
+      productCountSplit: string
       sourceLabel:      string
       lastUpdateLabel:  string
       statusLabel:      string

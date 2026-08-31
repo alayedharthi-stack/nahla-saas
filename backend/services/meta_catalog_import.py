@@ -130,6 +130,7 @@ from core.catalog_write_router import (
     conflict_detail_payload,
     resolve_meta_import_action,
 )
+from core.catalog_image import coerce_image_url
 from core.config import META_GRAPH_API_VERSION, WA_TOKEN
 from models import Product, WhatsAppConnection
 from services.whatsapp_platform.wa_connection_secrets import read_access_token
@@ -2243,7 +2244,7 @@ def _process_one_meta_product(
         meta_blob = {
             "source":       SOURCE_META_EXISTING,
             "meta_id":      meta_id or None,
-            "image_url":    row.get("image_url") or None,
+            "image_url":    coerce_image_url(row.get("image_url")) or None,
             "product_url":  row.get("url") or None,
             "currency":     currency,
             "availability": availability or None,

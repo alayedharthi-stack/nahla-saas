@@ -46,6 +46,7 @@ from routers.catalog import (  # noqa: E402
     CatalogConfigPatch,
     CatalogTestSendBody,
     _apply_config_changes,
+    _diagnostics_payload,
     _status_advice,
     admin_router,
     merchant_router,
@@ -256,3 +257,49 @@ def test_status_advice_retailer_id_coverage_zero() -> None:
         coverage={"with_retailer_id": 0, "without_retailer_id": 5},
     )
     assert "retailer_id" in text or "مزامنة" in text
+
+
+def test_diagnostics_counts_active_not_removed_history() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    active = SimpleNamespace(
+        catalog_status="active",
+        merchant_hidden_at=None,
+        meta_retailer_id="rid-active",
+        external_id=None,
+        source="meta",
+        extra_metadata={},
+    )
+    removed = SimpleNamespace(
+        catalog_status="removed_from_meta",
+        merchant_hidden_at=None,
+        meta_retailer_id="rid-removed",
+        external_id=None,
+        source="meta",
+        extra_metadata={},
+    )
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return None
+
+        def all(self):
+            return [active, removed]
+
+    db = MagicMock()
+    db.query.return_value = _Query()
+    with patch(
+        "services.meta_catalog_import.build_graph_import_diagnostics",
+        return_value={"ok": True},
+    ):
+        payload = _diagnostics_payload(db, 33, graph_preflight=False)
+
+    products = payload["products"]
+    assert products["active"] == 1
+    assert products["total"] == 1
+    assert products["removed_from_meta"] == 1
+    assert products["all_rows"] == 2

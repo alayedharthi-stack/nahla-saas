@@ -50,8 +50,15 @@ export default function CatalogSummaryCard(props: {
   const displaySource = resolveCatalogDisplaySource(d.products)
   const sourceKey = (displaySource in SOURCE_STYLES ? displaySource : 'unknown') as CatalogSourceKey
   const sourceStyle = SOURCE_STYLES[sourceKey] ?? SOURCE_STYLES.unknown
+  const activeCount = d.products.active ?? d.products.total
+  const archivedCount = d.products.removed_from_meta ?? 0
+  const countLabel = archivedCount > 0
+    ? copy.productCountSplit
+        .replace('{active}', fmtCount(activeCount, lang))
+        .replace('{archived}', fmtCount(archivedCount, lang))
+    : copy.productCount.replace('{count}', fmtCount(activeCount, lang))
 
-  const statusLabel = d.products.total === 0
+  const statusLabel = activeCount === 0
     ? copy.statusEmpty
     : d.readiness.catalog_ready
       ? copy.statusReady
@@ -71,7 +78,7 @@ export default function CatalogSummaryCard(props: {
               {copy.title}
             </h2>
             <p className="text-2xl font-black text-slate-900 mt-1">
-              {copy.productCount.replace('{count}', fmtCount(d.products.total, lang))}
+              {countLabel}
             </p>
           </div>
           <dl className="grid grid-cols-1 xs:grid-cols-2 gap-2 text-sm">
@@ -94,11 +101,11 @@ export default function CatalogSummaryCard(props: {
               <dt className="text-slate-500 font-semibold">{copy.statusLabel}</dt>
               <dd>
                 <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border ${
-                  d.readiness.catalog_ready && d.products.total > 0
+                  d.readiness.catalog_ready && activeCount > 0
                     ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
                     : 'bg-amber-50 border-amber-200 text-amber-700'
                 }`}>
-                  {d.readiness.catalog_ready && d.products.total > 0
+                  {d.readiness.catalog_ready && activeCount > 0
                     ? <CheckCircle2 className="w-3.5 h-3.5" />
                     : null}
                   {statusLabel}

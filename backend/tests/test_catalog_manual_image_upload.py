@@ -170,3 +170,39 @@ def test_attach_idempotent_for_same_product(mock_client_factory):
     cms.attach_catalog_product_image(tenant_id=7, image_url=url, product_id=99)
 
     mock_client.copy_object.assert_called_once()
+
+
+@patch("services.catalog_media_storage.download_remote_catalog_image")
+@patch("services.catalog_media_storage.attach_catalog_product_image")
+@patch("services.catalog_media_storage.upload_catalog_product_image")
+def test_ingest_remote_skips_already_durable(mock_upload, mock_attach, mock_download):
+    url = "https://pub-example.r2.dev/catalog-products/7/abc123.webp"
+    result = cms.ingest_remote_catalog_image(
+        tenant_id=7, source_url=url, product_id=99,
+    )
+    assert result["skipped"] is True
+    assert result["reason"] == "already_durable"
+    mock_download.assert_not_called()
+    mock_upload.assert_not_called()
+    mock_attach.assert_not_called()
+
+
+@patch("services.catalog_media_storage.attach_catalog_product_image")
+@patch("services.catalog_media_storage.upload_catalog_product_image")
+@patch("services.catalog_media_storage.download_remote_catalog_image")
+def test_ingest_remote_uploads_and_attaches(mock_download, mock_upload, mock_attach):
+    mock_download.return_value = _png_bytes()
+    mock_upload.return_value = {
+        "image_url": "https://pub-example.r2.dev/catalog-products/7/deadbeef.webp",
+        "media_id": "deadbeef",
+        "size_bytes": 12,
+    }
+    result = cms.ingest_remote_catalog_image(
+        tenant_id=7,
+        source_url="https://fbcdn.example/tmp.png",
+        product_id=99,
+    )
+    assert result["skipped"] is False
+    assert result["image_url"].endswith("deadbeef.webp")
+    mock_upload.assert_called_once()
+    mock_attach.assert_called_once()

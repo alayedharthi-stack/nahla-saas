@@ -273,6 +273,76 @@ def _s3_client():
     )
 
 
+REMOTE_FETCH_TIMEOUT_SECONDS = 30.0
+SOURCE_META_IMAGE_KEY = "meta_source_image_url"
+
+
+def download_remote_catalog_image(url: str) -> bytes:
+    """Fetch a remote product image for durable R2 ingest. No Graph writes."""
+    import httpx  # lazy — only needed on ingest
+
+    target = (url or "").strip()
+    if not (target.startswith("https://") or target.startswith("http://")):
+        raise CatalogMediaValidationError("remote_image_url_invalid")
+
+    with httpx.Client(
+        timeout=REMOTE_FETCH_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers={"User-Agent": "NahlaCatalogImageIngest/1.0"},
+    ) as http:
+        resp = http.get(target)
+        if resp.status_code >= 400:
+            raise CatalogMediaStorageError("remote_image_http_error")
+        content = resp.content or b""
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise CatalogMediaValidationError("file_too_large")
+    if sniff_image_mime(content) not in ALLOWED_INPUT_MIMES:
+        raise CatalogMediaValidationError("unsupported_image_type")
+    return content
+
+
+def ingest_remote_catalog_image(
+    *,
+    tenant_id: int,
+    source_url: str,
+    product_id: int,
+) -> dict:
+    """Download a remote image and store it on the catalog R2 prefix.
+
+    Idempotent when *source_url* is already this tenant's managed URL.
+    Does not write Meta Graph. Does not create product rows.
+    """
+    from core.catalog_image import coerce_image_url  # noqa: PLC0415
+
+    src = coerce_image_url(source_url)
+    if not src:
+        raise CatalogMediaValidationError("remote_image_url_invalid")
+    if is_managed_catalog_image_url(src) and image_url_owned_by_tenant(tenant_id, src):
+        return {
+            "image_url": src,
+            "skipped": True,
+            "reason": "already_durable",
+        }
+
+    content = download_remote_catalog_image(src)
+    uploaded = upload_catalog_product_image(tenant_id=int(tenant_id), content=content)
+    durable = str(uploaded.get("image_url") or "").strip()
+    if not durable:
+        raise CatalogMediaStorageError("upload_failed")
+    attach_catalog_product_image(
+        tenant_id=int(tenant_id),
+        image_url=durable,
+        product_id=int(product_id),
+    )
+    return {
+        "image_url": durable,
+        "skipped": False,
+        "source_url": src,
+        "media_id": uploaded.get("media_id"),
+        "size_bytes": uploaded.get("size_bytes"),
+    }
+
+
 def upload_catalog_product_image(
     *,
     tenant_id: int,

@@ -2101,6 +2101,7 @@ const en: Translations = {
     summary: {
       title:            'Product catalog',
       productCount:     '{count} products',
+      productCountSplit: '{active} active + {archived} archived',
       sourceLabel:      'Source',
       lastUpdateLabel:  'Last update',
       statusLabel:      'Status',

@@ -1896,12 +1896,23 @@ def _diagnostics_payload(
           .filter(Product.tenant_id == tenant_id)
           .all()
     )
-    total = len(products)
-    with_rid = sum(1 for p in products if effective_retailer_id(p))
+    active_products = [
+        p for p in products
+        if catalog_status_of(p) == CATALOG_STATUS_ACTIVE
+        and getattr(p, "merchant_hidden_at", None) is None
+    ]
+    removed_products = [
+        p for p in products
+        if catalog_status_of(p) == CATALOG_STATUS_REMOVED_FROM_META
+    ]
+    total = len(active_products)
+    all_rows = len(products)
+    removed_count = len(removed_products)
+    with_rid = sum(1 for p in active_products if effective_retailer_id(p))
     without_rid = total - with_rid
     coverage_pct = int(round((with_rid / total) * 100)) if total else 0
 
-    breakdown = source_breakdown(products)
+    breakdown = source_breakdown(active_products)
     dom = dominant_source(breakdown)
 
     catalog_ready = (
@@ -1933,6 +1944,9 @@ def _diagnostics_payload(
         },
         "products": {
             "total":                          total,
+            "active":                         total,
+            "removed_from_meta":              removed_count,
+            "all_rows":                       all_rows,
             "with_effective_retailer_id":     with_rid,
             "without_effective_retailer_id":  without_rid,
             "coverage_pct":                   coverage_pct,

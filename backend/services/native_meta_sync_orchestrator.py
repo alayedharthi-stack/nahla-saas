@@ -85,6 +85,7 @@ PERMANENT_BLOCK_CODES = frozenset({
     "product_already_meta_managed",
     "product_not_channel_publish_eligible",
     "not_eligible",
+    "existing_catalog_identity",
 })
 PRODUCT_BLOCK_CODES = frozenset({
     "preview_fatal",

@@ -192,6 +192,59 @@ def find_meta_catalog_item_by_retailer_id(
         return _run(owned)
 
 
+def _legacy_identity_retailer_ids(parent: Any, *, exclude_rid: str) -> List[str]:
+    """Strong identity keys for a parent — never name-only."""
+    current = (exclude_rid or "").strip()
+    ordered: List[str] = []
+
+    def _add(value: Any) -> None:
+        rid = str(value or "").strip()
+        if not rid or rid == current or rid in ordered:
+            return
+        ordered.append(rid)
+
+    _add(getattr(parent, "meta_retailer_id", None))
+    _add(getattr(parent, "external_id", None))
+    _add(getattr(parent, "canonical_retailer_id", None))
+    _add(getattr(parent, "source_external_id", None))
+    ext = str(getattr(parent, "external_id", None) or "").strip()
+    for variant in getattr(parent, "variants", None) or []:
+        stored = str(getattr(variant, "retailer_id", None) or "").strip()
+        _add(stored)
+        svid = str(getattr(variant, "salla_variant_id", None) or "").strip()
+        _add(svid)
+        if ext and svid:
+            _add(f"{ext}-{svid}")
+    return ordered[:12]
+
+
+def _block_create_if_existing_identity(
+    conn: Any,
+    catalog_id: str,
+    parent: Any,
+    variant: Any,
+    retailer_id: str,
+    *,
+    client: Optional[httpx.Client] = None,
+) -> Optional[Dict[str, Any]]:
+    """Refuse CREATE when a sibling/legacy retailer_id already exists in Meta."""
+    del variant  # identity is parent-scoped
+    for candidate in _legacy_identity_retailer_ids(parent, exclude_rid=retailer_id):
+        meta_id, lookup = find_meta_catalog_item_by_retailer_id(
+            conn, catalog_id, candidate, client=client,
+        )
+        if lookup.get("error"):
+            continue
+        if meta_id:
+            return {
+                "error": "existing_catalog_identity",
+                "identity_class": "EXISTING_LEGACY",
+                "meta_product_id": meta_id,
+                "legacy_retailer_id": candidate,
+            }
+    return None
+
+
 def _post_catalog_item(
     url: str,
     token: str,
@@ -277,6 +330,19 @@ def push_one_meta_catalog_item(
         result["meta_product_id"] = meta_product_id
         post_url = _graph_product_url(meta_product_id)
     else:
+        blocked = _block_create_if_existing_identity(
+            conn, catalog_id, parent, variant, rid, client=client,
+        )
+        if blocked is not None:
+            result["action"] = "skip_existing"
+            result["error"] = blocked["error"]
+            result["meta_product_id"] = blocked.get("meta_product_id")
+            result["lookup"] = {
+                **(result.get("lookup") or {}),
+                "legacy_retailer_id": blocked.get("legacy_retailer_id"),
+                "identity_class": blocked.get("identity_class"),
+            }
+            return result
         result["action"] = "create"
         post_url = _graph_base(catalog_id, "products")
 
