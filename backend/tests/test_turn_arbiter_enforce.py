@@ -27,6 +27,7 @@ from modules.ai.brain.intent_priority.types import (  # noqa: E402
     IntentPriorityVerdict,
 )
 from modules.ai.brain.state.state_relevance import StateRelevanceVerdict  # noqa: E402
+from modules.ai.brain.commerce.commerce_focus_owner import set_product_focus  # noqa: E402
 from modules.ai.brain.turn.enforce import maybe_enforce_turn_decision  # noqa: E402
 from modules.ai.brain.turn.mismatch import (  # noqa: E402
     MISMATCH_CHECKOUT_VS_DISCOVERY,
@@ -34,6 +35,7 @@ from modules.ai.brain.turn.mismatch import (  # noqa: E402
     MISMATCH_STAFF_VS_PERSONA,
 )
 from modules.ai.brain.turn.shadow import prepare_turn_arbitration  # noqa: E402
+from modules.ai.brain.turn_owner_contract import build_turn_owner_contract  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     INTENT_ASK_PRICE,
     INTENT_COMPLAINT_REFUND,
@@ -59,6 +61,8 @@ def _ctx(
     intent_priority: IntentPriorityVerdict | None = None,
     social_human_context=None,
     has_coupons: bool = False,
+    facts: CommerceFacts | None = None,
+    intent_slots: dict | None = None,
 ) -> BrainContext:
     st = state or MerchantConversationState(turn=3)
     return BrainContext(
@@ -66,9 +70,12 @@ def _ctx(
         customer_phone="+966500000000",
         message=msg,
         raw_message=msg,
-        intent=Intent(name=intent_name, confidence=0.92, slots={}),
+        intent=Intent(name=intent_name, confidence=0.92, slots=intent_slots or {}),
         state=st,
-        facts=CommerceFacts(has_products=True, has_coupons=has_coupons),
+        facts=facts if facts is not None else CommerceFacts(
+            has_products=True,
+            has_coupons=has_coupons,
+        ),
         history=[],
         state_relevance=state_relevance,
         intent_priority=intent_priority,
@@ -244,3 +251,180 @@ def test_enforce_noop_when_owners_match(monkeypatch):
     new_decision, result = maybe_enforce_turn_decision(ctx, legacy)
     assert result.enforced is False
     assert new_decision.action == ACTION_SEARCH_PRODUCTS
+
+
+_CONCRETE_SHOE = {
+    "id": 501,
+    "external_id": "shoe-white-501",
+    "title": "حذاء رياضي أبيض",
+    "description": "حذاء شبكي خفيف مناسب للمشي اليومي.",
+    "price": 199,
+    "can_checkout": True,
+    "in_stock": True,
+}
+_OTHER_PERFUME = {
+    "id": 8801,
+    "external_id": "perfume-rose-8801",
+    "title": "عطر ورد 100ml",
+    "description": "عطر ورد بتركيز 100 مل.",
+    "price": 180,
+    "can_checkout": True,
+    "in_stock": True,
+}
+
+
+def _concrete_product_facts(*products: dict) -> CommerceFacts:
+    rows = [dict(product) for product in products]
+    return CommerceFacts(
+        has_products=True,
+        product_count=len(rows),
+        in_stock_count=len(rows),
+        orderable=True,
+        snapshot_fresh=True,
+        top_products=rows,
+        discovery_products=rows,
+    )
+
+
+def _stale_checkout_with_concrete_focus() -> MerchantConversationState:
+    state = _stale_checkout_state()
+    set_product_focus(
+        state,
+        dict(_CONCRETE_SHOE),
+        reason="test_concrete_catalog_subject",
+        turn=state.turn,
+    )
+    return state
+
+
+class TestConcreteProductInformationEnforcement:
+    def test_catalog_confirmed_product_info_uses_existing_fact_owner(self, monkeypatch):
+        _enable_enforce_platform_wide(monkeypatch)
+        state = _stale_checkout_with_concrete_focus()
+        ctx = _ctx(
+            "حدثني عن حذاء رياضي أبيض",
+            intent_name="ask_product",
+            state=state,
+            state_relevance=_state_rel(),
+            facts=_concrete_product_facts(_CONCRETE_SHOE),
+            intent_slots={"product_query": _CONCRETE_SHOE["title"]},
+        )
+        prepare_turn_arbitration(ctx)
+        legacy = Decision(action=ACTION_ORDER_CONTEXT_UPDATE, reason="ask_city")
+
+        new_decision, result = maybe_enforce_turn_decision(ctx, legacy)
+
+        assert result.enforced is True
+        assert result.mismatch_type == MISMATCH_CHECKOUT_VS_DISCOVERY
+        assert new_decision.action == ACTION_LLM_REPLY
+        assert new_decision.args.get("topic") == "product_knowledge_facts"
+        assert new_decision.args.get("question_kind") == "attribute"
+        assert new_decision.args.get("subject_product", {}).get("id") == 501
+        assert "catalog_description" in (new_decision.args.get("allowed_facts") or {})
+        assert new_decision.args.get("block_order_flow") is True
+        assert "source" not in (new_decision.args or {})
+        assert str((ctx.state.current_product_focus or {}).get("id") or "") == "501"
+        assert ctx.state.order_prep.missing_fields == []
+        contract = build_turn_owner_contract(new_decision, ctx)
+        assert contract.owner == "product_knowledge"
+        assert contract.block_catalog_push is True
+
+    def test_broad_browse_still_uses_discovery_search(self, monkeypatch):
+        _enable_enforce_platform_wide(monkeypatch)
+        ctx = _ctx(
+            "ما أنواع الأحذية عندكم؟",
+            intent_name="ask_product",
+            state=_stale_checkout_with_concrete_focus(),
+            state_relevance=_state_rel(),
+            facts=_concrete_product_facts(_CONCRETE_SHOE, _OTHER_PERFUME),
+        )
+        prepare_turn_arbitration(ctx)
+        legacy = Decision(action=ACTION_ORDER_CONTEXT_UPDATE, reason="ask_city")
+
+        new_decision, result = maybe_enforce_turn_decision(ctx, legacy)
+
+        assert result.enforced is True
+        assert new_decision.action == ACTION_SEARCH_PRODUCTS
+        assert new_decision.args.get("topic") == "discovery"
+        assert new_decision.args.get("source") == "state_continuity_reresolve"
+        assert str((ctx.state.current_product_focus or {}).get("id") or "") == "501"
+
+    def test_availability_question_does_not_enter_product_knowledge_facts(self, monkeypatch):
+        _enable_enforce_platform_wide(monkeypatch)
+        ctx = _ctx(
+            "هل الحذاء الرياضي الأبيض متوفر؟",
+            intent_name="ask_product",
+            state=_stale_checkout_with_concrete_focus(),
+            state_relevance=_state_rel(),
+            facts=_concrete_product_facts(_CONCRETE_SHOE),
+            intent_slots={"product_query": _CONCRETE_SHOE["title"]},
+        )
+        prepare_turn_arbitration(ctx)
+        legacy = Decision(action=ACTION_ORDER_CONTEXT_UPDATE, reason="ask_city")
+
+        new_decision, result = maybe_enforce_turn_decision(ctx, legacy)
+
+        assert result.enforced is True
+        assert new_decision.args.get("topic") != "product_knowledge_facts"
+        assert new_decision.action == ACTION_SEARCH_PRODUCTS
+
+    def test_explicit_product_switch_does_not_reresolve_old_focus(self, monkeypatch):
+        _enable_enforce_platform_wide(monkeypatch)
+        ctx = _ctx(
+            "حدثني عن عطر ورد 100ml",
+            intent_name="ask_product",
+            state=_stale_checkout_with_concrete_focus(),
+            state_relevance=_state_rel(),
+            facts=_concrete_product_facts(_CONCRETE_SHOE, _OTHER_PERFUME),
+            intent_slots={"product_query": _OTHER_PERFUME["title"]},
+        )
+        prepare_turn_arbitration(ctx)
+        legacy = Decision(action=ACTION_ORDER_CONTEXT_UPDATE, reason="ask_city")
+
+        new_decision, result = maybe_enforce_turn_decision(ctx, legacy)
+
+        assert result.enforced is True
+        assert new_decision.action == ACTION_SEARCH_PRODUCTS
+        assert new_decision.args.get("topic") == "discovery"
+        assert new_decision.args.get("query") == ctx.message
+        assert "product_id" not in (new_decision.args or {})
+        assert "external_id" not in (new_decision.args or {})
+
+    def test_ambiguous_product_inquiry_does_not_claim_existing_focus(self, monkeypatch):
+        _enable_enforce_platform_wide(monkeypatch)
+        ctx = _ctx(
+            "ممكن أعرف عن منتج؟",
+            intent_name="ask_product",
+            state=_stale_checkout_with_concrete_focus(),
+            state_relevance=_state_rel(),
+            facts=_concrete_product_facts(_CONCRETE_SHOE, _OTHER_PERFUME),
+        )
+        prepare_turn_arbitration(ctx)
+        legacy = Decision(action=ACTION_ORDER_CONTEXT_UPDATE, reason="ask_city")
+
+        new_decision, result = maybe_enforce_turn_decision(ctx, legacy)
+
+        assert result.enforced is True
+        assert new_decision.action == ACTION_SEARCH_PRODUCTS
+        assert new_decision.args.get("topic") == "discovery"
+        assert new_decision.args.get("topic") != "product_knowledge_facts"
+
+    def test_foreign_catalog_rows_cannot_confirm_product_information(self, monkeypatch):
+        _enable_enforce_platform_wide(monkeypatch)
+        ctx = _ctx(
+            "حدثني عن حذاء رياضي أبيض",
+            tenant_id=77,
+            intent_name="ask_product",
+            state=_stale_checkout_with_concrete_focus(),
+            state_relevance=_state_rel(),
+            facts=_concrete_product_facts(_OTHER_PERFUME),
+            intent_slots={"product_query": _CONCRETE_SHOE["title"]},
+        )
+        prepare_turn_arbitration(ctx)
+        legacy = Decision(action=ACTION_ORDER_CONTEXT_UPDATE, reason="ask_city")
+
+        new_decision, result = maybe_enforce_turn_decision(ctx, legacy)
+
+        assert result.enforced is True
+        assert new_decision.action == ACTION_SEARCH_PRODUCTS
+        assert new_decision.args.get("topic") != "product_knowledge_facts"
