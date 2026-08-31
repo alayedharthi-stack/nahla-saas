@@ -1223,6 +1223,8 @@ def test_classify_block_codes():
     assert classify_block_code("access_token_missing") == "readiness"
     assert classify_block_code("missing_image_url") == "product"
     assert classify_block_code("product_already_meta_managed") == "permanent"
+    assert classify_block_code("existing_catalog_identity") == "permanent"
+    assert classify_block_code("ambiguous_sibling") == "permanent"
 
 
 def test_blocked_product_is_reconsidered_after_content_fix():

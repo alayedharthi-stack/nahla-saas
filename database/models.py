@@ -228,6 +228,10 @@ class Product(Base):
     # ── Multi-source ownership (migration 0085) ───────────────────────────
     ownership_mode = Column(String(32), nullable=True)
     source_external_id = Column(String(128), nullable=True)
+    # Graph item id. Partial unique index (migration 0101)
+    # ``uq_products_active_tenant_meta_item``: one active local row per
+    # (tenant_id, meta_item_id). Historical catalog_status values may
+    # keep the same id; the advisory lock is an extra defense only.
     meta_item_id = Column(String(128), nullable=True)
     canonical_retailer_id = Column(String(255), nullable=True)
     sync_status = Column(String(32), nullable=True)

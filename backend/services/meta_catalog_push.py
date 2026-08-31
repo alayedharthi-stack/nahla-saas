@@ -21,6 +21,18 @@ from services.meta_catalog_access import (
     select_catalog_graph_token,
 )
 from services.meta_catalog_export import preview_meta_variant_payload
+from services.meta_catalog_identity import (
+    ACTION_BLOCK,
+    ACTION_LINK,
+    ERROR_AMBIGUOUS_SIBLING,
+    REASON_ALREADY_BOUND,
+    REASON_LOOKUP,
+    canonical_sibling_retailer_ids,
+    evaluate_canonical_sibling_bind,
+    existing_identity_retailer_id,
+    occupied_active_meta_item_ids,
+    parent_would_create_in_meta,
+)
 from services.meta_catalog_import import _select_graph_token
 
 logger = logging.getLogger("nahla.meta_catalog_push")
@@ -29,6 +41,7 @@ REQUEST_TIMEOUT: float = 45.0
 # Graph Catalog Product Item fields used after a push. Identity plus
 # the content fields this API version exposes on GET.
 GRAPH_FIELDS = "id,retailer_id,name,price,currency,availability"
+SIBLING_GRAPH_FIELDS = "id,retailer_id,price,currency,availability,url,image_url"
 
 
 class MetaCatalogPushError(RuntimeError):
@@ -148,6 +161,7 @@ def find_meta_catalog_item_by_retailer_id(
     retailer_id: str,
     *,
     client: Optional[httpx.Client] = None,
+    fields: Optional[str] = None,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     """Return (meta_product_id, lookup_meta) for a catalog retailer_id."""
     rid = (retailer_id or "").strip()
@@ -165,7 +179,7 @@ def find_meta_catalog_item_by_retailer_id(
     _catalog_id, token = _resolve_catalog_and_token(conn)
     url = _graph_base(catalog_id, "products")
     params = {
-        "fields": GRAPH_FIELDS,
+        "fields": (fields or GRAPH_FIELDS).strip() or GRAPH_FIELDS,
         "filter": json.dumps({"retailer_id": {"eq": rid}}, separators=(",", ":")),
     }
     headers = _graph_auth_headers(token)
@@ -179,17 +193,158 @@ def find_meta_catalog_item_by_retailer_id(
         rows = (resp.json() or {}).get("data") or []
         if not rows:
             return None, lookup
+        if len(rows) != 1:
+            lookup["error"] = "ambiguous_graph_rows"
+            lookup["item"] = rows[0] or {}
+            return None, lookup
         first = rows[0] or {}
         meta_id = str(first.get("id") or "").strip() or None
         lookup["item"] = first
-        if meta_id:
-            lookup["matched"] = True
+        if not meta_id:
+            lookup["error"] = "missing_graph_id"
+            return None, lookup
+        lookup["matched"] = True
         return meta_id, lookup
 
     if client is not None:
         return _run(client)
     with httpx.Client(timeout=REQUEST_TIMEOUT) as owned:
         return _run(owned)
+
+
+def _parent_variants_for_gate(db: Any, parent: Any, variant: Any, tenant_id: int) -> List[Any]:
+    rows = list(getattr(parent, "variants", None) or [])
+    if not rows and db is not None:
+        from models import ProductVariant  # noqa: PLC0415
+
+        rows = (
+            db.query(ProductVariant)
+            .filter(
+                ProductVariant.tenant_id == int(tenant_id),
+                ProductVariant.product_id == int(getattr(parent, "id", 0) or 0),
+            )
+            .all()
+        )
+        if not isinstance(rows, list):
+            rows = []
+    current_id = int(getattr(variant, "id", 0) or 0)
+    if variant is not None and current_id and all(
+        int(getattr(row, "id", 0) or 0) != current_id for row in rows
+    ):
+        rows.append(variant)
+    elif variant is not None and not rows:
+        rows.append(variant)
+    return rows
+
+
+def _load_occupied_meta_item_ids(db: Any, tenant_id: int, exclude_product_id: int) -> Dict[str, int]:
+    from models import Product  # noqa: PLC0415
+
+    rows = (
+        db.query(Product)
+        .filter(
+            Product.tenant_id == int(tenant_id),
+            Product.meta_item_id.isnot(None),
+        )
+        .all()
+    )
+    if not isinstance(rows, list):
+        rows = []
+    return occupied_active_meta_item_ids(rows, exclude_product_id=exclude_product_id)
+
+
+def _variant_for_sibling_rid(ext: str, sibling_rid: str, variants: List[Any]) -> Optional[Any]:
+    suffix = sibling_rid[len(ext) + 1 :] if ext and sibling_rid.startswith(f"{ext}-") else ""
+    for row in variants:
+        if suffix and str(getattr(row, "salla_variant_id", "") or "").strip() == suffix:
+            return row
+    for row in variants:
+        if str(getattr(row, "retailer_id", "") or "").strip() == sibling_rid:
+            return row
+    return None
+
+
+def _decision_to_push_block(decision: Any) -> Dict[str, Any]:
+    return {
+        "action": decision.action,
+        "error": decision.error,
+        "reason": decision.reason,
+        "identity_class": decision.identity_class,
+        "meta_product_id": decision.meta_product_id,
+        "sibling_retailer_id": decision.sibling_retailer_id,
+        "idempotent": bool(decision.idempotent),
+        "content_mismatches": list(decision.content_mismatches or []),
+        "canonical_rule": decision.canonical_rule,
+    }
+
+
+def _canonical_sibling_gate(
+    db: Any,
+    conn: Any,
+    catalog_id: str,
+    parent: Any,
+    variant: Any,
+    retailer_id: str,
+    *,
+    client: Optional[httpx.Client] = None,
+) -> Optional[Dict[str, Any]]:
+    """LINK a unique safe sibling, BLOCK if unproven, else None (CREATE)."""
+    tenant_id = int(getattr(parent, "tenant_id", 0) or getattr(conn, "tenant_id", 0) or 0)
+    variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
+    candidates = canonical_sibling_retailer_ids(
+        parent, exclude_rid=retailer_id, variants=variants,
+    )
+    live_by_rid: Dict[str, Dict[str, Any]] = {}
+    lookup_unproven = False
+    for candidate in candidates:
+        meta_id, lookup = find_meta_catalog_item_by_retailer_id(
+            conn, catalog_id, candidate, client=client, fields=SIBLING_GRAPH_FIELDS,
+        )
+        if lookup.get("error"):
+            lookup_unproven = True
+            continue
+        if meta_id:
+            item = dict(lookup.get("item") or {})
+            item["id"] = meta_id
+            if not str(item.get("retailer_id") or "").strip():
+                item["retailer_id"] = candidate
+            live_by_rid[candidate] = item
+    if lookup_unproven:
+        return {
+            "action": ACTION_BLOCK,
+            "error": ERROR_AMBIGUOUS_SIBLING,
+            "reason": REASON_LOOKUP,
+            "identity_class": None,
+            "meta_product_id": None,
+            "sibling_retailer_id": None,
+            "idempotent": False,
+            "content_mismatches": [],
+            "canonical_rule": None,
+        }
+
+    ext = str(getattr(parent, "external_id", None) or "").strip()
+    sibling_payloads: Dict[str, Dict[str, Any]] = {}
+    for sibling_rid in live_by_rid:
+        sibling_variant = _variant_for_sibling_rid(ext, sibling_rid, variants)
+        if sibling_variant is None:
+            continue
+        preview = preview_meta_variant_payload(parent, sibling_variant)
+        sibling_payloads[sibling_rid] = dict(preview.get("payload") or {})
+
+    occupied = _load_occupied_meta_item_ids(
+        db, tenant_id, int(getattr(parent, "id", 0) or 0),
+    )
+    decision = evaluate_canonical_sibling_bind(
+        parent,
+        current_rid=retailer_id,
+        variants=variants,
+        live_by_rid=live_by_rid,
+        occupied_meta_item_ids=occupied,
+        sibling_payloads=sibling_payloads,
+    )
+    if decision.allow_create:
+        return None
+    return _decision_to_push_block(decision)
 
 
 def _post_catalog_item(
@@ -273,10 +428,40 @@ def push_one_meta_catalog_item(
         return result
 
     if meta_product_id:
+        already = str(getattr(parent, "meta_item_id", None) or "").strip()
+        if already and already != str(meta_product_id).strip():
+            result["action"] = ACTION_BLOCK
+            result["error"] = ERROR_AMBIGUOUS_SIBLING
+            result["ok"] = False
+            result["meta_product_id"] = meta_product_id
+            result["lookup"] = {
+                **(result.get("lookup") or {}),
+                "reason": REASON_ALREADY_BOUND,
+                "identity_class": None,
+            }
+            return result
         result["action"] = "update"
         result["meta_product_id"] = meta_product_id
         post_url = _graph_product_url(meta_product_id)
     else:
+        blocked = _canonical_sibling_gate(
+            db, conn, catalog_id, parent, variant, rid, client=client,
+        )
+        if blocked is not None:
+            result["action"] = blocked.get("action")
+            result["error"] = blocked.get("error")
+            result["ok"] = blocked.get("action") == ACTION_LINK
+            result["meta_product_id"] = blocked.get("meta_product_id")
+            result["lookup"] = {
+                **(result.get("lookup") or {}),
+                "identity_class": blocked.get("identity_class"),
+                "sibling_retailer_id": blocked.get("sibling_retailer_id"),
+                "reason": blocked.get("reason"),
+                "idempotent": blocked.get("idempotent"),
+                "content_mismatches": blocked.get("content_mismatches") or [],
+                "canonical_rule": blocked.get("canonical_rule"),
+            }
+            return result
         result["action"] = "create"
         post_url = _graph_base(catalog_id, "products")
 
@@ -421,8 +606,10 @@ def push_ready_meta_catalog_batch(
 
 __all__ = [
     "MetaCatalogPushError",
+    "existing_identity_retailer_id",
     "find_meta_catalog_item_by_retailer_id",
     "load_variant_for_push",
+    "parent_would_create_in_meta",
     "push_one_meta_catalog_item",
     "push_ready_meta_catalog_batch",
 ]

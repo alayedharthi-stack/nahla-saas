@@ -2105,6 +2105,7 @@ const ar: Translations = {
     summary: {
       title:            'كتالوج المنتجات',
       productCount:     '{count} منتج',
+      productCountSplit: '{active} نشطًا + {archived} مؤرشفًا',
       sourceLabel:      'المصدر',
       lastUpdateLabel:  'آخر تحديث',
       statusLabel:      'الحالة',

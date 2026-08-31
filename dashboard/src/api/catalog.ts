@@ -522,6 +522,9 @@ export interface CatalogDiagnostics {
   }
   products: {
     total:                          number
+    active?:                        number
+    removed_from_meta?:             number
+    all_rows?:                      number
     with_effective_retailer_id:     number
     without_effective_retailer_id:  number
     coverage_pct:                   number
