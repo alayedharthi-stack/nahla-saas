@@ -129,46 +129,24 @@ def test_concurrent_ensure_creates_exactly_one_catalog(
     create_lock = threading.Lock()
     barrier = threading.Barrier(2)
     errors: list[str] = []
+    results: list[dict] = []
 
     def _create(business_id, token, name, *, client=None):
         with create_lock:
             n = len(created_ids) + 1
-            created_ids.append(f"CAT-NEW-{n}")
+            cid = f"CAT-NEW-{n}"
+            created_ids.append(cid)
         time.sleep(0.2)
-        return created_ids[-1], None
+        return cid, None
+
+    from unittest.mock import patch
 
     def worker() -> None:
-        from unittest.mock import patch
-
         db = SessionLocal()
         try:
             barrier.wait(timeout=5)
-            with patch(
-                "services.meta_catalog_onboarding._select_graph_token",
-                return_value={"token": "EAAB-merchant"},
-            ), patch(
-                "services.meta_catalog_onboarding.fetch_waba_owner_business_id",
-                return_value={"ok": True, "business_id": "BM-MERCHANT"},
-            ), patch(
-                "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
-                return_value=([], 200, None),
-            ), patch(
-                "services.meta_catalog_onboarding._list_owned_catalog_ids",
-                side_effect=lambda *a, **k: (list(created_ids), None, False),
-            ), patch(
-                "services.meta_catalog_onboarding._create_owned_catalog",
-                side_effect=_create,
-            ), patch(
-                "services.meta_catalog_onboarding.link_waba_to_catalog",
-                return_value={"ok": True, "already_linked": False, "action": "link"},
-            ), patch(
-                "services.meta_catalog_onboarding.probe_catalog_readable",
-                return_value={"ok": True, "business_id": "BM-MERCHANT"},
-            ), patch(
-                "services.meta_catalog_onboarding.get_entitlements",
-            ) as ent:
-                ent.return_value.has_feature.return_value = True
-                out = ensure_waba_catalog_for_tenant(db, _TEST_TENANT, confirm=True)
+            out = ensure_waba_catalog_for_tenant(db, _TEST_TENANT, confirm=True)
+            results.append(out)
             if not out.get("ok"):
                 errors.append(str(out.get("error")))
         except Exception as exc:  # noqa: BLE001
@@ -177,13 +155,38 @@ def test_concurrent_ensure_creates_exactly_one_catalog(
         finally:
             db.close()
 
-    t1 = threading.Thread(target=worker)
-    t2 = threading.Thread(target=worker)
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
-    assert errors == []
+    with patch(
+        "services.meta_catalog_onboarding._select_graph_token",
+        return_value={"token": "EAAB-merchant"},
+    ), patch(
+        "services.meta_catalog_onboarding.fetch_waba_owner_business_id",
+        return_value={"ok": True, "business_id": "BM-MERCHANT"},
+    ), patch(
+        "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+        return_value=([], 200, None),
+    ), patch(
+        "services.meta_catalog_onboarding._list_owned_catalog_ids",
+        side_effect=lambda *a, **k: (list(created_ids), None, False),
+    ), patch(
+        "services.meta_catalog_onboarding._create_owned_catalog",
+        side_effect=_create,
+    ), patch(
+        "services.meta_catalog_onboarding.link_waba_to_catalog",
+        return_value={"ok": True, "already_linked": False, "action": "link"},
+    ), patch(
+        "services.meta_catalog_onboarding.probe_catalog_readable",
+        return_value={"ok": True, "business_id": "BM-MERCHANT"},
+    ), patch(
+        "services.meta_catalog_onboarding.get_entitlements",
+    ) as ent:
+        ent.return_value.has_feature.return_value = True
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+    assert errors == [], results
     assert len(created_ids) == 1
 
     verify = SessionLocal()
