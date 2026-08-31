@@ -109,6 +109,110 @@ def _identity_hint_from_ctx(ctx: BrainContext) -> Optional[dict[str, Any]]:
     return None
 
 
+def _concrete_product_knowledge_decision(
+    ctx: BrainContext,
+    *,
+    mismatch_type: str,
+) -> Optional[Decision]:
+    """Reuse the existing fact owner before an enforced discovery fallback.
+
+    A checkout-vs-discovery mismatch must still release stale checkout
+    authority.  It must not, however, replace a catalog-confirmed product
+    information turn with generic search merely because the legacy decision
+    was a checkout action.  This helper is deliberately a consumer of the
+    existing canonical-referent and product-knowledge owners: it introduces
+    neither phrase classification nor a second fact bundle.
+    """
+    if mismatch_type != MISMATCH_CHECKOUT_VS_DISCOVERY:
+        return None
+
+    understanding = getattr(ctx, "turn_understanding_shadow", None)
+    if str(getattr(understanding, "current_intent", "") or "") != "product_inquiry":
+        return None
+
+    message = str(getattr(ctx, "raw_message", None) or ctx.message or "").strip()
+    if not message:
+        return None
+
+    try:
+        from ..commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
+            ensure_canonical_referent_catalog_projection,
+        )
+        from ..commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+            product_focus_identity,
+        )
+        from ..product_discovery_gate import (  # noqa: PLC0415
+            _explicit_category_scope_broadening,
+            _turn_scoped_to_canonical_referent,
+        )
+        from ..postprocess.availability_guard_policy import (  # noqa: PLC0415
+            inbound_asks_stock_or_orderability,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing owners fail closed
+        return None
+
+    referent = canonical_product_referent(getattr(ctx, "state", None))
+    if not has_structured_catalog_identity(referent):
+        return None
+    if (
+        inbound_asks_stock_or_orderability(message)
+        or _explicit_category_scope_broadening(message)
+        or not _turn_scoped_to_canonical_referent(
+            message,
+            referent,
+            state=getattr(ctx, "state", None),
+        )
+    ):
+        return None
+
+    try:
+        from modules.ai.order_flow_v2.triggers import is_catalog_order_inbound  # noqa: PLC0415
+
+        profile = getattr(ctx, "profile", None)
+        inbound_metadata = (
+            dict(profile.get("inbound_metadata") or {})
+            if isinstance(profile, dict)
+            else {}
+        )
+        if is_catalog_order_inbound(inbound_metadata, message):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — do not infer checkout on probe failure
+        pass
+
+    projected = ensure_canonical_referent_catalog_projection(
+        db=getattr(ctx, "_db", None),
+        tenant_id=getattr(ctx, "tenant_id", None),
+        state=getattr(ctx, "state", None),
+        facts=getattr(ctx, "facts", None),
+        merchant_context=getattr(ctx, "merchant_context", None),
+        bind_to_merchant_context=True,
+    )
+    if not has_structured_catalog_identity(projected):
+        return None
+
+    try:
+        from ..commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            TOPIC_PRODUCT_KNOWLEDGE_FACTS,
+            try_product_knowledge_decision,
+        )
+
+        decision = try_product_knowledge_decision(ctx)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing fact owner remains authoritative
+        return None
+
+    args = dict(getattr(decision, "args", None) or {}) if decision is not None else {}
+    subject = dict(args.get("subject_product") or {})
+    if (
+        decision is None
+        or args.get("topic") != TOPIC_PRODUCT_KNOWLEDGE_FACTS
+        or product_focus_identity(subject) != product_focus_identity(projected)
+    ):
+        return None
+    return decision
+
+
 def _decision_for_arbitration(
     arbitration: TurnArbitration,
     understanding: TurnUnderstanding,
@@ -142,6 +246,19 @@ def _decision_for_arbitration(
         and ctx is not None
     ):
         identity = _identity_hint_from_ctx(ctx)
+        if identity:
+            try:
+                from ..commerce.state_continuity_identity import (  # noqa: PLC0415
+                    _is_explicit_different_product,
+                )
+
+                if _is_explicit_different_product(
+                    getattr(ctx, "state", None),
+                    getattr(ctx, "intent", None),
+                ):
+                    identity = None
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — preserve safe legacy fallback
+                pass
         msg = str(getattr(ctx, "raw_message", None) or ctx.message or "")
         # Fresh catalog retrieval only when a trusted identity hint exists
         # (nominate → re-resolve). Pure coupon/social discovery without a
@@ -233,13 +350,26 @@ def maybe_enforce_turn_decision(
     legacy_owner = legacy_owner_from_decision(decision)
     proposed_owner = arbitration.turn_owner
 
-    _apply_suspend_scope(ctx, understanding, mismatch_type=mismatch_type)
-    enforced_decision = _decision_for_arbitration(
-        arbitration,
-        understanding,
+    product_knowledge_decision = _concrete_product_knowledge_decision(
+        ctx,
         mismatch_type=mismatch_type,
-        ctx=ctx,
     )
+    _apply_suspend_scope(ctx, understanding, mismatch_type=mismatch_type)
+    if product_knowledge_decision is not None:
+        product_knowledge_decision.args = {
+            **dict(product_knowledge_decision.args or {}),
+            "turn_arbiter_enforced": True,
+            "turn_arbiter_mismatch_type": mismatch_type,
+            "block_order_flow": True,
+        }
+        enforced_decision = product_knowledge_decision
+    else:
+        enforced_decision = _decision_for_arbitration(
+            arbitration,
+            understanding,
+            mismatch_type=mismatch_type,
+            ctx=ctx,
+        )
 
     result = TurnEnforceResult(
         enforced=True,
@@ -254,15 +384,17 @@ def maybe_enforce_turn_decision(
     logger.info(
         "[TURN_ARBITER_ENFORCE] tenant=%s enforced=true mismatch_type=%s "
         "proposed_owner=%s legacy_owner=%s legacy_action=%s new_action=%s "
-        "reply_goal=%s compose_mode=%s suspend_stale=%s preview=%r",
+        "reply_goal=%s compose_mode=%s preserve_product_knowledge=%s "
+        "suspend_stale=%s preview=%r",
         ctx.tenant_id,
         mismatch_type,
         proposed_owner,
         legacy_owner,
         legacy_action,
         enforced_decision.action,
-        arbitration.owner_brief.reply_goal,
-        arbitration.owner_brief.compose_mode,
+        str((enforced_decision.args or {}).get("response_goal") or arbitration.owner_brief.reply_goal),
+        str((enforced_decision.args or {}).get("compose_mode") or arbitration.owner_brief.compose_mode),
+        str(product_knowledge_decision is not None).lower(),
         str(understanding.should_suspend_stale_state).lower(),
         (getattr(ctx, "raw_message", None) or ctx.message or "")[:80],
     )
