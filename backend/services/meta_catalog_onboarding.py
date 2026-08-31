@@ -111,13 +111,21 @@ def _acquire_catalog_claim_lock(db: Any, catalog_id: str) -> None:
 
 
 def _reload_connection_after_lock(db: Any, conn: Any, tenant_id: int) -> Any:
-    """Drop the identity-mapped row so a waiter sees commits made while blocked."""
+    """Drop the identity-mapped row so a waiter sees commits made while blocked.
+
+    Fail closed: expire/refresh errors raise; a missing row returns None
+    and must never reuse the pre-lock object.
+    """
     try:
         db.expire(conn)
-    except Exception:
-        pass
-    reloaded = _load_connection(db, tenant_id)
-    return reloaded if reloaded is not None else conn
+    except Exception as exc:
+        logger.error(
+            "[META_CATALOG_ONBOARD] expire after lock failed tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
+        raise OnboardingLockError(ERROR_ONBOARDING_LOCK_FAILED) from exc
+    return _load_connection(db, tenant_id)
 
 
 def _now_iso() -> str:
@@ -423,11 +431,10 @@ def ensure_waba_catalog_for_tenant(
 
     try:
         _acquire_tenant_onboard_lock(db, tenant_id)
+        conn = _reload_connection_after_lock(db, conn, tenant_id)
     except OnboardingLockError:
         result["error"] = ERROR_ONBOARDING_LOCK_FAILED
         return result
-
-    conn = _reload_connection_after_lock(db, conn, tenant_id)
     if conn is None:
         result["error"] = "connection_not_found"
         return result

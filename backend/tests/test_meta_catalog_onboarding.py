@@ -526,3 +526,49 @@ def test_readable_linked_catalog_without_business_id_does_not_stamp():
     assert out["error"] == ERROR_CATALOG_BUSINESS_UNPROVEN
     assert conn.meta_catalog_id in (None, "")
     create.assert_not_called()
+
+
+def test_expire_after_lock_stops_before_graph():
+    conn = _conn()
+    db = _db(conn)
+    db.expire.side_effect = RuntimeError("identity map exploded")
+    with patch("services.meta_catalog_onboarding.fetch_waba_owner_business_id") as owner:
+        with patch("services.meta_catalog_onboarding._fetch_waba_product_catalogs") as fetch:
+            with patch("services.meta_catalog_onboarding._create_owned_catalog") as create:
+                out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == ERROR_ONBOARDING_LOCK_FAILED
+    owner.assert_not_called()
+    fetch.assert_not_called()
+    create.assert_not_called()
+    assert conn.meta_catalog_id in (None, "")
+
+
+def test_missing_connection_after_lock_does_not_reuse_stale_object():
+    stale = _conn()
+    loads = {"n": 0}
+    db = MagicMock()
+
+    def _query(model):
+        q = MagicMock()
+        name = getattr(model, "__name__", str(model))
+        if name == "WhatsAppConnection":
+            loads["n"] += 1
+            q.filter.return_value.first.return_value = stale if loads["n"] == 1 else None
+            q.filter.return_value.all.return_value = [stale] if loads["n"] == 1 else []
+        else:
+            q.filter.return_value.first.return_value = None
+            q.filter.return_value.all.return_value = []
+        return q
+
+    db.query.side_effect = _query
+    with patch("services.meta_catalog_onboarding.fetch_waba_owner_business_id") as owner:
+        with patch("services.meta_catalog_onboarding._fetch_waba_product_catalogs") as fetch:
+            with patch("services.meta_catalog_onboarding._create_owned_catalog") as create:
+                out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == "connection_not_found"
+    owner.assert_not_called()
+    fetch.assert_not_called()
+    create.assert_not_called()
+    assert stale.meta_catalog_id in (None, "")
