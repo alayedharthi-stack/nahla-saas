@@ -117,6 +117,18 @@ def is_phantom_category_scope(scope: str) -> bool:
     return False
 
 
+def is_inventory_subject_scope(scope: str) -> bool:
+    """True when an extracted token is an inventory subject, not a category noun.
+
+    Reuses the existing inventory-subject morphological frame
+    (``منتجات`` / ``متوفر`` / ``catalog`` / …). Does not add phrase lists.
+    """
+    norm = _normalize_ar(scope or "")
+    if not norm:
+        return False
+    return bool(_INVENTORY_SUBJECT_RE.search(norm))
+
+
 _ORDER_CONTINUATION_RE = re.compile(
     r"(?:"
     r"اطلب(?:ه|ها|هم)|اشتري(?:ه|ها|هم)|"
@@ -452,6 +464,7 @@ __all__ = [
     "is_collections_start_over_request",
     "is_group_products_more_request",
     "is_navigation_more_request",
+    "is_inventory_subject_scope",
     "is_phantom_category_scope",
     "message_indicates_catalog_browse",
 ]
