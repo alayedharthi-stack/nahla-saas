@@ -23,6 +23,7 @@ from services.meta_catalog_export import (
     resolve_meta_item_group_id,
 )
 from services.meta_catalog_reconcile import fetch_meta_catalog_live_products
+from services.meta_catalog_identity import existing_identity_retailer_id
 
 PUSHABLE_STATUSES = frozenset({"ready", "warn"})
 IN_STOCK_AVAILABILITY = "in stock"
@@ -70,6 +71,7 @@ class MetaCatalogReadinessItem:
     reasons: List[str] = field(default_factory=list)
     payload_preview: Optional[Dict[str, Any]] = None
     in_meta_live: Optional[bool] = None
+    in_meta_identity: Optional[bool] = None
     meta_product_id: Optional[str] = None
     live_name: Optional[str] = None
     local_name: Optional[str] = None
@@ -97,6 +99,8 @@ class MetaCatalogReadinessItem:
             out["payload_preview"] = dict(self.payload_preview)
         if self.in_meta_live is not None:
             out["in_meta_live"] = self.in_meta_live
+        if self.in_meta_identity is not None:
+            out["in_meta_identity"] = self.in_meta_identity
         if self.meta_product_id is not None:
             out["meta_product_id"] = self.meta_product_id
         if self.live_name is not None:
@@ -729,6 +733,20 @@ def build_meta_catalog_readiness_report(
             live_row=live_row,
             include_meta=include_meta_live_read,
         )
+        if include_meta_live_read:
+            sibling_rid = existing_identity_retailer_id(
+                parent,
+                live_by_retailer.keys(),
+                current_rid=str(elig.retailer_id or ""),
+                variants=variants_by_product.get(int(elig.product_id)),
+            )
+            item.in_meta_identity = bool(sibling_rid)
+            if (
+                item.action_needed == "create"
+                and sibling_rid
+                and sibling_rid != str(elig.retailer_id or "").strip()
+            ):
+                item.action_needed = "skip"
 
         if exclude_out_of_stock and "out_of_stock" in item.reasons:
             continue

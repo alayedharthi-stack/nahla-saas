@@ -73,7 +73,11 @@ def _cleanup(session) -> None:
 
 def test_legacy_identity_keys_from_persisted_variants(postgres_engine: Engine) -> None:
     from database.models import Product, ProductVariant, Tenant
-    from services.meta_catalog_push import _legacy_identity_retailer_ids
+    from services.meta_catalog_identity import (
+        existing_identity_retailer_id,
+        legacy_identity_retailer_ids,
+        parent_would_create_in_meta,
+    )
 
     _ensure_orm_tables(postgres_engine)
     Session = sessionmaker(bind=postgres_engine)
@@ -160,15 +164,31 @@ def test_legacy_identity_keys_from_persisted_variants(postgres_engine: Engine) -
         db.refresh(missing)
         db.refresh(ambiguous)
 
-        exact_keys = _legacy_identity_retailer_ids(exact, exclude_rid="88001")
+        exact_keys = legacy_identity_retailer_ids(exact, exclude_rid="88001")
         assert "88001-591001" in exact_keys
         assert "88001" not in exact_keys
+        assert exact.title not in exact_keys
 
-        missing_keys = _legacy_identity_retailer_ids(missing, exclude_rid="99001-1")
+        exact_variants = [v for v in (exact.variants or [])]
+        live_exact = {"88001-591001"}
+        assert existing_identity_retailer_id(
+            exact, live_exact, current_rid="88001", variants=exact_variants,
+        ) == "88001-591001"
+        assert parent_would_create_in_meta(exact, live_exact, variants=exact_variants) is False
+        assert parent_would_create_in_meta(exact, live_exact, variants=exact_variants) is False
+
+        missing_keys = legacy_identity_retailer_ids(missing, exclude_rid="99001-1")
         assert "99001" in missing_keys
         assert "99001-1" not in missing_keys
+        missing_variants = [v for v in (missing.variants or [])]
+        assert parent_would_create_in_meta(
+            missing, live_exact, variants=missing_variants,
+        ) is True
+        assert parent_would_create_in_meta(
+            missing, set(), variants=missing_variants,
+        ) is True
 
-        ambiguous_keys = _legacy_identity_retailer_ids(ambiguous, exclude_rid="77001-A")
+        ambiguous_keys = legacy_identity_retailer_ids(ambiguous, exclude_rid="77001-A")
         assert "legacy-77001" in ambiguous_keys
         assert "77001-B" in ambiguous_keys
         assert "77001" in ambiguous_keys

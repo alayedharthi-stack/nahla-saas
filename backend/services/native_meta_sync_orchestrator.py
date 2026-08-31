@@ -1398,6 +1398,44 @@ def _attempt_acquired_body(
             http_status = int(meta_block.get("http_status") or 0)
         except (TypeError, ValueError):
             http_status = 0
+        if not lookup_only and push_result.get("action") == "skip_existing":
+            bound_id = str(push_result.get("meta_product_id") or "").strip()
+            if not bound_id:
+                return fail(
+                    "existing_catalog_identity",
+                    "existing_catalog_identity",
+                    retailer_id=retailer_id,
+                )
+            waba_status = get_waba_catalog_link_status(db, tenant_id)
+            waba_linked = _waba_linked_flag(waba_status)
+            lookup_block = push_result.get("lookup") if isinstance(push_result.get("lookup"), dict) else {}
+
+            def _stamp_identity_bound(row: Any) -> None:
+                _mark_synced(row, meta_item_id=bound_id, waba_linked=waba_linked)
+                _write_sync_meta(
+                    row,
+                    last_error_code=None,
+                    last_error_summary=None,
+                    identity_bound=True,
+                    skipped_create=True,
+                    identity_class=str(lookup_block.get("identity_class") or "EXISTING_EXACT"),
+                    bound_retailer_id=str(lookup_block.get("legacy_retailer_id") or ""),
+                )
+                _requeue_if_dirty(row)
+
+            if not _stamp_with_lease(db, parent, lease, _stamp_identity_bound):
+                return _abandon_stale_lease(db)
+            return {
+                "ok": True,
+                "skipped_create": True,
+                "action": "skip_existing",
+                "sync_status": parent.sync_status,
+                "meta_item_id": bound_id,
+                "retailer_id": retailer_id,
+                "variant_count": len(retailer_ids),
+                "waba_catalog_linked": waba_linked,
+                "push": last_push,
+            }
         if not lookup_only and not push_result.get("ok"):
             err_msg = _sanitize_sync_error(push_result)
             code = str(push_result.get("error") or "meta_push_failed")

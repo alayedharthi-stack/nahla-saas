@@ -466,6 +466,7 @@ jobs:
           unset DATABASE_URL || true
           python -m pytest \
             backend/tests/test_whatsapp_catalog_sync_postgres_locks.py \
+            backend/tests/test_meta_catalog_identity_postgres.py \
             -q --tb=short --maxfail=1 \
             --junitxml=/tmp/wa-catalog-pg.xml
           python scripts/check_junit_clean.py /tmp/wa-catalog-pg.xml

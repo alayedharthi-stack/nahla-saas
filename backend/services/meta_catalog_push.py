@@ -21,6 +21,11 @@ from services.meta_catalog_access import (
     select_catalog_graph_token,
 )
 from services.meta_catalog_export import preview_meta_variant_payload
+from services.meta_catalog_identity import (
+    existing_identity_retailer_id,
+    legacy_identity_retailer_ids as _legacy_identity_retailer_ids,
+    parent_would_create_in_meta,
+)
 from services.meta_catalog_import import _select_graph_token
 
 logger = logging.getLogger("nahla.meta_catalog_push")
@@ -192,32 +197,6 @@ def find_meta_catalog_item_by_retailer_id(
         return _run(owned)
 
 
-def _legacy_identity_retailer_ids(parent: Any, *, exclude_rid: str) -> List[str]:
-    """Strong identity keys for a parent — never name-only."""
-    current = (exclude_rid or "").strip()
-    ordered: List[str] = []
-
-    def _add(value: Any) -> None:
-        rid = str(value or "").strip()
-        if not rid or rid == current or rid in ordered:
-            return
-        ordered.append(rid)
-
-    _add(getattr(parent, "meta_retailer_id", None))
-    _add(getattr(parent, "external_id", None))
-    _add(getattr(parent, "canonical_retailer_id", None))
-    _add(getattr(parent, "source_external_id", None))
-    ext = str(getattr(parent, "external_id", None) or "").strip()
-    for variant in getattr(parent, "variants", None) or []:
-        stored = str(getattr(variant, "retailer_id", None) or "").strip()
-        _add(stored)
-        svid = str(getattr(variant, "salla_variant_id", None) or "").strip()
-        _add(svid)
-        if ext and svid:
-            _add(f"{ext}-{svid}")
-    return ordered[:12]
-
-
 def _block_create_if_existing_identity(
     conn: Any,
     catalog_id: str,
@@ -236,9 +215,16 @@ def _block_create_if_existing_identity(
         if lookup.get("error"):
             continue
         if meta_id:
+            variant_rids = {
+                str(getattr(row, "retailer_id", "") or "").strip()
+                for row in (getattr(parent, "variants", None) or [])
+            }
+            identity_class = (
+                "EXISTING_EXACT" if candidate in variant_rids else "EXISTING_LEGACY"
+            )
             return {
                 "error": "existing_catalog_identity",
-                "identity_class": "EXISTING_LEGACY",
+                "identity_class": identity_class,
                 "meta_product_id": meta_id,
                 "legacy_retailer_id": candidate,
             }
@@ -487,8 +473,10 @@ def push_ready_meta_catalog_batch(
 
 __all__ = [
     "MetaCatalogPushError",
+    "existing_identity_retailer_id",
     "find_meta_catalog_item_by_retailer_id",
     "load_variant_for_push",
+    "parent_would_create_in_meta",
     "push_one_meta_catalog_item",
     "push_ready_meta_catalog_batch",
 ]

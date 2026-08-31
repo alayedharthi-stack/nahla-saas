@@ -16,6 +16,8 @@ os.environ.setdefault("NAHLA_TEST_NO_DB", "1")
 
 from services.meta_catalog_push import (  # noqa: E402
     MetaCatalogPushError,
+    existing_identity_retailer_id,
+    parent_would_create_in_meta,
     push_one_meta_catalog_item,
 )
 
@@ -287,6 +289,7 @@ def test_confirm_skips_create_when_sibling_hyphenated_rid_exists():
     assert result["error"] == "existing_catalog_identity"
     assert result["ok"] is False
     assert mock_client.post.call_count == 0
+    assert (result.get("lookup") or {}).get("identity_class") == "EXISTING_EXACT"
 
 
 def test_confirm_skips_create_when_legacy_parent_rid_exists():
@@ -352,6 +355,48 @@ def test_confirm_creates_when_no_exact_or_legacy_identity():
     assert result["ok"] is True
     assert result["meta_product_id"] == "META-NEW-MISSING"
     assert mock_client.post.call_count == 1
+
+
+def test_identity_classifier_binds_sibling_not_title():
+    parent = _parent()
+    parent.title = "تنورة طويلة"
+    sibling = _variant("88001-591001")
+    default = _variant("88001")
+    parent.variants = [sibling, default]
+    live = {"88001-591001"}
+    assert existing_identity_retailer_id(parent, live, current_rid="88001") == "88001-591001"
+    assert parent_would_create_in_meta(parent, live) is False
+    assert parent_would_create_in_meta(parent, live) is False  # idempotent
+    assert existing_identity_retailer_id(parent, {"unrelated-rid"}, current_rid="88001") is None
+    assert parent_would_create_in_meta(parent, {"unrelated-rid"}) is True
+    keys = []
+    from services.meta_catalog_identity import legacy_identity_retailer_ids
+    keys = legacy_identity_retailer_ids(parent, exclude_rid="88001")
+    assert parent.title not in keys
+
+
+def test_lookup_filter_is_exact_retailer_id_not_name():
+    db = _mock_db()
+    captured = []
+
+    def _get(url, **kwargs):
+        captured.append(kwargs.get("params") or {})
+        return httpx.Response(200, json={"data": []})
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = _get
+    mock_client.post.return_value = httpx.Response(200, json={"id": "META-NEW"})
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
+    assert captured
+    filt = str(captured[0].get("filter") or "")
+    assert "retailer_id" in filt
+    assert "eq" in filt
+    assert "name" not in filt
 
 
 def test_load_variant_requires_retailer_id():
