@@ -220,9 +220,10 @@ def test_confirm_get_existing_then_update():
     assert post_headers.get("Authorization") == "Bearer tok"
 
 
-def test_confirm_does_not_update_different_bound_meta_item():
+def test_confirm_updates_sellable_variant_even_if_parent_meta_item_differs():
+    """Salla variant identity is independent of Product.meta_item_id."""
     parent = _parent()
-    parent.meta_item_id = "META-SIBLING"
+    parent.meta_item_id = "META-PARENT-STALE"
     db = _mock_db(parent=parent)
     lookup_resp = httpx.Response(
         200,
@@ -230,6 +231,7 @@ def test_confirm_does_not_update_different_bound_meta_item():
     )
     mock_client = MagicMock()
     mock_client.get.return_value = lookup_resp
+    mock_client.post.return_value = httpx.Response(200, json={"success": True})
     mock_client.__enter__.return_value = mock_client
     mock_client.__exit__.return_value = False
 
@@ -238,10 +240,10 @@ def test_confirm_does_not_update_different_bound_meta_item():
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
 
-    assert result["action"] == "block_ambiguous_sibling"
-    assert result["error"] == "ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "already_bound_other"
-    assert mock_client.post.call_count == 0
+    assert result["action"] == "update"
+    assert result["ok"] is True
+    assert result["meta_product_id"] == "META-ITEM-EXISTING"
+    assert mock_client.post.call_count == 1
 
 
 def test_fatal_preview_does_not_call_graph():
@@ -611,6 +613,40 @@ def test_identity_classifier_binds_sibling_not_title():
     from services.meta_catalog_identity import legacy_identity_retailer_ids
     keys = legacy_identity_retailer_ids(parent, exclude_rid="88001")
     assert parent.title not in keys
+
+
+def test_sellable_salla_sizes_create_instead_of_linking_first_sibling():
+    """Five size SKUs are independent identities; sibling gate must not collapse them."""
+    parent = _parent()
+    parent.external_id = "863278879"
+    sizes = [
+        _variant(f"863278879-{100 + i}")
+        for i in range(5)
+    ]
+    for i, row in enumerate(sizes):
+        row.id = 200 + i
+        row.salla_variant_id = str(100 + i)
+    parent.variants = sizes
+    variant = sizes[1]
+    db = _mock_db(parent=parent, variant=variant)
+    lookup_resp = httpx.Response(200, json={"data": []})
+    create_resp = httpx.Response(200, json={"id": "META-SIZE-2"})
+    mock_client = MagicMock()
+    mock_client.get.return_value = lookup_resp
+    mock_client.post.return_value = create_resp
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    preview = _preview_ok()
+    preview["payload"]["retailer_id"] = variant.retailer_id
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=preview):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                with patch("services.meta_catalog_push._canonical_sibling_gate") as gate:
+                    result = push_one_meta_catalog_item(db, 9, variant.retailer_id, confirm=True)
+    assert result["action"] == "create"
+    assert result["ok"] is True
+    gate.assert_not_called()
+    assert mock_client.post.call_count == 1
 
 
 def test_lookup_filter_is_exact_retailer_id_not_name():

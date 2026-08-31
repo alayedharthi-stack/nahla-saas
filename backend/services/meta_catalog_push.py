@@ -427,9 +427,19 @@ def push_one_meta_catalog_item(
         result["error"] = "lookup_failed"
         return result
 
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        identity_for_retailer_id,
+        is_salla_source,
+    )
+
+    sellable_salla = False
+    if is_salla_source(parent):
+        gate_variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
+        sellable_salla = identity_for_retailer_id(parent, gate_variants, rid) is not None
+
     if meta_product_id:
         already = str(getattr(parent, "meta_item_id", None) or "").strip()
-        if already and already != str(meta_product_id).strip():
+        if already and already != str(meta_product_id).strip() and not sellable_salla:
             result["action"] = ACTION_BLOCK
             result["error"] = ERROR_AMBIGUOUS_SIBLING
             result["ok"] = False
@@ -444,9 +454,11 @@ def push_one_meta_catalog_item(
         result["meta_product_id"] = meta_product_id
         post_url = _graph_product_url(meta_product_id)
     else:
-        blocked = _canonical_sibling_gate(
-            db, conn, catalog_id, parent, variant, rid, client=client,
-        )
+        blocked = None
+        if not sellable_salla:
+            blocked = _canonical_sibling_gate(
+                db, conn, catalog_id, parent, variant, rid, client=client,
+            )
         if blocked is not None:
             result["action"] = blocked.get("action")
             result["error"] = blocked.get("error")

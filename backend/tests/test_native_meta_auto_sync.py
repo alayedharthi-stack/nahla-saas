@@ -1084,6 +1084,7 @@ def test_newer_generation_pushes_and_verifies_on_resume(
         assert parent.sync_status != "synced" or int(sm.get("expected_content_generation") or 0) == 2
 
 
+@patch("services.native_meta_sync_orchestrator._collect_retailer_ids")
 @patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
 @patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
 @patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
@@ -1097,6 +1098,7 @@ def test_scheduler_binds_existing_identity_without_create(
     lookup_mock,
     waba_mock,
     lock_mock,
+    collect_mock,
 ):
     parent = _generic_native_parent(
         source="salla",
@@ -1109,6 +1111,7 @@ def test_scheduler_binds_existing_identity_without_create(
     lock_mock.return_value = parent
     preview_mock.return_value = _preview_ok()
     ensure_mock.return_value = (SimpleNamespace(retailer_id="88001"), False)
+    collect_mock.return_value = ["88001-591001"]
     push_mock.return_value = {
         "ok": True,
         "action": "link_canonical_sibling",
@@ -1137,6 +1140,7 @@ def test_scheduler_binds_existing_identity_without_create(
     assert parent.extra_metadata["sync_meta"].get("identity_class") == "EXISTING_CANONICAL_SIBLING"
 
 
+@patch("services.native_meta_sync_orchestrator._collect_retailer_ids")
 @patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
 @patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
 @patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
@@ -1150,6 +1154,7 @@ def test_scheduler_blocks_ambiguous_sibling_without_create(
     lookup_mock,
     waba_mock,
     lock_mock,
+    collect_mock,
 ):
     parent = _generic_native_parent(
         source="salla",
@@ -1162,6 +1167,7 @@ def test_scheduler_blocks_ambiguous_sibling_without_create(
     lock_mock.return_value = parent
     preview_mock.return_value = _preview_ok()
     ensure_mock.return_value = (SimpleNamespace(retailer_id="88001"), False)
+    collect_mock.return_value = ["88001-591001"]
     push_mock.return_value = {
         "ok": False,
         "action": "block_ambiguous_sibling",

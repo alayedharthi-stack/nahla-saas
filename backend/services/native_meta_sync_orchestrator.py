@@ -91,6 +91,7 @@ PERMANENT_BLOCK_CODES = frozenset({
     "not_eligible",
     "existing_catalog_identity",
     "ambiguous_sibling",
+    "ambiguous_variant_identity",
 })
 PRODUCT_BLOCK_CODES = frozenset({
     "preview_fatal",
@@ -1101,35 +1102,18 @@ def _raise_variant_discovery_failed(db: Any, parent: Any, exc: BaseException) ->
 
 
 def _collect_retailer_ids(db: Any, parent: Any, fallback: Optional[str]) -> list[str]:
-    ids: list[str] = []
-    try:
-        from models import ProductVariant  # noqa: PLC0415
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        AmbiguousVariantIdentity,
+        collect_push_retailer_ids,
+    )
 
-        rows = (
-            db.query(ProductVariant)
-            .filter(
-                ProductVariant.tenant_id == int(parent.tenant_id),
-                ProductVariant.product_id == int(parent.id),
-            )
-            .all()
-        )
-        if isinstance(rows, list):
-            for row in rows:
-                rid = str(getattr(row, "retailer_id", "") or "").strip()
-                if rid:
-                    ids.append(rid)
+    try:
+        return collect_push_retailer_ids(db, parent, fallback)
+    except AmbiguousVariantIdentity:
+        raise
     except (SQLAlchemyError, AttributeError, TypeError, ValueError) as exc:
         _raise_variant_discovery_failed(db, parent, exc)
-    fb = str(fallback or "").strip()
-    if fb and fb not in ids:
-        ids.append(fb)
-    seen: Set[str] = set()
-    out: list[str] = []
-    for rid in ids:
-        if rid not in seen:
-            seen.add(rid)
-            out.append(rid)
-    return out
+    return []
 
 
 def _mark_pending_verification(
@@ -1367,6 +1351,15 @@ def _attempt_acquired_body(
             "variant_discovery_failed",
             f"variant_discovery_failed: {exc}"[:500],
         )
+    except Exception as exc:
+        from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+            AmbiguousVariantIdentity,
+            ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        )
+
+        if isinstance(exc, AmbiguousVariantIdentity):
+            return fail(ERROR_AMBIGUOUS_VARIANT_IDENTITY, ERROR_AMBIGUOUS_VARIANT_IDENTITY)
+        raise
     if not retailer_ids:
         return fail("missing_retailer_id", "missing_retailer_id")
 
@@ -1508,6 +1501,55 @@ def _attempt_acquired_body(
                 "verification_failed: retailer_id not found after push",
                 retailer_id=retailer_id,
             )
+        from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+            ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+            identity_for_retailer_id,
+            is_salla_source,
+            upsert_variant_membership,
+        )
+
+        if is_salla_source(parent):
+            from models import ProductVariant  # noqa: PLC0415
+
+            vrows = (
+                db.query(ProductVariant)
+                .filter(
+                    ProductVariant.tenant_id == int(tenant_id),
+                    ProductVariant.product_id == int(parent.id),
+                )
+                .all()
+            )
+            ident = identity_for_retailer_id(parent, vrows, str(retailer_id))
+            if ident is None:
+                return fail(
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    retailer_id=retailer_id,
+                )
+            bound = upsert_variant_membership(
+                db,
+                tenant_id=int(tenant_id),
+                catalog_id=catalog_id,
+                identity=ident,
+                meta_item_id=str(meta_item_id),
+            )
+            if not bound.get("ok"):
+                return fail(
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    str(bound.get("reason") or bound.get("error") or ERROR_AMBIGUOUS_VARIANT_IDENTITY),
+                    retailer_id=retailer_id,
+                )
+            db.flush()
+            # Durable before the next variant so a later failure cannot
+            # roll back a Graph item that already has a local identity.
+            try:
+                db.commit()
+            except SQLAlchemyError as exc:
+                return fail(
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    f"membership_commit_failed:{type(exc).__name__}"[:200],
+                    retailer_id=retailer_id,
+                )
         if verified_meta_item_id is None:
             verified_meta_item_id = str(meta_item_id)
 
@@ -1550,11 +1592,15 @@ def _attempt_acquired_body(
             return False
 
     def _stamp_verify_lag(row: Any) -> None:
-        if not _claim_meta(row, str(verified_meta_item_id or "")):
+        from services.salla_variant_catalog_identity import is_salla_source  # noqa: PLC0415
+
+        bind_product = not (is_salla_source(row) and len(retailer_ids) != 1)
+        claimed_id = str(verified_meta_item_id or "") if bind_product else str(getattr(row, "meta_item_id", None) or "")
+        if bind_product and not _claim_meta(row, claimed_id):
             return
         _mark_pending_verification(
             row,
-            meta_item_id=str(verified_meta_item_id),
+            meta_item_id=claimed_id,
             comparison=last_comparison,
             waba_linked=waba_linked,
         )
@@ -1569,12 +1615,16 @@ def _attempt_acquired_body(
         _requeue_if_dirty(row)
 
     def _stamp_success(row: Any) -> None:
+        from services.salla_variant_catalog_identity import is_salla_source  # noqa: PLC0415
+
         if skipped_push and not _should_verify_without_push(_read_sync_meta(row)):
             _stamp_verify_lag(row)
             return
-        if not _claim_meta(row, str(verified_meta_item_id)):
+        bind_product = not (is_salla_source(row) and len(retailer_ids) != 1)
+        claimed_id = str(verified_meta_item_id or "") if bind_product else str(getattr(row, "meta_item_id", None) or "")
+        if bind_product and not _claim_meta(row, claimed_id):
             return
-        _mark_synced(row, meta_item_id=str(verified_meta_item_id), waba_linked=waba_linked)
+        _mark_synced(row, meta_item_id=claimed_id, waba_linked=waba_linked)
         updates: Dict[str, Any] = {
             "lookup_verified_fields": list(LOOKUP_VERIFIED_FIELDS),
             "lookup_unverified_fields": list(LOOKUP_UNVERIFIED_FIELDS),
