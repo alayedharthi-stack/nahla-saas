@@ -231,3 +231,212 @@ def test_concurrent_ensure_creates_exactly_one_catalog(
         verify.execute(text("DELETE FROM tenants WHERE id = :tid"), {"tid": _TEST_TENANT})
         verify.commit()
         verify.close()
+
+
+def test_waiter_observes_catalog_id_committed_while_waiting(
+    postgres_engine: Engine, monkeypatch,
+) -> None:
+    from models import Tenant, WhatsAppConnection
+    from services.meta_catalog_onboarding import ensure_waba_catalog_for_tenant
+
+    monkeypatch.setenv("NAHLA_AUTO_CATALOG_ONBOARDING", "1")
+    Tenant.__table__.create(bind=postgres_engine, checkfirst=True)
+    WhatsAppConnection.__table__.create(bind=postgres_engine, checkfirst=True)
+    SessionLocal = sessionmaker(bind=postgres_engine)
+    setup = SessionLocal()
+    try:
+        setup.execute(text("DELETE FROM whatsapp_connections WHERE tenant_id = :tid"), {"tid": _TEST_TENANT})
+        setup.execute(text("DELETE FROM tenants WHERE id = :tid"), {"tid": _TEST_TENANT})
+        setup.add(Tenant(id=_TEST_TENANT, name=f"generic-commerce-{_TEST_TENANT}"))
+        setup.flush()
+        setup.add(WhatsAppConnection(
+            tenant_id=_TEST_TENANT,
+            status="connected",
+            whatsapp_business_account_id="WABA-GENERIC-001",
+            access_token="EAAB-merchant",
+            extra_metadata={},
+        ))
+        setup.commit()
+    finally:
+        setup.close()
+
+    seen_stamped: list[str] = []
+    created_ids: list[str] = []
+    barrier = threading.Barrier(2)
+    errors: list[str] = []
+    from unittest.mock import patch
+
+    def _create(business_id, token, name, *, client=None):
+        cid = f"CAT-WAIT-{len(created_ids) + 1}"
+        created_ids.append(cid)
+        time.sleep(0.2)
+        return cid, None
+
+    def worker() -> None:
+        db = SessionLocal()
+        try:
+            barrier.wait(timeout=5)
+            out = ensure_waba_catalog_for_tenant(db, _TEST_TENANT, confirm=True)
+            seen_stamped.append(str(out.get("catalog_id") or ""))
+            if not out.get("ok"):
+                errors.append(str(out.get("error")))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+            db.rollback()
+        finally:
+            db.close()
+
+    with patch(
+        "services.meta_catalog_onboarding._select_graph_token",
+        return_value={"token": "EAAB-merchant"},
+    ), patch(
+        "services.meta_catalog_onboarding.fetch_waba_owner_business_id",
+        return_value={"ok": True, "business_id": "BM-MERCHANT"},
+    ), patch(
+        "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+        return_value=([], 200, None),
+    ), patch(
+        "services.meta_catalog_onboarding._list_owned_catalog_ids",
+        return_value=([], None, False),
+    ), patch(
+        "services.meta_catalog_onboarding._catalog_management_granted",
+        return_value=True,
+    ), patch(
+        "services.meta_catalog_onboarding._create_owned_catalog",
+        side_effect=_create,
+    ), patch(
+        "services.meta_catalog_onboarding.link_waba_to_catalog",
+        return_value={"ok": True, "already_linked": False, "action": "link"},
+    ), patch(
+        "services.meta_catalog_onboarding.probe_catalog_readable",
+        return_value={"ok": True, "business_id": "BM-MERCHANT"},
+    ), patch(
+        "services.meta_catalog_onboarding.get_entitlements",
+    ) as ent:
+        ent.return_value.has_feature.return_value = True
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+    assert errors == [], errors
+    assert created_ids == ["CAT-WAIT-1"]
+    assert seen_stamped == ["CAT-WAIT-1", "CAT-WAIT-1"]
+    verify = SessionLocal()
+    try:
+        row = (
+            verify.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.tenant_id == _TEST_TENANT)
+            .one()
+        )
+        assert row.meta_catalog_id == "CAT-WAIT-1"
+    finally:
+        verify.execute(text("DELETE FROM whatsapp_connections WHERE tenant_id = :tid"), {"tid": _TEST_TENANT})
+        verify.execute(text("DELETE FROM tenants WHERE id = :tid"), {"tid": _TEST_TENANT})
+        verify.commit()
+        verify.close()
+
+
+def test_two_tenants_cannot_claim_the_same_catalog(
+    postgres_engine: Engine, monkeypatch,
+) -> None:
+    from models import Tenant, WhatsAppConnection
+    from services.meta_catalog_onboarding import ensure_waba_catalog_for_tenant
+
+    monkeypatch.setenv("NAHLA_AUTO_CATALOG_ONBOARDING", "1")
+    tenant_a = _TEST_TENANT
+    tenant_b = _TEST_TENANT + 1
+    Tenant.__table__.create(bind=postgres_engine, checkfirst=True)
+    WhatsAppConnection.__table__.create(bind=postgres_engine, checkfirst=True)
+    SessionLocal = sessionmaker(bind=postgres_engine)
+    setup = SessionLocal()
+    try:
+        setup.execute(
+            text("DELETE FROM whatsapp_connections WHERE tenant_id IN (:a, :b)"),
+            {"a": tenant_a, "b": tenant_b},
+        )
+        setup.execute(
+            text("DELETE FROM tenants WHERE id IN (:a, :b)"),
+            {"a": tenant_a, "b": tenant_b},
+        )
+        setup.add(Tenant(id=tenant_a, name="tenant-a"))
+        setup.add(Tenant(id=tenant_b, name="tenant-b"))
+        setup.flush()
+        for tid in (tenant_a, tenant_b):
+            setup.add(WhatsAppConnection(
+                tenant_id=tid,
+                status="connected",
+                whatsapp_business_account_id=f"WABA-{tid}",
+                access_token="EAAB-merchant",
+                extra_metadata={},
+            ))
+        setup.commit()
+    finally:
+        setup.close()
+
+    barrier = threading.Barrier(2)
+    errors: list[str] = []
+    results: list[dict] = []
+    from unittest.mock import patch
+
+    def worker(tid: int) -> None:
+        db = SessionLocal()
+        try:
+            barrier.wait(timeout=5)
+            out = ensure_waba_catalog_for_tenant(db, tid, confirm=True)
+            results.append(out)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{type(exc).__name__}: {exc}")
+            db.rollback()
+        finally:
+            db.close()
+
+    with patch(
+        "services.meta_catalog_onboarding._select_graph_token",
+        return_value={"token": "EAAB-merchant"},
+    ), patch(
+        "services.meta_catalog_onboarding.fetch_waba_owner_business_id",
+        return_value={"ok": True, "business_id": "BM-MERCHANT"},
+    ), patch(
+        "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+        return_value=([{"id": "CAT-SHARED"}], 200, None),
+    ), patch(
+        "services.meta_catalog_onboarding.probe_catalog_readable",
+        return_value={"ok": True, "business_id": "BM-MERCHANT"},
+    ), patch(
+        "services.meta_catalog_onboarding.get_entitlements",
+    ) as ent:
+        ent.return_value.has_feature.return_value = True
+        t1 = threading.Thread(target=worker, args=(tenant_a,))
+        t2 = threading.Thread(target=worker, args=(tenant_b,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+    assert errors == [], errors
+    ok_stamps = [r for r in results if r.get("ok") and r.get("catalog_id") == "CAT-SHARED"]
+    denied = [r for r in results if r.get("error") == "catalog_claimed_other_tenant"]
+    assert len(ok_stamps) == 1
+    assert len(denied) == 1
+    verify = SessionLocal()
+    try:
+        claimed = verify.execute(
+            text(
+                "SELECT tenant_id FROM whatsapp_connections "
+                "WHERE meta_catalog_id = 'CAT-SHARED' AND tenant_id IN (:a, :b)"
+            ),
+            {"a": tenant_a, "b": tenant_b},
+        ).fetchall()
+        assert len(claimed) == 1
+    finally:
+        verify.execute(
+            text("DELETE FROM whatsapp_connections WHERE tenant_id IN (:a, :b)"),
+            {"a": tenant_a, "b": tenant_b},
+        )
+        verify.execute(
+            text("DELETE FROM tenants WHERE id IN (:a, :b)"),
+            {"a": tenant_a, "b": tenant_b},
+        )
+        verify.commit()
+        verify.close()

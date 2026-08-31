@@ -19,6 +19,7 @@ from services.meta_catalog_onboarding import (  # noqa: E402
     ERROR_CATALOG_BUSINESS_MISMATCH,
     ERROR_CATALOG_CLAIMED_OTHER_TENANT,
     ERROR_CATALOG_MANAGE_PERMISSION,
+    ERROR_CATALOG_BUSINESS_UNPROVEN,
     ERROR_ONBOARDING_DISABLED,
     ERROR_ONBOARDING_LOCK_FAILED,
     ERROR_OWNED_CATALOGS_UNREADABLE,
@@ -505,3 +506,23 @@ def test_lock_failure_is_fail_closed_no_create():
     assert out["error"] == ERROR_ONBOARDING_LOCK_FAILED
     create.assert_not_called()
     assert conn.meta_catalog_id in (None, "")
+
+
+def test_readable_linked_catalog_without_business_id_does_not_stamp():
+    conn = _conn()
+    db = _db(conn)
+    with _token(), _owner_ok():
+        with patch(
+            "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+            return_value=([{"id": "CAT-LIVE-1"}], 200, None),
+        ):
+            with patch(
+                "services.meta_catalog_onboarding.probe_catalog_readable",
+                return_value={"ok": True, "business_id": ""},
+            ):
+                with patch("services.meta_catalog_onboarding._create_owned_catalog") as create:
+                    out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == ERROR_CATALOG_BUSINESS_UNPROVEN
+    assert conn.meta_catalog_id in (None, "")
+    create.assert_not_called()

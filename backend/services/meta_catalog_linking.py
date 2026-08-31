@@ -303,7 +303,12 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
     ensure_meta = extra.get("meta_catalog_ensure") if isinstance(extra, dict) else {}
     onboarding_error = None
     legacy = False
-    if isinstance(ensure_meta, dict):
+    try:
+        from services.meta_catalog_onboarding import auto_catalog_onboarding_enabled  # noqa: PLC0415
+        consume_onboarding = auto_catalog_onboarding_enabled()
+    except ImportError:
+        consume_onboarding = False
+    if consume_onboarding and isinstance(ensure_meta, dict):
         onboarding_error = str(ensure_meta.get("error") or "").strip() or None
         legacy = bool(ensure_meta.get("legacy_repair"))
 

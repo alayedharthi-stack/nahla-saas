@@ -26,6 +26,7 @@ from services.meta_catalog_linking import (
     fetch_waba_owner_business_id,
     get_waba_catalog_link_status,
     link_waba_to_catalog,
+    share_catalog_with_business,
 )
 
 logger = logging.getLogger("nahla.meta_catalog_reconnect")
@@ -179,6 +180,26 @@ def bind_current_waba_to_merchant_catalog(
             result["error"] = "catalog_business_mismatch"
             result["legacy_repair"] = True
             result["ok"] = False
+            _persist_bind_result(conn, {**result, "at": _now_iso()})
+            db.commit()
+            return result
+        share = share_catalog_with_business(
+            catalog_id,
+            owner_bm,
+            catalog_token,
+            confirm=confirm,
+            allowed_business_id=owner_bm,
+            client=client,
+        )
+        result["shared"] = bool(share.get("ok"))
+        result["share"] = {
+            "action": share.get("action"),
+            "already_shared": share.get("already_shared"),
+            "error": share.get("error"),
+            "dry_run": share.get("dry_run"),
+        }
+        if confirm and not share.get("ok"):
+            result["error"] = str(share.get("error") or "catalog_share_failed")
             _persist_bind_result(conn, {**result, "at": _now_iso()})
             db.commit()
             return result

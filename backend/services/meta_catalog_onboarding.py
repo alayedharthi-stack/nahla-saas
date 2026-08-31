@@ -38,6 +38,7 @@ logger = logging.getLogger("nahla.meta_catalog_onboarding")
 
 _AUTO_ONBOARD_ENV = "NAHLA_AUTO_CATALOG_ONBOARDING"
 _ONBOARD_LOCK_KEY = 904221
+_CATALOG_CLAIM_LOCK_KEY = 904222
 
 ENSURE_META_KEY = "meta_catalog_ensure"
 ENSURED_CATALOG_KEY = "nahla_ensured_catalog_id"
@@ -51,6 +52,7 @@ ERROR_CATALOG_CREATE_FAILED = "catalog_create_failed"
 ERROR_ONBOARDING_DISABLED = "auto_catalog_onboarding_disabled"
 ERROR_CATALOG_CLAIMED_OTHER_TENANT = "catalog_claimed_other_tenant"
 ERROR_ONBOARDING_LOCK_FAILED = "onboarding_lock_failed"
+ERROR_CATALOG_BUSINESS_UNPROVEN = "catalog_business_unproven"
 
 
 class OnboardingLockError(RuntimeError):
@@ -62,13 +64,16 @@ def auto_catalog_onboarding_enabled() -> bool:
     return os.environ.get(_AUTO_ONBOARD_ENV, "").strip().lower() in ("1", "true", "yes")
 
 
+def _is_postgres(db: Any) -> bool:
+    bind = db.get_bind() if hasattr(db, "get_bind") else None
+    return str(getattr(getattr(bind, "dialect", None), "name", "") or "") == "postgresql"
+
+
 def _acquire_tenant_onboard_lock(db: Any, tenant_id: int) -> None:
     """Serialize create/link for one tenant. SQLite/unit callers skip; Postgres failures raise."""
     from sqlalchemy import text  # noqa: PLC0415
 
-    bind = db.get_bind() if hasattr(db, "get_bind") else None
-    dialect = str(getattr(getattr(bind, "dialect", None), "name", "") or "")
-    if dialect != "postgresql":
+    if not _is_postgres(db):
         return
     try:
         db.execute(
@@ -82,6 +87,37 @@ def _acquire_tenant_onboard_lock(db: Any, tenant_id: int) -> None:
             exc_info=True,
         )
         raise OnboardingLockError(ERROR_ONBOARDING_LOCK_FAILED) from exc
+
+
+def _acquire_catalog_claim_lock(db: Any, catalog_id: str) -> None:
+    """Serialize stamp of one catalog id across tenants. Postgres failures raise."""
+    from sqlalchemy import text  # noqa: PLC0415
+
+    cid = str(catalog_id or "").strip()
+    if not cid or not _is_postgres(db):
+        return
+    try:
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:k, hashtext(:c))"),
+            {"k": _CATALOG_CLAIM_LOCK_KEY, "c": cid},
+        )
+    except Exception as exc:
+        logger.error(
+            "[META_CATALOG_ONBOARD] catalog claim lock failed catalog=%s",
+            cid,
+            exc_info=True,
+        )
+        raise OnboardingLockError(ERROR_ONBOARDING_LOCK_FAILED) from exc
+
+
+def _reload_connection_after_lock(db: Any, conn: Any, tenant_id: int) -> Any:
+    """Drop the identity-mapped row so a waiter sees commits made while blocked."""
+    try:
+        db.expire(conn)
+    except Exception:
+        pass
+    reloaded = _load_connection(db, tenant_id)
+    return reloaded if reloaded is not None else conn
 
 
 def _now_iso() -> str:
@@ -277,6 +313,31 @@ def _catalog_management_granted(
     return granted
 
 
+def _catalog_business_is_proven(
+    result: Dict[str, Any],
+    *,
+    catalog_bm: str,
+    owner_bm: str,
+) -> bool:
+    """Fail closed unless catalog Business is present and matches the WABA owner."""
+    owner = str(owner_bm or result.get("waba_owner_business_id") or "").strip()
+    catalog = str(catalog_bm or "").strip()
+    if catalog:
+        result["catalog_business_id"] = catalog
+    if not catalog or not owner:
+        result["error"] = ERROR_CATALOG_BUSINESS_UNPROVEN
+        result["ok"] = False
+        result["waba_catalog_linked"] = False
+        return False
+    if catalog != owner:
+        result["error"] = ERROR_CATALOG_BUSINESS_MISMATCH
+        result["legacy_repair"] = True
+        result["ok"] = False
+        result["waba_catalog_linked"] = False
+        return False
+    return True
+
+
 def _prove_readable_then_stamp(
     conn: Any,
     db: Any,
@@ -289,6 +350,13 @@ def _prove_readable_then_stamp(
     client: Optional[httpx.Client] = None,
 ) -> bool:
     """Stamp meta_catalog_id only after Graph proves the catalog is readable."""
+    try:
+        _acquire_catalog_claim_lock(db, catalog_id)
+    except OnboardingLockError:
+        result["error"] = ERROR_ONBOARDING_LOCK_FAILED
+        result["ok"] = False
+        result["waba_catalog_linked"] = False
+        return False
     if _catalog_claimed_by_other_tenant(db, tenant_id, catalog_id):
         result["error"] = ERROR_CATALOG_CLAIMED_OTHER_TENANT
         result["ok"] = False
@@ -297,17 +365,15 @@ def _prove_readable_then_stamp(
     probe = probe_catalog_readable(token, catalog_id, client=client)
     result["catalog_read_ok"] = bool(probe.get("ok"))
     catalog_bm = str(probe.get("business_id") or "").strip()
-    if catalog_bm:
-        result["catalog_business_id"] = catalog_bm
     if not probe.get("ok"):
         result["error"] = "catalog_not_readable"
         result["ok"] = False
         result["waba_catalog_linked"] = False
         return False
-    owner = str(owner_bm or result.get("waba_owner_business_id") or "").strip()
-    if catalog_bm and owner and catalog_bm != owner:
-        result["error"] = ERROR_CATALOG_BUSINESS_MISMATCH
-        result["legacy_repair"] = True
+    if not _catalog_business_is_proven(result, catalog_bm=catalog_bm, owner_bm=owner_bm):
+        return False
+    if _catalog_claimed_by_other_tenant(db, tenant_id, catalog_id):
+        result["error"] = ERROR_CATALOG_CLAIMED_OTHER_TENANT
         result["ok"] = False
         result["waba_catalog_linked"] = False
         return False
@@ -361,7 +427,7 @@ def ensure_waba_catalog_for_tenant(
         result["error"] = ERROR_ONBOARDING_LOCK_FAILED
         return result
 
-    conn = _load_connection(db, tenant_id)
+    conn = _reload_connection_after_lock(db, conn, tenant_id)
     if conn is None:
         result["error"] = "connection_not_found"
         return result
@@ -439,12 +505,13 @@ def ensure_waba_catalog_for_tenant(
         else:
             probe = probe_catalog_readable(token, chosen, client=client)
             catalog_bm = str(probe.get("business_id") or "").strip()
-            if catalog_bm:
-                result["catalog_business_id"] = catalog_bm
-            if catalog_bm and owner_bm and catalog_bm != owner_bm:
-                result["error"] = ERROR_CATALOG_BUSINESS_MISMATCH
-                result["legacy_repair"] = True
+            if not probe.get("ok"):
+                result["error"] = "catalog_not_readable"
                 result["waba_catalog_linked"] = False
+                _persist_ensure(conn, {**result, "at": _now_iso()})
+                db.commit()
+                return result
+            if not _catalog_business_is_proven(result, catalog_bm=catalog_bm, owner_bm=owner_bm):
                 _persist_ensure(conn, {**result, "at": _now_iso()})
                 db.commit()
                 return result
@@ -473,10 +540,7 @@ def ensure_waba_catalog_for_tenant(
             _persist_ensure(conn, {**result, "at": _now_iso()})
             db.commit()
             return result
-        if catalog_bm and catalog_bm != owner_bm:
-            result["error"] = ERROR_CATALOG_BUSINESS_MISMATCH
-            result["legacy_repair"] = True
-            result["waba_catalog_linked"] = False
+        if not _catalog_business_is_proven(result, catalog_bm=catalog_bm, owner_bm=owner_bm):
             _persist_ensure(conn, {**result, "at": _now_iso()})
             db.commit()
             return result
@@ -647,6 +711,7 @@ __all__ = [
     "ERROR_CATALOG_CLAIMED_OTHER_TENANT",
     "ERROR_OWNED_CATALOGS_UNREADABLE",
     "ERROR_ONBOARDING_LOCK_FAILED",
+    "ERROR_CATALOG_BUSINESS_UNPROVEN",
     "ERROR_ONBOARDING_DISABLED",
     "OnboardingLockError",
     "auto_catalog_onboarding_enabled",

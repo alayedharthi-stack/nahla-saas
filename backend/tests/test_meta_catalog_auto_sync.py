@@ -417,11 +417,13 @@ def test_cross_business_catalog_is_legacy_mismatch_not_shared(monkeypatch):
                 return_value={"ok": True, "business_id": "BM-MERCHANT"},
             ):
                 with patch("services.meta_catalog_reconnect.link_waba_to_catalog") as link:
-                    out = bind_current_waba_to_merchant_catalog(db, 9, confirm=True)
+                    with patch("services.meta_catalog_reconnect.share_catalog_with_business") as share:
+                        out = bind_current_waba_to_merchant_catalog(db, 9, confirm=True)
     assert out["ok"] is False
     assert out["error"] == "catalog_business_mismatch"
     assert out["legacy_repair"] is True
     link.assert_not_called()
+    share.assert_not_called()
 
 
 def test_cross_business_bind_unchanged_when_onboarding_flag_off(monkeypatch):
@@ -454,9 +456,20 @@ def test_cross_business_bind_unchanged_when_onboarding_flag_off(monkeypatch):
                         "linked_catalog_ids": ["CAT-GENERIC-001"],
                     },
                 ) as link:
-                    out = bind_current_waba_to_merchant_catalog(db, 9, confirm=True)
+                    with patch(
+                        "services.meta_catalog_reconnect.share_catalog_with_business",
+                        return_value={
+                            "ok": True,
+                            "already_shared": False,
+                            "action": "share",
+                            "error": None,
+                        },
+                    ) as share:
+                        out = bind_current_waba_to_merchant_catalog(db, 9, confirm=True)
     assert out["ok"] is True
     assert out.get("error") in (None, "")
+    assert out["shared"] is True
+    share.assert_called_once()
     link.assert_called_once()
 
 
