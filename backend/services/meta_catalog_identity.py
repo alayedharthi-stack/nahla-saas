@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
+from sqlalchemy.exc import IntegrityError
+
 IDENTITY_CANONICAL_SIBLING = "EXISTING_CANONICAL_SIBLING"
 ERROR_AMBIGUOUS_SIBLING = "ambiguous_sibling"
 
@@ -278,6 +280,105 @@ def occupied_active_meta_item_ids(
         if mid:
             occupied[mid] = row_id
     return occupied
+
+
+class DuplicateActiveMetaBinding(RuntimeError):
+    """Another active local row already owns this Meta item id."""
+
+    def __init__(self, reason: str = REASON_FOREIGN_META):
+        super().__init__(reason)
+        self.error = ERROR_AMBIGUOUS_SIBLING
+        self.reason = reason
+
+
+def acquire_active_meta_item_advisory_lock(db: Any, tenant_id: int, meta_item_id: str) -> None:
+    """Session-scoped PG lock. Kept as defense in addition to the unique index."""
+    import zlib
+
+    from sqlalchemy import text
+
+    mid = _strip(meta_item_id)
+    if not mid:
+        return
+    bind = db.get_bind() if callable(getattr(db, "get_bind", None)) else None
+    dialect_name = str(getattr(getattr(bind, "dialect", None), "name", "") or "")
+    if dialect_name != "postgresql":
+        return
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:a, :b)"),
+        {
+            "a": int(tenant_id),
+            "b": zlib.crc32(mid.encode("utf-8")) & 0x7FFFFFFF,
+        },
+    )
+
+
+def claim_active_meta_item_binding(db: Any, row: Any, meta_item_id: str) -> None:
+    """Single writer for LINK (and orchestrator stamps that assign meta_item_id).
+
+    Occupancy + advisory lock first. The partial unique index is the final
+    PostgreSQL guarantee. Raises DuplicateActiveMetaBinding instead of CREATE.
+    """
+    from core.catalog import CATALOG_STATUS_ACTIVE, catalog_status_of
+
+    mid = _strip(meta_item_id)
+    if not mid:
+        raise DuplicateActiveMetaBinding(REASON_LOOKUP)
+    tenant_id = int(getattr(row, "tenant_id", 0) or 0)
+    row_id = int(getattr(row, "id", 0) or 0)
+    if catalog_status_of(row) != CATALOG_STATUS_ACTIVE:
+        raise DuplicateActiveMetaBinding(REASON_LINEAGE)
+    already = _strip(getattr(row, "meta_item_id", None))
+    if already and already != mid:
+        raise DuplicateActiveMetaBinding(REASON_ALREADY_BOUND)
+
+    acquire_active_meta_item_advisory_lock(db, tenant_id, mid)
+
+    from models import Product  # noqa: PLC0415
+
+    others = (
+        db.query(Product)
+        .filter(
+            Product.tenant_id == int(tenant_id),
+            Product.meta_item_id == mid,
+            Product.catalog_status == CATALOG_STATUS_ACTIVE,
+        )
+        .all()
+    )
+    occupied = occupied_active_meta_item_ids(
+        others if isinstance(others, list) else [],
+        exclude_product_id=row_id,
+    )
+    if mid in occupied:
+        raise DuplicateActiveMetaBinding(REASON_FOREIGN_META)
+
+    previous = getattr(row, "meta_item_id", None)
+    row.meta_item_id = mid
+    flush = getattr(db, "flush", None)
+    if not callable(flush):
+        return
+    bind = db.get_bind() if callable(getattr(db, "get_bind", None)) else None
+    dialect_name = str(getattr(getattr(bind, "dialect", None), "name", "") or "")
+    nested = getattr(db, "begin_nested", None)
+
+    def _restore_unbound() -> None:
+        row.meta_item_id = previous
+
+    if dialect_name == "postgresql" and callable(nested):
+        savepoint = db.begin_nested()
+        try:
+            db.flush()
+            savepoint.commit()
+        except IntegrityError:
+            savepoint.rollback()
+            _restore_unbound()
+            raise DuplicateActiveMetaBinding(REASON_FOREIGN_META) from None
+        return
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        _restore_unbound()
+        raise DuplicateActiveMetaBinding(REASON_FOREIGN_META) from exc
 
 
 @dataclass

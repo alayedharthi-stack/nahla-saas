@@ -30,6 +30,10 @@ from services.meta_catalog_push import (
     _resolve_connection,
 )
 from services.meta_catalog_sync_preview import preview_native_meta_sync
+from services.meta_catalog_identity import (
+    DuplicateActiveMetaBinding,
+    claim_active_meta_item_binding,
+)
 
 logger = logging.getLogger("nahla.native_meta_sync")
 
@@ -1433,41 +1437,16 @@ def _attempt_acquired_body(
             stamp_block: Dict[str, str] = {}
 
             def _stamp_identity_bound(row: Any) -> None:
-                import zlib
-
-                from models import Product  # noqa: PLC0415
-                from services.meta_catalog_identity import occupied_active_meta_item_ids
-                from sqlalchemy import text
-
-                bind = db.get_bind() if callable(getattr(db, "get_bind", None)) else None
-                dialect_name = str(getattr(getattr(bind, "dialect", None), "name", "") or "")
-                if dialect_name == "postgresql":
-                    db.execute(
-                        text("SELECT pg_advisory_xact_lock(:a, :b)"),
-                        {
-                            "a": int(tenant_id),
-                            "b": zlib.crc32(bound_id.encode("utf-8")) & 0x7FFFFFFF,
-                        },
-                    )
-                others = (
-                    db.query(Product)
-                    .filter(
-                        Product.tenant_id == int(tenant_id),
-                        Product.meta_item_id == bound_id,
-                    )
-                    .all()
-                )
-                occupied = occupied_active_meta_item_ids(
-                    others if isinstance(others, list) else [],
-                    exclude_product_id=int(getattr(row, "id", 0) or 0),
-                )
-                if bound_id in occupied:
+                try:
+                    claim_active_meta_item_binding(db, row, bound_id)
+                except DuplicateActiveMetaBinding as exc:
                     _mark_blocked(
                         row,
                         error_code="ambiguous_sibling",
-                        summary="foreign_meta_item",
+                        summary=str(exc.reason or "foreign_meta_item"),
                     )
                     stamp_block["code"] = "ambiguous_sibling"
+                    stamp_block["reason"] = str(exc.reason or "foreign_meta_item")
                     return
                 _mark_synced(row, meta_item_id=bound_id, waba_linked=waba_linked)
                 _write_sync_meta(
@@ -1489,7 +1468,7 @@ def _attempt_acquired_body(
                     "ok": False,
                     "sync_status": parent.sync_status,
                     "error_code": "ambiguous_sibling",
-                    "reason": "foreign_meta_item",
+                    "reason": stamp_block.get("reason") or "foreign_meta_item",
                     "retailer_id": retailer_id,
                 }
             return {
@@ -1552,7 +1531,27 @@ def _attempt_acquired_body(
 
     pushed_payload = last_push.get("payload") if isinstance(last_push.get("payload"), dict) else None
 
+    stamp_meta_block: Dict[str, str] = {}
+
+    def _claim_meta(row: Any, meta_id: str) -> bool:
+        if not str(meta_id or "").strip():
+            return True
+        try:
+            claim_active_meta_item_binding(db, row, str(meta_id))
+            return True
+        except DuplicateActiveMetaBinding as exc:
+            _mark_blocked(
+                row,
+                error_code="ambiguous_sibling",
+                summary=str(exc.reason or "foreign_meta_item"),
+            )
+            stamp_meta_block["code"] = "ambiguous_sibling"
+            stamp_meta_block["reason"] = str(exc.reason or "foreign_meta_item")
+            return False
+
     def _stamp_verify_lag(row: Any) -> None:
+        if not _claim_meta(row, str(verified_meta_item_id or "")):
+            return
         _mark_pending_verification(
             row,
             meta_item_id=str(verified_meta_item_id),
@@ -1573,6 +1572,8 @@ def _attempt_acquired_body(
         if skipped_push and not _should_verify_without_push(_read_sync_meta(row)):
             _stamp_verify_lag(row)
             return
+        if not _claim_meta(row, str(verified_meta_item_id)):
+            return
         _mark_synced(row, meta_item_id=str(verified_meta_item_id), waba_linked=waba_linked)
         updates: Dict[str, Any] = {
             "lookup_verified_fields": list(LOOKUP_VERIFIED_FIELDS),
@@ -1589,6 +1590,14 @@ def _attempt_acquired_body(
     if content_ok:
         if not _stamp_with_lease(db, parent, lease, _stamp_success):
             return _abandon_stale_lease(db)
+        if stamp_meta_block.get("code"):
+            return {
+                "ok": False,
+                "sync_status": parent.sync_status,
+                "error_code": "ambiguous_sibling",
+                "reason": stamp_meta_block.get("reason") or "foreign_meta_item",
+                "retailer_id": retailer_id,
+            }
         logger.info(
             "[NATIVE_META_SYNC] tenant=%s product=%s retailer_id=%s meta_item_id=%s variants=%s requeued=%s content=matched",
             tenant_id,
@@ -1622,6 +1631,14 @@ def _attempt_acquired_body(
 
     if not _stamp_with_lease(db, parent, lease, _stamp_verify_lag):
         return _abandon_stale_lease(db)
+    if stamp_meta_block.get("code"):
+        return {
+            "ok": False,
+            "sync_status": parent.sync_status,
+            "error_code": "ambiguous_sibling",
+            "reason": stamp_meta_block.get("reason") or "foreign_meta_item",
+            "retailer_id": retailer_id,
+        }
     sm = _read_sync_meta(parent)
     exhausted = bool(sm.get("verify_exhausted"))
     return {

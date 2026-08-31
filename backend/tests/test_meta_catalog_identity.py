@@ -15,6 +15,7 @@ from services.meta_catalog_identity import (  # noqa: E402
     ACTION_CREATE,
     ACTION_LINK,
     CANONICAL_SIBLING_RULE,
+    DuplicateActiveMetaBinding,
     ERROR_AMBIGUOUS_SIBLING,
     IDENTITY_CANONICAL_SIBLING,
     REASON_CONTENT,
@@ -22,6 +23,7 @@ from services.meta_catalog_identity import (  # noqa: E402
     REASON_LINEAGE,
     REASON_MULTIPLE,
     canonical_sibling_retailer_ids,
+    claim_active_meta_item_binding,
     evaluate_canonical_sibling_bind,
     existing_identity_retailer_id,
     live_canonical_sibling_hits,
@@ -347,3 +349,32 @@ def test_integer_price_does_not_match_undotted_major():
     )
     assert decision.reason == REASON_CONTENT
     assert "price" in decision.content_mismatches
+
+
+def test_orchestrator_link_paths_use_single_claim_helper():
+    import inspect
+
+    import services.native_meta_sync_orchestrator as orchestrator
+
+    source = inspect.getsource(orchestrator)
+    assert "claim_active_meta_item_binding(" in source
+    assert source.count("claim_active_meta_item_binding(") >= 2
+
+
+def test_claim_converts_unique_violation_to_ambiguous_sibling_and_restores():
+    from unittest.mock import MagicMock
+
+    from sqlalchemy.exc import IntegrityError
+
+    row = _parent(meta_item_id=None)
+    db = MagicMock()
+    db.get_bind.return_value.dialect.name = "sqlite"
+    db.query.return_value.filter.return_value.all.return_value = []
+    db.flush.side_effect = IntegrityError("INSERT", {}, Exception("unique"))
+    try:
+        claim_active_meta_item_binding(db, row, "META-1")
+        raise AssertionError("expected DuplicateActiveMetaBinding")
+    except DuplicateActiveMetaBinding as exc:
+        assert exc.error == ERROR_AMBIGUOUS_SIBLING
+        assert exc.reason == REASON_FOREIGN_META
+    assert row.meta_item_id is None
