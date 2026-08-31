@@ -25,10 +25,12 @@ logger = logging.getLogger("nahla.brain.catalog.navigation_signals")
 
 _DIA = r"[\u064B-\u065F\u0640]"
 
+# Inventory / assortment nouns plus merchant-sell frames (what the store sells).
 _INVENTORY_SUBJECT_RE = re.compile(
     r"(?:"
     r"انواع|اقسام|أقسام|مجموعات|خيارات|منتجات|متوفر|متاح|"
-    r"available|catalog|types|categories|sections|products"
+    r"تبيعون|تبيعو|تبيع|"
+    r"available|catalog|types|categories|sections|products|sell(?:s|ing)?"
     r")",
     re.UNICODE | re.IGNORECASE,
 )

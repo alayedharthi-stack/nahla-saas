@@ -71,6 +71,13 @@ jobs:
             -v --tb=short --maxfail=1 \
             --junitxml=/tmp/orders-list-newest-first.xml
 
+      - name: Salla broad browse ownership tests
+        run: |
+          python -m pytest \
+            backend/tests/test_salla_broad_browse_ownership.py \
+            -q --tb=short --maxfail=1 \
+            --junitxml=/tmp/salla-broad-browse-ownership.xml
+
       - name: Salla PR 888 remediation unit tests
         run: |
           python -m pytest \
