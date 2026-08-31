@@ -451,11 +451,26 @@ def push_one_meta_catalog_item(
     sellable_salla = False
     if is_salla_source(parent):
         gate_variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
+        ident = None
         try:
-            sellable_salla = identity_for_retailer_id(parent, gate_variants, rid) is not None
+            ident = identity_for_retailer_id(parent, gate_variants, rid)
         except AmbiguousVariantIdentity:
-            sellable_salla = False
-        if not sellable_salla:
+            ident = None
+        if ident is None:
+            result["action"] = ACTION_BLOCK
+            result["error"] = ERROR_AMBIGUOUS_VARIANT_IDENTITY
+            result["ok"] = False
+            return result
+        sellable_salla = True
+        payload["retailer_id"] = ident.retailer_id
+        result["payload"] = payload
+        body_rid = str(payload.get("retailer_id") or "").strip()
+        if (
+            body_rid != rid
+            or body_rid != ident.retailer_id
+            or body_rid.startswith("nahla_v_")
+            or body_rid.startswith("nahla_p_")
+        ):
             result["action"] = ACTION_BLOCK
             result["error"] = ERROR_AMBIGUOUS_VARIANT_IDENTITY
             result["ok"] = False

@@ -268,3 +268,11 @@ def test_meta_variant_payload_arabic_and_english_option_keys():
     payload_ar = build_meta_variant_payload(parent, variant_ar)
     assert payload_ar["size"] == "42"
     assert payload_ar["color"] == "أزرق"
+
+
+def test_salla_payload_pins_deterministic_rid_not_stored_nahla_v():
+    parent = _parent(source="salla", external_id="88001")
+    variant = _variant(retailer_id="nahla_v_501", salla_variant_id="591539870")
+    payload = build_meta_variant_payload(parent, variant)
+    assert payload["retailer_id"] == "88001-591539870"
+    assert not str(payload["retailer_id"]).startswith("nahla_v_")

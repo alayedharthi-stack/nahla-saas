@@ -673,3 +673,28 @@ def test_load_variant_requires_retailer_id():
         assert False, "expected MetaCatalogPushError"
     except MetaCatalogPushError as exc:
         assert exc.code == "retailer_id_missing"
+
+
+def test_confirm_does_not_post_stale_nahla_v_when_identity_is_hyphenated():
+    parent = _parent()
+    variant = _variant("nahla_v_501")
+    variant.salla_variant_id = "591001"
+    parent.variants = [variant]
+    db = _mock_db(parent=parent, variant=variant)
+    mock_client = MagicMock()
+    mock_client.get.return_value = httpx.Response(200, json={"data": []})
+    mock_client.post.return_value = httpx.Response(200, json={"id": "META-DET"})
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+        with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+            result = push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
+
+    assert result["ok"] is True
+    assert result["action"] == "create"
+    assert result["payload"]["retailer_id"] == "88001-591001"
+    assert mock_client.post.call_count == 1
+    post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
+    assert post_body["retailer_id"] == "88001-591001"
+    assert not str(post_body["retailer_id"]).startswith("nahla_v_")
