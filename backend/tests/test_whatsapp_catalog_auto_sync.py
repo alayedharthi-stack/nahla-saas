@@ -606,6 +606,23 @@ def test_whatsapp_sync_post_catalog_disabled_remains_409(attempt_mock):
     attempt_mock.assert_not_called()
 
 
+@patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
+def test_readiness_blocks_legacy_catalog_business_mismatch():
+    conn = _conn(extra_metadata={
+        "waba_catalog_linked": False,
+        "meta_catalog_ensure": {
+            "error": "catalog_business_mismatch",
+            "legacy_repair": True,
+        },
+    })
+    db = _db_with_conn(conn)
+    ready = evaluate_whatsapp_catalog_sync_readiness(db, 9)
+    assert ready["ready"] is False
+    assert ready["blocker_code"] == "catalog_business_mismatch"
+    assert "محفظة" in (ready.get("message_ar") or "")
+    assert "كتالوجًا بديلًا" in (ready.get("action_ar") or "") or "كتالوغاً" in (ready.get("action_ar") or "")
+
+
 def _post_whatsapp_sync_allow_drain(db):
     import asyncio
     from routers.catalog import _WhatsappCatalogSyncBody, merchant_whatsapp_catalog_sync

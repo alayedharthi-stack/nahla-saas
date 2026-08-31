@@ -28,6 +28,7 @@ type ViewCase =
   | 'linked'
   | 'none'
   | 'mismatch'
+  | 'ownership_mismatch'
   | 'missing'
   | 'waba_inaccessible'
   | 'waba_not_found'
@@ -47,6 +48,9 @@ function resolveCase(
   if (fetchError) return 'fetch_error'
   if (!status) return 'fetch_error'
   if (status.missing.length > 0) return 'missing'
+  if (status.error === 'catalog_business_mismatch' || status.legacy_repair) {
+    return 'ownership_mismatch'
+  }
   if (!status.ok) {
     if (status.error === 'waba_inaccessible') return 'waba_inaccessible'
     if (status.error === 'waba_not_found') return 'waba_not_found'
@@ -268,6 +272,23 @@ export default function WabaCatalogLinkStatusCard({ onCatalogApplied }: WabaCata
             onUse={catalogId => void applyCatalog(catalogId)}
             copy={copy}
           />
+        </div>
+      </div>
+    )
+  }
+
+  if (view === 'ownership_mismatch' && status) {
+    return (
+      <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0" />
+            <div>
+              <h4 className="text-sm font-bold text-slate-800">{copy.ownershipMismatchTitle}</h4>
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">{copy.ownershipMismatchDesc}</p>
+            </div>
+          </div>
+          {refreshBtn}
         </div>
       </div>
     )

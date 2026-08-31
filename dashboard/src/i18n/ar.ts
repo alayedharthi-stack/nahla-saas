@@ -2251,6 +2251,8 @@ const ar: Translations = {
       singleCatalogRecommendation: 'يوجد كتالوج واحد مربوط بحساب واتساب التجاري — يمكنك استخدامه مباشرة.',
       mismatchTitle:        'يوجد كتالوج آخر مربوط بحساب واتساب التجاري في Meta',
       mismatchDesc:         'الكتالوج المضبوط في نحلة لا يطابق الكتالوج المرتبط حاليًا بحساب واتساب التجاري في Meta.',
+      ownershipMismatchTitle: 'هذا الكتالوج تابع لمحفظة أعمال مختلفة',
+      ownershipMismatchDesc:  'لن تنشئ نحلة كتالوجًا بديلًا ولن تنقل الملكية. يلزم إصلاح لمرة واحدة حتى يكون الكتالوج وخط واتساب في نفس المحفظة.',
       expectedCatalogLabel: 'الكتالوج المتوقع في نحلة',
       linkedCatalogsLabel:  'الكتالوجات المربوطة في Meta',
       missingTitle:         'إعدادات الربط غير مكتملة',

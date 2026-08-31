@@ -252,24 +252,32 @@ def test_zero_eligible_products_still_binds():
     conn = _conn()
     db = _db(conn, products=[])
     with patch(
-        "services.meta_catalog_reconnect.select_catalog_graph_token",
+        "services.meta_catalog_onboarding.ensure_waba_catalog_for_tenant",
         return_value={
-            "token": "EAAB-platform",
-            "token_source": _TOKEN_SOURCE_PLATFORM_SYSTEM,
-            "catalog": {"business_id": "BM-PLATFORM"},
+            "ok": True,
+            "action": "reuse_linked",
+            "error": None,
+            "catalog_id": "CAT-GENERIC-001",
+            "created": False,
+            "legacy_repair": False,
+            "waba_catalog_linked": True,
         },
     ):
         with patch(
-            "services.meta_catalog_reconnect._select_graph_token",
-            return_value={"token": "EAAB-merchant"},
+            "services.meta_catalog_reconnect.select_catalog_graph_token",
+            return_value={
+                "token": "EAAB-merchant",
+                "token_source": _TOKEN_SOURCE_MERCHANT_OAUTH,
+                "catalog": {"business_id": "BM-MERCHANT"},
+            },
         ):
             with patch(
-                "services.meta_catalog_reconnect.fetch_waba_owner_business_id",
-                return_value={"ok": True, "business_id": "BM-MERCHANT"},
+                "services.meta_catalog_reconnect._select_graph_token",
+                return_value={"token": "EAAB-merchant"},
             ):
                 with patch(
-                    "services.meta_catalog_reconnect.share_catalog_with_business",
-                    return_value={"ok": True, "action": "share"},
+                    "services.meta_catalog_reconnect.fetch_waba_owner_business_id",
+                    return_value={"ok": True, "business_id": "BM-MERCHANT"},
                 ):
                     with patch(
                         "services.meta_catalog_reconnect.link_waba_to_catalog",
@@ -299,38 +307,50 @@ def test_reconnect_retries_synced_eligible_products(monkeypatch):
     products = [_native(id=501), _native(id=502, title="حذاء رياضي أبيض")]
     db = _db(conn, products=products)
     with patch(
-        "services.meta_catalog_reconnect.select_catalog_graph_token",
+        "services.meta_catalog_onboarding.ensure_waba_catalog_for_tenant",
         return_value={
-            "token": "EAAB-platform",
-            "token_source": _TOKEN_SOURCE_PLATFORM_SYSTEM,
-            "catalog": {"business_id": "BM-MERCHANT"},
+            "ok": True,
+            "action": "reuse_linked",
+            "error": None,
+            "catalog_id": "CAT-GENERIC-001",
+            "created": False,
+            "legacy_repair": False,
+            "waba_catalog_linked": True,
         },
     ):
         with patch(
-            "services.meta_catalog_reconnect._select_graph_token",
-            return_value={"token": "EAAB-merchant"},
+            "services.meta_catalog_reconnect.select_catalog_graph_token",
+            return_value={
+                "token": "EAAB-platform",
+                "token_source": _TOKEN_SOURCE_PLATFORM_SYSTEM,
+                "catalog": {"business_id": "BM-MERCHANT"},
+            },
         ):
             with patch(
-                "services.meta_catalog_reconnect.fetch_waba_owner_business_id",
-                return_value={"ok": True, "business_id": "BM-MERCHANT"},
+                "services.meta_catalog_reconnect._select_graph_token",
+                return_value={"token": "EAAB-merchant"},
             ):
                 with patch(
-                    "services.meta_catalog_reconnect.link_waba_to_catalog",
-                    return_value={
-                        "ok": True,
-                        "already_linked": True,
-                        "link_status": "linked",
-                        "action": "already_linked",
-                        "linked_catalog_ids": ["CAT-GENERIC-001"],
-                    },
+                    "services.meta_catalog_reconnect.fetch_waba_owner_business_id",
+                    return_value={"ok": True, "business_id": "BM-MERCHANT"},
                 ):
                     with patch(
-                        "services.native_meta_sync_orchestrator.attempt_native_meta_sync",
-                        return_value={"ok": True},
-                    ) as sync:
-                        out = reconcile_meta_catalog_after_whatsapp_change(
-                            db, 9, confirm=True,
-                        )
+                        "services.meta_catalog_reconnect.link_waba_to_catalog",
+                        return_value={
+                            "ok": True,
+                            "already_linked": True,
+                            "link_status": "linked",
+                            "action": "already_linked",
+                            "linked_catalog_ids": ["CAT-GENERIC-001"],
+                        },
+                    ):
+                        with patch(
+                            "services.native_meta_sync_orchestrator.attempt_native_meta_sync",
+                            return_value={"ok": True},
+                        ) as sync:
+                            out = reconcile_meta_catalog_after_whatsapp_change(
+                                db, 9, confirm=True,
+                            )
     assert out["ok"] is True
     assert out["synced"] == 2
     assert sync.call_count == 2
@@ -374,6 +394,33 @@ def test_eligible_ids_are_tenant_scoped_and_skip_external_meta():
     assert ids == [1, 3]
     assert is_meta_export_eligible(rows[2]) is False
     assert is_meta_export_eligible(rows[3]) is False
+
+
+def test_cross_business_catalog_is_legacy_mismatch_not_shared():
+    conn = _conn()
+    db = _db(conn)
+    with patch(
+        "services.meta_catalog_reconnect.select_catalog_graph_token",
+        return_value={
+            "token": "EAAB-platform",
+            "token_source": _TOKEN_SOURCE_PLATFORM_SYSTEM,
+            "catalog": {"business_id": "BM-PLATFORM"},
+        },
+    ):
+        with patch(
+            "services.meta_catalog_reconnect._select_graph_token",
+            return_value={"token": "EAAB-merchant"},
+        ):
+            with patch(
+                "services.meta_catalog_reconnect.fetch_waba_owner_business_id",
+                return_value={"ok": True, "business_id": "BM-MERCHANT"},
+            ):
+                with patch("services.meta_catalog_reconnect.link_waba_to_catalog") as link:
+                    out = bind_current_waba_to_merchant_catalog(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == "catalog_business_mismatch"
+    assert out["legacy_repair"] is True
+    link.assert_not_called()
 
 
 def test_rerun_bind_is_idempotent_already_linked():
@@ -421,3 +468,45 @@ def test_catalog_enable_change_requires_reconcile():
         {"catalog_enabled": {"before": True, "after": False}}
     ) is False
     assert catalog_config_changes_require_reconcile({}) is False
+
+
+def test_reconnect_skips_ensure_when_onboarding_flag_off(monkeypatch):
+    monkeypatch.delenv("NAHLA_AUTO_CATALOG_ONBOARDING", raising=False)
+    monkeypatch.setenv("NAHLA_WHATSAPP_CATALOG_AUTO_SYNC", "1")
+    conn = _conn()
+    db = _db(conn, products=[])
+    with patch(
+        "services.meta_catalog_onboarding.ensure_waba_catalog_for_tenant",
+    ) as ensure:
+        with patch(
+            "services.meta_catalog_reconnect.select_catalog_graph_token",
+            return_value={
+                "token": "EAAB-merchant",
+                "token_source": _TOKEN_SOURCE_MERCHANT_OAUTH,
+                "catalog": {"business_id": "BM-MERCHANT"},
+            },
+        ):
+            with patch(
+                "services.meta_catalog_reconnect._select_graph_token",
+                return_value={"token": "EAAB-merchant"},
+            ):
+                with patch(
+                    "services.meta_catalog_reconnect.fetch_waba_owner_business_id",
+                    return_value={"ok": True, "business_id": "BM-MERCHANT"},
+                ):
+                    with patch(
+                        "services.meta_catalog_reconnect.link_waba_to_catalog",
+                        return_value={
+                            "ok": True,
+                            "already_linked": True,
+                            "link_status": "linked",
+                            "linked_catalog_ids": ["CAT-GENERIC-001"],
+                            "action": "already_linked",
+                        },
+                    ):
+                        out = reconcile_meta_catalog_after_whatsapp_change(
+                            db, 9, confirm=True,
+                        )
+    assert out["ok"] is True
+    assert out["ensure"]["skipped"] is True
+    ensure.assert_not_called()

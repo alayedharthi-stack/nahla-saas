@@ -2247,6 +2247,8 @@ const en: Translations = {
       singleCatalogRecommendation: 'One catalog is linked to your WhatsApp Business account — you can use it directly.',
       mismatchTitle:        'Another catalog is linked to WhatsApp Business account in Meta',
       mismatchDesc:         'The catalog configured in Nahla does not match the catalog currently linked to your WhatsApp Business account in Meta.',
+      ownershipMismatchTitle: 'This catalog belongs to a different Meta Business',
+      ownershipMismatchDesc:  'Nahla will not create a replacement catalog or move ownership. A one-time repair is required so the catalog and WhatsApp line share the same Business.',
       expectedCatalogLabel: 'Expected catalog in Nahla',
       linkedCatalogsLabel:  'Catalogs linked in Meta',
       missingTitle:         'Link settings incomplete',
