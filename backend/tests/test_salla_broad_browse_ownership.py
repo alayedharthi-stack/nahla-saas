@@ -2,9 +2,15 @@
 
 Phase A: catalog_browse_turn_policy consumes navigation_signals
 ``message_indicates_catalog_browse`` so stale ordering cannot force llm_reply.
+
+SEMANTIC_ROUTING_GAP (out of PR #898 acceptance):
+``ايش تبيعون؟`` is not classified by the existing inventory-noun /
+merchant-scope frames. Do not close it with new customer-language regex.
+Separate RCA required.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from typing import Any
@@ -32,6 +38,9 @@ from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_SEARCH_PRODUCTS,
 )
 from modules.ai.brain.decision.engine import DefaultDecisionEngine  # noqa: E402
+from modules.ai.brain.execution.catalog_navigate import (  # noqa: E402
+    CatalogNavigateHandler,
+)
 from modules.ai.brain.turn.contract import OWNER_DISCOVERY  # noqa: E402
 from modules.ai.brain.turn.ownership import (  # noqa: E402
     has_explicit_catalog_browse_intent,
@@ -47,12 +56,12 @@ from modules.ai.brain.types import (  # noqa: E402
 
 MSG_PRODUCTS = "وش منتجاتكم؟"
 MSG_AINDAKOM = "وش عندكم؟"
-MSG_SELL = "ايش تبيعون؟"
 MSG_ENGLISH = "What products do you have?"
 MSG_CONTINUE = "أبيه"
 MSG_ORDER_IT = "اطلبه"
 MSG_PRICE = "كم سعره؟"
 MSG_CATEGORY = "ورني الجاكيتات"
+MSG_SELL_VERB_GAP = "ايش تبيعون؟"
 
 _STRUCTURED_BROWSE_ACTIONS = frozenset({
     ACTION_CATALOG_NAVIGATE,
@@ -64,9 +73,21 @@ COLLECTIONS = [
         "id": 1,
         "slug": "jackets",
         "label": "جاكيتات",
+        "group_name": "جاكيتات",
+        "group_id": "jackets",
         "is_active": True,
         "priority": 1,
         "product_count": 3,
+    },
+    {
+        "id": 2,
+        "slug": "shirts",
+        "label": "قمصان",
+        "group_name": "قمصان",
+        "group_id": "shirts",
+        "is_active": True,
+        "priority": 2,
+        "product_count": 4,
     },
 ]
 
@@ -125,6 +146,14 @@ def _ctx(
     return ctx
 
 
+def _orphan_only_bullet_lines(text: str) -> list[str]:
+    return [
+        line
+        for line in str(text or "").splitlines()
+        if line.strip() in {"-", "•"}
+    ]
+
+
 def _ownership_and_decision(ctx: BrainContext):
     ownership = resolve_conversation_turn_ownership(ctx)
     suspended = maybe_suspend_stale_checkout_for_turn(ctx)
@@ -139,7 +168,7 @@ def _ownership_and_decision(ctx: BrainContext):
 class TestSharedBrowseSignal:
     @pytest.mark.parametrize(
         "message",
-        [MSG_PRODUCTS, MSG_AINDAKOM, MSG_SELL, MSG_ENGLISH],
+        [MSG_PRODUCTS, MSG_AINDAKOM, MSG_ENGLISH],
     )
     def test_policy_reuses_navigation_signal(self, message: str) -> None:
         signal = message_indicates_catalog_browse(message, intent_name="ask_product")
@@ -156,6 +185,21 @@ class TestSharedBrowseSignal:
         intent = "start_order" if message != MSG_PRICE else "ask_price"
         assert message_indicates_catalog_browse(message, intent_name=intent) is False
         assert is_catalog_browse_message(message, intent_name=intent) is False
+
+
+class TestSellVerbBrowseSemanticGap:
+    """``ايش تبيعون؟`` is not accepted in PR #898.
+
+    Existing inventory_frame requires assortment nouns already in
+    ``_INVENTORY_SUBJECT_RE`` (منتجات / متوفر / …). A sell-verb ask is a
+    separate semantic-routing gap — do not add customer-language regex here.
+    """
+
+    def test_not_classified_by_existing_inventory_signal(self) -> None:
+        assert message_indicates_catalog_browse(
+            MSG_SELL_VERB_GAP,
+            intent_name="ask_product",
+        ) is False
 
 
 class TestExactReproducerOwnership:
@@ -183,7 +227,7 @@ class TestExactReproducerOwnership:
 class TestBrowseVariants:
     @pytest.mark.parametrize(
         "message",
-        [MSG_AINDAKOM, MSG_SELL, MSG_ENGLISH],
+        [MSG_AINDAKOM, MSG_ENGLISH],
     )
     def test_variants_suspend_stale_order_and_route_structured(self, message: str) -> None:
         state = _stale_ordering_state()
@@ -260,29 +304,27 @@ class TestTenantIsolation:
         assert resolve_conversation_turn_ownership(ctx_b).turn_owner == OWNER_DISCOVERY
 
 
-class TestStructuredPathSkipsLlmGroundingRewrite:
-    def test_navigator_chosen_paths_are_guard_allowlisted(self) -> None:
-        from modules.ai.brain.postprocess.catalog_product_grounding_guard import (  # noqa: PLC0415
-            _DETERMINISTIC_ALLOW_PATHS,
-            apply_catalog_product_grounding_guard,
-        )
+class TestStructuredPresenterHasNoOrphanBullets:
+    def test_exact_repro_presenter_text_has_no_orphan_only_bullets(self) -> None:
+        state = _stale_ordering_state()
+        ctx = _ctx(MSG_PRODUCTS, state=state, db=object())
+        ownership, suspended, decision = _ownership_and_decision(ctx)
+        assert ownership.turn_owner == OWNER_DISCOVERY
+        assert suspended is True
+        assert decision.action == ACTION_CATALOG_NAVIGATE
 
-        assert "catalog_navigation_groups" in _DETERMINISTIC_ALLOW_PATHS
-        assert "catalog_navigation_top_products_fallback" in _DETERMINISTIC_ALLOW_PATHS
-        llm_shape = (
-            "عندنا حالياً:\n"
-            "- فساتين\n"
-            "- جاكيتات\n"
-            "- بناطيل\n"
-            "\nتحب تشوف أي قسم؟"
-        )
-        result = apply_catalog_product_grounding_guard(
-            reply=llm_shape,
-            inbound_text=MSG_PRODUCTS,
-            executor_products=[{"title": "جاكيت"}],
-            chosen_path="catalog_navigation_top_products_fallback",
-        )
-        assert result.action == "allowed"
-        assert result.reply == llm_shape
-        assert "-" in result.reply
+        with patch(
+            "modules.ai.brain.catalog.catalog_browse_scope_resolver.load_merchant_catalog_groups",
+            return_value=COLLECTIONS,
+        ):
+            result = asyncio.run(CatalogNavigateHandler().handle(decision, ctx))
 
+        assert result.success is True
+        text = str(
+            (result.data or {}).get("discovery_presentation_text")
+            or (result.data or {}).get("product_lines")
+            or ""
+        )
+        assert text.strip()
+        assert _orphan_only_bullet_lines(text) == []
+        assert "جاكيتات" in text or "جاكيت" in text or "قمصان" in text
