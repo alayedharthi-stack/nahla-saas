@@ -378,3 +378,23 @@ def test_claim_converts_unique_violation_to_ambiguous_sibling_and_restores():
         assert exc.error == ERROR_AMBIGUOUS_SIBLING
         assert exc.reason == REASON_FOREIGN_META
     assert row.meta_item_id is None
+
+
+def test_claim_converts_begin_nested_integrity_error():
+    from unittest.mock import MagicMock
+
+    from sqlalchemy.exc import IntegrityError
+
+    row = _parent(meta_item_id=None)
+    db = MagicMock()
+    db.get_bind.return_value.dialect.name = "postgresql"
+    db.query.return_value.filter.return_value.all.return_value = []
+    db.autoflush = True
+    db.begin_nested.side_effect = IntegrityError("BEGIN", {}, Exception("unique"))
+    try:
+        claim_active_meta_item_binding(db, row, "META-1")
+        raise AssertionError("expected DuplicateActiveMetaBinding")
+    except DuplicateActiveMetaBinding as exc:
+        assert exc.error == ERROR_AMBIGUOUS_SIBLING
+        assert exc.reason == REASON_FOREIGN_META
+    assert row.meta_item_id is None

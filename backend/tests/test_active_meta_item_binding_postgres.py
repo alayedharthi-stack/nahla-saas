@@ -269,6 +269,101 @@ def test_two_sessions_cannot_bind_same_active_meta_item(postgres_engine: Engine)
         verify.close()
 
 
+def test_claim_converts_direct_writer_unique_collision(postgres_engine: Engine) -> None:
+    """Index is the backstop when a writer skips the helper."""
+    from database.models import Product
+    from services.meta_catalog_identity import (
+        DuplicateActiveMetaBinding,
+        claim_active_meta_item_binding,
+    )
+
+    _ensure_orm_tables(postgres_engine)
+    Session = sessionmaker(bind=postgres_engine)
+    setup = Session()
+    try:
+        _cleanup(setup)
+        left = _product(setup, tenant_id=_TEST_TENANT_A, title="قميص قطني أزرق")
+        right = _product(setup, tenant_id=_TEST_TENANT_A, title="حذاء رياضي أبيض")
+        setup.commit()
+        left_id = int(left.id)
+        right_id = int(right.id)
+    finally:
+        setup.close()
+
+    barrier = threading.Barrier(2, timeout=10)
+    outcomes: dict[str, str] = {}
+
+    def _claim() -> None:
+        session = Session()
+        try:
+            row = session.get(Product, left_id)
+            assert row is not None
+            barrier.wait()
+            try:
+                claim_active_meta_item_binding(session, row, "META-DIRECT")
+                session.commit()
+                outcomes["claim"] = "committed"
+            except DuplicateActiveMetaBinding:
+                session.rollback()
+                outcomes["claim"] = "ambiguous_sibling"
+            except IntegrityError:
+                session.rollback()
+                outcomes["claim"] = "unique_violation"
+            except Exception as exc:  # noqa: BLE001
+                session.rollback()
+                outcomes["claim"] = f"error:{type(exc).__name__}"
+        finally:
+            session.close()
+
+    def _direct() -> None:
+        session = Session()
+        try:
+            row = session.get(Product, right_id)
+            assert row is not None
+            barrier.wait()
+            try:
+                row.meta_item_id = "META-DIRECT"
+                session.commit()
+                outcomes["direct"] = "committed"
+            except IntegrityError:
+                session.rollback()
+                outcomes["direct"] = "unique_violation"
+            except Exception as exc:  # noqa: BLE001
+                session.rollback()
+                outcomes["direct"] = f"error:{type(exc).__name__}"
+        finally:
+            session.close()
+
+    thread_claim = threading.Thread(target=_claim, daemon=True)
+    thread_direct = threading.Thread(target=_direct, daemon=True)
+    thread_claim.start()
+    thread_direct.start()
+    thread_claim.join(timeout=15)
+    thread_direct.join(timeout=15)
+    assert not thread_claim.is_alive()
+    assert not thread_direct.is_alive()
+    assert set(outcomes) == {"claim", "direct"}
+    assert (outcomes["claim"] == "committed") != (outcomes["direct"] == "committed")
+    if outcomes["claim"] != "committed":
+        assert outcomes["claim"] == "ambiguous_sibling"
+        assert outcomes["direct"] == "committed"
+    else:
+        assert outcomes["direct"] == "unique_violation"
+
+    verify = Session()
+    try:
+        rows = (
+            verify.query(Product)
+            .filter(Product.tenant_id == _TEST_TENANT_A, Product.meta_item_id == "META-DIRECT")
+            .all()
+        )
+        assert len(rows) == 1
+        assert str(rows[0].catalog_status) == "active"
+    finally:
+        _cleanup(verify)
+        verify.close()
+
+
 def test_raw_unique_index_rejects_second_active_bind(postgres_engine: Engine) -> None:
     _ensure_orm_tables(postgres_engine)
     Session = sessionmaker(bind=postgres_engine)

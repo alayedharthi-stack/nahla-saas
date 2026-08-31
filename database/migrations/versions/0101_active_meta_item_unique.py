@@ -26,9 +26,12 @@ _DATABASE_DIR = Path(__file__).resolve().parents[2]
 if str(_DATABASE_DIR) not in sys.path:
     sys.path.insert(0, str(_DATABASE_DIR))
 
+from sqlalchemy.exc import IntegrityError
+
 from catalog_meta_item_uniqueness import (  # noqa: E402
     CREATE_UQ_PRODUCTS_ACTIVE_TENANT_META_ITEM_SQL,
     DROP_UQ_PRODUCTS_ACTIVE_TENANT_META_ITEM_SQL,
+    ERROR_DUPLICATE_ACTIVE_META_BINDING_BLOCKED,
     UQ_PRODUCTS_ACTIVE_TENANT_META_ITEM,
     raise_if_duplicate_active_meta_bindings,
 )
@@ -49,10 +52,21 @@ def _has_index(bind, table: str, name: str) -> bool:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    # Hold writers for the audit + CREATE INDEX window so a concurrent
+    # insert cannot replace DUPLICATE_ACTIVE_META_BINDING_BLOCKED with
+    # an unbranded unique_violation.
+    op.execute(sa.text("LOCK TABLE products IN SHARE ROW EXCLUSIVE MODE"))
     raise_if_duplicate_active_meta_bindings(bind)
     if _has_index(bind, "products", UQ_PRODUCTS_ACTIVE_TENANT_META_ITEM):
         return
-    op.execute(sa.text(CREATE_UQ_PRODUCTS_ACTIVE_TENANT_META_ITEM_SQL))
+    try:
+        op.execute(sa.text(CREATE_UQ_PRODUCTS_ACTIVE_TENANT_META_ITEM_SQL))
+    except IntegrityError as exc:
+        raise RuntimeError(
+            ERROR_DUPLICATE_ACTIVE_META_BINDING_BLOCKED
+            + "\nUnique index creation failed. "
+            "No delete, merge, or winner selection was performed."
+        ) from exc
 
 
 def downgrade() -> None:

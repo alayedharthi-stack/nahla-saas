@@ -353,32 +353,43 @@ def claim_active_meta_item_binding(db: Any, row: Any, meta_item_id: str) -> None
         raise DuplicateActiveMetaBinding(REASON_FOREIGN_META)
 
     previous = getattr(row, "meta_item_id", None)
-    row.meta_item_id = mid
     flush = getattr(db, "flush", None)
     if not callable(flush):
+        row.meta_item_id = mid
         return
     bind = db.get_bind() if callable(getattr(db, "get_bind", None)) else None
     dialect_name = str(getattr(getattr(bind, "dialect", None), "name", "") or "")
     nested = getattr(db, "begin_nested", None)
+    autoflush_prev = getattr(db, "autoflush", None)
 
     def _restore_unbound() -> None:
         row.meta_item_id = previous
 
-    if dialect_name == "postgresql" and callable(nested):
-        savepoint = db.begin_nested()
-        try:
-            db.flush()
-            savepoint.commit()
-        except IntegrityError:
-            savepoint.rollback()
-            _restore_unbound()
-            raise DuplicateActiveMetaBinding(REASON_FOREIGN_META) from None
-        return
+    # Assign inside the guarded section. begin_nested() autoflushes dirty
+    # state, so the unique index must not see meta_item_id until the
+    # savepoint try/except is armed.
     try:
+        if autoflush_prev is not None:
+            db.autoflush = False
+        if dialect_name == "postgresql" and callable(nested):
+            savepoint = db.begin_nested()
+            try:
+                row.meta_item_id = mid
+                db.flush()
+                savepoint.commit()
+            except IntegrityError:
+                savepoint.rollback()
+                _restore_unbound()
+                raise DuplicateActiveMetaBinding(REASON_FOREIGN_META) from None
+            return
+        row.meta_item_id = mid
         db.flush()
     except IntegrityError as exc:
         _restore_unbound()
         raise DuplicateActiveMetaBinding(REASON_FOREIGN_META) from exc
+    finally:
+        if autoflush_prev is not None:
+            db.autoflush = autoflush_prev
 
 
 @dataclass
