@@ -78,12 +78,10 @@ import Customers from './pages/Customers'
 import CustomersImport from './pages/CustomersImport'
 import WhatsAppManualSetup from './pages/WhatsAppManualSetup'
 import WhatsAppCatalog from './pages/WhatsAppCatalog'
-import CatalogIntelligence from './pages/CatalogIntelligence'
 import AdminCatalog from './pages/AdminCatalog'
 import ManualCouponCampaign from './pages/ManualCouponCampaign'
 import MarketingHub from './pages/MarketingHub'
 import NahlaTemplateLibrary from './pages/NahlaTemplateLibrary'
-import ProductsHub from './pages/ProductsHub'
 import ChannelsHub from './pages/ChannelsHub'
 import SettingsHub from './pages/SettingsHub'
 import AutomationHub from './pages/AutomationHub'
@@ -176,7 +174,7 @@ export default function App() {
             <Route path="campaigns/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="marketing"            element={<MarketingHub />} />
             <Route path="marketing/templates"  element={<NahlaTemplateLibrary />} />
-            <Route path="products"           element={<ProductsHub />} />
+            <Route path="products"           element={<Navigate to="/catalog" replace />} />
             <Route path="orders-hub"         element={<RedirectPreserveSearch to="/orders" />} />
             <Route path="automation"         element={<AutomationHub />} />
             <Route path="templates-hub"      element={<TemplatesHub />} />
@@ -219,7 +217,7 @@ export default function App() {
                   component. */}
             <Route path="catalog"            element={<WhatsAppCatalog />} />
             <Route path="whatsapp-catalog"   element={<WhatsAppCatalog />} />
-            <Route path="catalog-intelligence" element={<CatalogIntelligence />} />
+            <Route path="catalog-intelligence" element={<Navigate to="/catalog" replace />} />
             <Route path="wa-usage"           element={<WaUsage />} />
             <Route path="delivery-quality"   element={<DeliveryQuality />} />
             <Route path="handoff-queue"      element={<HandoffQueue />} />

@@ -18,7 +18,7 @@ const PAGE_META: Record<string, PageMetaSelector> = {
   '/marketing':                  tr => tr.pages.marketingHub,
   '/marketing/templates':        tr => tr.pages.ecommerceTemplates,
   '/inbox':                      tr => tr.pages.inboxHub,
-  '/products':                   tr => tr.pages.productsHub,
+  '/products':                   tr => ({ title: tr.nav.items.whatsappCatalog, subtitle: '' }),
   '/orders-hub':                 tr => tr.pages.ordersHub,
   '/automation':                 tr => tr.pages.automationHub,
   '/templates-hub':              tr => tr.pages.templatesHub,
@@ -43,7 +43,7 @@ const PAGE_META: Record<string, PageMetaSelector> = {
   '/whatsapp-connect':           tr => tr.pages.whatsappConnect,
   '/catalog':                    tr => ({ title: tr.nav.items.whatsappCatalog, subtitle: '' }),
   '/whatsapp-catalog':           tr => ({ title: tr.nav.items.whatsappCatalog, subtitle: '' }),
-  '/catalog-intelligence':       tr => tr.pages.catalogIntelligence,
+  '/catalog-intelligence':       tr => ({ title: tr.nav.items.whatsappCatalog, subtitle: '' }),
   '/wa-usage':                   tr => ({
     title: tr.overview.waUsage.title,
     subtitle: tr.overview.waUsage.periodUsageTitle,
