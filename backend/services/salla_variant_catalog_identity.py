@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 ERROR_AMBIGUOUS_VARIANT_IDENTITY = "ambiguous_variant_identity"
 PROVENANCE_VARIANT_PUSH = "salla_variant_push"
@@ -57,23 +57,37 @@ class SallaVariantIdentity:
     is_default: bool
 
 
+class AmbiguousVariantIdentity(ValueError):
+    def __init__(self, reason: str = ERROR_AMBIGUOUS_VARIANT_IDENTITY) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 def sellable_salla_identities(
     parent: Any,
     variants: Sequence[Any],
 ) -> List[SallaVariantIdentity]:
-    """Return pushable Salla SKUs. Default stubs without salla_variant_id are omitted."""
+    """Return pushable Salla SKUs. Default stubs without salla_variant_id are omitted.
+
+    Duplicate ``salla_variant_id`` / retailer_id values are fail-closed, never
+    silently discarded.
+    """
     ext = _strip(getattr(parent, "external_id", None))
     product_id = int(getattr(parent, "id", 0) or 0)
     out: List[SallaVariantIdentity] = []
-    seen: set[str] = set()
+    seen_rid: set[str] = set()
+    seen_svid: set[str] = set()
     for row in variants or []:
         svid = _strip(getattr(row, "salla_variant_id", None))
         if not svid:
             continue
         rid = deterministic_variant_retailer_id(ext, svid)
-        if not rid or rid in seen:
+        if not rid:
             continue
-        seen.add(rid)
+        if rid in seen_rid or svid in seen_svid:
+            raise AmbiguousVariantIdentity(ERROR_AMBIGUOUS_VARIANT_IDENTITY)
+        seen_rid.add(rid)
+        seen_svid.add(svid)
         out.append(
             SallaVariantIdentity(
                 product_id=product_id,
@@ -84,12 +98,6 @@ def sellable_salla_identities(
             )
         )
     return out
-
-
-class AmbiguousVariantIdentity(ValueError):
-    def __init__(self, reason: str = ERROR_AMBIGUOUS_VARIANT_IDENTITY) -> None:
-        super().__init__(reason)
-        self.reason = reason
 
 
 def collect_push_retailer_ids(
@@ -178,6 +186,100 @@ def classify_graph_retailer_id(
     return CLASS_UNBOUND_VARIANT
 
 
+def _local_identity_conflict(existing: Any, identity: SallaVariantIdentity) -> Optional[str]:
+    """Refuse rebinding a membership onto a different local product/variant."""
+    ep = getattr(existing, "product_id", None)
+    ev = getattr(existing, "variant_id", None)
+    es = _strip(getattr(existing, "salla_variant_id", None))
+    try:
+        existing_pid = int(ep) if ep not in (None, "") else 0
+    except (TypeError, ValueError):
+        existing_pid = 0
+    try:
+        existing_vid = int(ev) if ev not in (None, "") else 0
+    except (TypeError, ValueError):
+        existing_vid = 0
+    if existing_pid and existing_pid != int(identity.product_id):
+        return "product_id_immutable"
+    if existing_vid and int(identity.variant_id) and existing_vid != int(identity.variant_id):
+        return "variant_id_immutable"
+    if es and es != identity.salla_variant_id:
+        return "salla_variant_id_immutable"
+    return None
+
+
+def _find_membership(
+    db: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+) -> Any:
+    from models import MetaCatalogMembership  # noqa: PLC0415
+
+    return (
+        db.query(MetaCatalogMembership)
+        .filter(
+            MetaCatalogMembership.tenant_id == int(tenant_id),
+            MetaCatalogMembership.catalog_id == catalog_id,
+            MetaCatalogMembership.retailer_id == retailer_id,
+        )
+        .first()
+    )
+
+
+def ensure_variant_membership_slot(
+    db: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    identity: SallaVariantIdentity,
+    provenance: str = PROVENANCE_VARIANT_PUSH,
+) -> Dict[str, Any]:
+    """Persist local identity before Graph CREATE. ``meta_item_id`` stays empty."""
+    from models import MetaCatalogMembership  # noqa: PLC0415
+
+    cid = _strip(catalog_id)
+    rid = _strip(identity.retailer_id)
+    if not cid or not rid or not identity.salla_variant_id:
+        return {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY}
+
+    existing = _find_membership(
+        db, tenant_id=tenant_id, catalog_id=cid, retailer_id=rid,
+    )
+    now = datetime.now(timezone.utc)
+    if existing is not None:
+        conflict = _local_identity_conflict(existing, identity)
+        if conflict:
+            return {
+                "ok": False,
+                "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                "reason": conflict,
+            }
+        existing.verified_at = now
+        existing.provenance = provenance
+        return {
+            "ok": True,
+            "created": False,
+            "meta_item_id": _strip(getattr(existing, "meta_item_id", None)),
+        }
+
+    kwargs: Dict[str, Any] = dict(
+        tenant_id=int(tenant_id),
+        catalog_id=cid,
+        retailer_id=rid,
+        product_id=int(identity.product_id),
+        variant_id=int(identity.variant_id) or None,
+        meta_item_id=None,
+        verified_at=now,
+        provenance=provenance,
+    )
+    if "salla_variant_id" in MetaCatalogMembership.__table__.columns:
+        kwargs["salla_variant_id"] = identity.salla_variant_id
+    db.add(MetaCatalogMembership(**kwargs))
+    return {"ok": True, "created": True, "meta_item_id": ""}
+
+
 def upsert_variant_membership(
     db: Any,
     *,
@@ -196,17 +298,18 @@ def upsert_variant_membership(
     if not cid or not rid or not mid or not identity.salla_variant_id:
         return {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY}
 
-    existing = (
-        db.query(MetaCatalogMembership)
-        .filter(
-            MetaCatalogMembership.tenant_id == int(tenant_id),
-            MetaCatalogMembership.catalog_id == cid,
-            MetaCatalogMembership.retailer_id == rid,
-        )
-        .first()
+    existing = _find_membership(
+        db, tenant_id=tenant_id, catalog_id=cid, retailer_id=rid,
     )
     now = datetime.now(timezone.utc)
     if existing is not None:
+        conflict = _local_identity_conflict(existing, identity)
+        if conflict:
+            return {
+                "ok": False,
+                "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                "reason": conflict,
+            }
         already = _strip(getattr(existing, "meta_item_id", None))
         if already and already != mid:
             return {
@@ -215,10 +318,6 @@ def upsert_variant_membership(
                 "reason": "meta_item_id_immutable",
                 "existing_meta_item_id": already,
             }
-        existing.product_id = int(identity.product_id)
-        existing.variant_id = int(identity.variant_id) or None
-        if hasattr(existing, "salla_variant_id"):
-            existing.salla_variant_id = identity.salla_variant_id
         existing.meta_item_id = already or mid
         existing.verified_at = now
         existing.provenance = provenance
@@ -261,14 +360,34 @@ def upsert_variant_membership(
     return {"ok": True, "created": True, "meta_item_id": mid, "identity_unchanged": False}
 
 
-def _norm_price(value: Any) -> str:
+def _graph_price_minor(value: Any) -> str:
+    """Normalize a Graph price to minor-unit string.
+
+    Raw ints are already minor units. Decimal display strings are major.
+    Digit-only strings are treated as Graph minor units.
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(int(value))
     text = _strip(value)
     if not text:
         return ""
-    try:
-        return str(int(round(float(text))))
-    except (TypeError, ValueError):
-        return text
+    if text.isdigit():
+        return str(int(text))
+    from services.meta_catalog_export import meta_price_minor_units  # noqa: PLC0415
+
+    minor = meta_price_minor_units(value)
+    return str(minor) if minor is not None else ""
+
+
+def _local_price_minor(value: Any) -> str:
+    from services.meta_catalog_export import meta_price_minor_units  # noqa: PLC0415
+
+    minor = meta_price_minor_units(value)
+    return str(minor) if minor is not None else ""
 
 
 def content_signature_from_graph(item: Any) -> Dict[str, str]:
@@ -277,7 +396,7 @@ def content_signature_from_graph(item: Any) -> Dict[str, str]:
     if isinstance(image, dict):
         image = image.get("url") or ""
     return {
-        "price": _norm_price(row.get("price")),
+        "price": _graph_price_minor(row.get("price")),
         "currency": _strip(row.get("currency")).upper(),
         "availability": _strip(row.get("availability")).lower(),
         "image_url": _strip(image),
@@ -293,7 +412,7 @@ def content_signature_from_variant(variant: Any) -> Dict[str, str]:
     if getattr(variant, "in_stock", True) is False:
         availability = "out of stock"
     return {
-        "price": _norm_price(getattr(variant, "price", None)),
+        "price": _local_price_minor(getattr(variant, "price", None)),
         "currency": _strip(getattr(variant, "currency", None) or (extra.get("currency") if isinstance(extra, dict) else "")).upper(),
         "availability": availability,
         "image_url": _strip(image),

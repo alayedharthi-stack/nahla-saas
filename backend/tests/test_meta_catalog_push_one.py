@@ -332,14 +332,10 @@ def test_confirm_links_unique_canonical_sibling_without_create():
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
-    assert result["action"] == "link_canonical_sibling"
-    assert result["ok"] is True
-    assert result["error"] is None
-    assert result["meta_product_id"] == "META-SIBLING"
+    assert result["action"] == "block_ambiguous_sibling"
+    assert result["ok"] is False
+    assert result["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
-    lookup = result.get("lookup") or {}
-    assert lookup.get("identity_class") == "EXISTING_CANONICAL_SIBLING"
-    assert lookup.get("sibling_retailer_id") == "398551325-591001"
 
 
 def test_confirm_blocks_when_multiple_canonical_siblings():
@@ -381,8 +377,7 @@ def test_confirm_blocks_when_multiple_canonical_siblings():
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
     assert result["action"] == "block_ambiguous_sibling"
-    assert result["error"] == "ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "multiple_siblings"
+    assert result["error"] == "ambiguous_variant_identity"
     assert result["ok"] is False
     assert mock_client.post.call_count == 0
 
@@ -418,8 +413,7 @@ def test_confirm_blocks_when_meta_item_occupied_by_other_active_row():
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
     assert result["action"] == "block_ambiguous_sibling"
-    assert result["error"] == "ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "foreign_meta_item"
+    assert result["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
 
 
@@ -454,9 +448,7 @@ def test_confirm_blocks_when_sibling_price_mismatches():
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
     assert result["action"] == "block_ambiguous_sibling"
-    assert result["error"] == "ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "content_mismatch"
-    assert "price" in ((result.get("lookup") or {}).get("content_mismatches") or [])
+    assert result["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
 
 
@@ -491,7 +483,7 @@ def test_confirm_blocks_when_live_item_lineage_mismatches():
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
     assert result["action"] == "block_ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "lineage_mismatch"
+    assert result["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
 
 
@@ -524,14 +516,13 @@ def test_canonical_sibling_link_is_idempotent_and_does_not_post():
                 first = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
                 second = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
-    assert first["action"] == "link_canonical_sibling"
-    assert second["action"] == "link_canonical_sibling"
-    assert first["meta_product_id"] == second["meta_product_id"] == "META-SIBLING"
-    assert (second.get("lookup") or {}).get("idempotent") is True
+    assert first["action"] == "block_ambiguous_sibling"
+    assert second["action"] == "block_ambiguous_sibling"
+    assert first["error"] == second["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
 
 
-def test_confirm_creates_when_only_bare_parent_rid_exists():
+def test_confirm_blocks_salla_when_svid_missing_even_if_bare_parent_exists():
     parent = _parent()
     parent.variants = [_variant("88001-591001")]
     variant = _variant("nahla_v_501")
@@ -562,10 +553,10 @@ def test_confirm_creates_when_only_bare_parent_rid_exists():
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "nahla_v_501", confirm=True)
 
-    assert result["action"] == "create"
-    assert result["ok"] is True
-    assert result["meta_product_id"] == "META-NEW-MISSING"
-    assert mock_client.post.call_count == 1
+    assert result["ok"] is False
+    assert result["error"] == "ambiguous_variant_identity"
+    assert result["action"] == "block_ambiguous_sibling"
+    assert mock_client.post.call_count == 0
 
 
 def test_confirm_creates_when_no_exact_or_legacy_identity():

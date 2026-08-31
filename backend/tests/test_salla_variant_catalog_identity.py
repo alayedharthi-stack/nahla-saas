@@ -14,6 +14,7 @@ from services.salla_variant_catalog_identity import (
     classify_graph_retailer_id,
     collect_push_retailer_ids,
     deterministic_variant_retailer_id,
+    ensure_variant_membership_slot,
     identity_for_retailer_id,
     literal_bind_plan,
     sellable_salla_identities,
@@ -214,7 +215,7 @@ def test_price_currency_availability_image_are_variant_scoped():
             graph_item={
                 "id": f"meta-{i}",
                 "retailer_id": rid,
-                "price": str(100 + i),
+                "price": (100 + i) * 100,
                 "currency": "SAR",
                 "availability": "in stock",
                 "image_url": f"https://cdn.example/{i}.jpg",
@@ -477,8 +478,10 @@ def test_partial_variant_failure_keeps_successful_memberships(
     lookup_mock.side_effect = lambda _conn, _cat, rid, **kw: _matched_lookup(rid, f"meta-{rid}")
     result = attempt_native_meta_sync(db, 1, 21)
     assert result["ok"] is False
-    assert len(db.added) == 2
-    assert {row.retailer_id for row in db.added} == {rids[0], rids[1]}
+    assert len(db.added) == 3
+    stamped = [row for row in db.added if getattr(row, "meta_item_id", None)]
+    assert len(stamped) == 2
+    assert {row.retailer_id for row in stamped} == {rids[0], rids[1]}
 
 
 @patch("services.native_meta_sync_orchestrator._resolve_connection")
@@ -505,3 +508,187 @@ def test_salla_missing_variant_id_blocks_without_create(
     assert result["error_code"] == ERROR_AMBIGUOUS_VARIANT_IDENTITY
     push_mock.assert_not_called()
     assert db.added == []
+
+
+def test_duplicate_normalized_svid_is_blocked():
+    parent = _parent()
+    a = _variant(id=1, salla_variant_id="845296417", retailer_id="863278879-845296417")
+    b = _variant(id=2, salla_variant_id="845296417", retailer_id="863278879-845296417")
+    try:
+        sellable_salla_identities(parent, [a, b])
+        assert False, "duplicate svid must not be discarded"
+    except AmbiguousVariantIdentity as exc:
+        assert exc.reason == ERROR_AMBIGUOUS_VARIANT_IDENTITY
+
+
+def test_membership_local_identity_is_immutable():
+    existing = SimpleNamespace(
+        tenant_id=1,
+        catalog_id="cat",
+        retailer_id="863278879-845296417",
+        product_id=21,
+        variant_id=217,
+        salla_variant_id="845296417",
+        meta_item_id="meta-a",
+        provenance="x",
+        verified_at=None,
+    )
+    parent = _parent()
+    other = _variant(id=999, salla_variant_id="845296417")
+    ident = identity_for_retailer_id(parent, [other], "863278879-845296417")
+    db = _Db([other], memberships=[existing])
+    result = upsert_variant_membership(
+        db,
+        tenant_id=1,
+        catalog_id="cat",
+        identity=ident,
+        meta_item_id="meta-a",
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "variant_id_immutable"
+    assert existing.variant_id == 217
+
+
+def test_graph_minor_units_match_local_major_price():
+    parent = _parent()
+    v = _variant(
+        id=217,
+        salla_variant_id="845296417",
+        retailer_id="863278879-845296417",
+        price="199",
+        currency="SAR",
+        in_stock=True,
+        image_url="https://cdn.example/a.jpg",
+    )
+    plan = literal_bind_plan(
+        graph_item={
+            "id": "g1",
+            "retailer_id": "863278879-845296417",
+            "price": 19900,
+            "currency": "SAR",
+            "availability": "in stock",
+            "image_url": "https://cdn.example/a.jpg",
+        },
+        product=parent,
+        variants=[v],
+    )
+    assert plan["content_exact"] is True
+    assert plan["would_bind"] is True
+    assert plan["quarantine"] is False
+
+
+@patch("services.native_meta_sync_orchestrator._resolve_connection")
+@patch("services.native_meta_sync_orchestrator._collect_retailer_ids")
+@patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
+@patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
+@patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+@patch("services.meta_catalog_sync_confirm.ensure_native_default_variant")
+@patch("services.native_meta_sync_orchestrator.preview_native_meta_sync")
+def test_single_salla_variant_leaves_parent_unbound_across_catalog_switch(
+    preview_mock,
+    ensure_mock,
+    push_mock,
+    lookup_mock,
+    waba_mock,
+    lock_mock,
+    collect_mock,
+    conn_mock,
+):
+    parent = _salla_sync_parent()
+    parent.meta_item_id = "OLD-CATALOG-ITEM"
+    v = _variant(id=217, salla_variant_id="845296417", retailer_id="863278879-845296417")
+    db = _sync_db([v])
+    lock_mock.return_value = parent
+    preview_mock.return_value = {"eligible": True, "retailer_id": v.retailer_id, "fatal_errors": []}
+    ensure_mock.return_value = (v, False)
+    collect_mock.return_value = [v.retailer_id]
+    conn_mock.return_value = SimpleNamespace(meta_catalog_id="cat-new", catalog_enabled=True)
+    waba_mock.return_value = {"ok": True, "expected_catalog_linked": True}
+    push_mock.return_value = {
+        "ok": True,
+        "action": "create",
+        "meta_product_id": "meta-new",
+        "payload": {"price": 19900, "currency": "SAR", "availability": "in stock"},
+    }
+    lookup_mock.return_value = _matched_lookup(v.retailer_id, "meta-new")
+    result = attempt_native_meta_sync(db, 1, 21)
+    assert result.get("ok") is True, result
+    assert parent.meta_item_id in (None, "")
+    assert db.memberships[0].meta_item_id == "meta-new"
+    assert db.memberships[0].catalog_id == "cat-new"
+
+
+@patch("services.native_meta_sync_orchestrator._resolve_connection")
+@patch("services.native_meta_sync_orchestrator._collect_retailer_ids")
+@patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
+@patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
+@patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+@patch("services.meta_catalog_sync_confirm.ensure_native_default_variant")
+@patch("services.native_meta_sync_orchestrator.preview_native_meta_sync")
+def test_membership_commit_failure_after_graph_create_retries_by_retailer_id(
+    preview_mock,
+    ensure_mock,
+    push_mock,
+    lookup_mock,
+    waba_mock,
+    lock_mock,
+    collect_mock,
+    conn_mock,
+):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    parent = _salla_sync_parent()
+    v = _variant(id=217, salla_variant_id="845296417", retailer_id="863278879-845296417")
+    db = _sync_db([v])
+    lock_mock.return_value = parent
+    preview_mock.return_value = {"eligible": True, "retailer_id": v.retailer_id, "fatal_errors": []}
+    ensure_mock.return_value = (v, False)
+    collect_mock.return_value = [v.retailer_id]
+    conn_mock.return_value = SimpleNamespace(meta_catalog_id="cat-new", catalog_enabled=True)
+    waba_mock.return_value = {"ok": True, "expected_catalog_linked": True}
+    push_mock.return_value = {
+        "ok": True,
+        "action": "create",
+        "meta_product_id": "meta-a",
+        "payload": {"price": 19900, "currency": "SAR", "availability": "in stock"},
+    }
+    lookup_mock.return_value = _matched_lookup(v.retailer_id, "meta-a")
+    commits = {"n": 0}
+
+    def _commit():
+        commits["n"] += 1
+        if commits["n"] == 2:
+            raise SQLAlchemyError("injected membership stamp failure")
+
+    db.commit = _commit
+    first = attempt_native_meta_sync(db, 1, 21)
+    assert first["ok"] is False
+    assert first["error_code"] == ERROR_AMBIGUOUS_VARIANT_IDENTITY
+    assert "membership_commit_failed" in str(parent.sync_error or "")
+    assert push_mock.call_count == 1
+    db.commit = lambda: None
+    parent.sync_status = "pending"
+    second = attempt_native_meta_sync(db, 1, 21)
+    assert second["ok"] is True
+    assert db.memberships[0].meta_item_id == "meta-a"
+
+
+def test_two_workers_cannot_rebind_same_slot_to_other_variant():
+    parent = _parent()
+    first = _variant(id=217, salla_variant_id="845296417")
+    ident = identity_for_retailer_id(parent, [first], "863278879-845296417")
+    db = _Db([first])
+    slot = ensure_variant_membership_slot(
+        db, tenant_id=1, catalog_id="cat", identity=ident,
+    )
+    assert slot["ok"] is True
+    other_parent = _parent(id=99)
+    other = _variant(id=1, product_id=99, salla_variant_id="845296417")
+    other_ident = identity_for_retailer_id(other_parent, [other], "863278879-845296417")
+    raced = ensure_variant_membership_slot(
+        db, tenant_id=1, catalog_id="cat", identity=other_ident,
+    )
+    assert raced["ok"] is False
+    assert raced["reason"] == "product_id_immutable"

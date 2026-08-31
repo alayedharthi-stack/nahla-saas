@@ -67,8 +67,8 @@ def main() -> int:
     try:
         try:
             db.execute(text("SET TRANSACTION READ ONLY"))
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"read_only_unavailable:{type(exc).__name__}", file=sys.stderr)
         products = {
             p.id: p
             for p in db.query(Product).filter(Product.tenant_id == int(args.tenant)).all()

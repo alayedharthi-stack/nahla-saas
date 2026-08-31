@@ -1277,6 +1277,7 @@ def test_variant_query_failure_retries_all_retailer_ids(postgres_engine: Engine)
     try:
         product_id = _seed_lock_product(
             setup,
+            source="manual",
             extra_metadata={
                 "currency": "SAR",
                 "image_url": "https://cdn.example/shirt.webp",
@@ -1597,6 +1598,7 @@ def test_empty_variants_creates_single_default_and_is_idempotent(postgres_engine
     try:
         product_id = _seed_lock_product(
             setup,
+            source="manual",
             extra_metadata={
                 "currency": "SAR",
                 "image_url": "https://cdn.example/shirt.webp",
