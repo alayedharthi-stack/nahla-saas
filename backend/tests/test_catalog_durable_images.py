@@ -39,6 +39,9 @@ def _product(**kwargs):
 def test_active_meta_readonly_helper_excludes_removed():
     assert _is_active_meta_readonly(_product()) is True
     assert _is_active_meta_readonly(_product(catalog_status="removed_from_meta")) is False
+    assert _is_active_meta_readonly(
+        _product(ownership_mode="external_managed", source="meta"),
+    ) is False
 
 
 def test_persist_skips_already_durable(monkeypatch):

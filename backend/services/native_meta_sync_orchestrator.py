@@ -86,6 +86,7 @@ PERMANENT_BLOCK_CODES = frozenset({
     "product_not_channel_publish_eligible",
     "not_eligible",
     "existing_catalog_identity",
+    "ambiguous_sibling",
 })
 PRODUCT_BLOCK_CODES = frozenset({
     "preview_fatal",
@@ -1398,19 +1399,76 @@ def _attempt_acquired_body(
             http_status = int(meta_block.get("http_status") or 0)
         except (TypeError, ValueError):
             http_status = 0
-        if not lookup_only and push_result.get("action") == "skip_existing":
+        if not lookup_only and push_result.get("action") == "block_ambiguous_sibling":
+            return fail(
+                "ambiguous_sibling",
+                str((push_result.get("lookup") or {}).get("reason") or "ambiguous_sibling"),
+                retailer_id=retailer_id,
+                reason=str((push_result.get("lookup") or {}).get("reason") or ""),
+            )
+        if not lookup_only and push_result.get("action") in {
+            "link_canonical_sibling",
+            "skip_existing",
+        }:
             bound_id = str(push_result.get("meta_product_id") or "").strip()
-            if not bound_id:
+            lookup_block = push_result.get("lookup") if isinstance(push_result.get("lookup"), dict) else {}
+            identity_class = str(lookup_block.get("identity_class") or "")
+            if identity_class != "EXISTING_CANONICAL_SIBLING" or not bound_id:
                 return fail(
-                    "existing_catalog_identity",
-                    "existing_catalog_identity",
+                    "ambiguous_sibling",
+                    str(lookup_block.get("reason") or "ambiguous_sibling"),
                     retailer_id=retailer_id,
+                    reason=str(lookup_block.get("reason") or ""),
                 )
             waba_status = get_waba_catalog_link_status(db, tenant_id)
             waba_linked = _waba_linked_flag(waba_status)
-            lookup_block = push_result.get("lookup") if isinstance(push_result.get("lookup"), dict) else {}
+            already = str(getattr(parent, "meta_item_id", None) or "").strip()
+            if already and already != bound_id:
+                return fail(
+                    "ambiguous_sibling",
+                    "already_bound_other",
+                    retailer_id=retailer_id,
+                    reason="already_bound_other",
+                )
+            stamp_block: Dict[str, str] = {}
 
             def _stamp_identity_bound(row: Any) -> None:
+                import zlib
+
+                from models import Product  # noqa: PLC0415
+                from services.meta_catalog_identity import occupied_active_meta_item_ids
+                from sqlalchemy import text
+
+                bind = db.get_bind() if callable(getattr(db, "get_bind", None)) else None
+                dialect_name = str(getattr(getattr(bind, "dialect", None), "name", "") or "")
+                if dialect_name == "postgresql":
+                    db.execute(
+                        text("SELECT pg_advisory_xact_lock(:a, :b)"),
+                        {
+                            "a": int(tenant_id),
+                            "b": zlib.crc32(bound_id.encode("utf-8")) & 0x7FFFFFFF,
+                        },
+                    )
+                others = (
+                    db.query(Product)
+                    .filter(
+                        Product.tenant_id == int(tenant_id),
+                        Product.meta_item_id == bound_id,
+                    )
+                    .all()
+                )
+                occupied = occupied_active_meta_item_ids(
+                    others if isinstance(others, list) else [],
+                    exclude_product_id=int(getattr(row, "id", 0) or 0),
+                )
+                if bound_id in occupied:
+                    _mark_blocked(
+                        row,
+                        error_code="ambiguous_sibling",
+                        summary="foreign_meta_item",
+                    )
+                    stamp_block["code"] = "ambiguous_sibling"
+                    return
                 _mark_synced(row, meta_item_id=bound_id, waba_linked=waba_linked)
                 _write_sync_meta(
                     row,
@@ -1418,19 +1476,29 @@ def _attempt_acquired_body(
                     last_error_summary=None,
                     identity_bound=True,
                     skipped_create=True,
-                    identity_class=str(lookup_block.get("identity_class") or "EXISTING_EXACT"),
-                    bound_retailer_id=str(lookup_block.get("legacy_retailer_id") or ""),
+                    identity_class="EXISTING_CANONICAL_SIBLING",
+                    bound_retailer_id=str(lookup_block.get("sibling_retailer_id") or ""),
+                    canonical_rule=str(lookup_block.get("canonical_rule") or ""),
                 )
                 _requeue_if_dirty(row)
 
             if not _stamp_with_lease(db, parent, lease, _stamp_identity_bound):
                 return _abandon_stale_lease(db)
+            if stamp_block.get("code"):
+                return {
+                    "ok": False,
+                    "sync_status": parent.sync_status,
+                    "error_code": "ambiguous_sibling",
+                    "reason": "foreign_meta_item",
+                    "retailer_id": retailer_id,
+                }
             return {
                 "ok": True,
                 "skipped_create": True,
-                "action": "skip_existing",
+                "action": "link_canonical_sibling",
                 "sync_status": parent.sync_status,
                 "meta_item_id": bound_id,
+                "identity_unchanged": already == bound_id,
                 "retailer_id": retailer_id,
                 "variant_count": len(retailer_ids),
                 "waba_catalog_linked": waba_linked,

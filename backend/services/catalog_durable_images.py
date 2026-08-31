@@ -21,9 +21,6 @@ from core.catalog import (
     OWNERSHIP_META_READONLY,
     catalog_status_of,
     infer_ownership_mode,
-    normalize_source,
-    SOURCE_META,
-    SOURCE_META_EXISTING,
 )
 from core.catalog_image import coerce_image_url, resolve_product_image_url
 from core.config import META_GRAPH_API_VERSION
@@ -37,7 +34,6 @@ from services.catalog_media_storage import (
 
 logger = logging.getLogger("nahla.catalog_durable_images")
 
-_META_SOURCES = frozenset({SOURCE_META, SOURCE_META_EXISTING, "meta"})
 _GRAPH_IMAGE_TIMEOUT_SECONDS = 30.0
 
 
@@ -49,8 +45,7 @@ def _is_active_meta_readonly(product: Any) -> bool:
     if getattr(product, "merchant_hidden_at", None) is not None:
         return False
     mode = infer_ownership_mode(product) or ""
-    src = normalize_source(getattr(product, "source", None) or "")
-    return mode == OWNERSHIP_META_READONLY or src in _META_SOURCES
+    return mode == OWNERSHIP_META_READONLY
 
 
 def _meta_item_id_of(product: Any) -> str:

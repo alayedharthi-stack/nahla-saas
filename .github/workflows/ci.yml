@@ -45,6 +45,17 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
+      - name: Canonical sibling identity unit tests
+        run: |
+          python -m pytest \
+            backend/tests/test_meta_catalog_identity.py \
+            backend/tests/test_meta_catalog_push_one.py \
+            backend/tests/test_catalog_durable_images.py \
+            backend/tests/test_native_meta_auto_sync.py::test_scheduler_binds_existing_identity_without_create \
+            backend/tests/test_native_meta_auto_sync.py::test_scheduler_blocks_ambiguous_sibling_without_create \
+            backend/tests/test_whatsapp_catalog_auto_sync.py::test_classify_block_codes \
+            -q --tb=short --maxfail=1
+
       - name: Manual gift grant permanence tests
         run: |
           python -m pytest \
@@ -466,7 +477,9 @@ jobs:
           unset DATABASE_URL || true
           python -m pytest \
             backend/tests/test_whatsapp_catalog_sync_postgres_locks.py \
+            backend/tests/test_meta_catalog_identity.py \
             backend/tests/test_meta_catalog_identity_postgres.py \
+            backend/tests/test_meta_catalog_push_one.py \
             -q --tb=short --maxfail=1 \
             --junitxml=/tmp/wa-catalog-pg.xml
           python scripts/check_junit_clean.py /tmp/wa-catalog-pg.xml

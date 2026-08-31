@@ -1110,13 +1110,14 @@ def test_scheduler_binds_existing_identity_without_create(
     preview_mock.return_value = _preview_ok()
     ensure_mock.return_value = (SimpleNamespace(retailer_id="88001"), False)
     push_mock.return_value = {
-        "ok": False,
-        "action": "skip_existing",
-        "error": "existing_catalog_identity",
+        "ok": True,
+        "action": "link_canonical_sibling",
+        "error": None,
         "meta_product_id": "META-SIBLING",
         "lookup": {
-            "identity_class": "EXISTING_EXACT",
-            "legacy_retailer_id": "88001-591001",
+            "identity_class": "EXISTING_CANONICAL_SIBLING",
+            "sibling_retailer_id": "88001-591001",
+            "canonical_rule": "one_local_row_one_meta_item_identity_bind_no_content_post",
         },
         "payload": {},
     }
@@ -1127,10 +1128,56 @@ def test_scheduler_binds_existing_identity_without_create(
 
     assert result["ok"] is True
     assert result["skipped_create"] is True
-    assert result["action"] == "skip_existing"
+    assert result["action"] == "link_canonical_sibling"
     assert parent.sync_status == "synced"
     assert parent.meta_item_id == "META-SIBLING"
     push_mock.assert_called_once()
     lookup_mock.assert_not_called()
     assert parent.extra_metadata["sync_meta"].get("skipped_create") is True
+    assert parent.extra_metadata["sync_meta"].get("identity_class") == "EXISTING_CANONICAL_SIBLING"
+
+
+@patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
+@patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
+@patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
+@patch("services.native_meta_sync_orchestrator.push_one_meta_catalog_item")
+@patch("services.meta_catalog_sync_confirm.ensure_native_default_variant")
+@patch("services.native_meta_sync_orchestrator.preview_native_meta_sync")
+def test_scheduler_blocks_ambiguous_sibling_without_create(
+    preview_mock,
+    ensure_mock,
+    push_mock,
+    lookup_mock,
+    waba_mock,
+    lock_mock,
+):
+    parent = _generic_native_parent(
+        source="salla",
+        ownership_mode=OWNERSHIP_EXTERNAL_MANAGED,
+        external_id="88001",
+        title="حذاء رياضي أبيض",
+        sync_status="pending",
+    )
+    db = MagicMock()
+    lock_mock.return_value = parent
+    preview_mock.return_value = _preview_ok()
+    ensure_mock.return_value = (SimpleNamespace(retailer_id="88001"), False)
+    push_mock.return_value = {
+        "ok": False,
+        "action": "block_ambiguous_sibling",
+        "error": "ambiguous_sibling",
+        "meta_product_id": None,
+        "lookup": {"reason": "multiple_siblings"},
+        "payload": {},
+    }
+    lookup_mock.return_value = (None, {"matched": False})
+    waba_mock.return_value = {"ok": True, "expected_catalog_linked": False}
+
+    result = attempt_native_meta_sync(db, 9, 501)
+
+    assert result["ok"] is False
+    assert result["error_code"] == "ambiguous_sibling"
+    assert parent.sync_status == "blocked"
+    push_mock.assert_called_once()
+    lookup_mock.assert_not_called()
 

@@ -23,7 +23,7 @@ from services.meta_catalog_export import (
     resolve_meta_item_group_id,
 )
 from services.meta_catalog_reconcile import fetch_meta_catalog_live_products
-from services.meta_catalog_identity import existing_identity_retailer_id
+from services.meta_catalog_identity import live_canonical_sibling_hits
 
 PUSHABLE_STATUSES = frozenset({"ready", "warn"})
 IN_STOCK_AVAILABILITY = "in stock"
@@ -734,18 +734,15 @@ def build_meta_catalog_readiness_report(
             include_meta=include_meta_live_read,
         )
         if include_meta_live_read:
-            sibling_rid = existing_identity_retailer_id(
+            sibling_hits = live_canonical_sibling_hits(
                 parent,
                 live_by_retailer.keys(),
                 current_rid=str(elig.retailer_id or ""),
                 variants=variants_by_product.get(int(elig.product_id)),
             )
+            sibling_rid = sibling_hits[0] if len(sibling_hits) == 1 else None
             item.in_meta_identity = bool(sibling_rid)
-            if (
-                item.action_needed == "create"
-                and sibling_rid
-                and sibling_rid != str(elig.retailer_id or "").strip()
-            ):
+            if item.action_needed == "create" and sibling_hits:
                 item.action_needed = "skip"
 
         if exclude_out_of_stock and "out_of_stock" in item.reasons:

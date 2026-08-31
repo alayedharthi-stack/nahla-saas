@@ -38,6 +38,7 @@ def _parent():
         tenant_id=9,
         title="قميص قطني أزرق",
         external_id="88001",
+        source="salla",
         description="وصف عام للمنتج",
         extra_metadata={
             "image_url": "https://cdn.example/parent.jpg",
@@ -82,6 +83,20 @@ def _preview_ok():
     }
 
 
+def _sibling_live_item(meta_id="META-SIBLING", retailer_id="398551325-591001", **overrides):
+    item = {
+        "id": meta_id,
+        "retailer_id": retailer_id,
+        "price": 12000,
+        "currency": "SAR",
+        "availability": "in stock",
+        "url": "https://store.example/p/88001",
+        "image_url": "https://cdn.example/parent.jpg",
+    }
+    item.update(overrides)
+    return item
+
+
 def _preview_fatal():
     report = _preview_ok()
     report["fatal"] = True
@@ -90,19 +105,26 @@ def _preview_fatal():
     return report
 
 
-def _mock_db(parent=None, variant=None, conn=None):
+def _mock_db(parent=None, variant=None, conn=None, occupied=None):
     db = MagicMock()
     parent = parent or _parent()
     variant = variant or _variant()
     conn = conn or _conn()
+    occupied_rows = occupied if occupied is not None else []
 
     def _query(model):
         q = MagicMock()
         name = getattr(model, "__name__", str(model))
         if name == "ProductVariant":
-            q.filter.return_value.first.return_value = variant
+            filtered = MagicMock()
+            filtered.first.return_value = variant
+            filtered.all.return_value = list(getattr(parent, "variants", None) or [variant])
+            q.filter.return_value = filtered
         elif name == "Product":
-            q.filter.return_value.first.return_value = parent
+            filtered = MagicMock()
+            filtered.first.return_value = parent
+            filtered.all.return_value = list(occupied_rows)
+            q.filter.return_value = filtered
         elif name == "WhatsAppConnection":
             q.filter.return_value.first.return_value = conn
         return q
@@ -198,6 +220,30 @@ def test_confirm_get_existing_then_update():
     assert post_headers.get("Authorization") == "Bearer tok"
 
 
+def test_confirm_does_not_update_different_bound_meta_item():
+    parent = _parent()
+    parent.meta_item_id = "META-SIBLING"
+    db = _mock_db(parent=parent)
+    lookup_resp = httpx.Response(
+        200,
+        json={"data": [{"id": "META-ITEM-EXISTING", "retailer_id": "88001-591001"}]},
+    )
+    mock_client = MagicMock()
+    mock_client.get.return_value = lookup_resp
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                result = push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
+
+    assert result["action"] == "block_ambiguous_sibling"
+    assert result["error"] == "ambiguous_sibling"
+    assert (result.get("lookup") or {}).get("reason") == "already_bound_other"
+    assert mock_client.post.call_count == 0
+
+
 def test_fatal_preview_does_not_call_graph():
     db = _mock_db()
     with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_fatal()):
@@ -255,7 +301,127 @@ def test_catalog_unreadable_is_permission_denied_not_success():
     client_cls.assert_not_called()
 
 
-def test_confirm_skips_create_when_sibling_hyphenated_rid_exists():
+def test_confirm_links_unique_canonical_sibling_without_create():
+    parent = _parent()
+    parent.external_id = "398551325"
+    sibling = _variant("398551325-591001")
+    sibling.salla_variant_id = "591001"
+    default = _variant("398551325")
+    default.salla_variant_id = ""
+    parent.variants = [sibling, default]
+    db = _mock_db(parent=parent, variant=default)
+
+    def _get(url, **kwargs):
+        params = kwargs.get("params") or {}
+        filt = str(params.get("filter") or "")
+        fields = str(params.get("fields") or "")
+        if "398551325-591001" in filt:
+            assert "name" not in fields
+            return httpx.Response(200, json={"data": [_sibling_live_item()]})
+        return httpx.Response(200, json={"data": []})
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = _get
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
+
+    assert result["action"] == "link_canonical_sibling"
+    assert result["ok"] is True
+    assert result["error"] is None
+    assert result["meta_product_id"] == "META-SIBLING"
+    assert mock_client.post.call_count == 0
+    lookup = result.get("lookup") or {}
+    assert lookup.get("identity_class") == "EXISTING_CANONICAL_SIBLING"
+    assert lookup.get("sibling_retailer_id") == "398551325-591001"
+
+
+def test_confirm_blocks_when_multiple_canonical_siblings():
+    parent = _parent()
+    parent.external_id = "398551325"
+    v1 = _variant("398551325-591001")
+    v1.salla_variant_id = "591001"
+    v2 = _variant("398551325-591002")
+    v2.id = 502
+    v2.salla_variant_id = "591002"
+    default = _variant("398551325")
+    default.salla_variant_id = ""
+    parent.variants = [v1, v2, default]
+    db = _mock_db(parent=parent, variant=default)
+
+    def _get(url, **kwargs):
+        params = kwargs.get("params") or {}
+        filt = str(params.get("filter") or "")
+        if "398551325-591001" in filt:
+            return httpx.Response(
+                200,
+                json={"data": [_sibling_live_item(meta_id="META-A", retailer_id="398551325-591001")]},
+            )
+        if "398551325-591002" in filt:
+            return httpx.Response(
+                200,
+                json={"data": [_sibling_live_item(meta_id="META-B", retailer_id="398551325-591002")]},
+            )
+        return httpx.Response(200, json={"data": []})
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = _get
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
+
+    assert result["action"] == "block_ambiguous_sibling"
+    assert result["error"] == "ambiguous_sibling"
+    assert (result.get("lookup") or {}).get("reason") == "multiple_siblings"
+    assert result["ok"] is False
+    assert mock_client.post.call_count == 0
+
+
+def test_confirm_blocks_when_meta_item_occupied_by_other_active_row():
+    parent = _parent()
+    parent.external_id = "398551325"
+    sibling = _variant("398551325-591001")
+    sibling.salla_variant_id = "591001"
+    default = _variant("398551325")
+    default.salla_variant_id = ""
+    parent.variants = [sibling, default]
+    other = SimpleNamespace(
+        id=777, tenant_id=9, meta_item_id="META-SIBLING", catalog_status="active",
+    )
+    db = _mock_db(parent=parent, variant=default, occupied=[other])
+
+    def _get(url, **kwargs):
+        params = kwargs.get("params") or {}
+        filt = str(params.get("filter") or "")
+        if "398551325-591001" in filt:
+            return httpx.Response(200, json={"data": [_sibling_live_item()]})
+        return httpx.Response(200, json={"data": []})
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = _get
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
+
+    assert result["action"] == "block_ambiguous_sibling"
+    assert result["error"] == "ambiguous_sibling"
+    assert (result.get("lookup") or {}).get("reason") == "foreign_meta_item"
+    assert mock_client.post.call_count == 0
+
+
+def test_confirm_blocks_when_sibling_price_mismatches():
     parent = _parent()
     parent.external_id = "398551325"
     sibling = _variant("398551325-591001")
@@ -271,7 +437,7 @@ def test_confirm_skips_create_when_sibling_hyphenated_rid_exists():
         if "398551325-591001" in filt:
             return httpx.Response(
                 200,
-                json={"data": [{"id": "META-SIBLING", "retailer_id": "398551325-591001"}]},
+                json={"data": [_sibling_live_item(price=999)]},
             )
         return httpx.Response(200, json={"data": []})
 
@@ -285,29 +451,30 @@ def test_confirm_skips_create_when_sibling_hyphenated_rid_exists():
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
-    assert result["action"] == "skip_existing"
-    assert result["error"] == "existing_catalog_identity"
-    assert result["ok"] is False
+    assert result["action"] == "block_ambiguous_sibling"
+    assert result["error"] == "ambiguous_sibling"
+    assert (result.get("lookup") or {}).get("reason") == "content_mismatch"
+    assert "price" in ((result.get("lookup") or {}).get("content_mismatches") or [])
     assert mock_client.post.call_count == 0
-    assert (result.get("lookup") or {}).get("identity_class") == "EXISTING_EXACT"
 
 
-def test_confirm_skips_create_when_legacy_parent_rid_exists():
+def test_confirm_blocks_when_live_item_lineage_mismatches():
     parent = _parent()
-    parent.variants = [_variant("88001-591001")]
-    variant = _variant("nahla_v_501")
-    variant.salla_variant_id = ""
-    db = _mock_db(parent=parent, variant=variant)
+    parent.external_id = "398551325"
+    sibling = _variant("398551325-591001")
+    sibling.salla_variant_id = "591001"
+    default = _variant("398551325")
+    default.salla_variant_id = ""
+    parent.variants = [sibling, default]
+    db = _mock_db(parent=parent, variant=default)
 
     def _get(url, **kwargs):
         params = kwargs.get("params") or {}
         filt = str(params.get("filter") or "")
-        if "nahla_v_501" in filt:
-            return httpx.Response(200, json={"data": []})
-        if "88001" in filt:
+        if "398551325-591001" in filt:
             return httpx.Response(
                 200,
-                json={"data": [{"id": "META-LEGACY", "retailer_id": "88001"}]},
+                json={"data": [_sibling_live_item(retailer_id="77001-B")]},
             )
         return httpx.Response(200, json={"data": []})
 
@@ -319,13 +486,84 @@ def test_confirm_skips_create_when_legacy_parent_rid_exists():
     with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
         with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
+
+    assert result["action"] == "block_ambiguous_sibling"
+    assert (result.get("lookup") or {}).get("reason") == "lineage_mismatch"
+    assert mock_client.post.call_count == 0
+
+
+def test_canonical_sibling_link_is_idempotent_and_does_not_post():
+    parent = _parent()
+    parent.external_id = "398551325"
+    parent.meta_item_id = "META-SIBLING"
+    sibling = _variant("398551325-591001")
+    sibling.salla_variant_id = "591001"
+    default = _variant("398551325")
+    default.salla_variant_id = ""
+    parent.variants = [sibling, default]
+    db = _mock_db(parent=parent, variant=default)
+
+    def _get(url, **kwargs):
+        params = kwargs.get("params") or {}
+        filt = str(params.get("filter") or "")
+        if "398551325-591001" in filt:
+            return httpx.Response(200, json={"data": [_sibling_live_item()]})
+        return httpx.Response(200, json={"data": []})
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = _get
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                first = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
+                second = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
+
+    assert first["action"] == "link_canonical_sibling"
+    assert second["action"] == "link_canonical_sibling"
+    assert first["meta_product_id"] == second["meta_product_id"] == "META-SIBLING"
+    assert (second.get("lookup") or {}).get("idempotent") is True
+    assert mock_client.post.call_count == 0
+
+
+def test_confirm_creates_when_only_bare_parent_rid_exists():
+    parent = _parent()
+    parent.variants = [_variant("88001-591001")]
+    variant = _variant("nahla_v_501")
+    variant.salla_variant_id = ""
+    db = _mock_db(parent=parent, variant=variant)
+    create_resp = httpx.Response(200, json={"id": "META-NEW-MISSING"})
+
+    def _get(url, **kwargs):
+        params = kwargs.get("params") or {}
+        filt = str(params.get("filter") or "")
+        if "88001-591001" in filt:
+            return httpx.Response(200, json={"data": []})
+        if filt.endswith('eq":"88001"}') or "88001" in filt:
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "META-LEGACY", "retailer_id": "88001"}]},
+            )
+        return httpx.Response(200, json={"data": []})
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = _get
+    mock_client.post.return_value = create_resp
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "nahla_v_501", confirm=True)
 
-    assert result["action"] == "skip_existing"
-    assert result["error"] == "existing_catalog_identity"
-    assert result["ok"] is False
-    assert result["meta_product_id"] == "META-LEGACY"
-    assert mock_client.post.call_count == 0
+    assert result["action"] == "create"
+    assert result["ok"] is True
+    assert result["meta_product_id"] == "META-NEW-MISSING"
+    assert mock_client.post.call_count == 1
 
 
 def test_confirm_creates_when_no_exact_or_legacy_identity():
