@@ -173,14 +173,15 @@ def bind_current_waba_to_merchant_catalog(
     result["catalog_business_id"] = catalog_bm or None
 
     if catalog_bm and owner_bm and catalog_bm != owner_bm:
-        # Path B: split-wallet legacy. Automatic onboarding must not
-        # share, create a replacement catalog, or POST-link across BMs.
-        result["error"] = "catalog_business_mismatch"
-        result["legacy_repair"] = True
-        result["ok"] = False
-        _persist_bind_result(conn, {**result, "at": _now_iso()})
-        db.commit()
-        return result
+        from services.meta_catalog_onboarding import auto_catalog_onboarding_enabled  # noqa: PLC0415
+
+        if auto_catalog_onboarding_enabled():
+            result["error"] = "catalog_business_mismatch"
+            result["legacy_repair"] = True
+            result["ok"] = False
+            _persist_bind_result(conn, {**result, "at": _now_iso()})
+            db.commit()
+            return result
 
     link = link_waba_to_catalog(
         waba_id,

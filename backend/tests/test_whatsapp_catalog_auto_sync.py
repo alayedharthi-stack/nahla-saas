@@ -607,7 +607,8 @@ def test_whatsapp_sync_post_catalog_disabled_remains_409(attempt_mock):
 
 
 @patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
-def test_readiness_blocks_legacy_catalog_business_mismatch():
+def test_readiness_blocks_legacy_catalog_business_mismatch(monkeypatch):
+    monkeypatch.setenv("NAHLA_AUTO_CATALOG_ONBOARDING", "1")
     conn = _conn(extra_metadata={
         "waba_catalog_linked": False,
         "meta_catalog_ensure": {
@@ -621,6 +622,22 @@ def test_readiness_blocks_legacy_catalog_business_mismatch():
     assert ready["blocker_code"] == "catalog_business_mismatch"
     assert "محفظة" in (ready.get("message_ar") or "")
     assert "كتالوجًا بديلًا" in (ready.get("action_ar") or "") or "كتالوغاً" in (ready.get("action_ar") or "")
+
+
+@patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
+def test_readiness_ignores_onboarding_metadata_when_flag_off(monkeypatch):
+    monkeypatch.delenv("NAHLA_AUTO_CATALOG_ONBOARDING", raising=False)
+    conn = _conn(extra_metadata={
+        "waba_catalog_linked": False,
+        "meta_catalog_ensure": {
+            "error": "catalog_business_mismatch",
+            "legacy_repair": True,
+        },
+    })
+    db = _db_with_conn(conn)
+    ready = evaluate_whatsapp_catalog_sync_readiness(db, 9)
+    assert ready["ready"] is True
+    assert ready.get("blocker_code") in (None, "")
 
 
 def _post_whatsapp_sync_allow_drain(db):

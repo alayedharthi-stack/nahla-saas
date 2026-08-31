@@ -49,6 +49,12 @@ ERROR_CATALOG_MANAGE_PERMISSION = "catalog_manage_permission_required"
 ERROR_OWNED_CATALOGS_UNREADABLE = "owned_catalogs_unreadable"
 ERROR_CATALOG_CREATE_FAILED = "catalog_create_failed"
 ERROR_ONBOARDING_DISABLED = "auto_catalog_onboarding_disabled"
+ERROR_CATALOG_CLAIMED_OTHER_TENANT = "catalog_claimed_other_tenant"
+ERROR_ONBOARDING_LOCK_FAILED = "onboarding_lock_failed"
+
+
+class OnboardingLockError(RuntimeError):
+    """PostgreSQL advisory lock could not be acquired. Fail closed."""
 
 
 def auto_catalog_onboarding_enabled() -> bool:
@@ -57,24 +63,25 @@ def auto_catalog_onboarding_enabled() -> bool:
 
 
 def _acquire_tenant_onboard_lock(db: Any, tenant_id: int) -> None:
-    """Serialize create/link for one tenant. No-op when the session is not PostgreSQL."""
-    try:
-        from sqlalchemy import text  # noqa: PLC0415
+    """Serialize create/link for one tenant. SQLite/unit callers skip; Postgres failures raise."""
+    from sqlalchemy import text  # noqa: PLC0415
 
-        bind = db.get_bind() if hasattr(db, "get_bind") else None
-        dialect = str(getattr(getattr(bind, "dialect", None), "name", "") or "")
-        if dialect != "postgresql":
-            return
+    bind = db.get_bind() if hasattr(db, "get_bind") else None
+    dialect = str(getattr(getattr(bind, "dialect", None), "name", "") or "")
+    if dialect != "postgresql":
+        return
+    try:
         db.execute(
             text("SELECT pg_advisory_xact_lock(:k, :t)"),
             {"k": _ONBOARD_LOCK_KEY, "t": int(tenant_id)},
         )
-    except Exception:  # noqa: silent-ok — lock must not block SQLite/unit callers
-        logger.debug(
-            "[META_CATALOG_ONBOARD] advisory lock skipped tenant=%s",
+    except Exception as exc:
+        logger.error(
+            "[META_CATALOG_ONBOARD] advisory lock failed tenant=%s",
             tenant_id,
             exc_info=True,
         )
+        raise OnboardingLockError(ERROR_ONBOARDING_LOCK_FAILED) from exc
 
 
 def _now_iso() -> str:
@@ -212,6 +219,64 @@ def _enable_catalog_if_entitled(db: Any, conn: Any, tenant_id: int) -> None:
     conn.catalog_enabled = True
 
 
+def _catalog_claimed_by_other_tenant(db: Any, tenant_id: int, catalog_id: str) -> bool:
+    cid = str(catalog_id or "").strip()
+    if not cid:
+        return False
+    from models import WhatsAppConnection  # noqa: PLC0415
+
+    rows = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.meta_catalog_id == cid)
+        .all()
+    )
+    if not isinstance(rows, (list, tuple)):
+        return False
+    for row in rows:
+        other = int(getattr(row, "tenant_id", 0) or 0)
+        if other and other != int(tenant_id):
+            return True
+    return False
+
+
+def _catalog_management_granted(
+    token: str,
+    *,
+    client: Optional[httpx.Client] = None,
+) -> Optional[bool]:
+    """True when the token is proven to include catalog_management.
+
+    False = proven missing. None = unproven (treat as fail-closed).
+    """
+    if not str(token or "").strip():
+        return None
+    resp = _graph_json(
+        "GET",
+        "me/permissions",
+        token,
+        params={},
+        client=client,
+    )
+    if not resp.get("ok"):
+        return None
+    body = resp.get("body") or {}
+    rows = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        return None
+    granted = False
+    saw = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("permission") or "") != "catalog_management":
+            continue
+        saw = True
+        granted = str(row.get("status") or "").lower() == "granted"
+    if not saw:
+        return False
+    return granted
+
+
 def _prove_readable_then_stamp(
     conn: Any,
     db: Any,
@@ -220,9 +285,15 @@ def _prove_readable_then_stamp(
     catalog_id: str,
     result: Dict[str, Any],
     *,
+    owner_bm: str = "",
     client: Optional[httpx.Client] = None,
 ) -> bool:
     """Stamp meta_catalog_id only after Graph proves the catalog is readable."""
+    if _catalog_claimed_by_other_tenant(db, tenant_id, catalog_id):
+        result["error"] = ERROR_CATALOG_CLAIMED_OTHER_TENANT
+        result["ok"] = False
+        result["waba_catalog_linked"] = False
+        return False
     probe = probe_catalog_readable(token, catalog_id, client=client)
     result["catalog_read_ok"] = bool(probe.get("ok"))
     catalog_bm = str(probe.get("business_id") or "").strip()
@@ -230,6 +301,13 @@ def _prove_readable_then_stamp(
         result["catalog_business_id"] = catalog_bm
     if not probe.get("ok"):
         result["error"] = "catalog_not_readable"
+        result["ok"] = False
+        result["waba_catalog_linked"] = False
+        return False
+    owner = str(owner_bm or result.get("waba_owner_business_id") or "").strip()
+    if catalog_bm and owner and catalog_bm != owner:
+        result["error"] = ERROR_CATALOG_BUSINESS_MISMATCH
+        result["legacy_repair"] = True
         result["ok"] = False
         result["waba_catalog_linked"] = False
         return False
@@ -277,7 +355,16 @@ def ensure_waba_catalog_for_tenant(
         result["error"] = "connection_not_found"
         return result
 
-    _acquire_tenant_onboard_lock(db, tenant_id)
+    try:
+        _acquire_tenant_onboard_lock(db, tenant_id)
+    except OnboardingLockError:
+        result["error"] = ERROR_ONBOARDING_LOCK_FAILED
+        return result
+
+    conn = _load_connection(db, tenant_id)
+    if conn is None:
+        result["error"] = "connection_not_found"
+        return result
 
     waba_id = str(getattr(conn, "whatsapp_business_account_id", "") or "").strip()
     stamped = str(getattr(conn, "meta_catalog_id", "") or "").strip()
@@ -323,31 +410,53 @@ def ensure_waba_catalog_for_tenant(
     result["linked_catalog_ids"] = linked_ids
 
     chosen = ""
-    if stamped and stamped in linked_ids:
-        chosen = stamped
-        result["action"] = "reuse_linked"
-    elif len(linked_ids) == 1:
-        chosen = linked_ids[0]
-        result["action"] = "reuse_linked"
-    elif len(linked_ids) > 1:
+    if len(linked_ids) > 1:
         result["error"] = ERROR_AMBIGUOUS_WABA_CATALOGS
         result["waba_catalog_linked"] = False
         _persist_ensure(conn, {**result, "at": _now_iso()})
         db.commit()
         return result
+    if len(linked_ids) == 1:
+        chosen = linked_ids[0]
+        result["action"] = "reuse_linked"
+        if stamped and stamped != chosen:
+            result["error"] = ERROR_AMBIGUOUS_WABA_CATALOGS
+            result["waba_catalog_linked"] = False
+            _persist_ensure(conn, {**result, "at": _now_iso()})
+            db.commit()
+            return result
 
     if chosen:
         result["catalog_id"] = chosen
-        result["already_linked"] = True
-        result["waba_catalog_linked"] = True
-        result["link_status"] = LINK_STATUS_LINKED
         if confirm:
             if not _prove_readable_then_stamp(
-                conn, db, tenant_id, token, chosen, result, client=client,
+                conn, db, tenant_id, token, chosen, result,
+                owner_bm=owner_bm, client=client,
             ):
                 _persist_ensure(conn, {**result, "at": _now_iso()})
                 db.commit()
                 return result
+        else:
+            probe = probe_catalog_readable(token, chosen, client=client)
+            catalog_bm = str(probe.get("business_id") or "").strip()
+            if catalog_bm:
+                result["catalog_business_id"] = catalog_bm
+            if catalog_bm and owner_bm and catalog_bm != owner_bm:
+                result["error"] = ERROR_CATALOG_BUSINESS_MISMATCH
+                result["legacy_repair"] = True
+                result["waba_catalog_linked"] = False
+                _persist_ensure(conn, {**result, "at": _now_iso()})
+                db.commit()
+                return result
+            if _catalog_claimed_by_other_tenant(db, tenant_id, chosen):
+                result["error"] = ERROR_CATALOG_CLAIMED_OTHER_TENANT
+                result["waba_catalog_linked"] = False
+                _persist_ensure(conn, {**result, "at": _now_iso()})
+                db.commit()
+                return result
+        result["already_linked"] = True
+        result["waba_catalog_linked"] = True
+        result["link_status"] = LINK_STATUS_LINKED
         result["ok"] = True
         _persist_ensure(conn, {**result, "at": _now_iso()})
         db.commit()
@@ -428,6 +537,13 @@ def ensure_waba_catalog_for_tenant(
         return result
 
     if chosen:
+        if _catalog_claimed_by_other_tenant(db, tenant_id, chosen):
+            result["error"] = ERROR_CATALOG_CLAIMED_OTHER_TENANT
+            result["ok"] = False
+            result["waba_catalog_linked"] = False
+            _persist_ensure(conn, {**result, "at": _now_iso()})
+            db.commit()
+            return result
         result["catalog_id"] = chosen
         result["action"] = result.get("action") or "reuse_owned"
         if not confirm:
@@ -450,7 +566,8 @@ def ensure_waba_catalog_for_tenant(
             db.commit()
             return result
         if not _prove_readable_then_stamp(
-            conn, db, tenant_id, token, chosen, result, client=client,
+            conn, db, tenant_id, token, chosen, result,
+            owner_bm=owner_bm, client=client,
         ):
             _persist_ensure(conn, {**result, "at": _now_iso()})
             db.commit()
@@ -458,6 +575,18 @@ def ensure_waba_catalog_for_tenant(
         result["ok"] = True
         result["waba_catalog_linked"] = True
         result["link_status"] = LINK_STATUS_LINKED
+        _persist_ensure(conn, {**result, "at": _now_iso()})
+        db.commit()
+        return result
+
+    granted = _catalog_management_granted(token, client=client)
+    if granted is not True:
+        result["error"] = (
+            ERROR_CATALOG_MANAGE_PERMISSION
+            if granted is False
+            else ERROR_OWNED_CATALOGS_UNREADABLE
+        )
+        result["waba_catalog_linked"] = False
         _persist_ensure(conn, {**result, "at": _now_iso()})
         db.commit()
         return result
@@ -495,7 +624,8 @@ def ensure_waba_catalog_for_tenant(
         db.commit()
         return result
     if not _prove_readable_then_stamp(
-        conn, db, tenant_id, token, created_id, result, client=client,
+        conn, db, tenant_id, token, created_id, result,
+        owner_bm=owner_bm, client=client,
     ):
         _persist_ensure(conn, {**result, "at": _now_iso()})
         db.commit()
@@ -514,7 +644,11 @@ __all__ = [
     "ERROR_AMBIGUOUS_WABA_CATALOGS",
     "ERROR_CATALOG_BUSINESS_MISMATCH",
     "ERROR_CATALOG_MANAGE_PERMISSION",
+    "ERROR_CATALOG_CLAIMED_OTHER_TENANT",
+    "ERROR_OWNED_CATALOGS_UNREADABLE",
+    "ERROR_ONBOARDING_LOCK_FAILED",
     "ERROR_ONBOARDING_DISABLED",
+    "OnboardingLockError",
     "auto_catalog_onboarding_enabled",
     "ensure_waba_catalog_for_tenant",
 ]

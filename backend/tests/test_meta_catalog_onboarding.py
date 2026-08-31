@@ -17,8 +17,12 @@ from services.meta_catalog_onboarding import (  # noqa: E402
     ERROR_AMBIGUOUS_OWNED_CATALOGS,
     ERROR_AMBIGUOUS_WABA_CATALOGS,
     ERROR_CATALOG_BUSINESS_MISMATCH,
+    ERROR_CATALOG_CLAIMED_OTHER_TENANT,
     ERROR_CATALOG_MANAGE_PERMISSION,
     ERROR_ONBOARDING_DISABLED,
+    ERROR_ONBOARDING_LOCK_FAILED,
+    ERROR_OWNED_CATALOGS_UNREADABLE,
+    OnboardingLockError,
     auto_catalog_onboarding_enabled,
     ensure_waba_catalog_for_tenant,
 )
@@ -38,6 +42,15 @@ def _catalog_readable():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _catalog_management_granted():
+    with patch(
+        "services.meta_catalog_onboarding._catalog_management_granted",
+        return_value=True,
+    ):
+        yield
+
+
 def _conn(**overrides):
     base = dict(
         tenant_id=9,
@@ -51,16 +64,19 @@ def _conn(**overrides):
     return SimpleNamespace(**base)
 
 
-def _db(conn):
+def _db(conn, other_claims=None):
     db = MagicMock()
+    claims = list(other_claims) if other_claims is not None else [conn]
 
     def _query(model):
         q = MagicMock()
         name = getattr(model, "__name__", str(model))
         if name == "WhatsAppConnection":
             q.filter.return_value.first.return_value = conn
+            q.filter.return_value.all.return_value = claims
         else:
             q.filter.return_value.first.return_value = None
+            q.filter.return_value.all.return_value = []
         return q
 
     db.query.side_effect = _query
@@ -372,3 +388,120 @@ def test_product_auto_sync_flag_does_not_enable_onboarding(monkeypatch):
     monkeypatch.setenv("NAHLA_WHATSAPP_CATALOG_AUTO_SYNC", "1")
     monkeypatch.delenv("NAHLA_AUTO_CATALOG_ONBOARDING", raising=False)
     assert auto_catalog_onboarding_enabled() is False
+
+
+def test_stamped_among_multiple_linked_is_still_ambiguous():
+    conn = _conn(meta_catalog_id="CAT-A")
+    db = _db(conn)
+    with _token(), _owner_ok():
+        with patch(
+            "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+            return_value=(
+                [{"id": "CAT-A", "name": "A"}, {"id": "CAT-B", "name": "B"}],
+                200,
+                None,
+            ),
+        ):
+            with patch("services.meta_catalog_onboarding._create_owned_catalog") as create:
+                out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == ERROR_AMBIGUOUS_WABA_CATALOGS
+    assert conn.meta_catalog_id == "CAT-A"
+    create.assert_not_called()
+
+
+def test_linked_catalog_other_business_is_mismatch_not_ok():
+    conn = _conn()
+    db = _db(conn)
+    with _token(), _owner_ok():
+        with patch(
+            "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+            return_value=([{"id": "CAT-LIVE-1"}], 200, None),
+        ):
+            with patch(
+                "services.meta_catalog_onboarding.probe_catalog_readable",
+                return_value={"ok": True, "business_id": "BM-PLATFORM"},
+            ):
+                with patch("services.meta_catalog_onboarding._create_owned_catalog") as create:
+                    out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == ERROR_CATALOG_BUSINESS_MISMATCH
+    assert conn.meta_catalog_id in (None, "")
+    create.assert_not_called()
+
+
+def test_empty_owned_list_without_catalog_management_does_not_create():
+    conn = _conn()
+    db = _db(conn)
+    with _token(), _owner_ok():
+        with patch(
+            "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+            return_value=([], 200, None),
+        ):
+            with patch(
+                "services.meta_catalog_onboarding._list_owned_catalog_ids",
+                return_value=([], None, False),
+            ):
+                with patch(
+                    "services.meta_catalog_onboarding._catalog_management_granted",
+                    return_value=False,
+                ):
+                    with patch("services.meta_catalog_onboarding._create_owned_catalog") as create:
+                        out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == ERROR_CATALOG_MANAGE_PERMISSION
+    create.assert_not_called()
+    assert conn.meta_catalog_id in (None, "")
+
+
+def test_empty_owned_list_unproven_permission_does_not_create():
+    conn = _conn()
+    db = _db(conn)
+    with _token(), _owner_ok():
+        with patch(
+            "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+            return_value=([], 200, None),
+        ):
+            with patch(
+                "services.meta_catalog_onboarding._list_owned_catalog_ids",
+                return_value=([], None, False),
+            ):
+                with patch(
+                    "services.meta_catalog_onboarding._catalog_management_granted",
+                    return_value=None,
+                ):
+                    with patch("services.meta_catalog_onboarding._create_owned_catalog") as create:
+                        out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == ERROR_OWNED_CATALOGS_UNREADABLE
+    create.assert_not_called()
+
+
+def test_does_not_stamp_catalog_claimed_by_other_tenant():
+    conn = _conn()
+    other = SimpleNamespace(tenant_id=99, meta_catalog_id="CAT-LIVE-1")
+    db = _db(conn, other_claims=[other, conn])
+    with _token(), _owner_ok():
+        with patch(
+            "services.meta_catalog_onboarding._fetch_waba_product_catalogs",
+            return_value=([{"id": "CAT-LIVE-1"}], 200, None),
+        ):
+            out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == ERROR_CATALOG_CLAIMED_OTHER_TENANT
+    assert conn.meta_catalog_id in (None, "")
+
+
+def test_lock_failure_is_fail_closed_no_create():
+    conn = _conn()
+    db = _db(conn)
+    with patch(
+        "services.meta_catalog_onboarding._acquire_tenant_onboard_lock",
+        side_effect=OnboardingLockError(ERROR_ONBOARDING_LOCK_FAILED),
+    ):
+        with patch("services.meta_catalog_onboarding._create_owned_catalog") as create:
+            out = ensure_waba_catalog_for_tenant(db, 9, confirm=True)
+    assert out["ok"] is False
+    assert out["error"] == ERROR_ONBOARDING_LOCK_FAILED
+    create.assert_not_called()
+    assert conn.meta_catalog_id in (None, "")

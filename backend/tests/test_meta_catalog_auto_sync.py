@@ -396,7 +396,8 @@ def test_eligible_ids_are_tenant_scoped_and_skip_external_meta():
     assert is_meta_export_eligible(rows[3]) is False
 
 
-def test_cross_business_catalog_is_legacy_mismatch_not_shared():
+def test_cross_business_catalog_is_legacy_mismatch_not_shared(monkeypatch):
+    monkeypatch.setenv("NAHLA_AUTO_CATALOG_ONBOARDING", "1")
     conn = _conn()
     db = _db(conn)
     with patch(
@@ -421,6 +422,42 @@ def test_cross_business_catalog_is_legacy_mismatch_not_shared():
     assert out["error"] == "catalog_business_mismatch"
     assert out["legacy_repair"] is True
     link.assert_not_called()
+
+
+def test_cross_business_bind_unchanged_when_onboarding_flag_off(monkeypatch):
+    monkeypatch.delenv("NAHLA_AUTO_CATALOG_ONBOARDING", raising=False)
+    conn = _conn()
+    db = _db(conn)
+    with patch(
+        "services.meta_catalog_reconnect.select_catalog_graph_token",
+        return_value={
+            "token": "EAAB-platform",
+            "token_source": _TOKEN_SOURCE_PLATFORM_SYSTEM,
+            "catalog": {"business_id": "BM-PLATFORM"},
+        },
+    ):
+        with patch(
+            "services.meta_catalog_reconnect._select_graph_token",
+            return_value={"token": "EAAB-merchant"},
+        ):
+            with patch(
+                "services.meta_catalog_reconnect.fetch_waba_owner_business_id",
+                return_value={"ok": True, "business_id": "BM-MERCHANT"},
+            ):
+                with patch(
+                    "services.meta_catalog_reconnect.link_waba_to_catalog",
+                    return_value={
+                        "ok": True,
+                        "already_linked": True,
+                        "action": "already_linked",
+                        "link_status": "linked",
+                        "linked_catalog_ids": ["CAT-GENERIC-001"],
+                    },
+                ) as link:
+                    out = bind_current_waba_to_merchant_catalog(db, 9, confirm=True)
+    assert out["ok"] is True
+    assert out.get("error") in (None, "")
+    link.assert_called_once()
 
 
 def test_rerun_bind_is_idempotent_already_linked():

@@ -57,6 +57,32 @@ def postgres_engine() -> Engine:
         pytest.skip(message)
 
 
+def test_lock_failure_raises_and_does_not_create(postgres_engine: Engine, monkeypatch) -> None:
+    from services.meta_catalog_onboarding import (
+        ERROR_ONBOARDING_LOCK_FAILED,
+        OnboardingLockError,
+        _acquire_tenant_onboard_lock,
+    )
+
+    monkeypatch.setenv("NAHLA_AUTO_CATALOG_ONBOARDING", "1")
+    SessionLocal = sessionmaker(bind=postgres_engine)
+    db = SessionLocal()
+    try:
+        original = db.execute
+
+        def _boom(stmt, *args, **kwargs):
+            if "pg_advisory_xact_lock" in str(stmt):
+                raise RuntimeError("lock backend unavailable")
+            return original(stmt, *args, **kwargs)
+
+        db.execute = _boom  # type: ignore[method-assign]
+        with pytest.raises(OnboardingLockError) as exc:
+            _acquire_tenant_onboard_lock(db, _TEST_TENANT)
+        assert ERROR_ONBOARDING_LOCK_FAILED in str(exc.value)
+    finally:
+        db.close()
+
+
 def test_advisory_lock_serializes_two_sessions(postgres_engine: Engine, monkeypatch) -> None:
     from services.meta_catalog_onboarding import _acquire_tenant_onboard_lock
 
@@ -176,6 +202,9 @@ def test_concurrent_ensure_creates_exactly_one_catalog(
     ), patch(
         "services.meta_catalog_onboarding.probe_catalog_readable",
         return_value={"ok": True, "business_id": "BM-MERCHANT"},
+    ), patch(
+        "services.meta_catalog_onboarding._catalog_management_granted",
+        return_value=True,
     ), patch(
         "services.meta_catalog_onboarding.get_entitlements",
     ) as ent:
