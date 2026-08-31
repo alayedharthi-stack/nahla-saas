@@ -24,7 +24,7 @@ import json
 import logging
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from .types import (
     ActionResult,
@@ -798,6 +798,246 @@ def _maybe_apply_native_catalog_order(
             tenant_id,
             exc,
         )
+
+
+# ── Pipeline 6b: catalog-navigation ownership vs lexical category filter ──
+# The executor may already own a GLOBAL no-groups top-products fallback.
+# Downstream lexical scope extraction must not convert a generic inventory
+# word into a category and erase that result. Customer wording is not used.
+
+_PATH_CATALOG_NAV_TOP_FALLBACK = "catalog_navigation_top_products_fallback"
+_OWNER_CATALOG_NAVIGATION = "catalog_navigation"
+_SKIP_STRUCTURAL_GLOBAL_CATALOG_FALLBACK = "structurally_global_catalog_fallback"
+
+
+def _browse_meta_flag(value: Any) -> bool:
+    if value is True or value is False:
+        return bool(value)
+    if value is None:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"", "0", "false", "no", "off", "none"}:
+        return False
+    return text in {"1", "true", "yes"}
+
+
+def _first_nonempty_meta(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not str(value).strip():
+            continue
+        return value
+    return None
+
+
+def _payload_has_catalog_group(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, Mapping):
+        return any(
+            str(item).strip()
+            for item in value.values()
+            if item is not None and item is not False
+        )
+    return bool(str(value).strip())
+
+
+def _merged_navigation_state_patch(
+    decision: Any,
+    result_data: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    args = getattr(decision, "args", None) or {}
+    patch: Dict[str, Any] = {}
+    args_patch = args.get("navigation_state_patch")
+    if isinstance(args_patch, Mapping):
+        patch.update(dict(args_patch))
+    data_patch = (result_data or {}).get("navigation_state_patch")
+    if isinstance(data_patch, Mapping):
+        patch.update(dict(data_patch))
+    return patch
+
+
+def _has_selected_catalog_group(
+    *,
+    decision: Any = None,
+    result_data: Optional[Mapping[str, Any]] = None,
+    state: Any = None,
+) -> bool:
+    """True when a catalog group is selected/current — not a global fallback."""
+    if state is not None:
+        if _payload_has_catalog_group(getattr(state, "current_catalog_group", None)):
+            return True
+        if str(getattr(state, "selected_collection", "") or "").strip():
+            return True
+        if str(getattr(state, "catalog_navigation_source", "") or "").strip() == "group_products":
+            return True
+        session = getattr(state, "commerce_session", None)
+        if isinstance(session, Mapping) and str(
+            session.get("active_catalog_group_slug") or ""
+        ).strip():
+            return True
+    patch = _merged_navigation_state_patch(decision, result_data)
+    if _payload_has_catalog_group(patch.get("current_catalog_group")):
+        return True
+    if str(patch.get("selected_collection") or "").strip():
+        return True
+    if str(patch.get("catalog_navigation_source") or "").strip() == "group_products":
+        return True
+    return False
+
+
+def is_structurally_global_catalog_fallback(
+    *,
+    decision: Any = None,
+    result_data: Optional[Mapping[str, Any]] = None,
+    state: Any = None,
+) -> bool:
+    """True when catalog-navigation already owns GLOBAL no-groups top-products.
+
+    Derived from decision/result/state ownership metadata only — never from
+    customer wording.
+    """
+    data = result_data or {}
+    args = getattr(decision, "args", None) or {}
+    turn_owner = str(
+        _first_nonempty_meta(data.get("turn_owner"), args.get("turn_owner")) or ""
+    ).strip()
+    owner_locked = _browse_meta_flag(
+        _first_nonempty_meta(data.get("owner_locked"), args.get("owner_locked"))
+    )
+    chosen_path = str(
+        _first_nonempty_meta(data.get("chosen_path"), args.get("chosen_path")) or ""
+    ).strip()
+    no_groups = _browse_meta_flag(
+        _first_nonempty_meta(
+            data.get("navigator_no_groups_fallback"),
+            args.get("navigator_no_groups_fallback"),
+        )
+    )
+    if turn_owner != _OWNER_CATALOG_NAVIGATION:
+        return False
+    if not owner_locked:
+        return False
+    if chosen_path != _PATH_CATALOG_NAV_TOP_FALLBACK:
+        return False
+    if not no_groups:
+        return False
+    if _has_selected_catalog_group(
+        decision=decision,
+        result_data=data,
+        state=state,
+    ):
+        return False
+    return True
+
+
+def structurally_global_catalog_fallback_skip_reason(
+    *,
+    decision: Any = None,
+    result_data: Optional[Mapping[str, Any]] = None,
+    state: Any = None,
+) -> str:
+    if is_structurally_global_catalog_fallback(
+        decision=decision,
+        result_data=result_data,
+        state=state,
+    ):
+        return _SKIP_STRUCTURAL_GLOBAL_CATALOG_FALLBACK
+    return ""
+
+
+def _stamp_pipeline_browse_category_filter_meta(
+    result_data: Optional[Dict[str, Any]],
+    *,
+    applied: bool,
+    skip_reason: str,
+    products_before: int,
+    products_after: int,
+) -> None:
+    if not isinstance(result_data, dict):
+        return
+    result_data["browse_category_filter_applied"] = "yes" if applied else "no"
+    result_data["browse_category_filter_skip_reason"] = str(skip_reason or "")
+    result_data["products_before_filter"] = int(products_before)
+    result_data["products_after_filter"] = int(products_after)
+
+
+def apply_pipeline_browse_category_filter(
+    products: Sequence[Any],
+    *,
+    message: str = "",
+    query: str = "",
+    source: str = "",
+    last_browse_query: str = "",
+    decision: Any = None,
+    result_data: Optional[Dict[str, Any]] = None,
+    state: Any = None,
+) -> List[Any]:
+    """Pipeline 6b product filter. Skips lexical narrowing for global fallback."""
+    items = list(products or [])
+    before = len(items)
+    data = result_data if isinstance(result_data, dict) else {}
+    args = getattr(decision, "args", None) or {}
+    no_groups = _browse_meta_flag(
+        _first_nonempty_meta(
+            data.get("navigator_no_groups_fallback"),
+            args.get("navigator_no_groups_fallback"),
+        )
+    )
+    skip_reason = structurally_global_catalog_fallback_skip_reason(
+        decision=decision,
+        result_data=result_data,
+        state=state,
+    )
+    if skip_reason:
+        _stamp_pipeline_browse_category_filter_meta(
+            result_data if isinstance(result_data, dict) else None,
+            applied=False,
+            skip_reason=skip_reason,
+            products_before=before,
+            products_after=before,
+        )
+        logger.info(
+            "[BROWSE_CATEGORY_FILTER] applied=no skip_reason=%s "
+            "before=%d after=%d navigator_no_groups_fallback=%s",
+            skip_reason,
+            before,
+            before,
+            "yes" if no_groups else "no",
+        )
+        return items
+
+    from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+        filter_products_for_browse_turn,
+    )
+
+    filtered = filter_products_for_browse_turn(
+        items,
+        message=message or "",
+        query=query,
+        source=source,
+        last_browse_query=last_browse_query,
+        state=state,
+    )
+    after = len(filtered)
+    _stamp_pipeline_browse_category_filter_meta(
+        result_data if isinstance(result_data, dict) else None,
+        applied=True,
+        skip_reason="",
+        products_before=before,
+        products_after=after,
+    )
+    logger.info(
+        "[BROWSE_CATEGORY_FILTER] applied=yes skip_reason=- "
+        "before=%d after=%d navigator_no_groups_fallback=%s",
+        before,
+        after,
+        "yes" if no_groups else "no",
+    )
+    return list(filtered)
 
 
 class MerchantBrain:
@@ -2954,11 +3194,7 @@ class MerchantBrain:
             or []
         )
         try:
-            from .commerce.commerce_browse_category_guard import (  # noqa: PLC0415
-                filter_products_for_browse_turn,
-            )
-
-            _search_products = filter_products_for_browse_turn(
+            _search_products = apply_pipeline_browse_category_filter(
                 list(_search_products),
                 message=ctx.message or "",
                 query=str(
@@ -2968,6 +3204,8 @@ class MerchantBrain:
                 ),
                 source=str((decision.args or {}).get("source") or "").strip().lower(),
                 last_browse_query=str(getattr(new_state, "last_browse_query", "") or ""),
+                decision=decision,
+                result_data=result.data,
                 state=new_state,
             )
             if result.data.get("products"):

@@ -75,6 +75,7 @@ jobs:
         run: |
           python -m pytest \
             backend/tests/test_salla_broad_browse_ownership.py \
+            backend/tests/test_salla_broad_browse_global_fallback_guard.py \
             -q --tb=short --maxfail=1 \
             --junitxml=/tmp/salla-broad-browse-ownership.xml
 
