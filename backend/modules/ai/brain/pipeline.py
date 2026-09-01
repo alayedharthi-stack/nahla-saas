@@ -3397,6 +3397,9 @@ class MerchantBrain:
                 ))
             )
             if new_state.current_product_focus:
+                from .commerce.assistant_presented_provenance import (  # noqa: PLC0415
+                    current_turn_executor_catalog_referent,
+                )
                 from .commerce.commerce_focus_owner import (  # noqa: PLC0415
                     archive_current_product_focus,
                     bind_structured_catalog_referent,
@@ -3404,19 +3407,22 @@ class MerchantBrain:
                     should_keep_live_order_focus_after_product_list,
                 )
 
+                _turn_ref = current_turn_executor_catalog_referent(decision, result)
                 _keep_focus = should_keep_live_order_focus_after_product_list(
                     new_state.current_product_focus,
                     new_state.last_search_candidates,
                     has_live_order=bool(_has_live_order),
                     state=new_state,
+                    current_turn_customer_referent=bool(_turn_ref),
                 )
                 if _keep_focus:
                     logger.info(
                         "[ORDER FLOW] preserving current_product_focus after product list | "
-                        "identity=%r candidates=%d live_order=%s action=%s",
+                        "identity=%r candidates=%d live_order=%s customer_referent=%s action=%s",
                         product_focus_identity(new_state.current_product_focus),
                         len(new_state.last_search_candidates),
                         bool(_has_live_order),
+                        bool(_turn_ref),
                         decision.action,
                     )
                 else:
@@ -3427,15 +3433,19 @@ class MerchantBrain:
                         )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — archive focus is best-effort
                         pass
-                    _unique_new = list(new_state.last_search_candidates or [])
-                    if len(_unique_new) == 1 and isinstance(_unique_new[0], dict):
+                    _bind_row = dict(_turn_ref) if isinstance(_turn_ref, dict) else None
+                    if _bind_row is None:
+                        _unique_new = list(new_state.last_search_candidates or [])
+                        if len(_unique_new) == 1 and isinstance(_unique_new[0], dict):
+                            _bind_row = dict(_unique_new[0])
+                    if _bind_row is not None:
                         try:
                             bind_structured_catalog_referent(
                                 new_state,
-                                dict(_unique_new[0]),
+                                _bind_row,
                                 reason="structured_turn_product",
                                 turn=int(getattr(new_state, "turn", 0) or 0),
-                                current_turn_customer_referent=True,
+                                current_turn_customer_referent=bool(_turn_ref),
                             )
                         except Exception:  # noqa: BLE001  # noqa: silent-ok — unique new-goal bind is best-effort
                             new_state.current_product_focus = None
@@ -3443,10 +3453,11 @@ class MerchantBrain:
                         new_state.current_product_focus = None
                     logger.info(
                         "[ORDER FLOW] reset stale current_product_focus after product list display | "
-                        "old_focus=%r new_candidates=%d live_order=%s action=%s",
+                        "old_focus=%r new_candidates=%d live_order=%s customer_referent=%s action=%s",
                         _old_focus_title,
                         len(new_state.last_search_candidates),
                         bool(_has_live_order),
+                        bool(_turn_ref),
                         decision.action,
                     )
 

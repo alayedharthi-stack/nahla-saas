@@ -494,7 +494,7 @@ def _unique_product_list_row(container: Dict[str, Any]) -> Optional[Dict[str, An
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — turn identity probe must not block compose stamp
         return None
-    products = container.get("replay_candidates") or container.get("products")
+    products = container.get("products")
     if (
         isinstance(products, list)
         and len(products) == 1
@@ -511,8 +511,9 @@ def current_turn_executor_catalog_referent(
 ) -> Optional[Dict[str, Any]]:
     """Catalog identity from executor/result for this customer turn.
 
-    Excludes assistant ``recommended_product`` so recommendations cannot be
-    treated as a new customer product goal.
+    Proven signals: ``product``, ``focus_product``, or a unique ``products``
+    list. Assistant ``recommended_product`` and unique ``replay_candidates``
+    are not a customer product goal.
     """
     args = dict(getattr(decision, "args", None) or {})
     data = dict(getattr(result, "data", None) or {})

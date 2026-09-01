@@ -28,7 +28,7 @@ from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: E402
     canonical_product_referent,
     product_focus_identity,
     revert_to_previous_product_focus,
-    search_results_are_new_customer_product_goal,
+    search_results_exclude_current_focus,
     should_keep_live_order_focus_after_product_list,
     should_preserve_focus_after_product_list_display,
 )
@@ -267,8 +267,8 @@ class TestAgent2D1ReturnToPreviousProduct:
 
 
 class TestAgent2D1SearchListDoesNotKeepStaleOwner:
-    def test_different_product_candidates_are_a_new_goal(self) -> None:
-        assert search_results_are_new_customer_product_goal(
+    def test_different_catalog_results_are_not_a_customer_goal_without_provenance(self) -> None:
+        assert search_results_exclude_current_focus(
             dict(PRODUCT_A),
             [dict(PRODUCT_B), dict(PRODUCT_C)],
         ) is True
@@ -276,7 +276,28 @@ class TestAgent2D1SearchListDoesNotKeepStaleOwner:
             dict(PRODUCT_A),
             [dict(PRODUCT_B), dict(PRODUCT_C)],
             has_live_order=True,
+            current_turn_customer_referent=False,
+        ) is True
+
+    def test_proven_current_turn_referent_releases_live_order_for_product_b(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        assert should_keep_live_order_focus_after_product_list(
+            state.current_product_focus,
+            [dict(PRODUCT_B)],
+            has_live_order=True,
+            state=state,
+            current_turn_customer_referent=True,
         ) is False
+        bind_structured_catalog_referent(
+            state,
+            dict(PRODUCT_B),
+            reason="structured_turn_product",
+            turn=9,
+            current_turn_customer_referent=True,
+        )
+        assert product_focus_identity(state.current_product_focus) == "sku-blue-shirt"
+        assert state.order_prep.product_id == "sku-white-sneaker"
+        assert state.draft_order_id == "draft-a-1"
 
     def test_live_order_same_product_list_still_protected(self) -> None:
         focus = dict(PRODUCT_A)
@@ -297,6 +318,29 @@ class TestAgent2D1SearchListDoesNotKeepStaleOwner:
             focus,
             [dict(PRODUCT_B), dict(PRODUCT_C)],
         ) is True
+
+    def test_pipeline_helper_keeps_live_checkout_for_side_effect_list(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        assert should_keep_live_order_focus_after_product_list(
+            state.current_product_focus,
+            [dict(PRODUCT_B), dict(PRODUCT_C)],
+            has_live_order=True,
+            state=state,
+            current_turn_customer_referent=False,
+        ) is True
+        assert product_focus_identity(state.current_product_focus) == "sku-white-sneaker"
+        assert canonical_product_referent(state, checkout_active=True)["id"] == 801
+
+    def test_unique_side_effect_hit_does_not_release_live_checkout(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        assert should_keep_live_order_focus_after_product_list(
+            state.current_product_focus,
+            [dict(PRODUCT_B)],
+            has_live_order=True,
+            state=state,
+            current_turn_customer_referent=False,
+        ) is True
+        assert product_focus_identity(state.current_product_focus) == "sku-white-sneaker"
 
 
 class TestAgent2D1SelectionAndVariantRegression:
@@ -349,3 +393,10 @@ class TestAgent2D1ExecutorProductOutranksRecommendedProduct:
         result = type("R", (), {"data": {}})()
         assert structured_product_from_turn(decision, result)["id"] == 802
         assert current_turn_executor_catalog_referent(decision, result) is None
+
+    def test_unique_products_list_is_executor_goal_replay_is_not(self) -> None:
+        decision = type("D", (), {"args": {}})()
+        result_products = type("R", (), {"data": {"products": [dict(PRODUCT_B)]}})()
+        result_replay = type("R", (), {"data": {"replay_candidates": [dict(PRODUCT_B)]}})()
+        assert current_turn_executor_catalog_referent(decision, result_products)["id"] == 802
+        assert current_turn_executor_catalog_referent(decision, result_replay) is None

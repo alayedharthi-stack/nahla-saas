@@ -214,14 +214,14 @@ def canonical_product_referent(
     return dict(focus) if focus else None
 
 
-def search_results_are_new_customer_product_goal(
+def search_results_exclude_current_focus(
     focus: Any,
     candidates: Sequence[Any],
 ) -> bool:
-    """True when this turn's catalog hits are a different product than current focus.
+    """True when catalog hits have identities that do not include current focus.
 
-    Identity-only: does not inspect customer phrasing. Empty or unstructured
-    candidate lists are not a new product goal.
+    This is different search results, not a proven customer product goal.
+    Empty or unstructured candidate lists do not count.
     """
     focus_id = product_focus_identity(focus)
     if not focus_id:
@@ -242,13 +242,20 @@ def should_keep_live_order_focus_after_product_list(
     *,
     has_live_order: bool,
     state: Any = None,
+    current_turn_customer_referent: bool = False,
 ) -> bool:
-    """Live-order preserve must not block a current-turn different product goal.
+    """Keep live-order/checkout focus unless this turn has proven customer ownership.
+
+    Different catalog identities alone must not release Family-2 checkout.
+    ``current_turn_customer_referent`` must come from structured provenance
+    (executor product / current-turn customer bind), never from phrase maps.
 
     Submitted/draft order rows are out of scope here — this only decides
     whether conversational ``current_product_focus`` stays pinned.
     """
-    if search_results_are_new_customer_product_goal(focus, candidates):
+    if current_turn_customer_referent and search_results_exclude_current_focus(
+        focus, candidates
+    ):
         return False
     if has_live_order:
         return True
@@ -701,7 +708,7 @@ __all__ = [
     "product_focus_identity",
     "restore_suspended_product_focus",
     "revert_to_previous_product_focus",
-    "search_results_are_new_customer_product_goal",
+    "search_results_exclude_current_focus",
     "set_product_focus",
     "should_keep_live_order_focus_after_product_list",
     "should_preserve_focus_after_product_list_display",
