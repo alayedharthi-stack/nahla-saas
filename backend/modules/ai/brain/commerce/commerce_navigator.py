@@ -594,9 +594,34 @@ def resolve_commerce_navigator(
         )
 
     awaiting_channel = bool(prep.get("awaiting_checkout_channel"))
-    channel = _structured_selected_channel(slots, inbound_metadata)
-    if channel is None and not awaiting_channel:
-        channel = _selected_channel(msg)
+    channel = None
+    if awaiting_channel:
+        try:
+            from .checkout_route_owner import (  # noqa: PLC0415
+                extract_structured_purchase_channel_id,
+            )
+
+            channel = extract_structured_purchase_channel_id(
+                message=msg,
+                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — chrome extract must not guess
+            channel = None
+        if channel is None:
+            return CommerceNavigatorDecision(
+                stage="purchase_channel_selection",
+                confidence=0.9,
+                reason="awaiting purchase-channel choice — unstructured turn, do not guess",
+                next_goal="help_customer_choose_purchase_channel",
+                available_purchase_channels=channels,
+                known_fields=known,
+                forbidden_actions=_forbidden_for_channel_selection(),
+                customer_intent="wants_to_buy",
+            )
+    else:
+        channel = _structured_selected_channel(slots, inbound_metadata)
+        if channel is None:
+            channel = _selected_channel(msg)
     genuine_purchase_entry = False
     try:
         from .checkout_route_owner import (  # noqa: PLC0415

@@ -129,22 +129,50 @@ def _resolve_maps_url(db: Any, tenant_id: int) -> tuple[str, str]:
     return "", "none"
 
 
+def whatsapp_order_processing_ready(
+    db: Any,
+    tenant_id: int,
+    *,
+    whatsapp_order_ready: Optional[bool] = None,
+) -> bool:
+    """WhatsApp connection/order-processing readiness — not native catalog browse.
+
+    Canonical owner: connected ``WhatsAppConnection`` with a phone_number_id,
+    same signal as ``trial_lifecycle._tenant_has_connected_whatsapp``.
+    Distinct from ``evaluate_native_catalog_capability.eligible``.
+    """
+    if whatsapp_order_ready is not None:
+        return bool(whatsapp_order_ready)
+    if db is None or not tenant_id:
+        return False
+    try:
+        from models import WhatsAppConnection  # noqa: PLC0415
+
+        conn = (
+            db.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.tenant_id == int(tenant_id))
+            .first()
+        )
+        if conn is None:
+            return False
+        return str(getattr(conn, "status", "") or "") == "connected" and bool(
+            getattr(conn, "phone_number_id", None)
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — WhatsApp capability must fail closed
+        return False
+
+
 def _whatsapp_order_capability_ready(
     db: Any,
     tenant_id: int,
     *,
     whatsapp_order_ready: Optional[bool],
 ) -> bool:
-    if whatsapp_order_ready is not None:
-        return bool(whatsapp_order_ready)
-    try:
-        from core.native_catalog_capability import (  # noqa: PLC0415
-            whatsapp_native_order_ready,
-        )
-
-        return bool(whatsapp_native_order_ready(db, int(tenant_id or 0)))
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — WhatsApp capability must fail closed
-        return False
+    return whatsapp_order_processing_ready(
+        db,
+        tenant_id,
+        whatsapp_order_ready=whatsapp_order_ready,
+    )
 
 
 def resolve_merchant_sales_channels(
@@ -162,8 +190,9 @@ def resolve_merchant_sales_channels(
     When ``store_url`` / ``maps_url`` are pre-loaded on CommerceFacts, pass them
     through together with ``store_url_source`` so Navigator matches facts loader.
 
-    WhatsApp availability is ``enabled AND`` real native-catalog order
-    capability — never ``enabled == available``.
+    WhatsApp availability is ``enabled AND`` WhatsApp order-processing
+    readiness (connected WhatsApp number) — never native-catalog browse
+    eligibility, and never ``enabled == available``.
     """
     toggles = {"online_store": True, "whatsapp_quick_order": True, "showroom_visit": True}
     try:
@@ -214,9 +243,9 @@ def resolve_merchant_sales_channels(
     )
     wa_available = bool(wa_enabled and wa_ready)
     if wa_available:
-        wa_evidence = "whatsapp_catalog"
+        wa_evidence = "whatsapp_order_processing"
     elif wa_enabled:
-        wa_evidence = "whatsapp_catalog_unavailable"
+        wa_evidence = "whatsapp_connection_unavailable"
     else:
         wa_evidence = "whatsapp_disabled"
 
@@ -248,4 +277,5 @@ __all__ = [
     "parse_sales_channel_toggles",
     "resolve_merchant_sales_channels",
     "store_url_evidence_activates_channel",
+    "whatsapp_order_processing_ready",
 ]
