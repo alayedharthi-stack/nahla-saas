@@ -479,7 +479,7 @@ class _SelectPurchaseChannelHandler:
             maps_url=str(getattr(facts, "maps_url", "") or ""),
             selection_source=selection_source,
         )
-        executed_ok = bool(result.accepted and result.persist_ok and result.executed)
+        executed_ok = bool(result.accepted and result.persist_ok and result.executed and result.committed)
         topic = result.execution_topic if executed_ok else "purchase_channel_selection"
         args["topic"] = topic
         args["selected_channel_id"] = result.selected_channel_id
@@ -487,7 +487,10 @@ class _SelectPurchaseChannelHandler:
         args["selection_source"] = result.selection_source or selection_source
         args["persist_ok"] = result.persist_ok
         args["executed"] = result.executed
-        args["durable_choice_state"] = bool(result.persist_ok and result.accepted)
+        args["committed"] = result.committed
+        args["awaiting_checkout_channel"] = result.awaiting_checkout_channel
+        args["offered_purchase_channel_ids"] = list(result.offered_purchase_channel_ids)
+        args["durable_choice_state"] = bool(result.committed)
         if executed_ok and result.cta_url:
             args["cta_url"] = result.cta_url
             args["cta_label"] = result.cta_label
@@ -505,9 +508,12 @@ class _SelectPurchaseChannelHandler:
                 "selected_channel_id": result.selected_channel_id,
                 "execution_topic": topic,
                 "reason": result.reason,
-                "checkout_channel": result.checkout_channel,
+                "checkout_channel": result.checkout_channel if executed_ok else "",
                 "persist_ok": result.persist_ok,
                 "executed": result.executed,
+                "committed": result.committed,
+                "awaiting_checkout_channel": result.awaiting_checkout_channel,
+                "offered_purchase_channel_ids": list(result.offered_purchase_channel_ids),
                 "execution_owner": result.execution_owner,
                 "execution_evidence": result.execution_evidence,
                 "selection_source": result.selection_source or selection_source,

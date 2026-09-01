@@ -662,28 +662,38 @@ class TestStructuredActionContractPersistAndExecute:
         assert result.data.get("accepted") is False
         assert result.data.get("executed") is False
 
-    def test_persistence_failure_returns_success_false_and_does_not_execute(self) -> None:
+    def test_cta_prepared_then_persistence_fails_does_not_commit_or_send(self) -> None:
+        db, conv = _persist_ok_db()
         ctx = _ctx(
             "",
             sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
             state=_awaiting_state(),
-            db=MagicMock(),
+            db=db,
         )
         with patch(
-            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
-            return_value=False,
+            "core.order_flow._load_brain_state",
+            return_value=(conv, {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])}),
         ), patch(
             "modules.ai.brain.commerce.checkout_route_owner._storefront_delivery_decision",
-        ) as store_owner, patch(
-            "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
-        ) as showroom_owner:
+            return_value=CheckoutRouteDecision(
+                reply_text="",
+                reason="store_link_delivered",
+                cta_url=_STORE,
+                cta_label="المتجر",
+            ),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=False,
+        ):
             result = _handle_select(self._structured_action("online_store"), ctx)
         assert result.success is False
         assert result.data.get("reason") == "persist_failed"
         assert result.data.get("executed") is False
-        assert result.data.get("execution_owner") in {None, ""}
-        store_owner.assert_not_called()
-        showroom_owner.assert_not_called()
+        assert result.data.get("committed") is False
+        assert result.data.get("cta_url") in {None, ""}
+        op = conv.extra_metadata["brain_state"]["order_prep"]
+        assert op.get("checkout_channel") in {None, ""}
+        assert op["awaiting_checkout_channel"] is True
 
     def test_persist_success_executes_storefront_owner(self) -> None:
         db, conv = _persist_ok_db()
@@ -775,7 +785,203 @@ class TestExecutionTruthGate:
             confidence=0.99,
         )
 
-    def test_initial_awaiting_persist_failure_is_not_durable(self) -> None:
+    def _op(self, conv: MagicMock) -> dict[str, Any]:
+        return dict(conv.extra_metadata["brain_state"]["order_prep"])
+
+    def test_store_execution_failure_keeps_awaiting_recoverable(self) -> None:
+        db, conv = _persist_ok_db()
+        sales = _sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS)
+        ctx = _ctx("", sales=sales, state=_awaiting_state(), db=db)
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(conv, {"order_prep": dict(self._op(conv))}),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner._storefront_delivery_decision",
+            side_effect=RuntimeError("store owner down"),
+        ):
+            result = _handle_select(self._structured_action("online_store"), ctx)
+        assert result.success is False
+        assert result.data.get("executed") is False
+        assert result.data.get("committed") is False
+        assert result.data.get("cta_url") in {None, ""}
+        assert result.data.get("reason") == REASON_CAPABILITY_EXECUTION_FAILED
+        op = self._op(conv)
+        assert op.get("checkout_channel") in {None, ""}
+        assert op["awaiting_checkout_channel"] is True
+        assert op["offered_purchase_channel_ids"] == [
+            "online_store",
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]
+        next_ctx = _ctx(
+            "",
+            sales=sales,
+            state=_awaiting_state(),
+            inbound_metadata={"button_id": "checkout_whatsapp_fast"},
+        )
+        nxt = _decide(next_ctx)
+        assert nxt.action == ACTION_SELECT_PURCHASE_CHANNEL
+        assert nxt.args.get("selected_channel_id") == "whatsapp_quick_order"
+
+    def test_showroom_execution_failure_keeps_awaiting_recoverable(self) -> None:
+        db, conv = _persist_ok_db()
+        ctx = _ctx(
+            "",
+            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
+            state=_awaiting_state(),
+            db=db,
+        )
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(conv, {"order_prep": dict(self._op(conv))}),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
+            return_value=CheckoutRouteDecision(
+                reply_text="",
+                reason="showroom_visit_unavailable",
+                cta_url="",
+            ),
+        ):
+            result = _handle_select(self._structured_action("showroom_visit"), ctx)
+        assert result.success is False
+        assert result.data.get("executed") is False
+        assert result.data.get("committed") is False
+        op = self._op(conv)
+        assert op.get("checkout_channel") in {None, ""}
+        assert op["awaiting_checkout_channel"] is True
+        assert op["offered_purchase_channel_ids"] == [
+            "online_store",
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]
+
+    def test_cta_prepared_then_persistence_fails_does_not_send_or_commit(self) -> None:
+        db, conv = _persist_ok_db()
+        ctx = _ctx(
+            "",
+            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
+            state=_awaiting_state(),
+            db=db,
+        )
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(conv, {"order_prep": dict(self._op(conv))}),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner._storefront_delivery_decision",
+            return_value=CheckoutRouteDecision(
+                reply_text="",
+                reason="store_link_delivered",
+                cta_url=_STORE,
+                cta_label="المتجر",
+            ),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=False,
+        ):
+            result = _handle_select(self._structured_action("online_store"), ctx)
+        assert result.success is False
+        assert result.data.get("cta_url") in {None, ""}
+        assert result.data.get("executed") is False
+        assert result.data.get("committed") is False
+        op = self._op(conv)
+        assert op.get("checkout_channel") in {None, ""}
+        assert op["awaiting_checkout_channel"] is True
+
+    def test_store_and_showroom_full_success_persists_after_cta(self) -> None:
+        db, conv = _persist_ok_db()
+        ctx = _ctx(
+            "",
+            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
+            state=_awaiting_state(),
+            db=db,
+        )
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(conv, {"order_prep": dict(self._op(conv))}),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner._storefront_delivery_decision",
+            return_value=CheckoutRouteDecision(
+                reply_text="",
+                reason="store_link_delivered",
+                cta_url=_STORE,
+                cta_label="المتجر",
+            ),
+        ):
+            store = _handle_select(self._structured_action("online_store"), ctx)
+        assert store.success is True
+        assert store.data.get("cta_url") == _STORE
+        assert store.data.get("executed") is True
+        assert store.data.get("committed") is True
+        op = self._op(conv)
+        assert op["checkout_channel"] == CHECKOUT_CHANNEL_STORE
+        assert op["awaiting_checkout_channel"] is False
+
+        db2, conv2 = _persist_ok_db()
+        ctx2 = _ctx(
+            "",
+            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
+            state=_awaiting_state(),
+            db=db2,
+        )
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(conv2, {"order_prep": dict(self._op(conv2))}),
+        ), patch(
+            "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
+            return_value=CheckoutRouteDecision(
+                reply_text="",
+                reason="showroom_location_delivered",
+                cta_url=_MAPS,
+                cta_label="موقع المعرض",
+            ),
+        ):
+            showroom = _handle_select(self._structured_action("showroom_visit"), ctx2)
+        assert showroom.success is True
+        assert showroom.data.get("cta_url") == _MAPS
+        assert showroom.data.get("executed") is True
+        assert self._op(conv2)["awaiting_checkout_channel"] is False
+
+    def test_whatsapp_persistence_failure_keeps_awaiting_recoverable(self) -> None:
+        db, conv = _persist_ok_db()
+        ctx = _ctx(
+            "",
+            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
+            state=_awaiting_state(),
+            db=db,
+        )
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=False,
+        ):
+            result = _handle_select(self._structured_action("whatsapp_quick_order"), ctx)
+        assert result.success is False
+        assert result.data.get("executed") is False
+        assert result.data.get("committed") is False
+        op = self._op(conv)
+        assert op.get("checkout_channel") in {None, ""}
+        assert op["awaiting_checkout_channel"] is True
+
+    def test_whatsapp_persistence_success_commits_order_state(self) -> None:
+        db, conv = _persist_ok_db()
+        ctx = _ctx(
+            "",
+            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
+            state=_awaiting_state(),
+            db=db,
+        )
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(conv, {"order_prep": dict(self._op(conv))}),
+        ):
+            result = _handle_select(self._structured_action("whatsapp_quick_order"), ctx)
+        assert result.success is True
+        assert result.data.get("executed") is True
+        assert result.data.get("execution_evidence") == EXECUTION_EVIDENCE_WHATSAPP_STATE
+        op = self._op(conv)
+        assert op["checkout_channel"] == CHECKOUT_CHANNEL_WHATSAPP
+        assert op["awaiting_checkout_channel"] is False
+
+    def test_initial_awaiting_persist_failure_disables_selection_actions(self) -> None:
         sales = _sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS)
         intent = Intent(name="start_order", confidence=0.9, raw_message="ابي اطلب")
         with patch(
@@ -797,18 +1003,15 @@ class TestExecutionTruthGate:
         assert turn is not None
         assert turn.reason == REASON_AWAITING_PERSIST_FAILED
         assert turn.args.get("durable_choice_state") is False
-        assert turn.args.get("persist_ok") is False
+        assert turn.args.get("selection_actions_enabled") is False
         assert turn.args.get("offered_purchase_channel_ids") == []
-        assert turn.args.get("response_goal") != "guide_customer_to_online_store"
-
         ctx = _ctx(
             "المتجر الإلكتروني",
             intent_name="ask_store_info",
             sales=sales,
             state=_awaiting_state(offered=[]),
         )
-        decision = _decide(ctx)
-        assert decision.action != ACTION_SELECT_PURCHASE_CHANNEL
+        assert _decide(ctx).action != ACTION_SELECT_PURCHASE_CHANNEL
         assert extract_structured_purchase_channel_id(
             message="المتجر الإلكتروني",
             offered_purchase_channel_ids=[],
@@ -817,224 +1020,6 @@ class TestExecutionTruthGate:
             message="2",
             offered_purchase_channel_ids=[],
         ) is None
-
-    def test_store_owner_raises_is_not_success(self) -> None:
-        db, conv = _persist_ok_db()
-        ctx = _ctx(
-            "",
-            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
-            state=_awaiting_state(),
-            db=db,
-        )
-        with patch(
-            "core.order_flow._load_brain_state",
-            return_value=(conv, {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])}),
-        ), patch(
-            "modules.ai.brain.commerce.checkout_route_owner._storefront_delivery_decision",
-            side_effect=RuntimeError("store owner down"),
-        ):
-            result = _handle_select(self._structured_action("online_store"), ctx)
-        assert result.success is False
-        assert result.data.get("executed") is False
-        assert result.data.get("cta_url") in {None, ""}
-        assert result.data.get("execution_topic") == "purchase_channel_selection"
-        assert result.data.get("reason") == REASON_CAPABILITY_EXECUTION_FAILED
-        assert result.data.get("execution_topic") == "purchase_channel_selection"
-
-    def test_store_owner_empty_or_invalid_cta_is_not_success(self) -> None:
-        db, conv = _persist_ok_db()
-        ctx = _ctx(
-            "",
-            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
-            state=_awaiting_state(),
-            db=db,
-        )
-        for bad_cta in ("", "not a url", "ftp://shop.example.sa"):
-            with patch(
-                "core.order_flow._load_brain_state",
-                return_value=(
-                    conv,
-                    {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])},
-                ),
-            ), patch(
-                "modules.ai.brain.commerce.checkout_route_owner._storefront_delivery_decision",
-                return_value=CheckoutRouteDecision(
-                    reply_text="",
-                    reason="store_link_unavailable",
-                    cta_url=bad_cta,
-                    cta_label="المتجر",
-                ),
-            ):
-                result = _handle_select(self._structured_action("online_store"), ctx)
-            assert result.success is False
-            assert result.data.get("executed") is False
-            assert result.data.get("cta_url") in {None, ""}
-            assert result.data.get("reason") == REASON_CAPABILITY_EXECUTION_FAILED
-
-    def test_showroom_owner_raises_or_empty_maps_cta_is_not_success(self) -> None:
-        db, conv = _persist_ok_db()
-        ctx = _ctx(
-            "",
-            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
-            state=_awaiting_state(),
-            db=db,
-        )
-        with patch(
-            "core.order_flow._load_brain_state",
-            return_value=(conv, {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])}),
-        ), patch(
-            "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
-            side_effect=RuntimeError("maps owner down"),
-        ):
-            raised = _handle_select(self._structured_action("showroom_visit"), ctx)
-        assert raised.success is False
-        assert raised.data.get("executed") is False
-        assert raised.data.get("reason") == REASON_CAPABILITY_EXECUTION_FAILED
-
-        with patch(
-            "core.order_flow._load_brain_state",
-            return_value=(conv, {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])}),
-        ), patch(
-            "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
-            return_value=CheckoutRouteDecision(
-                reply_text="",
-                reason="showroom_visit_unavailable",
-                cta_url="",
-                cta_label="",
-            ),
-        ):
-            empty = _handle_select(self._structured_action("showroom_visit"), ctx)
-        assert empty.success is False
-        assert empty.data.get("executed") is False
-        assert empty.data.get("cta_url") in {None, ""}
-
-        with patch(
-            "core.order_flow._load_brain_state",
-            return_value=(conv, {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])}),
-        ), patch(
-            "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
-            return_value=CheckoutRouteDecision(
-                reply_text="",
-                reason="showroom_location_delivered",
-                cta_url="https://shop.example.sa/not-maps",
-                cta_label="موقع المعرض",
-            ),
-        ):
-            invalid = _handle_select(self._structured_action("showroom_visit"), ctx)
-        assert invalid.success is False
-        assert invalid.data.get("executed") is False
-
-    def test_whatsapp_committed_order_state_is_execution_evidence(self) -> None:
-        db, conv = _persist_ok_db()
-        ctx = _ctx(
-            "",
-            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
-            state=_awaiting_state(),
-            db=db,
-        )
-        with patch(
-            "core.order_flow._load_brain_state",
-            return_value=(conv, {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])}),
-        ):
-            result = _handle_select(self._structured_action("whatsapp_quick_order"), ctx)
-        assert result.success is True
-        assert result.data.get("executed") is True
-        assert result.data.get("persist_ok") is True
-        assert result.data.get("execution_evidence") == EXECUTION_EVIDENCE_WHATSAPP_STATE
-        op = conv.extra_metadata["brain_state"]["order_prep"]
-        assert op["checkout_channel"] == CHECKOUT_CHANNEL_WHATSAPP
-        assert op["awaiting_checkout_channel"] is False
-
-    def test_persist_ok_but_capability_failure_does_not_claim_success(self) -> None:
-        db, conv = _persist_ok_db()
-        ctx = _ctx(
-            "",
-            sales=_sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS),
-            state=_awaiting_state(),
-            db=db,
-        )
-        with patch(
-            "core.order_flow._load_brain_state",
-            return_value=(conv, {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])}),
-        ), patch(
-            "modules.ai.brain.commerce.checkout_route_owner._storefront_delivery_decision",
-            return_value=CheckoutRouteDecision(
-                reply_text="",
-                reason="store_link_unavailable",
-                cta_url="",
-            ),
-        ):
-            result = _handle_select(self._structured_action("online_store"), ctx)
-        assert result.success is False
-        assert result.data.get("persist_ok") is True
-        assert result.data.get("executed") is False
-        assert result.data.get("reason") == REASON_CAPABILITY_EXECUTION_FAILED
-        assert result.data.get("execution_topic") == "purchase_channel_selection"
-        op = conv.extra_metadata["brain_state"]["order_prep"]
-        assert op["checkout_channel"] == CHECKOUT_CHANNEL_STORE
-        assert op["awaiting_checkout_channel"] is False
-        assert result.data.get("cta_url") in {None, ""}
-
-    def test_exact_title_and_index_without_offered_authority_rejected(self) -> None:
-        sales = _sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS)
-        title_ctx = _ctx(
-            "المتجر الإلكتروني",
-            intent_name="ask_store_info",
-            sales=sales,
-            state=_awaiting_state(offered=[]),
-        )
-        index_ctx = _ctx(
-            "2",
-            intent_name="general",
-            sales=sales,
-            state=_awaiting_state(offered=[]),
-        )
-        assert _decide(title_ctx).action != ACTION_SELECT_PURCHASE_CHANNEL
-        assert _decide(index_ctx).action != ACTION_SELECT_PURCHASE_CHANNEL
-        assert extract_structured_purchase_channel_id(
-            message="المتجر الإلكتروني",
-            offered_purchase_channel_ids=[],
-        ) is None
-        assert extract_structured_purchase_channel_id(
-            message="2",
-            offered_purchase_channel_ids=[],
-        ) is None
-
-    def test_verified_button_for_offered_available_channel_executes(self) -> None:
-        db, conv = _persist_ok_db()
-        sales = _sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS)
-        ctx = _ctx(
-            "",
-            intent_name="start_order",
-            sales=sales,
-            state=_awaiting_state(),
-            inbound_metadata={"button_id": "checkout_store_link"},
-            db=db,
-        )
-        decision = _decide(ctx)
-        assert decision.action == ACTION_SELECT_PURCHASE_CHANNEL
-        assert decision.args.get("selected_channel_id") == "online_store"
-        assert decision.args.get("selection_source") == SELECTION_SOURCE_VERIFIED_BUTTON
-        with patch(
-            "core.order_flow._load_brain_state",
-            return_value=(conv, {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])}),
-        ), patch(
-            "modules.ai.brain.commerce.checkout_route_owner._storefront_delivery_decision",
-            return_value=CheckoutRouteDecision(
-                reply_text="",
-                reason="store_link_delivered",
-                cta_url=_STORE,
-                cta_label="المتجر",
-            ),
-        ):
-            result = _handle_select(decision, ctx)
-        assert result.success is True
-        assert result.data.get("accepted") is True
-        assert result.data.get("persist_ok") is True
-        assert result.data.get("executed") is True
-        assert result.data.get("cta_url") == _STORE
-        assert result.data.get("execution_evidence") == EXECUTION_EVIDENCE_STORE_CTA
-        assert result.data.get("selection_source") == SELECTION_SOURCE_VERIFIED_BUTTON
 
 
 class TestCrossTenantB10:

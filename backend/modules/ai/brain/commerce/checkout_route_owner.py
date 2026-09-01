@@ -1507,6 +1507,8 @@ class PurchaseChannelSelectionResult:
     offered_purchase_channel_ids: Tuple[str, ...] = field(default_factory=tuple)
     selection_source: str = ""
     execution_evidence: str = ""
+    awaiting_checkout_channel: bool = True
+    committed: bool = False
 
 
 @dataclass(frozen=True)
@@ -1847,11 +1849,11 @@ def apply_selected_purchase_channel(
     execute: bool = True,
     selection_source: str = "",
 ) -> PurchaseChannelSelectionResult:
-    """Validate, persist, then execute the selected capability owner.
+    """Prepare capability evidence, then persist the committed selection.
 
-    Customer-facing success requires accepted + persist_ok + executed.
-    Store/showroom execution requires a usable canonical CTA.
-    WhatsApp execution evidence is the committed WhatsApp order state.
+    Store/showroom persist only after a usable canonical CTA exists.
+    WhatsApp persistence is the execution evidence. Failed capability or
+    failed persist leaves awaiting recoverable and does not commit a channel.
     """
     result = validate_selected_purchase_channel(
         selected_channel_id=selected_channel_id,
@@ -1866,38 +1868,58 @@ def apply_selected_purchase_channel(
     )
     if not result.accepted:
         return result
-    persist_ok = persist_checkout_route_state(
-        db,
-        tenant_id=int(tenant_id or 0),
-        phone=str(phone or ""),
-        checkout_channel=result.checkout_channel,
-        awaiting_checkout_channel=False,
-    )
-    if not persist_ok:
+
+    offered = result.offered_purchase_channel_ids
+
+    def _recover(*, reason: str, execution_owner: str = "") -> PurchaseChannelSelectionResult:
         return PurchaseChannelSelectionResult(
-            accepted=False,
+            accepted=True,
             selected_channel_id=result.selected_channel_id,
             execution_topic=PURCHASE_CHANNEL_ENTRY_SELECTION,
-            checkout_channel=result.checkout_channel,
-            reason="persist_failed",
+            checkout_channel="",
+            reason=reason,
             available_purchase_channel_ids=result.available_purchase_channel_ids,
             persist_ok=False,
             executed=False,
-            offered_purchase_channel_ids=result.offered_purchase_channel_ids,
+            execution_owner=execution_owner,
+            offered_purchase_channel_ids=offered,
             selection_source=selection_source,
+            awaiting_checkout_channel=True,
+            committed=False,
         )
+
+    if result.selected_channel_id == PURCHASE_CHANNEL_ENTRY_WHATSAPP:
+        persist_ok = persist_checkout_route_state(
+            db,
+            tenant_id=int(tenant_id or 0),
+            phone=str(phone or ""),
+            checkout_channel=result.checkout_channel,
+            awaiting_checkout_channel=False,
+        )
+        if not persist_ok:
+            return _recover(reason="persist_failed")
+        return PurchaseChannelSelectionResult(
+            accepted=True,
+            selected_channel_id=result.selected_channel_id,
+            execution_topic=result.execution_topic,
+            checkout_channel=result.checkout_channel,
+            reason=result.reason,
+            available_purchase_channel_ids=result.available_purchase_channel_ids,
+            persist_ok=True,
+            executed=True,
+            execution_owner=_EXECUTION_OWNER_WHATSAPP,
+            offered_purchase_channel_ids=offered,
+            selection_source=selection_source,
+            execution_evidence=EXECUTION_EVIDENCE_WHATSAPP_STATE,
+            awaiting_checkout_channel=False,
+            committed=True,
+        )
+
     execution_owner = ""
     cta_url = ""
     cta_label = ""
-    executed = False
     execution_evidence = ""
-    reason = result.reason
-    execution_topic = result.execution_topic
-    if result.selected_channel_id == PURCHASE_CHANNEL_ENTRY_WHATSAPP:
-        execution_owner = _EXECUTION_OWNER_WHATSAPP
-        executed = True
-        execution_evidence = EXECUTION_EVIDENCE_WHATSAPP_STATE
-    elif execute:
+    if execute:
         try:
             execution_owner, cta_url, cta_label, execution_evidence = (
                 _execute_selected_channel_capability(
@@ -1909,47 +1931,54 @@ def apply_selected_purchase_channel(
                     store_url_source=store_url_source,
                 )
             )
-            executed = bool(execution_evidence and (cta_url or False))
-            if not executed:
-                reason = REASON_CAPABILITY_EXECUTION_FAILED
-                execution_topic = PURCHASE_CHANNEL_ENTRY_SELECTION
-                cta_url = ""
-                cta_label = ""
-                execution_evidence = ""
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[CHECKOUT_ROUTE] capability execution failed tenant=%s err=%s",
                 tenant_id,
                 exc,
             )
-            execution_owner = execution_owner or (
+            execution_owner = (
                 _EXECUTION_OWNER_STORE
                 if result.selected_channel_id == PURCHASE_CHANNEL_ENTRY_STORE
                 else _EXECUTION_OWNER_SHOWROOM
                 if result.selected_channel_id == PURCHASE_CHANNEL_ENTRY_SHOWROOM
-                else execution_owner
+                else ""
             )
-            executed = False
             cta_url = ""
             cta_label = ""
             execution_evidence = ""
-            reason = REASON_CAPABILITY_EXECUTION_FAILED
-            execution_topic = PURCHASE_CHANNEL_ENTRY_SELECTION
+    if not bool(execution_evidence and cta_url):
+        return _recover(
+            reason=REASON_CAPABILITY_EXECUTION_FAILED,
+            execution_owner=execution_owner,
+        )
+
+    persist_ok = persist_checkout_route_state(
+        db,
+        tenant_id=int(tenant_id or 0),
+        phone=str(phone or ""),
+        checkout_channel=result.checkout_channel,
+        awaiting_checkout_channel=False,
+    )
+    if not persist_ok:
+        return _recover(reason="persist_failed", execution_owner=execution_owner)
     return PurchaseChannelSelectionResult(
         accepted=True,
         selected_channel_id=result.selected_channel_id,
-        execution_topic=execution_topic,
+        execution_topic=result.execution_topic,
         checkout_channel=result.checkout_channel,
-        reason=reason,
+        reason=result.reason,
         available_purchase_channel_ids=result.available_purchase_channel_ids,
         persist_ok=True,
-        executed=executed,
+        executed=True,
         execution_owner=execution_owner,
         cta_url=cta_url,
         cta_label=cta_label,
-        offered_purchase_channel_ids=result.offered_purchase_channel_ids,
+        offered_purchase_channel_ids=offered,
         selection_source=selection_source,
         execution_evidence=execution_evidence,
+        awaiting_checkout_channel=False,
+        committed=True,
     )
 
 
@@ -2046,6 +2075,7 @@ def resolve_purchase_channel_turn(
                     "offered_purchase_channel_ids": [],
                     "persist_ok": False,
                     "durable_choice_state": False,
+                    "selection_actions_enabled": False,
                 },
                 reason=REASON_AWAITING_PERSIST_FAILED,
                 confidence=0.7,
@@ -2059,6 +2089,7 @@ def resolve_purchase_channel_turn(
                 "offered_purchase_channel_ids": list(available),
                 "persist_ok": True,
                 "durable_choice_state": True,
+                "selection_actions_enabled": True,
             },
             reason="genuine purchase entry — multiple available purchase channels",
             confidence=0.92,
