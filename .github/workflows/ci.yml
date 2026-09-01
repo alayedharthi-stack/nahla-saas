@@ -89,6 +89,17 @@ jobs:
             -q --tb=short --maxfail=1 \
             --junitxml=/tmp/salla-presented-identity-product-card.xml
 
+      - name: Salla compose trusted singleton handoff tests
+        run: |
+          python -m pytest \
+            backend/tests/test_salla_compose_trusted_singleton_handoff.py \
+            backend/tests/test_salla_presented_identity_product_card.py \
+            backend/tests/test_selection_context_phase4b.py \
+            backend/tests/test_single_resolved_product_presentation.py \
+            backend/tests/test_salla_broad_browse_global_fallback_guard.py \
+            -q --tb=short --maxfail=1 \
+            --junitxml=/tmp/salla-compose-trusted-singleton-handoff.xml
+
       - name: Salla PR 888 remediation unit tests
         run: |
           python -m pytest \
