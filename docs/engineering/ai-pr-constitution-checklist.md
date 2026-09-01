@@ -7,7 +7,7 @@ Root-cause gate: `docs/engineering/root-cause-first-policy.md` (no Brain/Prompt/
 Intelligence gate: `docs/engineering/intelligence-non-interference-policy.md` (GOV-001 — keep the model free; fix the system around it).  
 Enforcement: `constitution-compliance` CI check.
 
-**Merge-blocking status:** The check runs in CI but is **not** merge-blocking until GitHub branch protection marks `constitution-compliance` as Required. Owner actions: `docs/engineering/merge-and-ci-policy.md`.
+**Merge-blocking status:** `constitution-compliance` is a required merge-blocking check on `main` through GitHub branch protection, together with `lint-and-test` and `Scan repository for leaked secrets`. Policy detail: `docs/engineering/merge-and-ci-policy.md`.
 
 **Waiver policy:** Tracked violations are `FAILING POLICY WITH TEMPORARY WAIVER` — never approved exceptions. New waivers require governance PR + `governance_baseline_version` bump.
 
