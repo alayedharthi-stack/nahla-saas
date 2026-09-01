@@ -1,0 +1,55 @@
+---
+description: GOV-001 Intelligence Non-Interference — keep the model free; fix the system around it. No prompt/phrase/keyword intelligence hacks by default.
+alwaysApply: true
+---
+
+# GOV-001 — Intelligence Non-Interference Policy
+
+```text
+INTELLIGENCE_POLICY=KEEP_MODEL_FREE_FIX_SYSTEM_AROUND_IT
+INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+MODEL_CHANGE=FORBIDDEN_BY_DEFAULT
+PROMPT_CHANGE=FORBIDDEN_BY_DEFAULT
+PERSONA_CHANGE=FORBIDDEN_BY_DEFAULT
+PHRASE_MAPS=FORBIDDEN
+KEYWORD_INTENT_HACKS=FORBIDDEN
+CUSTOMER_REGEX_INTENT_REPAIR=FORBIDDEN
+```
+
+Every Nahla AI defect assignment / Agent task / AI PR must state:
+
+```text
+INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+MODEL_CHANGED=NO
+PROMPT_CHANGED=NO
+PERSONA_CHANGED=NO
+PHRASE_MAP_CHANGED=NO
+KEYWORD_ROUTER_CHANGED=NO
+CUSTOMER_REGEX_CHANGED=NO
+```
+
+Default for all of the above: **NO**.
+
+```text
+DEFAULT_FIX_ORDER=
+STATE
+→ TRUTH
+→ CONTEXT
+→ ROUTING
+→ CAPABILITY
+→ EXECUTION
+→ PERSISTENCE
+→ POSTPROCESS
+→ ONLY THEN RAW MODEL EVALUATION
+```
+
+Model/prompt/persona may be touched only if:
+
+1. correct authoritative context and capabilities reached the model, AND
+2. raw model output itself is proven to be the first executable divergence, AND
+3. owner explicitly approves the exception.
+
+Do not hard-code customer language. Phrases are test evidence only.
+
+Full policy: `docs/engineering/intelligence-non-interference-policy.md`.
+Companion: `AGENTS.md`, `.cursor/rules/root-cause-first.mdc`.

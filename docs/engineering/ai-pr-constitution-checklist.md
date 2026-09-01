@@ -4,9 +4,10 @@ Mandatory for every AI behavior PR. A PR cannot receive PASS or merge approval u
 
 Authoritative doctrine: `AGENTS.md` (Mandatory Natural Language Rule + Final customer text provenance rule).  
 Root-cause gate: `docs/engineering/root-cause-first-policy.md` (no Brain/Prompt/Compose/State/Memory patch from live tests until channel→facts layers are proven; Principle of Evidence applies).  
+Intelligence gate: `docs/engineering/intelligence-non-interference-policy.md` (GOV-001 — keep the model free; fix the system around it).  
 Enforcement: `constitution-compliance` CI check.
 
-**Merge-blocking status:** The check runs in CI but is **not** merge-blocking until GitHub branch protection marks `constitution-compliance` as Required. Owner actions: `docs/engineering/merge-and-ci-policy.md`.
+**Merge-blocking status:** `constitution-compliance` is a required merge-blocking check on `main` through GitHub branch protection, together with `lint-and-test` and `Scan repository for leaked secrets`. Policy detail: `docs/engineering/merge-and-ci-policy.md`.
 
 **Waiver policy:** Tracked violations are `FAILING POLICY WITH TEMPORARY WAIVER` — never approved exceptions. New waivers require governance PR + `governance_baseline_version` bump.
 
@@ -30,3 +31,11 @@ Enforcement: `constitution-compliance` CI check.
 - [ ] Tests assert behavior, facts, and metadata—not exact normal prose.
 - [ ] Adjacent pre-existing paths reached by the change were checked.
 - [ ] Constitution compliance check is green.
+
+## GOV-001 Intelligence non-interference (required)
+
+- [ ] `INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE` stated on the assignment/PR.
+- [ ] Report `MODEL_CHANGED`, `PROMPT_CHANGED`, `PERSONA_CHANGED`, `PHRASE_MAP_CHANGED`, `KEYWORD_ROUTER_CHANGED`, `CUSTOMER_REGEX_CHANGED` — default **NO**.
+- [ ] Fix order followed: state → truth → context → routing → capability → execution → persistence → postprocess → only then raw model evaluation.
+- [ ] No phrase maps, keyword routers, or customer-regex intent repair.
+- [ ] Model/prompt/persona unchanged unless MODEL-BLAME GATE passed **and** `OWNER_APPROVAL_REQUIRED=YES`.
