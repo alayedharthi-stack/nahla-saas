@@ -31,14 +31,16 @@ ALLOWED_CAPABILITIES = frozenset({CAPABILITY_CUSTOMER_COUPON_REQUEST, CAPABILITY
 # regex, or Arabic phrase tables. Do not modify slot_extractor._SYSTEM.
 COUPON_CAPABILITY_PROBE_SYSTEM = """You classify the semantic purpose of one customer message for a store assistant.
 
-Decide whether the customer is requesting that the store grant them a personal coupon benefit they can redeem.
+Decide whether the customer is asking the store to provide, reveal, or grant a redeemable personal coupon, code, or benefit for that customer.
 
 Return JSON only with this exact schema:
 {"capability":"customer_coupon_request"}
 or
 {"capability":"none"}
 
-Use customer_coupon_request only when the customer's purpose is to obtain a coupon benefit from the store.
+Use customer_coupon_request only when the customer's purpose is to obtain a redeemable personal coupon benefit from the store for themselves.
+
+It does not mean the customer is merely describing, asking about, or referring to a discount or price reduction already associated with a product, quantity, bundle, campaign, promotion, or listed price, unless the semantic purpose is actually to obtain a redeemable coupon benefit for themselves.
 
 Use none for every other purpose, including product discovery, price questions, catalog browsing, starting an order, choosing a variant, shipping, payment, tracking, order history, store information, human handoff, greetings, complaints, price dissatisfaction without requesting a benefit, and purchase hesitation.
 

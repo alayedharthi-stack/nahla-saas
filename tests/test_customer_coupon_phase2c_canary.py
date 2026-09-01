@@ -78,7 +78,8 @@ from test_customer_request_coupon_service import (  # noqa: E402
     _make_db,
 )
 
-# Test-data only. Never imported by runtime routing.
+# Test-data only. Never imported by runtime routing or the isolated probe prompt.
+PREVIOUS_FALSE_POSITIVE_UTTERANCE = "خصم الكمية في العطر ورد"
 POSITIVE_CLASSIFICATION_EXAMPLES = (
     "ابي كوبون خصم",
     "هل يوجد قسيمة لطلبتي؟",
@@ -96,6 +97,22 @@ POSITIVE_CLASSIFICATION_EXAMPLES = (
     "فيه كود لي ولا لا؟",
     "أبغى كوبون الخصم الخاص فيني",
     "do you have a coupon code for me",
+    "هل تقدرون تعطوني كود أستخدمه عند الدفع؟",
+    "أبي تستخرجون لي قسيمة شخصية",
+    "grant me a redeemable coupon if I am eligible",
+    "لو أستحق كوبون أبغاه الآن",
+    "أعطني كود القسيمة الخاص بحسابي",
+    "is there a personal voucher I can apply",
+    "أبغى تستخرجون لي كود تخفيض لي أنا",
+    "please issue me a coupon code",
+    "هل لي كوبون أقدر أضيفه للسلة؟",
+    "I need a coupon benefit assigned to me",
+    "عطوني كود أستفيد منه كعميل",
+    "can you reveal my eligible coupon",
+    "أطلب كوبون شخصي لو مسموح",
+    "do I currently have a coupon I can redeem",
+    "أبغى كود قسيمة أستخدمه بنفسي",
+    "if I qualify can you give me a voucher code",
 )
 NEGATIVE_CLASSIFICATION_EXAMPLES = (
     "كم سعر الحذاء الرياضي الأبيض؟",
@@ -105,7 +122,7 @@ NEGATIVE_CLASSIFICATION_EXAMPLES = (
     "وين وصل طلبي",
     "أبي أرجع القطعة",
     "أبي أشوف المنتجات",
-    "خصم الكمية في العطر ورد",
+    PREVIOUS_FALSE_POSITIVE_UTTERANCE,
     "غالي مرة",
     "الحذاء عليه تخفيض الحين؟",
     "متردد أطلب ولا لا",
@@ -114,6 +131,49 @@ NEGATIVE_CLASSIFICATION_EXAMPLES = (
     "وين عنوان الفرع",
     "استخدمت خصم قبل كذا",
     "what's the price of the blue cotton shirt",
+    "هل العطر عليه تخفيض كمية؟",
+    "الباكج عليه خصم حزمة؟",
+    "فيه عرض على هذا المنتج؟",
+    "السعر بعد التخفيض كم؟",
+    "الحملة الحالية تخصم من السعر المعروض؟",
+    "this perfume is already on sale",
+    "is the white sneaker discounted right now",
+    "the two-item bundle is cheaper than buying one",
+    "العرض الحالي على السلة يكفي",
+    "المنتج عليه تخفيض في صفحة السعر",
+    "الكمية الأكبر أرخص من القطعة الواحدة",
+    "حولني لموظف",
+    "أبي أدفع تحويل",
+    "the listed price already includes a reduction",
+    "this campaign markdown is already on the product page",
+    "فيه عرض هدية مع العطر؟",
+)
+PRODUCT_DISCOUNT_NEGATIVES = (
+    "هذا القميص عليه خصم؟",
+    "الحذاء عليه تخفيض الحين؟",
+    "فيه عرض على هذا المنتج؟",
+    "is the white sneaker discounted right now",
+    "this perfume is already on sale",
+)
+QUANTITY_DISCOUNT_NEGATIVES = (
+    PREVIOUS_FALSE_POSITIVE_UTTERANCE,
+    "هل العطر عليه تخفيض كمية؟",
+    "الكمية الأكبر أرخص من القطعة الواحدة",
+)
+BUNDLE_DISCOUNT_NEGATIVES = (
+    "الباكج عليه خصم حزمة؟",
+    "the two-item bundle is cheaper than buying one",
+)
+CAMPAIGN_PROMOTION_NEGATIVES = (
+    "الحملة الحالية تخصم من السعر المعروض؟",
+    "العرض الحالي على السلة يكفي",
+    "this campaign markdown is already on the product page",
+    "فيه عرض هدية مع العطر؟",
+)
+PRICE_MARKDOWN_NEGATIVES = (
+    "السعر بعد التخفيض كم؟",
+    "المنتج عليه تخفيض في صفحة السعر",
+    "the listed price already includes a reduction",
 )
 
 RUNTIME_SCAN_PATHS = (
@@ -583,8 +643,21 @@ def test_positive_examples_are_test_data_only() -> None:
     runtime = "\n".join(path.read_text(encoding="utf-8") for path in RUNTIME_SCAN_PATHS)
     for utterance in POSITIVE_CLASSIFICATION_EXAMPLES + NEGATIVE_CLASSIFICATION_EXAMPLES:
         assert utterance not in runtime
-    assert len(POSITIVE_CLASSIFICATION_EXAMPLES) >= 16
-    assert len(NEGATIVE_CLASSIFICATION_EXAMPLES) >= 16
+    assert len(POSITIVE_CLASSIFICATION_EXAMPLES) >= 32
+    assert len(NEGATIVE_CLASSIFICATION_EXAMPLES) >= 32
+    assert len(set(POSITIVE_CLASSIFICATION_EXAMPLES)) == len(POSITIVE_CLASSIFICATION_EXAMPLES)
+    assert len(set(NEGATIVE_CLASSIFICATION_EXAMPLES)) == len(NEGATIVE_CLASSIFICATION_EXAMPLES)
+    assert PREVIOUS_FALSE_POSITIVE_UTTERANCE in NEGATIVE_CLASSIFICATION_EXAMPLES
+    for bucket in (
+        PRODUCT_DISCOUNT_NEGATIVES,
+        QUANTITY_DISCOUNT_NEGATIVES,
+        BUNDLE_DISCOUNT_NEGATIVES,
+        CAMPAIGN_PROMOTION_NEGATIVES,
+        PRICE_MARKDOWN_NEGATIVES,
+    ):
+        assert bucket
+        for utterance in bucket:
+            assert utterance in NEGATIVE_CLASSIFICATION_EXAMPLES
 
 
 def test_no_issuance_on_negative_classification_cases(monkeypatch) -> None:
@@ -655,6 +728,16 @@ def test_product_card_owners_not_imported_by_2c_runtime() -> None:
         assert "product_card" not in text
         assert "catalog_navigate" not in text
         assert "presented_identity" not in text
+
+
+def test_eval_harness_prints_both_evidence_blocks() -> None:
+    src = (
+        REPO_ROOT / "scripts/operators/customer_coupon_capability_probe_no_send_eval.py"
+    ).read_text(encoding="utf-8")
+    fp_idx = src.find('print("FALSE_POSITIVE_EVIDENCE:")')
+    fn_idx = src.find('print("FALSE_NEGATIVE_EVIDENCE:")')
+    ret_idx = src.rfind("return 3")
+    assert 0 <= fp_idx < fn_idx < ret_idx
 
 
 def test_no_canned_arabic_in_handler_or_owner() -> None:

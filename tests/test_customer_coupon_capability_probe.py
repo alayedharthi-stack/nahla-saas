@@ -89,7 +89,11 @@ def test_isolated_prompt_has_no_phrase_table() -> None:
     # No customer utterance examples.
     assert "ابي" not in prompt
     assert "أبغى" not in prompt
+    assert "خصم الكمية في العطر ورد" not in prompt
     assert "customer_coupon_request" in prompt
+    assert '{"capability":"customer_coupon_request"}' in prompt
+    assert '{"capability":"none"}' in prompt
+    assert "redeemable personal" in prompt
     assert prompt is not slot_extractor._SYSTEM
 
 
