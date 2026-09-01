@@ -19,7 +19,16 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from core.catalog import is_whatsapp_channel_publish_eligible
+from core.catalog import (
+    CATALOG_STATUS_ACTIVE,
+    META_EXISTING_SOURCES,
+    OWNERSHIP_META_READONLY,
+    OWNERSHIP_NAHLA_MANAGED_META,
+    catalog_status_of,
+    infer_ownership_mode,
+    is_whatsapp_channel_publish_eligible,
+    normalize_source,
+)
 from core.plan_entitlements import EntitlementLookupUnavailable, get_entitlements
 from services.native_meta_sync_orchestrator import (
     CONTENT_LOOKUP_FIELDS,
@@ -349,6 +358,30 @@ def _belongs_to_tenant(product: Any, tenant_id: int) -> bool:
     return int(getattr(product, "tenant_id", 0) or 0) == int(tenant_id)
 
 
+def _catalog_is_linked(conn: Any) -> bool:
+    if conn is None:
+        return False
+    catalog_id = str(getattr(conn, "meta_catalog_id", "") or "").strip()
+    return bool(getattr(conn, "catalog_enabled", False) and catalog_id)
+
+
+def _is_meta_available_row(product: Any) -> bool:
+    """Active local row that already exists as a WhatsApp/Meta catalog item."""
+    if getattr(product, "merchant_hidden_at", None):
+        return False
+    if catalog_status_of(product) != CATALOG_STATUS_ACTIVE:
+        return False
+    mode = infer_ownership_mode(product)
+    src = normalize_source(getattr(product, "source", None))
+    if mode in (OWNERSHIP_META_READONLY, OWNERSHIP_NAHLA_MANAGED_META):
+        return True
+    if src in META_EXISTING_SOURCES:
+        return True
+    if str(getattr(product, "meta_item_id", None) or "").strip():
+        return True
+    return _status_of(product) == "synced"
+
+
 def _empty_sync_counts() -> Dict[str, int]:
     return {
         "eligible": 0,
@@ -367,6 +400,13 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
     counts = _empty_sync_counts()
     last_success_at = None
     failures: List[Dict[str, Any]] = []
+    meta_available_count = 0
+    conn = None
+    try:
+        conn = _load_connection(db, tenant_id)
+    except (SQLAlchemyError, AttributeError):
+        conn = None
+    catalog_linked = _catalog_is_linked(conn)
 
     if readiness.get("blocker_code") == "entitlement_unavailable":
         try:
@@ -381,6 +421,8 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
         for row in iter_tenant_products(db, tenant_id):
             if not _belongs_to_tenant(row, tenant_id):
                 continue
+            if _is_meta_available_row(row):
+                meta_available_count += 1
             if not is_whatsapp_channel_publish_eligible(row):
                 counts["skipped_ineligible"] += 1
                 continue
@@ -450,6 +492,9 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
         "action_ar": readiness.get("action_ar"),
         "phase": status_phase,
         "counts": counts,
+        "queue_count": int(counts["pending"] + counts["syncing"] + counts["pending_verification"]),
+        "meta_available_count": int(meta_available_count),
+        "catalog_linked": bool(catalog_linked),
         "last_success_at": last_success_at,
         "failures": failures,
         "auto_sync_enabled": auto_on,

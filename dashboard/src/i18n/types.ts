@@ -1837,6 +1837,9 @@ export interface Translations {
       syncing:          string
       lastSuccess:      string
       lastSuccessNever: string
+      catalogLinked:    string
+      availableCount:   string
+      queueEmpty:       string
       pending:          string
       failed:           string
       synced:           string
