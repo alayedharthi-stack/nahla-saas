@@ -345,11 +345,29 @@ def _strip_browse_leads(candidate: str) -> str:
 
 
 def _scope_token_from_segment(segment: str) -> Optional[str]:
+    tokens = _scope_tokens_from_segment(segment)
+    return tokens[0] if tokens else None
+
+
+def _scope_tokens_from_segment(segment: str) -> List[str]:
+    """All valid category nouns in a segment — do not stop at the first token.
+
+    A show-verb plus category noun (``ورني الجاكيتات``) must keep the
+    category noun. Inventory words remain valid tokens here; scope mode
+    later distinguishes them from real category nouns.
+    """
+    scopes: List[str] = []
+    seen: set[str] = set()
     for tok in _tokens(segment):
         scope = _canonical_scope_token(tok)
-        if _is_valid_scope_token(scope):
-            return scope
-    return None
+        if not _is_valid_scope_token(scope):
+            continue
+        key = _canonical_scope_token(scope)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        scopes.append(scope)
+    return scopes
 
 
 def extract_browse_category_scopes(
@@ -387,14 +405,14 @@ def extract_browse_category_scopes(
             scopes: List[str] = []
             seen: set[str] = set()
             for part in parts:
-                scope = _scope_token_from_segment(part)
-                if not scope:
-                    continue
-                key = _canonical_scope_token(scope)
-                if key in seen:
-                    continue
-                seen.add(key)
-                scopes.append(scope)
+                for scope in _scope_tokens_from_segment(part):
+                    if not scope:
+                        continue
+                    key = _canonical_scope_token(scope)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    scopes.append(scope)
             if scopes:
                 return scopes
             scope = _canonical_scope_token(subject)
@@ -417,14 +435,14 @@ def extract_browse_category_scopes(
         scopes: List[str] = []
         seen: set[str] = set()
         for part in parts:
-            scope = _scope_token_from_segment(part)
-            if not scope:
-                continue
-            key = _canonical_scope_token(scope)
-            if key in seen:
-                continue
-            seen.add(key)
-            scopes.append(scope)
+            for scope in _scope_tokens_from_segment(part):
+                if not scope:
+                    continue
+                key = _canonical_scope_token(scope)
+                if key in seen:
+                    continue
+                seen.add(key)
+                scopes.append(scope)
         if scopes:
             return scopes
 
@@ -472,6 +490,61 @@ def is_category_scoped_browse(
         logger.exception("[BROWSE_CATEGORY_GUARD] global browse check failed")
 
     return True
+
+
+BROWSE_SCOPE_MODE_GLOBAL = "global"
+BROWSE_SCOPE_MODE_CATEGORY = "category"
+
+
+def resolve_browse_scope_mode(
+    message: str,
+    query: str = "",
+    *,
+    products: Optional[Sequence[Mapping[str, Any]]] = None,
+    state: Any = None,
+    source: str = "",
+) -> str:
+    """Canonical browse scope: global vs category.
+
+    Owned here (lexical scopes + catalog product metadata) together with
+    the existing inventory-subject frame in ``navigation_signals``.
+    Inventory-subject tokens such as a generic products word are not
+    category nouns. Real category nouns remain category-scoped even when
+    the navigator used a no-groups top-products fallback.
+    """
+    locked = str(active_category_from_state(state) or "").strip()
+    scopes = resolve_browse_category_scopes(
+        message,
+        query,
+        active_category=locked,
+        source=source,
+    )
+    if locked and not scopes:
+        return BROWSE_SCOPE_MODE_CATEGORY
+    if not scopes:
+        return BROWSE_SCOPE_MODE_GLOBAL
+
+    try:
+        from ..catalog.navigation_signals import (  # noqa: PLC0415
+            is_inventory_subject_scope,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("[BROWSE_CATEGORY_GUARD] inventory_subject_probe_failed")
+
+        def is_inventory_subject_scope(_scope: str) -> bool:  # noqa: N802
+            return False
+
+    category_scopes = [
+        scope for scope in scopes if not is_inventory_subject_scope(str(scope))
+    ]
+    if category_scopes:
+        return BROWSE_SCOPE_MODE_CATEGORY
+
+    items = [p for p in (products or []) if isinstance(p, Mapping)]
+    for product in items:
+        if _product_kept_for_scopes(product, scopes=scopes, message=message or ""):
+            return BROWSE_SCOPE_MODE_CATEGORY
+    return BROWSE_SCOPE_MODE_GLOBAL
 
 
 def _product_tags(product: Mapping[str, Any]) -> List[str]:
@@ -757,6 +830,8 @@ def filter_products_for_browse_turn(
 
 
 __all__ = [
+    "BROWSE_SCOPE_MODE_CATEGORY",
+    "BROWSE_SCOPE_MODE_GLOBAL",
     "active_category_from_state",
     "extract_browse_category_scope",
     "extract_browse_category_scopes",
@@ -767,5 +842,6 @@ __all__ = [
     "is_generic_category_browse",
     "resolve_browse_category_scope",
     "resolve_browse_category_scopes",
+    "resolve_browse_scope_mode",
     "should_exclude_cross_category_product",
 ]

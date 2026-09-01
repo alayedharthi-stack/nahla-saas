@@ -57,6 +57,37 @@ def catalog_compose_products_for_search_turn(
     return list(display_candidates)
 
 
+def _trusted_search_compose_candidates(
+    data: Dict[str, Any],
+    decision: Any,
+) -> List[Dict[str, Any]]:
+    """Compose-local search candidates. Never mutates executor ``products``.
+
+    A confirmed identity singleton is stored on ``data["product"]`` with
+    ``products=[]`` so pipeline 6b does not restamp browse focus. Compose
+    may use that singleton only when presentation identity is grounded
+    AND the row already has structured catalog identity.
+    """
+    products = [p for p in (data.get("products") or []) if isinstance(p, dict)]
+    if products:
+        return products
+    args = getattr(decision, "args", None) or {}
+    grounded = (
+        data.get("presentation_identity_grounded") is True
+        or args.get("presentation_identity_grounded") is True
+    )
+    if not grounded:
+        return []
+    product = data.get("product")
+    from ..commerce.commerce_focus_owner import (  # noqa: PLC0415
+        has_structured_catalog_identity,
+    )
+
+    if not has_structured_catalog_identity(product):
+        return []
+    return [product]
+
+
 from ..types import ActionResult, BrainContext, Decision
 from ..decision.actions import (
     ACTION_CATALOG_NAVIGATE,
@@ -676,7 +707,9 @@ class DefaultComposer:
             # the executor already filtered as orderable somehow lacks
             # can_checkout=True, log it as a catalog bug and exclude it.
             # This prevents "product listed then immediately rejected" UX.
-            raw_products = list(data.get("products") or [])
+            # Confirmed identity singletons live on data["product"] with
+            # products=[] — recover them locally without mutating executor state.
+            raw_products = _trusted_search_compose_candidates(data, decision)
             _search_query = str(
                 (decision.args or {}).get("query") or data.get("query") or ""
             ).strip()

@@ -659,6 +659,58 @@ def _product_contains_all_tokens(product: Dict[str, Any], tokens: Sequence[str])
     return all(token in label_tokens for token in tokens)
 
 
+def _presented_identity_key(text: str) -> str:
+    """Canonical label key for exact presented-identity matching.
+
+    Reuses the existing browse-scope token owner so ``جاكيت`` and
+    ``الجاكيت`` compare equal without a defect-local article rule.
+    """
+    raw = _normalize_ar(text or "").strip(".,؟?!")
+    if not raw:
+        return ""
+    from .commerce_browse_category_guard import _canonical_scope_token  # noqa: PLC0415
+
+    return _canonical_scope_token(raw)
+
+
+def _resolve_unique_presented_identity(
+    message: str,
+    presented: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Resolve inbound to exactly one identity-bearing presented product.
+
+    Full-string equality against presented labels only — not catalog
+    search, not substring/fragment matching. Duplicate titles return
+    None so existing clarify/multi-choice can own the turn.
+    """
+    inbound = _presented_identity_key(message)
+    if not inbound:
+        return None
+
+    hits: Dict[str, Dict[str, Any]] = {}
+    for product in presented:
+        if not isinstance(product, dict):
+            continue
+        if not _product_is_checkout_eligible(product):
+            continue
+        labels = (
+            str(product.get("display_label") or ""),
+            str(product.get("title") or ""),
+            str(product.get("label_override") or ""),
+        )
+        if not any(
+            label and _presented_identity_key(label) == inbound for label in labels
+        ):
+            continue
+        key = _product_key(product)
+        if not key:
+            continue
+        hits[key] = product
+    if len(hits) != 1:
+        return None
+    return next(iter(hits.values()))
+
+
 def _resolve_unique_presented_fragment(
     message: str,
     presented: Sequence[Dict[str, Any]],
@@ -966,6 +1018,14 @@ def _selection_patch_from_product(product: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _presentation_identity_patch_from_product(product: Dict[str, Any]) -> Dict[str, Any]:
+    """Track the presented product without binding a checkout variant."""
+    return {
+        "selected_product_id": _product_id(product),
+        "selection_context_turn": None,
+    }
+
+
 def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resolve follow-up turns against last presented discovery products."""
     if not has_active_selection_context(ctx.state):
@@ -973,9 +1033,38 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
 
     is_explicit_followup = is_selection_followup_message(ctx.message or "")
     if not is_explicit_followup:
+        presented = get_presented_products(ctx.state)
+        identity_product = _resolve_unique_presented_identity(
+            ctx.message or "",
+            presented,
+        )
+        if identity_product is not None:
+            logger.info(
+                "[SELECTION_CONTEXT] tenant=%s kind=unique_presented_identity selected=%r preview=%r",
+                getattr(ctx, "tenant_id", None),
+                (identity_product or {}).get("title"),
+                (ctx.message or "")[:60],
+            )
+            product_title = str(
+                identity_product.get("title") or identity_product.get("display_label") or ""
+            ).strip()
+            return Decision(
+                action=ACTION_SEARCH_PRODUCTS,
+                args={
+                    "query": product_title,
+                    "source": "selection_context_unique_presented_identity",
+                    "products": [identity_product],
+                    "presentation_identity_grounded": True,
+                    "selection_context_patch": _presentation_identity_patch_from_product(
+                        identity_product
+                    ),
+                },
+                reason="selection context unique_presented_identity",
+                confidence=0.92,
+            )
         fragment_product = _resolve_unique_presented_fragment(
             ctx.message or "",
-            get_presented_products(ctx.state),
+            presented,
         )
         if fragment_product is not None:
             logger.info(
@@ -993,6 +1082,7 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
                     "query": product_title,
                     "source": "selection_context_unique_fragment",
                     "products": [fragment_product],
+                    "presentation_identity_grounded": True,
                     "selection_context_patch": _selection_patch_from_product(fragment_product),
                 },
                 reason="selection context unique_fragment_select",
