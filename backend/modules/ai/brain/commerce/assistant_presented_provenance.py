@@ -434,14 +434,12 @@ def apply_turn_catalog_referent_binding(
     turn: int = 0,
     structured_product: Optional[Dict[str, Any]] = None,
     customer_selected: bool = False,
-    current_turn_customer_referent: bool = True,
+    current_turn_customer_referent: bool = False,
 ) -> List[Dict[str, Any]]:
     """Bind structured identity first; title matching is compatibility fallback only.
 
-    ``current_turn_customer_referent`` is True when ``structured_product`` is an
-    explicit customer-owned catalog identity for this turn. Pass False for
-    assistant recommendations, unique ``products`` lists, replay, narrow, and
-    recommend_addon so Family 2 checkout selection is not stolen.
+    Default is not customer-owned. Pass ``current_turn_customer_referent`` only
+    from ``current_turn_executor_catalog_referent`` (or customer_selected).
     """
     try:
         from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
@@ -487,38 +485,72 @@ def _identity_row(container: Dict[str, Any], key: str) -> Optional[Dict[str, Any
     return None
 
 
-_NON_CUSTOMER_OWNED_RESULT_TYPES = frozenset({
-    "recommend_addon",
-    "narrow",
+_CUSTOMER_OWNED_SOURCES = frozenset({
+    "product_selection_list_pick",
+    "selection_context_unique_fragment",
+    "selection_context_unique_presented_identity",
 })
-_NON_CUSTOMER_OWNED_ACTIONS = frozenset({
-    "recommend_addon",
-    "narrow",
-})
+
+
+def _has_positive_customer_owned_referent_provenance(
+    decision: Any = None,
+    result: Any = None,
+) -> bool:
+    """True only when an existing structured contract proves customer ownership.
+
+    Default is not customer-owned. Product keys and unique search hits are
+    not sufficient.
+    """
+    args = dict(getattr(decision, "args", None) or {})
+    data = dict(getattr(result, "data", None) or {})
+    if data.get("product_selection") is True or args.get("product_selection") is True:
+        return True
+    source = str(args.get("source") or data.get("source") or "").strip().lower()
+    if source in _CUSTOMER_OWNED_SOURCES:
+        return True
+    entry_type = str(
+        data.get("discovery_entry_type") or args.get("discovery_entry_type") or ""
+    ).strip().lower()
+    kind = str(
+        data.get("discovery_output_kind") or args.get("discovery_output_kind") or "products"
+    ).strip().lower()
+    presented = list(data.get("products") or [])
+    if not presented:
+        product = data.get("product") or args.get("selected_product") or args.get("product")
+        if isinstance(product, dict):
+            presented = [product]
+    try:
+        from modules.ai.brain.execution.search import (  # noqa: PLC0415
+            resolve_confirmed_discovery_product,
+        )
+
+        confirmed = resolve_confirmed_discovery_product(
+            entry_type=entry_type,
+            discovery_output_kind=kind,
+            presented_products=presented,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing discovery contract must not invent ownership
+        confirmed = None
+    return confirmed is not None
 
 
 def current_turn_executor_catalog_referent(
     decision: Any = None,
     result: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """Explicit customer-owned catalog identity for this turn.
+    """Customer-owned catalog identity for this turn, else None.
 
-    Proven signals: executor/result ``product`` or ``focus_product``.
-
-    Not a customer product goal:
-    unique ``products`` lists, ``recommended_product``, ``replay_candidates``,
-    ``recommend_addon``, or ``narrow``.
+    Requires positive provenance from an existing contract:
+    ``product_selection``, list-pick / unique selection-context source, or
+    confirmed ``product_specific`` discovery. A ``product`` / ``focus_product``
+    key or unique search hit is not ownership by itself.
     """
-    action = str(getattr(decision, "action", "") or "").strip().lower()
-    if action in _NON_CUSTOMER_OWNED_ACTIONS:
+    if not _has_positive_customer_owned_referent_provenance(decision, result):
         return None
     args = dict(getattr(decision, "args", None) or {})
     data = dict(getattr(result, "data", None) or {})
-    result_type = str(data.get("type") or "").strip().lower()
-    if result_type in _NON_CUSTOMER_OWNED_RESULT_TYPES:
-        return None
     for container in (data, args):
-        for key in ("product", "focus_product"):
+        for key in ("product", "focus_product", "selected_product"):
             found = _identity_row(container, key)
             if found is not None:
                 return found
@@ -528,14 +560,19 @@ def current_turn_executor_catalog_referent(
 def structured_product_from_turn(decision: Any = None, result: Any = None) -> Optional[Dict[str, Any]]:
     """Identity already known on the decision/result — not inferred from reply text.
 
-    Explicit executor ``product`` / ``focus_product`` outranks ``recommended_product``.
-    Unique ``products`` lists are presentation data, not a customer goal.
+    Customer-owned executor identity outranks a plain ``product`` key, which
+    outranks ``recommended_product``. Identity is not ownership.
     """
     found = current_turn_executor_catalog_referent(decision, result)
     if found is not None:
         return found
     args = dict(getattr(decision, "args", None) or {})
     data = dict(getattr(result, "data", None) or {})
+    for container in (data, args):
+        for key in ("product", "focus_product"):
+            found = _identity_row(container, key)
+            if found is not None:
+                return found
     for container in (data, args):
         rec = _identity_row(container, "recommended_product")
         if rec is not None:

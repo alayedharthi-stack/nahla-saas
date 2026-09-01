@@ -129,13 +129,38 @@ class TestAgent2D1CurrentTurnProductSupersedesStaleCheckout:
 
     def test_apply_turn_binding_promotes_structured_product_b(self) -> None:
         state = _checkout_selected_state(PRODUCT_A)
+        decision = type(
+            "D",
+            (),
+            {
+                "action": "search_products",
+                "args": {
+                    "source": "product_selection_list_pick",
+                    "selected_product": dict(PRODUCT_B),
+                },
+            },
+        )()
+        result = type(
+            "R",
+            (),
+            {
+                "data": {
+                    "product": dict(PRODUCT_B),
+                    "products": [],
+                    "product_selection": True,
+                }
+            },
+        )()
+        ref = current_turn_executor_catalog_referent(decision, result)
         apply_turn_catalog_referent_binding(
             state=state,
             reply="",
             catalog_candidates=[dict(PRODUCT_A), dict(PRODUCT_B)],
             turn=9,
-            structured_product=dict(PRODUCT_B),
+            structured_product=structured_product_from_turn(decision, result),
+            current_turn_customer_referent=bool(ref),
         )
+        assert ref is not None
         assert canonical_product_referent(state)["id"] == 802
         assert product_focus_identity(state.current_product_focus) == "sku-blue-shirt"
 
@@ -382,10 +407,35 @@ class TestAgent2D1SelectionAndVariantRegression:
 
 
 class TestAgent2D1ExecutorProductOutranksRecommendedProduct:
-    def test_executor_product_is_current_turn_goal(self) -> None:
-        decision = type("D", (), {"args": {"recommended_product": dict(PRODUCT_A)}})()
-        result = type("R", (), {"data": {"product": dict(PRODUCT_B)}})()
+    def test_product_key_alone_is_not_customer_provenance(self) -> None:
+        decision = type("D", (), {"action": "search_products", "args": {}})()
+        result = type("R", (), {"data": {"product": dict(PRODUCT_B), "products": [dict(PRODUCT_B)]}})()
         assert structured_product_from_turn(decision, result)["id"] == 802
+        assert current_turn_executor_catalog_referent(decision, result) is None
+
+    def test_product_selection_is_customer_provenance(self) -> None:
+        decision = type(
+            "D",
+            (),
+            {
+                "action": "search_products",
+                "args": {
+                    "source": "product_selection_list_pick",
+                    "selected_product": dict(PRODUCT_B),
+                },
+            },
+        )()
+        result = type(
+            "R",
+            (),
+            {
+                "data": {
+                    "product": dict(PRODUCT_B),
+                    "products": [],
+                    "product_selection": True,
+                }
+            },
+        )()
         assert current_turn_executor_catalog_referent(decision, result)["id"] == 802
 
     def test_recommended_only_is_not_executor_goal(self) -> None:
@@ -476,3 +526,126 @@ class TestAgent2D1RecommendAddonAndNarrowCannotStealCheckout:
         )
         assert product_focus_identity(state.current_product_focus) == "sku-white-sneaker"
         assert canonical_product_referent(state, checkout_active=True)["id"] == 801
+
+
+def _apply_turn_from_decision_result(state, decision, result, candidates) -> None:
+    ref = current_turn_executor_catalog_referent(decision, result)
+    keep = should_keep_live_order_focus_after_product_list(
+        state.current_product_focus,
+        candidates,
+        has_live_order=True,
+        state=state,
+        current_turn_customer_referent=bool(ref),
+    )
+    if not keep and ref is not None:
+        bind_structured_catalog_referent(
+            state,
+            dict(ref),
+            reason="structured_turn_product",
+            turn=9,
+            current_turn_customer_referent=True,
+        )
+    apply_turn_catalog_referent_binding(
+        state=state,
+        reply="",
+        catalog_candidates=candidates,
+        turn=9,
+        structured_product=structured_product_from_turn(decision, result),
+        current_turn_customer_referent=bool(ref),
+    )
+
+
+class TestAgent2D1EndToEndProvenance:
+    def test_generic_unique_search_product_key_keeps_live_checkout(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        decision = type(
+            "D",
+            (),
+            {"action": "search_products", "args": {"source": "catalog_search", "query": ""}},
+        )()
+        result = type(
+            "R",
+            (),
+            {
+                "data": {
+                    "products": [dict(PRODUCT_B)],
+                    "product": dict(PRODUCT_B),
+                    "count": 1,
+                    "query": "",
+                }
+            },
+        )()
+        ref = current_turn_executor_catalog_referent(decision, result)
+        assert ref is None
+        _apply_turn_from_decision_result(state, decision, result, [dict(PRODUCT_B)])
+        assert product_focus_identity(state.current_product_focus) == "sku-white-sneaker"
+        assert canonical_product_referent(state, checkout_active=True)["id"] == 801
+        assert state.order_prep.product_id == "sku-white-sneaker"
+
+    def test_list_pick_product_selection_switches_focus_and_keeps_prep(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        decision = type(
+            "D",
+            (),
+            {
+                "action": "search_products",
+                "args": {
+                    "source": "product_selection_list_pick",
+                    "selected_product": dict(PRODUCT_B),
+                    "products": [dict(PRODUCT_B)],
+                    "list_index": 1,
+                },
+            },
+        )()
+        result = type(
+            "R",
+            (),
+            {
+                "data": {
+                    "products": [],
+                    "product": dict(PRODUCT_B),
+                    "product_selection": True,
+                    "discovery_output_kind": "products",
+                    "count": 1,
+                }
+            },
+        )()
+        ref = current_turn_executor_catalog_referent(decision, result)
+        assert ref is not None
+        assert product_focus_identity(ref) == "sku-blue-shirt"
+        _apply_turn_from_decision_result(state, decision, result, [dict(PRODUCT_B)])
+        assert product_focus_identity(state.current_product_focus) == "sku-blue-shirt"
+        assert canonical_product_referent(state)["id"] == 802
+        assert state.order_prep.product_id == "sku-white-sneaker"
+        assert state.draft_order_id == "draft-a-1"
+
+    def test_recommend_addon_keeps_live_checkout(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        decision = type("D", (), {"action": "recommend_addon", "args": {}})()
+        result = type(
+            "R",
+            (),
+            {
+                "data": {
+                    "type": "recommend_addon",
+                    "products": [dict(PRODUCT_B)],
+                    "product": dict(PRODUCT_B),
+                    "recommended_products": [dict(PRODUCT_B)],
+                }
+            },
+        )()
+        assert current_turn_executor_catalog_referent(decision, result) is None
+        _apply_turn_from_decision_result(state, decision, result, [dict(PRODUCT_B)])
+        assert product_focus_identity(state.current_product_focus) == "sku-white-sneaker"
+
+    def test_narrow_keeps_live_checkout(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        decision = type("D", (), {"action": "narrow", "args": {}})()
+        result = type(
+            "R",
+            (),
+            {"data": {"type": "narrow", "products": [dict(PRODUCT_B)], "product": dict(PRODUCT_B)}},
+        )()
+        assert current_turn_executor_catalog_referent(decision, result) is None
+        _apply_turn_from_decision_result(state, decision, result, [dict(PRODUCT_B)])
+        assert product_focus_identity(state.current_product_focus) == "sku-white-sneaker"
