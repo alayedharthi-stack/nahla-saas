@@ -141,14 +141,16 @@ def presentation_context_from_brain(
     resolved_product: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Brain-context kwargs for ``apply_search_product_presentation``."""
+    args = getattr(decision, "args", None) or {}
     return {
         "state": getattr(ctx, "state", None),
         "facts": getattr(ctx, "facts", None),
         "merchant_context": getattr(ctx, "merchant_context", None),
         "resolved_product": resolved_product,
-        "discovery_entry_type": str(
-            (getattr(decision, "args", None) or {}).get("discovery_entry_type") or ""
+        "identity_grounded": bool(
+            args.get("presentation_identity_grounded") or args.get("identity_grounded")
         ),
+        "discovery_entry_type": str(args.get("discovery_entry_type") or ""),
     }
 
 
@@ -431,6 +433,8 @@ def apply_search_product_presentation(
     result_data["product_presentation_kind"] = decision.kind
     result_data["product_presentation_reason"] = decision.reason
     result_data["presentation_candidate_count"] = int(decision.candidate_count or len(rows))
+    if identity_grounded:
+        result_data["presentation_identity_grounded"] = True
 
     if decision.kind == PRESENTATION_MULTI_CHOICES:
         if build_buttons is not None:

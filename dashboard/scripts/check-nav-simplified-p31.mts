@@ -60,15 +60,15 @@ assert(
 
 const legacyPaths = extractConstStringArray(navDataSource, 'LEGACY_MERCHANT_NAV_PATHS')
 assert(
-  'LEGACY_MERCHANT_NAV_PATHS defines exactly 27 routes',
-  legacyPaths.length === 27,
+  'LEGACY_MERCHANT_NAV_PATHS defines exactly 26 routes',
+  legacyPaths.length === 26,
   `got ${legacyPaths.length}`,
 )
 
 const simplifiedPaths = new Set(extractSimplifiedNavPaths(navDataSource))
 assert(
-  'simplified tree exposes exactly 27 legacy merchant routes',
-  [...simplifiedPaths].filter(p => legacyPaths.includes(p)).length === 27,
+  'simplified tree exposes exactly 26 legacy merchant routes',
+  [...simplifiedPaths].filter(p => legacyPaths.includes(p)).length === 26,
   `legacy subset got ${[...simplifiedPaths].filter(p => legacyPaths.includes(p)).length}`,
 )
 
@@ -129,6 +129,26 @@ assert(
     && !simplifiedPaths.has('/inbox'),
 )
 
+assert(
+  'products open via /catalog directLink (not /products hub)',
+  navDataSource.includes("destKey: 'dest_products'")
+    && destBlock.includes("to: '/catalog'")
+    && !simplifiedPaths.has('/products')
+    && !simplifiedPaths.has('/catalog-intelligence'),
+)
+assert(
+  'App redirects /products → /catalog with replace (no hub flash)',
+  appSource.includes('path="products"')
+    && appSource.includes('to="/catalog"')
+    && appSource.includes('replace')
+    && !appSource.includes('ProductsHub'),
+)
+assert(
+  'App redirects /catalog-intelligence → /catalog with replace',
+  appSource.includes('path="catalog-intelligence"')
+    && appSource.includes('Navigate to="/catalog" replace')
+    && !appSource.includes('CatalogIntelligence'),
+)
 assert(
   'orders open via /orders directLink (not /orders-hub)',
   navDataSource.includes("destKey: 'dest_orders'")

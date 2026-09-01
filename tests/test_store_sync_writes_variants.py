@@ -176,9 +176,12 @@ class TestVariantUpsert:
         assert p.has_variants is False
 
     def test_parent_with_hyphenated_override_routes_per_variant(self):
-        """A merchant who set ``meta_retailer_id='custom-base'`` on
-        the parent has signalled "use this prefix" — variants should
-        round-trip as ``custom-{salla_variant_id}``."""
+        """Salla sellable identity is ``{external_id}-{salla_variant_id}``.
+
+        A hyphenated parent ``meta_retailer_id`` must not become the Graph
+        retailer_id. That override path is non-Salla only; posting
+        ``custom-vY`` would CREATE a non-canonical Meta item.
+        """
         db, _ = _make_db()
         _, p = _seed(db, meta_retailer_id="custom-base")
         _upsert_variants_for(db, p, {
@@ -191,7 +194,9 @@ class TestVariantUpsert:
         }); db.commit()
         rows = db.query(ProductVariant).filter_by(product_id=p.id).all()
         rids = {r.salla_variant_id: r.retailer_id for r in rows}
-        assert rids == {"vX": "custom-vX", "vY": "custom-vY"}
+        assert rids == {"vX": "ext_p-vX", "vY": "ext_p-vY"}
+        assert all(not rid.startswith("custom-") for rid in rids.values())
+        assert all(not rid.startswith("nahla_v_") for rid in rids.values())
 
 
 # ─────────────────────────────────────────────────────────────────────

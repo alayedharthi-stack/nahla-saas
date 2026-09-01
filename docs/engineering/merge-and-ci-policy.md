@@ -11,7 +11,7 @@ Nahla engineering policy:
    - `lint-and-test`
    - `constitution-compliance` (constitutional governance gate)
    - `Scan repository for leaked secrets` / gitleaks
-3. **Important:** `constitution-compliance` is **not merge-blocking by itself**. The repository cannot enforce GitHub branch protection from code. It becomes merge-blocking only after a repository admin marks it as a **Required Status Check** in GitHub branch protection for `main`.
+3. **Important:** GitHub branch protection for `main` currently requires `constitution-compliance`, `lint-and-test`, and `Scan repository for leaked secrets` / gitleaks as merge-blocking status checks. Repository files cannot themselves enforce GitHub branch protection; that configuration is external. A required check is not the same as a non-bypassable gate — admin bypass and CODEOWNERS enforcement are documented separately below and are **not** claimed proven here.
 4. Local test claims are not enough if GitHub CI is red.
 5. If GitHub shows red on a merged PR, treat it as an engineering incident until explained.
 6. Admin/owner bypass is prohibited except with explicit written justification:
@@ -26,11 +26,22 @@ Nahla engineering policy:
 
 ## GitHub branch protection settings for main
 
-Repository admin must enable (manual action — not enforceable from this repository):
+Proven current required status checks on `main` (GitHub branch protection, external to this repository):
 
-1. Add **`constitution-compliance`** as a **Required Status Check**.
-2. Retain **`lint-and-test`** and **`Scan repository for leaked secrets`** as required checks.
-3. Require **Code Owner review** for:
+1. **`constitution-compliance`** — required / merge-blocking.
+2. **`lint-and-test`** — required / merge-blocking.
+3. **`Scan repository for leaked secrets`** / gitleaks — required / merge-blocking.
+
+Repository files cannot themselves create or enforce those GitHub settings.
+
+Still **unverified** unless separately proven (do not treat as current fact):
+
+- CODEOWNERS review enforcement for governance files
+- Admin bypass restricted or disabled
+
+Recommended remaining admin configuration (not claimed complete):
+
+1. Require **Code Owner review** for:
    - `AGENTS.md`
    - `backend/modules/ai/compose/constitutional_policy.py`
    - `backend/modules/ai/compose/tracked_violations_baseline.json`
@@ -38,19 +49,19 @@ Repository admin must enable (manual action — not enforceable from this reposi
    - `.github/workflows/ci.yml`
    - `.github/CODEOWNERS`
    - deterministic exception / tracked-violation registries
-4. Prevent bypass where repository settings permit (disable admin bypass if available).
-5. Require explicit review for any change to:
+2. Prevent bypass where repository settings permit (disable admin bypass if available).
+3. Require explicit review for any change to:
    - `tracked_violations_baseline.json`
    - `allowed_violation_ids`
    - `governance_baseline_version`
    - `DETERMINISTIC_EXCEPTIONS`
 
-Until these settings are verified in GitHub, do **not** describe the constitution gate as non-bypassable.
+Do **not** describe the constitution gate as completely non-bypassable. Required-check status is proven; bypass restrictions and CODEOWNERS enforcement are not.
 
 ### Owner verification checklist
 
-- [ ] `constitution-compliance` visible on PR checks
-- [ ] `constitution-compliance` marked Required on `main`
+- [x] `constitution-compliance` visible on PR checks
+- [x] `constitution-compliance` marked Required on `main`
 - [ ] CODEOWNERS enforced for governance files
 - [ ] Admin bypass restricted/disabled where possible
 

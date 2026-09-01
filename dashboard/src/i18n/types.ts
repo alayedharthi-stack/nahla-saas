@@ -62,7 +62,6 @@ export interface Translations {
       storeIntegration: string
       whatsappConnect:  string
       whatsappCatalog:      string
-      catalogIntelligence:  string
       manualSetup:          string
       widgets:          string
       nahlaTemplateLibrary: string
@@ -190,14 +189,6 @@ export interface Translations {
         handoffQueue:  { title: string; description: string }
       }
     }
-    productsHub: {
-      title: string
-      subtitle: string
-      cards: {
-        catalog:              { title: string; description: string }
-        catalogIntelligence:  { title: string; description: string }
-      }
-    }
     channelsHub: {
       title: string
       subtitle: string
@@ -303,40 +294,6 @@ export interface Translations {
     systemStatus:     { title: string; subtitle: string }
     storeIntegration: { title: string; subtitle: string }
     whatsappConnect:  { title: string; subtitle: string }
-    catalogIntelligence: {
-      title: string
-      subtitle: string
-      refresh: string
-      tabs: { groups: string; settings: string; uncategorized: string }
-      groupsTitle: string
-      newGroupPlaceholder: string
-      noGroups: string
-      selectGroupHint: string
-      catalogMatchPlaceholder: string
-      saveGroup: string
-      saved: string
-      confirmDeleteGroup: string
-      inactive: string
-      productsInGroup: string
-      alternatives: string
-      alternativesFor: string
-      bestSeller: string
-      searchProductPlaceholder: string
-      pickProduct: string
-      pickAlternative: string
-      addAlternative: string
-      settingsTitle: string
-      bestSellerMode: string
-      defaultGroupSlug: string
-      maxRelations: string
-      saveSettings: string
-      validationTitle: string
-      validationSummary: string
-      validationOk: string
-      uncategorizedHint: string
-      uncategorizedCount: string
-      allCategorized: string
-    }
   }
 
   /** Admin-only page titles */

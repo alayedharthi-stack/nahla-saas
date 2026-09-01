@@ -23,7 +23,12 @@ _BROWSE_DISCOVERY_ENTRY_TYPES = frozenset({
 
 
 def is_catalog_browse_message(message: str, *, intent_name: str = "") -> bool:
-    """Return True when message/intent evidence indicates catalog browse, not checkout."""
+    """Return True when message/intent evidence indicates catalog browse, not checkout.
+
+    Uses the same morphological inventory/browse frames as CatalogNavigator
+    (``message_indicates_catalog_browse``) so turn-ownership, stale-checkout
+    isolation, and navigator/discovery share one definition.
+    """
     msg = message or ""
     intent = str(intent_name or "").strip()
 
@@ -37,6 +42,14 @@ def is_catalog_browse_message(message: str, *, intent_name: str = "") -> bool:
             return True
     except Exception:  # noqa: BLE001
         logger.exception("[CATALOG_BROWSE_TURN] product_visual_probe_failed")
+
+    try:
+        from .navigation_signals import message_indicates_catalog_browse  # noqa: PLC0415
+
+        if message_indicates_catalog_browse(msg, intent_name=intent):
+            return True
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_BROWSE_TURN] navigation_signal_probe_failed")
 
     try:
         from ..commerce.product_breadth_policy import (  # noqa: PLC0415

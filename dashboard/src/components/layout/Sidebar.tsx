@@ -144,7 +144,6 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/conversations',          icon: MessageSquare,   label: tr => tr.nav.items.conversations    },
       // ▸ Promoted from "store" group — see header comment above.
       { to: '/catalog',                icon: Package,         label: tr => tr.nav.items.whatsappCatalog  },
-      { to: '/catalog-intelligence',   icon: FolderTree,      label: tr => tr.nav.items.catalogIntelligence },
       { to: '/orders',                 icon: ShoppingCart,    label: tr => tr.nav.items.orders           },
       { to: '/customers',              icon: Users,           label: tr => tr.nav.items.customers        },
       { to: '/smart-automations',      icon: Bot,             label: tr => tr.nav.items.autopilot,  isAI: true },

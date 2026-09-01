@@ -268,18 +268,11 @@ class TestGroundingImport:
 
 
 class TestValidationClient:
-    def test_dashboard_api_uses_shared_authenticated_client(self) -> None:
-        dashboard_api = os.path.join(
-            os.path.dirname(_HERE),
-            "..",
-            "dashboard",
-            "src",
-            "api",
-            "catalogIntelligence.ts",
-        )
-        text = open(dashboard_api, encoding="utf-8").read()
-        assert "apiCall('/catalog-intelligence/validation')" in text
-        assert "apiCall('/settings/catalog-intelligence'" in text
+    def test_merchant_runtime_does_not_ship_catalog_intelligence_screen(self) -> None:
+        dashboard_src = os.path.join(os.path.dirname(_HERE), "..", "dashboard", "src")
+        assert not os.path.exists(os.path.join(dashboard_src, "api", "catalogIntelligence.ts"))
+        assert not os.path.exists(os.path.join(dashboard_src, "pages", "CatalogIntelligence.tsx"))
+        assert not os.path.exists(os.path.join(dashboard_src, "pages", "ProductsHub.tsx"))
 
 
 class TestCatalogBrowseTurnPolicy:

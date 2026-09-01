@@ -52,8 +52,8 @@ const legacyPaths = extractConstStringArray(navDataSource, 'LEGACY_MERCHANT_NAV_
 const simplifiedPaths = new Set(extractSimplifiedNavPaths(navDataSource))
 
 assert(
-  'LEGACY_MERCHANT_NAV_PATHS still defines exactly 27 routes',
-  legacyPaths.length === 27,
+  'LEGACY_MERCHANT_NAV_PATHS still defines exactly 26 routes',
+  legacyPaths.length === 26,
   `got ${legacyPaths.length}`,
 )
 
@@ -77,8 +77,8 @@ assert(
   simplifiedPaths.has('/conversations') && !simplifiedPaths.has('/inbox'),
 )
 assert(
-  'simplified tree includes products hub route',
-  simplifiedPaths.has('/products'),
+  'simplified tree opens products at /catalog (products hub retired)',
+  simplifiedPaths.has('/catalog') && !simplifiedPaths.has('/products'),
 )
 assert(
   'simplified tree opens orders at /orders (orders-hub retired from rail)',
@@ -102,7 +102,7 @@ assert(
 )
 assert(
   'simplified tree exposes expected route count after daily-use correction',
-  simplifiedPaths.size >= 34 && simplifiedPaths.size <= 38,
+  simplifiedPaths.size >= 32 && simplifiedPaths.size <= 36,
   `got ${simplifiedPaths.size}`,
 )
 
@@ -127,8 +127,16 @@ assert(
     && appSource.includes('RedirectPreserveSearch'),
 )
 assert(
-  'App.tsx registers products hub route',
-  appSource.includes('path="products"') && appSource.includes('ProductsHub'),
+  'App.tsx redirects /products to /catalog with replace',
+  appSource.includes('path="products"')
+    && appSource.includes('to="/catalog"')
+    && !appSource.includes('ProductsHub'),
+)
+assert(
+  'App.tsx redirects /catalog-intelligence to /catalog with replace',
+  appSource.includes('path="catalog-intelligence"')
+    && appSource.includes('Navigate to="/catalog" replace')
+    && !appSource.includes('CatalogIntelligence'),
 )
 assert(
   'App.tsx redirects orders-hub to orders',

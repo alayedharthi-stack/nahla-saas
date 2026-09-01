@@ -74,6 +74,35 @@ jobs:
             -v --tb=short --maxfail=1 \
             --junitxml=/tmp/orders-list-newest-first.xml
 
+      - name: Salla broad browse ownership tests
+        run: |
+          python -m pytest \
+            backend/tests/test_salla_broad_browse_ownership.py \
+            backend/tests/test_salla_broad_browse_global_fallback_guard.py \
+            -q --tb=short --maxfail=1 \
+            --junitxml=/tmp/salla-broad-browse-ownership.xml
+
+      - name: Salla presented identity product card tests
+        run: |
+          python -m pytest \
+            backend/tests/test_salla_presented_identity_product_card.py \
+            backend/tests/test_selection_context_phase4b.py \
+            backend/tests/test_single_resolved_product_presentation.py \
+            backend/tests/test_salla_broad_browse_global_fallback_guard.py \
+            -q --tb=short --maxfail=1 \
+            --junitxml=/tmp/salla-presented-identity-product-card.xml
+
+      - name: Salla compose trusted singleton handoff tests
+        run: |
+          python -m pytest \
+            backend/tests/test_salla_compose_trusted_singleton_handoff.py \
+            backend/tests/test_salla_presented_identity_product_card.py \
+            backend/tests/test_selection_context_phase4b.py \
+            backend/tests/test_single_resolved_product_presentation.py \
+            backend/tests/test_salla_broad_browse_global_fallback_guard.py \
+            -q --tb=short --maxfail=1 \
+            --junitxml=/tmp/salla-compose-trusted-singleton-handoff.xml
+
       - name: Salla PR 888 remediation unit tests
         run: |
           python -m pytest \
@@ -485,6 +514,8 @@ jobs:
             backend/tests/test_meta_catalog_identity_postgres.py \
             backend/tests/test_meta_catalog_push_one.py \
             backend/tests/test_active_meta_item_binding_postgres.py \
+            backend/tests/test_salla_variant_catalog_identity.py \
+            backend/tests/test_salla_variant_catalog_identity_postgres.py \
             backend/tests/test_meta_catalog_onboarding_postgres.py \
             -q --tb=short --maxfail=1 \
             --junitxml=/tmp/wa-catalog-pg.xml
