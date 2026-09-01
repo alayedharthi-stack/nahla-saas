@@ -7,16 +7,216 @@ without promoting to ``paid`` until explicit verification.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from core.wa_order_linking import MSG_WA_PAYMENT_UNLINKED, find_linkable_wa_order
 
 logger = logging.getLogger("nahla.wa_payment_submission")
 
+_ACTIVE_PAYMENT_KEYS = (
+    "payment_method",
+    "payment_status",
+    "payment_confirmed",
+    "payment_verified",
+    "payment_settled",
+    "payment_verification_status",
+    "payment_submission_source",
+    "payment_submission_type",
+    "payment_submission_received",
+    "payment_submission_at",
+    "awaiting_payment_receipt",
+    "payment_receipt_received",
+    "payment_receipt_at",
+    "payment_receipt_metadata",
+    "payment_claim_unverified",
+    "payment_claim_unverified_at",
+    "payment_claim_text_preview",
+    "payment_claim_at",
+    "payment_resolution_state",
+    "payment_review_state",
+    "payment_evidence_received",
+    "payment_destination",
+    "requested_bank",
+    "payment_bank",
+)
+
+_PAYMENT_FUNNEL_STATUSES = frozenset({
+    "awaiting_receipt",
+    "awaiting_payment",
+    "under_review",
+    "payment_submitted",
+    "pending_payment",
+    "payment_pending",
+    "complete",
+    "paid",
+})
+
+_ACTIVE_PAYMENT_RESET: Dict[str, Any] = {
+    "payment_method": "",
+    "payment_status": "",
+    "payment_confirmed": False,
+    "payment_verified": False,
+    "payment_settled": False,
+    "payment_verification_status": "",
+    "payment_submission_source": "",
+    "payment_submission_type": "",
+    "payment_submission_received": False,
+    "payment_submission_at": "",
+    "awaiting_payment_receipt": False,
+    "payment_receipt_received": False,
+    "payment_receipt_at": "",
+    "payment_receipt_metadata": {},
+    "payment_claim_unverified": False,
+    "payment_claim_unverified_at": "",
+    "payment_claim_text_preview": "",
+    "payment_claim_at": "",
+    "payment_resolution_state": "",
+    "payment_review_state": "not_started",
+    "payment_evidence_received": False,
+    "payment_destination": {},
+    "requested_bank": "",
+    "payment_bank": "",
+}
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _prep_get(prep: Any, key: str, default: Any = None) -> Any:
+    if prep is None:
+        return default
+    if isinstance(prep, dict):
+        return prep.get(key, default)
+    return getattr(prep, key, default)
+
+
+def _prep_set(prep: Any, key: str, value: Any) -> None:
+    if prep is None:
+        return
+    if isinstance(prep, dict):
+        prep[key] = value
+        return
+    try:
+        setattr(prep, key, value)
+    except Exception:
+        pass
+
+
+def _copy_payment_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        return [dict(x) if isinstance(x, dict) else x for x in value]
+    return value
+
+
+def _has_active_payment_evidence(snapshot: Dict[str, Any]) -> bool:
+    if snapshot.get("payment_receipt_received") or snapshot.get("payment_evidence_received"):
+        return True
+    if snapshot.get("payment_claim_unverified"):
+        return True
+    if snapshot.get("payment_method"):
+        return True
+    if snapshot.get("payment_receipt_metadata"):
+        return True
+    if snapshot.get("payment_destination"):
+        return True
+    status = str(snapshot.get("order_status") or "").strip().lower()
+    return status in _PAYMENT_FUNNEL_STATUSES
+
+
+def isolate_active_payment_for_new_checkout(
+    prep: Any,
+    *,
+    reason: str = "new_catalog_checkout",
+    tenant_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Unbind prior-order payment evidence from a new active checkout.
+
+    Historical fields are appended to ``payment_evidence_history`` and
+    remain tied to the previous ``checkout_payment_id`` / product when
+    known. Active payment slots are reset. Conversation-level
+    ``last_payment_confirmed_at`` is never deleted.
+    """
+    result: Dict[str, Any] = {
+        "archived": False,
+        "new_checkout_payment_id": "",
+        "old_checkout_payment_id": str(_prep_get(prep, "checkout_payment_id", "") or ""),
+    }
+    if prep is None:
+        return result
+
+    snapshot: Dict[str, Any] = {}
+    for key in _ACTIVE_PAYMENT_KEYS:
+        snapshot[key] = _copy_payment_value(_prep_get(prep, key))
+    snapshot["order_status"] = _prep_get(prep, "order_status", "")
+    snapshot["product_id"] = _prep_get(prep, "product_id", "")
+    snapshot["checkout_payment_id"] = result["old_checkout_payment_id"]
+
+    if _has_active_payment_evidence(snapshot):
+        history = list(_prep_get(prep, "payment_evidence_history", None) or [])
+        history.append({
+            "archived_at": _utcnow_iso(),
+            "reason": str(reason or "new_checkout"),
+            "tenant_id": int(tenant_id) if tenant_id else None,
+            "checkout_payment_id": result["old_checkout_payment_id"] or None,
+            "product_id": snapshot.get("product_id") or None,
+            "evidence": snapshot,
+        })
+        _prep_set(prep, "payment_evidence_history", history[-20:])
+        result["archived"] = True
+        result["history_len"] = len(history[-20:])
+
+    for key, value in _ACTIVE_PAYMENT_RESET.items():
+        _prep_set(prep, key, _copy_payment_value(value))
+
+    old_status = str(snapshot.get("order_status") or "").strip().lower()
+    if old_status in _PAYMENT_FUNNEL_STATUSES or not old_status:
+        _prep_set(prep, "order_status", "awaiting_address")
+
+    new_id = uuid.uuid4().hex
+    _prep_set(prep, "checkout_payment_id", new_id)
+    result["new_checkout_payment_id"] = new_id
+    return result
+
+
+def resolve_verified_payment_destinations(
+    db: Any,
+    *,
+    tenant_id: int,
+) -> List[Dict[str, Any]]:
+    """Tenant-scoped complete IBANs only. Never invents or truncates."""
+    if db is None or not tenant_id:
+        return []
+    try:
+        from core.tenant_payment_accounts import (  # noqa: PLC0415
+            canonical_iban,
+            load_tenant_payment_accounts,
+        )
+    except Exception:
+        return []
+    try:
+        accounts = load_tenant_payment_accounts(db, tenant_id=int(tenant_id))
+    except Exception:
+        return []
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in accounts.ibans or ():
+        canon = canonical_iban(str(raw or ""))
+        if not canon or canon in seen:
+            continue
+        seen.add(canon)
+        out.append({
+            "iban": canon,
+            "source": "tenant_payment_accounts",
+            "tenant_id": int(tenant_id),
+            "complete": True,
+            "verified_or_eligible": True,
+        })
+    return out
 
 
 def build_payment_submission_prep_patch(
@@ -200,5 +400,7 @@ __all__ = [
     "apply_wa_payment_submission",
     "build_payment_submission_order_metadata",
     "build_payment_submission_prep_patch",
+    "isolate_active_payment_for_new_checkout",
     "record_unlinked_payment_claim",
+    "resolve_verified_payment_destinations",
 ]

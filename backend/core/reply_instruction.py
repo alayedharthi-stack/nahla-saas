@@ -289,6 +289,21 @@ def build_payment_receipt_instruction(
     )
 
 
+def _delivery_only_address_facts(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Address ack may carry delivery/identity facts — never payment truth."""
+    out: Dict[str, Any] = {}
+    for key, val in dict(raw or {}).items():
+        if val in (None, "", [], {}):
+            continue
+        k = str(key)
+        if k.startswith("payment_") or k.startswith("awaiting_payment") or k.startswith("last_payment"):
+            continue
+        if k in {"order_status", "payment_receipt_received", "awaiting_payment_receipt"}:
+            continue
+        out[k] = val
+    return out
+
+
 def build_address_instruction(
     *,
     legacy_copy: str,
@@ -299,20 +314,19 @@ def build_address_instruction(
     missing_fields: Optional[List[str]] = None,
     next_missing_field: Optional[str] = None,
 ) -> ReplyInstruction:
-    facts: Dict[str, Any] = {}
+    facts: Dict[str, Any] = {
+        "address_ack_scope": "delivery_only",
+        "payment_state_committed": False,
+    }
     if summary:
-        facts.update({
+        facts.update(_delivery_only_address_facts({
             "selected_product": summary.get("selected_product"),
             "awaiting_location": summary.get("awaiting_location"),
-            "order_status": summary.get("order_status"),
-        })
+        }))
     if address_type:
         facts["delivery_address_type"] = address_type
     if checkout_facts:
-        for key, val in checkout_facts.items():
-            if val in (None, "", [], {}):
-                continue
-            facts[key] = val
+        facts.update(_delivery_only_address_facts(checkout_facts))
     facts["missing_fields"] = list(missing_fields or [])
     facts["next_missing_field"] = next_missing_field or "none"
     facts["constrained_compose_decides_slot"] = False
@@ -325,6 +339,7 @@ def build_address_instruction(
             CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT,
             CONSTRAINT_NO_SHIPPING_PROMISE,
             CONSTRAINT_NO_INTERNAL_CONTACT_LEAK,
+            CONSTRAINT_NO_PAYMENT_CONFIRM,
         ),
         forbidden_claims=FORBIDDEN_PAYMENT_CONFIRM_MARKERS,
         legacy_copy=legacy_copy,
@@ -339,10 +354,23 @@ def build_payment_method_instruction(
     payment_method: str = "",
     summary: Optional[Dict[str, Any]] = None,
     inbound_text: str = "",
+    destination_available: bool = False,
+    payment_destination: Optional[Dict[str, Any]] = None,
 ) -> ReplyInstruction:
-    facts: Dict[str, Any] = {}
+    facts: Dict[str, Any] = {
+        "payment_claim": False,
+        "payment_submitted": False,
+        "payment_verified": False,
+        "payment_settled": False,
+        "payment_destination_available": bool(destination_available),
+    }
     if payment_method:
         facts["payment_method"] = payment_method
+    dest = dict(payment_destination or {})
+    if dest:
+        facts["payment_destination"] = dest
+        if dest.get("iban"):
+            facts["payment_destination_iban"] = dest.get("iban")
     if summary:
         facts.update({
             "selected_product": summary.get("selected_product"),
@@ -352,7 +380,7 @@ def build_payment_method_instruction(
         CONSTRAINT_NO_PAYMENT_CONFIRM,
         CONSTRAINT_NO_SHIPPING_PROMISE,
     ]
-    if payment_method == "bank_transfer":
+    if payment_method == "bank_transfer" and destination_available:
         constraints.append(CONSTRAINT_ASK_PAYMENT_PROOF)
     return ReplyInstruction(
         path=PATH_PAYMENT_METHOD_ACK,

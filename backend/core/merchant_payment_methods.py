@@ -226,6 +226,36 @@ def parse_payment_method_from_text(text: str) -> Optional[str]:
     return None
 
 
+def inbound_is_payment_method_choice(
+    text: str,
+    methods: MerchantPaymentMethods,
+) -> Optional[str]:
+    """Return a canonical method when the inbound is a method *choice*.
+
+    Uses existing method labels / indexed choices. Does not treat
+    completion claims such as ``تم التحويل`` as a method selection.
+    """
+    raw = str(text or "").strip()
+    if not raw or len(raw) > 120:
+        return None
+    compact = re.sub(r"\s+", " ", raw).strip()
+    indexed = resolve_indexed_choice(compact, methods)
+    if indexed and not str(indexed).startswith("__"):
+        return indexed
+    parsed = parse_payment_method_from_text(compact)
+    if parsed and not str(parsed).startswith("__"):
+        if parsed in methods.available_methods:
+            return parsed
+    for method in methods.available_methods:
+        label = METHOD_LABELS_AR.get(method, method)
+        if compact == method or compact == label:
+            return method
+        tokens = [tok for tok in str(label).split() if len(tok) >= 3]
+        if compact in tokens:
+            return method
+    return None
+
+
 def resolve_indexed_choice(text: str, methods: MerchantPaymentMethods) -> Optional[str]:
     parsed = parse_payment_method_from_text(text)
     if parsed not in ("__choice_index_1__", "__choice_index_2__", "__choice_index_3__"):
@@ -320,6 +350,7 @@ __all__ = [
     "format_method_labels_ar",
     "load_merchant_payment_methods",
     "moyasar_checkout_ready",
+    "inbound_is_payment_method_choice",
     "parse_payment_method_from_text",
     "resolve_indexed_choice",
     "resolve_merchant_payment_methods",

@@ -17,6 +17,7 @@ from core.reply_instruction import (
     CONSTRAINT_NO_PAYMENT_CONFIRM,
     CONSTRAINT_NO_SHIPPING_PROMISE,
     FORBIDDEN_PAYMENT_CONFIRM_MARKERS,
+    PATH_ADDRESS_INGEST_ACK,
     PATH_PAYMENT_RECEIPT_ACK,
     ReplyInstruction,
 )
@@ -100,6 +101,28 @@ def validate_operational_reply(
                 return OperationalReplyValidation(
                     ok=False,
                     reason=f"forbidden_ship_promise:{marker}",
+                )
+
+    if instruction.path == PATH_ADDRESS_INGEST_ACK:
+        facts = instruction.facts or {}
+        payment_committed = bool(
+            facts.get("payment_state_committed")
+            or facts.get("payment_evidence_received")
+            or facts.get("payment_receipt_received")
+        )
+        if facts.get("address_ack_scope") == "delivery_only" and not payment_committed:
+            paymentish = any(
+                token in norm
+                for token in ("تحويل", "حواله", "حوالة", "دفع", "ايصال", "إيصال")
+            )
+            reviewish = any(
+                token in norm
+                for token in ("مراجع", "تأكيد الدفع", "تاكيد الدفع", "تم استلام الايصال")
+            )
+            if paymentish and reviewish:
+                return OperationalReplyValidation(
+                    ok=False,
+                    reason="address_ack_uncommitted_payment_claim",
                 )
 
     if instruction.path == PATH_PAYMENT_RECEIPT_ACK:

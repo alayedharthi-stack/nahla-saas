@@ -238,6 +238,19 @@ class OrderPreparationState:
     payment_claim_unverified:    bool = False
     payment_claim_unverified_at: str = ""
     payment_claim_text_preview:  str = ""
+    # Active checkout payment ownership. Must round-trip through
+    # to_dict/from_dict so a later brain save cannot drop a selected
+    # method or reattach a prior order's receipt to a new checkout.
+    payment_method: str = ""
+    payment_status: str = ""
+    payment_confirmed: bool = False
+    payment_verified: bool = False
+    payment_settled: bool = False
+    payment_review_state: str = "not_started"
+    payment_evidence_received: bool = False
+    payment_destination: Dict[str, Any] = field(default_factory=dict)
+    checkout_payment_id: str = ""
+    payment_evidence_history: List[Dict[str, Any]] = field(default_factory=list)
     # PR-4 — multi-item WhatsApp cart mirror (consumed by nahla_order_bridge).
     line_items: List[Dict[str, Any]] = field(default_factory=list)
     cart_deltas: List[Dict[str, Any]] = field(default_factory=list)
@@ -316,6 +329,16 @@ class OrderPreparationState:
             "payment_claim_unverified":    self.payment_claim_unverified,
             "payment_claim_unverified_at": self.payment_claim_unverified_at,
             "payment_claim_text_preview":  self.payment_claim_text_preview,
+            "payment_method":              str(self.payment_method or ""),
+            "payment_status":              str(self.payment_status or ""),
+            "payment_confirmed":           bool(self.payment_confirmed),
+            "payment_verified":            bool(self.payment_verified),
+            "payment_settled":             bool(self.payment_settled),
+            "payment_review_state":        str(self.payment_review_state or "not_started"),
+            "payment_evidence_received":   bool(self.payment_evidence_received),
+            "payment_destination":         dict(self.payment_destination or {}),
+            "checkout_payment_id":         str(self.checkout_payment_id or ""),
+            "payment_evidence_history":    list(self.payment_evidence_history or []),
             "line_items": list(self.line_items or []),
             "cart_deltas": list(self.cart_deltas or []),
             "catalog_checkout_total": self.catalog_checkout_total,
@@ -388,6 +411,19 @@ class OrderPreparationState:
             payment_claim_unverified=bool(raw.get("payment_claim_unverified", False)),
             payment_claim_unverified_at=str(raw.get("payment_claim_unverified_at", "") or ""),
             payment_claim_text_preview=str(raw.get("payment_claim_text_preview", "") or ""),
+            payment_method=str(raw.get("payment_method", "") or ""),
+            payment_status=str(raw.get("payment_status", "") or ""),
+            payment_confirmed=bool(raw.get("payment_confirmed", False)),
+            payment_verified=bool(raw.get("payment_verified", False)),
+            payment_settled=bool(raw.get("payment_settled", False)),
+            payment_review_state=str(raw.get("payment_review_state", "") or "not_started"),
+            payment_evidence_received=bool(raw.get("payment_evidence_received", False)),
+            payment_destination=dict(raw.get("payment_destination") or {}),
+            checkout_payment_id=str(raw.get("checkout_payment_id", "") or ""),
+            payment_evidence_history=[
+                dict(x) for x in (raw.get("payment_evidence_history") or [])
+                if isinstance(x, dict)
+            ],
             line_items=list(raw.get("line_items") or []),
             cart_deltas=list(raw.get("cart_deltas") or []),
             catalog_checkout_total=_as_optional_float(raw.get("catalog_checkout_total")),

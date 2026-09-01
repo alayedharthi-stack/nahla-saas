@@ -443,6 +443,22 @@ def apply_native_order_to_state(
 
         prep = OrderPreparationState()
         state.order_prep = prep
+    try:
+        from core.wa_payment_submission import (  # noqa: PLC0415
+            isolate_active_payment_for_new_checkout,
+        )
+
+        isolate_active_payment_for_new_checkout(
+            prep,
+            reason="native_catalog_order",
+            tenant_id=int(tenant_id) if tenant_id else None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[WA_NATIVE_ORDER] payment isolation skipped tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
 
     prep.line_items = list(resolution.line_items)
     state.cart_items = list(resolution.line_items)

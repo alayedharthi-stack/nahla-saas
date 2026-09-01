@@ -166,6 +166,14 @@ def reproject_address_ingest_decision_after_persist(
     next_goal = next_goal_for_missing_field(nxt)
     known_facts["next_missing_field"] = nxt or "none"
     known_facts["next_goal"] = next_goal
+    known_facts["address_ack_scope"] = "delivery_only"
+    for _pay_key in list(known_facts.keys()):
+        if (
+            str(_pay_key).startswith("payment_")
+            or str(_pay_key).startswith("awaiting_payment")
+            or str(_pay_key) in {"order_status", "payment_receipt_received"}
+        ):
+            known_facts.pop(_pay_key, None)
     if _prep_str(op_projected, "city"):
         known_facts["checkout_city"] = _prep_str(op_projected, "city")
     if _prep_str(op_projected, "district"):
