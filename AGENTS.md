@@ -314,6 +314,46 @@ Agent rule: `.cursor/rules/root-cause-first.mdc`
 
 ---
 
+## GOV-001 — Intelligence Non-Interference Policy (permanent)
+
+Authoritative policy: `docs/engineering/intelligence-non-interference-policy.md`  
+Agent rule: `.cursor/rules/intelligence-non-interference.mdc`
+
+```text
+INTELLIGENCE_POLICY=KEEP_MODEL_FREE_FIX_SYSTEM_AROUND_IT
+INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+
+MODEL_CHANGE=FORBIDDEN_BY_DEFAULT
+PROMPT_CHANGE=FORBIDDEN_BY_DEFAULT
+PERSONA_CHANGE=FORBIDDEN_BY_DEFAULT
+
+PHRASE_MAPS=FORBIDDEN
+KEYWORD_INTENT_HACKS=FORBIDDEN
+CUSTOMER_REGEX_INTENT_REPAIR=FORBIDDEN
+
+DEFAULT_FIX_ORDER=
+STATE → TRUTH → CONTEXT → ROUTING → CAPABILITY → EXECUTION → PERSISTENCE → POSTPROCESS
+→ ONLY THEN RAW MODEL EVALUATION
+```
+
+Every Nahla AI defect assignment, Agent task, and AI PR must report:
+
+```text
+INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+MODEL_CHANGED=NO
+PROMPT_CHANGED=NO
+PERSONA_CHANGED=NO
+PHRASE_MAP_CHANGED=NO
+KEYWORD_ROUTER_CHANGED=NO
+CUSTOMER_REGEX_CHANGED=NO
+```
+
+Expected default for all change flags: **NO**.
+
+Model, prompt, or persona may be touched only if correct authoritative context and capabilities reached the model, **and** raw model output is the first executable divergence, **and** the owner explicitly approves.
+
+---
+
 ## Generic Commerce Regression Tests
 
 Nahla AI is a **multi-merchant** WhatsApp commerce platform. Every AI commerce fix and regression test must be **platform-wide and merchant-agnostic**.
