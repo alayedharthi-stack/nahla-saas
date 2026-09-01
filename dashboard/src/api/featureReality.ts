@@ -309,6 +309,8 @@ export interface DashboardCoupon {
   coupon_level?: CouponLevelId | null
   /** Where the code is allowed to be issued from. */
   allocation_channel?: CouponChannel | null
+  /** Explicit merchant opt-in for one-customer AI allocation. Default false. */
+  ai_allocatable?: boolean
   /** Seconds remaining until expiry (null when no expiry). */
   remaining_seconds?: number | null
 }
@@ -752,6 +754,9 @@ export const featureRealityApi = {
     expires?: string
     category?: 'standard' | 'vip' | 'auto'
     active?: boolean
+    ai_allocatable?: boolean
+    coupon_level?: CouponLevelId | null
+    allocation_channel?: CouponChannel | null
   }): Promise<{ id: number }> {
     return apiCall('/coupons', {
       method: 'POST',

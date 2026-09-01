@@ -561,6 +561,12 @@ async def issue_customer_coupon(
                 count.customer_id,
                 for_channel=channel,
             )
+            if coupon is None:
+                coupon = generator.pick_native_ai_coupon_for_level(
+                    resolved_level,
+                    count.customer_id,
+                    for_channel=channel,
+                )
 
         if coupon is None and pool_mode == POOL_MODE_POOL_ONLY:
             return _empty_result(
@@ -573,20 +579,28 @@ async def issue_customer_coupon(
             )
 
         if coupon is None:
+            adapter = generator._get_adapter()
+            if adapter is None:
+                return _empty_result(
+                    customer_id=count.customer_id,
+                    countable_orders=count.countable_orders,
+                    resolved_level=resolved_level,
+                    policy_allowed=True,
+                    reason_code=REASON_POOL_EMPTY,
+                    count=count,
+                )
             coupon = await generator.create_on_demand_for_level(
                 resolved_level,
                 customer_id=count.customer_id,
                 for_channel=channel,
             )
             if coupon is None:
-                adapter = generator._get_adapter()
-                reason = REASON_SALLA_UNAVAILABLE if adapter is None else REASON_POOL_EMPTY
                 return _empty_result(
                     customer_id=count.customer_id,
                     countable_orders=count.countable_orders,
                     resolved_level=resolved_level,
                     policy_allowed=True,
-                    reason_code=reason,
+                    reason_code=REASON_POOL_EMPTY,
                     count=count,
                 )
 

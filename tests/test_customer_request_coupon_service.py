@@ -210,6 +210,49 @@ def _add_pool_coupon(
     return row
 
 
+def _add_native_coupon(
+    db,
+    tenant_id: int,
+    code: str,
+    level: str,
+    *,
+    used: str = "false",
+    expires_at: Optional[datetime] = None,
+    extra: Optional[dict] = None,
+    allocation_channel: str = "ai",
+    usage_limit: int = 1,
+    ai_allocatable: Any = True,
+    source_type: str = "manual",
+) -> Coupon:
+    meta = {
+        "source": "dashboard",
+        "used": used,
+        "active": True,
+        "ai_allocatable": ai_allocatable,
+        "coupon_level": level,
+        "allocation_channel": allocation_channel,
+        "usage_limit": usage_limit,
+        "usage_count": 0,
+    }
+    if extra:
+        meta.update(extra)
+    row = Coupon(
+        tenant_id=tenant_id,
+        code=code,
+        discount_type="percentage",
+        discount_value="6",
+        expires_at=expires_at or (datetime.now(timezone.utc) + timedelta(days=3)),
+        extra_metadata=meta,
+        coupon_level=level,
+        allocation_channel=allocation_channel,
+        source_type=source_type,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 def _stamp_owned(
     db,
     coupon: Coupon,
@@ -760,3 +803,193 @@ def test_reuse_query_is_tenant_scoped() -> None:
     db.refresh(foreign)
     assert int((foreign.extra_metadata or {}).get("customer_id")) == customer.id
     assert foreign.tenant_id == other.id
+
+
+def test_general_manual_promo_is_not_ai_allocated() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    promo = _add_native_coupon(
+        db, tenant_id, "AYRDIS", "bronze", ai_allocatable=False
+    )
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    db.refresh(promo)
+    assert (promo.extra_metadata or {}).get("customer_id") is None
+    assert (promo.extra_metadata or {}).get("used") != "true"
+
+
+def test_legacy_manual_without_marker_is_excluded() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    row = Coupon(
+        tenant_id=tenant_id,
+        code="AYODIS",
+        discount_type="percentage",
+        discount_value="6",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=3),
+        extra_metadata={"source": "dashboard", "active": True, "usage_limit": 1},
+        source_type="manual",
+    )
+    db.add(row)
+    db.commit()
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    db.refresh(row)
+    assert (row.extra_metadata or {}).get("customer_id") is None
+
+
+def test_native_ai_coupon_is_issued_without_salla() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    native = _add_native_coupon(db, tenant_id, "NATAI1", "bronze")
+    with patch.object(
+        coupon_request_mod.CouponGeneratorService, "_get_adapter", lambda self: None
+    ):
+        result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.code == "NATAI1"
+    assert result.reason_code == "issued"
+    db.refresh(native)
+    assert int((native.extra_metadata or {}).get("customer_id")) == customer.id
+    assert (native.extra_metadata or {}).get("issued_reason") == ISSUED_REASON_CUSTOMER_REQUEST
+    assert (native.extra_metadata or {}).get("issued_channel") == "ai"
+
+
+def test_native_wrong_level_is_excluded() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    wrong = _add_native_coupon(db, tenant_id, "NASLV1", "silver")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    db.refresh(wrong)
+    assert (wrong.extra_metadata or {}).get("customer_id") is None
+
+
+def test_native_wrong_channel_is_excluded() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    wrong = _add_native_coupon(
+        db, tenant_id, "NACMP1", "bronze", allocation_channel="campaign"
+    )
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    db.refresh(wrong)
+    assert (wrong.extra_metadata or {}).get("customer_id") is None
+
+
+def test_native_expired_and_used_and_bound_are_excluded() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    other = _add_customer(db, tenant_id, PHONE_B)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_native_coupon(
+        db,
+        tenant_id,
+        "NAEXP1",
+        "bronze",
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    _add_native_coupon(db, tenant_id, "NAUSD1", "bronze", used="true")
+    bound = _add_native_coupon(db, tenant_id, "NABND1", "bronze")
+    _stamp_owned(db, bound, other.id)
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+
+
+def test_native_repeat_request_reuses_assignment() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    native = _add_native_coupon(db, tenant_id, "NAREU1", "bronze")
+    spare = _add_native_coupon(db, tenant_id, "NAREU2", "bronze")
+    first = _issue(db, tenant_id, customer.id)
+    second = _issue(db, tenant_id, customer.id)
+    assert first.issued and second.issued
+    assert first.coupon_id == second.coupon_id == native.id
+    db.refresh(spare)
+    assert (spare.extra_metadata or {}).get("customer_id") is None
+
+
+def test_two_customers_cannot_share_native_coupon() -> None:
+    db, tenant_id, _engine = _make_db()
+    a = _add_customer(db, tenant_id, PHONE_A)
+    b = _add_customer(db, tenant_id, PHONE_B)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_orders(db, tenant_id, PHONE_B, countable=1)
+    native = _add_native_coupon(db, tenant_id, "NASHR1", "bronze")
+    first = _issue(db, tenant_id, a.id)
+    second = _issue(db, tenant_id, b.id)
+    assert first.issued is True
+    assert first.coupon_id == native.id
+    assert second.issued is False
+    assert second.reason_code == REASON_POOL_EMPTY
+
+
+def test_salla_pool_is_selected_ahead_of_native() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    salla = _add_pool_coupon(db, tenant_id, "NHAAA", "bronze")
+    native = _add_native_coupon(db, tenant_id, "NATAI9", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.coupon_id == salla.id
+    db.refresh(native)
+    assert (native.extra_metadata or {}).get("customer_id") is None
+
+
+def test_salla_pool_pick_ignores_native_manual() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    native = _add_native_coupon(db, tenant_id, "NATAI8", "bronze")
+    svc = CouponGeneratorService(db, tenant_id)
+    picked = svc.pick_coupon_for_level("bronze", customer.id, for_channel="ai")
+    assert picked is None
+    native_picked = svc.pick_native_ai_coupon_for_level(
+        "bronze", customer.id, for_channel="ai"
+    )
+    assert native_picked is not None
+    assert native_picked.id == native.id
+
+
+def test_no_salla_empty_native_is_pool_empty_not_salla_unavailable() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    with patch.object(
+        coupon_request_mod.CouponGeneratorService, "_get_adapter", lambda self: None
+    ):
+        result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    assert db.query(Coupon).filter(Coupon.tenant_id == tenant_id).count() == 0
+
+
+def test_unlimited_manual_usage_is_not_one_customer_safe() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    promo = _add_native_coupon(
+        db, tenant_id, "NAUNL1", "bronze", usage_limit=0, extra={"usage_limit": 0}
+    )
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    db.refresh(promo)
+    assert (promo.extra_metadata or {}).get("customer_id") is None
+
+
+def test_zero_orders_first_purchase_enabled_authorizes_bronze() -> None:
+    db, tenant_id, _engine = _make_db(first_purchase=True)
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    native = _add_native_coupon(db, tenant_id, "NAFP01", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.resolved_level == "bronze"
+    assert result.coupon_id == native.id
+    assert result.countable_orders == 0

@@ -909,3 +909,17 @@ def test_create_one_coupon_failure_logs_redacted_code_not_raw():
 
 def test_level_to_segments_covers_all_canonical_levels():
     assert set(LEVEL_TO_SEGMENTS.keys()) == set(CANONICAL_COUPON_LEVELS)
+
+
+def test_salla_pool_base_filters_contract_unchanged():
+    import inspect
+
+    src = inspect.getsource(CouponGeneratorService._pool_base_filters)
+    assert 'Coupon.source_type == "system"' in src
+    assert '("manual", "imported")' in src
+    assert "salla_synced" in src
+    assert "SHORT_CODE_PREFIX" in src
+    assert "ai_allocatable" not in src
+    native_src = inspect.getsource(CouponGeneratorService._native_ai_pool_filters)
+    assert "salla_synced" not in native_src
+    assert "SHORT_CODE_PREFIX" not in native_src
