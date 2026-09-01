@@ -407,6 +407,7 @@ class MetaCatalogMembership(Base):
     variant_id = Column(
         Integer, ForeignKey("product_variants.id", ondelete="CASCADE"), nullable=True
     )
+    salla_variant_id = Column(String(64), nullable=True)
     meta_item_id = Column(String(128), nullable=True)
     verified_at = Column(DateTime(timezone=True), nullable=False)
     provenance = Column(String(64), nullable=False)

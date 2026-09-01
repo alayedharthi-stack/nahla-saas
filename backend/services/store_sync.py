@@ -356,21 +356,29 @@ def _resolve_variant_retailer_id(parent: Any, variant_id: Optional[int],
                                  salla_variant_id: Optional[str]) -> str:
     """Pick a per-variant retailer_id.
 
-    Order:
+    For Salla SKUs with a ``salla_variant_id``, the identity is always
+    ``{external_id}-{salla_variant_id}``. Parent overrides and ``nahla_v_*``
+    synthetics are not sellable Salla identities.
+
+    Order for non-Salla:
       1. The merchant's parent-level override (``meta_retailer_id``)
          when it carries a hyphenated shape like ``parent-variant``;
          we split it so per-variant ids round-trip cleanly.
-      2. ``{parent.external_id}-{salla_variant_id}`` when both exist —
-         the convention Salla's Meta Commerce auto-publish uses.
+      2. ``{parent.external_id}-{salla_variant_id}`` when both exist.
       3. ``nahla_v_{variant_id}`` synthetic fallback so a send never
          goes out without a retailer_id.
     """
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        deterministic_variant_retailer_id,
+        is_salla_source,
+    )
+
     salla_id = (salla_variant_id or "").strip()
     parent_ext = (getattr(parent, "external_id", "") or "").strip()
+    if is_salla_source(parent) and salla_id:
+        return deterministic_variant_retailer_id(parent_ext, salla_id)
     parent_override = (getattr(parent, "meta_retailer_id", "") or "").strip()
     if parent_override and "-" in parent_override and salla_id:
-        # Merchant put a ``parent-variant`` shape on the parent —
-        # respect it by swapping in the per-variant suffix.
         head, _, _tail = parent_override.partition("-")
         if head:
             return f"{head}-{salla_id}"
@@ -498,13 +506,17 @@ def _upsert_variants_for(db: Session, product: Any,
                     row.option_summary = summary
                 if image_url:
                     row.image_url = image_url
-                row.extra_metadata = meta
-            # Stamp retailer_id only when missing (never overwrite an
-            # explicit publish that came in via the dashboard / admin).
-            if not row.retailer_id:
-                row.retailer_id = _resolve_variant_retailer_id(
-                    product, row.id, sid,
-                )
+            row.extra_metadata = meta
+            # Salla sellable SKUs always keep the deterministic
+            # ``{external_id}-{salla_variant_id}`` retailer_id. Other
+            # sources stamp retailer_id only when missing.
+            from services.salla_variant_catalog_identity import is_salla_source  # noqa: PLC0415
+
+            resolved_rid = _resolve_variant_retailer_id(product, row.id, sid)
+            if is_salla_source(product) and sid and resolved_rid:
+                row.retailer_id = resolved_rid
+            elif not row.retailer_id:
+                row.retailer_id = resolved_rid
         # Soft-prune the ones that vanished from this payload.
         for sid, row in by_salla_id.items():
             if sid not in seen_salla_ids:

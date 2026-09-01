@@ -200,6 +200,50 @@ class TestGovernanceWaiverSchema:
         assert "NL-T002" not in waiver_report
 
 
+class TestGov001IntelligenceNonInterference:
+    """GOV-001 document lock — no runtime Brain/coupon/routing assertions."""
+
+    def test_policy_files_exist(self) -> None:
+        root = policy.REPO_ROOT
+        assert (root / "docs/engineering/intelligence-non-interference-policy.md").is_file()
+        assert (root / ".cursor/rules/intelligence-non-interference.mdc").is_file()
+
+    def test_agents_and_checklist_declare_gov_001(self) -> None:
+        agents = (policy.REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        checklist = (
+            policy.REPO_ROOT / "docs/engineering/ai-pr-constitution-checklist.md"
+        ).read_text(encoding="utf-8")
+        assert "GOV-001" in agents
+        assert "INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE" in agents
+        assert "KEEP_MODEL_FREE_FIX_SYSTEM_AROUND_IT" in agents
+        assert "CUSTOMER_REGEX_INTENT_REPAIR=FORBIDDEN" in agents
+        assert "GOV-001" in checklist
+        assert "INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE" in checklist
+
+    def test_policy_locks_model_prompt_persona_and_phrase_hacks(self) -> None:
+        text = (
+            policy.REPO_ROOT / "docs/engineering/intelligence-non-interference-policy.md"
+        ).read_text(encoding="utf-8")
+        for token in (
+            "INTELLIGENCE_POLICY=KEEP_MODEL_FREE_FIX_SYSTEM_AROUND_IT",
+            "MODEL_CHANGE=FORBIDDEN_BY_DEFAULT",
+            "PROMPT_CHANGE=FORBIDDEN_BY_DEFAULT",
+            "PERSONA_CHANGE=FORBIDDEN_BY_DEFAULT",
+            "PHRASE_MAPS=FORBIDDEN",
+            "KEYWORD_INTENT_HACKS=FORBIDDEN",
+            "CUSTOMER_REGEX_INTENT_REPAIR=FORBIDDEN",
+            "ONLY THEN RAW MODEL EVALUATION",
+            "INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE",
+            "MODEL_CHANGED=NO",
+            "PROMPT_CHANGED=NO",
+            "PERSONA_CHANGED=NO",
+            "PHRASE_MAP_CHANGED=NO",
+            "KEYWORD_ROUTER_CHANGED=NO",
+            "CUSTOMER_REGEX_CHANGED=NO",
+        ):
+            assert token in text, token
+
+
 class TestAntiGrandfathering:
     def test_new_violation_id_not_in_baseline_allowed_list_fails(self) -> None:
         errors = validate_new_violation_cannot_self_waive(

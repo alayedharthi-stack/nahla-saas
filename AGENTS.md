@@ -200,7 +200,7 @@ Fix ownership, state, evidence, routing, composition, and postprocessing. Paraph
 
 CI job: **`constitution-compliance`** (`backend/tests/test_constitution_compliance.py`).
 
-This job exists in GitHub Actions but is **not merge-blocking until** a repository admin marks it as a Required Status Check in GitHub branch protection. See `docs/engineering/merge-and-ci-policy.md`.
+`constitution-compliance` is currently a **required merge-blocking check on `main`** through GitHub branch protection. It must be green together with the other required checks (`lint-and-test`, `Scan repository for leaked secrets`). Repository files cannot themselves enforce GitHub branch protection; that configuration lives in GitHub. See `docs/engineering/merge-and-ci-policy.md`.
 
 Pre-existing violations must be tracked in `tracked_violations_baseline.json` with violation ID, owner, `added_at`, `expiry_date`, `approved_by`, and removal reference — never silently grandfathered. New violation IDs require `governance_baseline_version` bump in a dedicated governance PR.
 
@@ -208,7 +208,7 @@ Pre-existing violations must be tracked in `tracked_violations_baseline.json` wi
 
 Permanent checklist: `docs/engineering/ai-pr-constitution-checklist.md`.
 
-**Merge gate note:** `constitution-compliance` must be green on the PR, but merge-blocking status depends on GitHub branch protection (owner action). A PR cannot receive PASS or merge approval without completing this checklist.
+**Merge gate note:** `constitution-compliance` is a required merge-blocking check on `main` and must be green on the PR together with the other required checks. A PR cannot receive PASS or merge approval without completing this checklist.
 
 ### Final customer text provenance rule
 
@@ -311,6 +311,46 @@ Agent rule: `.cursor/rules/root-cause-first.mdc`
 **Live-test failures must not drive MerchantBrain / Prompt / Compose / State / Memory patches** until Channel → Webhook → Tenant → Identity → Persistence → Retrieval → State → Tools → Structured Facts are proven healthy. Stop at the first failing layer. RCA must state First Divergence, Source of Truth, Provenance, and Evidence. Classify as LLM Behavior only after all lower layers pass.
 
 **Principle of Evidence:** The burden of proof is on the proposed fix, not on the observed symptom. Symptoms alone never justify modifying AI behavior.
+
+---
+
+## GOV-001 — Intelligence Non-Interference Policy (permanent)
+
+Authoritative policy: `docs/engineering/intelligence-non-interference-policy.md`  
+Agent rule: `.cursor/rules/intelligence-non-interference.mdc`
+
+```text
+INTELLIGENCE_POLICY=KEEP_MODEL_FREE_FIX_SYSTEM_AROUND_IT
+INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+
+MODEL_CHANGE=FORBIDDEN_BY_DEFAULT
+PROMPT_CHANGE=FORBIDDEN_BY_DEFAULT
+PERSONA_CHANGE=FORBIDDEN_BY_DEFAULT
+
+PHRASE_MAPS=FORBIDDEN
+KEYWORD_INTENT_HACKS=FORBIDDEN
+CUSTOMER_REGEX_INTENT_REPAIR=FORBIDDEN
+
+DEFAULT_FIX_ORDER=
+STATE → TRUTH → CONTEXT → ROUTING → CAPABILITY → EXECUTION → PERSISTENCE → POSTPROCESS
+→ ONLY THEN RAW MODEL EVALUATION
+```
+
+Every Nahla AI defect assignment, Agent task, and AI PR must report:
+
+```text
+INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+MODEL_CHANGED=NO
+PROMPT_CHANGED=NO
+PERSONA_CHANGED=NO
+PHRASE_MAP_CHANGED=NO
+KEYWORD_ROUTER_CHANGED=NO
+CUSTOMER_REGEX_CHANGED=NO
+```
+
+Expected default for all change flags: **NO**.
+
+Model, prompt, or persona may be touched only if correct authoritative context and capabilities reached the model, **and** raw model output is the first executable divergence, **and** the owner explicitly approves.
 
 ---
 

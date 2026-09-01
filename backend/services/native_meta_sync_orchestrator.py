@@ -91,6 +91,7 @@ PERMANENT_BLOCK_CODES = frozenset({
     "not_eligible",
     "existing_catalog_identity",
     "ambiguous_sibling",
+    "ambiguous_variant_identity",
 })
 PRODUCT_BLOCK_CODES = frozenset({
     "preview_fatal",
@@ -1101,35 +1102,18 @@ def _raise_variant_discovery_failed(db: Any, parent: Any, exc: BaseException) ->
 
 
 def _collect_retailer_ids(db: Any, parent: Any, fallback: Optional[str]) -> list[str]:
-    ids: list[str] = []
-    try:
-        from models import ProductVariant  # noqa: PLC0415
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        AmbiguousVariantIdentity,
+        collect_push_retailer_ids,
+    )
 
-        rows = (
-            db.query(ProductVariant)
-            .filter(
-                ProductVariant.tenant_id == int(parent.tenant_id),
-                ProductVariant.product_id == int(parent.id),
-            )
-            .all()
-        )
-        if isinstance(rows, list):
-            for row in rows:
-                rid = str(getattr(row, "retailer_id", "") or "").strip()
-                if rid:
-                    ids.append(rid)
+    try:
+        return collect_push_retailer_ids(db, parent, fallback)
+    except AmbiguousVariantIdentity:
+        raise
     except (SQLAlchemyError, AttributeError, TypeError, ValueError) as exc:
         _raise_variant_discovery_failed(db, parent, exc)
-    fb = str(fallback or "").strip()
-    if fb and fb not in ids:
-        ids.append(fb)
-    seen: Set[str] = set()
-    out: list[str] = []
-    for rid in ids:
-        if rid not in seen:
-            seen.add(rid)
-            out.append(rid)
-    return out
+    return []
 
 
 def _mark_pending_verification(
@@ -1367,8 +1351,49 @@ def _attempt_acquired_body(
             "variant_discovery_failed",
             f"variant_discovery_failed: {exc}"[:500],
         )
+    except Exception as exc:
+        from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+            AmbiguousVariantIdentity,
+            ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        )
+
+        if isinstance(exc, AmbiguousVariantIdentity):
+            return fail(ERROR_AMBIGUOUS_VARIANT_IDENTITY, ERROR_AMBIGUOUS_VARIANT_IDENTITY)
+        raise
     if not retailer_ids:
         return fail("missing_retailer_id", "missing_retailer_id")
+
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        ensure_variant_membership_slot,
+        identity_for_retailer_id,
+        is_salla_source,
+        upsert_variant_membership,
+    )
+
+    salla_parent = is_salla_source(parent)
+    salla_catalog_id = ""
+    salla_variants: List[Any] = []
+    if salla_parent:
+        from models import ProductVariant  # noqa: PLC0415
+
+        salla_variants = (
+            db.query(ProductVariant)
+            .filter(
+                ProductVariant.tenant_id == int(tenant_id),
+                ProductVariant.product_id == int(parent.id),
+            )
+            .all()
+        )
+        if not isinstance(salla_variants, list):
+            salla_variants = []
+        try:
+            conn0 = _resolve_connection(db, tenant_id)
+            salla_catalog_id = str(getattr(conn0, "meta_catalog_id", "") or "").strip()
+        except MetaCatalogPushError as exc:
+            return fail(exc.code, exc.code)
+        if not salla_catalog_id:
+            return fail("catalog_id_missing", "meta_catalog_id is not set")
 
     last_push: Dict[str, Any] = {}
     last_lookup: Dict[str, Any] = {}
@@ -1382,6 +1407,36 @@ def _attempt_acquired_body(
     content_generation = _generation(_read_sync_meta(parent), "content_generation")
 
     for retailer_id in retailer_ids:
+        salla_ident = None
+        if salla_parent:
+            salla_ident = identity_for_retailer_id(parent, salla_variants, str(retailer_id))
+            if salla_ident is None:
+                return fail(
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    retailer_id=retailer_id,
+                )
+            if not lookup_only:
+                slot = ensure_variant_membership_slot(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=salla_catalog_id,
+                    identity=salla_ident,
+                )
+                if not slot.get("ok"):
+                    return fail(
+                        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                        str(slot.get("reason") or slot.get("error") or ERROR_AMBIGUOUS_VARIANT_IDENTITY),
+                        retailer_id=retailer_id,
+                    )
+                try:
+                    db.commit()
+                except SQLAlchemyError as exc:
+                    return fail(
+                        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                        f"membership_commit_failed:{type(exc).__name__}"[:200],
+                        retailer_id=retailer_id,
+                    )
         if lookup_only:
             push_result = {"ok": True, "skipped_push": True}
         else:
@@ -1427,7 +1482,7 @@ def _attempt_acquired_body(
             waba_status = get_waba_catalog_link_status(db, tenant_id)
             waba_linked = _waba_linked_flag(waba_status)
             already = str(getattr(parent, "meta_item_id", None) or "").strip()
-            if already and already != bound_id:
+            if (not salla_parent) and already and already != bound_id:
                 return fail(
                     "ambiguous_sibling",
                     "already_bound_other",
@@ -1437,6 +1492,21 @@ def _attempt_acquired_body(
             stamp_block: Dict[str, str] = {}
 
             def _stamp_identity_bound(row: Any) -> None:
+                if salla_parent:
+                    row.meta_item_id = None
+                    _mark_synced(row, meta_item_id="", waba_linked=waba_linked)
+                    _write_sync_meta(
+                        row,
+                        last_error_code=None,
+                        last_error_summary=None,
+                        identity_bound=True,
+                        skipped_create=True,
+                        identity_class="EXISTING_CANONICAL_SIBLING",
+                        bound_retailer_id=str(lookup_block.get("sibling_retailer_id") or ""),
+                        canonical_rule=str(lookup_block.get("canonical_rule") or ""),
+                    )
+                    _requeue_if_dirty(row)
+                    return
                 try:
                     claim_active_meta_item_binding(db, row, bound_id)
                 except DuplicateActiveMetaBinding as exc:
@@ -1508,6 +1578,36 @@ def _attempt_acquired_body(
                 "verification_failed: retailer_id not found after push",
                 retailer_id=retailer_id,
             )
+
+        if salla_parent:
+            if salla_ident is None:
+                return fail(
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    retailer_id=retailer_id,
+                )
+            bound = upsert_variant_membership(
+                db,
+                tenant_id=int(tenant_id),
+                catalog_id=salla_catalog_id or catalog_id,
+                identity=salla_ident,
+                meta_item_id=str(meta_item_id),
+            )
+            if not bound.get("ok"):
+                return fail(
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    str(bound.get("reason") or bound.get("error") or ERROR_AMBIGUOUS_VARIANT_IDENTITY),
+                    retailer_id=retailer_id,
+                )
+            db.flush()
+            try:
+                db.commit()
+            except SQLAlchemyError as exc:
+                return fail(
+                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    f"membership_commit_failed:{type(exc).__name__}"[:200],
+                    retailer_id=retailer_id,
+                )
         if verified_meta_item_id is None:
             verified_meta_item_id = str(meta_item_id)
 
@@ -1550,11 +1650,16 @@ def _attempt_acquired_body(
             return False
 
     def _stamp_verify_lag(row: Any) -> None:
-        if not _claim_meta(row, str(verified_meta_item_id or "")):
-            return
+        if salla_parent:
+            row.meta_item_id = None
+            claimed_id = ""
+        else:
+            claimed_id = str(verified_meta_item_id or "")
+            if not _claim_meta(row, claimed_id):
+                return
         _mark_pending_verification(
             row,
-            meta_item_id=str(verified_meta_item_id),
+            meta_item_id=claimed_id,
             comparison=last_comparison,
             waba_linked=waba_linked,
         )
@@ -1572,9 +1677,14 @@ def _attempt_acquired_body(
         if skipped_push and not _should_verify_without_push(_read_sync_meta(row)):
             _stamp_verify_lag(row)
             return
-        if not _claim_meta(row, str(verified_meta_item_id)):
-            return
-        _mark_synced(row, meta_item_id=str(verified_meta_item_id), waba_linked=waba_linked)
+        if salla_parent:
+            row.meta_item_id = None
+            claimed_id = ""
+        else:
+            claimed_id = str(verified_meta_item_id or "")
+            if not _claim_meta(row, claimed_id):
+                return
+        _mark_synced(row, meta_item_id=claimed_id, waba_linked=waba_linked)
         updates: Dict[str, Any] = {
             "lookup_verified_fields": list(LOOKUP_VERIFIED_FIELDS),
             "lookup_unverified_fields": list(LOOKUP_UNVERIFIED_FIELDS),

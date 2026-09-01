@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 _BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -224,3 +225,21 @@ def test_include_updates_flag():
     item = _item(action_needed="update")
     assert is_ready_create_in_stock_candidate(item) is False
     assert is_ready_create_in_stock_candidate(item, include_updates=True) is True
+
+
+def test_batch_salla_missing_svid_does_not_create():
+    items = [_item(retailer_id="nahla_v_501")]
+    parent = SimpleNamespace(id=26, tenant_id=9, source="salla", external_id="88001")
+    variant = SimpleNamespace(id=1, salla_variant_id="", retailer_id="nahla_v_501")
+    with patch(
+        "services.meta_catalog_readiness.build_meta_catalog_readiness_report",
+        return_value=_report(*items),
+    ), patch(
+        "services.meta_catalog_push.load_variant_for_push",
+        return_value=(parent, variant),
+    ), patch("services.meta_catalog_push.push_one_meta_catalog_item") as push_mock:
+        batch = push_ready_meta_catalog_batch(MagicMock(), 9, confirm=True)
+
+    push_mock.assert_not_called()
+    assert batch["summary"]["failed"] == 1
+    assert batch["results"][0]["error"] == "ambiguous_variant_identity"
