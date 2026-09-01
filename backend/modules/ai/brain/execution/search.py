@@ -91,7 +91,10 @@ class ProductSearchHandler:
             presentation = str(decision.args.get("selection_presentation_text") or "").strip()
             query = str(decision.args.get("query") or "")
             selected_product = None
-            if source == "selection_context_unique_fragment":
+            if source in {
+                "selection_context_unique_fragment",
+                "selection_context_unique_presented_identity",
+            }:
                 selected_product = resolve_confirmed_discovery_product(
                     entry_type="product_specific",
                     discovery_output_kind="products",
@@ -111,6 +114,8 @@ class ProductSearchHandler:
             }
             if selected_product is not None:
                 payload["product"] = selected_product
+            if decision.args.get("presentation_identity_grounded"):
+                payload["presentation_identity_grounded"] = True
             return ActionResult(success=True, data=payload)
 
         from ..commerce.product_breadth_policy import (  # noqa: PLC0415
