@@ -339,6 +339,9 @@ export interface WhatsappCatalogSyncStatus {
   phase: WhatsappCatalogSyncPhase
   counts: WhatsappCatalogSyncCounts
   last_success_at: string | null
+  queue_count?: number
+  meta_available_count?: number
+  catalog_linked?: boolean
   failures: WhatsappCatalogSyncFailure[]
   auto_sync_enabled?: boolean
   auto_sync_flag?: string

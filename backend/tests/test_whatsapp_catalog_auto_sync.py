@@ -124,6 +124,43 @@ def test_channel_publish_allows_generic_native_and_rejects_meta_import():
     assert is_whatsapp_channel_publish_eligible(meta_row) is False
 
 
+@patch("services.whatsapp_catalog_sync.get_entitlements", _entitled)
+def test_linked_meta_readonly_catalog_is_available_with_empty_queue():
+    """Imported Meta catalog: linked + available items + no drain queue.
+
+    Must not look like a failed WhatsApp publish. Generic merchant, not a
+    production tenant.
+    """
+    rows = [
+        _product(
+            id=140 + i,
+            tenant_id=9,
+            title="عطر ورد 100ml" if i % 2 else "قميص قطني أزرق",
+            source="meta",
+            ownership_mode=OWNERSHIP_META_READONLY,
+            sync_status=None,
+            last_synced_at=None,
+            meta_item_id=f"meta-item-{i}",
+        )
+        for i in range(28)
+    ]
+    db = _db_with_conn(_conn())
+    with patch(
+        "services.whatsapp_catalog_sync.iter_tenant_products",
+        return_value=rows,
+    ):
+        status = build_whatsapp_catalog_sync_status(db, 9)
+
+    assert status["catalog_linked"] is True
+    assert status["meta_available_count"] == 28
+    assert status["queue_count"] == 0
+    assert status["counts"]["pending"] == 0
+    assert status["counts"]["eligible"] == 0
+    assert status["counts"]["skipped_ineligible"] == 28
+    assert status["last_success_at"] is None
+    assert status["phase"] == "idle"
+
+
 def test_out_of_stock_remains_channel_publish_eligible():
     row = _product(in_stock=False, stock_quantity=0, title="حذاء رياضي أبيض")
     assert is_whatsapp_channel_publish_eligible(row) is True
