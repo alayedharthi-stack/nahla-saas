@@ -88,6 +88,14 @@ _BLOCKERS_AR = {
         "معرّف كتالوج Meta غير مربوط.",
         "أدخل Meta Catalog ID من Commerce Manager ثم احفظ.",
     ),
+    "catalog_business_mismatch": (
+        "كتالوج Meta المحفوظ لهذا المتجر تابع لمحفظة أعمال مختلفة عن حساب واتساب.",
+        "هذا إصلاح ملكية لمرة واحدة: انقل الكتالوج إلى محفظة واتساب نفسها أو اربط كتالوج تلك المحفظة. لن تُنشئ نحلة كتالوجًا بديلًا لتجاوز الاختلاف.",
+    ),
+    "waba_catalog_not_linked": (
+        "الكتالوج غير مربوط بحساب واتساب التجاري في Meta.",
+        "بعد ربط واتساب تتم المحاولة تلقائيًا. إذا رُفض الربط لصلاحيات ناقصة، اطلب صلاحية إدارة الكتالوج من مدير محفظة Meta.",
+    ),
     "access_token_missing": (
         "صلاحيات Meta غير مكتملة أو منتهية.",
         "أعد ربط واتساب لتجديد صلاحيات الكتالوج.",
@@ -167,6 +175,35 @@ def evaluate_whatsapp_catalog_sync_readiness(db: Any, tenant_id: int) -> Dict[st
             blocked = _blocker("access_token_missing")
             blocked["connection_fp"] = conn_fp
             return blocked
+
+    extra = getattr(conn, "extra_metadata", None) or {}
+    extra = extra if isinstance(extra, dict) else {}
+    try:
+        from services.meta_catalog_onboarding import auto_catalog_onboarding_enabled  # noqa: PLC0415
+    except ImportError:
+        auto_on = False
+    else:
+        auto_on = auto_catalog_onboarding_enabled()
+    if auto_on:
+        ensure_meta = extra.get("meta_catalog_ensure") if isinstance(extra.get("meta_catalog_ensure"), dict) else {}
+        bind_meta = extra.get("meta_catalog_bind") if isinstance(extra.get("meta_catalog_bind"), dict) else {}
+        persist_error = str(ensure_meta.get("error") or bind_meta.get("error") or "").strip()
+        if persist_error == "catalog_business_mismatch":
+            blocked = _blocker("catalog_business_mismatch")
+            blocked["connection_fp"] = conn_fp
+            return blocked
+        linked_flag = extra.get("waba_catalog_linked")
+        if linked_flag is False or persist_error in (
+            "waba_catalog_not_linked",
+            "catalog_manage_permission_required",
+            "waba_catalog_link_failed",
+            "ambiguous_waba_catalogs",
+            "ambiguous_owned_catalogs",
+        ):
+            blocked = _blocker("waba_catalog_not_linked")
+            blocked["connection_fp"] = conn_fp
+            return blocked
+
     return {
         "ready": True,
         "blocker_code": None,
