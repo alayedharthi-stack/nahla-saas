@@ -438,10 +438,10 @@ def apply_turn_catalog_referent_binding(
 ) -> List[Dict[str, Any]]:
     """Bind structured identity first; title matching is compatibility fallback only.
 
-    ``current_turn_customer_referent`` is True when ``structured_product`` is the
-    catalog identity resolved for this customer turn (executor product / unique
-    hit). Pass False for assistant ``recommended_product`` so Family 2 checkout
-    selection is not stolen.
+    ``current_turn_customer_referent`` is True when ``structured_product`` is an
+    explicit customer-owned catalog identity for this turn. Pass False for
+    assistant recommendations, unique ``products`` lists, replay, narrow, and
+    recommend_addon so Family 2 checkout selection is not stolen.
     """
     try:
         from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
@@ -487,51 +487,49 @@ def _identity_row(container: Dict[str, Any], key: str) -> Optional[Dict[str, Any
     return None
 
 
-def _unique_product_list_row(container: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    try:
-        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
-            has_structured_catalog_identity,
-        )
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn identity probe must not block compose stamp
-        return None
-    products = container.get("products")
-    if (
-        isinstance(products, list)
-        and len(products) == 1
-        and isinstance(products[0], dict)
-        and has_structured_catalog_identity(products[0])
-    ):
-        return dict(products[0])
-    return None
+_NON_CUSTOMER_OWNED_RESULT_TYPES = frozenset({
+    "recommend_addon",
+    "narrow",
+})
+_NON_CUSTOMER_OWNED_ACTIONS = frozenset({
+    "recommend_addon",
+    "narrow",
+})
 
 
 def current_turn_executor_catalog_referent(
     decision: Any = None,
     result: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """Catalog identity from executor/result for this customer turn.
+    """Explicit customer-owned catalog identity for this turn.
 
-    Proven signals: ``product``, ``focus_product``, or a unique ``products``
-    list. Assistant ``recommended_product`` and unique ``replay_candidates``
-    are not a customer product goal.
+    Proven signals: executor/result ``product`` or ``focus_product``.
+
+    Not a customer product goal:
+    unique ``products`` lists, ``recommended_product``, ``replay_candidates``,
+    ``recommend_addon``, or ``narrow``.
     """
+    action = str(getattr(decision, "action", "") or "").strip().lower()
+    if action in _NON_CUSTOMER_OWNED_ACTIONS:
+        return None
     args = dict(getattr(decision, "args", None) or {})
     data = dict(getattr(result, "data", None) or {})
+    result_type = str(data.get("type") or "").strip().lower()
+    if result_type in _NON_CUSTOMER_OWNED_RESULT_TYPES:
+        return None
     for container in (data, args):
         for key in ("product", "focus_product"):
             found = _identity_row(container, key)
             if found is not None:
                 return found
-        found = _unique_product_list_row(container)
-        if found is not None:
-            return found
     return None
 
 
 def structured_product_from_turn(decision: Any = None, result: Any = None) -> Optional[Dict[str, Any]]:
     """Identity already known on the decision/result — not inferred from reply text.
 
-    Executor ``product`` / unique catalog hit outranks ``recommended_product``.
+    Explicit executor ``product`` / ``focus_product`` outranks ``recommended_product``.
+    Unique ``products`` lists are presentation data, not a customer goal.
     """
     found = current_turn_executor_catalog_referent(decision, result)
     if found is not None:

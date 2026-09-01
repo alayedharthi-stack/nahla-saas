@@ -394,9 +394,85 @@ class TestAgent2D1ExecutorProductOutranksRecommendedProduct:
         assert structured_product_from_turn(decision, result)["id"] == 802
         assert current_turn_executor_catalog_referent(decision, result) is None
 
-    def test_unique_products_list_is_executor_goal_replay_is_not(self) -> None:
+    def test_unique_products_list_is_not_customer_provenance(self) -> None:
         decision = type("D", (), {"args": {}})()
         result_products = type("R", (), {"data": {"products": [dict(PRODUCT_B)]}})()
         result_replay = type("R", (), {"data": {"replay_candidates": [dict(PRODUCT_B)]}})()
-        assert current_turn_executor_catalog_referent(decision, result_products)["id"] == 802
+        assert current_turn_executor_catalog_referent(decision, result_products) is None
         assert current_turn_executor_catalog_referent(decision, result_replay) is None
+
+
+class TestAgent2D1RecommendAddonAndNarrowCannotStealCheckout:
+    def test_recommend_addon_unique_product_keeps_live_checkout(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        decision = type("D", (), {"action": "recommend_addon", "args": {}})()
+        result = type(
+            "R",
+            (),
+            {
+                "data": {
+                    "type": "recommend_addon",
+                    "products": [dict(PRODUCT_B)],
+                    "recommended_products": [dict(PRODUCT_B)],
+                }
+            },
+        )()
+        ref = current_turn_executor_catalog_referent(decision, result)
+        assert ref is None
+        result_with_product_key = type(
+            "R",
+            (),
+            {
+                "data": {
+                    "type": "recommend_addon",
+                    "product": dict(PRODUCT_B),
+                    "products": [dict(PRODUCT_B)],
+                }
+            },
+        )()
+        assert current_turn_executor_catalog_referent(decision, result_with_product_key) is None
+        assert should_keep_live_order_focus_after_product_list(
+            state.current_product_focus,
+            [dict(PRODUCT_B)],
+            has_live_order=True,
+            state=state,
+            current_turn_customer_referent=bool(ref),
+        ) is True
+        apply_turn_catalog_referent_binding(
+            state=state,
+            reply="",
+            catalog_candidates=[dict(PRODUCT_B)],
+            turn=9,
+            structured_product=dict(PRODUCT_B),
+            current_turn_customer_referent=bool(ref),
+        )
+        assert product_focus_identity(state.current_product_focus) == "sku-white-sneaker"
+        assert canonical_product_referent(state, checkout_active=True)["id"] == 801
+
+    def test_narrow_unique_product_keeps_live_checkout(self) -> None:
+        state = _checkout_selected_state(PRODUCT_A)
+        decision = type("D", (), {"action": "narrow", "args": {}})()
+        result = type(
+            "R",
+            (),
+            {"data": {"type": "narrow", "products": [dict(PRODUCT_B)]}},
+        )()
+        ref = current_turn_executor_catalog_referent(decision, result)
+        assert ref is None
+        assert should_keep_live_order_focus_after_product_list(
+            state.current_product_focus,
+            [dict(PRODUCT_B)],
+            has_live_order=True,
+            state=state,
+            current_turn_customer_referent=bool(ref),
+        ) is True
+        apply_turn_catalog_referent_binding(
+            state=state,
+            reply="",
+            catalog_candidates=[dict(PRODUCT_B)],
+            turn=9,
+            structured_product=dict(PRODUCT_B),
+            current_turn_customer_referent=bool(ref),
+        )
+        assert product_focus_identity(state.current_product_focus) == "sku-white-sneaker"
+        assert canonical_product_referent(state, checkout_active=True)["id"] == 801
