@@ -70,11 +70,15 @@ def _ensure_tables(engine: Engine) -> None:
     Product.__table__.create(bind=engine, checkfirst=True)
     ProductVariant.__table__.create(bind=engine, checkfirst=True)
     MetaCatalogMembership.__table__.create(bind=engine, checkfirst=True)
+    col_names = set(MetaCatalogMembership.__table__.columns.keys())
     with engine.begin() as conn:
-        if "salla_variant_id" not in {
-            col["name"] for col in MetaCatalogMembership.__table__.columns
-        }:
-            pass
+        if "salla_variant_id" not in col_names:
+            conn.execute(
+                text(
+                    "ALTER TABLE meta_catalog_memberships "
+                    "ADD COLUMN IF NOT EXISTS salla_variant_id VARCHAR(64)"
+                )
+            )
         conn.execute(text(DROP_UQ_MEMBERSHIP_VARIANT_KEY_SQL))
         conn.execute(text(DROP_UQ_MEMBERSHIP_META_ITEM_SQL))
         conn.execute(text(CREATE_UQ_MEMBERSHIP_VARIANT_KEY_SQL))
