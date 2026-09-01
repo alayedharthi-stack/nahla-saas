@@ -5079,52 +5079,6 @@ class MerchantBrain:
             )
 
         try:
-            from modules.ai.brain.postprocess.customer_coupon_request_truth_guard import (  # noqa: PLC0415
-                apply_customer_coupon_request_truth_guard,
-            )
-
-            _ccr_facts = dict(
-                (getattr(getattr(ctx, "reply_state", None), "known_facts", None) or {}).get(
-                    "customer_request_coupon_facts",
-                )
-                or {}
-            )
-            if not _ccr_facts:
-                _ccr_facts = dict(
-                    (getattr(result, "data", None) or {}).get("customer_request_coupon_facts")
-                    or {}
-                )
-            if _ccr_facts:
-                _ccr_guard = apply_customer_coupon_request_truth_guard(
-                    reply or "",
-                    customer_request_coupon_facts=_ccr_facts,
-                )
-                if _ccr_guard.changed:
-                    reply = _ccr_guard.reply
-                    _guard_replaced["customer_coupon_request_truth_guard"] = True
-                    result.data["final_text_transformed"] = True
-                    _ccr_reasons = [
-                        str(r)
-                        for r in (result.data.get("final_transform_reasons") or [])
-                        if r
-                    ]
-                    if "customer_coupon_request_truth_guard" not in _ccr_reasons:
-                        _ccr_reasons.append("customer_coupon_request_truth_guard")
-                    result.data["final_transform_reasons"] = _ccr_reasons
-                    result.data["customer_coupon_false_denial_blocked"] = (
-                        _ccr_guard.false_denial_blocked
-                    )
-                    result.data["customer_coupon_fabricated_code_blocked"] = (
-                        _ccr_guard.fabricated_code_blocked
-                    )
-        except Exception as _ccr_tg_exc:  # noqa: BLE001  # noqa: silent-ok — coupon truth guard must not block reply
-            logger.warning(
-                "[CUSTOMER_COUPON_REQUEST_TRUTH_GUARD] pipeline hook failed tenant=%s err=%s",
-                tenant_id,
-                _ccr_tg_exc,
-            )
-
-        try:
             from modules.ai.brain.postprocess.staff_escalation_truth_guard import (  # noqa: PLC0415
                 apply_staff_escalation_truth_guard,
             )

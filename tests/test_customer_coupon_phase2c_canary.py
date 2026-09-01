@@ -16,6 +16,7 @@ for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
         sys.path.insert(0, str(p))
 
 from modules.ai.brain.commerce.customer_coupon_request_owner import (  # noqa: E402
+    _ELIGIBLE_FALLBACK_ACTIONS,
     attach_customer_request_coupon_facts_to_reply_state,
     maybe_own_customer_coupon_request_turn,
     project_customer_request_coupon_facts,
@@ -23,10 +24,17 @@ from modules.ai.brain.commerce.customer_coupon_request_owner import (  # noqa: E
 )
 from modules.ai.brain.compose.prompt_state_serializer import _slim_known_facts  # noqa: E402
 from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_CATALOG_NAVIGATE,
     ACTION_CUSTOMER_COUPON_REQUEST,
+    ACTION_FAQ_REPLY,
     ACTION_HANDOFF,
     ACTION_LLM_REPLY,
+    ACTION_PAYMENT_CONTINUATION_REPLY,
+    ACTION_PAYMENT_TRANSFER_PROMISE,
     ACTION_PROPOSE_DRAFT_ORDER,
+    ACTION_SEARCH_PRODUCTS,
+    ACTION_SEND_PAYMENT_LINK,
+    ACTION_SOCIAL_REPLY,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
 )
@@ -35,9 +43,6 @@ from modules.ai.brain.execution.customer_coupon_request import (  # noqa: E402
     CustomerCouponRequestHandler,
 )
 from modules.ai.brain.execution.executor import DefaultActionExecutor  # noqa: E402
-from modules.ai.brain.postprocess.customer_coupon_request_truth_guard import (  # noqa: E402
-    apply_customer_coupon_request_truth_guard,
-)
 from modules.ai.brain.types import (  # noqa: E402
     INTENT_GENERAL,
     INTENT_HESITATION,
@@ -81,6 +86,16 @@ POSITIVE_CLASSIFICATION_EXAMPLES = (
     "أعطوني كود تخفيض إذا أستاهل",
     "أبغى عرض شخصي ككوبون",
     "وش الكود المتاح لي؟",
+    "عندكم كوبون لي كعميل؟",
+    "أبي كود خصم لطلبي الجاي",
+    "هل أستحق كوبون؟",
+    "send me a coupon if I qualify",
+    "أرسل لي كوبون لو فيه",
+    "ممكن قسيمة خصم؟",
+    "I want my customer coupon",
+    "فيه كود لي ولا لا؟",
+    "أبغى كوبون الخصم الخاص فيني",
+    "do you have a coupon code for me",
 )
 NEGATIVE_CLASSIFICATION_EXAMPLES = (
     "كم سعر الحذاء الرياضي الأبيض؟",
@@ -91,6 +106,14 @@ NEGATIVE_CLASSIFICATION_EXAMPLES = (
     "أبي أرجع القطعة",
     "أبي أشوف المنتجات",
     "خصم الكمية في العطر ورد",
+    "غالي مرة",
+    "الحذاء عليه تخفيض الحين؟",
+    "متردد أطلب ولا لا",
+    "حساب التحويل البنكي",
+    "وش حالة الطلب",
+    "وين عنوان الفرع",
+    "استخدمت خصم قبل كذا",
+    "what's the price of the blue cotton shirt",
 )
 
 RUNTIME_SCAN_PATHS = (
@@ -220,6 +243,7 @@ def test_canary_probe_failure_fail_closed(monkeypatch) -> None:
 
 def test_canary_positive_capability_owns_before_llm(monkeypatch) -> None:
     _enable_canary(monkeypatch, 42)
+    assert _ELIGIBLE_FALLBACK_ACTIONS == frozenset({ACTION_LLM_REPLY})
     out = maybe_own_customer_coupon_request_turn(
         Decision(action=ACTION_LLM_REPLY, args={}),
         tenant_id=42,
@@ -229,15 +253,28 @@ def test_canary_positive_capability_owns_before_llm(monkeypatch) -> None:
     assert out.args["tenant_canary_enabled"] is True
 
 
-def test_protected_actions_not_stolen(monkeypatch) -> None:
+def test_non_fallback_actions_not_stolen(monkeypatch) -> None:
     _enable_canary(monkeypatch, 42)
-    for action in (ACTION_HANDOFF, ACTION_TRACK_ORDER, ACTION_PROPOSE_DRAFT_ORDER):
+    protected = (
+        ACTION_HANDOFF,
+        ACTION_TRACK_ORDER,
+        ACTION_PROPOSE_DRAFT_ORDER,
+        ACTION_SEND_PAYMENT_LINK,
+        ACTION_PAYMENT_CONTINUATION_REPLY,
+        ACTION_PAYMENT_TRANSFER_PROMISE,
+        ACTION_SEARCH_PRODUCTS,
+        ACTION_FAQ_REPLY,
+        ACTION_SOCIAL_REPLY,
+        ACTION_SUGGEST_COUPON,
+        ACTION_CATALOG_NAVIGATE,
+    )
+    for action in protected:
         out = maybe_own_customer_coupon_request_turn(
             Decision(action=action, args={}),
             tenant_id=42,
             coupon_capability_telemetry=_telemetry(capability="customer_coupon_request"),
         )
-        assert out.action == action
+        assert out.action == action, action
 
 
 def test_human_priority_does_not_issue(monkeypatch) -> None:
@@ -316,9 +353,10 @@ def test_issued_facts_reach_compose_slim(monkeypatch) -> None:
     state = BrainReplyState()
     attach_customer_request_coupon_facts_to_reply_state(state, facts)
     slim = _slim_known_facts(state.known_facts)
+    assert slim["customer_request_coupon_facts"]["issued"] is True
     assert slim["customer_request_coupon_facts"]["coupon_code"] == "NHBRZ"
     assert slim["answer_contract"]["status"] == "KNOWN_VALUE"
-    assert "NHBRZ" in slim["answer_contract"]["claimable_values"]
+    assert slim["answer_contract"]["claimable_values"] == ["NHBRZ"]
 
 
 def test_no_coupon_truthful_reason_reaches_compose() -> None:
@@ -345,6 +383,7 @@ def test_no_coupon_truthful_reason_reaches_compose() -> None:
     state = BrainReplyState()
     attach_customer_request_coupon_facts_to_reply_state(state, facts)
     slim = _slim_known_facts(state.known_facts)
+    assert slim["customer_request_coupon_facts"]["issued"] is False
     assert slim["customer_request_coupon_facts"]["reason"] == REASON_NO_LEVEL
     assert slim["answer_contract"]["status"] == "KNOWN_EMPTY"
     assert slim["answer_contract"]["claimable_values"] == []
@@ -510,25 +549,42 @@ def test_zero_orders_truthful_when_first_purchase_disabled(monkeypatch) -> None:
     assert facts["countable_orders"] == 0
 
 
-def test_false_denial_after_issued_blocked() -> None:
-    facts = {"issued": True, "coupon_code": "NHBRZ", "reason": "issued"}
-    guard = apply_customer_coupon_request_truth_guard(
-        "ما عندنا كوبون حالياً. NHBRZ",
-        customer_request_coupon_facts=facts,
+def test_no_phrase_or_regex_model_output_repair() -> None:
+    runtime_files = (
+        REPO_ROOT / "backend/modules/ai/brain/commerce/customer_coupon_request_owner.py",
+        REPO_ROOT / "backend/modules/ai/brain/execution/customer_coupon_request.py",
+        REPO_ROOT / "backend/services/customer_request_coupon_canary.py",
+        REPO_ROOT / "backend/modules/ai/brain/pipeline.py",
     )
-    assert guard.false_denial_blocked is True
-    assert "ما عندنا كوبون" not in guard.reply
-    assert "NHBRZ" in guard.reply.upper() or "nhbrz" in guard.reply.lower()
+    forbidden = (
+        "customer_coupon_request_truth_guard",
+        "apply_customer_coupon_request_truth_guard",
+        "_FALSE_DENIAL_MARKERS",
+        "ما عندنا كوبون",
+        "ما عندنا خصم",
+        "لا يوجد كوبون",
+        "هذا كوبونك",
+        r"NH[A-Z0-9]{3}",
+        "false_denial_blocked",
+        "fabricated_code_blocked",
+    )
+    for path in runtime_files:
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            assert token not in text, f"{path.name} contains {token}"
+    guard_path = (
+        REPO_ROOT
+        / "backend/modules/ai/brain/postprocess/customer_coupon_request_truth_guard.py"
+    )
+    assert not guard_path.exists()
 
 
-def test_fabricated_coupon_blocked_when_not_issued() -> None:
-    facts = {"issued": False, "reason": REASON_NO_LEVEL}
-    guard = apply_customer_coupon_request_truth_guard(
-        "تفضلي الكود NHZZZ",
-        customer_request_coupon_facts=facts,
-    )
-    assert guard.fabricated_code_blocked is True
-    assert "NHZZZ" not in guard.reply.upper()
+def test_positive_examples_are_test_data_only() -> None:
+    runtime = "\n".join(path.read_text(encoding="utf-8") for path in RUNTIME_SCAN_PATHS)
+    for utterance in POSITIVE_CLASSIFICATION_EXAMPLES + NEGATIVE_CLASSIFICATION_EXAMPLES:
+        assert utterance not in runtime
+    assert len(POSITIVE_CLASSIFICATION_EXAMPLES) >= 16
+    assert len(NEGATIVE_CLASSIFICATION_EXAMPLES) >= 16
 
 
 def test_no_issuance_on_negative_classification_cases(monkeypatch) -> None:
@@ -540,18 +596,6 @@ def test_no_issuance_on_negative_classification_cases(monkeypatch) -> None:
             coupon_capability_telemetry=_telemetry(capability="none", parse_ok=True),
         )
         assert out.action == ACTION_LLM_REPLY, utterance
-
-
-def test_positive_examples_are_test_data_only() -> None:
-    runtime = "\n".join(path.read_text(encoding="utf-8") for path in RUNTIME_SCAN_PATHS)
-    for utterance in POSITIVE_CLASSIFICATION_EXAMPLES + NEGATIVE_CLASSIFICATION_EXAMPLES:
-        assert utterance not in runtime
-    owner = RUNTIME_SCAN_PATHS[3].read_text(encoding="utf-8")
-    handler = RUNTIME_SCAN_PATHS[4].read_text(encoding="utf-8")
-    assert "هذا كوبونك" not in owner
-    assert "ما عندنا كوبون" not in owner
-    assert "هذا كوبونك" not in handler
-    assert "ما عندنا كوبون" not in handler
 
 
 def test_hesitation_suggest_coupon_unchanged() -> None:
@@ -604,7 +648,6 @@ def test_product_card_owners_not_imported_by_2c_runtime() -> None:
     files = (
         REPO_ROOT / "backend/modules/ai/brain/commerce/customer_coupon_request_owner.py",
         REPO_ROOT / "backend/modules/ai/brain/execution/customer_coupon_request.py",
-        REPO_ROOT / "backend/modules/ai/brain/postprocess/customer_coupon_request_truth_guard.py",
         REPO_ROOT / "backend/services/customer_request_coupon_canary.py",
     )
     for path in files:

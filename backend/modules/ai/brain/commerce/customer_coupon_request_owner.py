@@ -10,12 +10,7 @@ from typing import Any, Dict, Optional
 
 from modules.ai.brain.decision.actions import (
     ACTION_CUSTOMER_COUPON_REQUEST,
-    ACTION_HANDOFF,
-    ACTION_PAYMENT_CONTINUATION_REPLY,
-    ACTION_PAYMENT_TRANSFER_PROMISE,
-    ACTION_PROPOSE_DRAFT_ORDER,
-    ACTION_SEND_PAYMENT_LINK,
-    ACTION_TRACK_ORDER,
+    ACTION_LLM_REPLY,
 )
 from modules.ai.brain.commerce.fact_answer import STATUS_KNOWN_EMPTY, STATUS_KNOWN_VALUE
 from modules.ai.brain.types import Decision
@@ -31,16 +26,8 @@ logger = logging.getLogger("nahla.brain.customer_coupon_request_owner")
 
 CAPABILITY_CUSTOMER_COUPON_REQUEST = "customer_coupon_request"
 
-_PROTECTED_ACTIONS = frozenset(
-    {
-        ACTION_HANDOFF,
-        ACTION_PROPOSE_DRAFT_ORDER,
-        ACTION_SEND_PAYMENT_LINK,
-        ACTION_TRACK_ORDER,
-        ACTION_PAYMENT_CONTINUATION_REPLY,
-        ACTION_PAYMENT_TRANSFER_PROMISE,
-    }
-)
+# Coupon capability may replace proven generic LLM fallback only.
+_ELIGIBLE_FALLBACK_ACTIONS = frozenset({ACTION_LLM_REPLY})
 
 
 def global_live_routing_enabled() -> bool:
@@ -69,7 +56,7 @@ def should_own_customer_coupon_request_turn(
         return False
     if str(capability or "") != CAPABILITY_CUSTOMER_COUPON_REQUEST:
         return False
-    if str(current_action or "") in _PROTECTED_ACTIONS:
+    if str(current_action or "") not in _ELIGIBLE_FALLBACK_ACTIONS:
         return False
     return True
 
@@ -173,6 +160,7 @@ def attach_customer_request_coupon_facts_to_reply_state(
 
 __all__ = [
     "CAPABILITY_CUSTOMER_COUPON_REQUEST",
+    "_ELIGIBLE_FALLBACK_ACTIONS",
     "attach_customer_request_coupon_facts_to_reply_state",
     "coupon_answer_contract_from_facts",
     "global_live_issuance_enabled",
