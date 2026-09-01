@@ -17,8 +17,6 @@ if _BACKEND not in sys.path:
 
 from core.ai_disabled_gate import (  # noqa: E402
     REASON_AI_PAUSED,
-    REASON_HUMAN_OWNERSHIP,
-    REASON_HUMAN_SUPERVISION,
     REASON_STORE_AI_TEST_MODE_NOT_ALLOWED,
     disabled_reason_for_conversation,
     is_ai_allowed_by_store_mode,
@@ -150,13 +148,13 @@ class TestTestModeParityAndSilence:
         assert decision.disabled is True
         assert decision.reason == REASON_STORE_AI_TEST_MODE_NOT_ALLOWED
 
-    def test_genuine_takeover_remains_suppressed(self) -> None:
+    def test_genuine_takeover_residue_does_not_disable(self) -> None:
         convo = _convo(
             status="human",
             paused_by_human=True,
             taken_over_at=datetime.now(timezone.utc),
         )
-        assert disabled_reason_for_conversation(convo) == REASON_HUMAN_SUPERVISION
+        assert disabled_reason_for_conversation(convo) == ""
 
     def test_suppressed_inbound_records_explicit_reason(self) -> None:
         db = MagicMock()
@@ -797,7 +795,7 @@ class TestSuiteAGateSuppression:
         assert decision.disabled is True
         assert decision.reason == REASON_AI_PAUSED
 
-    def test_ownership_handoff_active_disables(self) -> None:
+    def test_ownership_handoff_active_does_not_disable(self) -> None:
         convo = _convo()
         db = _mock_db_no_handoff_session()
         with patch(
@@ -813,20 +811,19 @@ class TestSuiteAGateSuppression:
             decision = is_ai_disabled_for_conversation(
                 db, tenant_id=1, customer_phone="966500000001",
             )
-        assert decision.disabled is True
-        assert decision.reason == REASON_HUMAN_OWNERSHIP
+        assert decision.disabled is False
 
-    def test_paused_by_human_disables(self) -> None:
+    def test_paused_by_human_does_not_disable(self) -> None:
         convo = _convo(paused_by_human=True)
-        assert disabled_reason_for_conversation(convo) == REASON_HUMAN_SUPERVISION
+        assert disabled_reason_for_conversation(convo) == ""
 
     def test_status_human_alone_does_not_disable(self) -> None:
         convo = _convo(status="human")
         assert disabled_reason_for_conversation(convo) == ""
 
-    def test_taken_over_at_disables(self) -> None:
+    def test_taken_over_at_does_not_disable(self) -> None:
         convo = _convo(taken_over_at=datetime.now(timezone.utc))
-        assert disabled_reason_for_conversation(convo) == REASON_HUMAN_SUPERVISION
+        assert disabled_reason_for_conversation(convo) == ""
 
     def test_advisory_handoff_flags_alone_do_not_disable(self) -> None:
         convo = _convo(is_human_handoff=True, handoff_active=True)
@@ -846,11 +843,11 @@ class TestSuiteAGateSuppression:
         )
         assert _handoff_session_disables_ai(leftover) is False
 
-    def test_staff_takeover_session_still_disables(self) -> None:
+    def test_staff_takeover_session_does_not_disable(self) -> None:
         from core.ai_disabled_gate import _handoff_session_disables_ai
 
         row = SimpleNamespace(status="active", handoff_reason="staff_takeover")
-        assert _handoff_session_disables_ai(row) is True
+        assert _handoff_session_disables_ai(row) is False
 
 
 class TestSuiteDKnowledgeRetrieval:

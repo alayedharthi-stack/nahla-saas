@@ -85,11 +85,10 @@ def test_ai_paused_human_handoff_reason_alone_is_not_human():
 
 
 def test_takeover_button_state_sets_all_columns():
-    # Real takeover row as written by ``POST /conversations/handoff``:
-    # AI paused + needs_human + handoff_active + taken_over_at all
-    # populated together. Must classify as human.
+    # Queue/audit row as written by ``POST /conversations/handoff``:
+    # human flags without mutating ``ai_paused``. Must classify as human.
     c = _StubConvo(
-        ai_paused=True, ai_paused_reason="manual_takeover",
+        ai_paused=False, ai_paused_reason=None,
         needs_human=True, handoff_active=True,
         taken_over_at=object(), taken_over_by="user:42",
         status="human", is_human_handoff=True,

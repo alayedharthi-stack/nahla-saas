@@ -4,16 +4,14 @@ core/automation_send_guard
 Platform-wide outbound automation guard.
 
 Automated WhatsApp replies are blocked when AI is explicitly paused,
-store AI is disabled, the number is blocked, or ownership is genuinely
-HUMAN_ACTIVE. Customer-requested handoff (HUMAN_REQUESTED / advisory
-queue flags) must not silence the wire.
+store AI is disabled, the number is blocked, or another platform/safety
+gate forbids send. Human/staff activity and ownership labels
+(HUMAN_ACTIVE / HUMAN_REQUESTED) must not silence the wire.
 
 Doctrine (AGENTS.md): operational silence must be deterministic — if the
-merchant paused AI or took over, the platform must not claim otherwise by
-sending canned fallbacks, brain replies, or media handlers.
-Customer escalation ≠ AI off. Advisory queue ≠ automation kill-switch.
-
-Ownership is derived only from ``core.ownership_state``.
+merchant explicitly paused AI, the platform must not send. Customer
+escalation ≠ AI off. Manual staff reply ≠ AI off. Advisory queue ≠
+automation kill-switch.
 """
 from __future__ import annotations
 
@@ -25,11 +23,6 @@ from unittest.mock import MagicMock, Mock
 from sqlalchemy.orm import Session
 
 from core.ai_pause_guard import is_internal_or_blocked
-from core.ownership_state import (
-    OWNERSHIP_HUMAN_ACTIVE,
-    conversation_handoff_active,
-    resolve_ownership_state,
-)
 from models import Conversation, Customer
 
 logger = logging.getLogger("nahla-backend")
@@ -133,24 +126,12 @@ def _explicit_ai_disabled_reason(convo: Conversation) -> str:
     return ""
 
 
-def _human_takeover_reason(db: Session, convo: Conversation) -> str:
-    """Block only OWNERSHIP_HUMAN_ACTIVE from the shared ownership contract.
+def _human_takeover_reason(_db: Session, _convo: Conversation) -> str:
+    """Human/staff activity is not an outbound automation blocker.
 
-    Advisory flags (needs_human / is_human_handoff / handoff_active /
-    status=human) resolve to HUMAN_REQUESTED and must not block send.
+    Conversation-level off is ``ai_paused`` (checked separately).
+    HUMAN_REQUESTED / HUMAN_ACTIVE / implicit residue must not block.
     """
-    try:
-        result = resolve_ownership_state(db, convo)
-    except Exception:
-        logger.exception("[AUTOMATION_SEND_GUARD] ownership resolve failed")
-        try:
-            if conversation_handoff_active(db, convo):
-                return REASON_HUMAN_TAKEOVER
-        except Exception:
-            logger.exception("[AUTOMATION_SEND_GUARD] handoff_active check failed")
-        return ""
-    if result.state == OWNERSHIP_HUMAN_ACTIVE:
-        return REASON_HUMAN_TAKEOVER
     return ""
 
 

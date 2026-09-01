@@ -6,16 +6,15 @@ reads existing Conversation flags + MessageEvent history.
 
 Doctrine:
     Customer escalation ≠ AI off.
-    Implicit staff takeover (manual reply) is TTL-bound.
-    Explicit takeover (dashboard /handoff, loop guard) persists until
-    return-to-ai.
+    Manual staff activity ≠ AI off.
+    Implicit takeover residue is audit/queue history, not AI execution.
+    Staff-idle TTL must not turn AI on or off.
+    Conversation-level AI off is explicit ``ai_paused`` only.
 """
 from __future__ import annotations
 
-import logging
-import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -23,14 +22,9 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from core.ai_pause_guard import (
     REASON_BOT_LOOP,
-    REASON_HUMAN_HANDOFF,
-    REASON_MANUAL_TAKEOVER,
-    REASON_SUPPORT_ESCALATION,
     HUMAN_PRESENCE_REASONS,
 )
 from models import Conversation, MessageEvent
-
-logger = logging.getLogger("nahla-backend")
 
 # ── Ownership states (derived, not persisted) ─────────────────────────────
 OWNERSHIP_AI_PRIMARY = "ai_primary"
@@ -46,8 +40,6 @@ _EXPLICIT_TAKEN_OVER_PREFIXES = (
     "dashboard:handoff",
     "system:loop_pause",
 )
-
-_STAFF_IDLE_TTL_SEC = int(os.environ.get("NAHLA_STAFF_IDLE_TTL_SEC", "900"))
 
 
 @dataclass(frozen=True)
@@ -214,21 +206,17 @@ def resolve_ownership_state(
             reason="explicit_takeover",
         )
 
+    # Implicit staff activity (paused_by_human / taken_over_at) is
+    # leftover audit residue. It must not become HUMAN_ACTIVE or
+    # HUMAN_IDLE, and must not control AI execution. Idle timestamps
+    # remain observational only — TTL never flips AI on/off.
+    last_staff = None
+    idle_sec: Optional[int] = None
+    waiting = False
     if has_implicit_takeover_signals(convo):
         last_staff = staff_last_manual_outbound_at(db, convo)
-        idle_sec: Optional[int] = None
         if last_staff is not None:
             idle_sec = max(0, int((now_ - last_staff).total_seconds()))
-
-        if idle_sec is not None and idle_sec < _STAFF_IDLE_TTL_SEC:
-            return OwnershipStateResult(
-                state=OWNERSHIP_HUMAN_ACTIVE,
-                takeover_class=TAKEOVER_IMPLICIT,
-                staff_idle_sec=idle_sec,
-                last_staff_outbound_at=last_staff,
-                reason="implicit_staff_recent",
-            )
-
         waiting = customer_waiting_after_staff(
             db,
             convo,
@@ -236,35 +224,25 @@ def resolve_ownership_state(
             now=now_,
             assume_current_inbound=assume_current_inbound,
         )
-        if waiting:
-            return OwnershipStateResult(
-                state=OWNERSHIP_HUMAN_IDLE,
-                takeover_class=TAKEOVER_IMPLICIT,
-                staff_idle_sec=idle_sec,
-                customer_waiting_after_staff=True,
-                last_staff_outbound_at=last_staff,
-                reason="implicit_staff_idle_customer_waiting",
-            )
-
-        return OwnershipStateResult(
-            state=OWNERSHIP_HUMAN_ACTIVE,
-            takeover_class=TAKEOVER_IMPLICIT,
-            staff_idle_sec=idle_sec,
-            last_staff_outbound_at=last_staff,
-            reason="implicit_takeover_no_customer_followup",
-        )
 
     if has_advisory_queue_signals(convo):
         return OwnershipStateResult(
             state=OWNERSHIP_HUMAN_REQUESTED,
             takeover_class=TAKEOVER_NONE,
+            staff_idle_sec=idle_sec,
+            customer_waiting_after_staff=waiting,
+            last_staff_outbound_at=last_staff,
             reason="advisory_queue",
         )
 
+    residue = has_implicit_takeover_signals(convo)
     return OwnershipStateResult(
         state=OWNERSHIP_AI_PRIMARY,
         takeover_class=TAKEOVER_NONE,
-        reason="default",
+        staff_idle_sec=idle_sec,
+        customer_waiting_after_staff=waiting,
+        last_staff_outbound_at=last_staff,
+        reason="legacy_implicit_residue_ignored" if residue else "default",
     )
 
 
@@ -305,50 +283,19 @@ def attempt_implicit_takeover_recovery(
     now: Optional[datetime] = None,
     assume_current_inbound: bool = True,
 ) -> ImplicitTakeoverRecoveryResult:
-    """Release implicit takeover when staff idle + customer waiting."""
+    """TTL must not turn AI on or off.
+
+    Implicit residue is not an AI owner. This stays a no-op so webhook
+    callers need not change. ``ai_paused`` and queue flags are untouched.
+    """
     before = resolve_ownership_state(
         db, convo, now=now, assume_current_inbound=assume_current_inbound,
     )
-    if before.state != OWNERSHIP_HUMAN_IDLE:
-        return ImplicitTakeoverRecoveryResult(
-            released=False,
-            previous_state=before.state,
-            new_state=before.state,
-        )
-    if before.takeover_class != TAKEOVER_IMPLICIT:
-        return ImplicitTakeoverRecoveryResult(
-            released=False,
-            previous_state=before.state,
-            new_state=before.state,
-            reason="not_implicit",
-        )
-    if not before.customer_waiting_after_staff:
-        return ImplicitTakeoverRecoveryResult(
-            released=False,
-            previous_state=before.state,
-            new_state=before.state,
-            reason="customer_not_waiting",
-        )
-
-    audit = release_implicit_takeover(
-        convo,
-        reason="staff_idle_ttl_customer_waiting",
-        now=now,
-    )
-    after = resolve_ownership_state(db, convo, now=now)
-    logger.info(
-        "[OWNERSHIP_IDLE_RELEASE] convo=%s prev=%s new=%s idle_sec=%s audit=%s",
-        getattr(convo, "id", None),
-        before.state,
-        after.state,
-        before.staff_idle_sec,
-        {k: audit.get(k) for k in ("ownership_release_reason", "ownership_released_at")},
-    )
     return ImplicitTakeoverRecoveryResult(
-        released=True,
+        released=False,
         previous_state=before.state,
-        new_state=after.state,
-        reason="staff_idle_ttl_customer_waiting",
+        new_state=before.state,
+        reason="ttl_does_not_control_ai",
         staff_idle_sec=before.staff_idle_sec,
     )
 
@@ -360,7 +307,10 @@ def conversation_handoff_active(
     now: Optional[datetime] = None,
     assume_current_inbound: bool = False,
 ) -> bool:
-    """True when staff genuinely owns the keyboard (not idle implicit)."""
+    """True only for explicit dashboard/loop takeover labels.
+
+    Not an AI on/off signal. Implicit staff activity never returns True.
+    """
     result = resolve_ownership_state(
         db, convo, now=now, assume_current_inbound=assume_current_inbound,
     )

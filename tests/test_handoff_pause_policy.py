@@ -179,10 +179,9 @@ def test_no_tier_ever_returns_pause_ai_true() -> None:
 # MODE_SUPPORT_ESCALATION → bypassed brain → customer's natural
 # follow-up questions went unanswered.
 #
-# Post-#46 only ``paused_by_human`` (set on every manual reply by
-# routers/conversations.py) and ``taken_over_at`` (stamped when staff
-# actively engages) make this gate fire. The advisory tags are still
-# visible to the dashboard but no longer kill the brain.
+# Human/staff activity residue (paused_by_human / taken_over_at) must
+# not fire this gate. Advisory tags remain dashboard-only. Explicit
+# Stop AI (ai_paused) is the conversation-level off switch.
 
 
 def _mock_convo(**flags) -> SimpleNamespace:
@@ -213,29 +212,25 @@ def test_handoff_flag_false_when_only_advisory_tags_set() -> None:
     )
 
 
-def test_handoff_flag_true_when_paused_by_human() -> None:
-    """``paused_by_human`` is set on every manual staff reply (line
-    ~1871 of routers/conversations.py). That IS a real takeover and
-    must trigger the override."""
+def test_handoff_flag_false_when_paused_by_human() -> None:
+    """``paused_by_human`` is leftover staff-activity residue and must
+    not own conversation mode or AI execution."""
     from modules.ai.routing.conversation_mode import _conversation_handoff_flag
 
     convo = _mock_convo(paused_by_human=True)
-    assert _conversation_handoff_flag(convo) is True
+    assert _conversation_handoff_flag(convo) is False
 
 
-def test_handoff_flag_true_when_taken_over_at_set() -> None:
-    """``taken_over_at`` is stamped the first time staff engages
-    (manual reply / "استلام" button). That IS a real takeover."""
+def test_handoff_flag_false_when_taken_over_at_set() -> None:
+    """``taken_over_at`` alone is implicit residue, not explicit Stop AI."""
     from datetime import datetime, timezone
     from modules.ai.routing.conversation_mode import _conversation_handoff_flag
 
     convo = _mock_convo(taken_over_at=datetime.now(timezone.utc))
-    assert _conversation_handoff_flag(convo) is True
+    assert _conversation_handoff_flag(convo) is False
 
 
-def test_handoff_flag_true_when_both_takeover_signals_set() -> None:
-    """Belt-and-suspenders — when both staff signals are set the
-    gate still fires."""
+def test_handoff_flag_false_when_both_implicit_signals_set() -> None:
     from datetime import datetime, timezone
     from modules.ai.routing.conversation_mode import _conversation_handoff_flag
 
@@ -243,7 +238,7 @@ def test_handoff_flag_true_when_both_takeover_signals_set() -> None:
         paused_by_human=True,
         taken_over_at=datetime.now(timezone.utc),
     )
-    assert _conversation_handoff_flag(convo) is True
+    assert _conversation_handoff_flag(convo) is False
 
 
 def test_handoff_flag_false_for_clean_conversation() -> None:
@@ -264,7 +259,7 @@ def test_advisory_tags_alongside_takeover_still_trigger_gate() -> None:
         handoff_active=True,
         paused_by_human=True,
     )
-    assert _conversation_handoff_flag(convo) is True
+    assert _conversation_handoff_flag(convo) is False
 
 
 # ════════════════════════════════════════════════════════════════════

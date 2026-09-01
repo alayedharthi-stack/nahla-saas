@@ -38,7 +38,10 @@ for _path in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 from models import (  # noqa: E402
     Base,
     Campaign,
+    Conversation,
     CustomerProfile,
+    HandoffSession,
+    MessageEvent,
     Tenant,
     WaConversationWindow,
     WhatsAppConnection,
@@ -569,6 +572,20 @@ def test_reply_allows_freeform_inside_service_window():
         fake_module._send_whatsapp_message.assert_awaited_once()
         # Customer profile was created automatically
         assert db.query(CustomerProfile).filter(CustomerProfile.tenant_id == tenant.id).count() == 1
+        event = db.query(MessageEvent).filter(
+            MessageEvent.id == result["message_event_id"],
+        ).one()
+        assert event.event_type == "manual_reply"
+        assert (event.extra_metadata or {}).get("is_ai") is False
+        convo = db.query(Conversation).filter(
+            Conversation.tenant_id == tenant.id,
+        ).one()
+        assert convo.ai_paused is False
+        assert convo.paused_by_human is False
+        assert convo.taken_over_at is None
+        assert db.query(HandoffSession).filter(
+            HandoffSession.tenant_id == tenant.id,
+        ).count() == 0
     finally:
         db.close()
         engine.dispose()

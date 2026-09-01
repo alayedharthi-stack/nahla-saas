@@ -1,8 +1,13 @@
 """
 core/ai_disabled_gate.py
 ────────────────────────
-P0 kill switch — when AI is disabled or the conversation is under human
-supervision, suppress ALL automated inbound processing and outbound sends.
+P0 kill switch — when conversation-level AI is explicitly paused, or a
+store/safety gate forbids automation, suppress inbound processing and
+outbound sends.
+
+Human/staff activity, advisory queue flags, HandoffSession rows, and
+ownership labels are not AI on/off signals. Per-conversation off comes
+only from ``ai_paused``.
 
 Uses the same multi-row phone lookup as the dashboard pause API so a
 sibling Conversation row cannot bypass the merchant's toggle.
@@ -83,32 +88,26 @@ def _handoff_reason_is_notify_only(reason: str) -> bool:
 
 
 def _handoff_session_disables_ai(row: Any) -> bool:
-    """Active staff-notify sessions must not silently kill AI."""
-    if not _is_active_handoff_session_row(row):
-        return False
-    reason = str(
-        getattr(row, "handoff_reason", None) or getattr(row, "reason", None) or ""
-    )
-    return not _handoff_reason_is_notify_only(reason)
+    """Handoff/queue sessions never disable conversation-level AI.
+
+    Notify-only and staff_takeover rows are escalation/audit state.
+    Explicit ``ai_paused`` is the conversation-level off switch.
+    """
+    return False
 
 
 def disabled_reason_for_conversation(convo: Conversation | None) -> str:
-    """Return a non-empty reason when automated AI must not reply."""
+    """Return a non-empty reason when automated AI must not reply.
+
+    Conversation-level off is ``ai_paused`` only. Legacy implicit
+    takeover residue (``paused_by_human``, ``taken_over_at``) and
+    advisory queue flags must not independently disable AI.
+    """
     if convo is None:
         return ""
 
     if bool(getattr(convo, "ai_paused", False)):
         return str(getattr(convo, "ai_paused_reason", None) or REASON_AI_PAUSED)
-
-    if bool(getattr(convo, "paused_by_human", False)):
-        return REASON_HUMAN_SUPERVISION
-    if getattr(convo, "taken_over_at", None) is not None:
-        return REASON_HUMAN_SUPERVISION
-
-    # status=human is overloaded: notify-only queue producers historically
-    # wrote it without a takeover stamp. Genuine ownership always stamps
-    # paused_by_human and/or taken_over_at (dashboard reply, loop-pause).
-    # is_human_handoff / handoff_active / needs_human remain advisory.
 
     return ""
 
@@ -198,8 +197,9 @@ def is_ai_disabled_for_conversation(
     """
     Aggregate kill-switch check across ALL conversation rows for a phone.
 
-    Mirrors dashboard pause semantics: if ANY matching row is paused or
-    under human supervision, automated AI is disabled for the thread.
+    Mirrors dashboard pause semantics: if ANY matching row is explicitly
+    ``ai_paused``, automated AI is disabled for the thread. Human/staff
+    activity, advisory queue, and ownership labels do not disable AI.
 
     Store-wide pause is checked first and does not mutate per-conversation
     ai_paused flags — individual pauses remain intact when the store toggle
@@ -243,91 +243,6 @@ def is_ai_disabled_for_conversation(
                 disabled=True,
                 reason=reason,
                 conversation=convo,
-                source=source,
-            )
-
-    try:
-        from models import HandoffSession  # noqa: PLC0415
-
-        session = (
-            db.query(HandoffSession)
-            .filter(
-                HandoffSession.tenant_id == tenant_id,
-                HandoffSession.customer_phone == customer_phone,
-                HandoffSession.status == "active",
-            )
-            .first()
-        )
-        if _handoff_session_disables_ai(session):
-            anchor = conversation or (convos[0] if convos else None)
-            return AIDisabledDecision(
-                disabled=True,
-                reason=REASON_HANDOFF_SESSION,
-                conversation=anchor,
-                source=source,
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[AI_DISABLED_GATE] handoff_session lookup failed tenant=%s err=%s",
-            tenant_id,
-            type(exc).__name__,
-        )
-        from core.handoff_truth import (  # noqa: PLC0415
-            REASON_GATE_VERIFY_FAILED,
-            evaluate_gate_error_fail_closed,
-        )
-
-        if evaluate_gate_error_fail_closed(
-            db,
-            tenant_id=tenant_id,
-            customer_phone=customer_phone,
-            conversation=conversation or (convos[0] if convos else None),
-            gate="ai_disabled_gate_handoff_session",
-            error=exc,
-        ):
-            anchor = conversation or (convos[0] if convos else None)
-            return AIDisabledDecision(
-                disabled=True,
-                reason=REASON_GATE_VERIFY_FAILED,
-                conversation=anchor,
-                source=source,
-            )
-
-    try:
-        from core.ownership_state import conversation_handoff_active  # noqa: PLC0415
-
-        for convo in convos:
-            if conversation_handoff_active(db, convo):
-                return AIDisabledDecision(
-                    disabled=True,
-                    reason=REASON_HUMAN_OWNERSHIP,
-                    conversation=convo,
-                    source=source,
-                )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[AI_DISABLED_GATE] ownership lookup failed tenant=%s err=%s",
-            tenant_id,
-            type(exc).__name__,
-        )
-        from core.handoff_truth import (  # noqa: PLC0415
-            REASON_GATE_VERIFY_FAILED,
-            evaluate_gate_error_fail_closed,
-        )
-
-        if evaluate_gate_error_fail_closed(
-            db,
-            tenant_id=tenant_id,
-            customer_phone=customer_phone,
-            conversation=conversation or (convos[0] if convos else None),
-            gate="ai_disabled_gate_ownership",
-            error=exc,
-        ):
-            anchor = conversation or (convos[0] if convos else None)
-            return AIDisabledDecision(
-                disabled=True,
-                reason=REASON_GATE_VERIFY_FAILED,
-                conversation=anchor,
                 source=source,
             )
 

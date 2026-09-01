@@ -807,11 +807,11 @@ def _conversation_handoff_flag(convo: Any, db: Any = None, *, now: Any = None) -
     """True when staff genuinely owns the keyboard (Real Handoff Slice 1).
 
     Uses ``core.ownership_state.conversation_handoff_active`` when a DB
-    session is available — implicit takeover expires after staff-idle TTL
-    once the customer messages again. Advisory queue flags alone never
-    fire this gate (May 2026 #46).
+    session is available. Implicit staff-activity residue and advisory
+    queue flags never fire this gate. TTL does not own the keyboard.
 
-    Without ``db`` (unit tests): falls back to raw takeover booleans.
+    Without ``db`` (unit tests): explicit takeover only. Implicit
+    staff-activity residue must not own the keyboard.
     """
     if db is not None:
         try:
@@ -822,10 +822,12 @@ def _conversation_handoff_flag(convo: Any, db: Any = None, *, now: Any = None) -
             )
         except Exception:
             pass
-    return bool(
-        getattr(convo, "paused_by_human", False)
-        or getattr(convo, "taken_over_at", None) is not None
-    )
+    try:
+        from core.ownership_state import is_explicit_takeover  # noqa: PLC0415
+
+        return is_explicit_takeover(convo)
+    except Exception:
+        return False
 
 
 # ── Public API: resolve_conversation_mode ────────────────────────────────────

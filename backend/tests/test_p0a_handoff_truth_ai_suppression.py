@@ -20,18 +20,13 @@ for _p in [_BACKEND, os.path.join(_BACKEND, "..")]:
 
 from core.ai_pause_guard import REASON_MANUAL_PAUSE
 from core.ai_disabled_gate import (
-    REASON_HANDOFF_SESSION,
-    REASON_HUMAN_OWNERSHIP,
-    REASON_HUMAN_SUPERVISION,
     disabled_reason_for_conversation,
     is_ai_disabled_for_conversation,
 )
 from core.handoff_truth import (
-    REASON_GATE_VERIFY_FAILED,
     evaluate_gate_error_fail_closed,
     resolve_handoff_truth_active,
 )
-from core.ownership_state import OWNERSHIP_HUMAN_ACTIVE
 
 
 def _run(coro):
@@ -287,7 +282,7 @@ class TestAISuppression:
         assert decision.disabled is False
         assert disabled_reason_for_conversation(convo) == ""
 
-    def test_human_ownership_disables(self) -> None:
+    def test_human_ownership_does_not_disable(self) -> None:
         convo = _convo()
         db = self._mock_db_no_handoff_session()
         with patch(
@@ -305,10 +300,9 @@ class TestAISuppression:
                 tenant_id=33,
                 customer_phone="966551459303",
             )
-        assert decision.disabled is True
-        assert decision.reason == REASON_HUMAN_OWNERSHIP
+        assert decision.disabled is False
 
-    def test_active_handoff_session_disables(self) -> None:
+    def test_active_handoff_session_does_not_disable(self) -> None:
         convo = _convo()
         db = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
@@ -329,8 +323,7 @@ class TestAISuppression:
                 tenant_id=33,
                 customer_phone="966551459303",
             )
-        assert decision.disabled is True
-        assert decision.reason == REASON_HANDOFF_SESSION
+        assert decision.disabled is False
 
     def test_needs_human_alone_does_not_disable_ai(self) -> None:
         convo = _convo(needs_human=True)
@@ -403,7 +396,7 @@ class TestAISuppression:
             )
         assert decision.disabled is False
 
-    def test_genuine_dashboard_takeover_still_disables(self) -> None:
+    def test_legacy_dashboard_takeover_residue_does_not_disable(self) -> None:
         from datetime import datetime, timezone  # noqa: PLC0415
 
         convo = _convo(
@@ -428,8 +421,8 @@ class TestAISuppression:
                 tenant_id=1,
                 customer_phone="966500000001",
             )
-        assert decision.disabled is True
-        assert decision.reason == REASON_HUMAN_SUPERVISION
+        assert decision.disabled is False
+        assert disabled_reason_for_conversation(convo) == ""
 
     def test_sibling_paused_row_disables(self) -> None:
         active = _convo(id=1, ai_paused=False)
@@ -506,11 +499,7 @@ class TestAIDisabledGateVerifyFailure:
                 tenant_id=33,
                 customer_phone="966551459303",
             )
-        assert decision.disabled is True
-        assert decision.reason in {
-            REASON_HUMAN_SUPERVISION,
-            REASON_GATE_VERIFY_FAILED,
-        }
+        assert decision.disabled is False
 
     def test_handoff_session_lookup_error_fail_open_without_signals(self) -> None:
         """Session query fails with no ownership signals → fail-open."""
@@ -549,8 +538,7 @@ class TestAIDisabledGateVerifyFailure:
                 tenant_id=33,
                 customer_phone="966551459303",
             )
-        assert decision.disabled is True
-        assert decision.reason == REASON_GATE_VERIFY_FAILED
+        assert decision.disabled is False
 
 
 class TestFailClosedPolicy:

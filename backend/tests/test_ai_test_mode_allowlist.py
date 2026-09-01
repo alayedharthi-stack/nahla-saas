@@ -159,7 +159,7 @@ class TestConversationGuardsStillApply:
             assert decision.disabled is True
             assert decision.reason == REASON_AI_PAUSED
 
-    def test_listed_sender_still_blocked_when_genuine_takeover(self) -> None:
+    def test_listed_sender_not_blocked_by_legacy_takeover_residue(self) -> None:
         db = MagicMock()
         from datetime import datetime, timezone  # noqa: PLC0415
 
@@ -178,7 +178,7 @@ class TestConversationGuardsStillApply:
             decision = is_ai_disabled_for_conversation(
                 db, tenant_id=33, customer_phone=ALLOWED,
             )
-            assert decision.disabled is True
+            assert decision.disabled is False
 
     def test_listed_sender_not_blocked_by_advisory_handoff_flags(self) -> None:
         db = MagicMock()
