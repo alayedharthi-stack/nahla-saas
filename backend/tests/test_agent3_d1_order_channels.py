@@ -326,10 +326,75 @@ class TestAvailabilityA1A8:
         decision = _decide(ctx)
         assert decision.action == ACTION_LLM_REPLY
         assert decision.action != ACTION_SEARCH_PRODUCTS
-        assert decision.args.get("topic") == "whatsapp_quick_order"
         assert decision.args.get("available_purchase_channels") == [
             "whatsapp_quick_order",
         ]
+        assert decision.args.get("topic") != "purchase_channel_selection"
+        # No db → persist fails; do not claim a committed WhatsApp order.
+        assert decision.args.get("committed") is not True
+        assert decision.args.get("execution_evidence") != EXECUTION_EVIDENCE_WHATSAPP_STATE
+        assert decision.args.get("topic") != "whatsapp_quick_order"
+
+    def test_whatsapp_only_persist_success_commits_order_state(self) -> None:
+        sales = _sales(whatsapp=True)
+        intent = Intent(name="start_order", confidence=0.9, raw_message="ابي اطلب")
+        db, conv = _persist_ok_db(offered=["whatsapp_quick_order"])
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(
+                conv,
+                {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])},
+            ),
+        ):
+            turn = resolve_purchase_channel_turn(
+                phase="entry",
+                message="ابي اطلب",
+                intent=intent,
+                merchant_sales_channels=sales,
+                tenant_id=_TENANT_A,
+                phone=_PHONE_A,
+                db=db,
+            )
+        assert turn is not None
+        assert turn.args.get("committed") is True
+        assert turn.args.get("executed") is True
+        assert turn.args.get("persist_ok") is True
+        assert turn.args.get("execution_evidence") == EXECUTION_EVIDENCE_WHATSAPP_STATE
+        assert turn.args.get("topic") == "whatsapp_quick_order"
+        assert turn.args.get("awaiting_checkout_channel") is False
+        assert turn.args.get("checkout_channel") == CHECKOUT_CHANNEL_WHATSAPP
+        op = conv.extra_metadata["brain_state"]["order_prep"]
+        assert op["checkout_channel"] == CHECKOUT_CHANNEL_WHATSAPP
+        assert op["awaiting_checkout_channel"] is False
+
+    def test_whatsapp_only_persist_failure_is_not_committed(self) -> None:
+        sales = _sales(whatsapp=True)
+        intent = Intent(name="start_order", confidence=0.9, raw_message="ابي اطلب")
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=False,
+        ):
+            turn = resolve_purchase_channel_turn(
+                phase="entry",
+                message="ابي اطلب",
+                intent=intent,
+                merchant_sales_channels=sales,
+                tenant_id=_TENANT_A,
+                phone=_PHONE_A,
+                db=MagicMock(),
+            )
+        assert turn is not None
+        assert turn.reason == "persist_failed"
+        assert turn.args.get("committed") is False
+        assert turn.args.get("executed") is False
+        assert turn.args.get("persist_ok") is False
+        assert turn.args.get("execution_evidence") in {None, ""}
+        assert turn.args.get("checkout_channel") in {None, ""}
+        assert turn.args.get("topic") != "whatsapp_quick_order"
+        assert turn.args.get("response_goal") != "collect_product_for_whatsapp_order"
+        assert turn.args.get("cta_url") in {None, ""}
+        assert turn.args.get("awaiting_checkout_channel") is True
+        assert turn.args.get("available_purchase_channels") == ["whatsapp_quick_order"]
 
     def test_a8_showroom_missing_valid_location(self) -> None:
         sales = resolve_merchant_sales_channels(

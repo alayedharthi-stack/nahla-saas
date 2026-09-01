@@ -385,7 +385,11 @@ class TestControlDWhatsappOnly:
             intent_name="start_order",
             sales=sales,
         )
-        decision = _decide(ctx)
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=True,
+        ):
+            decision = _decide(ctx)
         _assert_not_groups(decision)
         assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "whatsapp_quick_order"

@@ -2117,20 +2117,42 @@ def resolve_purchase_channel_turn(
             confidence=0.92,
         )
     if owner == PURCHASE_CHANNEL_ENTRY_WHATSAPP:
-        persist_checkout_route_state(
+        persist_ok = persist_checkout_route_state(
             db,
             tenant_id=int(tenant_id or 0),
             phone=str(phone or ""),
-            checkout_channel="whatsapp_fast",
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
             awaiting_checkout_channel=False,
             offered_purchase_channel_ids=list(available),
         )
+        if not persist_ok:
+            return PurchaseChannelTurnDecision(
+                action=_ACTION_LLM_REPLY,
+                args={
+                    "available_purchase_channels": list(available),
+                    "persist_ok": False,
+                    "executed": False,
+                    "committed": False,
+                    "awaiting_checkout_channel": True,
+                    "checkout_channel": "",
+                    "execution_evidence": "",
+                    "durable_choice_state": False,
+                },
+                reason="persist_failed",
+                confidence=0.7,
+            )
         return PurchaseChannelTurnDecision(
             action=_ACTION_LLM_REPLY,
             args={
                 "topic": "whatsapp_quick_order",
                 "response_goal": "collect_product_for_whatsapp_order",
                 "available_purchase_channels": list(available),
+                "persist_ok": True,
+                "executed": True,
+                "committed": True,
+                "awaiting_checkout_channel": False,
+                "checkout_channel": CHECKOUT_CHANNEL_WHATSAPP,
+                "execution_evidence": EXECUTION_EVIDENCE_WHATSAPP_STATE,
             },
             reason="genuine purchase entry — only WhatsApp quick order is available",
             confidence=0.92,
