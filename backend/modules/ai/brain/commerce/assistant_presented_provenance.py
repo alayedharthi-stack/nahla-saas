@@ -434,8 +434,15 @@ def apply_turn_catalog_referent_binding(
     turn: int = 0,
     structured_product: Optional[Dict[str, Any]] = None,
     customer_selected: bool = False,
+    current_turn_customer_referent: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Bind structured identity first; title matching is compatibility fallback only."""
+    """Bind structured identity first; title matching is compatibility fallback only.
+
+    ``current_turn_customer_referent`` is True when ``structured_product`` is the
+    catalog identity resolved for this customer turn (executor product / unique
+    hit). Pass False for assistant ``recommended_product`` so Family 2 checkout
+    selection is not stolen.
+    """
     try:
         from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
             bind_structured_catalog_referent,
@@ -451,6 +458,9 @@ def apply_turn_catalog_referent_binding(
                 reason="structured_turn_product",
                 turn=turn,
                 customer_selected=customer_selected,
+                current_turn_customer_referent=bool(
+                    current_turn_customer_referent or customer_selected
+                ),
             )
             return [bound] if bound else []
     except Exception:  # noqa: BLE001  # noqa: silent-ok — structured bind must not block fallback stamp
@@ -464,37 +474,79 @@ def apply_turn_catalog_referent_binding(
     )
 
 
-def structured_product_from_turn(decision: Any = None, result: Any = None) -> Optional[Dict[str, Any]]:
-    """Identity already known on the decision/result — not inferred from reply text."""
+def _identity_row(container: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
     try:
         from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
             has_structured_catalog_identity,
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — turn identity probe must not block compose stamp
         return None
+    cand = container.get(key)
+    if isinstance(cand, dict) and has_structured_catalog_identity(cand):
+        return dict(cand)
+    return None
+
+
+def _unique_product_list_row(container: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            has_structured_catalog_identity,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn identity probe must not block compose stamp
+        return None
+    products = container.get("replay_candidates") or container.get("products")
+    if (
+        isinstance(products, list)
+        and len(products) == 1
+        and isinstance(products[0], dict)
+        and has_structured_catalog_identity(products[0])
+    ):
+        return dict(products[0])
+    return None
+
+
+def current_turn_executor_catalog_referent(
+    decision: Any = None,
+    result: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Catalog identity from executor/result for this customer turn.
+
+    Excludes assistant ``recommended_product`` so recommendations cannot be
+    treated as a new customer product goal.
+    """
     args = dict(getattr(decision, "args", None) or {})
     data = dict(getattr(result, "data", None) or {})
-    for container in (args, data):
-        for key in ("recommended_product", "product"):
-            cand = container.get(key)
-            if isinstance(cand, dict) and has_structured_catalog_identity(cand):
-                return dict(cand)
-        focus_product = container.get("focus_product")
-        if isinstance(focus_product, dict) and has_structured_catalog_identity(focus_product):
-            return dict(focus_product)
-        products = container.get("replay_candidates") or container.get("products")
-        if (
-            isinstance(products, list)
-            and len(products) == 1
-            and isinstance(products[0], dict)
-            and has_structured_catalog_identity(products[0])
-        ):
-            return dict(products[0])
+    for container in (data, args):
+        for key in ("product", "focus_product"):
+            found = _identity_row(container, key)
+            if found is not None:
+                return found
+        found = _unique_product_list_row(container)
+        if found is not None:
+            return found
+    return None
+
+
+def structured_product_from_turn(decision: Any = None, result: Any = None) -> Optional[Dict[str, Any]]:
+    """Identity already known on the decision/result — not inferred from reply text.
+
+    Executor ``product`` / unique catalog hit outranks ``recommended_product``.
+    """
+    found = current_turn_executor_catalog_referent(decision, result)
+    if found is not None:
+        return found
+    args = dict(getattr(decision, "args", None) or {})
+    data = dict(getattr(result, "data", None) or {})
+    for container in (data, args):
+        rec = _identity_row(container, "recommended_product")
+        if rec is not None:
+            return rec
     return None
 
 
 __all__ = [
     "apply_turn_catalog_referent_binding",
+    "current_turn_executor_catalog_referent",
     "map_named_catalog_entities",
     "restore_selected_product_focus",
     "stamp_assistant_named_catalog_from_reply",
