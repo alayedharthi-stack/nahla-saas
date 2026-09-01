@@ -1477,8 +1477,11 @@ def test_drain_stops_on_rollback_failure_then_healthy_session_recovers(
             "image_url": "https://cdn.example/shirt.webp",
             "product_url": "https://example.test/p",
         }
-        first_id = _seed_lock_product(setup, extra_metadata=extras)
-        second_id = _seed_lock_product(setup, extra_metadata=extras)
+        # Native/manual: Salla without salla_variant_id is fail-closed
+        # (ambiguous_variant_identity) and would look like "drain did
+        # not recover" even when the healthy session did resume.
+        first_id = _seed_lock_product(setup, source="manual", extra_metadata=extras)
+        second_id = _seed_lock_product(setup, source="manual", extra_metadata=extras)
         held = (
             holder.query(Product)
             .filter(Product.id == first_id, Product.tenant_id == _TEST_TENANT)
