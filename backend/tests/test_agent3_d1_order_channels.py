@@ -205,6 +205,11 @@ def _decide(ctx: BrainContext):
         return DefaultDecisionEngine().decide(ctx)
 
 
+def _decide_live(ctx: BrainContext):
+    """Production-shaped decide — catalog delivery is not stubbed."""
+    return DefaultDecisionEngine().decide(ctx)
+
+
 def _handle_select(decision: Decision, ctx: BrainContext):
     return asyncio.run(DefaultActionExecutor().execute(decision, ctx))
 
@@ -1249,3 +1254,266 @@ class TestCanonicalStoreUrl:
     def test_empty_rejected(self) -> None:
         assert canonical_merchant_storefront_url("") == ""
         assert canonical_merchant_storefront_url("   ") == ""
+
+
+_LIVE_BUY = "ابي اشتري"
+
+
+class TestLivePickerBypassRegression:
+    """Tenant-33 live shape: «ابي اشتري» must use resolved platform channels."""
+
+    def _three(self) -> MerchantSalesChannels:
+        return _sales(
+            store=True,
+            whatsapp=True,
+            showroom=True,
+            store_url=_STORE,
+            maps_url=_MAPS,
+        )
+
+    def test_a_three_channels_unpatched_catalog_opens_picker(self) -> None:
+        from modules.ai.brain.commerce.commerce_entry_catalog_delivery import (
+            try_commerce_entry_catalog_decision,
+        )
+
+        sales = self._three()
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=sales,
+            store_url=_STORE,
+            maps_url=_MAPS,
+            db=MagicMock(),
+        )
+        assert try_commerce_entry_catalog_decision(ctx) is None
+        decision = _decide_live(ctx)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]
+        assert decision.args.get("topic") != "whatsapp_quick_order"
+
+    def test_b_whatsapp_and_showroom_opens_picker(self) -> None:
+        sales = _sales(whatsapp=True, showroom=True, maps_url=_MAPS)
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=sales,
+            store_url="",
+            maps_url=_MAPS,
+            db=MagicMock(),
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]
+
+    def test_c_online_and_whatsapp_opens_picker(self) -> None:
+        sales = _sales(store=True, whatsapp=True, store_url=_STORE)
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=sales,
+            store_url=_STORE,
+            maps_url="",
+            db=MagicMock(),
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+        ]
+
+    def test_d_showroom_only_direct_owner(self) -> None:
+        sales = _sales(showroom=True, maps_url=_MAPS)
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=sales,
+            store_url="",
+            maps_url=_MAPS,
+            db=MagicMock(),
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") == "showroom_visit"
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_e_whatsapp_only_persist_gate_unchanged(self) -> None:
+        sales = _sales(whatsapp=True)
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=sales,
+            store_url="",
+            maps_url="",
+            db=MagicMock(),
+        )
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=True,
+        ):
+            decision = _decide_live(ctx)
+        assert decision.args.get("topic") == "whatsapp_quick_order"
+        assert decision.args.get("committed") is True
+        assert decision.args.get("execution_evidence") == EXECUTION_EVIDENCE_WHATSAPP_STATE
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=False,
+        ):
+            failed = _decide_live(ctx)
+        assert failed.args.get("committed") is not True
+        assert failed.args.get("topic") != "whatsapp_quick_order"
+        assert failed.args.get("cta_url") in {None, ""}
+
+    def test_f_online_only_direct_owner(self) -> None:
+        sales = _sales(store=True, store_url=_STORE)
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=sales,
+            store_url=_STORE,
+            maps_url="",
+            db=MagicMock(),
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") == "online_store_redirect"
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_g_stale_catalog_shell_does_not_suppress_picker(self) -> None:
+        sales = self._three()
+        state = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=8,
+            current_product_focus=None,
+            commerce_session={"stage": "browsing", "active_product": ""},
+            order_prep=OrderPreparationState(
+                quantity=1,
+                checkout_channel="",
+                awaiting_checkout_channel=False,
+            ),
+        )
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=sales,
+            state=state,
+            db=MagicMock(),
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert "showroom_visit" in (decision.args.get("available_purchase_channels") or [])
+
+    def test_h_clean_state_opens_picker(self) -> None:
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=self._three(),
+            db=MagicMock(),
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+
+    def test_i_active_checkout_is_preserved(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="checkout",
+            turn=6,
+            current_product_focus={
+                "id": "501",
+                "title": "حذاء رياضي أبيض",
+            },
+            order_prep=OrderPreparationState(
+                product_id="501",
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                awaiting_checkout_channel=False,
+            ),
+        )
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=self._three(),
+            state=state,
+            db=MagicMock(),
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_j_greeting_does_not_open_picker(self) -> None:
+        ctx = _ctx(
+            "مرحبا كيف الحال",
+            intent_name="greeting",
+            sales=self._three(),
+            db=MagicMock(),
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_production_ctx_without_sales_object_uses_tenant_capabilities(self) -> None:
+        sales = self._three()
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            store_url="",
+            maps_url="",
+            db=MagicMock(),
+        )
+        assert getattr(ctx, "merchant_sales_channels", None) is None
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            return_value=sales,
+        ):
+            decision = _decide_live(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]
+
+    def test_cross_tenant_resolver_uses_ctx_tenant_id(self) -> None:
+        seen: list[int] = []
+
+        def _fake_resolve(db, tenant_id, **kwargs):
+            seen.append(int(tenant_id))
+            if int(tenant_id) == _TENANT_A:
+                return _sales(store=True, whatsapp=True, store_url=_STORE)
+            return _sales(whatsapp=True)
+
+        ctx_a = _ctx(
+            _LIVE_BUY,
+            tenant_id=_TENANT_A,
+            intent_name="start_order",
+            store_url="",
+            maps_url="",
+            db=MagicMock(),
+        )
+        ctx_b = _ctx(
+            _LIVE_BUY,
+            tenant_id=_TENANT_B,
+            phone=_PHONE_B,
+            intent_name="start_order",
+            store_url="",
+            maps_url="",
+            db=MagicMock(),
+        )
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            side_effect=_fake_resolve,
+        ):
+            dec_a = _decide_live(ctx_a)
+            dec_b = _decide_live(ctx_b)
+        assert set(seen) == {_TENANT_A, _TENANT_B}
+        assert dec_a.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+        ]
+        assert dec_b.args.get("available_purchase_channels") == ["whatsapp_quick_order"]
+        assert dec_a.args.get("topic") == "purchase_channel_selection"
+        assert dec_b.args.get("topic") != "purchase_channel_selection"

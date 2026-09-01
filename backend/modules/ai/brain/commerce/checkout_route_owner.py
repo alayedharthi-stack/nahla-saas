@@ -290,6 +290,42 @@ def available_channels(caps: CheckoutChannelCapabilities) -> List[str]:
     return out
 
 
+def _resolve_turn_sales_channels(
+    merchant_sales_channels: Any = None,
+    *,
+    db: Any = None,
+    tenant_id: int = 0,
+    store_url: str = "",
+    maps_url: str = "",
+    store_url_source: str = "",
+) -> Any:
+    """Use the attached sales object, else the tenant's resolved capabilities.
+
+    Production DecisionEngine does not attach ``ctx.merchant_sales_channels``
+    before decide(). Entry must not default to WhatsApp-only when ``db`` can
+    resolve store/showroom evidence the same way compose later does.
+    """
+    if merchant_sales_channels is not None:
+        return merchant_sales_channels
+    tid = int(tenant_id or 0)
+    if not db or not tid:
+        return None
+    try:
+        from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
+            resolve_merchant_sales_channels,
+        )
+
+        return resolve_merchant_sales_channels(
+            db,
+            tid,
+            store_url=store_url,
+            store_url_source=store_url_source,
+            maps_url=maps_url,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — facts URL fallback remains
+        return None
+
+
 def resolve_available_purchase_channel_facts(
     *,
     store_url: str = "",
@@ -810,6 +846,8 @@ def should_block_bare_start_product_prompt(
     maps_url: str = "",
     store_url_source: str = "",
     merchant_sales_channels: Any = None,
+    db: Any = None,
+    tenant_id: int = 0,
 ) -> bool:
     """Block deterministic product prompts until purchase channel is chosen."""
     prep = _order_prep_mapping(order_prep)
@@ -817,12 +855,20 @@ def should_block_bare_start_product_prompt(
         return False
     if _awaiting_channel(prep):
         return True
+    sales = _resolve_turn_sales_channels(
+        merchant_sales_channels,
+        db=db,
+        tenant_id=tenant_id,
+        store_url=store_url,
+        maps_url=maps_url,
+        store_url_source=store_url_source,
+    )
     return should_route_bare_start_to_channel_selection(
         order_prep=order_prep,
         store_url=store_url,
         maps_url=maps_url,
         store_url_source=store_url_source,
-        merchant_sales_channels=merchant_sales_channels,
+        merchant_sales_channels=sales,
     )
 
 
@@ -2002,7 +2048,14 @@ def resolve_purchase_channel_turn(
     stage: str = "",
 ) -> Optional[PurchaseChannelTurnDecision]:
     """D1A: chrome selection while awaiting. Natural-language selection is D1B."""
-    sales = merchant_sales_channels
+    sales = _resolve_turn_sales_channels(
+        merchant_sales_channels,
+        db=db,
+        tenant_id=tenant_id,
+        store_url=store_url,
+        maps_url=maps_url,
+        store_url_source=store_url_source,
+    )
     available = resolve_available_purchase_channel_facts(
         store_url=store_url,
         maps_url=maps_url,
