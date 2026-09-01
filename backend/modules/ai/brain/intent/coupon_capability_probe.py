@@ -1,9 +1,8 @@
-"""Isolated shadow capability probe for customer coupon requests (Phase 2B).
+"""Isolated coupon capability probe (Phase 2B shadow + Phase 2C canary consume).
 
-This module is telemetry-only. It must not mutate intent, decision, Brain
-state, coupon rows, customer state, or WhatsApp output.
-
-Default: no model call (env flag off). Fail-closed to capability=none.
+The probe itself never mutates intent, Brain state, coupon rows, or WhatsApp
+output. It never issues coupons. Canary routing may read the classification
+after a separate ownership gate. Fail-closed to capability=none.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ import re
 import time
 from typing import Any, Dict, Optional
 
+from services.customer_request_coupon_canary import is_customer_coupon_canary_tenant
 from services.customer_request_coupon_service import (
     CUSTOMER_COUPON_LIVE_ISSUANCE,
     CUSTOMER_COUPON_LIVE_ROUTING,
@@ -210,3 +210,33 @@ async def maybe_run_shadow_coupon_capability_probe(
     if not shadow_coupon_capability_probe_enabled():
         return _shadow_telemetry(run=False, parse_ok=True)
     return await run_coupon_capability_probe(message)
+
+
+async def maybe_run_coupon_capability_probe_for_turn(
+    message: str,
+    *,
+    tenant_id: Optional[int] = None,
+    history: Any = None,
+) -> Dict[str, Any]:
+    """Run the isolated probe when shadow telemetry is on OR the tenant is canary.
+
+    Non-canary + shadow off → no model call, capability=none (existing path).
+    Probe failure/timeout → fail closed. Never allocates coupons.
+    ``history`` is accepted for call-site compatibility and ignored.
+    """
+    del history
+    canary = is_customer_coupon_canary_tenant(tenant_id)
+    shadow = shadow_coupon_capability_probe_enabled()
+    if not canary and not shadow:
+        return _shadow_telemetry(
+            run=False,
+            parse_ok=True,
+            extra={
+                "coupon_capability_canary_eligible": False,
+                "coupon_capability_shadow_only": True,
+            },
+        )
+    result = await run_coupon_capability_probe(message)
+    result["coupon_capability_canary_eligible"] = canary
+    result["coupon_capability_shadow_only"] = not canary
+    return result

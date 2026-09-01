@@ -21,10 +21,15 @@ from services.customer_request_coupon_service import (
 )
 
 
-def test_no_live_customer_coupon_action() -> None:
-    names = [name for name in dir(decision_actions) if name.startswith("ACTION_")]
-    assert "ACTION_CUSTOMER_COUPON_REQUEST" not in names
+def test_no_live_customer_coupon_action_from_decision_engine() -> None:
+    """Action exists for canary ownership, but decide() still never emits it."""
+    assert decision_actions.ACTION_CUSTOMER_COUPON_REQUEST == "customer_coupon_request"
+    assert decision_actions.ACTION_CUSTOMER_COUPON_REQUEST in decision_actions.ALL_ACTIONS
     assert decision_actions.ACTION_SUGGEST_COUPON == "suggest_coupon"
+    source = inspect.getsource(DefaultDecisionEngine.decide)
+    assert "ACTION_CUSTOMER_COUPON_REQUEST" not in source
+    assert "customer_coupon_request" not in source
+    assert "issue_customer_coupon" not in source
 
 
 def test_hesitation_coupon_action_still_only_hesitation_product() -> None:
@@ -39,7 +44,10 @@ def test_pipeline_does_not_call_issuance() -> None:
     pipeline = (REPO_ROOT / "backend/modules/ai/brain/pipeline.py").read_text(encoding="utf-8")
     assert "issue_customer_coupon" not in pipeline
     assert "ACTION_CUSTOMER_COUPON_REQUEST" not in pipeline
-    assert "maybe_run_shadow_coupon_capability_probe" in pipeline
+    assert "maybe_own_customer_coupon_request_turn" in pipeline
+    assert "maybe_run_coupon_capability_probe_for_turn" in pipeline
+    assert "if tenant_id == 1" not in pipeline
+    assert "tenant_id == 1" not in pipeline
 
 
 def test_slot_extractor_and_persona_not_repurposed() -> None:

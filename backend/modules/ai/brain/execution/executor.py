@@ -34,6 +34,7 @@ from ..decision.actions import (
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
+    ACTION_CUSTOMER_COUPON_REQUEST,
     ACTION_SUGGEST_COUPON,
     ACTION_TRACK_ORDER,
     ACTION_CUSTOMER_LEDGER_REPLY,
@@ -438,12 +439,14 @@ class DefaultActionExecutor:
 
     def __init__(self) -> None:
         from .catalog_navigate import CatalogNavigateHandler
+        from .customer_coupon_request import CustomerCouponRequestHandler
         from .faq import FAQReplyHandler
         from .search import ProductSearchHandler
         from .orders import DraftOrderHandler, TrackOrderHandler
 
         self._handlers: Dict[str, Any] = {
             ACTION_GREET:               _GreetHandler(),
+            ACTION_CUSTOMER_COUPON_REQUEST: CustomerCouponRequestHandler(),
             ACTION_FAQ_REPLY:           FAQReplyHandler(),
             ACTION_SEARCH_PRODUCTS:     ProductSearchHandler(),
             ACTION_CATALOG_NAVIGATE:    CatalogNavigateHandler(),

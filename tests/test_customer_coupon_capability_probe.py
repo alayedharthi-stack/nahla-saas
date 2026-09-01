@@ -16,6 +16,7 @@ from modules.ai.brain.intent.coupon_capability_probe import (
     ALLOWED_CAPABILITIES,
     COUPON_CAPABILITY_PROBE_SYSTEM,
     SHADOW_PROBE_ENV,
+    maybe_run_coupon_capability_probe_for_turn,
     maybe_run_shadow_coupon_capability_probe,
     parse_coupon_capability_payload,
     run_coupon_capability_probe,
@@ -176,3 +177,53 @@ def test_evaluation_matrix_is_test_only_not_imported_by_runtime() -> None:
         assert utterance not in probe_src
         assert utterance not in service_src
         assert expected in ALLOWED_CAPABILITIES
+
+
+def test_turn_helper_does_not_run_outside_canary_when_shadow_off(monkeypatch) -> None:
+    monkeypatch.delenv(SHADOW_PROBE_ENV, raising=False)
+    monkeypatch.delenv("NAHLA_CUSTOMER_COUPON_CANARY_TENANTS", raising=False)
+    called = {"n": 0}
+
+    async def _boom(*_a, **_k):
+        called["n"] += 1
+        raise AssertionError("probe must not run outside canary when shadow is off")
+
+    monkeypatch.setattr(
+        "modules.ai.brain.intent.coupon_capability_probe.run_coupon_capability_probe",
+        _boom,
+    )
+    result = asyncio.run(
+        maybe_run_coupon_capability_probe_for_turn("any message", tenant_id=9)
+    )
+    assert called["n"] == 0
+    assert result["coupon_capability_probe_run"] is False
+    assert result["coupon_capability"] == "none"
+    assert result["coupon_capability_canary_eligible"] is False
+
+
+def test_turn_helper_runs_for_canary_tenant_even_when_shadow_off(monkeypatch) -> None:
+    monkeypatch.delenv(SHADOW_PROBE_ENV, raising=False)
+    monkeypatch.setenv("NAHLA_CUSTOMER_COUPON_CANARY_TENANTS", "42")
+    from services.customer_request_coupon_canary import clear_customer_coupon_canary_cache
+
+    clear_customer_coupon_canary_cache()
+
+    async def _ok(_message, **_k):
+        return {
+            "coupon_capability_probe_run": True,
+            "coupon_capability": "customer_coupon_request",
+            "coupon_capability_parse_ok": True,
+            "coupon_capability_shadow_only": True,
+        }
+
+    monkeypatch.setattr(
+        "modules.ai.brain.intent.coupon_capability_probe.run_coupon_capability_probe",
+        _ok,
+    )
+    result = asyncio.run(
+        maybe_run_coupon_capability_probe_for_turn("semantic request", tenant_id=42)
+    )
+    assert result["coupon_capability"] == "customer_coupon_request"
+    assert result["coupon_capability_canary_eligible"] is True
+    assert result["coupon_capability_shadow_only"] is False
+    clear_customer_coupon_canary_cache()

@@ -128,6 +128,9 @@ def _authoritative_fact_contract_present(state: BrainReplyState) -> bool:
         "cash_on_delivery",
     }:
         return True
+    coupon_facts = facts.get("customer_request_coupon_facts")
+    if isinstance(coupon_facts, dict) and coupon_facts:
+        return True
     return False
 
 
