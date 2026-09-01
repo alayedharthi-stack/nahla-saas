@@ -436,50 +436,72 @@ class _PaymentContinuationReplyHandler:
 
 
 class _SelectPurchaseChannelHandler:
-    """Validate chrome or structured-action selection, persist, then execute."""
+    """Validate selection, persist, then execute. Success requires all three."""
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         from ..commerce.checkout_route_owner import (  # noqa: PLC0415
             apply_selected_purchase_channel,
-            extract_structured_purchase_channel_id,
+            extract_structured_purchase_channel_pick,
         )
 
         args = dict(decision.args or {})
         facts = getattr(ctx, "facts", None)
         state = getattr(ctx, "state", None)
         inbound = getattr(ctx, "inbound_metadata", None)
-        trusted_id = extract_structured_purchase_channel_id(
+        order_prep = getattr(state, "order_prep", None) if state is not None else None
+        offered = None
+        if order_prep is not None:
+            raw_offered = getattr(order_prep, "offered_purchase_channel_ids", None)
+            if raw_offered is None and isinstance(order_prep, dict):
+                raw_offered = order_prep.get("offered_purchase_channel_ids")
+            if isinstance(raw_offered, (list, tuple)):
+                offered = list(raw_offered)
+        pick = extract_structured_purchase_channel_pick(
             message=getattr(ctx, "message", "") or "",
             inbound_metadata=inbound if isinstance(inbound, dict) else {},
             brain_decision_action=str(decision.action or ""),
             brain_decision_args=args,
+            offered_purchase_channel_ids=offered,
         )
-        selected_id = str(trusted_id or "").strip()
+        selected_id = str(pick.channel_id if pick is not None else "").strip()
+        selection_source = str(pick.selection_source if pick is not None else "") or str(
+            args.get("selection_source") or ""
+        )
         result = apply_selected_purchase_channel(
             getattr(ctx, "_db", None) or getattr(ctx, "db", None),
             tenant_id=int(ctx.tenant_id or 0),
             phone=str(ctx.customer_phone or ""),
             selected_channel_id=selected_id,
-            order_prep=getattr(state, "order_prep", None) if state is not None else None,
+            order_prep=order_prep,
             merchant_sales_channels=getattr(ctx, "merchant_sales_channels", None),
             store_url=str(getattr(facts, "store_url", "") or ""),
             store_url_source=str(getattr(facts, "store_url_source", "") or ""),
             maps_url=str(getattr(facts, "maps_url", "") or ""),
+            selection_source=selection_source,
         )
-        topic = result.execution_topic if result.accepted else "purchase_channel_selection"
+        executed_ok = bool(result.accepted and result.persist_ok and result.executed)
+        topic = result.execution_topic if executed_ok else "purchase_channel_selection"
         args["topic"] = topic
         args["selected_channel_id"] = result.selected_channel_id
         args["available_purchase_channels"] = list(result.available_purchase_channel_ids)
-        if result.accepted and result.cta_url:
+        args["selection_source"] = result.selection_source or selection_source
+        args["persist_ok"] = result.persist_ok
+        args["executed"] = result.executed
+        args["durable_choice_state"] = bool(result.persist_ok and result.accepted)
+        if executed_ok and result.cta_url:
             args["cta_url"] = result.cta_url
             args["cta_label"] = result.cta_label
+        else:
+            args.pop("cta_url", None)
+            args.pop("cta_label", None)
+            if not executed_ok:
+                args["response_goal"] = "help_customer_choose_purchase_channel"
         decision.args = args
-        accepted = bool(result.accepted and result.persist_ok)
         return ActionResult(
-            success=accepted,
+            success=executed_ok,
             data={
                 "type": "select_purchase_channel",
-                "accepted": accepted,
+                "accepted": result.accepted,
                 "selected_channel_id": result.selected_channel_id,
                 "execution_topic": topic,
                 "reason": result.reason,
@@ -487,10 +509,12 @@ class _SelectPurchaseChannelHandler:
                 "persist_ok": result.persist_ok,
                 "executed": result.executed,
                 "execution_owner": result.execution_owner,
-                "cta_url": result.cta_url if accepted else "",
-                "cta_label": result.cta_label if accepted else "",
+                "execution_evidence": result.execution_evidence,
+                "selection_source": result.selection_source or selection_source,
+                "cta_url": result.cta_url if executed_ok else "",
+                "cta_label": result.cta_label if executed_ok else "",
             },
-            error=None if accepted else result.reason or "selection_rejected",
+            error=None if executed_ok else result.reason or "selection_rejected",
         )
 
 

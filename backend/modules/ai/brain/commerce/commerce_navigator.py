@@ -367,12 +367,12 @@ def _trusted_selected_channel(
     inbound_metadata: Optional[Dict[str, Any]] = None,
     brain_decision_action: str = "",
     brain_decision_args: Optional[Dict[str, Any]] = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
 ) -> Optional[PurchaseChannel]:
-    """Verified chrome or a real Brain ``select_purchase_channel`` decision.
+    """Verified button payload or constrained presented choice text.
 
     Does not read ``selected_channel_id`` from intent slots or arbitrary
-    inbound metadata. D1A chrome only; D1B structured Brain decision is
-    reserved for a future post-semantic producer.
+    inbound metadata. Exact title/index require persisted offered ids.
     """
     try:
         from .checkout_route_owner import (  # noqa: PLC0415
@@ -384,6 +384,7 @@ def _trusted_selected_channel(
             inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
             brain_decision_action=brain_decision_action,
             brain_decision_args=brain_decision_args,
+            offered_purchase_channel_ids=offered_purchase_channel_ids,
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — untrusted extract must not invent a channel
         return None
@@ -602,9 +603,11 @@ def resolve_commerce_navigator(
         )
 
     awaiting_channel = bool(prep.get("awaiting_checkout_channel"))
+    offered_ids = prep.get("offered_purchase_channel_ids")
     channel = _trusted_selected_channel(
         message=msg,
         inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
+        offered_purchase_channel_ids=offered_ids if isinstance(offered_ids, (list, tuple)) else None,
     )
     if awaiting_channel and channel is None:
         return CommerceNavigatorDecision(

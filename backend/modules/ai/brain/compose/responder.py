@@ -165,23 +165,32 @@ class DefaultComposer:
             if not topic:
                 topic = str((decision.args or {}).get("topic") or "").strip()
             decision.args = dict(decision.args or {})
-            if topic:
-                decision.args["topic"] = topic
-            if isinstance(data, dict) and data.get("accepted") is False:
+            executed_ok = bool(
+                result.success
+                and isinstance(data, dict)
+                and data.get("executed") is True
+                and data.get("persist_ok") is True
+            )
+            if not executed_ok:
                 decision.args["topic"] = "purchase_channel_selection"
                 decision.args["response_goal"] = "help_customer_choose_purchase_channel"
-            elif topic == "whatsapp_quick_order":
-                decision.args.setdefault(
-                    "response_goal", "collect_product_for_whatsapp_order"
-                )
-            elif topic == "online_store_redirect":
-                decision.args.setdefault(
-                    "response_goal", "guide_customer_to_online_store"
-                )
-            elif topic == "showroom_visit":
-                decision.args.setdefault(
-                    "response_goal", "guide_customer_to_showroom"
-                )
+                decision.args.pop("cta_url", None)
+                decision.args.pop("cta_label", None)
+            else:
+                if topic:
+                    decision.args["topic"] = topic
+                if topic == "whatsapp_quick_order":
+                    decision.args.setdefault(
+                        "response_goal", "collect_product_for_whatsapp_order"
+                    )
+                elif topic == "online_store_redirect":
+                    decision.args.setdefault(
+                        "response_goal", "guide_customer_to_online_store"
+                    )
+                elif topic == "showroom_visit":
+                    decision.args.setdefault(
+                        "response_goal", "guide_customer_to_showroom"
+                    )
             decision.action = ACTION_LLM_REPLY
             action = ACTION_LLM_REPLY
 
