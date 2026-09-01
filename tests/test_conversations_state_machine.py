@@ -73,8 +73,6 @@ def _do_handoff(convo, *, by="user:42"):
     convo.handoff_active = True
     convo.taken_over_at = "2026-01-01T00:00:00+00:00"
     convo.taken_over_by = by
-    convo.ai_paused = True
-    convo.ai_paused_reason = REASON_MANUAL_TAKEOVER
 
 
 def _do_manual_pause(convo):
@@ -126,8 +124,7 @@ def test_handoff_makes_conversation_human():
     c = _Convo()
     _do_handoff(c)
     assert _is_human(c)
-    assert c.ai_paused is True
-    assert c.ai_paused_reason == REASON_MANUAL_TAKEOVER
+    assert c.ai_paused is False
     assert c.needs_human is True
     assert c.handoff_active is True
     assert c.taken_over_at is not None
@@ -188,7 +185,7 @@ def test_no_auto_transition_between_paths():
     c2 = _Convo()
     _do_handoff(c2)
     assert _is_human(c2)
-    assert c2.ai_paused_reason == REASON_MANUAL_TAKEOVER
+    assert c2.ai_paused is False
     assert c2.ai_paused_reason != REASON_MANUAL_PAUSE
 
 

@@ -15,10 +15,8 @@ from core.ai_pause_guard import REASON_HUMAN_HANDOFF, REASON_MANUAL_PAUSE
 from core.ownership_state import (
     OWNERSHIP_AI_PRIMARY,
     OWNERSHIP_HUMAN_ACTIVE,
-    OWNERSHIP_HUMAN_IDLE,
     OWNERSHIP_HUMAN_REQUESTED,
     TAKEOVER_EXPLICIT,
-    TAKEOVER_IMPLICIT,
     attempt_implicit_takeover_recovery,
     conversation_handoff_active,
     is_explicit_takeover,
@@ -127,7 +125,7 @@ def test_manual_pause_is_not_explicit_takeover() -> None:
     assert is_explicit_takeover(convo) is False
 
 
-def test_implicit_recent_staff_is_active() -> None:
+def test_implicit_recent_staff_is_not_ai_owner() -> None:
     staff_at = _now() - timedelta(minutes=5)
     convo = _convo(
         paused_by_human=True,
@@ -142,11 +140,13 @@ def test_implicit_recent_staff_is_active() -> None:
         ),
     ]
     result = resolve_ownership_state(_FakeDB(rows), convo, now=_now())
-    assert result.state == OWNERSHIP_HUMAN_ACTIVE
-    assert result.takeover_class == TAKEOVER_IMPLICIT
+    assert result.state == OWNERSHIP_AI_PRIMARY
+    assert conversation_handoff_active(
+        _FakeDB(rows), convo, now=_now(),
+    ) is False
 
 
-def test_implicit_idle_customer_waiting_is_idle() -> None:
+def test_implicit_idle_customer_waiting_stays_advisory() -> None:
     staff_at = _now() - timedelta(minutes=20)
     convo = _convo(
         paused_by_human=True,
@@ -162,11 +162,11 @@ def test_implicit_idle_customer_waiting_is_idle() -> None:
     result = resolve_ownership_state(
         _FakeDB(rows), convo, now=_now(), assume_current_inbound=True,
     )
-    assert result.state == OWNERSHIP_HUMAN_IDLE
+    assert result.state == OWNERSHIP_HUMAN_REQUESTED
     assert result.customer_waiting_after_staff is True
 
 
-def test_idle_recovery_releases_implicit_takeover() -> None:
+def test_idle_recovery_does_not_auto_release() -> None:
     staff_at = _now() - timedelta(minutes=20)
     convo = _convo(
         paused_by_human=True,
@@ -184,11 +184,11 @@ def test_idle_recovery_releases_implicit_takeover() -> None:
     recovery = attempt_implicit_takeover_recovery(
         db, convo, now=_now(), assume_current_inbound=True,
     )
-    assert recovery.released is True
-    assert convo.paused_by_human is False
-    assert convo.taken_over_at is None
+    assert recovery.released is False
+    assert recovery.reason == "ttl_does_not_control_ai"
+    assert convo.paused_by_human is True
+    assert convo.taken_over_at is not None
     assert convo.needs_human is True
-    assert convo.handoff_active is True
     after = resolve_ownership_state(db, convo, now=_now())
     assert after.state == OWNERSHIP_HUMAN_REQUESTED
 
@@ -224,7 +224,7 @@ def test_conversation_handoff_active_false_after_idle() -> None:
     ) is False
 
 
-def test_conversation_handoff_active_true_within_ttl() -> None:
+def test_conversation_handoff_active_false_within_ttl() -> None:
     staff_at = _now() - timedelta(minutes=2)
     convo = _convo(
         paused_by_human=True,
@@ -236,7 +236,7 @@ def test_conversation_handoff_active_true_within_ttl() -> None:
     ])
     assert conversation_handoff_active(
         db, convo, now=_now(), assume_current_inbound=True,
-    ) is True
+    ) is False
 
 
 def test_release_implicit_preserves_queue_flags() -> None:

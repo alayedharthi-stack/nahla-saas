@@ -2413,53 +2413,11 @@ async def reply_to_conversation(body: ReplyIn, request: Request, db: Session = D
         db.refresh(queued_event)
         ps = (queued_event.extra_metadata or {}).get("provider_send") or {}
 
-    raw = (customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
-    suffix = raw[-9:] if len(raw) >= 9 else raw
-    has_active_handoff = False
-    for hs in db.query(HandoffSession).filter(
-        HandoffSession.tenant_id == tenant_id,
-        HandoffSession.status == "active",
-    ).all():
-        hs_raw = (hs.customer_phone or "").replace("+", "").replace("-", "").replace(" ", "")
-        if hs_raw == raw or hs_raw.endswith(suffix):
-            has_active_handoff = True
-            break
-
-    if not has_active_handoff:
-        from handoff.manager import create_handoff_session  # noqa: PLC0415
-        create_handoff_session(
-            db, tenant_id, customer_phone,
-            customer_name=convo.customer.name if convo.customer else customer_phone,
-            last_message=body.message,
-            reason="staff_takeover",
-        )
-
-    convo.status = "human"
-    convo.is_human_handoff = True
-    convo.paused_by_human = True
-    # Stamp ``taken_over_at`` on the FIRST manual reply only. This is the
-    # signal Human-Priority Mode reads in ``_is_human_actually_active``
-    # to flip from "AI replies in clamped mode" to the legacy hard-stop
-    # (AI fully silent because a human is engaging now). Stamping only
-    # on the first reply preserves the original takeover time so the
-    # dashboard can show "تم الاستلام منذ ..." accurately even if the
-    # agent sends multiple messages.
-    if not getattr(convo, "taken_over_at", None):
-        try:
-            from core.auth import get_jwt_user_id  # noqa: PLC0415
-            _actor = get_jwt_user_id(request)
-        except Exception:  # noqa: BLE001
-            _actor = None
-        convo.taken_over_at = datetime.now(timezone.utc)
-        convo.taken_over_by = (
-            f"user:{_actor}" if _actor is not None else "dashboard:reply"
-        )
-        _log.info(
-            "[HUMAN_PRIORITY] takeover stamped tenant=%s convo=%s phone=%s by=%s — "
-            "AI now fully silent on this conversation",
-            tenant_id, convo.id, customer_phone, convo.taken_over_by,
-        )
-    db.add(convo)
+    # Manual dashboard outbound is staff activity/audit evidence only.
+    # It must not mutate conversation-level AI execution, implicit
+    # takeover columns, or open a session whose reason disables AI.
+    # Queue / HandoffSession lifecycle stays independent (AGENT3-D3).
+    # Explicit Stop AI / Start AI / Return to AI own AI on/off.
     db.commit()
 
     # ── Real send outcome returned to the dashboard ────────────────────
@@ -2499,12 +2457,6 @@ async def handoff_conversation(body: HandoffIn, request: Request, db: Session = 
     get_or_create_tenant(db, tenant_id)
 
     from handoff.manager import create_handoff_session  # noqa: PLC0415
-    from core.ai_pause_guard import (  # noqa: PLC0415
-        pause_ai as _pause_ai,
-        REASON_HUMAN_HANDOFF as _R_HOFF,
-        REASON_MANUAL_TAKEOVER as _R_MANUAL,
-        REASON_SUPPORT_ESCALATION as _R_ESCAL,
-    )
     from core.auth import get_jwt_user_id  # noqa: PLC0415
 
     actor_user_id = None
@@ -2524,16 +2476,7 @@ async def handoff_conversation(body: HandoffIn, request: Request, db: Session = 
     )
     now = datetime.now(timezone.utc)
 
-    if body.reason == "support_escalation":
-        pause_reason = _R_ESCAL
-    elif body.reason in {"manual_takeover", "staff_takeover"}:
-        pause_reason = _R_MANUAL
-    else:
-        pause_reason = _R_HOFF
-
-    # Update EVERY conversation row for this customer so the inbox view
-    # (which dedupes by phone) is consistent regardless of which row was
-    # picked first.
+    # Queue / audit only. Dashboard handoff must not pause or resume AI.
     convos = _find_conversations_for_phone(db, tenant_id, body.customer_phone) or [convo]
     for c in convos:
         c.status = "human"
@@ -2548,20 +2491,11 @@ async def handoff_conversation(body: HandoffIn, request: Request, db: Session = 
         db.add(c)
     db.commit()
 
-    # Flip the AI loop guard so subsequent inbound messages don't trigger
-    # token-spending replies after the dashboard takeover. We do this in
-    # a second pass so the human-state columns above are persisted first.
-    for c in convos:
-        try:
-            _pause_ai(db, c, reason=pause_reason, by="dashboard:handoff", commit=False)
-        except Exception as exc:
-            _log.debug("[ai_pause] handoff_conversation pause failed: %s", exc)
-    db.commit()
-
     _log.info(
-        "[HANDOFF_API] tenant=%s phone=%r reason=%s pause_reason=%s by=%s rows=%d",
-        tenant_id, body.customer_phone, body.reason, pause_reason,
+        "[HANDOFF_API] tenant=%s phone=%r reason=%s by=%s rows=%d ai_paused=%s",
+        tenant_id, body.customer_phone, body.reason,
         actor_user_id or "dashboard", len(convos),
+        bool(getattr(convo, "ai_paused", False)),
     )
     return {
         "handoff": True,
