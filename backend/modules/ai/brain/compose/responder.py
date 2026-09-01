@@ -102,6 +102,7 @@ from ..decision.actions import (
     ACTION_ORDER_CONTEXT_UPDATE,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
+    ACTION_SELECT_PURCHASE_CHANNEL,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
@@ -156,6 +157,33 @@ class DefaultComposer:
         if not isinstance(result.data, dict):
             result.data = {}
         data = result.data
+
+        if action == ACTION_SELECT_PURCHASE_CHANNEL:
+            topic = ""
+            if isinstance(data, dict):
+                topic = str(data.get("execution_topic") or "").strip()
+            if not topic:
+                topic = str((decision.args or {}).get("topic") or "").strip()
+            decision.args = dict(decision.args or {})
+            if topic:
+                decision.args["topic"] = topic
+            if isinstance(data, dict) and data.get("accepted") is False:
+                decision.args["topic"] = "purchase_channel_selection"
+                decision.args["response_goal"] = "help_customer_choose_purchase_channel"
+            elif topic == "whatsapp_quick_order":
+                decision.args.setdefault(
+                    "response_goal", "collect_product_for_whatsapp_order"
+                )
+            elif topic == "online_store_redirect":
+                decision.args.setdefault(
+                    "response_goal", "guide_customer_to_online_store"
+                )
+            elif topic == "showroom_visit":
+                decision.args.setdefault(
+                    "response_goal", "guide_customer_to_showroom"
+                )
+            decision.action = ACTION_LLM_REPLY
+            action = ACTION_LLM_REPLY
 
         # ── State guard (defense-in-depth) ─────────────────────────────────
         # The DecisionEngine already gates greetings on `state.greeted` and

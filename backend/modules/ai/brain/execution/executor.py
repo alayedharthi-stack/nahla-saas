@@ -31,6 +31,7 @@ from ..decision.actions import (
     ACTION_PRODUCT_MEDIA_IDENTITY,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
+    ACTION_SELECT_PURCHASE_CHANNEL,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
@@ -434,6 +435,47 @@ class _PaymentContinuationReplyHandler:
         )
 
 
+class _SelectPurchaseChannelHandler:
+    """Validate Brain-selected purchase channel, persist, then LLM compose."""
+
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+            apply_selected_purchase_channel,
+        )
+
+        args = dict(decision.args or {})
+        facts = getattr(ctx, "facts", None)
+        state = getattr(ctx, "state", None)
+        result = apply_selected_purchase_channel(
+            getattr(ctx, "_db", None) or getattr(ctx, "db", None),
+            tenant_id=int(ctx.tenant_id or 0),
+            phone=str(ctx.customer_phone or ""),
+            selected_channel_id=str(args.get("selected_channel_id") or "").strip(),
+            order_prep=getattr(state, "order_prep", None) if state is not None else None,
+            merchant_sales_channels=getattr(ctx, "merchant_sales_channels", None),
+            offered_purchase_channel_ids=args.get("offered_purchase_channel_ids"),
+            store_url=str(getattr(facts, "store_url", "") or ""),
+            store_url_source=str(getattr(facts, "store_url_source", "") or ""),
+            maps_url=str(getattr(facts, "maps_url", "") or ""),
+        )
+        topic = result.execution_topic if result.accepted else "purchase_channel_selection"
+        args["topic"] = topic
+        args["selected_channel_id"] = result.selected_channel_id
+        args["available_purchase_channels"] = list(result.available_purchase_channel_ids)
+        decision.args = args
+        return ActionResult(
+            success=True,
+            data={
+                "type": "select_purchase_channel",
+                "accepted": result.accepted,
+                "selected_channel_id": result.selected_channel_id,
+                "execution_topic": topic,
+                "reason": result.reason,
+                "checkout_channel": result.checkout_channel,
+            },
+        )
+
+
 class DefaultActionExecutor:
     """Implements ActionExecutor protocol."""
 
@@ -475,6 +517,7 @@ class DefaultActionExecutor:
             ACTION_VARIANT_PRICING:       _VariantPricingHandler(),
             ACTION_PAYMENT_TRANSFER_PROMISE: _PaymentTransferPromiseHandler(),
             ACTION_PRODUCT_MEDIA_IDENTITY: _ProductMediaIdentityHandler(),
+            ACTION_SELECT_PURCHASE_CHANNEL: _SelectPurchaseChannelHandler(),
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:

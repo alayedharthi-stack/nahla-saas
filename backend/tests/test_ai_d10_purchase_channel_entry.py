@@ -387,7 +387,12 @@ class TestControlDWhatsappOnly:
         )
         decision = _decide(ctx)
         _assert_not_groups(decision)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "whatsapp_quick_order"
         assert decision.args.get("topic") != "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "whatsapp_quick_order",
+        ]
         owner = resolve_purchase_channel_entry_owner(
             message=MSG_LIVE,
             merchant_sales_channels=sales,

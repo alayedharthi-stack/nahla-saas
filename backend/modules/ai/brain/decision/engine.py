@@ -36,6 +36,7 @@ from .actions import (
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
+    ACTION_SELECT_PURCHASE_CHANNEL,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
@@ -490,6 +491,254 @@ def _decision_product_selection_list_pick(
         ),
         confidence=0.95,
     )
+
+
+_AWAITING_CHANNEL_HOLD_INTENTS = frozenset({
+    INTENT_ASK_LOCATION,
+    INTENT_ASK_STORE_INFO,
+    INTENT_GENERAL,
+    INTENT_GREETING,
+    INTENT_ONLINE_STORE_INQUIRY,
+    INTENT_SOCIAL,
+    INTENT_START_ORDER,
+    INTENT_WHO_ARE_YOU,
+})
+
+
+def _maybe_awaiting_purchase_channel_decision(
+    ctx: BrainContext,
+    state: Any,
+    facts: Any,
+) -> Optional[Decision]:
+    """Honor structured/chrome channel selection while awaiting a choice.
+
+    Unstructured paraphrases are not guessed. Brain continues the conversation.
+    """
+    try:
+        from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+            PURCHASE_CHANNEL_ENTRY_SELECTION,
+            extract_structured_purchase_channel_id,
+            persist_checkout_route_state,
+            resolve_available_purchase_channel_facts,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    prep = getattr(state, "order_prep", None)
+    prep_map: Dict[str, Any] = {}
+    if isinstance(prep, dict):
+        prep_map = dict(prep)
+    elif prep is not None and hasattr(prep, "to_dict"):
+        raw = prep.to_dict()
+        if isinstance(raw, dict):
+            prep_map = dict(raw)
+    else:
+        awaiting = bool(getattr(prep, "awaiting_checkout_channel", False)) if prep is not None else False
+        offered = getattr(prep, "offered_purchase_channel_ids", None) if prep is not None else None
+        prep_map = {
+            "awaiting_checkout_channel": awaiting,
+            "offered_purchase_channel_ids": offered,
+            "checkout_channel": getattr(prep, "checkout_channel", "") if prep is not None else "",
+        }
+    if not prep_map.get("awaiting_checkout_channel"):
+        return None
+
+    intent = ctx.intent
+    intent_name = str(getattr(intent, "name", "") or "")
+    slots = dict(getattr(intent, "slots", None) or {})
+    inbound = getattr(ctx, "inbound_metadata", None)
+    selected = extract_structured_purchase_channel_id(
+        message=ctx.message or "",
+        inbound_metadata=inbound if isinstance(inbound, dict) else {},
+        intent_slots=slots,
+    )
+    sales = getattr(ctx, "merchant_sales_channels", None)
+    available = resolve_available_purchase_channel_facts(
+        store_url=str(getattr(facts, "store_url", "") or ""),
+        maps_url=str(getattr(facts, "maps_url", "") or ""),
+        store_url_source=str(getattr(facts, "store_url_source", "") or ""),
+        merchant_sales_channels=sales,
+    )
+    offered = prep_map.get("offered_purchase_channel_ids") or available
+    if selected:
+        return Decision(
+            action=ACTION_SELECT_PURCHASE_CHANNEL,
+            args={
+                "selected_channel_id": selected,
+                "topic": PURCHASE_CHANNEL_ENTRY_SELECTION,
+                "available_purchase_channels": list(available),
+                "offered_purchase_channel_ids": list(offered or []),
+            },
+            reason="structured purchase-channel selection",
+            confidence=0.96,
+        )
+    if intent_name and intent_name not in _AWAITING_CHANNEL_HOLD_INTENTS:
+        return None
+    try:
+        persist_checkout_route_state(
+            getattr(ctx, "_db", None),
+            tenant_id=int(ctx.tenant_id or 0),
+            phone=str(ctx.customer_phone or ""),
+            awaiting_checkout_channel=True,
+            offered_purchase_channel_ids=list(available),
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — persist must not block compose
+        pass
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": PURCHASE_CHANNEL_ENTRY_SELECTION,
+            "response_goal": "help_customer_choose_purchase_channel",
+            "available_purchase_channels": list(available),
+        },
+        reason="awaiting purchase-channel choice — unstructured turn, do not guess",
+        confidence=0.9,
+    )
+
+
+def _maybe_purchase_channel_entry_decision(
+    ctx: BrainContext,
+    state: Any,
+    facts: Any,
+    *,
+    selected_ref: Any = None,
+) -> Optional[Decision]:
+    """Capability-driven purchase-entry owner before discovery/search."""
+    try:
+        from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+            PURCHASE_CHANNEL_ENTRY_SELECTION,
+            PURCHASE_CHANNEL_ENTRY_SHOWROOM,
+            PURCHASE_CHANNEL_ENTRY_STORE,
+            PURCHASE_CHANNEL_ENTRY_WHATSAPP,
+            is_genuine_purchase_channel_entry,
+            persist_checkout_route_state,
+            resolve_available_purchase_channel_facts,
+            resolve_purchase_channel_entry_owner,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    intent_name = str(getattr(ctx.intent, "name", "") or "")
+    if intent_name == INTENT_ONLINE_STORE_INQUIRY:
+        return None
+
+    if not is_genuine_purchase_channel_entry(
+        message=ctx.message or "",
+        intent=ctx.intent,
+        order_prep=getattr(state, "order_prep", None),
+        selected_product_referent=selected_ref,
+        current_product_focus=getattr(state, "current_product_focus", None),
+        state=state,
+        inbound_metadata=getattr(ctx, "inbound_metadata", None),
+        stage=str(getattr(state, "stage", "") or ""),
+    ):
+        return None
+
+    sales = getattr(ctx, "merchant_sales_channels", None)
+    if sales is None:
+        try:
+            from ..commerce.sales_channel_capabilities import (  # noqa: PLC0415
+                resolve_merchant_sales_channels,
+            )
+
+            sales = resolve_merchant_sales_channels(
+                getattr(ctx, "_db", None),
+                int(ctx.tenant_id or 0),
+                store_url=str(getattr(facts, "store_url", "") or ""),
+                store_url_source=str(getattr(facts, "store_url_source", "") or ""),
+                maps_url=str(getattr(facts, "maps_url", "") or ""),
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — sales-channel resolve must not block entry
+            sales = None
+    try:
+        owner = resolve_purchase_channel_entry_owner(
+            message=ctx.message or "",
+            intent=ctx.intent,
+            order_prep=getattr(state, "order_prep", None),
+            selected_product_referent=selected_ref,
+            current_product_focus=getattr(state, "current_product_focus", None),
+            state=state,
+            inbound_metadata=getattr(ctx, "inbound_metadata", None),
+            store_url=str(getattr(facts, "store_url", "") or ""),
+            maps_url=str(getattr(facts, "maps_url", "") or ""),
+            store_url_source=str(getattr(facts, "store_url_source", "") or ""),
+            merchant_sales_channels=sales,
+            stage=str(getattr(state, "stage", "") or ""),
+        )
+        available = resolve_available_purchase_channel_facts(
+            store_url=str(getattr(facts, "store_url", "") or ""),
+            maps_url=str(getattr(facts, "maps_url", "") or ""),
+            store_url_source=str(getattr(facts, "store_url_source", "") or ""),
+            merchant_sales_channels=sales,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — channel owner must not block decide
+        return None
+    if owner == PURCHASE_CHANNEL_ENTRY_SELECTION:
+        try:
+            persist_checkout_route_state(
+                getattr(ctx, "_db", None),
+                tenant_id=int(ctx.tenant_id or 0),
+                phone=str(ctx.customer_phone or ""),
+                awaiting_checkout_channel=True,
+                offered_purchase_channel_ids=list(available),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "purchase_channel_selection",
+                "response_goal": "help_customer_choose_purchase_channel",
+                "available_purchase_channels": list(available),
+            },
+            reason="genuine purchase entry — multiple available purchase channels",
+            confidence=0.92,
+        )
+    if owner == PURCHASE_CHANNEL_ENTRY_STORE:
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "online_store_redirect",
+                "response_goal": "guide_customer_to_online_store",
+                "available_purchase_channels": list(available),
+            },
+            reason="genuine purchase entry — only online store is available",
+            confidence=0.92,
+        )
+    if owner == PURCHASE_CHANNEL_ENTRY_SHOWROOM:
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "showroom_visit",
+                "response_goal": "guide_customer_to_showroom",
+                "available_purchase_channels": list(available),
+            },
+            reason="genuine purchase entry — only showroom is available",
+            confidence=0.92,
+        )
+    if owner == PURCHASE_CHANNEL_ENTRY_WHATSAPP:
+        try:
+            persist_checkout_route_state(
+                getattr(ctx, "_db", None),
+                tenant_id=int(ctx.tenant_id or 0),
+                phone=str(ctx.customer_phone or ""),
+                checkout_channel="whatsapp_fast",
+                awaiting_checkout_channel=False,
+                offered_purchase_channel_ids=list(available),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return Decision(
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "whatsapp_quick_order",
+                "response_goal": "collect_product_for_whatsapp_order",
+                "available_purchase_channels": list(available),
+            },
+            reason="genuine purchase entry — only WhatsApp quick order is available",
+            confidence=0.92,
+        )
+    return None
 
 
 class DefaultDecisionEngine:
@@ -1189,6 +1438,12 @@ class DefaultDecisionEngine:
                 "[LEDGER_FOLLOW_UP] hook failed — falling through tenant=%s",
                 getattr(ctx, "tenant_id", None),
             )
+
+        _awaiting_channel_decision = _maybe_awaiting_purchase_channel_decision(
+            ctx, state, facts
+        )
+        if _awaiting_channel_decision is not None:
+            return _awaiting_channel_decision
 
         from ..current_turn_social_non_commerce import CurrentTurnSocialNonCommerce  # noqa: PLC0415
 
@@ -3278,6 +3533,12 @@ class DefaultDecisionEngine:
                 _swo_exc,
             )
 
+        _purchase_channel_entry = _maybe_purchase_channel_entry_decision(
+            ctx, state, facts
+        )
+        if _purchase_channel_entry is not None:
+            return _purchase_channel_entry
+
         from ..discovery.entry import (  # noqa: PLC0415
             resolve_discovery_entry,
             route_discovery_entry,
@@ -3541,6 +3802,12 @@ class DefaultDecisionEngine:
                     "disabled June 2026)"
                 ),
             )
+
+        _awaiting_channel_decision = _maybe_awaiting_purchase_channel_decision(
+            ctx, state, facts
+        )
+        if _awaiting_channel_decision is not None:
+            return _awaiting_channel_decision
 
         if intent.name in {INTENT_ASK_STORE_INFO, INTENT_ONLINE_STORE_INQUIRY}:
             from ..commerce.link_intent_media_source_guard import (  # noqa: PLC0415
@@ -3995,7 +4262,9 @@ class DefaultDecisionEngine:
                 PURCHASE_CHANNEL_ENTRY_SELECTION,
                 PURCHASE_CHANNEL_ENTRY_SHOWROOM,
                 PURCHASE_CHANNEL_ENTRY_STORE,
+                PURCHASE_CHANNEL_ENTRY_WHATSAPP,
                 is_genuine_purchase_channel_entry,
+                persist_checkout_route_state,
                 resolve_available_purchase_channel_facts,
                 resolve_purchase_channel_entry_owner,
             )
@@ -4061,6 +4330,18 @@ class DefaultDecisionEngine:
                         merchant_sales_channels=_sales_channels,
                     )
                     if _channel_owner == PURCHASE_CHANNEL_ENTRY_SELECTION:
+                        try:
+                            persist_checkout_route_state(
+                                getattr(ctx, "_db", None),
+                                tenant_id=int(ctx.tenant_id or 0),
+                                phone=str(ctx.customer_phone or ""),
+                                awaiting_checkout_channel=True,
+                                offered_purchase_channel_ids=list(
+                                    _available_channels
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — persist must not block selection
+                            pass
                         return Decision(
                             action=ACTION_LLM_REPLY,
                             args={
@@ -4107,6 +4388,37 @@ class DefaultDecisionEngine:
                             reason=(
                                 "genuine purchase entry — only showroom "
                                 "is available"
+                            ),
+                            confidence=0.92,
+                        )
+                    if _channel_owner == PURCHASE_CHANNEL_ENTRY_WHATSAPP:
+                        try:
+                            persist_checkout_route_state(
+                                getattr(ctx, "_db", None),
+                                tenant_id=int(ctx.tenant_id or 0),
+                                phone=str(ctx.customer_phone or ""),
+                                checkout_channel="whatsapp_fast",
+                                awaiting_checkout_channel=False,
+                                offered_purchase_channel_ids=list(
+                                    _available_channels
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — persist must not block WhatsApp owner
+                            pass
+                        return Decision(
+                            action=ACTION_LLM_REPLY,
+                            args={
+                                "topic": "whatsapp_quick_order",
+                                "response_goal": (
+                                    "collect_product_for_whatsapp_order"
+                                ),
+                                "available_purchase_channels": list(
+                                    _available_channels
+                                ),
+                            },
+                            reason=(
+                                "genuine purchase entry — only WhatsApp "
+                                "quick order is available"
                             ),
                             confidence=0.92,
                         )

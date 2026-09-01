@@ -597,6 +597,20 @@ def evaluate_native_catalog_capability(
     )
 
 
+def whatsapp_native_order_ready(db: Any, tenant_id: int) -> bool:
+    """True when native WhatsApp catalog order capability is eligible.
+
+    Same evidence ``MerchantCapabilities.has_whatsapp_catalog`` uses.
+    Fail closed when db/tenant is missing or the probe errors.
+    """
+    if db is None or not tenant_id:
+        return False
+    try:
+        return bool(evaluate_native_catalog_capability(db, int(tenant_id)).eligible)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — capability probe must fail closed
+        return False
+
+
 __all__ = [
     "NativeCatalogCapability",
     "NativeCatalogProductCapability",
@@ -615,6 +629,7 @@ __all__ = [
     "_scan_catalog_retailer_inventory",
     "count_matchable_catalog_products",
     "evaluate_native_catalog_capability",
+    "whatsapp_native_order_ready",
     "evaluate_native_catalog_product_capability",
     "invalidate_meta_catalog_publish_for_retailer_id",
     "load_whatsapp_connection",
