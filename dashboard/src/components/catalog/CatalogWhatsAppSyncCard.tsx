@@ -166,21 +166,43 @@ export default function CatalogWhatsAppSyncCard() {
               <div>
                 <dt className="sr-only">{copy.title}</dt>
                 <dd className="font-semibold">
-                  {status ? phaseLabel(status.phase, copy) : '—'}
+                  {status?.catalog_linked
+                    ? copy.catalogLinked
+                    : status
+                      ? phaseLabel(status.phase, copy)
+                      : '—'}
                 </dd>
               </div>
               <div>
                 <dd>
                   {status?.last_success_at
                     ? copy.lastSuccess.replace('{at}', fmtAt(status.last_success_at, lang))
-                    : copy.lastSuccessNever}
+                    : (status?.catalog_linked
+                        && (status.queue_count ?? counts?.pending ?? 0) === 0
+                        && (status.meta_available_count ?? 0) > 0
+                      ? null
+                      : copy.lastSuccessNever)}
                 </dd>
               </div>
               <div>
-                <dd>{copy.eligible.replace('{count}', fmtCount(counts?.eligible ?? 0, lang))}</dd>
+                <dd>
+                  {status?.catalog_linked
+                    ? copy.availableCount.replace(
+                        '{count}',
+                        fmtCount(status.meta_available_count ?? counts?.synced ?? 0, lang),
+                      )
+                    : copy.eligible.replace('{count}', fmtCount(counts?.eligible ?? 0, lang))}
+                </dd>
               </div>
               <div>
-                <dd>{copy.pending.replace('{count}', fmtCount(counts?.pending ?? 0, lang))}</dd>
+                <dd>
+                  {(status?.queue_count ?? counts?.pending ?? 0) === 0
+                    ? copy.queueEmpty
+                    : copy.pending.replace(
+                        '{count}',
+                        fmtCount(status?.queue_count ?? counts?.pending ?? 0, lang),
+                      )}
+                </dd>
               </div>
               <div>
                 <dd>{copy.synced.replace('{count}', fmtCount(counts?.synced ?? 0, lang))}</dd>
