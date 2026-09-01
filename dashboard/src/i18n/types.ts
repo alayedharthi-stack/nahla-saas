@@ -1966,6 +1966,8 @@ export interface Translations {
       singleCatalogRecommendation: string
       mismatchTitle:        string
       mismatchDesc:         string
+      ownershipMismatchTitle: string
+      ownershipMismatchDesc:  string
       expectedCatalogLabel: string
       linkedCatalogsLabel:  string
       missingTitle:         string

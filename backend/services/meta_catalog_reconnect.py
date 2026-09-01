@@ -1,11 +1,12 @@
 """
 services/meta_catalog_reconnect.py
 ──────────────────────────────────
-Reconcile an existing merchant Meta catalog to the current WABA after
-WhatsApp (re)connection.
+After WhatsApp (re)connection: run new-merchant catalog onboarding
+(ensure_waba_catalog_for_tenant), then bind + optional product sync.
 
-Does not create catalogs. Does not delete catalogs. Does not move
-Business Portfolio ownership. Reuses ``WhatsAppConnection.meta_catalog_id``.
+Does not delete catalogs. Does not move Business Portfolio ownership.
+Cross-Business stamps are fail-closed as catalog_business_mismatch
+(legacy repair), not auto-shared or replaced.
 """
 from __future__ import annotations
 
@@ -173,6 +174,15 @@ def bind_current_waba_to_merchant_catalog(
     result["catalog_business_id"] = catalog_bm or None
 
     if catalog_bm and owner_bm and catalog_bm != owner_bm:
+        from services.meta_catalog_onboarding import auto_catalog_onboarding_enabled  # noqa: PLC0415
+
+        if auto_catalog_onboarding_enabled():
+            result["error"] = "catalog_business_mismatch"
+            result["legacy_repair"] = True
+            result["ok"] = False
+            _persist_bind_result(conn, {**result, "at": _now_iso()})
+            db.commit()
+            return result
         share = share_catalog_with_business(
             catalog_id,
             owner_bm,
@@ -242,6 +252,33 @@ def reconcile_meta_catalog_after_whatsapp_change(
         "skipped": 0,
         "error": None,
     }
+    from services.meta_catalog_onboarding import (  # noqa: PLC0415
+        auto_catalog_onboarding_enabled,
+        ensure_waba_catalog_for_tenant,
+    )
+
+    if auto_catalog_onboarding_enabled():
+        ensure = ensure_waba_catalog_for_tenant(
+            db, tenant_id, confirm=confirm, client=client,
+        )
+        out["ensure"] = {
+            "ok": ensure.get("ok"),
+            "action": ensure.get("action"),
+            "error": ensure.get("error"),
+            "catalog_id": ensure.get("catalog_id"),
+            "created": ensure.get("created"),
+            "legacy_repair": ensure.get("legacy_repair"),
+            "waba_catalog_linked": ensure.get("waba_catalog_linked"),
+        }
+        if not ensure.get("ok"):
+            out["error"] = ensure.get("error")
+            return out
+    else:
+        out["ensure"] = {
+            "skipped": True,
+            "reason": "auto_catalog_onboarding_disabled",
+        }
+
     bind = bind_current_waba_to_merchant_catalog(
         db, tenant_id, confirm=confirm, client=client,
     )
@@ -254,6 +291,7 @@ def reconcile_meta_catalog_after_whatsapp_change(
         "catalog_reused": bind.get("catalog_reused"),
         "already_linked": bind.get("already_linked"),
         "catalog_token_source": bind.get("catalog_token_source"),
+        "legacy_repair": bind.get("legacy_repair"),
     }
     if bind.get("skipped") and bind.get("error") == "catalog_disabled":
         out["ok"] = True
