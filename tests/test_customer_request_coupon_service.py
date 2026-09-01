@@ -31,6 +31,7 @@ from backend.services.customer_request_coupon_service import (
     COUNT_SOURCE_CI_PHONE_INDEX,
     CUSTOMER_COUPON_LIVE_ISSUANCE,
     CUSTOMER_COUPON_LIVE_ROUTING,
+    ISSUED_REASON_CUSTOMER_REQUEST,
     REASON_AI_POLICY_DISABLED,
     REASON_IDENTITY_UNAVAILABLE,
     REASON_LEVEL_NOT_ALLOWED_FOR_AI,
@@ -39,6 +40,7 @@ from backend.services.customer_request_coupon_service import (
     REASON_POOL_EMPTY,
     REASON_SALLA_UNAVAILABLE,
     count_customer_orders,
+    find_reusable_assigned_coupon,
     issue_customer_coupon,
 )
 
@@ -206,6 +208,26 @@ def _add_pool_coupon(
     db.commit()
     db.refresh(row)
     return row
+
+
+def _stamp_owned(
+    db,
+    coupon: Coupon,
+    customer_id: int,
+    *,
+    reason: str = ISSUED_REASON_CUSTOMER_REQUEST,
+    channel: str = "ai",
+) -> Coupon:
+    meta = dict(coupon.extra_metadata or {})
+    meta["customer_id"] = int(customer_id)
+    meta["issued_reason"] = reason
+    meta["issued_channel"] = channel
+    coupon.extra_metadata = meta
+    coupon.allocation_channel = channel
+    flag_modified(coupon, "extra_metadata")
+    db.commit()
+    db.refresh(coupon)
+    return coupon
 
 
 def _issue(db, tenant_id, customer_id, **kwargs):
@@ -474,8 +496,11 @@ def test_consumed_assigned_coupon_is_not_reused() -> None:
     )
     meta = dict(consumed.extra_metadata or {})
     meta["customer_id"] = customer.id
+    meta["issued_reason"] = ISSUED_REASON_CUSTOMER_REQUEST
+    meta["issued_channel"] = "ai"
     meta["redeemed"] = True
     consumed.extra_metadata = meta
+    consumed.allocation_channel = "ai"
     flag_modified(consumed, "extra_metadata")
     db.commit()
     fresh = _add_pool_coupon(db, tenant_id, "NHNEW", "bronze")
@@ -594,3 +619,144 @@ def test_count_matrix_through_service_resolver_gate() -> None:
         else:
             assert result.resolved_level == expected
             assert result.countable_orders == n
+
+
+def test_bronze_assignment_is_not_reused_after_customer_reaches_silver() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    bronze = _add_pool_coupon(db, tenant_id, "NHBRZ", "bronze")
+    first = _issue(db, tenant_id, customer.id)
+    assert first.issued is True
+    assert first.coupon_id == bronze.id
+    assert first.resolved_level == "bronze"
+    _add_orders(db, tenant_id, PHONE_A, countable=2)
+    silver = _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
+    second = _issue(db, tenant_id, customer.id)
+    assert second.issued is True
+    assert second.resolved_level == "silver"
+    assert second.coupon_id == silver.id
+    assert second.reason_code == "issued"
+    db.refresh(bronze)
+    assert int((bronze.extra_metadata or {}).get("customer_id")) == customer.id
+    reused = find_reusable_assigned_coupon(
+        db, tenant_id, customer.id, resolved_level="bronze", for_channel="ai"
+    )
+    assert reused is not None and reused.id == bronze.id
+    current = find_reusable_assigned_coupon(
+        db, tenant_id, customer.id, resolved_level="silver", for_channel="ai"
+    )
+    assert current is not None and current.id == silver.id
+
+
+def test_current_silver_customer_request_is_reused() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=3)
+    first_pool = _add_pool_coupon(db, tenant_id, "NHSL1", "silver")
+    spare = _add_pool_coupon(db, tenant_id, "NHSL2", "silver")
+    one = _issue(db, tenant_id, customer.id)
+    two = _issue(db, tenant_id, customer.id)
+    assert one.issued and two.issued
+    assert one.resolved_level == two.resolved_level == "silver"
+    assert one.coupon_id == two.coupon_id == first_pool.id
+    assert two.reason_code == "reused_existing_assignment"
+    db.refresh(spare)
+    assert (spare.extra_metadata or {}).get("customer_id") is None
+
+
+def test_campaign_assignment_with_same_customer_is_not_reused() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    campaign = _add_pool_coupon(db, tenant_id, "NHCMP", "bronze")
+    _stamp_owned(db, campaign, customer.id, reason="campaign", channel="campaign")
+    pool = _add_pool_coupon(db, tenant_id, "NHNEW", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == pool.id
+    assert result.reason_code == "issued"
+    assert find_reusable_assigned_coupon(
+        db, tenant_id, customer.id, resolved_level="bronze", for_channel="ai"
+    ).id == pool.id
+
+
+def test_autopilot_assignment_with_same_customer_is_not_reused() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    auto = _add_pool_coupon(db, tenant_id, "NHAUT", "bronze")
+    _stamp_owned(db, auto, customer.id, reason="autopilot", channel="autopilot")
+    pool = _add_pool_coupon(db, tenant_id, "NHNEW", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == pool.id
+    assert result.reason_code == "issued"
+
+
+def test_reuse_finds_assignment_older_than_200_unrelated_coupons() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    assigned = _add_pool_coupon(db, tenant_id, "NHOLD", "bronze")
+    _stamp_owned(db, assigned, customer.id)
+    for i in range(210):
+        _add_pool_coupon(db, tenant_id, f"U{i:04d}", "bronze")
+    found = find_reusable_assigned_coupon(
+        db, tenant_id, customer.id, resolved_level="bronze", for_channel="ai"
+    )
+    assert found is not None
+    assert found.id == assigned.id
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == assigned.id
+    assert result.reason_code == "reused_existing_assignment"
+
+
+def test_reuse_query_is_tenant_scoped() -> None:
+    db, tenant_id, engine = _make_db()
+    other = Tenant(name="Other Coupon Tenant", is_active=True)
+    db.add(other)
+    db.flush()
+    db.add(
+        TenantSettings(
+            tenant_id=other.id,
+            extra_metadata={
+                "coupons_dashboard": {
+                    "levels": _levels(),
+                    "ai_policy": {
+                        "enabled": True,
+                        "allowed_levels": ["bronze"],
+                        "pool_mode": "pool_first",
+                    },
+                }
+            },
+        )
+    )
+    db.commit()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    foreign = Coupon(
+        tenant_id=other.id,
+        code="NHFOR",
+        discount_type="percentage",
+        discount_value="5",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=3),
+        extra_metadata=_pool_meta(level="bronze"),
+        coupon_level="bronze",
+        source_type="system",
+    )
+    db.add(foreign)
+    db.commit()
+    db.refresh(foreign)
+    _stamp_owned(db, foreign, customer.id)
+    found = find_reusable_assigned_coupon(
+        db, tenant_id, customer.id, resolved_level="bronze", for_channel="ai"
+    )
+    assert found is None
+    pool = _add_pool_coupon(db, tenant_id, "NHLOC", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.coupon_id == pool.id
+    db.refresh(foreign)
+    assert int((foreign.extra_metadata or {}).get("customer_id")) == customer.id
+    assert foreign.tenant_id == other.id

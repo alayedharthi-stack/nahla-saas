@@ -8,12 +8,15 @@ Existing CRM/autopilot/campaign APIs are not used as the public issuance path.
 """
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from core.pg_advisory_lock import DedicatedAdvisoryLock
 from models import Coupon, Customer
 from services.coupon_generator import (
     CouponGeneratorService,
@@ -72,6 +75,11 @@ CLOSED_REASON_CODES = frozenset(
 POOL_MODE_POOL_FIRST = "pool_first"
 POOL_MODE_POOL_ONLY = "pool_only"
 POOL_MODE_ON_DEMAND_ONLY = "on_demand_only"
+
+ISSUED_REASON_CUSTOMER_REQUEST = "customer_request"
+# Distinct from coupon_generator.POOL_LOCK_NAMESPACE (748103219).
+CUSTOMER_REQUEST_LOCK_NAMESPACE = 748103301
+CUSTOMER_REQUEST_LOCK_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -220,6 +228,17 @@ def _truthy(value: Any) -> bool:
     return False
 
 
+def _customer_request_lock_key(tenant_id: int, customer_id: int) -> int:
+    """Positive int31 lock id for pg_advisory_lock(namespace, lock_key)."""
+    digest = zlib.crc32(f"{int(tenant_id)}:{int(customer_id)}".encode("utf-8"))
+    return digest & 0x7FFFFFFF
+
+
+def _bind_is_postgresql(db: Session) -> bool:
+    bind = db.get_bind()
+    return bool(bind is not None and getattr(bind.dialect, "name", "") == "postgresql")
+
+
 def _assignment_remaining_ok(
     coupon: Coupon,
     *,
@@ -237,28 +256,92 @@ def _assignment_remaining_ok(
     return True, None
 
 
+def _matches_customer_request_contract(
+    coupon: Coupon,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    resolved_level: str,
+    for_channel: str,
+) -> bool:
+    if int(coupon.tenant_id) != int(tenant_id):
+        return False
+    level = str(resolved_level or "").strip().lower()
+    if not level or str(coupon.coupon_level or "").strip().lower() != level:
+        return False
+    meta = dict(coupon.extra_metadata or {})
+    owner = meta.get("customer_id")
+    if owner in (None, "", "null"):
+        return False
+    try:
+        if int(owner) != int(customer_id):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if str(meta.get("issued_reason") or "").strip().lower() != ISSUED_REASON_CUSTOMER_REQUEST:
+        return False
+    channel = str(for_channel or "ai").strip().lower()
+    issued_channel = str(meta.get("issued_channel") or "").strip().lower()
+    if issued_channel != channel:
+        return False
+    alloc = str(coupon.allocation_channel or meta.get("allocation_channel") or "").strip().lower()
+    if alloc and alloc not in {channel, "shared"}:
+        return False
+    return True
+
+
 def find_reusable_assigned_coupon(
     db: Session,
     tenant_id: int,
     customer_id: int,
     *,
+    resolved_level: str,
+    for_channel: str = "ai",
     min_remaining_hours: int = 0,
     now: Optional[datetime] = None,
 ) -> Optional[Coupon]:
+    """Return the current customer-request assignment for this contract, if any.
+
+    Ownership is structural: tenant, customer, resolved level, customer_request
+    provenance, and compatible channel. There is no newest-N scan.
+    """
     now = now or datetime.now(timezone.utc)
-    owner = str(int(customer_id))
-    rows = (
+    level = str(resolved_level or "").strip().lower()
+    if not level:
+        return None
+    try:
+        owner_id = int(customer_id)
+    except (TypeError, ValueError):
+        return None
+    if owner_id <= 0:
+        return None
+    channel = str(for_channel or "ai").strip().lower()
+    owner = str(owner_id)
+    ttl_cutoff = now + timedelta(hours=min_remaining_hours) if min_remaining_hours > 0 else now
+
+    query = (
         db.query(Coupon)
-        .filter(Coupon.tenant_id == tenant_id)
-        .order_by(Coupon.id.desc())
-        .limit(200)
-        .all()
+        .filter(
+            Coupon.tenant_id == tenant_id,
+            func.lower(func.coalesce(Coupon.coupon_level, "")) == level,
+            or_(Coupon.expires_at.is_(None), Coupon.expires_at > ttl_cutoff),
+        )
+        .order_by(Coupon.id.asc())
     )
-    for coupon in rows:
-        meta_owner = (coupon.extra_metadata or {}).get("customer_id")
-        if meta_owner in (None, "", "null"):
-            continue
-        if str(meta_owner) != owner:
+    if _bind_is_postgresql(db):
+        query = query.filter(
+            Coupon.extra_metadata["customer_id"].astext == owner,
+            Coupon.extra_metadata["issued_reason"].astext == ISSUED_REASON_CUSTOMER_REQUEST,
+            func.lower(Coupon.extra_metadata["issued_channel"].astext) == channel,
+        )
+    for coupon in query.all():
+        if not _matches_customer_request_contract(
+            coupon,
+            tenant_id=tenant_id,
+            customer_id=owner_id,
+            resolved_level=level,
+            for_channel=channel,
+        ):
             continue
         ok, _reason = _assignment_remaining_ok(
             coupon, min_remaining_hours=min_remaining_hours, now=now
@@ -440,72 +523,83 @@ async def issue_customer_coupon(
         )
 
     min_remaining_hours = int(policy.get("min_remaining_hours") or 0) if channel == "ai" else 0
-    existing = find_reusable_assigned_coupon(
+    lock = DedicatedAdvisoryLock(
         db,
-        tenant_id,
-        count.customer_id,
-        min_remaining_hours=min_remaining_hours,
+        namespace=CUSTOMER_REQUEST_LOCK_NAMESPACE,
+        level_key=_customer_request_lock_key(int(tenant_id), int(count.customer_id)),
     )
-    if existing is not None:
-        return _result_from_coupon(
-            existing,
-            count=count,
-            resolved_level=str(existing.coupon_level or resolved_level),
-            reason_code=REASON_REUSED,
-            min_order_amount=min_order_amount,
-            restrictions=restrictions,
-        )
-
-    pool_mode = str(policy.get("pool_mode") or POOL_MODE_POOL_FIRST).lower()
-    if pool_mode not in {POOL_MODE_POOL_FIRST, POOL_MODE_POOL_ONLY, POOL_MODE_ON_DEMAND_ONLY}:
-        pool_mode = POOL_MODE_POOL_FIRST
-
-    generator = CouponGeneratorService(db, tenant_id)
-    coupon: Optional[Coupon] = None
-
-    if pool_mode != POOL_MODE_ON_DEMAND_ONLY:
-        coupon = generator.pick_coupon_for_level(
-            resolved_level,
+    try:
+        lock.acquire_blocking(timeout_seconds=CUSTOMER_REQUEST_LOCK_TIMEOUT_SECONDS)
+        existing = find_reusable_assigned_coupon(
+            db,
+            tenant_id,
             count.customer_id,
+            resolved_level=str(resolved_level),
             for_channel=channel,
+            min_remaining_hours=min_remaining_hours,
         )
+        if existing is not None:
+            return _result_from_coupon(
+                existing,
+                count=count,
+                resolved_level=str(resolved_level),
+                reason_code=REASON_REUSED,
+                min_order_amount=min_order_amount,
+                restrictions=restrictions,
+            )
 
-    if coupon is None and pool_mode == POOL_MODE_POOL_ONLY:
-        return _empty_result(
-            customer_id=count.customer_id,
-            countable_orders=count.countable_orders,
-            resolved_level=resolved_level,
-            policy_allowed=True,
-            reason_code=REASON_POOL_EMPTY,
-            count=count,
-        )
+        pool_mode = str(policy.get("pool_mode") or POOL_MODE_POOL_FIRST).lower()
+        if pool_mode not in {POOL_MODE_POOL_FIRST, POOL_MODE_POOL_ONLY, POOL_MODE_ON_DEMAND_ONLY}:
+            pool_mode = POOL_MODE_POOL_FIRST
 
-    if coupon is None:
-        coupon = await generator.create_on_demand_for_level(
-            resolved_level,
-            customer_id=count.customer_id,
-            for_channel=channel,
-        )
-        if coupon is None:
-            adapter = generator._get_adapter()
-            reason = REASON_SALLA_UNAVAILABLE if adapter is None else REASON_POOL_EMPTY
+        generator = CouponGeneratorService(db, tenant_id)
+        coupon: Optional[Coupon] = None
+
+        if pool_mode != POOL_MODE_ON_DEMAND_ONLY:
+            coupon = generator.pick_coupon_for_level(
+                resolved_level,
+                count.customer_id,
+                for_channel=channel,
+            )
+
+        if coupon is None and pool_mode == POOL_MODE_POOL_ONLY:
             return _empty_result(
                 customer_id=count.customer_id,
                 countable_orders=count.countable_orders,
                 resolved_level=resolved_level,
                 policy_allowed=True,
-                reason_code=reason,
+                reason_code=REASON_POOL_EMPTY,
                 count=count,
             )
 
-    return _result_from_coupon(
-        coupon,
-        count=count,
-        resolved_level=resolved_level,
-        reason_code=REASON_ISSUED,
-        min_order_amount=min_order_amount,
-        restrictions=restrictions,
-    )
+        if coupon is None:
+            coupon = await generator.create_on_demand_for_level(
+                resolved_level,
+                customer_id=count.customer_id,
+                for_channel=channel,
+            )
+            if coupon is None:
+                adapter = generator._get_adapter()
+                reason = REASON_SALLA_UNAVAILABLE if adapter is None else REASON_POOL_EMPTY
+                return _empty_result(
+                    customer_id=count.customer_id,
+                    countable_orders=count.countable_orders,
+                    resolved_level=resolved_level,
+                    policy_allowed=True,
+                    reason_code=reason,
+                    count=count,
+                )
+
+        return _result_from_coupon(
+            coupon,
+            count=count,
+            resolved_level=resolved_level,
+            reason_code=REASON_ISSUED,
+            min_order_amount=min_order_amount,
+            restrictions=restrictions,
+        )
+    finally:
+        lock.release()
 
 
 __all__ = [
@@ -513,6 +607,8 @@ __all__ = [
     "COUNT_SOURCE_CI_PHONE_INDEX",
     "CUSTOMER_COUPON_LIVE_ISSUANCE",
     "CUSTOMER_COUPON_LIVE_ROUTING",
+    "CUSTOMER_REQUEST_LOCK_NAMESPACE",
+    "ISSUED_REASON_CUSTOMER_REQUEST",
     "CustomerCouponIssuanceResult",
     "CustomerOrderCount",
     "count_customer_orders",
