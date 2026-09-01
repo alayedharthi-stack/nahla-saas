@@ -200,7 +200,7 @@ Fix ownership, state, evidence, routing, composition, and postprocessing. Paraph
 
 CI job: **`constitution-compliance`** (`backend/tests/test_constitution_compliance.py`).
 
-This job exists in GitHub Actions but is **not merge-blocking until** a repository admin marks it as a Required Status Check in GitHub branch protection. See `docs/engineering/merge-and-ci-policy.md`.
+`constitution-compliance` is currently a **required merge-blocking check on `main`** through GitHub branch protection. It must be green together with the other required checks (`lint-and-test`, `Scan repository for leaked secrets`). Repository files cannot themselves enforce GitHub branch protection; that configuration lives in GitHub. See `docs/engineering/merge-and-ci-policy.md`.
 
 Pre-existing violations must be tracked in `tracked_violations_baseline.json` with violation ID, owner, `added_at`, `expiry_date`, `approved_by`, and removal reference — never silently grandfathered. New violation IDs require `governance_baseline_version` bump in a dedicated governance PR.
 
@@ -208,7 +208,7 @@ Pre-existing violations must be tracked in `tracked_violations_baseline.json` wi
 
 Permanent checklist: `docs/engineering/ai-pr-constitution-checklist.md`.
 
-**Merge gate note:** `constitution-compliance` must be green on the PR, but merge-blocking status depends on GitHub branch protection (owner action). A PR cannot receive PASS or merge approval without completing this checklist.
+**Merge gate note:** `constitution-compliance` is a required merge-blocking check on `main` and must be green on the PR together with the other required checks. A PR cannot receive PASS or merge approval without completing this checklist.
 
 ### Final customer text provenance rule
 
