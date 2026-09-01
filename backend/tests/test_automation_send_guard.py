@@ -1,10 +1,10 @@
-"""P0 — automation send guard blocks outbound when AI paused / human takeover."""
+"""P0 — automation send guard: pause / HUMAN_ACTIVE block; advisory handoff does not."""
 from __future__ import annotations
 
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,14 +17,72 @@ for _p in [_BACKEND, os.path.join(_BACKEND, "..")]:
 from core.ai_pause_guard import REASON_MANUAL_PAUSE
 from core.automation_send_guard import (
     REASON_AI_DISABLED,
+    REASON_BLOCKED_NUMBER,
     REASON_HUMAN_TAKEOVER,
-    REASON_REQUIRES_HUMAN,
+    REASON_STORE_AI_DISABLED,
     should_block_automation_for_conversation,
 )
+from core.ownership_state import OWNERSHIP_HUMAN_IDLE, OWNERSHIP_HUMAN_REQUESTED, resolve_ownership_state
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _now() -> datetime:
+    return datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+class _Msg:
+    def __init__(
+        self,
+        *,
+        direction: str,
+        created_at: datetime,
+        event_type: str = "",
+        extra_metadata: dict | None = None,
+    ) -> None:
+        self.direction = direction
+        self.created_at = created_at
+        self.event_type = event_type
+        self.extra_metadata = extra_metadata or {}
+
+
+class _FakeQuery:
+    def __init__(self, rows: list) -> None:
+        self._rows = list(rows)
+
+    def filter(self, *_args, **_kwargs) -> _FakeQuery:
+        return self
+
+    def order_by(self, *_args, **_kwargs) -> _FakeQuery:
+        return self
+
+    def limit(self, *_args, **_kwargs) -> _FakeQuery:
+        return self
+
+    def first(self):
+        inbounds = sorted(
+            [r for r in self._rows if r.direction == "inbound"],
+            key=lambda r: r.created_at,
+            reverse=True,
+        )
+        return inbounds[0] if inbounds else None
+
+    def all(self):
+        return sorted(
+            [r for r in self._rows if r.direction == "outbound"],
+            key=lambda r: r.created_at,
+            reverse=True,
+        )
+
+
+class _FakeDB:
+    def __init__(self, rows: list | None = None) -> None:
+        self._rows = list(rows or [])
+
+    def query(self, _model) -> _FakeQuery:
+        return _FakeQuery(self._rows)
 
 
 def _convo(**kwargs):
@@ -41,53 +99,116 @@ def _convo(**kwargs):
         taken_over_at=None,
         taken_over_by=None,
         status="active",
+        extra_metadata={},
     )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
 
+def _decision(convo, db=None):
+    return should_block_automation_for_conversation(
+        db if db is not None else _FakeDB(),
+        tenant_id=33,
+        customer_phone="966559968061",
+        conversation=convo,
+    )
+
+
 class TestShouldBlockAutomationForConversation:
     def test_ai_paused_blocks(self) -> None:
         convo = _convo(ai_paused=True, ai_paused_reason=REASON_MANUAL_PAUSE)
-        decision = should_block_automation_for_conversation(
-            MagicMock(),
-            tenant_id=33,
-            customer_phone="966559968061",
-            conversation=convo,
-        )
+        decision = _decision(convo)
         assert decision.block is True
         assert decision.reason == REASON_AI_DISABLED
 
     def test_human_takeover_columns_block(self) -> None:
-        convo = _convo(taken_over_at=datetime.now(timezone.utc), taken_over_by="dashboard:handoff")
-        decision = should_block_automation_for_conversation(
-            MagicMock(),
-            tenant_id=33,
-            customer_phone="966559968061",
-            conversation=convo,
+        convo = _convo(
+            taken_over_at=_now(),
+            taken_over_by="dashboard:handoff",
         )
+        decision = _decision(convo)
         assert decision.block is True
         assert decision.reason == REASON_HUMAN_TAKEOVER
 
-    def test_needs_human_blocks(self) -> None:
-        convo = _convo(needs_human=True)
-        decision = should_block_automation_for_conversation(
-            MagicMock(),
-            tenant_id=33,
-            customer_phone="966559968061",
-            conversation=convo,
+    def test_needs_human_advisory_allows(self) -> None:
+        convo = _convo(needs_human=True, handoff_active=True)
+        result = resolve_ownership_state(_FakeDB(), convo, now=_now())
+        assert result.state == OWNERSHIP_HUMAN_REQUESTED
+        decision = _decision(convo)
+        assert decision.block is False
+
+    def test_is_human_handoff_advisory_allows(self) -> None:
+        convo = _convo(is_human_handoff=True)
+        result = resolve_ownership_state(_FakeDB(), convo, now=_now())
+        assert result.state == OWNERSHIP_HUMAN_REQUESTED
+        decision = _decision(convo)
+        assert decision.block is False
+
+    def test_status_human_advisory_allows(self) -> None:
+        convo = _convo(status="human")
+        result = resolve_ownership_state(_FakeDB(), convo, now=_now())
+        assert result.state == OWNERSHIP_HUMAN_REQUESTED
+        decision = _decision(convo)
+        assert decision.block is False
+
+    def test_implicit_recent_staff_blocks(self) -> None:
+        now = datetime.now(timezone.utc)
+        staff_at = now - timedelta(minutes=5)
+        convo = _convo(
+            paused_by_human=True,
+            taken_over_at=staff_at,
+            taken_over_by="user:42",
         )
+        db = _FakeDB([
+            _Msg(direction="outbound", created_at=staff_at, event_type="manual_reply"),
+        ])
+        decision = _decision(convo, db=db)
         assert decision.block is True
-        assert decision.reason == REASON_REQUIRES_HUMAN
+        assert decision.reason == REASON_HUMAN_TAKEOVER
+
+    def test_human_idle_customer_waiting_allows(self) -> None:
+        now = datetime.now(timezone.utc)
+        staff_at = now - timedelta(minutes=20)
+        inbound_at = now - timedelta(minutes=1)
+        convo = _convo(
+            paused_by_human=True,
+            taken_over_at=staff_at,
+            taken_over_by="user:42",
+            needs_human=True,
+            handoff_active=True,
+        )
+        db = _FakeDB([
+            _Msg(direction="outbound", created_at=staff_at, event_type="manual_reply"),
+            _Msg(direction="inbound", created_at=inbound_at),
+        ])
+        result = resolve_ownership_state(db, convo, now=now, assume_current_inbound=True)
+        assert result.state == OWNERSHIP_HUMAN_IDLE
+        decision = _decision(convo, db=db)
+        assert decision.block is False
+
+    def test_blocked_number_blocks(self) -> None:
+        convo = _convo()
+        with patch(
+            "core.automation_send_guard.is_internal_or_blocked",
+            return_value=(True, "internal_number"),
+        ):
+            decision = _decision(convo)
+        assert decision.block is True
+        assert decision.reason == REASON_BLOCKED_NUMBER
+
+    def test_store_ai_disabled_blocks(self) -> None:
+        convo = _convo()
+        with patch(
+            "core.ai_disabled_gate.is_ai_allowed_by_store_mode",
+            return_value=SimpleNamespace(allowed=False, reason=REASON_STORE_AI_DISABLED, mode="off"),
+        ):
+            decision = _decision(convo)
+        assert decision.block is True
+        assert decision.reason == REASON_STORE_AI_DISABLED
 
     def test_active_conversation_allows(self) -> None:
         convo = _convo()
-        decision = should_block_automation_for_conversation(
-            MagicMock(),
-            tenant_id=33,
-            customer_phone="966559968061",
-            conversation=convo,
-        )
+        decision = _decision(convo)
         assert decision.block is False
 
 
