@@ -492,6 +492,54 @@ def _decision_product_selection_list_pick(
     )
 
 
+def _purchase_channel_turn_decision(
+    ctx: BrainContext,
+    state: Any,
+    facts: Any,
+    *,
+    phase: str,
+    selected_ref: Any = None,
+) -> Optional[Decision]:
+    """Thin engine adapter — checkout_route_owner owns the turn."""
+    try:
+        from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+            resolve_purchase_channel_turn,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — channel owner import must not block decide
+        return None
+
+    try:
+        sales = getattr(ctx, "merchant_sales_channels", None)
+        turn = resolve_purchase_channel_turn(
+            phase=phase,
+            message=ctx.message or "",
+            intent=ctx.intent,
+            order_prep=getattr(state, "order_prep", None),
+            inbound_metadata=getattr(ctx, "inbound_metadata", None),
+            merchant_sales_channels=sales,
+            store_url=str(getattr(facts, "store_url", "") or ""),
+            maps_url=str(getattr(facts, "maps_url", "") or ""),
+            store_url_source=str(getattr(facts, "store_url_source", "") or ""),
+            tenant_id=int(ctx.tenant_id or 0),
+            phone=str(ctx.customer_phone or ""),
+            db=getattr(ctx, "_db", None),
+            selected_product_referent=selected_ref,
+            current_product_focus=getattr(state, "current_product_focus", None),
+            state=state,
+            stage=str(getattr(state, "stage", "") or ""),
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — channel owner must not block decide
+        return None
+    if turn is None:
+        return None
+    return Decision(
+        action=turn.action,
+        args=dict(turn.args or {}),
+        reason=turn.reason,
+        confidence=turn.confidence,
+    )
+
+
 class DefaultDecisionEngine:
     """Implements DecisionMaker protocol."""
 
@@ -593,7 +641,7 @@ class DefaultDecisionEngine:
                 from ..state.state_relevance import validate_state_relevance  # noqa: PLC0415
 
                 return getattr(ctx, "state_relevance", None) or validate_state_relevance(ctx)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — state-relevance probe must not block decide
                 return None
 
         def _support_listing_blocks_checkout() -> bool:
@@ -1189,6 +1237,12 @@ class DefaultDecisionEngine:
                 "[LEDGER_FOLLOW_UP] hook failed — falling through tenant=%s",
                 getattr(ctx, "tenant_id", None),
             )
+
+        _awaiting_channel_decision = _purchase_channel_turn_decision(
+            ctx, state, facts, phase="awaiting"
+        )
+        if _awaiting_channel_decision is not None:
+            return _awaiting_channel_decision
 
         from ..current_turn_social_non_commerce import CurrentTurnSocialNonCommerce  # noqa: PLC0415
 
@@ -3278,6 +3332,12 @@ class DefaultDecisionEngine:
                 _swo_exc,
             )
 
+        _purchase_channel_entry = _purchase_channel_turn_decision(
+            ctx, state, facts, phase="entry"
+        )
+        if _purchase_channel_entry is not None:
+            return _purchase_channel_entry
+
         from ..discovery.entry import (  # noqa: PLC0415
             resolve_discovery_entry,
             route_discovery_entry,
@@ -3973,31 +4033,8 @@ class DefaultDecisionEngine:
                 _selected_ref = restore_selected_product_focus(state)
             except Exception:  # noqa: BLE001  # noqa: silent-ok — selected-product restore must not block start-order
                 _selected_ref = None
-            _sales_channels = getattr(ctx, "merchant_sales_channels", None)
-            if _sales_channels is None:
-                try:
-                    from ..commerce.sales_channel_capabilities import (  # noqa: PLC0415
-                        resolve_merchant_sales_channels,
-                    )
-
-                    _sales_channels = resolve_merchant_sales_channels(
-                        getattr(ctx, "_db", None),
-                        int(ctx.tenant_id or 0),
-                        store_url=str(getattr(facts, "store_url", "") or ""),
-                        store_url_source=str(
-                            getattr(facts, "store_url_source", "") or "",
-                        ),
-                        maps_url=str(getattr(facts, "maps_url", "") or ""),
-                    )
-                except Exception:  # noqa: BLE001  # noqa: silent-ok — sales-channel resolve must not block start-order
-                    _sales_channels = None
             from ..commerce.checkout_route_owner import (  # noqa: PLC0415
-                PURCHASE_CHANNEL_ENTRY_SELECTION,
-                PURCHASE_CHANNEL_ENTRY_SHOWROOM,
-                PURCHASE_CHANNEL_ENTRY_STORE,
                 is_genuine_purchase_channel_entry,
-                resolve_available_purchase_channel_facts,
-                resolve_purchase_channel_entry_owner,
             )
 
             _purchase_entry = is_genuine_purchase_channel_entry(
@@ -4033,88 +4070,11 @@ class DefaultDecisionEngine:
                         "[ORDER FLOW] fresh start-order clear failed tenant=%s",
                         ctx.tenant_id,
                     )
-                try:
-                    _channel_owner = resolve_purchase_channel_entry_owner(
-                        message=ctx.message or "",
-                        intent=intent,
-                        order_prep=getattr(state, "order_prep", None),
-                        selected_product_referent=_selected_ref,
-                        current_product_focus=getattr(
-                            state, "current_product_focus", None
-                        ),
-                        state=state,
-                        inbound_metadata=getattr(ctx, "inbound_metadata", None),
-                        store_url=str(getattr(facts, "store_url", "") or ""),
-                        maps_url=str(getattr(facts, "maps_url", "") or ""),
-                        store_url_source=str(
-                            getattr(facts, "store_url_source", "") or "",
-                        ),
-                        merchant_sales_channels=_sales_channels,
-                        stage=str(getattr(state, "stage", "") or ""),
-                    )
-                    _available_channels = resolve_available_purchase_channel_facts(
-                        store_url=str(getattr(facts, "store_url", "") or ""),
-                        maps_url=str(getattr(facts, "maps_url", "") or ""),
-                        store_url_source=str(
-                            getattr(facts, "store_url_source", "") or "",
-                        ),
-                        merchant_sales_channels=_sales_channels,
-                    )
-                    if _channel_owner == PURCHASE_CHANNEL_ENTRY_SELECTION:
-                        return Decision(
-                            action=ACTION_LLM_REPLY,
-                            args={
-                                "topic": "purchase_channel_selection",
-                                "response_goal": (
-                                    "help_customer_choose_purchase_channel"
-                                ),
-                                "available_purchase_channels": list(
-                                    _available_channels
-                                ),
-                            },
-                            reason=(
-                                "genuine purchase entry — multiple available "
-                                "purchase channels"
-                            ),
-                            confidence=0.92,
-                        )
-                    if _channel_owner == PURCHASE_CHANNEL_ENTRY_STORE:
-                        return Decision(
-                            action=ACTION_LLM_REPLY,
-                            args={
-                                "topic": "online_store_redirect",
-                                "response_goal": "guide_customer_to_online_store",
-                                "available_purchase_channels": list(
-                                    _available_channels
-                                ),
-                            },
-                            reason=(
-                                "genuine purchase entry — only online store "
-                                "is available"
-                            ),
-                            confidence=0.92,
-                        )
-                    if _channel_owner == PURCHASE_CHANNEL_ENTRY_SHOWROOM:
-                        return Decision(
-                            action=ACTION_LLM_REPLY,
-                            args={
-                                "topic": "showroom_visit",
-                                "response_goal": "guide_customer_to_showroom",
-                                "available_purchase_channels": list(
-                                    _available_channels
-                                ),
-                            },
-                            reason=(
-                                "genuine purchase entry — only showroom "
-                                "is available"
-                            ),
-                            confidence=0.92,
-                        )
-                except Exception:  # noqa: BLE001  # noqa: silent-ok — channel selection gate must not block decide
-                    logger.debug(
-                        "[ORDER FLOW] purchase channel selection gate skipped tenant=%s",
-                        ctx.tenant_id,
-                    )
+                _entry_turn = _purchase_channel_turn_decision(
+                    ctx, state, facts, phase="entry", selected_ref=_selected_ref
+                )
+                if _entry_turn is not None:
+                    return _entry_turn
 
             if (
                 not _purchase_entry

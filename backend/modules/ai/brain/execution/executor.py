@@ -31,6 +31,7 @@ from ..decision.actions import (
     ACTION_PRODUCT_MEDIA_IDENTITY,
     ACTION_RECOMMEND_ADDON,
     ACTION_SEARCH_PRODUCTS,
+    ACTION_SELECT_PURCHASE_CHANNEL,
     ACTION_SEND_PAYMENT_LINK,
     ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
@@ -434,6 +435,95 @@ class _PaymentContinuationReplyHandler:
         )
 
 
+class _SelectPurchaseChannelHandler:
+    """Validate selection, persist, then execute. Success requires all three."""
+
+    async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
+        from ..commerce.checkout_route_owner import (  # noqa: PLC0415
+            apply_selected_purchase_channel,
+            extract_structured_purchase_channel_pick,
+        )
+
+        args = dict(decision.args or {})
+        facts = getattr(ctx, "facts", None)
+        state = getattr(ctx, "state", None)
+        inbound = getattr(ctx, "inbound_metadata", None)
+        order_prep = getattr(state, "order_prep", None) if state is not None else None
+        offered = None
+        if order_prep is not None:
+            raw_offered = getattr(order_prep, "offered_purchase_channel_ids", None)
+            if raw_offered is None and isinstance(order_prep, dict):
+                raw_offered = order_prep.get("offered_purchase_channel_ids")
+            if isinstance(raw_offered, (list, tuple)):
+                offered = list(raw_offered)
+        pick = extract_structured_purchase_channel_pick(
+            message=getattr(ctx, "message", "") or "",
+            inbound_metadata=inbound if isinstance(inbound, dict) else {},
+            brain_decision_action=str(decision.action or ""),
+            brain_decision_args=args,
+            offered_purchase_channel_ids=offered,
+        )
+        selected_id = str(pick.channel_id if pick is not None else "").strip()
+        selection_source = str(pick.selection_source if pick is not None else "") or str(
+            args.get("selection_source") or ""
+        )
+        result = apply_selected_purchase_channel(
+            getattr(ctx, "_db", None) or getattr(ctx, "db", None),
+            tenant_id=int(ctx.tenant_id or 0),
+            phone=str(ctx.customer_phone or ""),
+            selected_channel_id=selected_id,
+            order_prep=order_prep,
+            merchant_sales_channels=getattr(ctx, "merchant_sales_channels", None),
+            store_url=str(getattr(facts, "store_url", "") or ""),
+            store_url_source=str(getattr(facts, "store_url_source", "") or ""),
+            maps_url=str(getattr(facts, "maps_url", "") or ""),
+            selection_source=selection_source,
+        )
+        executed_ok = bool(result.accepted and result.persist_ok and result.executed and result.committed)
+        topic = result.execution_topic if executed_ok else "purchase_channel_selection"
+        args["topic"] = topic
+        args["selected_channel_id"] = result.selected_channel_id
+        args["available_purchase_channels"] = list(result.available_purchase_channel_ids)
+        args["selection_source"] = result.selection_source or selection_source
+        args["persist_ok"] = result.persist_ok
+        args["executed"] = result.executed
+        args["committed"] = result.committed
+        args["awaiting_checkout_channel"] = result.awaiting_checkout_channel
+        args["offered_purchase_channel_ids"] = list(result.offered_purchase_channel_ids)
+        args["durable_choice_state"] = bool(result.committed)
+        if executed_ok and result.cta_url:
+            args["cta_url"] = result.cta_url
+            args["cta_label"] = result.cta_label
+        else:
+            args.pop("cta_url", None)
+            args.pop("cta_label", None)
+            if not executed_ok:
+                args["response_goal"] = "help_customer_choose_purchase_channel"
+        decision.args = args
+        return ActionResult(
+            success=executed_ok,
+            data={
+                "type": "select_purchase_channel",
+                "accepted": result.accepted,
+                "selected_channel_id": result.selected_channel_id,
+                "execution_topic": topic,
+                "reason": result.reason,
+                "checkout_channel": result.checkout_channel if executed_ok else "",
+                "persist_ok": result.persist_ok,
+                "executed": result.executed,
+                "committed": result.committed,
+                "awaiting_checkout_channel": result.awaiting_checkout_channel,
+                "offered_purchase_channel_ids": list(result.offered_purchase_channel_ids),
+                "execution_owner": result.execution_owner,
+                "execution_evidence": result.execution_evidence,
+                "selection_source": result.selection_source or selection_source,
+                "cta_url": result.cta_url if executed_ok else "",
+                "cta_label": result.cta_label if executed_ok else "",
+            },
+            error=None if executed_ok else result.reason or "selection_rejected",
+        )
+
+
 class DefaultActionExecutor:
     """Implements ActionExecutor protocol."""
 
@@ -475,6 +565,7 @@ class DefaultActionExecutor:
             ACTION_VARIANT_PRICING:       _VariantPricingHandler(),
             ACTION_PAYMENT_TRANSFER_PROMISE: _PaymentTransferPromiseHandler(),
             ACTION_PRODUCT_MEDIA_IDENTITY: _ProductMediaIdentityHandler(),
+            ACTION_SELECT_PURCHASE_CHANNEL: _SelectPurchaseChannelHandler(),
         }
 
     async def execute(self, decision: Decision, ctx: BrainContext) -> ActionResult:

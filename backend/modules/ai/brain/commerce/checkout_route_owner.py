@@ -307,21 +307,38 @@ def resolve_available_purchase_channel_facts(
         from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
             store_url_evidence_activates_channel,
         )
+        from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+            canonical_merchant_storefront_url,
+        )
 
+        canonical_store = canonical_merchant_storefront_url(store_url)
         if store_url_evidence_activates_channel(
             source=store_url_source,
-            found=bool(str(store_url or "").strip()),
+            found=bool(canonical_store),
         ):
             out.append("online_store")
     except Exception:  # noqa: BLE001  # noqa: silent-ok — evidence gate must not block legacy path
-        if str(store_url or "").strip():
-            out.append("online_store")
+        try:
+            from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+                canonical_merchant_storefront_url as _canon_store,
+            )
+
+            if _canon_store(store_url):
+                out.append("online_store")
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical URL probe must not invent online_store
+            pass
     if whatsapp_available:
         out.append("whatsapp_quick_order")
-    if str(maps_url or "").strip():
-        out.append("showroom_visit")
-    if not out:
-        out.append("whatsapp_quick_order")
+    try:
+        from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+            canonical_merchant_storefront_url as _canon_maps,
+        )
+
+        if _canon_maps(maps_url):
+            out.append("showroom_visit")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — maps URL gate must not invent showroom
+        if str(maps_url or "").strip():
+            out.append("showroom_visit")
     return out
 
 
@@ -1022,39 +1039,95 @@ def _explicit_channel_title_map() -> Dict[str, str]:
     return out
 
 
+def _payload_source_for_checkout_channel(
+    checkout_channel: str,
+    *,
+    source: str,
+) -> Optional[Tuple[str, str]]:
+    if str(checkout_channel or "").strip() in {
+        CHECKOUT_CHANNEL_WHATSAPP,
+        CHECKOUT_CHANNEL_STORE,
+        CHECKOUT_CHANNEL_SHOWROOM,
+    }:
+        return (str(checkout_channel).strip(), source)
+    return None
+
+
 def resolve_explicit_purchase_channel_payload(
     message: str,
     *,
     caps: CheckoutChannelCapabilities,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
 ) -> Optional[str]:
-    """Map platform chrome (button id / exact title / numbered index) only.
+    """Map button payload, or constrained title/index when offered authority exists.
 
-    Free-text paraphrases are unstructured NL and must return None so Brain
-    owns semantics. Do not treat customer prose as a second semantic engine.
+    Free-text paraphrases are unstructured NL and must return None.
+    Exact title / ``1|2|3`` are ``constrained_presented_choice_text``, not
+    verified chrome. They require persisted ``offered_purchase_channel_ids``
+    when that list is supplied (including empty).
     """
+    pick = resolve_explicit_purchase_channel_payload_with_source(
+        message,
+        caps=caps,
+        inbound_metadata=inbound_metadata,
+        offered_purchase_channel_ids=offered_purchase_channel_ids,
+    )
+    return None if pick is None else pick[0]
+
+
+def resolve_explicit_purchase_channel_payload_with_source(
+    message: str,
+    *,
+    caps: CheckoutChannelCapabilities,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
+) -> Optional[Tuple[str, str]]:
     meta = inbound_metadata if isinstance(inbound_metadata, dict) else {}
+    offered = (
+        None
+        if offered_purchase_channel_ids is None
+        else _canonical_offered_ids(offered_purchase_channel_ids)
+    )
+
+    def _accept(checkout_channel: str, source: str) -> Optional[Tuple[str, str]]:
+        fact_id = _checkout_channel_to_fact_id(checkout_channel)
+        if offered is not None and fact_id not in offered:
+            return None
+        return _payload_source_for_checkout_channel(checkout_channel, source=source)
+
     for key in ("button_id", "button_provenance", "list_reply_id"):
         bid = str(meta.get(key) or "").strip()
         if bid in _EXPLICIT_CHANNEL_IDS:
-            return _EXPLICIT_CHANNEL_IDS[bid]
+            return _accept(_EXPLICIT_CHANNEL_IDS[bid], SELECTION_SOURCE_VERIFIED_BUTTON)
 
     raw = (message or "").strip()
     if not raw:
         return None
     if raw in _EXPLICIT_CHANNEL_IDS:
-        return _EXPLICIT_CHANNEL_IDS[raw]
+        return _accept(_EXPLICIT_CHANNEL_IDS[raw], SELECTION_SOURCE_VERIFIED_BUTTON)
 
     title_map = _explicit_channel_title_map()
     titled = title_map.get(_norm(raw))
     if titled:
-        return titled
+        if offered is not None and not offered:
+            return None
+        return _accept(titled, SELECTION_SOURCE_CONSTRAINED_TEXT)
 
     if re.fullmatch(r"[123]", raw):
+        if offered is not None:
+            if not offered:
+                return None
+            idx = int(raw) - 1
+            if 0 <= idx < len(offered):
+                fact_id = offered[idx]
+                checkout = _FACT_ID_TO_CHECKOUT_CHANNEL.get(fact_id, "")
+                return _accept(checkout, SELECTION_SOURCE_CONSTRAINED_TEXT)
+            return None
         channels = available_channels(caps)
         idx = int(raw) - 1
         if 0 <= idx < len(channels):
-            return channels[idx]
+            return _accept(channels[idx], SELECTION_SOURCE_CONSTRAINED_TEXT)
     return None
 
 _PURCHASE_CHANNEL_FACT_MAP: Dict[str, str] = {
@@ -1399,6 +1472,694 @@ def _showroom_delivery_decision(db: Any, *, tenant_id: int) -> CheckoutRouteDeci
     )
 
 
+CANONICAL_PURCHASE_CHANNEL_IDS = frozenset({
+    PURCHASE_CHANNEL_ENTRY_STORE,
+    PURCHASE_CHANNEL_ENTRY_WHATSAPP,
+    PURCHASE_CHANNEL_ENTRY_SHOWROOM,
+})
+
+_FACT_ID_TO_CHECKOUT_CHANNEL: Dict[str, str] = {
+    PURCHASE_CHANNEL_ENTRY_STORE: CHECKOUT_CHANNEL_STORE,
+    PURCHASE_CHANNEL_ENTRY_WHATSAPP: CHECKOUT_CHANNEL_WHATSAPP,
+    PURCHASE_CHANNEL_ENTRY_SHOWROOM: CHECKOUT_CHANNEL_SHOWROOM,
+}
+
+_FACT_ID_TO_EXECUTION_TOPIC: Dict[str, str] = {
+    PURCHASE_CHANNEL_ENTRY_STORE: "online_store_redirect",
+    PURCHASE_CHANNEL_ENTRY_WHATSAPP: "whatsapp_quick_order",
+    PURCHASE_CHANNEL_ENTRY_SHOWROOM: "showroom_visit",
+}
+
+
+@dataclass(frozen=True)
+class PurchaseChannelSelectionResult:
+    accepted: bool
+    selected_channel_id: str = ""
+    execution_topic: str = PURCHASE_CHANNEL_ENTRY_SELECTION
+    checkout_channel: str = ""
+    reason: str = ""
+    available_purchase_channel_ids: Tuple[str, ...] = field(default_factory=tuple)
+    persist_ok: bool = False
+    executed: bool = False
+    execution_owner: str = ""
+    cta_url: str = ""
+    cta_label: str = ""
+    offered_purchase_channel_ids: Tuple[str, ...] = field(default_factory=tuple)
+    selection_source: str = ""
+    execution_evidence: str = ""
+    awaiting_checkout_channel: bool = True
+    committed: bool = False
+
+
+@dataclass(frozen=True)
+class PurchaseChannelTurnDecision:
+    """Structured turn owned by checkout_route_owner — engine converts to Decision."""
+
+    action: str
+    args: Dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+    confidence: float = 0.0
+
+
+_TRUSTED_BRAIN_SELECT_ACTION = "select_purchase_channel"
+_ACTION_LLM_REPLY = "llm_reply"
+
+_EXECUTION_OWNER_STORE = "storefront_cta_owner"
+_EXECUTION_OWNER_SHOWROOM = "showroom_maps_owner"
+_EXECUTION_OWNER_WHATSAPP = "whatsapp_quick_order_owner"
+
+SELECTION_SOURCE_VERIFIED_BUTTON = "verified_button_payload"
+SELECTION_SOURCE_CONSTRAINED_TEXT = "constrained_presented_choice_text"
+SELECTION_SOURCE_BRAIN_DECISION = "future_brain_structured_decision"
+
+REASON_CAPABILITY_EXECUTION_FAILED = "capability_execution_failed"
+REASON_AWAITING_PERSIST_FAILED = "awaiting_state_persist_failed"
+
+EXECUTION_EVIDENCE_STORE_CTA = "canonical_storefront_cta"
+EXECUTION_EVIDENCE_SHOWROOM_CTA = "canonical_maps_cta"
+EXECUTION_EVIDENCE_WHATSAPP_STATE = "committed_whatsapp_order_state"
+
+_MAPS_CTA_HINTS = (
+    "google.com/maps",
+    "maps.google",
+    "maps.app.goo.gl",
+    "goo.gl/maps",
+    "waze.com",
+    "apple.com/maps",
+)
+
+
+@dataclass(frozen=True)
+class PurchaseChannelSelectionPick:
+    """Trusted D1A pick — not customer-language understanding."""
+
+    channel_id: str
+    selection_source: str
+
+
+def extract_structured_purchase_channel_pick(
+    *,
+    message: str = "",
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    intent_slots: Optional[Dict[str, Any]] = None,
+    caps: Optional[CheckoutChannelCapabilities] = None,
+    brain_decision_action: str = "",
+    brain_decision_args: Optional[Dict[str, Any]] = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
+) -> Optional[PurchaseChannelSelectionPick]:
+    """D1A trusted sources: button payload, or constrained title/index.
+
+    Title/index require an authoritative offered list when that argument is
+    supplied. Untrusted intent slots and inbound ``selected_channel_id`` are
+    ignored. Natural-language selection is not implemented.
+    """
+    del intent_slots  # untrusted classifier slots are not a selection source
+    meta = inbound_metadata if isinstance(inbound_metadata, dict) else {}
+    payload = resolve_explicit_purchase_channel_payload_with_source(
+        message,
+        caps=caps or CheckoutChannelCapabilities(),
+        inbound_metadata=meta,
+        offered_purchase_channel_ids=offered_purchase_channel_ids,
+    )
+    if payload:
+        checkout_channel, source = payload
+        fact_id = _checkout_channel_to_fact_id(checkout_channel)
+        if fact_id in CANONICAL_PURCHASE_CHANNEL_IDS:
+            return PurchaseChannelSelectionPick(
+                channel_id=fact_id,
+                selection_source=source,
+            )
+
+    if str(brain_decision_action or "").strip() == _TRUSTED_BRAIN_SELECT_ACTION:
+        args = brain_decision_args if isinstance(brain_decision_args, dict) else {}
+        raw = str(args.get("selected_channel_id") or "").strip()
+        if raw in CANONICAL_PURCHASE_CHANNEL_IDS:
+            offered = (
+                None
+                if offered_purchase_channel_ids is None
+                else _canonical_offered_ids(offered_purchase_channel_ids)
+            )
+            if offered is not None and raw not in offered:
+                return None
+            explicit_source = str(args.get("selection_source") or "").strip()
+            source = (
+                explicit_source
+                if explicit_source
+                in {
+                    SELECTION_SOURCE_VERIFIED_BUTTON,
+                    SELECTION_SOURCE_CONSTRAINED_TEXT,
+                    SELECTION_SOURCE_BRAIN_DECISION,
+                }
+                else SELECTION_SOURCE_BRAIN_DECISION
+            )
+            return PurchaseChannelSelectionPick(
+                channel_id=raw,
+                selection_source=source,
+            )
+    return None
+
+
+def extract_structured_purchase_channel_id(
+    *,
+    message: str = "",
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    intent_slots: Optional[Dict[str, Any]] = None,
+    caps: Optional[CheckoutChannelCapabilities] = None,
+    brain_decision_action: str = "",
+    brain_decision_args: Optional[Dict[str, Any]] = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
+) -> Optional[str]:
+    pick = extract_structured_purchase_channel_pick(
+        message=message,
+        inbound_metadata=inbound_metadata,
+        intent_slots=intent_slots,
+        caps=caps,
+        brain_decision_action=brain_decision_action,
+        brain_decision_args=brain_decision_args,
+        offered_purchase_channel_ids=offered_purchase_channel_ids,
+    )
+    return None if pick is None else pick.channel_id
+
+
+def _offered_channel_ids(order_prep: Any) -> List[str]:
+    prep = _order_prep_mapping(order_prep)
+    if "offered_purchase_channel_ids" in prep:
+        return _canonical_offered_ids(prep.get("offered_purchase_channel_ids"))
+    return []
+
+
+def _canonical_offered_ids(raw: Any) -> List[str]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: List[str] = []
+    for item in raw:
+        token = str(item or "").strip()
+        if token in CANONICAL_PURCHASE_CHANNEL_IDS and token not in out:
+            out.append(token)
+    return out
+
+
+def _authority_offered_ids(
+    order_prep: Any,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Persisted offered list is the authority. Empty list fails closed."""
+    prep = _order_prep_mapping(order_prep)
+    if "offered_purchase_channel_ids" in prep:
+        return _canonical_offered_ids(prep.get("offered_purchase_channel_ids"))
+    return _canonical_offered_ids(offered_purchase_channel_ids)
+
+
+def validate_selected_purchase_channel(
+    *,
+    selected_channel_id: str,
+    tenant_id: int,
+    db: Any = None,
+    order_prep: Any = None,
+    merchant_sales_channels: Any = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
+    store_url: str = "",
+    store_url_source: str = "",
+    maps_url: str = "",
+) -> PurchaseChannelSelectionResult:
+    """Re-resolve current tenant availability and reject stale/fabricated ids."""
+    fact_id = str(selected_channel_id or "").strip()
+    tid = int(tenant_id or 0)
+    offered = _authority_offered_ids(order_prep, offered_purchase_channel_ids)
+
+    sales = merchant_sales_channels
+    if sales is None:
+        try:
+            from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
+                resolve_merchant_sales_channels,
+            )
+
+            sales = resolve_merchant_sales_channels(
+                db,
+                tid,
+                store_url=store_url,
+                store_url_source=store_url_source,
+                maps_url=maps_url,
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — selection must fail closed
+            sales = None
+
+    available: List[str] = []
+    if sales is not None:
+        available = list(sales.available_purchase_channel_ids())
+    else:
+        available = resolve_available_purchase_channel_facts(
+            store_url=store_url,
+            maps_url=maps_url,
+            store_url_source=store_url_source,
+            whatsapp_available=False,
+        )
+
+    if fact_id not in CANONICAL_PURCHASE_CHANNEL_IDS:
+        return PurchaseChannelSelectionResult(
+            accepted=False,
+            selected_channel_id=fact_id,
+            reason="unknown_channel_id",
+            available_purchase_channel_ids=tuple(available),
+            offered_purchase_channel_ids=tuple(offered),
+        )
+    if not offered:
+        return PurchaseChannelSelectionResult(
+            accepted=False,
+            selected_channel_id=fact_id,
+            reason="no_offered_channels",
+            available_purchase_channel_ids=tuple(available),
+            offered_purchase_channel_ids=tuple(offered),
+        )
+    if fact_id not in offered:
+        return PurchaseChannelSelectionResult(
+            accepted=False,
+            selected_channel_id=fact_id,
+            reason="channel_not_offered",
+            available_purchase_channel_ids=tuple(available),
+            offered_purchase_channel_ids=tuple(offered),
+        )
+    if fact_id not in available:
+        return PurchaseChannelSelectionResult(
+            accepted=False,
+            selected_channel_id=fact_id,
+            reason="channel_unavailable",
+            available_purchase_channel_ids=tuple(available),
+            offered_purchase_channel_ids=tuple(offered),
+        )
+    return PurchaseChannelSelectionResult(
+        accepted=True,
+        selected_channel_id=fact_id,
+        execution_topic=_FACT_ID_TO_EXECUTION_TOPIC[fact_id],
+        checkout_channel=_FACT_ID_TO_CHECKOUT_CHANNEL[fact_id],
+        reason="channel_selected",
+        available_purchase_channel_ids=tuple(available),
+        offered_purchase_channel_ids=tuple(offered),
+    )
+
+
+def _canonical_storefront_cta(url: str) -> str:
+    try:
+        from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+            canonical_merchant_storefront_url,
+        )
+
+        return str(canonical_merchant_storefront_url(url) or "")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unusable CTA must fail closed
+        return ""
+
+
+def _canonical_maps_cta(url: str) -> str:
+    canon = _canonical_storefront_cta(url)
+    if not canon:
+        return ""
+    low = canon.lower()
+    if any(hint in low for hint in _MAPS_CTA_HINTS):
+        return canon
+    return ""
+
+
+def _execute_selected_channel_capability(
+    db: Any,
+    *,
+    tenant_id: int,
+    selected_channel_id: str,
+    merchant_sales_channels: Any = None,
+    store_url: str = "",
+    store_url_source: str = "",
+) -> Tuple[str, str, str, str]:
+    """Call the existing deterministic capability owner.
+
+    Returns ``(owner, canonical_cta_url, cta_label, execution_evidence)``.
+    Owner name alone is not execution evidence.
+    """
+    fact_id = str(selected_channel_id or "").strip()
+    if fact_id == PURCHASE_CHANNEL_ENTRY_STORE:
+        sales = merchant_sales_channels
+        caps = CheckoutChannelCapabilities(
+            whatsapp_fast=bool(getattr(getattr(sales, "whatsapp_quick_order", None), "available", False)),
+            store_link=True,
+            showroom_visit=bool(getattr(getattr(sales, "showroom_visit", None), "available", False)),
+            store_url=str(getattr(sales, "store_url", "") or store_url or ""),
+            store_name=str(getattr(sales, "store_name", "") or ""),
+        )
+        delivery = _storefront_delivery_decision(
+            db,
+            tenant_id=int(tenant_id or 0),
+            caps=caps,
+            store_url_source=store_url_source,
+        )
+        cta_url = _canonical_storefront_cta(str(getattr(delivery, "cta_url", "") or ""))
+        if not cta_url:
+            return (_EXECUTION_OWNER_STORE, "", "", "")
+        return (
+            _EXECUTION_OWNER_STORE,
+            cta_url,
+            str(getattr(delivery, "cta_label", "") or ""),
+            EXECUTION_EVIDENCE_STORE_CTA,
+        )
+    if fact_id == PURCHASE_CHANNEL_ENTRY_SHOWROOM:
+        delivery = _showroom_delivery_decision(db, tenant_id=int(tenant_id or 0))
+        cta_url = _canonical_maps_cta(str(getattr(delivery, "cta_url", "") or ""))
+        if not cta_url:
+            return (_EXECUTION_OWNER_SHOWROOM, "", "", "")
+        return (
+            _EXECUTION_OWNER_SHOWROOM,
+            cta_url,
+            str(getattr(delivery, "cta_label", "") or ""),
+            EXECUTION_EVIDENCE_SHOWROOM_CTA,
+        )
+    if fact_id == PURCHASE_CHANNEL_ENTRY_WHATSAPP:
+        return (_EXECUTION_OWNER_WHATSAPP, "", "", EXECUTION_EVIDENCE_WHATSAPP_STATE)
+    return ("", "", "", "")
+
+
+def apply_selected_purchase_channel(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone: str,
+    selected_channel_id: str,
+    order_prep: Any = None,
+    merchant_sales_channels: Any = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
+    store_url: str = "",
+    store_url_source: str = "",
+    maps_url: str = "",
+    execute: bool = True,
+    selection_source: str = "",
+) -> PurchaseChannelSelectionResult:
+    """Prepare capability evidence, then persist the committed selection.
+
+    Store/showroom persist only after a usable canonical CTA exists.
+    WhatsApp persistence is the execution evidence. Failed capability or
+    failed persist leaves awaiting recoverable and does not commit a channel.
+    """
+    result = validate_selected_purchase_channel(
+        selected_channel_id=selected_channel_id,
+        tenant_id=tenant_id,
+        db=db,
+        order_prep=order_prep,
+        merchant_sales_channels=merchant_sales_channels,
+        offered_purchase_channel_ids=offered_purchase_channel_ids,
+        store_url=store_url,
+        store_url_source=store_url_source,
+        maps_url=maps_url,
+    )
+    if not result.accepted:
+        return result
+
+    offered = result.offered_purchase_channel_ids
+
+    def _recover(*, reason: str, execution_owner: str = "") -> PurchaseChannelSelectionResult:
+        return PurchaseChannelSelectionResult(
+            accepted=True,
+            selected_channel_id=result.selected_channel_id,
+            execution_topic=PURCHASE_CHANNEL_ENTRY_SELECTION,
+            checkout_channel="",
+            reason=reason,
+            available_purchase_channel_ids=result.available_purchase_channel_ids,
+            persist_ok=False,
+            executed=False,
+            execution_owner=execution_owner,
+            offered_purchase_channel_ids=offered,
+            selection_source=selection_source,
+            awaiting_checkout_channel=True,
+            committed=False,
+        )
+
+    if result.selected_channel_id == PURCHASE_CHANNEL_ENTRY_WHATSAPP:
+        persist_ok = persist_checkout_route_state(
+            db,
+            tenant_id=int(tenant_id or 0),
+            phone=str(phone or ""),
+            checkout_channel=result.checkout_channel,
+            awaiting_checkout_channel=False,
+        )
+        if not persist_ok:
+            return _recover(reason="persist_failed")
+        return PurchaseChannelSelectionResult(
+            accepted=True,
+            selected_channel_id=result.selected_channel_id,
+            execution_topic=result.execution_topic,
+            checkout_channel=result.checkout_channel,
+            reason=result.reason,
+            available_purchase_channel_ids=result.available_purchase_channel_ids,
+            persist_ok=True,
+            executed=True,
+            execution_owner=_EXECUTION_OWNER_WHATSAPP,
+            offered_purchase_channel_ids=offered,
+            selection_source=selection_source,
+            execution_evidence=EXECUTION_EVIDENCE_WHATSAPP_STATE,
+            awaiting_checkout_channel=False,
+            committed=True,
+        )
+
+    execution_owner = ""
+    cta_url = ""
+    cta_label = ""
+    execution_evidence = ""
+    if execute:
+        try:
+            execution_owner, cta_url, cta_label, execution_evidence = (
+                _execute_selected_channel_capability(
+                    db,
+                    tenant_id=int(tenant_id or 0),
+                    selected_channel_id=result.selected_channel_id,
+                    merchant_sales_channels=merchant_sales_channels,
+                    store_url=store_url,
+                    store_url_source=store_url_source,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[CHECKOUT_ROUTE] capability execution failed tenant=%s err=%s",
+                tenant_id,
+                exc,
+            )
+            execution_owner = (
+                _EXECUTION_OWNER_STORE
+                if result.selected_channel_id == PURCHASE_CHANNEL_ENTRY_STORE
+                else _EXECUTION_OWNER_SHOWROOM
+                if result.selected_channel_id == PURCHASE_CHANNEL_ENTRY_SHOWROOM
+                else ""
+            )
+            cta_url = ""
+            cta_label = ""
+            execution_evidence = ""
+    if not bool(execution_evidence and cta_url):
+        return _recover(
+            reason=REASON_CAPABILITY_EXECUTION_FAILED,
+            execution_owner=execution_owner,
+        )
+
+    persist_ok = persist_checkout_route_state(
+        db,
+        tenant_id=int(tenant_id or 0),
+        phone=str(phone or ""),
+        checkout_channel=result.checkout_channel,
+        awaiting_checkout_channel=False,
+    )
+    if not persist_ok:
+        return _recover(reason="persist_failed", execution_owner=execution_owner)
+    return PurchaseChannelSelectionResult(
+        accepted=True,
+        selected_channel_id=result.selected_channel_id,
+        execution_topic=result.execution_topic,
+        checkout_channel=result.checkout_channel,
+        reason=result.reason,
+        available_purchase_channel_ids=result.available_purchase_channel_ids,
+        persist_ok=True,
+        executed=True,
+        execution_owner=execution_owner,
+        cta_url=cta_url,
+        cta_label=cta_label,
+        offered_purchase_channel_ids=offered,
+        selection_source=selection_source,
+        execution_evidence=execution_evidence,
+        awaiting_checkout_channel=False,
+        committed=True,
+    )
+
+
+def resolve_purchase_channel_turn(
+    *,
+    phase: str,
+    message: str = "",
+    intent: Any = None,
+    order_prep: Any = None,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    merchant_sales_channels: Any = None,
+    store_url: str = "",
+    maps_url: str = "",
+    store_url_source: str = "",
+    tenant_id: int = 0,
+    phone: str = "",
+    db: Any = None,
+    selected_product_referent: Any = None,
+    current_product_focus: Any = None,
+    state: Any = None,
+    stage: str = "",
+) -> Optional[PurchaseChannelTurnDecision]:
+    """D1A: chrome selection while awaiting. Natural-language selection is D1B."""
+    sales = merchant_sales_channels
+    available = resolve_available_purchase_channel_facts(
+        store_url=store_url,
+        maps_url=maps_url,
+        store_url_source=store_url_source,
+        merchant_sales_channels=sales,
+    )
+    prep = _order_prep_mapping(order_prep)
+    offered = _offered_channel_ids(order_prep)
+    mode = str(phase or "").strip().lower()
+
+    if mode == "awaiting":
+        if not prep.get("awaiting_checkout_channel"):
+            return None
+        pick = extract_structured_purchase_channel_pick(
+            message=message,
+            inbound_metadata=inbound_metadata,
+            offered_purchase_channel_ids=offered,
+        )
+        if pick is None:
+            return None
+        return PurchaseChannelTurnDecision(
+            action=_TRUSTED_BRAIN_SELECT_ACTION,
+            args={
+                "selected_channel_id": pick.channel_id,
+                "topic": PURCHASE_CHANNEL_ENTRY_SELECTION,
+                "available_purchase_channels": list(available),
+                "offered_purchase_channel_ids": list(offered),
+                "selection_source": pick.selection_source,
+            },
+            reason="trusted purchase-channel selection",
+            confidence=0.96,
+        )
+
+    if mode != "entry":
+        return None
+
+    intent_name = str(getattr(intent, "name", "") or "")
+    if intent_name == "online_store_inquiry":
+        return None
+    owner = resolve_purchase_channel_entry_owner(
+        message=message,
+        intent=intent,
+        order_prep=order_prep,
+        selected_product_referent=selected_product_referent,
+        current_product_focus=current_product_focus,
+        state=state,
+        inbound_metadata=inbound_metadata,
+        store_url=store_url,
+        maps_url=maps_url,
+        store_url_source=store_url_source,
+        merchant_sales_channels=sales,
+        stage=stage,
+    )
+    if owner is None:
+        return None
+    if owner == PURCHASE_CHANNEL_ENTRY_SELECTION:
+        persist_ok = persist_checkout_route_state(
+            db,
+            tenant_id=int(tenant_id or 0),
+            phone=str(phone or ""),
+            awaiting_checkout_channel=True,
+            offered_purchase_channel_ids=list(available),
+        )
+        if not persist_ok:
+            return PurchaseChannelTurnDecision(
+                action=_ACTION_LLM_REPLY,
+                args={
+                    "topic": "purchase_channel_selection",
+                    "available_purchase_channels": list(available),
+                    "offered_purchase_channel_ids": [],
+                    "persist_ok": False,
+                    "durable_choice_state": False,
+                    "selection_actions_enabled": False,
+                },
+                reason=REASON_AWAITING_PERSIST_FAILED,
+                confidence=0.7,
+            )
+        return PurchaseChannelTurnDecision(
+            action=_ACTION_LLM_REPLY,
+            args={
+                "topic": "purchase_channel_selection",
+                "response_goal": "help_customer_choose_purchase_channel",
+                "available_purchase_channels": list(available),
+                "offered_purchase_channel_ids": list(available),
+                "persist_ok": True,
+                "durable_choice_state": True,
+                "selection_actions_enabled": True,
+            },
+            reason="genuine purchase entry — multiple available purchase channels",
+            confidence=0.92,
+        )
+    if owner == PURCHASE_CHANNEL_ENTRY_STORE:
+        return PurchaseChannelTurnDecision(
+            action=_ACTION_LLM_REPLY,
+            args={
+                "topic": "online_store_redirect",
+                "response_goal": "guide_customer_to_online_store",
+                "available_purchase_channels": list(available),
+            },
+            reason="genuine purchase entry — only online store is available",
+            confidence=0.92,
+        )
+    if owner == PURCHASE_CHANNEL_ENTRY_SHOWROOM:
+        return PurchaseChannelTurnDecision(
+            action=_ACTION_LLM_REPLY,
+            args={
+                "topic": "showroom_visit",
+                "response_goal": "guide_customer_to_showroom",
+                "available_purchase_channels": list(available),
+            },
+            reason="genuine purchase entry — only showroom is available",
+            confidence=0.92,
+        )
+    if owner == PURCHASE_CHANNEL_ENTRY_WHATSAPP:
+        persist_ok = persist_checkout_route_state(
+            db,
+            tenant_id=int(tenant_id or 0),
+            phone=str(phone or ""),
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            awaiting_checkout_channel=False,
+            offered_purchase_channel_ids=list(available),
+        )
+        if not persist_ok:
+            return PurchaseChannelTurnDecision(
+                action=_ACTION_LLM_REPLY,
+                args={
+                    "available_purchase_channels": list(available),
+                    "persist_ok": False,
+                    "executed": False,
+                    "committed": False,
+                    "awaiting_checkout_channel": True,
+                    "checkout_channel": "",
+                    "execution_evidence": "",
+                    "durable_choice_state": False,
+                },
+                reason="persist_failed",
+                confidence=0.7,
+            )
+        return PurchaseChannelTurnDecision(
+            action=_ACTION_LLM_REPLY,
+            args={
+                "topic": "whatsapp_quick_order",
+                "response_goal": "collect_product_for_whatsapp_order",
+                "available_purchase_channels": list(available),
+                "persist_ok": True,
+                "executed": True,
+                "committed": True,
+                "awaiting_checkout_channel": False,
+                "checkout_channel": CHECKOUT_CHANNEL_WHATSAPP,
+                "execution_evidence": EXECUTION_EVIDENCE_WHATSAPP_STATE,
+            },
+            reason="genuine purchase entry — only WhatsApp quick order is available",
+            confidence=0.92,
+        )
+    return None
+
+
 def persist_checkout_route_state(
     db: Any,
     *,
@@ -1406,6 +2167,7 @@ def persist_checkout_route_state(
     phone: str,
     checkout_channel: str = "",
     awaiting_checkout_channel: Optional[bool] = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
 ) -> bool:
     if not db or not tenant_id or not phone:
         return False
@@ -1423,6 +2185,12 @@ def persist_checkout_route_state(
         if awaiting_checkout_channel is not None:
             op["awaiting_checkout_channel"] = bool(awaiting_checkout_channel)
             op["checkout_route_prompt_sent"] = bool(awaiting_checkout_channel)
+        if offered_purchase_channel_ids is not None:
+            op["offered_purchase_channel_ids"] = [
+                str(x).strip()
+                for x in offered_purchase_channel_ids
+                if str(x).strip() in CANONICAL_PURCHASE_CHANNEL_IDS
+            ]
         bs["order_prep"] = op
         meta = dict(getattr(conv, "extra_metadata", None) or {})
         meta["brain_state"] = bs
@@ -1430,6 +2198,27 @@ def persist_checkout_route_state(
         flag_modified(conv, "extra_metadata")
         db.add(conv)
         db.flush()
+        written = dict(op)
+        if awaiting_checkout_channel and not written.get("awaiting_checkout_channel"):
+            return False
+        if offered_purchase_channel_ids is not None:
+            expected_offered = [
+                str(x).strip()
+                for x in offered_purchase_channel_ids
+                if str(x).strip() in CANONICAL_PURCHASE_CHANNEL_IDS
+            ]
+            written_offered = [
+                str(x).strip()
+                for x in (written.get("offered_purchase_channel_ids") or [])
+                if str(x).strip() in CANONICAL_PURCHASE_CHANNEL_IDS
+            ]
+            if awaiting_checkout_channel and (not expected_offered or written_offered != expected_offered):
+                return False
+        if checkout_channel == CHECKOUT_CHANNEL_WHATSAPP:
+            if str(written.get("checkout_channel") or "") != CHECKOUT_CHANNEL_WHATSAPP:
+                return False
+            if written.get("awaiting_checkout_channel"):
+                return False
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -1660,12 +2449,20 @@ __all__ = [
     "build_catalog_visibility_reply",
     "build_channel_choice_buttons",
     "build_channel_choice_prompt",
+    "CANONICAL_PURCHASE_CHANNEL_IDS",
+    "PurchaseChannelSelectionResult",
+    "PurchaseChannelTurnDecision",
+    "apply_selected_purchase_channel",
     "build_purchase_channel_selection_facts",
     "compose_purchase_channel_selection_goal",
+    "extract_structured_purchase_channel_id",
+    "extract_structured_purchase_channel_pick",
+    "resolve_purchase_channel_turn",
     "purchase_channel_committed",
     "resolve_available_purchase_channel_facts",
     "resolve_explicit_purchase_channel_payload",
     "resolve_purchase_channel_entry_owner",
+    "validate_selected_purchase_channel",
     "is_genuine_purchase_channel_entry",
     "has_actionable_active_order_context",
     "should_block_bare_start_product_prompt",

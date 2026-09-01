@@ -155,6 +155,8 @@ def _infer_owner(*, topic: str, action: str, args: Mapping[str, Any]) -> Optiona
         return "commerce_order_channel"
     if topic == TOPIC_PURCHASE_CHANNEL_SELECTION:
         return "purchase_channel_selection"
+    if action == "select_purchase_channel":
+        return "purchase_channel_selection"
     if topic == TOPIC_PRODUCT_KNOWLEDGE:
         return "product_knowledge"
     if action == "catalog_navigate" or args.get("catalog_delivery_kind"):

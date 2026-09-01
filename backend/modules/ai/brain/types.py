@@ -246,6 +246,7 @@ class OrderPreparationState:
     catalog_checkout_currency: str = ""
     checkout_channel: str = ""
     awaiting_checkout_channel: bool = False
+    offered_purchase_channel_ids: List[str] = field(default_factory=list)
     catalog_line_items_authoritative: bool = False
     product_mentions: List[Dict[str, Any]] = field(default_factory=list)
     # Gift / recipient delivery (P0 gift-order gate)
@@ -321,6 +322,7 @@ class OrderPreparationState:
             "catalog_checkout_currency": str(self.catalog_checkout_currency or ""),
             "checkout_channel": str(self.checkout_channel or ""),
             "awaiting_checkout_channel": bool(self.awaiting_checkout_channel),
+            "offered_purchase_channel_ids": list(self.offered_purchase_channel_ids or []),
             "catalog_line_items_authoritative": bool(self.catalog_line_items_authoritative),
             "product_mentions": list(self.product_mentions or []),
             "recipient_name": str(self.recipient_name or ""),
@@ -392,6 +394,11 @@ class OrderPreparationState:
             catalog_checkout_currency=str(raw.get("catalog_checkout_currency") or ""),
             checkout_channel=str(raw.get("checkout_channel", "") or ""),
             awaiting_checkout_channel=bool(raw.get("awaiting_checkout_channel", False)),
+            offered_purchase_channel_ids=[
+                str(x).strip()
+                for x in (raw.get("offered_purchase_channel_ids") or [])
+                if str(x).strip()
+            ],
             catalog_line_items_authoritative=bool(
                 raw.get("catalog_line_items_authoritative", False)
             ),

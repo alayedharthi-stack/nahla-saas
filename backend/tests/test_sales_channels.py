@@ -49,6 +49,7 @@ class TestOnlineStoreChannelEvidence:
             store_url=_STORE,
             store_url_source="structured_settings",
             maps_url=_MAPS,
+            whatsapp_order_ready=True,
         )
         assert "online_store" in sales.available_purchase_channel_ids()
         assert sales.online_store.evidence == "store_url"
@@ -87,6 +88,7 @@ class TestOnlineStoreChannelEvidence:
     def test_online_store_missing_when_store_url_empty_but_maps_present(self) -> None:
         sales = resolve_merchant_sales_channels(
             None, 0, store_url="", maps_url=_MAPS,
+            whatsapp_order_ready=True,
         )
         channels = sales.available_purchase_channel_ids()
         assert "online_store" not in channels
@@ -100,6 +102,7 @@ class TestOnlineStoreChannelEvidence:
             store_url=_STORE,
             store_url_source="merchant_profile:merchant_override",
             maps_url=_MAPS,
+            whatsapp_order_ready=True,
         )
         assert "online_store" in sales.available_purchase_channel_ids()
         assert store_url_evidence_activates_channel(
@@ -116,6 +119,7 @@ class TestOnlineStoreChannelEvidence:
             store_url="https://kb-scraped.example",
             store_url_source="kb_free_text",
             maps_url=_MAPS,
+            whatsapp_order_ready=True,
         )
         assert "online_store" not in sales.available_purchase_channel_ids()
 
@@ -128,6 +132,7 @@ class TestNavigatorCheckoutParity:
             store_url=_STORE,
             store_url_source="merchant_profile",
             maps_url=_MAPS,
+            whatsapp_order_ready=True,
         )
 
         caps = CheckoutChannelCapabilities(
@@ -163,6 +168,7 @@ class TestNavigatorCheckoutParity:
             store_url=_STORE,
             store_url_source="structured_settings",
             maps_url=_MAPS,
+            whatsapp_order_ready=True,
         )
         monkeypatch.setattr(
             "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
@@ -178,6 +184,7 @@ class TestPurchaseIntentGating:
     def test_purchase_intent_shows_enabled_channels_only(self) -> None:
         sales = resolve_merchant_sales_channels(
             None, 0, store_url=_STORE, store_url_source="structured_settings",
+            whatsapp_order_ready=True,
         )
         nav = resolve_commerce_navigator(
             message="ابي اطلب",
@@ -194,6 +201,7 @@ class TestPurchaseIntentGating:
         sales = resolve_merchant_sales_channels(
             None, 0, store_url=_STORE, store_url_source="structured_settings",
             maps_url=_MAPS,
+            whatsapp_order_ready=True,
         )
         nav = resolve_commerce_navigator(
             message="السلام عليكم",
@@ -210,6 +218,7 @@ class TestPurchaseIntentGating:
             merchant_sales_channels=resolve_merchant_sales_channels(
                 None, 0, store_url=_STORE, store_url_source="structured_settings",
                 maps_url=_MAPS,
+                whatsapp_order_ready=True,
             ),
         )
         assert nav.stage != "purchase_channel_selection"
@@ -221,6 +230,7 @@ class TestPurchaseIntentGating:
             merchant_sales_channels=resolve_merchant_sales_channels(
                 None, 0, store_url=_STORE, store_url_source="structured_settings",
                 maps_url=_MAPS,
+                whatsapp_order_ready=True,
             ),
         )
         assert nav.stage == "post_purchase_tracking"
@@ -247,6 +257,7 @@ class TestSalesChannelAvailabilityFacts:
         sales = resolve_merchant_sales_channels(
             None, 0, store_url=_STORE, store_url_source="structured_settings",
             maps_url=_MAPS,
+            whatsapp_order_ready=True,
         )
         facts = sales.availability_facts()
         assert facts["online_store"]["enabled"] is True

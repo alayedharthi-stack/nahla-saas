@@ -10,6 +10,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
+from urllib.parse import urlparse
 
 logger = logging.getLogger("nahla.brain.store_url_resolver")
 
@@ -123,6 +124,36 @@ def _normalise_url(url: str) -> str:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — hygiene import must not block resolver
         pass
     return s
+
+
+def canonical_merchant_storefront_url(url: str) -> str:
+    """Return a customer-safe merchant storefront URL, or empty.
+
+    Reuses ``_normalise_url`` then rejects empty hosts, spaces, non-http(s)
+    schemes, and platform pages. Never fabricates a storefront from prose.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if any(ch.isspace() for ch in raw):
+        return ""
+    scheme_hint = ""
+    if "://" in raw:
+        scheme_hint = raw.split("://", 1)[0].strip().lower()
+        if scheme_hint not in {"http", "https"}:
+            return ""
+    normalised = _normalise_url(raw)
+    if not normalised:
+        return ""
+    parsed = urlparse(normalised)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    host = str(parsed.hostname or "").strip().lower()
+    if not host or any(ch.isspace() for ch in host) or "." not in host:
+        return ""
+    if not scheme_hint and not raw.lower().startswith("www.") and "." not in raw:
+        return ""
+    return normalised
 
 
 def _normalise_message(text: str) -> str:
@@ -416,6 +447,7 @@ def lookup_tenant_store_url(db: Any, tenant_id: int) -> str:
 
 __all__ = [
     "StoreUrlResolution",
+    "canonical_merchant_storefront_url",
     "is_online_store_inquiry",
     "lookup_tenant_store_url",
     "resolve_store_url",
