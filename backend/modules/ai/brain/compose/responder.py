@@ -106,6 +106,7 @@ from ..decision.actions import (
     ACTION_SOCIAL_REPLY,
     ACTION_STASH_ADDRESS_PRE_PRODUCT,
     ACTION_SUGGEST_COUPON,
+    ACTION_CUSTOMER_COUPON_REQUEST,
     ACTION_TRACK_ORDER,
     ACTION_CUSTOMER_LEDGER_REPLY,
     ACTION_PAYMENT_CONTINUATION_REPLY,
@@ -1666,6 +1667,10 @@ class DefaultComposer:
             if self._is_duplicate(text, ctx):
                 text = T.handoff(variant=(variant + 1) % 3)
             return text
+
+        # ── Customer-request coupon (canary) — structured facts, LLM wording ─
+        if action == ACTION_CUSTOMER_COUPON_REQUEST:
+            return await self._llm_compose(ctx, result, decision=decision)
 
         # ── LLM fallback ───────────────────────────────────────────────────
         if action == ACTION_LLM_REPLY:
