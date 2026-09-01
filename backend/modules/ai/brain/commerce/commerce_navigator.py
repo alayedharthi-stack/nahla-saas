@@ -361,26 +361,34 @@ def _selected_channel(message: str) -> Optional[PurchaseChannel]:
     return None
 
 
-def _structured_selected_channel(
-    intent_slots: Optional[Dict[str, Any]],
-    inbound_metadata: Optional[Dict[str, Any]],
+def _trusted_selected_channel(
+    *,
+    message: str = "",
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    brain_decision_action: str = "",
+    brain_decision_args: Optional[Dict[str, Any]] = None,
 ) -> Optional[PurchaseChannel]:
-    """Brain/chrome structured id only — never customer-prose regex."""
-    blobs: List[Dict[str, Any]] = []
-    if isinstance(intent_slots, dict):
-        blobs.append(intent_slots)
-        nested = intent_slots.get("args")
-        if isinstance(nested, dict):
-            blobs.append(nested)
-    if isinstance(inbound_metadata, dict):
-        blobs.append(inbound_metadata)
-        nested_meta = inbound_metadata.get("args")
-        if isinstance(nested_meta, dict):
-            blobs.append(nested_meta)
-    for blob in blobs:
-        raw = str(blob.get("selected_channel_id") or "").strip()
-        if raw in _ALL_CHANNELS:
-            return raw  # type: ignore[return-value]
+    """Verified chrome or a real Brain ``select_purchase_channel`` decision.
+
+    Does not read ``selected_channel_id`` from intent slots or arbitrary
+    inbound metadata. D1A chrome only; D1B structured Brain decision is
+    reserved for a future post-semantic producer.
+    """
+    try:
+        from .checkout_route_owner import (  # noqa: PLC0415
+            extract_structured_purchase_channel_id,
+        )
+
+        fact = extract_structured_purchase_channel_id(
+            message=message,
+            inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
+            brain_decision_action=brain_decision_action,
+            brain_decision_args=brain_decision_args,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — untrusted extract must not invent a channel
+        return None
+    if fact in _ALL_CHANNELS:
+        return fact  # type: ignore[return-value]
     return None
 
 
@@ -594,34 +602,23 @@ def resolve_commerce_navigator(
         )
 
     awaiting_channel = bool(prep.get("awaiting_checkout_channel"))
-    channel = None
-    if awaiting_channel:
-        try:
-            from .checkout_route_owner import (  # noqa: PLC0415
-                extract_structured_purchase_channel_id,
-            )
-
-            channel = extract_structured_purchase_channel_id(
-                message=msg,
-                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
-            )
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — chrome extract must not guess
-            channel = None
-        if channel is None:
-            return CommerceNavigatorDecision(
-                stage="purchase_channel_selection",
-                confidence=0.9,
-                reason="awaiting purchase-channel choice — unstructured turn, do not guess",
-                next_goal="help_customer_choose_purchase_channel",
-                available_purchase_channels=channels,
-                known_fields=known,
-                forbidden_actions=_forbidden_for_channel_selection(),
-                customer_intent="wants_to_buy",
-            )
-    else:
-        channel = _structured_selected_channel(slots, inbound_metadata)
-        if channel is None:
-            channel = _selected_channel(msg)
+    channel = _trusted_selected_channel(
+        message=msg,
+        inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
+    )
+    if awaiting_channel and channel is None:
+        return CommerceNavigatorDecision(
+            stage="purchase_channel_selection",
+            confidence=0.9,
+            reason="awaiting purchase-channel choice — unstructured turn, do not guess",
+            next_goal="help_customer_choose_purchase_channel",
+            available_purchase_channels=channels,
+            known_fields=known,
+            forbidden_actions=_forbidden_for_channel_selection(),
+            customer_intent="wants_to_buy",
+        )
+    if channel is None and not awaiting_channel:
+        channel = _selected_channel(msg)
     genuine_purchase_entry = False
     try:
         from .checkout_route_owner import (  # noqa: PLC0415

@@ -436,7 +436,7 @@ class _PaymentContinuationReplyHandler:
 
 
 class _SelectPurchaseChannelHandler:
-    """Validate Brain/chrome selection, persist, then execute the capability owner."""
+    """Validate chrome or structured-action selection, persist, then execute."""
 
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
         from ..commerce.checkout_route_owner import (  # noqa: PLC0415

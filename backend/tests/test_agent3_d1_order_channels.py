@@ -1,7 +1,17 @@
-"""AGENT-3 D1 — purchase-channel availability, trusted selection, persist/execute.
+"""AGENT3-D1A — channel availability and verified chrome execution.
+
+Proven scope: canonical availability, storefront URL, WhatsApp order
+readiness, WhatsApp-only entry, verified button/title chrome, validation,
+required persistence, deterministic CTA/state execution.
+
+NATURAL_LANGUAGE_SELECTION_IMPLEMENTED=NO
+ARCHITECTURE_BLOCKER=POST-SEMANTIC STRUCTURED ACTION PATH MISSING
 
 Generic commerce fixtures only. Phrases are acceptance examples, not runtime
 triggers. Assert owner/state/ids — not customer-facing wording.
+
+Structured-action contract tests may inject ``action=select_purchase_channel``
+to prove validation/persistence/execution. That is not semantic-language proof.
 
 INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
 MODEL_CHANGED=NO
@@ -41,6 +51,9 @@ from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: E402
     SalesChannelSlot,
     resolve_merchant_sales_channels,
     whatsapp_order_processing_ready,
+)
+from modules.ai.brain.commerce.commerce_navigator import (  # noqa: E402
+    resolve_commerce_navigator,
 )
 from modules.ai.brain.commerce.store_url_resolver import (  # noqa: E402
     canonical_merchant_storefront_url,
@@ -324,8 +337,8 @@ class TestAvailabilityA1A8:
         assert sales.maps_url == ""
 
 
-class TestTrustedChromeProducer:
-    """The existing semantic producer for selection is chrome, not NL slots."""
+class TestVerifiedChromeProducer:
+    """D1A producer is verified interactive chrome, not customer language."""
 
     def test_exact_button_title_selects_online_store(self) -> None:
         sales = _sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS)
@@ -377,8 +390,8 @@ class TestTrustedChromeProducer:
         assert resolve_explicit_purchase_channel_payload("2", caps=caps) == CHECKOUT_CHANNEL_STORE
 
 
-class TestRawNaturalLanguageIsNotAProducer:
-    """Architecture: decision engine is pre-LLM and cannot emit structured NL selection."""
+class TestNaturalLanguageSelectionNotImplemented:
+    """D1A: raw paraphrases must not emit select_purchase_channel."""
 
     @pytest.mark.parametrize(
         "message",
@@ -435,6 +448,38 @@ class TestUntrustedInboundRejected:
         )
         decision = _decide(ctx)
         assert decision.action != ACTION_SELECT_PURCHASE_CHANNEL
+
+    def test_navigator_rejects_untrusted_slot_and_metadata_ids(self) -> None:
+        sales = _sales(store=True, whatsapp=True, showroom=True, store_url=_STORE, maps_url=_MAPS)
+        awaiting = {
+            "awaiting_checkout_channel": True,
+            "offered_purchase_channel_ids": [
+                "online_store",
+                "whatsapp_quick_order",
+                "showroom_visit",
+            ],
+        }
+        nav = resolve_commerce_navigator(
+            message=_RAW_AMBIGUOUS,
+            intent_name="general",
+            intent_slots={"selected_channel_id": "online_store"},
+            inbound_metadata={"selected_channel_id": "showroom_visit"},
+            order_prep=awaiting,
+            merchant_sales_channels=sales,
+            store_url=_STORE,
+            maps_url=_MAPS,
+        )
+        assert nav.stage == "purchase_channel_selection"
+        nav_chrome = resolve_commerce_navigator(
+            message="",
+            intent_name="general",
+            inbound_metadata={"button_id": "checkout_store_link"},
+            order_prep=awaiting,
+            merchant_sales_channels=sales,
+            store_url=_STORE,
+            maps_url=_MAPS,
+        )
+        assert nav_chrome.stage == "online_store_redirect"
 
 
 class TestFaqSocialDoNotStealOrForce:
@@ -576,12 +621,12 @@ class TestValidationAndPersistence:
         ]
 
 
-class TestHandlerPersistAndExecute:
-    def _brain_decision(self, channel: str) -> Decision:
+class TestStructuredActionContractPersistAndExecute:
+    def _structured_action(self, channel: str) -> Decision:
         return Decision(
             action=ACTION_SELECT_PURCHASE_CHANNEL,
             args={"selected_channel_id": channel},
-            reason="injected brain structured decision",
+            reason="structured-action contract injection — not semantic-language proof",
             confidence=0.99,
         )
 
@@ -591,7 +636,7 @@ class TestHandlerPersistAndExecute:
             sales=_sales(store=True, store_url=_STORE),
             state=_awaiting_state(offered=["online_store"]),
         )
-        result = _handle_select(self._brain_decision("showroom_visit"), ctx)
+        result = _handle_select(self._structured_action("showroom_visit"), ctx)
         assert result.success is False
         assert result.data.get("accepted") is False
         assert result.data.get("executed") is False
@@ -611,7 +656,7 @@ class TestHandlerPersistAndExecute:
         ) as store_owner, patch(
             "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
         ) as showroom_owner:
-            result = _handle_select(self._brain_decision("online_store"), ctx)
+            result = _handle_select(self._structured_action("online_store"), ctx)
         assert result.success is False
         assert result.data.get("reason") == "persist_failed"
         assert result.data.get("executed") is False
@@ -639,7 +684,7 @@ class TestHandlerPersistAndExecute:
                 cta_label="المتجر",
             ),
         ) as store_owner:
-            result = _handle_select(self._brain_decision("online_store"), ctx)
+            result = _handle_select(self._structured_action("online_store"), ctx)
         assert result.success is True
         assert result.data.get("persist_ok") is True
         assert result.data.get("executed") is True
@@ -667,7 +712,7 @@ class TestHandlerPersistAndExecute:
                 cta_label="موقع المعرض",
             ),
         ) as showroom_owner:
-            result = _handle_select(self._brain_decision("showroom_visit"), ctx)
+            result = _handle_select(self._structured_action("showroom_visit"), ctx)
         assert result.success is True
         assert result.data.get("execution_owner") == "showroom_maps_owner"
         assert result.data.get("cta_url") == _MAPS
@@ -689,7 +734,7 @@ class TestHandlerPersistAndExecute:
         ) as store_owner, patch(
             "modules.ai.brain.commerce.checkout_route_owner._showroom_delivery_decision",
         ) as showroom_owner:
-            result = _handle_select(self._brain_decision("whatsapp_quick_order"), ctx)
+            result = _handle_select(self._structured_action("whatsapp_quick_order"), ctx)
         assert result.success is True
         assert result.data.get("execution_owner") == "whatsapp_quick_order_owner"
         assert result.data.get("checkout_channel") == CHECKOUT_CHANNEL_WHATSAPP

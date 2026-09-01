@@ -1479,11 +1479,14 @@ def extract_structured_purchase_channel_id(
     brain_decision_action: str = "",
     brain_decision_args: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """Trusted chrome or Brain structured decision only.
+    """D1A trusted sources only: verified interactive chrome.
 
     Accepts:
     - verified interactive chrome (button_id / exact title / 1|2|3)
-    - Brain ``action=select_purchase_channel`` with canonical ``selected_channel_id``
+
+    D1B (not implemented): a real structured Brain decision
+    ``action=select_purchase_channel`` with canonical ``selected_channel_id``,
+    produced after semantic understanding. That producer does not exist yet.
 
     Rejects arbitrary inbound ``selected_channel_id`` and intent-slot injection.
     Does not parse customer paraphrases.
@@ -1783,7 +1786,7 @@ def resolve_purchase_channel_turn(
     state: Any = None,
     stage: str = "",
 ) -> Optional[PurchaseChannelTurnDecision]:
-    """Single owner for initial channel choice and awaiting chrome selection."""
+    """D1A: chrome selection while awaiting. Natural-language selection is D1B."""
     sales = merchant_sales_channels
     available = resolve_available_purchase_channel_facts(
         store_url=store_url,
