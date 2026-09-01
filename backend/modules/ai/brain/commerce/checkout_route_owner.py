@@ -325,7 +325,7 @@ def resolve_available_purchase_channel_facts(
 
             if _canon_store(store_url):
                 out.append("online_store")
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical URL probe must not invent online_store
             pass
     if whatsapp_available:
         out.append("whatsapp_quick_order")

@@ -505,7 +505,7 @@ def _purchase_channel_turn_decision(
         from ..commerce.checkout_route_owner import (  # noqa: PLC0415
             resolve_purchase_channel_turn,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — channel owner import must not block decide
         return None
 
     try:
@@ -641,7 +641,7 @@ class DefaultDecisionEngine:
                 from ..state.state_relevance import validate_state_relevance  # noqa: PLC0415
 
                 return getattr(ctx, "state_relevance", None) or validate_state_relevance(ctx)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — state-relevance probe must not block decide
                 return None
 
         def _support_listing_blocks_checkout() -> bool:
