@@ -187,6 +187,7 @@ def test_upsert_five_variants_soft_prunes_default(monkeypatch: pytest.MonkeyPatc
     product = SimpleNamespace(
         id=100,
         tenant_id=50,
+        source="salla",
         external_id="88001",
         meta_retailer_id=None,
         sku="PARENT-SKU",
@@ -240,6 +241,10 @@ def test_upsert_five_variants_soft_prunes_default(monkeypatch: pytest.MonkeyPatc
     assert len(real_variants) == 5
     assert default_variant.in_stock is False
     assert all(r.retailer_id == f"88001-{r.salla_variant_id}" for r in real_variants)
+    real_variants[0].retailer_id = f"nahla_v_{real_variants[0].id}"
+    _upsert_variants_for(db, product, normalised)
+    real_variants = [r for r in db.rows if r.salla_variant_id]
+    assert all(r.retailer_id == f"88001-{r.salla_variant_id}" for r in real_variants)
     assert real_variants[0].extra_metadata["sale_price"] == "59.0"
     assert real_variants[0].extra_metadata["regular_price"] == "119.0"
     assert real_variants[0].options == {"المقاس": "S"}
@@ -276,8 +281,13 @@ def test_upsert_without_variants_keeps_synthetic_default(monkeypatch: pytest.Mon
 
 
 def test_resolve_variant_retailer_id_uses_external_and_salla_id():
-    parent = SimpleNamespace(external_id="88001", meta_retailer_id=None)
+    parent = SimpleNamespace(source="salla", external_id="88001", meta_retailer_id="override-x")
     assert _resolve_variant_retailer_id(parent, 7, "591539870") == "88001-591539870"
+
+
+def test_resolve_variant_retailer_id_ignores_legacy_override_for_salla():
+    parent = SimpleNamespace(source="salla", external_id="863278879", meta_retailer_id="legacy-845296417")
+    assert _resolve_variant_retailer_id(parent, 217, "845296417") == "863278879-845296417"
 
 
 def test_enrich_normalised_variants_from_adapter():

@@ -74,6 +74,20 @@ def load_variant_for_push(
         )
         .first()
     )
+    if variant is None and "-" in rid:
+        ext, _, svid = rid.rpartition("-")
+        if ext and svid:
+            variant = (
+                db.query(ProductVariant)
+                .join(Product, Product.id == ProductVariant.product_id)
+                .filter(
+                    ProductVariant.tenant_id == int(tenant_id),
+                    Product.tenant_id == int(tenant_id),
+                    Product.external_id == ext,
+                    ProductVariant.salla_variant_id == svid,
+                )
+                .first()
+            )
     if variant is None:
         raise MetaCatalogPushError("variant_not_found", f"variant not found for retailer_id={rid}")
 
@@ -427,9 +441,44 @@ def push_one_meta_catalog_item(
         result["error"] = "lookup_failed"
         return result
 
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        AmbiguousVariantIdentity,
+        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        identity_for_retailer_id,
+        is_salla_source,
+    )
+
+    sellable_salla = False
+    if is_salla_source(parent):
+        gate_variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
+        ident = None
+        try:
+            ident = identity_for_retailer_id(parent, gate_variants, rid)
+        except AmbiguousVariantIdentity:
+            ident = None
+        if ident is None:
+            result["action"] = ACTION_BLOCK
+            result["error"] = ERROR_AMBIGUOUS_VARIANT_IDENTITY
+            result["ok"] = False
+            return result
+        sellable_salla = True
+        payload["retailer_id"] = ident.retailer_id
+        result["payload"] = payload
+        body_rid = str(payload.get("retailer_id") or "").strip()
+        if (
+            body_rid != rid
+            or body_rid != ident.retailer_id
+            or body_rid.startswith("nahla_v_")
+            or body_rid.startswith("nahla_p_")
+        ):
+            result["action"] = ACTION_BLOCK
+            result["error"] = ERROR_AMBIGUOUS_VARIANT_IDENTITY
+            result["ok"] = False
+            return result
+
     if meta_product_id:
         already = str(getattr(parent, "meta_item_id", None) or "").strip()
-        if already and already != str(meta_product_id).strip():
+        if already and already != str(meta_product_id).strip() and not sellable_salla:
             result["action"] = ACTION_BLOCK
             result["error"] = ERROR_AMBIGUOUS_SIBLING
             result["ok"] = False
@@ -444,9 +493,11 @@ def push_one_meta_catalog_item(
         result["meta_product_id"] = meta_product_id
         post_url = _graph_product_url(meta_product_id)
     else:
-        blocked = _canonical_sibling_gate(
-            db, conn, catalog_id, parent, variant, rid, client=client,
-        )
+        blocked = None
+        if not sellable_salla:
+            blocked = _canonical_sibling_gate(
+                db, conn, catalog_id, parent, variant, rid, client=client,
+            )
         if blocked is not None:
             result["action"] = blocked.get("action")
             result["error"] = blocked.get("error")
@@ -489,6 +540,99 @@ def push_one_meta_catalog_item(
         status_code,
     )
     return result
+
+
+def _prepare_salla_batch_membership_slot(db: Any, tenant_id: int, retailer_id: str) -> None:
+    """Durable local identity before a confirmed batch CREATE."""
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        AmbiguousVariantIdentity,
+        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        ensure_variant_membership_slot,
+        identity_for_retailer_id,
+        is_salla_source,
+    )
+
+    try:
+        parent, variant = load_variant_for_push(db, tenant_id, retailer_id=retailer_id)
+    except MetaCatalogPushError:
+        return
+    if not is_salla_source(parent):
+        return
+    variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
+    try:
+        ident = identity_for_retailer_id(parent, variants, retailer_id)
+    except AmbiguousVariantIdentity as exc:
+        raise MetaCatalogPushError(
+            ERROR_AMBIGUOUS_VARIANT_IDENTITY, ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        ) from exc
+    if ident is None:
+        raise MetaCatalogPushError(
+            ERROR_AMBIGUOUS_VARIANT_IDENTITY, ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        )
+    conn = _resolve_connection(db, tenant_id)
+    catalog_id, _token = _resolve_catalog_and_token(conn, require_catalog_readable=False)
+    slot = ensure_variant_membership_slot(
+        db,
+        tenant_id=int(tenant_id),
+        catalog_id=catalog_id,
+        identity=ident,
+    )
+    if not slot.get("ok"):
+        raise MetaCatalogPushError(
+            ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+            str(slot.get("reason") or slot.get("error") or ERROR_AMBIGUOUS_VARIANT_IDENTITY),
+        )
+    db.commit()
+
+
+def _stamp_salla_batch_membership(
+    db: Any,
+    tenant_id: int,
+    retailer_id: str,
+    meta_item_id: str,
+    catalog_id: str,
+) -> None:
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        AmbiguousVariantIdentity,
+        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        identity_for_retailer_id,
+        is_salla_source,
+        upsert_variant_membership,
+    )
+
+    mid = (meta_item_id or "").strip()
+    if not mid:
+        return
+    try:
+        parent, variant = load_variant_for_push(db, tenant_id, retailer_id=retailer_id)
+    except MetaCatalogPushError:
+        return
+    if not is_salla_source(parent):
+        return
+    variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
+    try:
+        ident = identity_for_retailer_id(parent, variants, retailer_id)
+    except AmbiguousVariantIdentity:
+        return
+    if ident is None:
+        return
+    cid = (catalog_id or "").strip()
+    if not cid:
+        conn = _resolve_connection(db, tenant_id)
+        cid, _token = _resolve_catalog_and_token(conn, require_catalog_readable=False)
+    bound = upsert_variant_membership(
+        db,
+        tenant_id=int(tenant_id),
+        catalog_id=cid,
+        identity=ident,
+        meta_item_id=mid,
+    )
+    if not bound.get("ok"):
+        raise MetaCatalogPushError(
+            ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+            str(bound.get("reason") or bound.get("error") or ERROR_AMBIGUOUS_VARIANT_IDENTITY),
+        )
+    db.commit()
 
 
 def push_ready_meta_catalog_batch(
@@ -566,6 +710,7 @@ def push_ready_meta_catalog_batch(
 
         rid = str(item.retailer_id or "").strip()
         try:
+            _prepare_salla_batch_membership_slot(db, int(tenant_id), rid)
             push_result = push_one_meta_catalog_item(
                 db,
                 int(tenant_id),
@@ -573,6 +718,14 @@ def push_ready_meta_catalog_batch(
                 confirm=True,
                 client=client,
             )
+            if push_result.get("ok"):
+                _stamp_salla_batch_membership(
+                    db,
+                    int(tenant_id),
+                    rid,
+                    str(push_result.get("meta_product_id") or ""),
+                    str(push_result.get("catalog_id") or ""),
+                )
         except MetaCatalogPushError as exc:
             push_result = {
                 "ok": False,

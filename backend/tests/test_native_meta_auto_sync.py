@@ -1084,6 +1084,46 @@ def test_newer_generation_pushes_and_verifies_on_resume(
         assert parent.sync_status != "synced" or int(sm.get("expected_content_generation") or 0) == 2
 
 
+def _salla_scheduler_db(variant):
+    memberships: list = []
+
+    class _Chain:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return self._rows[0] if self._rows else None
+
+        def all(self):
+            return list(self._rows)
+
+    def _query(model):
+        name = getattr(model, "__name__", str(model))
+        if "Membership" in name:
+            return _Chain(memberships)
+        if "Variant" in name:
+            return _Chain([variant])
+        q = MagicMock()
+        filtered = MagicMock()
+        filtered.first.return_value = None
+        filtered.all.return_value = []
+        q.filter.return_value = filtered
+        return q
+
+    db = MagicMock()
+    db.query.side_effect = _query
+    db.add.side_effect = memberships.append
+    db.commit = MagicMock()
+    db.flush = MagicMock()
+    db.memberships = memberships
+    return db
+
+
+@patch("services.native_meta_sync_orchestrator._resolve_connection")
+@patch("services.native_meta_sync_orchestrator._collect_retailer_ids")
 @patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
 @patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
 @patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
@@ -1097,6 +1137,8 @@ def test_scheduler_binds_existing_identity_without_create(
     lookup_mock,
     waba_mock,
     lock_mock,
+    collect_mock,
+    conn_mock,
 ):
     parent = _generic_native_parent(
         source="salla",
@@ -1105,10 +1147,20 @@ def test_scheduler_binds_existing_identity_without_create(
         title="قميص قطني أزرق",
         sync_status="pending",
     )
-    db = MagicMock()
+    variant = SimpleNamespace(
+        id=501,
+        tenant_id=9,
+        product_id=501,
+        salla_variant_id="591001",
+        retailer_id="88001-591001",
+        is_default=False,
+    )
+    db = _salla_scheduler_db(variant)
     lock_mock.return_value = parent
     preview_mock.return_value = _preview_ok()
     ensure_mock.return_value = (SimpleNamespace(retailer_id="88001"), False)
+    collect_mock.return_value = ["88001-591001"]
+    conn_mock.return_value = SimpleNamespace(meta_catalog_id="CAT-1", catalog_enabled=True)
     push_mock.return_value = {
         "ok": True,
         "action": "link_canonical_sibling",
@@ -1130,13 +1182,15 @@ def test_scheduler_binds_existing_identity_without_create(
     assert result["skipped_create"] is True
     assert result["action"] == "link_canonical_sibling"
     assert parent.sync_status == "synced"
-    assert parent.meta_item_id == "META-SIBLING"
+    assert parent.meta_item_id in (None, "")
     push_mock.assert_called_once()
     lookup_mock.assert_not_called()
     assert parent.extra_metadata["sync_meta"].get("skipped_create") is True
     assert parent.extra_metadata["sync_meta"].get("identity_class") == "EXISTING_CANONICAL_SIBLING"
 
 
+@patch("services.native_meta_sync_orchestrator._resolve_connection")
+@patch("services.native_meta_sync_orchestrator._collect_retailer_ids")
 @patch("services.native_meta_sync_orchestrator._try_acquire_sync_lock")
 @patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status")
 @patch("services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id")
@@ -1150,6 +1204,8 @@ def test_scheduler_blocks_ambiguous_sibling_without_create(
     lookup_mock,
     waba_mock,
     lock_mock,
+    collect_mock,
+    conn_mock,
 ):
     parent = _generic_native_parent(
         source="salla",
@@ -1158,10 +1214,20 @@ def test_scheduler_blocks_ambiguous_sibling_without_create(
         title="حذاء رياضي أبيض",
         sync_status="pending",
     )
-    db = MagicMock()
+    variant = SimpleNamespace(
+        id=501,
+        tenant_id=9,
+        product_id=501,
+        salla_variant_id="591001",
+        retailer_id="88001-591001",
+        is_default=False,
+    )
+    db = _salla_scheduler_db(variant)
     lock_mock.return_value = parent
     preview_mock.return_value = _preview_ok()
     ensure_mock.return_value = (SimpleNamespace(retailer_id="88001"), False)
+    collect_mock.return_value = ["88001-591001"]
+    conn_mock.return_value = SimpleNamespace(meta_catalog_id="CAT-1", catalog_enabled=True)
     push_mock.return_value = {
         "ok": False,
         "action": "block_ambiguous_sibling",

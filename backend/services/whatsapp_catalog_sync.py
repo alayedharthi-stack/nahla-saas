@@ -467,7 +467,11 @@ def enqueue_whatsapp_catalog_sync(
             continue
         eligible += 1
         status = _status_of(row)
-        never_synced = getattr(row, "last_synced_at", None) is None and not getattr(row, "meta_item_id", None)
+        from services.salla_variant_catalog_identity import is_salla_source  # noqa: PLC0415
+
+        never_synced = getattr(row, "last_synced_at", None) is None
+        if not is_salla_source(row):
+            never_synced = never_synced and not getattr(row, "meta_item_id", None)
         if force or never_synced or status in ("pending", "failed", "blocked", "sync_failed", "pending_verification", ""):
             bump_content = status not in ("pending", "pending_verification")
             if mark_native_meta_sync_pending(db, row, bump_content=bump_content):
@@ -493,7 +497,12 @@ def drain_whatsapp_catalog_sync(
     limit: int = DRAIN_BATCH_SIZE,
     client: Any = None,
 ) -> Dict[str, Any]:
-    """Process a batch of pending/failed products for one tenant."""
+    """Process a batch of pending/failed products for one tenant.
+
+    Product is the lock unit. Meta identities are sellable variant
+    retailer_ids collected inside ``attempt_native_meta_sync`` — a Salla
+    parent is never treated as a Graph identity.
+    """
     readiness = evaluate_whatsapp_catalog_sync_readiness(db, tenant_id)
     out = {
         "ok": True,
