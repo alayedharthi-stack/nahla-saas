@@ -99,6 +99,14 @@ class DedicatedAdvisoryLock:
             {'namespace': self._namespace, 'lock_key': self._level_key},
         )
 
+    def _blocking_acquire_sql(self) -> Tuple[str, Dict[str, Any]]:
+        if self._key is not None:
+            return 'SELECT pg_advisory_lock(:k)', {'k': self._key}
+        return (
+            'SELECT pg_advisory_lock(:namespace, :lock_key)',
+            {'namespace': self._namespace, 'lock_key': self._level_key},
+        )
+
     def _release_sql(self) -> Tuple[str, Dict[str, Any]]:
         if self._key is not None:
             return 'SELECT pg_advisory_unlock(:k)', {'k': self._key}
@@ -148,6 +156,51 @@ class DedicatedAdvisoryLock:
 
         self._safe_close()
         return False
+
+    def acquire_blocking(self, *, timeout_seconds: Optional[float] = 30.0) -> None:
+        """Block until this connection owns the lock.
+
+        Pool refill and campaign/autopilot callers keep using ``try_acquire``.
+        This blocking path is for same-customer customer-request issuance.
+        """
+        if self._held:
+            return
+
+        if not self._bind_is_postgresql():
+            self._use_thread_lock = True
+            self._thread_lock = _shared_thread_lock(
+                _thread_lock_identity(
+                    key=self._key,
+                    namespace=self._namespace,
+                    level_key=self._level_key,
+                )
+            )
+            acquire_kwargs: Dict[str, Any] = {"blocking": True}
+            if timeout_seconds is not None:
+                acquire_kwargs["timeout"] = timeout_seconds
+            acquired = self._thread_lock.acquire(**acquire_kwargs)
+            if not acquired:
+                self._thread_lock = None
+                self._use_thread_lock = False
+                raise RuntimeError("advisory lock timed out")
+            self._held = True
+            return
+
+        if self._conn is not None:
+            self._safe_close()
+
+        self._conn = self._engine_from_bind().connect()
+        self._owns_connection = True
+        sql, params = self._blocking_acquire_sql()
+        try:
+            if timeout_seconds is not None:
+                timeout_ms = max(1, int(float(timeout_seconds) * 1000))
+                self._conn.execute(text(f"SET lock_timeout = '{timeout_ms}'"))
+            self._conn.execute(text(sql), params)
+        except Exception:
+            self._invalidate_connection()
+            raise
+        self._held = True
 
     def release(self) -> bool:
         """Release the lock and close the dedicated connection.

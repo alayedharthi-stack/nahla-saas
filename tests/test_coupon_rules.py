@@ -390,6 +390,27 @@ class TestCouponLevels:
         # Only 'ai' is a known channel — the rest are dropped.
         assert n["allowed_channels"] == ["ai"]
 
+    def test_normalise_level_backfills_canonical_min_orders(self) -> None:
+        bronze = _normalise_level({"id": "bronze", "discount_default": 4})
+        silver = _normalise_level({"id": "silver"})
+        gold = _normalise_level({"id": "gold"})
+        vip = _normalise_level({"id": "vip"})
+        assert bronze["min_orders"] == 1
+        assert silver["min_orders"] == 3
+        assert gold["min_orders"] == 7
+        assert vip["min_orders"] == 15
+
+    def test_normalise_level_keeps_merchant_min_orders(self) -> None:
+        n = _normalise_level({"id": "silver", "min_orders": 5})
+        assert n["min_orders"] == 5
+
+    def test_default_catalogue_exposes_numeric_min_orders(self) -> None:
+        by_id = {lv["id"]: lv for lv in DEFAULT_COUPON_LEVELS}
+        assert by_id["bronze"]["min_orders"] == 1
+        assert by_id["silver"]["min_orders"] == 3
+        assert by_id["gold"]["min_orders"] == 7
+        assert by_id["vip"]["min_orders"] == 15
+
     def test_empty_channel_list_falls_back_to_defaults(self) -> None:
         # If the merchant strips all channels (probably by accident), we
         # restore the level's catalogue defaults so generation never breaks.
