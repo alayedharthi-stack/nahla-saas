@@ -3,13 +3,17 @@ core/automation_send_guard
 ──────────────────────────
 Platform-wide outbound automation guard.
 
-When a conversation is under human supervision or AI is disabled, no
-automated WhatsApp reply may leave the system. The only exception is a
-manual staff send from the dashboard (``allow_manual=True``).
+Automated WhatsApp replies are blocked when AI is explicitly paused,
+store AI is disabled, the number is blocked, or ownership is genuinely
+HUMAN_ACTIVE. Customer-requested handoff (HUMAN_REQUESTED / advisory
+queue flags) must not silence the wire.
 
 Doctrine (AGENTS.md): operational silence must be deterministic — if the
 merchant paused AI or took over, the platform must not claim otherwise by
 sending canned fallbacks, brain replies, or media handlers.
+Customer escalation ≠ AI off. Advisory queue ≠ automation kill-switch.
+
+Ownership is derived only from ``core.ownership_state``.
 """
 from __future__ import annotations
 
@@ -21,7 +25,11 @@ from unittest.mock import MagicMock, Mock
 from sqlalchemy.orm import Session
 
 from core.ai_pause_guard import is_internal_or_blocked
-from core.ownership_state import conversation_handoff_active
+from core.ownership_state import (
+    OWNERSHIP_HUMAN_ACTIVE,
+    conversation_handoff_active,
+    resolve_ownership_state,
+)
 from models import Conversation, Customer
 
 logger = logging.getLogger("nahla-backend")
@@ -119,20 +127,29 @@ def lookup_conversation_for_phone(
         return None
 
 
-def _human_supervision_reason(convo: Conversation) -> str:
+def _explicit_ai_disabled_reason(convo: Conversation) -> str:
     if bool(getattr(convo, "ai_paused", False)):
         return REASON_AI_DISABLED
-    if bool(getattr(convo, "is_human_handoff", False)):
-        return REASON_HUMAN_TAKEOVER
-    if bool(getattr(convo, "needs_human", False)):
-        return REASON_REQUIRES_HUMAN
-    if bool(getattr(convo, "handoff_active", False)):
-        return REASON_HUMAN_TAKEOVER
-    if getattr(convo, "taken_over_at", None) is not None:
-        return REASON_HUMAN_TAKEOVER
-    if bool(getattr(convo, "paused_by_human", False)):
-        return REASON_HUMAN_TAKEOVER
-    if str(getattr(convo, "status", "") or "").strip().lower() == "human":
+    return ""
+
+
+def _human_takeover_reason(db: Session, convo: Conversation) -> str:
+    """Block only OWNERSHIP_HUMAN_ACTIVE from the shared ownership contract.
+
+    Advisory flags (needs_human / is_human_handoff / handoff_active /
+    status=human) resolve to HUMAN_REQUESTED and must not block send.
+    """
+    try:
+        result = resolve_ownership_state(db, convo)
+    except Exception:
+        logger.exception("[AUTOMATION_SEND_GUARD] ownership resolve failed")
+        try:
+            if conversation_handoff_active(db, convo):
+                return REASON_HUMAN_TAKEOVER
+        except Exception:
+            logger.exception("[AUTOMATION_SEND_GUARD] handoff_active check failed")
+        return ""
+    if result.state == OWNERSHIP_HUMAN_ACTIVE:
         return REASON_HUMAN_TAKEOVER
     return ""
 
@@ -185,15 +202,13 @@ def should_block_automation_for_conversation(
     if convo is None:
         return AutomationBlockDecision(block=False)
 
-    supervision = _human_supervision_reason(convo)
-    if supervision:
-        return AutomationBlockDecision(block=True, reason=supervision)
+    paused = _explicit_ai_disabled_reason(convo)
+    if paused:
+        return AutomationBlockDecision(block=True, reason=paused)
 
-    try:
-        if conversation_handoff_active(db, convo):
-            return AutomationBlockDecision(block=True, reason=REASON_HUMAN_TAKEOVER)
-    except Exception:
-        logger.exception("[AUTOMATION_SEND_GUARD] handoff_active check failed")
+    takeover = _human_takeover_reason(db, convo)
+    if takeover:
+        return AutomationBlockDecision(block=True, reason=takeover)
 
     return AutomationBlockDecision(block=False)
 
