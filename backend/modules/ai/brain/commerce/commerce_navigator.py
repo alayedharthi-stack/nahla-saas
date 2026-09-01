@@ -361,6 +361,38 @@ def _selected_channel(message: str) -> Optional[PurchaseChannel]:
     return None
 
 
+def _trusted_selected_channel(
+    *,
+    message: str = "",
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+    brain_decision_action: str = "",
+    brain_decision_args: Optional[Dict[str, Any]] = None,
+    offered_purchase_channel_ids: Optional[Sequence[str]] = None,
+) -> Optional[PurchaseChannel]:
+    """Verified button payload or constrained presented choice text.
+
+    Does not read ``selected_channel_id`` from intent slots or arbitrary
+    inbound metadata. Exact title/index require persisted offered ids.
+    """
+    try:
+        from .checkout_route_owner import (  # noqa: PLC0415
+            extract_structured_purchase_channel_id,
+        )
+
+        fact = extract_structured_purchase_channel_id(
+            message=message,
+            inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
+            brain_decision_action=brain_decision_action,
+            brain_decision_args=brain_decision_args,
+            offered_purchase_channel_ids=offered_purchase_channel_ids,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — untrusted extract must not invent a channel
+        return None
+    if fact in _ALL_CHANNELS:
+        return fact  # type: ignore[return-value]
+    return None
+
+
 def _is_active_whatsapp_checkout(*, stage: str = "", order_prep: Any = None, state: Any = None) -> bool:
     try:
         from .checkout_route_owner import (  # noqa: PLC0415
@@ -462,8 +494,6 @@ def resolve_commerce_navigator(
             if ch == "showroom_visit" and not str(maps_url or "").strip():
                 continue
             channels.append(ch)
-    if not channels:
-        channels = ["whatsapp_quick_order"]
     known = _enrich_navigator_known_fields(
         known,
         merchant_sales_channels=merchant_sales_channels,
@@ -572,7 +602,26 @@ def resolve_commerce_navigator(
             forbidden_actions=["do_not_restart_checkout", "do_not_ask_address"],
         )
 
-    channel = _selected_channel(msg)
+    awaiting_channel = bool(prep.get("awaiting_checkout_channel"))
+    offered_ids = prep.get("offered_purchase_channel_ids")
+    channel = _trusted_selected_channel(
+        message=msg,
+        inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else {},
+        offered_purchase_channel_ids=offered_ids if isinstance(offered_ids, (list, tuple)) else None,
+    )
+    if awaiting_channel and channel is None:
+        return CommerceNavigatorDecision(
+            stage="purchase_channel_selection",
+            confidence=0.9,
+            reason="awaiting purchase-channel choice — unstructured turn, do not guess",
+            next_goal="help_customer_choose_purchase_channel",
+            available_purchase_channels=channels,
+            known_fields=known,
+            forbidden_actions=_forbidden_for_channel_selection(),
+            customer_intent="wants_to_buy",
+        )
+    if channel is None and not awaiting_channel:
+        channel = _selected_channel(msg)
     genuine_purchase_entry = False
     try:
         from .checkout_route_owner import (  # noqa: PLC0415
@@ -721,6 +770,18 @@ def resolve_commerce_navigator(
             stage="purchase_channel_selection",
             confidence=0.91,
             reason="customer expressed purchase intent but purchase channel is not chosen",
+            next_goal="help_customer_choose_purchase_channel",
+            available_purchase_channels=channels,
+            known_fields=known,
+            forbidden_actions=_forbidden_for_channel_selection(),
+            customer_intent="wants_to_buy",
+        )
+
+    if awaiting_channel and channel is None:
+        return CommerceNavigatorDecision(
+            stage="purchase_channel_selection",
+            confidence=0.9,
+            reason="awaiting purchase-channel choice — unstructured turn, do not guess",
             next_goal="help_customer_choose_purchase_channel",
             available_purchase_channels=channels,
             known_fields=known,

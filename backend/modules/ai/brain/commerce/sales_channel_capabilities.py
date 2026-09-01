@@ -54,6 +54,17 @@ def store_url_evidence_activates_channel(*, source: str = "", found: bool = Fals
     return src in _STRUCTURED_STORE_EVIDENCE or head in _STRUCTURED_STORE_EVIDENCE
 
 
+def _canonical_customer_url(url: str) -> str:
+    try:
+        from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+            canonical_merchant_storefront_url,
+        )
+
+        return canonical_merchant_storefront_url(url)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — invalid URL must not activate a channel
+        return ""
+
+
 @dataclass(frozen=True)
 class SalesChannelSlot:
     enabled: bool
@@ -77,7 +88,7 @@ class MerchantSalesChannels:
         default_factory=lambda: SalesChannelSlot(False, False, "none"),
     )
     whatsapp_quick_order: SalesChannelSlot = field(
-        default_factory=lambda: SalesChannelSlot(True, True, "whatsapp_catalog_or_enabled"),
+        default_factory=lambda: SalesChannelSlot(True, False, "none"),
     )
     showroom_visit: SalesChannelSlot = field(
         default_factory=lambda: SalesChannelSlot(True, False, "none"),
@@ -98,8 +109,6 @@ class MerchantSalesChannels:
             out.append("whatsapp_quick_order")
         if self.showroom_visit.enabled and self.showroom_visit.available:
             out.append("showroom_visit")
-        if not out and self.whatsapp_quick_order.enabled:
-            out.append("whatsapp_quick_order")
         return out
 
 
@@ -112,10 +121,58 @@ def _resolve_maps_url(db: Any, tenant_id: int) -> tuple[str, str]:
 
         loc = resolve_canonical_location(db, int(tenant_id or 0))
         if loc.showroom_visit_available and loc.maps_url:
-            return loc.maps_url, loc.source or "structured_branch"
+            maps = _canonical_customer_url(loc.maps_url) or str(loc.maps_url or "").strip()
+            if maps:
+                return maps, loc.source or "structured_branch"
     except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical location must not block channels
         pass
     return "", "none"
+
+
+def whatsapp_order_processing_ready(
+    db: Any,
+    tenant_id: int,
+    *,
+    whatsapp_order_ready: Optional[bool] = None,
+) -> bool:
+    """WhatsApp connection/order-processing readiness — not native catalog browse.
+
+    Canonical owner: connected ``WhatsAppConnection`` with a phone_number_id,
+    same signal as ``trial_lifecycle._tenant_has_connected_whatsapp``.
+    Distinct from ``evaluate_native_catalog_capability.eligible``.
+    """
+    if whatsapp_order_ready is not None:
+        return bool(whatsapp_order_ready)
+    if db is None or not tenant_id:
+        return False
+    try:
+        from models import WhatsAppConnection  # noqa: PLC0415
+
+        conn = (
+            db.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.tenant_id == int(tenant_id))
+            .first()
+        )
+        if conn is None:
+            return False
+        return str(getattr(conn, "status", "") or "") == "connected" and bool(
+            getattr(conn, "phone_number_id", None)
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — WhatsApp capability must fail closed
+        return False
+
+
+def _whatsapp_order_capability_ready(
+    db: Any,
+    tenant_id: int,
+    *,
+    whatsapp_order_ready: Optional[bool],
+) -> bool:
+    return whatsapp_order_processing_ready(
+        db,
+        tenant_id,
+        whatsapp_order_ready=whatsapp_order_ready,
+    )
 
 
 def resolve_merchant_sales_channels(
@@ -125,12 +182,17 @@ def resolve_merchant_sales_channels(
     store_url: str = "",
     store_url_source: str = "",
     maps_url: str = "",
+    whatsapp_order_ready: Optional[bool] = None,
 ) -> MerchantSalesChannels:
     """
     Single source of truth for purchase-channel availability.
 
     When ``store_url`` / ``maps_url`` are pre-loaded on CommerceFacts, pass them
     through together with ``store_url_source`` so Navigator matches facts loader.
+
+    WhatsApp availability is ``enabled AND`` WhatsApp order-processing
+    readiness (connected WhatsApp number) — never native-catalog browse
+    eligibility, and never ``enabled == available``.
     """
     toggles = {"online_store": True, "whatsapp_quick_order": True, "showroom_visit": True}
     try:
@@ -144,7 +206,7 @@ def resolve_merchant_sales_channels(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — toggle read must not block resolution
         pass
 
-    resolved_url = str(store_url or "").strip()
+    resolved_url = _canonical_customer_url(store_url)
     resolved_source = str(store_url_source or "none").strip() or "none"
     if db is not None and tenant_id and not resolved_url:
         try:
@@ -153,15 +215,18 @@ def resolve_merchant_sales_channels(
             )
 
             resolution = resolve_store_url(db, int(tenant_id))
-            resolved_url = str(resolution.url or "").strip()
+            resolved_url = _canonical_customer_url(resolution.url)
             resolved_source = str(resolution.source or "none")
         except Exception:  # noqa: BLE001  # noqa: silent-ok — store URL resolver must not block channels
             pass
 
-    resolved_maps = str(maps_url or "").strip()
+    resolved_maps = _canonical_customer_url(maps_url)
     maps_evidence = "maps_url" if resolved_maps else "none"
     if db is not None and tenant_id and not resolved_maps:
         resolved_maps, maps_evidence = _resolve_maps_url(db, int(tenant_id))
+        if resolved_maps and not _canonical_customer_url(resolved_maps):
+            # Canonical location already proved a usable maps URL; keep it.
+            pass
 
     showroom_available = bool(resolved_maps)
 
@@ -170,8 +235,22 @@ def resolve_merchant_sales_channels(
         found=bool(resolved_url),
     )
 
+    wa_enabled = bool(toggles["whatsapp_quick_order"])
+    wa_ready = _whatsapp_order_capability_ready(
+        db,
+        tenant_id,
+        whatsapp_order_ready=whatsapp_order_ready,
+    )
+    wa_available = bool(wa_enabled and wa_ready)
+    if wa_available:
+        wa_evidence = "whatsapp_order_processing"
+    elif wa_enabled:
+        wa_evidence = "whatsapp_connection_unavailable"
+    else:
+        wa_evidence = "whatsapp_disabled"
+
     return MerchantSalesChannels(
-        store_url=resolved_url,
+        store_url=resolved_url if online_available else (resolved_url if resolved_url else ""),
         store_url_source=resolved_source,
         maps_url=resolved_maps,
         online_store=SalesChannelSlot(
@@ -180,9 +259,9 @@ def resolve_merchant_sales_channels(
             evidence="store_url" if online_available else resolved_source or "none",
         ),
         whatsapp_quick_order=SalesChannelSlot(
-            enabled=toggles["whatsapp_quick_order"],
-            available=toggles["whatsapp_quick_order"],
-            evidence="whatsapp_catalog_or_enabled",
+            enabled=wa_enabled,
+            available=wa_available,
+            evidence=wa_evidence,
         ),
         showroom_visit=SalesChannelSlot(
             enabled=toggles["showroom_visit"],
@@ -198,4 +277,5 @@ __all__ = [
     "parse_sales_channel_toggles",
     "resolve_merchant_sales_channels",
     "store_url_evidence_activates_channel",
+    "whatsapp_order_processing_ready",
 ]

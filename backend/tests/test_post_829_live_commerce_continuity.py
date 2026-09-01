@@ -194,6 +194,7 @@ class TestCapabilityDrivenPurchaseChannels:
             store_url="https://shop.example.sa",
             store_url_source="merchant_profile:merchant_override",
             maps_url="https://maps.app.goo.gl/example",
+            whatsapp_order_ready=True,
         )
         ids = sales.available_purchase_channel_ids()
         assert ids == ["online_store", "whatsapp_quick_order", "showroom_visit"]
@@ -209,7 +210,7 @@ class TestCapabilityDrivenPurchaseChannels:
         assert CHECKOUT_CHANNEL_SHOWROOM in available_channels(caps)
 
     def test_missing_store_and_showroom_are_omitted(self) -> None:
-        sales = resolve_merchant_sales_channels(None, 1, store_url="", maps_url="")
+        sales = resolve_merchant_sales_channels(None, 1, store_url="", maps_url="", whatsapp_order_ready=True)
         ids = sales.available_purchase_channel_ids()
         assert "online_store" not in ids
         assert "showroom_visit" not in ids
