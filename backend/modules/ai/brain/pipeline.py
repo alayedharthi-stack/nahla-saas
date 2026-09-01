@@ -3396,23 +3396,33 @@ class MerchantBrain:
                     getattr(_op, "address_line", "") or "",
                 ))
             )
-            if new_state.current_product_focus and not _has_live_order:
+            if new_state.current_product_focus:
+                from .commerce.assistant_presented_provenance import (  # noqa: PLC0415
+                    current_turn_executor_catalog_referent,
+                )
                 from .commerce.commerce_focus_owner import (  # noqa: PLC0415
                     archive_current_product_focus,
+                    bind_structured_catalog_referent,
                     product_focus_identity,
-                    should_preserve_focus_after_product_list_display,
+                    should_keep_live_order_focus_after_product_list,
                 )
 
-                if should_preserve_focus_after_product_list_display(
+                _turn_ref = current_turn_executor_catalog_referent(decision, result)
+                _keep_focus = should_keep_live_order_focus_after_product_list(
                     new_state.current_product_focus,
                     new_state.last_search_candidates,
+                    has_live_order=bool(_has_live_order),
                     state=new_state,
-                ):
+                    current_turn_customer_referent=bool(_turn_ref),
+                )
+                if _keep_focus:
                     logger.info(
-                        "[ORDER FLOW] preserving current_product_focus after single exact search hit | "
-                        "identity=%r candidates=%d action=%s",
+                        "[ORDER FLOW] preserving current_product_focus after product list | "
+                        "identity=%r candidates=%d live_order=%s customer_referent=%s action=%s",
                         product_focus_identity(new_state.current_product_focus),
                         len(new_state.last_search_candidates),
+                        bool(_has_live_order),
+                        bool(_turn_ref),
                         decision.action,
                     )
                 else:
@@ -3423,25 +3433,33 @@ class MerchantBrain:
                         )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — archive focus is best-effort
                         pass
+                    _bind_row = dict(_turn_ref) if isinstance(_turn_ref, dict) else None
+                    if _bind_row is None:
+                        _unique_new = list(new_state.last_search_candidates or [])
+                        if len(_unique_new) == 1 and isinstance(_unique_new[0], dict):
+                            _bind_row = dict(_unique_new[0])
+                    if _bind_row is not None:
+                        try:
+                            bind_structured_catalog_referent(
+                                new_state,
+                                _bind_row,
+                                reason="structured_turn_product",
+                                turn=int(getattr(new_state, "turn", 0) or 0),
+                                current_turn_customer_referent=bool(_turn_ref),
+                            )
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — unique new-goal bind is best-effort
+                            new_state.current_product_focus = None
+                    else:
+                        new_state.current_product_focus = None
                     logger.info(
                         "[ORDER FLOW] reset stale current_product_focus after product list display | "
-                        "old_focus=%r new_candidates=%d action=%s",
+                        "old_focus=%r new_candidates=%d live_order=%s customer_referent=%s action=%s",
                         _old_focus_title,
                         len(new_state.last_search_candidates),
+                        bool(_has_live_order),
+                        bool(_turn_ref),
                         decision.action,
                     )
-                    new_state.current_product_focus = None
-            elif new_state.current_product_focus and _has_live_order:
-                logger.info(
-                    "[ORDER FLOW] preserving current_product_focus during active order | "
-                    "focus=%r stage=%s has_product_id=%s has_address=%s has_name=%s "
-                    "— order funnel takes priority over list display",
-                    _old_focus_title,
-                    new_state.stage,
-                    bool(getattr(_op, "product_id", "")),
-                    bool(getattr(_op, "short_address_code", "") or getattr(_op, "google_maps_url", "")),
-                    bool(getattr(_op, "customer_first_name", "")),
-                )
 
         new_state.customer_goal = _infer_customer_goal(intent, decision, state.customer_goal)
         try:
@@ -4389,12 +4407,14 @@ class MerchantBrain:
         try:
             from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: PLC0415
                 apply_turn_catalog_referent_binding,
+                current_turn_executor_catalog_referent,
                 structured_product_from_turn,
             )
             from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
                 collect_catalog_reasoning_candidates,
             )
 
+            _turn_product = structured_product_from_turn(decision, result)
             apply_turn_catalog_referent_binding(
                 state=new_state,
                 reply=reply or "",
@@ -4405,7 +4425,10 @@ class MerchantBrain:
                 ),
                 intent_name=str(getattr(intent, "name", "") or ""),
                 turn=int(getattr(new_state, "turn", 0) or 0),
-                structured_product=structured_product_from_turn(decision, result),
+                structured_product=_turn_product,
+                current_turn_customer_referent=bool(
+                    current_turn_executor_catalog_referent(decision, result)
+                ),
             )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — presented provenance must not block outbound
             logger.exception("[PRESENTED_PROVENANCE] stamp failed")
@@ -5353,12 +5376,14 @@ class MerchantBrain:
         try:
             from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: PLC0415
                 apply_turn_catalog_referent_binding,
+                current_turn_executor_catalog_referent,
                 structured_product_from_turn,
             )
             from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
                 collect_catalog_reasoning_candidates,
             )
 
+            _turn_product = structured_product_from_turn(decision, result)
             apply_turn_catalog_referent_binding(
                 state=new_state,
                 reply=reply or "",
@@ -5369,7 +5394,10 @@ class MerchantBrain:
                 ),
                 intent_name=str(getattr(intent, "name", "") or ""),
                 turn=int(getattr(new_state, "turn", 0) or 0),
-                structured_product=structured_product_from_turn(decision, result),
+                structured_product=_turn_product,
+                current_turn_customer_referent=bool(
+                    current_turn_executor_catalog_referent(decision, result)
+                ),
             )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — presented provenance must not block outbound
             logger.exception("[PRESENTED_PROVENANCE] stamp failed")

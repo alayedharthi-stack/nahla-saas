@@ -214,6 +214,112 @@ def canonical_product_referent(
     return dict(focus) if focus else None
 
 
+def search_results_exclude_current_focus(
+    focus: Any,
+    candidates: Sequence[Any],
+) -> bool:
+    """True when catalog hits have identities that do not include current focus.
+
+    This is different search results, not a proven customer product goal.
+    Empty or unstructured candidate lists do not count.
+    """
+    focus_id = product_focus_identity(focus)
+    if not focus_id:
+        return False
+    candidate_ids = [
+        product_focus_identity(row)
+        for row in (candidates or [])
+        if product_focus_identity(row)
+    ]
+    if not candidate_ids:
+        return False
+    return focus_id not in candidate_ids
+
+
+def should_keep_live_order_focus_after_product_list(
+    focus: Any,
+    candidates: Sequence[Any],
+    *,
+    has_live_order: bool,
+    state: Any = None,
+    current_turn_customer_referent: bool = False,
+) -> bool:
+    """Keep live-order/checkout focus unless this turn has proven customer ownership.
+
+    Different catalog identities alone must not release Family-2 checkout.
+    ``current_turn_customer_referent`` must come from structured provenance
+    (executor product / current-turn customer bind), never from phrase maps.
+
+    Submitted/draft order rows are out of scope here — this only decides
+    whether conversational ``current_product_focus`` stays pinned.
+    """
+    if current_turn_customer_referent and search_results_exclude_current_focus(
+        focus, candidates
+    ):
+        return False
+    if has_live_order:
+        return True
+    return should_preserve_focus_after_product_list_display(
+        focus,
+        candidates,
+        state=state,
+    )
+
+
+def _demote_stale_checkout_selection(state: Any, new_identity: str) -> None:
+    """Drop active checkout-selection flags on a different product.
+
+    Does not delete presented history, order_prep, or submitted order ids.
+    """
+    if state is None or not new_identity:
+        return
+    presented = list(getattr(state, "last_presented_products", None) or [])
+    changed = False
+    for row in presented:
+        if not isinstance(row, dict):
+            continue
+        if product_focus_identity(row) == new_identity:
+            continue
+        if (
+            row.get("customer_selected")
+            or str(row.get("provenance") or "") == "catalog_order_selected"
+            or row.get("from_catalog_order")
+            or row.get("from_native_catalog_order")
+        ):
+            row["customer_selected"] = False
+            if str(row.get("provenance") or "") == "catalog_order_selected":
+                row["provenance"] = "previous_checkout_selected"
+            row.pop("from_catalog_order", None)
+            row.pop("from_native_catalog_order", None)
+            changed = True
+    if changed:
+        state.last_presented_products = presented
+
+
+def _clear_foreign_selected_variant(state: Any, new_identity: str) -> None:
+    """A prior product's variant must not travel onto a new product identity."""
+    if state is None:
+        return
+    variant = getattr(state, "selected_variant", None)
+    if not isinstance(variant, dict) or not variant:
+        return
+    variant_product = product_focus_identity(
+        {
+            "id": variant.get("product_id") or variant.get("id"),
+            "external_id": variant.get("external_id") or variant.get("product_retailer_id"),
+            "sku": variant.get("sku"),
+        }
+    )
+    if variant_product and new_identity and variant_product == new_identity:
+        return
+    state.selected_variant = None
+    focus = getattr(state, "current_product_focus", None)
+    if isinstance(focus, dict) and focus:
+        for key in ("variant_id", "variant_label", "unit"):
+            focus.pop(key, None)
+        state.current_product_focus = focus
+
+
 def bind_structured_catalog_referent(
     state: Any,
     product: Optional[Dict[str, Any]],
@@ -221,11 +327,14 @@ def bind_structured_catalog_referent(
     reason: str,
     turn: int = 0,
     customer_selected: bool = False,
+    current_turn_customer_referent: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Bind a product that already has catalog identity via set_product_focus.
 
     Conversational recommendation must not overwrite a Family 2 selected
-    checkout referent.
+    checkout referent. A structured referent resolved for the current
+    customer turn may take conversational ownership without deleting
+    submitted/draft order rows.
     """
     if state is None:
         return None
@@ -238,17 +347,22 @@ def bind_structured_catalog_referent(
         return None
 
     selected = checkout_selected_referent(state)
+    new_id = product_focus_identity(row)
+    selected_id = product_focus_identity(selected)
+    current_turn_goal = bool(current_turn_customer_referent or customer_selected)
     if (
         selected
         and is_customer_selected_checkout_referent(selected)
-        and not customer_selected
-        and product_focus_identity(selected) != product_focus_identity(row)
+        and not current_turn_goal
+        and selected_id
+        and new_id
+        and selected_id != new_id
     ):
         logger.info(
             "[COMMERCE_FOCUS] skip_conversational_overwrite checkout_selected=%r "
             "candidate=%r reason=%s",
-            product_focus_identity(selected),
-            product_focus_identity(row),
+            selected_id,
+            new_id,
             reason,
         )
         try:
@@ -267,7 +381,12 @@ def bind_structured_catalog_referent(
             pass
         return dict(selected)
 
+    if current_turn_goal and selected_id and new_id and selected_id != new_id:
+        _demote_stale_checkout_selection(state, new_id)
+
     set_product_focus(state, row, reason=reason, turn=turn)
+    if current_turn_goal and selected_id and new_id and selected_id != new_id:
+        _clear_foreign_selected_variant(state, new_id)
     try:
         from .assistant_presented_provenance import (  # noqa: PLC0415
             stamp_structured_presented_products,
@@ -589,7 +708,9 @@ __all__ = [
     "product_focus_identity",
     "restore_suspended_product_focus",
     "revert_to_previous_product_focus",
+    "search_results_exclude_current_focus",
     "set_product_focus",
+    "should_keep_live_order_focus_after_product_list",
     "should_preserve_focus_after_product_list_display",
     "suspend_product_focus",
     "try_ordinal_correction_focus_swap",
