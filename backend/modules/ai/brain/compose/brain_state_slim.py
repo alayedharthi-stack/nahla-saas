@@ -122,6 +122,9 @@ def should_slim_general_brain_state(state: BrainReplyState) -> Tuple[bool, str]:
     if isinstance(contract, dict) and str(contract.get("fact_kind") or "").strip():
         return False, "authoritative_fact_contract"
 
+    if isinstance(facts, dict) and facts.get("customer_request_coupon_facts"):
+        return False, "customer_request_coupon_facts"
+
     if bool(getattr(state, "platform_kb_mode", False)):
         return False, "platform_kb_mode"
 

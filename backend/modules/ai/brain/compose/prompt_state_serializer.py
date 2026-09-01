@@ -528,6 +528,9 @@ def _slim_known_facts(raw: Any) -> Dict[str, Any]:
     tc_facts = raw.get("trusted_coupon_offer_facts")
     if isinstance(tc_facts, dict) and tc_facts:
         out["trusted_coupon_offer_facts"] = tc_facts
+    ccr_facts = raw.get("customer_request_coupon_facts")
+    if isinstance(ccr_facts, dict) and ccr_facts:
+        out["customer_request_coupon_facts"] = ccr_facts
     tc_projection = raw.get("trusted_context_projection")
     if isinstance(tc_projection, dict) and tc_projection:
         out["trusted_context_projection"] = tc_projection

@@ -1576,21 +1576,23 @@ class MerchantBrain:
                 _psc_exc,
             )
 
-        # ── 1a.54 Shadow coupon capability probe (telemetry only) ────────
-        # Default OFF. Must not mutate intent, decision, coupons, or reply.
+        # ── 1a.54 Coupon capability probe (shadow telemetry; canary consume) ──
+        # Default OFF except canary tenants. Must not mutate intent.name.
         _coupon_capability_shadow: Dict[str, Any] = {
             "coupon_capability_probe_run": False,
             "coupon_capability": "none",
             "coupon_capability_shadow_only": True,
+            "coupon_capability_canary_eligible": False,
         }
         try:
             from .intent.coupon_capability_probe import (  # noqa: PLC0415
-                maybe_run_shadow_coupon_capability_probe,
+                maybe_run_coupon_capability_probe_for_turn,
             )
 
             _intent_before_coupon_probe = str(getattr(intent, "name", "") or "")
-            _coupon_capability_shadow = await maybe_run_shadow_coupon_capability_probe(
+            _coupon_capability_shadow = await maybe_run_coupon_capability_probe_for_turn(
                 message=_raw_message or message,
+                tenant_id=tenant_id,
             )
             if str(getattr(intent, "name", "") or "") != _intent_before_coupon_probe:
                 logger.error(
@@ -2828,6 +2830,23 @@ class MerchantBrain:
                 getattr(ctx, "tenant_id", "?"), _pm_exc,
             )
 
+        try:
+            from .commerce.customer_coupon_request_owner import (  # noqa: PLC0415
+                maybe_own_customer_coupon_request_turn,
+            )
+
+            decision = maybe_own_customer_coupon_request_turn(
+                decision,
+                tenant_id=tenant_id,
+                coupon_capability_telemetry=_coupon_capability_shadow,
+            )
+        except Exception as _ccr_own_exc:  # noqa: BLE001  # noqa: silent-ok — coupon canary ownership must fail closed
+            logger.debug(
+                "[CUSTOMER_COUPON_REQUEST] ownership skipped tenant=%s err=%s",
+                tenant_id,
+                _ccr_own_exc,
+            )
+
         _turn_owner_contract_meta = {}
         _turn_owner_contract_summary = {}
         try:
@@ -3968,6 +3987,21 @@ class MerchantBrain:
             merchant_context=slim_merchant_ctx,
             db=db,
         )
+        try:
+            from .commerce.customer_coupon_request_owner import (  # noqa: PLC0415
+                attach_customer_request_coupon_facts_to_reply_state,
+            )
+
+            attach_customer_request_coupon_facts_to_reply_state(
+                ctx.reply_state,
+                dict((result.data or {}).get("customer_request_coupon_facts") or {}),
+            )
+        except Exception as _ccr_facts_exc:  # noqa: BLE001  # noqa: silent-ok — coupon facts must not block compose
+            logger.debug(
+                "[CUSTOMER_COUPON_REQUEST] facts attach skipped tenant=%s err=%s",
+                tenant_id,
+                _ccr_facts_exc,
+            )
 
         # ── 6.98 Final Turn Contract (Phase 3.1 shadow) ────────────────────
         _final_turn_contract = None
