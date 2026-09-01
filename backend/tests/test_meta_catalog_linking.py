@@ -130,6 +130,51 @@ def test_link_status_expected_linked_true(mock_client_cls):
 
 
 @patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_ignores_stale_onboarding_metadata_when_flag_off(
+    mock_client_cls, monkeypatch,
+):
+    monkeypatch.delenv("NAHLA_AUTO_CATALOG_ONBOARDING", raising=False)
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_response([
+        {"id": "CAT-GENERIC-001", "name": "متجر تجريبي عام"},
+    ])
+    conn = _conn()
+    conn.extra_metadata = {
+        "meta_catalog_ensure": {
+            "error": "catalog_business_mismatch",
+            "legacy_repair": True,
+        }
+    }
+    out = get_waba_catalog_link_status(_db_with(conn), 9)
+    assert out["ok"] is True
+    assert out["error"] is None
+    assert out.get("onboarding_error") is None
+    assert out.get("legacy_repair") is False
+
+
+@patch("services.meta_catalog_linking.httpx.Client")
+def test_link_status_consumes_onboarding_metadata_when_flag_on(
+    mock_client_cls, monkeypatch,
+):
+    monkeypatch.setenv("NAHLA_AUTO_CATALOG_ONBOARDING", "1")
+    mock_client = MagicMock()
+    mock_client_cls.return_value.__enter__.return_value = mock_client
+    mock_client.get.return_value = _graph_response([])
+    conn = _conn()
+    conn.extra_metadata = {
+        "meta_catalog_ensure": {
+            "error": "catalog_business_mismatch",
+            "legacy_repair": True,
+        }
+    }
+    out = get_waba_catalog_link_status(_db_with(conn), 9)
+    assert out["error"] == "catalog_business_mismatch"
+    assert out["legacy_repair"] is True
+    assert out["onboarding_error"] == "catalog_business_mismatch"
+
+
+@patch("services.meta_catalog_linking.httpx.Client")
 def test_link_status_expected_linked_false(mock_client_cls):
     mock_client = MagicMock()
     mock_client_cls.return_value.__enter__.return_value = mock_client

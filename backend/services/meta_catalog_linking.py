@@ -299,7 +299,20 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
     else:
         link_status = LINK_STATUS_NOT_LINKED
 
-    return {
+    extra = getattr(conn, "extra_metadata", None) or {}
+    ensure_meta = extra.get("meta_catalog_ensure") if isinstance(extra, dict) else {}
+    onboarding_error = None
+    legacy = False
+    try:
+        from services.meta_catalog_onboarding import auto_catalog_onboarding_enabled  # noqa: PLC0415
+        consume_onboarding = auto_catalog_onboarding_enabled()
+    except ImportError:
+        consume_onboarding = False
+    if consume_onboarding and isinstance(ensure_meta, dict):
+        onboarding_error = str(ensure_meta.get("error") or "").strip() or None
+        legacy = bool(ensure_meta.get("legacy_repair"))
+
+    payload = {
         "ok": True,
         "connected": any_linked,
         "waba_id": waba_id,
@@ -313,7 +326,13 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
         "error": None,
         "link_status": link_status,
         "catalog_exists": True if expected_linked else None,
+        "legacy_repair": legacy,
+        "onboarding_error": onboarding_error,
     }
+    if not expected_linked and onboarding_error == "catalog_business_mismatch":
+        payload["error"] = "catalog_business_mismatch"
+        payload["legacy_repair"] = True
+    return payload
 
 
 def _auth_headers(token: str) -> Dict[str, str]:
@@ -356,6 +375,8 @@ def _graph_json(
                 "subcode": (err or {}).get("error_subcode"),
                 "type": (err or {}).get("type"),
                 "message": str((err or {}).get("message") or "")[:240],
+                "user_title": str((err or {}).get("error_user_title") or "")[:120] or None,
+                "user_msg": str((err or {}).get("error_user_msg") or "")[:240] or None,
             } if err else None,
         }
 
@@ -566,7 +587,11 @@ def link_waba_to_catalog(
         "error": resp.get("error"),
     }
     if not resp.get("ok"):
-        result["error"] = "waba_catalog_link_failed"
+        graph_err = resp.get("error") or {}
+        if int(graph_err.get("subcode") or 0) == 2388100:
+            result["error"] = "catalog_manage_permission_required"
+        else:
+            result["error"] = "waba_catalog_link_failed"
         result["ok"] = False
         return result
     linked_after, _, err_after = _fetch_waba_product_catalogs(
