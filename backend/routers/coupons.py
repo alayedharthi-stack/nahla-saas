@@ -157,6 +157,7 @@ DEFAULT_COUPON_LEVELS: List[Dict[str, Any]] = [
         "per_customer_usage": 1,
         "allowed_channels":  ["ai", "campaign", "autopilot"],
         "enabled":           True,
+        "min_orders":        1,
     },
     {
         "id":                "silver",
@@ -170,6 +171,7 @@ DEFAULT_COUPON_LEVELS: List[Dict[str, Any]] = [
         "per_customer_usage": 1,
         "allowed_channels":  ["ai", "campaign", "autopilot"],
         "enabled":           True,
+        "min_orders":        3,
     },
     {
         "id":                "gold",
@@ -183,6 +185,7 @@ DEFAULT_COUPON_LEVELS: List[Dict[str, Any]] = [
         "per_customer_usage": 1,
         "allowed_channels":  ["campaign", "autopilot"],
         "enabled":           True,
+        "min_orders":        7,
     },
     {
         "id":                "vip",
@@ -196,6 +199,7 @@ DEFAULT_COUPON_LEVELS: List[Dict[str, Any]] = [
         "per_customer_usage": 1,
         "allowed_channels":  ["campaign", "autopilot"],
         "enabled":           True,
+        "min_orders":        15,
     },
 ]
 
@@ -279,6 +283,7 @@ class CouponLevelIn(BaseModel):
     id: str
     label: Optional[str] = None
     threshold: Optional[str] = None
+    min_orders:          Optional[int]   = None
     discount_default:    Optional[float] = None
     discount_min:        Optional[float] = None
     discount_max:        Optional[float] = None
@@ -360,6 +365,12 @@ def _normalise_level(raw: Dict[str, Any]) -> Dict[str, Any]:
     base["validity_hours"]     = max(1, _take("validity_hours",     int, default_val=24))
     base["max_uses"]           = max(1, _take("max_uses",           int, default_val=1))
     base["per_customer_usage"] = max(1, _take("per_customer_usage", int, default_val=1))
+    from services.coupon_level_contract import CANONICAL_LEVEL_MIN_ORDERS  # noqa: PLC0415
+    base["min_orders"]         = max(0, _take(
+        "min_orders",
+        int,
+        default_val=int(CANONICAL_LEVEL_MIN_ORDERS.get(rid, 0)),
+    ))
 
     chans = raw.get("allowed_channels")
     if isinstance(chans, list):
@@ -712,7 +723,7 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
     return {
         "rules": rules,
         "vip_tiers": list(coupon_dash.get("vip_tiers") or DEFAULT_VIP_TIERS),
-        "levels":          coupon_dash.get("levels") or _normalise_levels(None),
+        "levels":          _normalise_levels(coupon_dash.get("levels")),
         "global_defaults": coupon_dash.get("global_defaults") or dict(DEFAULT_GLOBAL_DEFAULTS),
         "ai_policy":       coupon_dash.get("ai_policy") or dict(DEFAULT_AI_POLICY),
         "coupons": coupons,

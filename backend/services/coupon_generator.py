@@ -994,6 +994,166 @@ class CouponGeneratorService:
         self._mark_coupon_sent(coupon, sent_at=datetime.now(timezone.utc), commit=True)
         return coupon
 
+    def _supports_skip_locked(self) -> bool:
+        bind = self.db.get_bind()
+        return bool(bind is not None and getattr(bind.dialect, "name", "") == "postgresql")
+
+    def _unassigned_pool_clause(self):
+        """Warm-pool rows that are not yet owned by a customer."""
+        return or_(
+            Coupon.extra_metadata["customer_id"].is_(None),
+            Coupon.extra_metadata["customer_id"].astext.in_(("", "null")),
+        )
+
+    def _remaining_hours_ok(self, coupon: Coupon, *, min_remaining_hours: int, now: datetime) -> bool:
+        if min_remaining_hours <= 0:
+            return True
+        exp = coupon.expires_at
+        if exp is None:
+            return True
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        return (exp - now) >= timedelta(hours=min_remaining_hours)
+
+    def _stamp_customer_assignment(
+        self,
+        coupon: Coupon,
+        *,
+        customer_id: int,
+        for_channel: str,
+        now: Optional[datetime] = None,
+        commit: bool = False,
+    ) -> None:
+        """Atomically own a coupon for one customer before facts are exposed."""
+        now = now or datetime.now(timezone.utc)
+        meta = dict(coupon.extra_metadata or {})
+        meta["customer_id"] = int(customer_id)
+        meta["assigned_at"] = now.isoformat()
+        meta["issued_channel"] = str(for_channel or "ai")
+        meta["issued_reason"] = "customer_request"
+        coupon.extra_metadata = meta
+        flag_modified(coupon, "extra_metadata")
+        if commit:
+            self.db.commit()
+
+    def pick_coupon_for_level(
+        self,
+        level_id: str,
+        customer_id: int,
+        *,
+        for_channel: str = "ai",
+    ) -> Optional[Coupon]:
+        """Level-native warm-pool pick with PostgreSQL SKIP LOCKED allocation.
+
+        Does not map the level onto a fake CRM segment. Existing
+        ``pick_coupon_for_segment`` behaviour is unchanged.
+        """
+        canonical_level = str(level_id or "").strip().lower()
+        if canonical_level not in CANONICAL_COUPON_LEVELS:
+            return None
+        try:
+            owner_id = int(customer_id)
+        except (TypeError, ValueError):
+            return None
+        if owner_id <= 0:
+            return None
+
+        now = datetime.now(timezone.utc)
+        min_remaining_hours = 0
+        if for_channel == "ai":
+            policy = _get_ai_policy(self.db, self.tenant_id)
+            min_remaining_hours = int(policy.get("min_remaining_hours") or 0)
+
+        skipped_ids: List[int] = []
+        use_skip = self._supports_skip_locked()
+        max_attempts = 20
+        for _ in range(max_attempts):
+            filters = list(self._pool_filter_by_level(canonical_level))
+            if skipped_ids:
+                filters.append(~Coupon.id.in_(skipped_ids))
+            query = (
+                self.db.query(Coupon)
+                .filter(*filters)
+                .order_by(Coupon.id.asc())
+            )
+            if use_skip:
+                query = query.with_for_update(skip_locked=True)
+            coupon = query.limit(1).first()
+            if coupon is None:
+                return None
+            owner = (coupon.extra_metadata or {}).get("customer_id")
+            if owner not in (None, "", "null"):
+                skipped_ids.append(int(coupon.id))
+                continue
+            if not self._remaining_hours_ok(
+                coupon, min_remaining_hours=min_remaining_hours, now=now
+            ):
+                skipped_ids.append(int(coupon.id))
+                continue
+            self._stamp_customer_assignment(
+                coupon,
+                customer_id=owner_id,
+                for_channel=for_channel,
+                now=now,
+                commit=False,
+            )
+            self._mark_coupon_sent(coupon, sent_at=now, commit=True)
+            return coupon
+        return None
+
+    async def create_on_demand_for_level(
+        self,
+        level_id: str,
+        *,
+        customer_id: int,
+        for_channel: str = "ai",
+    ) -> Optional[Coupon]:
+        """Create one coupon for a canonical level and assign it immediately.
+
+        Reuses ``_create_one_coupon``. The public API is level-native; the
+        existing segment column is filled from the level's representative
+        label only as a storage field, not as CRM-segment issuance policy.
+        """
+        canonical_level = str(level_id or "").strip().lower()
+        if canonical_level not in CANONICAL_COUPON_LEVELS:
+            return None
+        try:
+            owner_id = int(customer_id)
+        except (TypeError, ValueError):
+            return None
+        if owner_id <= 0:
+            return None
+
+        limits = _get_merchant_limits(self.db, self.tenant_id)
+        levels_cfg = _get_levels_config(self.db, self.tenant_id)
+        discount, expiry_days = self._resolve_level_economics(
+            canonical_level, levels_cfg, limits
+        )
+        representative = LEVEL_TO_REPRESENTATIVE_SEGMENT.get(canonical_level, CrmStatus.ACTIVE)
+        now = datetime.now(timezone.utc)
+        coupon = await self._create_one_coupon(
+            segment=representative,
+            discount=discount,
+            expiry_days=expiry_days,
+            reserved_codes=self._reserved_codes(),
+            adapter=self._get_adapter(),
+            extra_flags={
+                "on_demand": True,
+                "customer_id": owner_id,
+                "assigned_at": now.isoformat(),
+                "issued_channel": for_channel,
+                "issued_reason": "customer_request",
+            },
+            label=canonical_level,
+            coupon_level=canonical_level,
+            allocation_channel=for_channel,
+            source_type="system",
+        )
+        if coupon is None:
+            return None
+        self._mark_coupon_sent(coupon, sent_at=now, commit=True)
+        return coupon
+
     async def generate_for_customer(
         self,
         customer_id: int,

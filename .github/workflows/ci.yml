@@ -336,6 +336,7 @@ jobs:
             backend/tests/test_conversation_a1_subject_binding_migration_pg.py \
             backend/tests/test_conversation_a1_subject_read_bridge_postgres.py \
             backend/tests/test_coupon_pool_cap_postgres.py \
+            backend/tests/test_customer_coupon_allocation_postgres.py \
             backend/tests/test_salla_coupons_poller_race_postgres.py \
             backend/tests/test_salla_commerce_reconciler_postgres.py \
             backend/tests/test_salla_cart_recovery_postgres.py \

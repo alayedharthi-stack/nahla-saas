@@ -1135,6 +1135,10 @@ class MerchantBrain:
         human_priority: bool = False,
     ) -> Dict[str, Any]:
         t0 = time.monotonic()
+        _coupon_capability_shadow: Dict[str, Any] = {
+            "coupon_capability_probe_run": False,
+            "coupon_capability_shadow_only": True,
+        }
 
         # ── Outbound billing guard ────────────────────────────────────────────
         # Inbound message ingestion and conversation recording always run.
@@ -1571,6 +1575,35 @@ class MerchantBrain:
                 tenant_id,
                 _psc_exc,
             )
+
+        # ── 1a.54 Shadow coupon capability probe (telemetry only) ────────
+        # Default OFF. Must not mutate intent, decision, coupons, or reply.
+        _coupon_capability_shadow: Dict[str, Any] = {
+            "coupon_capability_probe_run": False,
+            "coupon_capability": "none",
+            "coupon_capability_shadow_only": True,
+        }
+        try:
+            from .intent.coupon_capability_probe import (  # noqa: PLC0415
+                maybe_run_shadow_coupon_capability_probe,
+            )
+
+            _intent_before_coupon_probe = str(getattr(intent, "name", "") or "")
+            _coupon_capability_shadow = await maybe_run_shadow_coupon_capability_probe(
+                message=_raw_message or message,
+            )
+            if str(getattr(intent, "name", "") or "") != _intent_before_coupon_probe:
+                logger.error(
+                    "[COUPON_CAPABILITY_PROBE] refused intent mutation tenant=%s",
+                    tenant_id,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — shadow probe must not affect production
+            _coupon_capability_shadow = {
+                "coupon_capability_probe_run": False,
+                "coupon_capability": "none",
+                "coupon_capability_parse_ok": False,
+                "coupon_capability_shadow_only": True,
+            }
 
         # ── 1a.55 Customer Intent Priority Layer (AI-ARCH-007) ─────────
         _intent_priority = None
@@ -6360,17 +6393,24 @@ class MerchantBrain:
             "shipment_guard_blocked_claims": list(
                 result.data.get("shipment_guard_blocked_claims") or []
             ),
-            "quality_observability": _build_quality_observability(
-                chosen_path=_chosen_path,
-                decision=decision,
-                intent=intent,
-                result_data=dict(getattr(result, "data", None) or {}),
-                reply=reply or "",
-                pre_guard_body=_owned_reply_snapshot or "",
-                guards_triggered=[
-                    name for name, fired in (_guard_replaced or {}).items() if fired
-                ],
-            ),
+            "quality_observability": {
+                **_build_quality_observability(
+                    chosen_path=_chosen_path,
+                    decision=decision,
+                    intent=intent,
+                    result_data=dict(getattr(result, "data", None) or {}),
+                    reply=reply or "",
+                    pre_guard_body=_owned_reply_snapshot or "",
+                    guards_triggered=[
+                        name for name, fired in (_guard_replaced or {}).items() if fired
+                    ],
+                ),
+                **{
+                    key: value
+                    for key, value in (_coupon_capability_shadow or {}).items()
+                    if str(key).startswith("coupon_capability")
+                },
+            },
             "memory_summarise_deferred": result.data.get("memory_summarise_deferred"),
             **_tc_coupon_constitutional_meta,
             **_cc_coupon_constitutional_meta,
