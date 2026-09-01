@@ -18,11 +18,10 @@ from core.ai_pause_guard import REASON_MANUAL_PAUSE
 from core.automation_send_guard import (
     REASON_AI_DISABLED,
     REASON_BLOCKED_NUMBER,
-    REASON_HUMAN_TAKEOVER,
     REASON_STORE_AI_DISABLED,
     should_block_automation_for_conversation,
 )
-from core.ownership_state import OWNERSHIP_HUMAN_IDLE, OWNERSHIP_HUMAN_REQUESTED, resolve_ownership_state
+from core.ownership_state import OWNERSHIP_HUMAN_REQUESTED, resolve_ownership_state
 
 
 def _run(coro):
@@ -121,14 +120,13 @@ class TestShouldBlockAutomationForConversation:
         assert decision.block is True
         assert decision.reason == REASON_AI_DISABLED
 
-    def test_human_takeover_columns_block(self) -> None:
+    def test_human_takeover_columns_do_not_block(self) -> None:
         convo = _convo(
             taken_over_at=_now(),
             taken_over_by="dashboard:handoff",
         )
         decision = _decision(convo)
-        assert decision.block is True
-        assert decision.reason == REASON_HUMAN_TAKEOVER
+        assert decision.block is False
 
     def test_needs_human_advisory_allows(self) -> None:
         convo = _convo(needs_human=True, handoff_active=True)
@@ -151,7 +149,7 @@ class TestShouldBlockAutomationForConversation:
         decision = _decision(convo)
         assert decision.block is False
 
-    def test_implicit_recent_staff_blocks(self) -> None:
+    def test_implicit_recent_staff_does_not_block(self) -> None:
         now = datetime.now(timezone.utc)
         staff_at = now - timedelta(minutes=5)
         convo = _convo(
@@ -163,8 +161,7 @@ class TestShouldBlockAutomationForConversation:
             _Msg(direction="outbound", created_at=staff_at, event_type="manual_reply"),
         ])
         decision = _decision(convo, db=db)
-        assert decision.block is True
-        assert decision.reason == REASON_HUMAN_TAKEOVER
+        assert decision.block is False
 
     def test_human_idle_customer_waiting_allows(self) -> None:
         now = datetime.now(timezone.utc)
@@ -182,7 +179,7 @@ class TestShouldBlockAutomationForConversation:
             _Msg(direction="inbound", created_at=inbound_at),
         ])
         result = resolve_ownership_state(db, convo, now=now, assume_current_inbound=True)
-        assert result.state == OWNERSHIP_HUMAN_IDLE
+        assert result.state == OWNERSHIP_HUMAN_REQUESTED
         decision = _decision(convo, db=db)
         assert decision.block is False
 

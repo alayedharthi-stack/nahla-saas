@@ -20,9 +20,6 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from core.ai_disabled_gate import (  # noqa: E402
-    REASON_HANDOFF_SESSION,
-    REASON_HUMAN_OWNERSHIP,
-    REASON_HUMAN_SUPERVISION,
     is_ai_disabled_for_conversation,
 )
 from core.ai_pause_guard import REASON_MANUAL_PAUSE  # noqa: E402
@@ -445,7 +442,7 @@ class TestGroupGHandoff:
         )
         assert ok
 
-    def test_g4_human_ownership_blocks(self, world) -> None:
+    def test_g4_human_ownership_does_not_block(self, world) -> None:
         convo = SimpleNamespace(
             id=2,
             tenant_id=world.tenant_a.tenant_id,
@@ -475,12 +472,12 @@ class TestGroupGHandoff:
                 tenant_id=world.tenant_a.tenant_id,
                 customer_phone=PHONE_CUST_B,
             )
-        ok = decision.disabled and decision.reason == REASON_HUMAN_OWNERSHIP
+        ok = decision.disabled is False
         record_acceptance(
             scenario_id="G4",
             messages=["مرحبا"],
             tenant=TENANT_A_NAME,
-            expected="human ownership disables AI",
+            expected="human ownership does not disable AI",
             actual="pass" if ok else "fail",
             tools=[],
             sources=["ownership_state"],

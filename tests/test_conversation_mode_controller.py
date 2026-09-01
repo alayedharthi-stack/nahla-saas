@@ -560,10 +560,9 @@ class TestHandoffPrecedence:
             "staff dashboard should pivot to MODE_SUPPORT_ESCALATION."
         )
 
-    def test_paused_by_human_routes_to_support(self):
-        """``paused_by_human`` is set on every manual staff reply — a
-        real takeover. The mode resolver MUST pivot to SUPPORT so the
-        brain doesn't talk over the human."""
+    def test_paused_by_human_does_not_route_to_support(self):
+        """``paused_by_human`` is leftover staff-activity residue.
+        Mode must not treat it as keyboard ownership."""
         db = FakeDB()
         convo = FakeConvo(paused_by_human=True)
 
@@ -573,12 +572,10 @@ class TestHandoffPrecedence:
             text="السلام عليكم",
         )
 
-        assert decision.mode == MODE_SUPPORT_ESCALATION
+        assert decision.mode != MODE_SUPPORT_ESCALATION
 
-    def test_taken_over_at_routes_to_support(self):
-        """``taken_over_at`` is stamped the first time staff engages
-        ("استلام" button or first manual reply) — also a real
-        takeover. New gate added in May 2026 #46."""
+    def test_taken_over_at_does_not_route_to_support(self):
+        """``taken_over_at`` alone is implicit residue, not Stop AI."""
         from datetime import datetime, timezone
 
         db = FakeDB()
@@ -591,7 +588,7 @@ class TestHandoffPrecedence:
             text="السلام عليكم",
         )
 
-        assert decision.mode == MODE_SUPPORT_ESCALATION
+        assert decision.mode != MODE_SUPPORT_ESCALATION
 
 
 # ══════════════════════════════════════════════════════════════════════════════
