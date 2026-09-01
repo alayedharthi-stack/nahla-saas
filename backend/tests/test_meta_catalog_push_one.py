@@ -220,9 +220,10 @@ def test_confirm_get_existing_then_update():
     assert post_headers.get("Authorization") == "Bearer tok"
 
 
-def test_confirm_does_not_update_different_bound_meta_item():
+def test_confirm_updates_sellable_variant_even_if_parent_meta_item_differs():
+    """Salla variant identity is independent of Product.meta_item_id."""
     parent = _parent()
-    parent.meta_item_id = "META-SIBLING"
+    parent.meta_item_id = "META-PARENT-STALE"
     db = _mock_db(parent=parent)
     lookup_resp = httpx.Response(
         200,
@@ -230,6 +231,7 @@ def test_confirm_does_not_update_different_bound_meta_item():
     )
     mock_client = MagicMock()
     mock_client.get.return_value = lookup_resp
+    mock_client.post.return_value = httpx.Response(200, json={"success": True})
     mock_client.__enter__.return_value = mock_client
     mock_client.__exit__.return_value = False
 
@@ -238,10 +240,10 @@ def test_confirm_does_not_update_different_bound_meta_item():
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
 
-    assert result["action"] == "block_ambiguous_sibling"
-    assert result["error"] == "ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "already_bound_other"
-    assert mock_client.post.call_count == 0
+    assert result["action"] == "update"
+    assert result["ok"] is True
+    assert result["meta_product_id"] == "META-ITEM-EXISTING"
+    assert mock_client.post.call_count == 1
 
 
 def test_fatal_preview_does_not_call_graph():
@@ -330,14 +332,10 @@ def test_confirm_links_unique_canonical_sibling_without_create():
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
-    assert result["action"] == "link_canonical_sibling"
-    assert result["ok"] is True
-    assert result["error"] is None
-    assert result["meta_product_id"] == "META-SIBLING"
+    assert result["action"] == "block_ambiguous_sibling"
+    assert result["ok"] is False
+    assert result["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
-    lookup = result.get("lookup") or {}
-    assert lookup.get("identity_class") == "EXISTING_CANONICAL_SIBLING"
-    assert lookup.get("sibling_retailer_id") == "398551325-591001"
 
 
 def test_confirm_blocks_when_multiple_canonical_siblings():
@@ -379,8 +377,7 @@ def test_confirm_blocks_when_multiple_canonical_siblings():
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
     assert result["action"] == "block_ambiguous_sibling"
-    assert result["error"] == "ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "multiple_siblings"
+    assert result["error"] == "ambiguous_variant_identity"
     assert result["ok"] is False
     assert mock_client.post.call_count == 0
 
@@ -416,8 +413,7 @@ def test_confirm_blocks_when_meta_item_occupied_by_other_active_row():
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
     assert result["action"] == "block_ambiguous_sibling"
-    assert result["error"] == "ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "foreign_meta_item"
+    assert result["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
 
 
@@ -452,9 +448,7 @@ def test_confirm_blocks_when_sibling_price_mismatches():
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
     assert result["action"] == "block_ambiguous_sibling"
-    assert result["error"] == "ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "content_mismatch"
-    assert "price" in ((result.get("lookup") or {}).get("content_mismatches") or [])
+    assert result["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
 
 
@@ -489,7 +483,7 @@ def test_confirm_blocks_when_live_item_lineage_mismatches():
                 result = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
     assert result["action"] == "block_ambiguous_sibling"
-    assert (result.get("lookup") or {}).get("reason") == "lineage_mismatch"
+    assert result["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
 
 
@@ -522,14 +516,13 @@ def test_canonical_sibling_link_is_idempotent_and_does_not_post():
                 first = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
                 second = push_one_meta_catalog_item(db, 9, "398551325", confirm=True)
 
-    assert first["action"] == "link_canonical_sibling"
-    assert second["action"] == "link_canonical_sibling"
-    assert first["meta_product_id"] == second["meta_product_id"] == "META-SIBLING"
-    assert (second.get("lookup") or {}).get("idempotent") is True
+    assert first["action"] == "block_ambiguous_sibling"
+    assert second["action"] == "block_ambiguous_sibling"
+    assert first["error"] == second["error"] == "ambiguous_variant_identity"
     assert mock_client.post.call_count == 0
 
 
-def test_confirm_creates_when_only_bare_parent_rid_exists():
+def test_confirm_blocks_salla_when_svid_missing_even_if_bare_parent_exists():
     parent = _parent()
     parent.variants = [_variant("88001-591001")]
     variant = _variant("nahla_v_501")
@@ -560,10 +553,10 @@ def test_confirm_creates_when_only_bare_parent_rid_exists():
             with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
                 result = push_one_meta_catalog_item(db, 9, "nahla_v_501", confirm=True)
 
-    assert result["action"] == "create"
-    assert result["ok"] is True
-    assert result["meta_product_id"] == "META-NEW-MISSING"
-    assert mock_client.post.call_count == 1
+    assert result["ok"] is False
+    assert result["error"] == "ambiguous_variant_identity"
+    assert result["action"] == "block_ambiguous_sibling"
+    assert mock_client.post.call_count == 0
 
 
 def test_confirm_creates_when_no_exact_or_legacy_identity():
@@ -613,6 +606,40 @@ def test_identity_classifier_binds_sibling_not_title():
     assert parent.title not in keys
 
 
+def test_sellable_salla_sizes_create_instead_of_linking_first_sibling():
+    """Five size SKUs are independent identities; sibling gate must not collapse them."""
+    parent = _parent()
+    parent.external_id = "863278879"
+    sizes = [
+        _variant(f"863278879-{100 + i}")
+        for i in range(5)
+    ]
+    for i, row in enumerate(sizes):
+        row.id = 200 + i
+        row.salla_variant_id = str(100 + i)
+    parent.variants = sizes
+    variant = sizes[1]
+    db = _mock_db(parent=parent, variant=variant)
+    lookup_resp = httpx.Response(200, json={"data": []})
+    create_resp = httpx.Response(200, json={"id": "META-SIZE-2"})
+    mock_client = MagicMock()
+    mock_client.get.return_value = lookup_resp
+    mock_client.post.return_value = create_resp
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    preview = _preview_ok()
+    preview["payload"]["retailer_id"] = variant.retailer_id
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=preview):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                with patch("services.meta_catalog_push._canonical_sibling_gate") as gate:
+                    result = push_one_meta_catalog_item(db, 9, variant.retailer_id, confirm=True)
+    assert result["action"] == "create"
+    assert result["ok"] is True
+    gate.assert_not_called()
+    assert mock_client.post.call_count == 1
+
+
 def test_lookup_filter_is_exact_retailer_id_not_name():
     db = _mock_db()
     captured = []
@@ -646,3 +673,28 @@ def test_load_variant_requires_retailer_id():
         assert False, "expected MetaCatalogPushError"
     except MetaCatalogPushError as exc:
         assert exc.code == "retailer_id_missing"
+
+
+def test_confirm_does_not_post_stale_nahla_v_when_identity_is_hyphenated():
+    parent = _parent()
+    variant = _variant("nahla_v_501")
+    variant.salla_variant_id = "591001"
+    parent.variants = [variant]
+    db = _mock_db(parent=parent, variant=variant)
+    mock_client = MagicMock()
+    mock_client.get.return_value = httpx.Response(200, json={"data": []})
+    mock_client.post.return_value = httpx.Response(200, json={"id": "META-DET"})
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+        with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+            result = push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
+
+    assert result["ok"] is True
+    assert result["action"] == "create"
+    assert result["payload"]["retailer_id"] == "88001-591001"
+    assert mock_client.post.call_count == 1
+    post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
+    assert post_body["retailer_id"] == "88001-591001"
+    assert not str(post_body["retailer_id"]).startswith("nahla_v_")

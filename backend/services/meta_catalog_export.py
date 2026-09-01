@@ -319,10 +319,28 @@ def resolve_variant_image_url(parent: Any, variant: Any) -> tuple[Optional[str],
 def build_meta_variant_payload(parent: Any, variant: Any) -> Dict[str, Any]:
     """Translate a Nahla variant (+ parent context) into a Meta item payload.
 
-    Uses ``variant.retailer_id`` — never the parent retailer id — so
-    multi-variant products map one Meta catalog item per sellable SKU.
-  """
+    Uses the sellable variant retailer_id — never the parent retailer id — so
+    multi-variant products map one Meta catalog item per SKU.
+
+    For Salla SKUs with a ``salla_variant_id``, Graph identity is always
+    ``{external_id}-{salla_variant_id}``. Stored ``nahla_v_*`` / overrides
+    are not posted.
+    """
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        deterministic_variant_retailer_id,
+        is_salla_source,
+    )
+
     retailer_id = (getattr(variant, "retailer_id", None) or "").strip() or None
+    if is_salla_source(parent):
+        det = deterministic_variant_retailer_id(
+            getattr(parent, "external_id", None),
+            getattr(variant, "salla_variant_id", None),
+        )
+        if det:
+            retailer_id = det
+        elif str(getattr(variant, "salla_variant_id", None) or "").strip():
+            retailer_id = None
     parent_meta = _row_metadata(parent)
     currency = (
         (getattr(variant, "currency", None) or "").strip()

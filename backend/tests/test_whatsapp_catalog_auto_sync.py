@@ -2009,6 +2009,8 @@ def test_dirty_update_during_push_is_drained_without_unbounded_resubmit(monkeypa
 
     row = _product(
         id=201,
+        source=SOURCE_NAHLA_NATIVE,
+        ownership_mode=OWNERSHIP_NAHLA_MANAGED,
         sync_status="pending",
         extra_metadata={
             "currency": "SAR",

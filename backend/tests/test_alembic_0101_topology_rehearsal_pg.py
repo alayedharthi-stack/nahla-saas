@@ -1,12 +1,13 @@
 """Ephemeral PostgreSQL rehearsal: integration path to 0101 without touching Production.
 
 Proves:
-- Repository heads stay {0092, 0101}; 0092 is not lost and is not selected.
+- Repository heads stay {0092, 0102}; 0092 is not lost and is not selected.
 - Fresh bootstrap 0093 then upgrade 0101 applies 0094..0101 and creates the index.
 - A production-like DB at 0100 then upgrade 0101 applies only 0101.
 - After 0101, upgrade 0092 can still attach as a second alembic_version row.
 - Merge revision of 0092+0101 is not required and must not exist.
 - Downgrade 0101 → 0100 drops the index.
+- 0101 → 0102 is fail-closed uniqueness (no delete/merge).
 
 Never uses Production DATABASE_URL. Never invokes ``head``.
 Production read-only current is ``0099``; this PR applies ``0100`` then ``0101``.
@@ -52,6 +53,7 @@ _BOOTSTRAP = INTEGRATION_BOOTSTRAP_TARGET
 _PROD_CURRENT = "0099"
 _PROD_LIKE = "0100"
 _TARGET = "0101"
+_HEAD = "0102"
 _VALIDATE_HEAD = "0092"
 _EXPECTED_FROM_BOOTSTRAP = ("0094", "0095", "0096", "0097", "0098", "0099", "0100", "0101")
 _EXPECTED_FROM_PROD = ("0100", "0101")
@@ -138,7 +140,7 @@ def test_repository_heads_stay_parallel_not_merged() -> None:
         script = _script()
         heads = set(script.get_heads())
         print("alembic_heads=" + ",".join(sorted(heads)))
-        assert heads == REPOSITORY_ALEMBIC_HEADS == {_VALIDATE_HEAD, _TARGET}
+        assert heads == REPOSITORY_ALEMBIC_HEADS == {_VALIDATE_HEAD, _HEAD}
         assert "head" in FORBIDDEN_BOOTSTRAP_LITERALS
         assert _BOOTSTRAP == "0093"
         merge_revs = [
@@ -220,6 +222,49 @@ def test_production_0099_then_0101_and_downgrade(admin_engine: Engine) -> None:
         print("alembic_current_after_downgrade=" + ",".join(sorted(current)))
         assert current == {_PROD_LIKE}
         assert _index_predicate(engine)["index_name"] is None
+    finally:
+        engine.dispose()
+        drop_ephemeral_database(admin_engine, db_name)
+
+
+def test_0101_then_0102_fail_closed_uniqueness(admin_engine: Engine) -> None:
+    from catalog_membership_uniqueness import (  # noqa: PLC0415
+        ERROR_DUPLICATE_CATALOG_IDENTITY_BLOCKED,
+        UQ_MEMBERSHIP_META_ITEM,
+        UQ_MEMBERSHIP_VARIANT_KEY,
+    )
+
+    source = (_DATABASE / "migrations" / "versions" / "0102_catalog_membership_variant_identity.py").read_text(
+        encoding="utf-8"
+    )
+    assert "down_revision = \"0101\"" in source or "down_revision = '0101'" in source
+    assert "DELETE FROM" not in source.upper().replace(" ", "")
+    assert "raise_if_duplicate_catalog_identities" in source
+    assert ERROR_DUPLICATE_CATALOG_IDENTITY_BLOCKED in source
+
+    db_name, engine = _ephemeral_engine(admin_engine)
+    try:
+        print("path=0101_then_0102_fail_closed")
+        run_alembic(engine, _TARGET)
+        assert _current_revisions(engine) == {_TARGET}
+        run_alembic(engine, _HEAD)
+        current = _current_revisions(engine)
+        print("alembic_current_after_0102=" + ",".join(sorted(current)))
+        assert current == {_HEAD}
+        with engine.connect() as conn:
+            names = {
+                str(row[0])
+                for row in conn.execute(
+                    text(
+                        "SELECT indexname FROM pg_indexes "
+                        "WHERE tablename = 'meta_catalog_memberships'"
+                    )
+                )
+            }
+        assert UQ_MEMBERSHIP_VARIANT_KEY in names
+        assert UQ_MEMBERSHIP_META_ITEM in names
+        run_alembic(engine, _VALIDATE_HEAD)
+        assert _current_revisions(engine) == {_VALIDATE_HEAD, _HEAD}
     finally:
         engine.dispose()
         drop_ephemeral_database(admin_engine, db_name)
