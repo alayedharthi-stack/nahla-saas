@@ -310,10 +310,34 @@ def _apply_operational_turn_signals(
     try:
         from ..commerce.contact_route_policy import has_explicit_contact_intent  # noqa: PLC0415
 
-        if has_explicit_contact_intent(msg) or intent_name in {
-            INTENT_TALK_HUMAN,
-            INTENT_ASK_OWNER_CONTACT,
-        }:
+        # Canonical Order Support stays authoritative. The generic contact
+        # detector may false-positive on order-number asks; it must not
+        # overwrite an already-proven Order Support turn. Real staff/contact
+        # without that provenance still wins below.
+        _os_authoritative = False
+        try:
+            from ..commerce.order_support_ownership import (  # noqa: PLC0415
+                has_authoritative_order_support_ownership,
+            )
+
+            _os_authoritative = bool(
+                has_authoritative_order_support_ownership(
+                    getattr(ctx, "intent", None),
+                    state=state,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[TURN_UNDERSTANDING] order_support_ownership_probe_failed"
+            )
+
+        if not _os_authoritative and (
+            has_explicit_contact_intent(msg)
+            or intent_name in {
+                INTENT_TALK_HUMAN,
+                INTENT_ASK_OWNER_CONTACT,
+            }
+        ):
             evidence = list(evidence)
             evidence.append(_evidence(
                 "current_turn_authority",
