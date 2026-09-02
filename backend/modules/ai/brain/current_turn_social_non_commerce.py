@@ -264,6 +264,7 @@ def _has_explicit_catalog_or_product_intent(
     *,
     intent: Optional[Intent] = None,
     inbound_metadata: Optional[dict[str, Any]] = None,
+    state: Any = None,
 ) -> bool:
     raw = (message or "").strip()
     if not raw:
@@ -273,6 +274,15 @@ def _has_explicit_catalog_or_product_intent(
 
     name = _intent_name(intent)
     conf = _intent_confidence(intent)
+    try:
+        from modules.ai.brain.commerce.order_support_ownership import (  # noqa: PLC0415
+            has_authoritative_order_support_ownership,
+        )
+
+        if has_authoritative_order_support_ownership(intent, state=state):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must not block social-NC
+        pass
     if name in _CLEAR_COMMERCE_INTENTS and conf >= 0.80:
         return True
     if name in _OPERATIONAL_NON_CATALOG_INTENTS and conf >= 0.80:
@@ -483,6 +493,7 @@ def resolve_current_turn_social_non_commerce(
         raw,
         intent=intent,
         inbound_metadata=inbound_metadata,
+        state=state,
     ):
         return CurrentTurnSocialNonCommerce(False, reason="explicit_commerce_or_operational_intent")
 

@@ -134,13 +134,21 @@ def try_ledger_follow_up_decision(ctx: Any) -> Optional[Decision]:
     Returns ``ACTION_CUSTOMER_LEDGER_REPLY`` with
     ``ledger_topic=INTENT_ORDER_REFERENCE_LIST`` when matched; otherwise ``None``.
     """
+    from .order_support_ownership import (  # noqa: PLC0415
+        has_authoritative_order_support_ownership,
+        should_stamp_ledger_context,
+    )
+
     state = getattr(ctx, "state", None)
     message = str(getattr(ctx, "message", "") or "")
     intent = getattr(ctx, "intent", None)
     intent_name = str(getattr(intent, "name", "") or "")
 
     if intent_name == INTENT_ORDER_REFERENCE_LIST:
-        stamp_ledger_context(state)
+        if not has_authoritative_order_support_ownership(intent, state=state):
+            return None
+        if should_stamp_ledger_context(intent, state=state):
+            stamp_ledger_context(state)
         return Decision(
             action=ACTION_CUSTOMER_LEDGER_REPLY,
             args={"ledger_topic": INTENT_ORDER_REFERENCE_LIST},

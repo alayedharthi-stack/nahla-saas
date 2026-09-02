@@ -113,7 +113,21 @@ def detect_product_attribute_question(message: str) -> bool:
     return False
 
 
-def detect_product_information_topic_shift(message: str) -> bool:
+def detect_product_information_topic_shift(
+    message: str,
+    *,
+    state: Any = None,
+    intent: Any = None,
+) -> bool:
+    try:
+        from modules.ai.brain.commerce.order_support_ownership import (  # noqa: PLC0415
+            has_authoritative_order_support_ownership,
+        )
+
+        if has_authoritative_order_support_ownership(intent, state=state):
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must not block product-info
+        pass
     try:
         from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
             product_knowledge_blocks_product_information,
@@ -184,12 +198,13 @@ def recent_unresolved_product_information(
 
 def product_information_blocks_checkout(ctx: Any) -> bool:
     msg = str(getattr(ctx, "message", "") or "")
-    if detect_product_information_topic_shift(msg):
+    state = getattr(ctx, "state", None)
+    intent = getattr(ctx, "intent", None)
+    if detect_product_information_topic_shift(msg, state=state, intent=intent):
         return True
     history = getattr(ctx, "history", None) or []
     if not recent_unresolved_product_information(history, current_message=msg):
         return False
-    state = getattr(ctx, "state", None)
     stage = str(getattr(state, "stage", "") or "")
     op = getattr(state, "order_prep", None)
     if stage not in ("ordering", "deciding", "checkout"):

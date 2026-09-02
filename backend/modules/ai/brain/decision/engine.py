@@ -2089,7 +2089,11 @@ class DefaultDecisionEngine:
             if (
                 not _pk_blocks_info
                 and (
-                    detect_product_information_topic_shift(ctx.message or "")
+                    detect_product_information_topic_shift(
+                        ctx.message or "",
+                        state=state,
+                        intent=intent,
+                    )
                     or product_information_blocks_checkout(ctx)
                 )
             ):
@@ -2430,30 +2434,44 @@ class DefaultDecisionEngine:
             INTENT_ORDER_HISTORY_COUNT,
             INTENT_ORDER_REFERENCE_LIST,
         ):
-            from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
-
-            stamp_ledger_context(state)
-            return Decision(
-                action=ACTION_CUSTOMER_LEDGER_REPLY,
-                args={"ledger_topic": intent.name},
-                reason="customer commerce ledger history inquiry",
-                confidence=float(intent.confidence or 0.94),
+            from ..commerce.order_support_ownership import (  # noqa: PLC0415
+                has_authoritative_order_support_ownership,
+                should_stamp_ledger_context,
             )
+
+            if has_authoritative_order_support_ownership(intent, state=state):
+                from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
+
+                if should_stamp_ledger_context(intent, state=state):
+                    stamp_ledger_context(state)
+                return Decision(
+                    action=ACTION_CUSTOMER_LEDGER_REPLY,
+                    args={"ledger_topic": intent.name},
+                    reason="customer commerce ledger history inquiry",
+                    confidence=float(intent.confidence or 0.94),
+                )
 
         if intent.name == INTENT_LATEST_ORDER_SUMMARY:
-            from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
-
-            stamp_ledger_context(state)
-            return Decision(
-                action=ACTION_LLM_REPLY,
-                args={
-                    "topic": "latest_order_summary",
-                    "ledger_topic": intent.name,
-                    "block_catalog_push": True,
-                },
-                reason="latest order summary — evidence compose",
-                confidence=float(intent.confidence or 0.94),
+            from ..commerce.order_support_ownership import (  # noqa: PLC0415
+                has_authoritative_order_support_ownership,
+                should_stamp_ledger_context,
             )
+
+            if has_authoritative_order_support_ownership(intent, state=state):
+                from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
+
+                if should_stamp_ledger_context(intent, state=state):
+                    stamp_ledger_context(state)
+                return Decision(
+                    action=ACTION_LLM_REPLY,
+                    args={
+                        "topic": "latest_order_summary",
+                        "ledger_topic": intent.name,
+                        "block_catalog_push": True,
+                    },
+                    reason="latest order summary — evidence compose",
+                    confidence=float(intent.confidence or 0.94),
+                )
 
         # ── 3. Track order ────────────────────────────────────────────────
         if intent.name == INTENT_TRACK_ORDER:
@@ -2502,18 +2520,28 @@ class DefaultDecisionEngine:
                     )
                     and not _explicit_status
                 ):
-                    return Decision(
-                        action=ACTION_LLM_REPLY,
-                        args={
-                            "topic": "order_history",
-                            "block_catalog_push": True,
-                        },
-                        reason=(
-                            "order question without status-rule match — "
-                            "full customer_order_evidence compose"
-                        ),
-                        confidence=float(intent.confidence or 0.9),
+                    from ..commerce.order_support_ownership import (  # noqa: PLC0415
+                        has_authoritative_order_support_ownership,
+                        should_stamp_ledger_context,
                     )
+
+                    if has_authoritative_order_support_ownership(intent, state=state):
+                        from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
+
+                        if should_stamp_ledger_context(intent, state=state):
+                            stamp_ledger_context(state)
+                        return Decision(
+                            action=ACTION_LLM_REPLY,
+                            args={
+                                "topic": "order_history",
+                                "block_catalog_push": True,
+                            },
+                            reason=(
+                                "order question without status-rule match — "
+                                "full customer_order_evidence compose"
+                            ),
+                            confidence=float(intent.confidence or 0.9),
+                        )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — non-rule track_order probe must not block tracking
                 pass
             return Decision(
@@ -5496,6 +5524,18 @@ def _try_active_order_review_decision(ctx: BrainContext) -> Optional[Decision]:
 
 def _try_order_resume_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resume/checkout phrases — never catalog search or invented orders."""
+    try:
+        from ..commerce.order_support_ownership import (  # noqa: PLC0415
+            has_authoritative_order_support_ownership,
+        )
+
+        if has_authoritative_order_support_ownership(
+            getattr(ctx, "intent", None),
+            state=getattr(ctx, "state", None),
+        ):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order-support probe must not block resume
+        pass
     try:
         from ..commerce.start_order_verb_guard import (  # noqa: PLC0415
             is_order_resume_or_completion_phrase,
