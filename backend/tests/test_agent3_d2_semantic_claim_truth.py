@@ -104,7 +104,7 @@ def _result(**data: Any) -> ActionResult:
 
 def _claims(
     *,
-    registered: bool = False,
+    acknowledged: bool = False,
     queued: bool = False,
     assigned: bool = False,
     notified: bool = False,
@@ -114,7 +114,7 @@ def _claims(
     provenance: str = "injected",
 ) -> StaffEscalationCandidateClaims:
     return StaffEscalationCandidateClaims(
-        claims_request_registered=registered,
+        claims_request_acknowledged=acknowledged,
         claims_queued=queued,
         claims_staff_assigned=assigned,
         claims_staff_notified=notified,
@@ -155,7 +155,7 @@ async def _compose_handoff(
         classify_calls.append(text)
         if classify is not None:
             return await classify(text)
-        return _claims(registered=True, queued=True)
+        return _claims(acknowledged=True, queued=True)
 
     async def _mutating_impl(decision_inner, result_inner, ctx_inner):
         decision_inner.action = ACTION_LLM_REPLY
@@ -177,7 +177,7 @@ async def _compose_handoff(
 class TestCapabilityDerivation:
     def test_live_queue_only_session_85_capabilities(self) -> None:
         caps = capabilities_from_execution_data(_result().data)
-        assert caps.request_registered is True
+        assert caps.request_acknowledged is True
         assert caps.queued is True
         assert caps.staff_assigned is False
         assert caps.staff_notified is False
@@ -252,19 +252,118 @@ def CLAIM_QUEUED_ONLY(caps: StaffEscalationTruthCapabilities) -> bool:
 class TestUnsupportedSet:
     def test_future_followup_is_unsupported_on_queue_only(self) -> None:
         caps = capabilities_from_execution_data(_result().data)
-        claims = _claims(registered=True, queued=True, followup=True)
+        claims = _claims(acknowledged=True, queued=True, followup=True)
         assert "future_followup" in unsupported_claims(claims, caps)
 
     def test_queue_only_truthful_claims_are_supported(self) -> None:
         caps = capabilities_from_execution_data(_result().data)
-        claims = _claims(registered=True, queued=True)
+        claims = _claims(acknowledged=True, queued=True)
         assert unsupported_claims(claims, caps) == frozenset()
+
+
+class TestTruthAuthorityTightening:
+    def test_bare_queued_status_is_not_queue_authority(self) -> None:
+        caps = capabilities_from_execution_data(
+            {"escalation_status": "queued", "handoff_session_id": None}
+        )
+        assert caps.queued is False
+        assert caps.staff_notified is False
+
+    def test_bare_notification_status_is_not_notify_authority(self) -> None:
+        caps = capabilities_from_execution_data(
+            {
+                "notification_status": "accepted",
+                "notification_accepted": False,
+                "notification_sent": False,
+            }
+        )
+        assert caps.staff_notified is False
+
+        accepted = capabilities_from_execution_data({"notification_accepted": True})
+        sent = capabilities_from_execution_data({"notification_sent": True})
+        assert accepted.staff_notified is True
+        assert sent.staff_notified is True
+        assert accepted.queued is False
+        assert sent.queued is False
+
+    def test_persistence_failure_capabilities(self) -> None:
+        result = ActionResult(
+            success=False,
+            data={
+                "escalation_requested": True,
+                "escalation_status": "failed",
+                "handoff_session_id": None,
+                "notification_accepted": False,
+                "notification_sent": False,
+            },
+        )
+        caps = capabilities_from_execution_data(result.data)
+        assert caps.request_acknowledged is True
+        assert caps.queued is False
+        assert caps.staff_notified is False
+        assert caps.staff_assigned is False
+        assert caps.future_followup_committed is False
+        assert caps.contact_delivered is False
+
+    def test_persistence_failure_semantic_overclaim_blocked(self) -> None:
+        failed = ActionResult(
+            success=False,
+            data={
+                "type": "handoff",
+                "escalation_requested": True,
+                "escalation_status": "failed",
+                "handoff_session_id": None,
+                "notification_accepted": False,
+                "notification_sent": False,
+            },
+        )
+        caps = capabilities_from_execution_data(failed.data)
+        assert unsupported_claims(_claims(acknowledged=True), caps) == frozenset()
+        assert "queued" in unsupported_claims(_claims(acknowledged=True, queued=True), caps)
+        assert "staff_notified" in unsupported_claims(
+            _claims(acknowledged=True, notified=True), caps
+        )
+        assert "staff_assigned" in unsupported_claims(
+            _claims(acknowledged=True, assigned=True), caps
+        )
+        assert "future_followup" in unsupported_claims(
+            _claims(acknowledged=True, followup=True), caps
+        )
+
+        async def classify_ack(text: str, **_kwargs):
+            return _claims(acknowledged=True)
+
+        allowed, stamped, *_rest = _run(
+            _compose_handoff(
+                first_text=TRUTHFUL_QUEUE_ONLY,
+                classify=classify_ack,
+                result=failed,
+            )
+        )
+        assert allowed == TRUTHFUL_QUEUE_ONLY
+        assert stamped.data["staff_escalation_semantic_verify"]["decision"] == "allowed"
+
+        async def classify_overclaim(text: str, **_kwargs):
+            return _claims(acknowledged=True, queued=True, notified=True, followup=True)
+
+        blocked, stamped_block, *_rest = _run(
+            _compose_handoff(
+                first_text=TRUTHFUL_QUEUE_ONLY,
+                second_text=TRUTHFUL_QUEUE_ONLY,
+                classify=classify_overclaim,
+                result=failed,
+            )
+        )
+        assert blocked == empty_reply_fallback()
+        assert stamped_block.data["staff_escalation_semantic_verify"]["decision"] == "required_fail_closed"
+        verify = stamped_block.data["staff_escalation_semantic_verify"]
+        assert "queued" in verify["unsupported_claims"]
 
 
 class TestParser:
     def test_valid_json_object(self) -> None:
         parsed = parse_staff_escalation_claim_payload(
-            '{"claims_request_registered": true, "claims_queued": true,'
+            '{"claims_request_acknowledged": true, "claims_queued": true,'
             ' "claims_staff_assigned": false, "claims_staff_notified": false,'
             ' "claims_future_followup": true, "claims_contact_delivered": false,'
             ' "confidence": 0.9}'
@@ -278,13 +377,13 @@ class TestParser:
 
     def test_missing_bool_fails_closed_parse(self) -> None:
         parsed = parse_staff_escalation_claim_payload(
-            '{"claims_request_registered": true, "claims_queued": true}'
+            '{"claims_request_acknowledged": true, "claims_queued": true}'
         )
         assert parsed.valid_parse is False
 
     def test_string_bool_is_invalid_schema(self) -> None:
         parsed = parse_staff_escalation_claim_payload(
-            '{"claims_request_registered": "true", "claims_queued": false,'
+            '{"claims_request_acknowledged": "true", "claims_queued": false,'
             ' "claims_staff_assigned": false, "claims_staff_notified": false,'
             ' "claims_future_followup": false, "claims_contact_delivered": false}'
         )
@@ -298,8 +397,8 @@ class TestLiveRegression:
 
         async def classify(text: str, **_kwargs):
             if text == LIVE_FALSE_PROMISE:
-                return _claims(registered=True, queued=True, followup=True)
-            return _claims(registered=True, queued=True)
+                return _claims(acknowledged=True, queued=True, followup=True)
+            return _claims(acknowledged=True, queued=True)
 
         text, result, _decision, calls, llm_texts = _run(
             _compose_handoff(first_text=LIVE_FALSE_PROMISE, classify=classify)
@@ -315,7 +414,7 @@ class TestLiveRegression:
 
     def test_detector_miss_is_not_allow_gate(self) -> None:
         async def classify(text: str, **_kwargs):
-            return _claims(registered=True, queued=True, followup=True)
+            return _claims(acknowledged=True, queued=True, followup=True)
 
         text, result, *_rest = _run(
             _compose_handoff(
@@ -333,7 +432,7 @@ class TestLiveRegression:
 class TestCapabilityMatrix:
     def test_queue_only_truthful_candidate_passes(self) -> None:
         async def classify(text: str, **_kwargs):
-            return _claims(registered=True, queued=True)
+            return _claims(acknowledged=True, queued=True)
 
         text, result, *_rest = _run(
             _compose_handoff(first_text=TRUTHFUL_QUEUE_ONLY, classify=classify)
@@ -345,8 +444,8 @@ class TestCapabilityMatrix:
     def test_false_notify_claim_is_blocked(self) -> None:
         async def classify(text: str, **_kwargs):
             if text == FALSE_NOTIFY_CLAIM:
-                return _claims(registered=True, queued=True, notified=True)
-            return _claims(registered=True, queued=True)
+                return _claims(acknowledged=True, queued=True, notified=True)
+            return _claims(acknowledged=True, queued=True)
 
         text, result, *_rest = _run(
             _compose_handoff(first_text=FALSE_NOTIFY_CLAIM, classify=classify)
@@ -364,7 +463,7 @@ class TestCapabilityMatrix:
         )
 
         async def classify(text: str, **_kwargs):
-            return _claims(registered=True, queued=True, notified=True)
+            return _claims(acknowledged=True, queued=True, notified=True)
 
         text, stamped, *_rest = _run(
             _compose_handoff(
@@ -384,7 +483,7 @@ class TestCapabilityMatrix:
         )
 
         async def classify(text: str, **_kwargs):
-            return _claims(registered=True, queued=True, notified=True, followup=True)
+            return _claims(acknowledged=True, queued=True, notified=True, followup=True)
 
         text, stamped, *_rest = _run(
             _compose_handoff(
@@ -407,8 +506,8 @@ class TestCapabilityMatrix:
 
         async def classify(text: str, **_kwargs):
             if text == ASSIGNED_CLAIM:
-                return _claims(registered=True, queued=True, notified=True, assigned=True)
-            return _claims(registered=True, queued=True, notified=True)
+                return _claims(acknowledged=True, queued=True, notified=True, assigned=True)
+            return _claims(acknowledged=True, queued=True, notified=True)
 
         text, *_rest = _run(
             _compose_handoff(
@@ -422,8 +521,8 @@ class TestCapabilityMatrix:
     def test_contact_delivery_requires_capability(self) -> None:
         async def classify(text: str, **_kwargs):
             if text == CONTACT_CLAIM:
-                return _claims(registered=True, queued=True, contact=True)
-            return _claims(registered=True, queued=True)
+                return _claims(acknowledged=True, queued=True, contact=True)
+            return _claims(acknowledged=True, queued=True)
 
         blocked, *_rest = _run(
             _compose_handoff(first_text=CONTACT_CLAIM, classify=classify)
@@ -461,7 +560,7 @@ class TestCapabilityMatrix:
 class TestRecomposeAndFailClosed:
     def test_second_overclaim_fails_closed_and_is_not_silent(self) -> None:
         async def classify(text: str, **_kwargs):
-            return _claims(registered=True, queued=True, followup=True)
+            return _claims(acknowledged=True, queued=True, followup=True)
 
         text, result, *_rest = _run(
             _compose_handoff(
@@ -534,7 +633,7 @@ class TestRecomposeAndFailClosed:
         llm_calls = []
 
         async def classify(text: str, **_kwargs):
-            return _claims(registered=True, queued=True, followup=True)
+            return _claims(acknowledged=True, queued=True, followup=True)
 
         composer = DefaultComposer()
         result = _result()
@@ -586,7 +685,7 @@ class TestComposeHookIsolation:
 
     def test_original_action_still_triggers_verifier_after_internal_mutation(self) -> None:
         async def classify(text: str, **_kwargs):
-            return _claims(registered=True, queued=True)
+            return _claims(acknowledged=True, queued=True)
 
         text, result, decision, calls, _llm = _run(
             _compose_handoff(
@@ -602,7 +701,7 @@ class TestComposeHookIsolation:
 
     def test_provenance_attaches_after_verified_candidate(self) -> None:
         async def classify(text: str, **_kwargs):
-            return _claims(registered=True, queued=True)
+            return _claims(acknowledged=True, queued=True)
 
         text, result, *_rest = _run(
             _compose_handoff(first_text=TRUTHFUL_QUEUE_ONLY, classify=classify)
@@ -615,8 +714,8 @@ class TestComposeHookIsolation:
     def test_provenance_attaches_after_recompose(self) -> None:
         async def classify(text: str, **_kwargs):
             if text == LIVE_FALSE_PROMISE:
-                return _claims(registered=True, queued=True, followup=True)
-            return _claims(registered=True, queued=True)
+                return _claims(acknowledged=True, queued=True, followup=True)
+            return _claims(acknowledged=True, queued=True)
 
         text, result, *_rest = _run(
             _compose_handoff(first_text=LIVE_FALSE_PROMISE, classify=classify)
@@ -687,7 +786,7 @@ class TestNoEventLoopHacks:
 
 class TestCanonicalProviderRuntime:
     _VALID_JSON = (
-        '{"claims_request_registered": true, "claims_queued": true,'
+        '{"claims_request_acknowledged": true, "claims_queued": true,'
         ' "claims_staff_assigned": false, "claims_staff_notified": false,'
         ' "claims_future_followup": true, "claims_contact_delivered": false,'
         ' "confidence": 0.8}'

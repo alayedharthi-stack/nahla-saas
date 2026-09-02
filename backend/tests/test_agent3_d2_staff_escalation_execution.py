@@ -120,7 +120,7 @@ def _decision(**args: Any) -> Decision:
 async def _truthful_queue_claims(text: str, **_kwargs: Any) -> StaffEscalationCandidateClaims:
     del text
     return StaffEscalationCandidateClaims(
-        claims_request_registered=True,
+        claims_request_acknowledged=True,
         claims_queued=True,
         valid_parse=True,
         provenance="test_injected",
@@ -571,10 +571,12 @@ class TestComposeFacts:
                 "type": "handoff",
                 "escalation_requested": True,
                 "escalation_status": "queued",
+                "handoff_session_id": 85,
                 "compose_facts_overlay": format_staff_escalation_facts_overlay(
                     {
                         "escalation_requested": True,
                         "escalation_status": "queued",
+                        "handoff_session_id": 85,
                         "handoff_session_created": True,
                         "notification_attempted": False,
                         "notification_accepted": False,

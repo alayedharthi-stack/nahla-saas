@@ -22,7 +22,7 @@ from modules.ai.brain.types import ActionResult, BrainContext, Decision
 
 logger = logging.getLogger("nahla.brain.staff_escalation_semantic_claims")
 
-CLAIM_REQUEST_REGISTERED = "request_registered"
+CLAIM_REQUEST_ACKNOWLEDGED = "request_acknowledged"
 CLAIM_QUEUED = "queued"
 CLAIM_STAFF_ASSIGNED = "staff_assigned"
 CLAIM_STAFF_NOTIFIED = "staff_notified"
@@ -30,7 +30,7 @@ CLAIM_FUTURE_FOLLOWUP = "future_followup"
 CLAIM_CONTACT_DELIVERED = "contact_delivered"
 
 _CLAIM_KEYS = (
-    CLAIM_REQUEST_REGISTERED,
+    CLAIM_REQUEST_ACKNOWLEDGED,
     CLAIM_QUEUED,
     CLAIM_STAFF_ASSIGNED,
     CLAIM_STAFF_NOTIFIED,
@@ -39,7 +39,7 @@ _CLAIM_KEYS = (
 )
 
 _CLAIM_ATTR = {
-    CLAIM_REQUEST_REGISTERED: "claims_request_registered",
+    CLAIM_REQUEST_ACKNOWLEDGED: "claims_request_acknowledged",
     CLAIM_QUEUED: "claims_queued",
     CLAIM_STAFF_ASSIGNED: "claims_staff_assigned",
     CLAIM_STAFF_NOTIFIED: "claims_staff_notified",
@@ -48,7 +48,7 @@ _CLAIM_ATTR = {
 }
 
 _CAP_ATTR = {
-    CLAIM_REQUEST_REGISTERED: "request_registered",
+    CLAIM_REQUEST_ACKNOWLEDGED: "request_acknowledged",
     CLAIM_QUEUED: "queued",
     CLAIM_STAFF_ASSIGNED: "staff_assigned",
     CLAIM_STAFF_NOTIFIED: "staff_notified",
@@ -65,7 +65,7 @@ RECOMPOSE_MAX_ATTEMPTS = 1
 
 @dataclass(frozen=True)
 class StaffEscalationTruthCapabilities:
-    request_registered: bool = False
+    request_acknowledged: bool = False
     queued: bool = False
     staff_assigned: bool = False
     staff_notified: bool = False
@@ -83,7 +83,7 @@ class StaffEscalationTruthCapabilities:
 
 @dataclass(frozen=True)
 class StaffEscalationCandidateClaims:
-    claims_request_registered: bool = False
+    claims_request_acknowledged: bool = False
     claims_queued: bool = False
     claims_staff_assigned: bool = False
     claims_staff_notified: bool = False
@@ -114,13 +114,10 @@ def capabilities_from_execution_data(data: Optional[Dict[str, Any]]) -> StaffEsc
     """Derive independent execution capabilities. Action names have zero authority."""
     md = data if isinstance(data, dict) else {}
     session_id = str(md.get("handoff_session_id") or "").strip()
-    status = str(md.get("escalation_status") or "").strip().lower()
-    queued = bool(session_id) or status in {"queued", "notified", "assigned"}
-    requested = bool(md.get("escalation_requested")) or queued or bool(session_id)
+    queued = bool(session_id)
     notified = (
         md.get("notification_accepted") is True
         or md.get("notification_sent") is True
-        or str(md.get("notification_status") or "").strip().lower() == "accepted"
     )
     assigned = md.get("staff_assigned") is True
     followup = md.get("future_followup_committed") is True
@@ -129,11 +126,9 @@ def capabilities_from_execution_data(data: Optional[Dict[str, Any]]) -> StaffEsc
         md.get("contact_delivered") is True
         or md.get("verified_contact_delivered") is True
     )
-    if notified:
-        requested = True
-        queued = True
+    acknowledged = bool(md.get("escalation_requested")) or queued or notified
     return StaffEscalationTruthCapabilities(
-        request_registered=bool(requested),
+        request_acknowledged=bool(acknowledged),
         queued=bool(queued),
         staff_assigned=bool(assigned),
         staff_notified=bool(notified),
