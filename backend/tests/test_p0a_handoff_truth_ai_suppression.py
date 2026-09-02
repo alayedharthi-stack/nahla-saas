@@ -88,6 +88,8 @@ class TestHandoffTruthPredicate:
             )
         assert result.active is True
         assert result.source == "handoff_session_active"
+        assert result.queue_truth is True
+        assert result.notification_truth is False
 
     def test_truth_when_conversation_flags_backed(self) -> None:
         db = MagicMock()
@@ -114,6 +116,8 @@ class TestHandoffTruthPredicate:
             )
         assert result.active is True
         assert "conversation" in result.source
+        assert result.queue_truth is False
+        assert result.notification_truth is False
 
     def test_truth_from_action_handoff_path(self) -> None:
         db = MagicMock()
@@ -130,7 +134,7 @@ class TestHandoffTruthPredicate:
                 customer_phone="966551459303",
                 chosen_path="ACTION_HANDOFF",
             )
-        assert result.active is True
+        assert result.active is False
 
 
 class TestWireLayerHandoffScrub:
@@ -159,7 +163,7 @@ class TestWireLayerHandoffScrub:
         assert scrubbed is True
         assert "سأحوّل" not in out["text"]["body"]
 
-    def test_allows_promise_with_truth(self) -> None:
+    def test_allows_promise_with_notification_truth(self) -> None:
         from core.outbound_sanitizer import sanitize_outbound_payload
 
         text = "سأحوّل المحادثة لفريق المتجر الآن."
@@ -172,7 +176,14 @@ class TestWireLayerHandoffScrub:
         db = MagicMock()
         with patch(
             "core.handoff_truth.resolve_handoff_truth_active",
-            return_value=SimpleNamespace(active=True, source="handoff_session_active", verify_failed=False),
+            return_value=SimpleNamespace(
+                active=True,
+                source="handoff_session_active",
+                verify_failed=False,
+                queue_truth=True,
+                notification_truth=True,
+                contact_delivery_truth=False,
+            ),
         ):
             out, scrubbed = sanitize_outbound_payload(
                 payload,
@@ -182,6 +193,37 @@ class TestWireLayerHandoffScrub:
             )
         assert scrubbed is False
         assert out["text"]["body"] == text
+
+    def test_scrubs_promise_when_only_queue_truth(self) -> None:
+        from core.outbound_sanitizer import sanitize_outbound_payload
+
+        text = "سأحوّل المحادثة لفريق المتجر الآن."
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": "966551459303",
+            "type": "text",
+            "text": {"body": text},
+        }
+        db = MagicMock()
+        with patch(
+            "core.handoff_truth.resolve_handoff_truth_active",
+            return_value=SimpleNamespace(
+                active=True,
+                source="handoff_session_active",
+                verify_failed=False,
+                queue_truth=True,
+                notification_truth=False,
+                contact_delivery_truth=False,
+            ),
+        ):
+            out, scrubbed = sanitize_outbound_payload(
+                payload,
+                tenant_id=33,
+                recipient="966551459303",
+                db=db,
+            )
+        assert scrubbed is True
+        assert "سأحوّل" not in out["text"]["body"]
 
     def test_scrubs_interactive_payload_body(self) -> None:
         from core.outbound_sanitizer import sanitize_outbound_payload

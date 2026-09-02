@@ -113,6 +113,39 @@ def _note_live_text_mutation(
     tracker["final_transform_reasons"] = reasons
 
 
+def _enrich_staff_escalation_metadata(
+    *,
+    db: Any,
+    tenant_id: int,
+    customer_phone: str,
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Attach persisted HandoffSession ids. Do not invent notification/assignment."""
+    enriched = dict(metadata or {})
+    if str(enriched.get("handoff_session_id") or "").strip():
+        return enriched
+    phone = str(customer_phone or "").strip()
+    if db is None or not tenant_id or not phone:
+        return enriched
+    try:
+        from handoff.manager import get_active_handoff  # noqa: PLC0415
+
+        session = get_active_handoff(db, int(tenant_id), phone)
+    except Exception:  # noqa: BLE001
+        return enriched
+    session_id = getattr(session, "id", None) if session is not None else None
+    try:
+        session_id_int = int(session_id)
+    except (TypeError, ValueError):
+        return enriched
+    if session_id_int <= 0:
+        return enriched
+    enriched["handoff_session_id"] = session_id_int
+    if getattr(session, "notification_sent", False) is True:
+        enriched["notification_sent"] = True
+    return enriched
+
+
 def _apply_staff_truth_guard_only(
     *,
     db,
@@ -141,6 +174,12 @@ def _apply_staff_truth_guard_only(
         from core.order_flow import _load_brain_state
 
         metadata = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else {}
+        metadata = _enrich_staff_escalation_metadata(
+            db=db,
+            tenant_id=tenant_id,
+            customer_phone=to,
+            metadata=metadata,
+        )
         chosen_path = str(metadata.get("deterministic_path") or br_action or "")
         _, brain_state = _load_brain_state(db, tenant_id=tenant_id, phone=to)
         result = apply_staff_escalation_truth_guard(
@@ -154,7 +193,8 @@ def _apply_staff_truth_guard_only(
                 "status": str(getattr(convo, "status", "") or ""),
             },
             chosen_path=chosen_path,
-            brain_handoff=True,
+            # Decision-level brain_handoff has zero authority as execution proof.
+            brain_handoff=False,
             tenant_id=tenant_id,
             conversation_id=conversation_id or getattr(convo, "id", None),
             state=brain_state,
@@ -537,6 +577,12 @@ def run_post_compose_truth_guards(
         from core.order_flow import _load_brain_state
 
         setg_meta = dict(inbound_metadata or {}) if isinstance(inbound_metadata, dict) else {}
+        setg_meta = _enrich_staff_escalation_metadata(
+            db=db,
+            tenant_id=tenant_id,
+            customer_phone=to,
+            metadata=setg_meta,
+        )
         setg_path = str(setg_meta.get("deterministic_path") or br_action or "")
         _, setg_bs = _load_brain_state(db, tenant_id=tenant_id, phone=to)
         before_guard = reply
@@ -551,7 +597,9 @@ def run_post_compose_truth_guards(
                 "status": str(getattr(convo, "status", "") or ""),
             },
             chosen_path=setg_path,
-            brain_handoff=bool(brain_handoff),
+            # Routing may still select this guard via ``brain_handoff``.
+            # Execution proof comes only from structured metadata/session.
+            brain_handoff=False,
             tenant_id=tenant_id,
             conversation_id=conv_id,
             state=setg_bs,
