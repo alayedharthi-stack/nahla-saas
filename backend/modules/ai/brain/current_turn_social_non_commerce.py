@@ -33,9 +33,6 @@ from .types import (
     INTENT_PERSONA_INTERACTION,
     INTENT_PRODUCT_VISUAL_REQUEST,
     INTENT_SOCIAL,
-    INTENT_LATEST_ORDER_SUMMARY,
-    INTENT_ORDER_HISTORY_COUNT,
-    INTENT_ORDER_REFERENCE_LIST,
     INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
     INTENT_COMPLAINT_REFUND,
@@ -73,18 +70,6 @@ _OPERATIONAL_NON_CATALOG_INTENTS = frozenset({
     INTENT_WHO_ARE_YOU,
     INTENT_PERSONA_INTERACTION,
 })
-
-# Existing-order support. Layer-2 may stamp these at 0.72 with
-# LAYER2_SEMANTIC_OVERRIDE; that provenance is authoritative even though
-# the numeric confidence is below the generic operational 0.80 gate.
-_ORDER_SUPPORT_INTENTS = frozenset({
-    INTENT_TRACK_ORDER,
-    INTENT_ORDER_HISTORY_COUNT,
-    INTENT_LATEST_ORDER_SUMMARY,
-    INTENT_ORDER_REFERENCE_LIST,
-})
-_LAYER2_AUTHORITATIVE_PROVENANCE = "LAYER2_SEMANTIC_OVERRIDE"
-_LAYER2_AUTHORITATIVE_WINNER = "layer2"
 
 _GREETING_ONLY_RE = re.compile(
     r"^(?:"
@@ -274,33 +259,12 @@ def _is_catalog_order_event(inbound_metadata: Optional[dict[str, Any]]) -> bool:
     return str(meta.get("source_type") or "").strip().lower() == "catalog_order"
 
 
-def has_authoritative_order_support_intent(intent: Optional[Intent] = None) -> bool:
-    """True when structured classifier provenance owns an existing-order turn.
-
-    Does not lower the global 0.80 operational gate. Layer-2 semantic override
-    is a closed provenance stamp (``LAYER2_SEMANTIC_OVERRIDE`` + winner
-    ``layer2``) and is the live 0.72 ``track_order`` owner. A bare low
-    confidence label without that stamp is not Order Support.
-    """
-    name = _intent_name(intent)
-    if name not in _ORDER_SUPPORT_INTENTS:
-        return False
-    if _intent_confidence(intent) >= 0.80:
-        return True
-    slots = dict(getattr(intent, "slots", None) or {})
-    provenance = str(slots.get("classification_provenance") or "").strip()
-    winner = str(slots.get("precedence_winner") or "").strip()
-    return (
-        provenance == _LAYER2_AUTHORITATIVE_PROVENANCE
-        and winner == _LAYER2_AUTHORITATIVE_WINNER
-    )
-
-
 def _has_explicit_catalog_or_product_intent(
     message: str,
     *,
     intent: Optional[Intent] = None,
     inbound_metadata: Optional[dict[str, Any]] = None,
+    state: Any = None,
 ) -> bool:
     raw = (message or "").strip()
     if not raw:
@@ -310,8 +274,15 @@ def _has_explicit_catalog_or_product_intent(
 
     name = _intent_name(intent)
     conf = _intent_confidence(intent)
-    if has_authoritative_order_support_intent(intent):
-        return True
+    try:
+        from modules.ai.brain.commerce.order_support_ownership import (  # noqa: PLC0415
+            has_authoritative_order_support_ownership,
+        )
+
+        if has_authoritative_order_support_ownership(intent, state=state):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must not block social-NC
+        pass
     if name in _CLEAR_COMMERCE_INTENTS and conf >= 0.80:
         return True
     if name in _OPERATIONAL_NON_CATALOG_INTENTS and conf >= 0.80:
@@ -522,6 +493,7 @@ def resolve_current_turn_social_non_commerce(
         raw,
         intent=intent,
         inbound_metadata=inbound_metadata,
+        state=state,
     ):
         return CurrentTurnSocialNonCommerce(False, reason="explicit_commerce_or_operational_intent")
 
@@ -650,7 +622,6 @@ def is_current_turn_social_non_commerce(
 
 __all__ = [
     "CurrentTurnSocialNonCommerce",
-    "has_authoritative_order_support_intent",
     "is_colloquial_social_inventory_message",
     "is_current_turn_social_non_commerce",
     "resolve_current_turn_social_non_commerce",

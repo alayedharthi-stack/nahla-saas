@@ -24,6 +24,10 @@ from modules.ai.brain.commerce.ledger_follow_up import (  # noqa: E402
     is_ledger_context_active,
     is_order_reference_follow_up,
 )
+from modules.ai.brain.commerce.order_support_ownership import (  # noqa: E402
+    has_authoritative_order_support_ownership,
+    should_stamp_ledger_context,
+)
 from modules.ai.brain.current_turn_social_non_commerce import (  # noqa: E402
     resolve_current_turn_social_non_commerce,
 )
@@ -270,11 +274,38 @@ class TestPrimarySocialNcBoundary:
         assert "staff_contact" in (decision.reason or "")
 
 
+class TestCanonicalOwnershipContract:
+    def test_layer2_provenance_is_authoritative(self) -> None:
+        intent = _layer2_track_order("placeholder")
+        assert has_authoritative_order_support_ownership(intent) is True
+        assert should_stamp_ledger_context(intent) is True
+
+    def test_high_confidence_order_intent_is_authoritative(self) -> None:
+        intent = Intent(name=INTENT_ORDER_HISTORY_COUNT, confidence=0.94)
+        assert has_authoritative_order_support_ownership(intent) is True
+
+    def test_noisy_low_confidence_does_not_own_or_stamp(self) -> None:
+        intent = _noisy_track_order("وش رقم المسؤول؟")
+        state = MerchantConversationState()
+        state.last_intent = INTENT_ORDER_HISTORY_COUNT
+        state.last_action = ACTION_CUSTOMER_LEDGER_REPLY
+        state.recent_topic = "customer_ledger"
+        state.recent_topic_turn = 0
+        state.turn = 1
+        assert has_authoritative_order_support_ownership(intent, state=state) is False
+        assert should_stamp_ledger_context(intent, state=state) is False
+        decision = _decide("وش رقم المسؤول؟", intent=intent, state=state)
+        assert decision.action != ACTION_CUSTOMER_LEDGER_REPLY
+        assert _is_order_support(decision) is False
+        assert is_ledger_context_active(state) is True
+
+
 class TestProductInformationBoundary:
     @pytest.mark.parametrize("message", COUNT_FAMILY)
     def test_order_history_count_not_product_usage(self, message: str) -> None:
-        assert detect_product_information_topic_shift(message) is False
-        decision = _decide(message, intent=_layer2_track_order(message))
+        intent = _layer2_track_order(message)
+        assert detect_product_information_topic_shift(message, intent=intent) is False
+        decision = _decide(message, intent=intent)
         assert (decision.args or {}).get("topic") != TOPIC_PRODUCT_USAGE_INFORMATION
         assert "product_information_topic_shift" not in (decision.reason or "")
         assert _is_order_support(decision)
@@ -357,7 +388,7 @@ class TestStaffAndBankBoundaries:
         state.recent_topic = "customer_ledger"
         state.recent_topic_turn = 0
         state.turn = 1
-        assert is_order_reference_follow_up("أرقام الحساب البنكي", context_active=True) is False
+        assert is_order_reference_follow_up("أرقام الحساب البنكي") is False
         decision = _decide("أرقام الحساب البنكي", state=state)
         assert decision.action != ACTION_CUSTOMER_LEDGER_REPLY
         assert (decision.args or {}).get("ledger_topic") != INTENT_ORDER_REFERENCE_LIST
@@ -367,7 +398,10 @@ class TestLiveFixtureReplay:
     def test_before_repair_shapes_no_longer_own(self) -> None:
         count_msg = COUNT_FAMILY[0]
         numbers_msg = NUMBER_FOLLOW_FAMILY[0]
-        assert detect_product_information_topic_shift(count_msg) is False
+        assert detect_product_information_topic_shift(
+            count_msg,
+            intent=_layer2_track_order(count_msg),
+        ) is False
         social = resolve_current_turn_social_non_commerce(
             numbers_msg,
             intent=_layer2_track_order(numbers_msg),

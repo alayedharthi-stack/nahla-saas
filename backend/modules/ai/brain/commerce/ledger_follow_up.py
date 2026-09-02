@@ -60,16 +60,6 @@ _ORDER_BOUND_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
-# When ledger/order-support context is already active, a pronoun-bound
-# number ask («أرقامها» / «أرقامهم») is an order-reference follow-up
-# regardless of a leading verb. The pronoun suffix is the structural
-# owner — this is not a customer-phrase list. Noun-bound contact asks
-# («أرقام خدمة العملاء») do not carry the pronoun suffix and stay out.
-_CONTEXTUAL_PRONOUN_NUMBER_RE = re.compile(
-    r"ارقام(?:ها|هم)\s*[\?؟!.]*$",
-    re.UNICODE | re.IGNORECASE,
-)
-
 
 def _norm_ar(text: str) -> str:
     if not text:
@@ -126,16 +116,12 @@ def is_ledger_context_active(state: Any) -> bool:
     return is_recent_topic_active(state, current_turn=turn)
 
 
-def is_order_reference_follow_up(message: str, *, context_active: bool = False) -> bool:
+def is_order_reference_follow_up(message: str) -> bool:
     """True for pronoun or order-bound reference follow-ups to a prior ledger turn."""
     text = _norm_ar(str(message or "").strip())
     if not text:
         return False
-    if _PRONOUN_HEAD_RE.match(text) or _ORDER_BOUND_RE.match(text):
-        return True
-    if context_active and _CONTEXTUAL_PRONOUN_NUMBER_RE.search(text):
-        return True
-    return False
+    return bool(_PRONOUN_HEAD_RE.match(text) or _ORDER_BOUND_RE.match(text))
 
 
 def try_ledger_follow_up_decision(ctx: Any) -> Optional[Decision]:
@@ -148,12 +134,20 @@ def try_ledger_follow_up_decision(ctx: Any) -> Optional[Decision]:
     Returns ``ACTION_CUSTOMER_LEDGER_REPLY`` with
     ``ledger_topic=INTENT_ORDER_REFERENCE_LIST`` when matched; otherwise ``None``.
     """
+    from .order_support_ownership import (  # noqa: PLC0415
+        has_authoritative_order_support_ownership,
+        should_stamp_ledger_context,
+    )
+
     state = getattr(ctx, "state", None)
     message = str(getattr(ctx, "message", "") or "")
     intent = getattr(ctx, "intent", None)
     intent_name = str(getattr(intent, "name", "") or "")
 
-    if intent_name == INTENT_ORDER_REFERENCE_LIST:
+    if (
+        intent_name == INTENT_ORDER_REFERENCE_LIST
+        and has_authoritative_order_support_ownership(intent, state=state)
+    ):
         stamp_ledger_context(state)
         return Decision(
             action=ACTION_CUSTOMER_LEDGER_REPLY,
@@ -164,12 +158,40 @@ def try_ledger_follow_up_decision(ctx: Any) -> Optional[Decision]:
 
     if not is_ledger_context_active(state):
         return None
-    if not is_order_reference_follow_up(message, context_active=True):
+    if is_order_reference_follow_up(message):
+        return Decision(
+            action=ACTION_CUSTOMER_LEDGER_REPLY,
+            args={"ledger_topic": INTENT_ORDER_REFERENCE_LIST},
+            reason="ledger context — order reference list follow-up",
+            confidence=0.94,
+        )
+
+    # Structural continuation: Order Support still owns the turn after a
+    # proven ledger/order-support turn. No customer-phrase detector.
+    if not has_authoritative_order_support_ownership(intent, state=state):
         return None
+    if intent_name in {INTENT_ORDER_HISTORY_COUNT, INTENT_LATEST_ORDER_SUMMARY}:
+        return None
+    try:
+        from .order_tracking_intent_guard import (  # noqa: PLC0415
+            is_explicit_order_tracking_request,
+        )
+
+        if is_explicit_order_tracking_request(
+            message,
+            state=state,
+            history=getattr(ctx, "history", None),
+            commerce_bundle=getattr(ctx, "commerce_bundle", None),
+        ):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — tracking probe must not block ledger continuation
+        return None
+    if should_stamp_ledger_context(intent, state=state):
+        stamp_ledger_context(state)
     return Decision(
         action=ACTION_CUSTOMER_LEDGER_REPLY,
         args={"ledger_topic": INTENT_ORDER_REFERENCE_LIST},
-        reason="ledger context — order reference list follow-up",
+        reason="ledger context — authoritative order-support continuation",
         confidence=0.94,
     )
 
