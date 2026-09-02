@@ -2295,14 +2295,6 @@ class TestD1CPaymentIdentityLifecycleAndPersist:
             state=state,
         ) is True
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "ARCHITECTURE_BLOCKER: conversation_recovery.py (#916 owner) must "
-            "pass state=state into should_block_bare_start_product_prompt so "
-            "current_product_focus / cart_items outside order_prep are visible"
-        ),
-    )
     def test_silent_recovery_focus_only_not_duplicated_in_order_prep(self) -> None:
         canned = build_bare_start_order_guard_reply(_LIVE_BUY)
         state = {
@@ -2332,14 +2324,6 @@ class TestD1CPaymentIdentityLifecycleAndPersist:
         assert recovery.reply != canned
         assert "كتالوج واتساب" not in (recovery.reply or "")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "ARCHITECTURE_BLOCKER: conversation_recovery.py (#916 owner) must "
-            "pass state=state into should_block_bare_start_product_prompt so "
-            "current_product_focus / cart_items outside order_prep are visible"
-        ),
-    )
     def test_silent_recovery_cart_only_not_duplicated_in_order_prep(self) -> None:
         canned = build_bare_start_order_guard_reply(_LIVE_BUY)
         state = MerchantConversationState(
