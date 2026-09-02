@@ -27,7 +27,7 @@ State → action → template mapping (authoritative reference):
   ACTION_WEB_SEARCH       → templates.web_search_summary   [discovery]
   ACTION_CLARIFY          → templates.clarify              [any]
   ACTION_NARROW           → templates.narrow_choices       [exploring]
-  ACTION_HANDOFF          → templates.handoff              → support
+  ACTION_HANDOFF          → _llm_compose + execution facts → support
   ACTION_LLM_REPLY        → _llm_compose (BrainReplyState) [fallback]
 
 Every template returns ONE message; Composer never chains templates.
@@ -1687,23 +1687,25 @@ class DefaultComposer:
             return text
 
         # ── Handoff ────────────────────────────────────────────────────────
-        # ``after_hours`` is propagated by ``PolicyGate._working_hours``
-        # when the customer requests a human outside the merchant's
-        # configured working hours. We keep the action as HANDOFF (so
-        # the webhook still registers the handoff session + needs_human
-        # flags) but use a different copy variant that tells the
-        # customer the team will reply during working hours — no
-        # "I'll alert the team now" implication.
+        # Platform owns structured execution facts. The model owns wording.
+        # Never emit deterministic notify/assignment promises from templates.
         if action == ACTION_HANDOFF:
-            args = decision.args or {}
-            after_hours = bool(args.get("after_hours"))
-            if after_hours:
-                return T.handoff_after_hours()
-            variant = self._variant_idx(ctx)
-            text = T.handoff(variant=variant)
-            if self._is_duplicate(text, ctx):
-                text = T.handoff(variant=(variant + 1) % 3)
-            return text
+            data = dict(getattr(result, "data", None) or {})
+            if (decision.args or {}).get("after_hours"):
+                data["after_hours"] = True
+                result.data["after_hours"] = True
+            overlay = str(data.get("compose_facts_overlay") or "").strip()
+            if not overlay or (
+                data.get("after_hours") is True and "after_hours=" not in overlay
+            ):
+                from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: PLC0415
+                    format_staff_escalation_facts_overlay,
+                )
+
+                result.data["compose_facts_overlay"] = format_staff_escalation_facts_overlay(
+                    {**data, **dict(result.data or {})}
+                )
+            return await self._llm_compose(ctx, result, decision=decision)
 
         # ── Customer-request coupon (canary) — structured facts, LLM wording ─
         if action == ACTION_CUSTOMER_COUPON_REQUEST:
