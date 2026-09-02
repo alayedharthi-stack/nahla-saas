@@ -187,7 +187,30 @@ def apply_staff_escalation_truth_guard(
                 evidence=evidence,
             )
 
-        if evidence.evidence_ok:
+        notify_promise = bool(contains_handoff_promise(original))
+        if notify_promise and evidence.notification_evidence_ok:
+            log_staff_escalation_truth_guard(
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                action="allowed",
+                reason="notification_evidence",
+                evidence_source=evidence.evidence_source,
+                handoff_session_present=evidence.handoff_session_present,
+                notification_present=True,
+            )
+            return StaffEscalationTruthGuardResult(
+                reply=original,
+                action="allowed",
+                evidence=evidence,
+            )
+        if (
+            (not notify_promise)
+            and (
+                evidence.queue_evidence_ok
+                or evidence.notification_evidence_ok
+                or evidence.contact_delivery_evidence_ok
+            )
+        ):
             log_staff_escalation_truth_guard(
                 tenant_id=tenant_id,
                 conversation_id=conversation_id,

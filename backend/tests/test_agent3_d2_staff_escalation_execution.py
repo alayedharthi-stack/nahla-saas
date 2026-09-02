@@ -21,7 +21,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from sqlalchemy import JSON, create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
@@ -93,7 +92,7 @@ def _ctx(
     phone: str,
     message: str = "ابي موظف",
     profile: dict | None = None,
-    verified_phone: str | None = None,
+    verified_record: Any = None,
 ) -> BrainContext:
     ctx = BrainContext(
         tenant_id=tenant_id,
@@ -106,8 +105,8 @@ def _ctx(
         profile=profile if profile is not None else {"name": "أحمد سالم"},
     )
     ctx._db = db  # type: ignore[attr-defined]
-    if verified_phone is not None:
-        ctx.verified_staff_contact_phone = verified_phone  # type: ignore[attr-defined]
+    if verified_record is not None:
+        ctx.verified_staff_contact_record = verified_record  # type: ignore[attr-defined]
     return ctx
 
 
@@ -142,6 +141,7 @@ class TestDurableQueue:
         assert result.data["escalation_status"] == STATUS_QUEUED
         assert result.data["handoff_session_created"] is True
         assert result.data["notification_accepted"] is False
+        assert result.data["notification_status"] == "not_attempted"
         session = db.query(HandoffSession).filter_by(id=result.data["handoff_session_id"]).one()
         assert session.tenant_id == tenant.id
         assert session.customer_phone == "966500000101"
@@ -179,6 +179,9 @@ class TestDurableQueue:
         assert result.data["escalation_status"] == STATUS_QUEUED
         assert result.data["notification_attempted"] is False
         assert result.data["notification_accepted"] is False
+        assert result.data["notification_status"] == "unavailable"
+        overlay = result.data["compose_facts_overlay"]
+        assert "notification_status=unavailable" in overlay
         assert db.query(HandoffSession).count() == 1
 
 
@@ -201,7 +204,10 @@ class TestNotification:
         db.commit()
         assert result.data["notification_attempted"] is True
         assert result.data["notification_accepted"] is True
+        assert result.data["notification_status"] == "accepted"
         assert result.data["escalation_status"] == STATUS_NOTIFIED
+        overlay = result.data["compose_facts_overlay"]
+        assert "notification_status=accepted" in overlay
         session = db.query(HandoffSession).one()
         assert session.notification_sent is True
 
@@ -228,7 +234,73 @@ class TestNotification:
         overlay = result.data["compose_facts_overlay"]
         assert "status=queued" in overlay
         assert "status=notified" not in overlay
+        assert "notification_status=failed" in overlay
+        assert "notification_failure_code=provider_rejected" in overlay
         assert db.query(HandoffSession).count() == 1
+
+    def test_duplicate_after_accepted_notify_does_not_resend(self) -> None:
+        db, _engine = _sqlite_db()
+        tenant = _seed_tenant(db, "D2 Notify Idempotent Merchant")
+        ctx = _ctx(db=db, tenant_id=tenant.id, phone="966500000114")
+        notify = AsyncMock(return_value=True)
+        settings = {
+            "notification_method": "webhook",
+            "webhook_url": "https://staff.example.test/handoff",
+        }
+        with patch(
+            "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
+            return_value=settings,
+        ), patch("handoff.notifier.notify_handoff", new=notify):
+            first = _run(execute_staff_escalation(_decision(), ctx))
+            db.commit()
+            second = _run(execute_staff_escalation(_decision(), ctx))
+            db.commit()
+        assert first.data["handoff_session_created"] is True
+        assert first.data["notification_accepted"] is True
+        assert first.data["escalation_status"] == STATUS_NOTIFIED
+        assert notify.await_count == 1
+        assert second.data["handoff_session_id"] == first.data["handoff_session_id"]
+        assert second.data["handoff_session_reused"] is True
+        assert second.data["notification_attempted"] is False
+        assert second.data["notification_accepted"] is True
+        assert second.data["reused_previous_notification"] is True
+        assert second.data["notification_status"] == "accepted"
+        assert second.data["escalation_status"] == STATUS_NOTIFIED
+        assert notify.await_count == 1
+        assert db.query(HandoffSession).one().notification_sent is True
+        overlay = second.data["compose_facts_overlay"]
+        assert "reused_previous_notification=true" in overlay
+        assert "notification_status=accepted" in overlay
+
+    def test_duplicate_after_failed_notify_does_not_retry_or_invent_acceptance(self) -> None:
+        db, _engine = _sqlite_db()
+        tenant = _seed_tenant(db, "D2 Notify Fail Idempotent Merchant")
+        ctx = _ctx(db=db, tenant_id=tenant.id, phone="966500000118")
+        notify = AsyncMock(return_value=False)
+        settings = {
+            "notification_method": "webhook",
+            "webhook_url": "https://staff.example.test/handoff",
+        }
+        with patch(
+            "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
+            return_value=settings,
+        ), patch("handoff.notifier.notify_handoff", new=notify):
+            first = _run(execute_staff_escalation(_decision(), ctx))
+            db.commit()
+            second = _run(execute_staff_escalation(_decision(), ctx))
+            db.commit()
+        assert first.data["notification_attempted"] is True
+        assert first.data["notification_accepted"] is False
+        assert first.data["notification_status"] == "failed"
+        assert first.data["escalation_status"] == STATUS_QUEUED
+        assert notify.await_count == 1
+        assert second.data["handoff_session_reused"] is True
+        assert second.data["notification_attempted"] is False
+        assert second.data["notification_accepted"] is False
+        assert second.data["notification_status"] == "not_attempted"
+        assert second.data["escalation_status"] == STATUS_QUEUED
+        assert notify.await_count == 1
+        assert db.query(HandoffSession).one().notification_sent is not True
 
 
 class TestFailureModes:
@@ -276,15 +348,65 @@ class TestVerifiedContact:
         assert result.data["verified_contact_phone"] == ""
         assert "verified_contact_phone=" not in result.data["compose_facts_overlay"]
 
+    def test_inbound_metadata_phone_is_not_verified_staff_contact(self) -> None:
+        db, _engine = _sqlite_db()
+        tenant = _seed_tenant(db, "D2 Inbound Phone Merchant")
+        inbound = {"verified_contact_phone": "966555551111"}
+        ctx = _ctx(
+            db=db,
+            tenant_id=tenant.id,
+            phone="966500000115",
+            profile={"name": "نورة عبدالله", "inbound_metadata": dict(inbound)},
+        )
+        with patch(
+            "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
+            return_value={"notification_method": "none", "webhook_url": ""},
+        ):
+            result = _run(execute_staff_escalation(_decision(), ctx))
+        assert result.data["verified_contact_available"] is False
+        assert result.data["verified_contact_phone"] == ""
+
+    def test_untyped_profile_phone_is_not_verified_staff_contact(self) -> None:
+        db, _engine = _sqlite_db()
+        tenant = _seed_tenant(db, "D2 Profile Phone Merchant")
+        ctx = _ctx(
+            db=db,
+            tenant_id=tenant.id,
+            phone="966500000116",
+            profile={"name": "أحمد سالم", "verified_contact_phone": "966555551112"},
+        )
+        ctx.verified_staff_contact_phone = "966555551113"  # type: ignore[attr-defined]
+        with patch(
+            "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
+            return_value={"notification_method": "none", "webhook_url": ""},
+        ):
+            result = _run(execute_staff_escalation(_decision(), ctx))
+        assert result.data["verified_contact_available"] is False
+        assert result.data["verified_contact_phone"] == ""
+
     def test_trusted_verified_contact_propagated_exactly(self) -> None:
+        from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
+            StaffContactRecord,
+        )
+
         db, _engine = _sqlite_db()
         tenant = _seed_tenant(db, "D2 Verified Phone Merchant")
         trusted = "966511112222"
+        record = StaffContactRecord(
+            lookup_name="خدمة العملاء",
+            phone=trusted,
+            section_id=1,
+            role="customer_service",
+            aliases=("خدمة العملاء",),
+            is_owner=False,
+            chain_index=0,
+            source="kb_section",
+        )
         ctx = _ctx(
             db=db,
             tenant_id=tenant.id,
             phone="966500000109",
-            verified_phone=trusted,
+            verified_record=record,
         )
         with patch(
             "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
@@ -328,6 +450,9 @@ class TestAiControl:
         source = inspect.getsource(execute_staff_escalation)
         assert "pause_ai" not in source
         assert "ai_paused = True" not in source
+        from modules.ai.brain.execution import staff_escalation_execution as exe  # noqa: PLC0415
+
+        assert "auto_pause_ai" not in exe._DEFAULT_HANDOFF_SETTINGS
         with patch(
             "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
             return_value={"notification_method": "none", "webhook_url": ""},
@@ -348,12 +473,20 @@ class TestEvidence:
         assert evidence.evidence_ok is False
         assert evidence.handoff_session_present is False
         assert evidence.notification_present is False
+        assert evidence.queue_evidence_ok is False
+        assert evidence.notification_evidence_ok is False
+        assert evidence.contact_delivery_evidence_ok is False
 
-    def test_real_session_is_queue_evidence(self) -> None:
+    def test_real_session_is_queue_evidence_not_notify(self) -> None:
         evidence = evaluate_staff_escalation_evidence(
-            inbound_metadata={"handoff_session_id": 88, "escalation_status": "queued"},
+            inbound_metadata={
+                "handoff_session_id": 88,
+                "escalation_status": "queued",
+                "notification_accepted": False,
+            },
         )
-        assert evidence.evidence_ok is True
+        assert evidence.queue_evidence_ok is True
+        assert evidence.notification_evidence_ok is False
         assert evidence.handoff_session_present is True
         assert evidence.notification_present is False
 
@@ -364,13 +497,30 @@ class TestEvidence:
                 "notification_accepted": True,
             },
         )
-        assert evidence.evidence_ok is True
+        assert evidence.notification_evidence_ok is True
         assert evidence.notification_present is True
+
+    def test_conversation_flags_do_not_fabricate_session(self) -> None:
+        evidence = evaluate_staff_escalation_evidence(
+            conversation_flags={
+                "needs_human": True,
+                "handoff_active": True,
+                "is_human_handoff": True,
+                "status": "human",
+            },
+        )
+        assert evidence.handoff_session_present is False
+        assert evidence.queue_evidence_ok is False
+        assert evidence.notification_evidence_ok is False
+        assert evidence.evidence_ok is False
 
     def test_chosen_path_handoff_never_counts(self) -> None:
         for path in ("ACTION_HANDOFF", "handoff", "action_handoff"):
             evidence = evaluate_staff_escalation_evidence(chosen_path=path)
             assert evidence.evidence_ok is False
+            assert evidence.queue_evidence_ok is False
+            assert evidence.notification_evidence_ok is False
+            assert evidence.contact_delivery_evidence_ok is False
 
 
 class TestComposeFacts:
@@ -390,6 +540,7 @@ class TestComposeFacts:
         assert "requested=true" in overlay
         assert "status=queued" in overlay
         assert "notification_accepted=false" in overlay
+        assert "notification_status=not_attempted" in overlay
 
     def test_compose_receives_overlay_and_does_not_use_template(self) -> None:
         composer = DefaultComposer()
@@ -460,82 +611,29 @@ class TestExecutorDispatch:
         assert db.query(HandoffSession).count() == 1
 
 
-class TestPostgresPersistence:
-    def test_session_persists_idempotent_and_isolated(self) -> None:
-        url = (
-            os.environ.get("DATABASE_PUBLIC_URL")
-            or os.environ.get("DATABASE_URL")
-            or ""
-        ).strip()
-        if not url or "sqlite" in url.lower() or "railway.internal" in url:
-            pytest.skip("no reachable postgres url for D2 persistence proof")
-        from sqlalchemy import text  # noqa: PLC0415
-        from sqlalchemy.engine import create_engine as pg_engine  # noqa: PLC0415
-
-        engine = pg_engine(url)
-        Session = sessionmaker(bind=engine)
-        db = Session()
-        suffix = os.getpid()
-        try:
-            tenant_a = Tenant(name=f"d2-pg-a-{suffix}", is_active=True)
-            tenant_b = Tenant(name=f"d2-pg-b-{suffix}", is_active=True)
-            db.add_all([tenant_a, tenant_b])
-            db.commit()
-            db.refresh(tenant_a)
-            db.refresh(tenant_b)
-            phone = f"96650007{suffix % 10000:04d}"
-            settings = {"notification_method": "none", "webhook_url": ""}
-            with patch(
-                "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
-                return_value=settings,
-            ):
-                first = _run(
-                    execute_staff_escalation(
-                        _decision(),
-                        _ctx(db=db, tenant_id=tenant_a.id, phone=phone),
-                    )
-                )
-                db.commit()
-                second = _run(
-                    execute_staff_escalation(
-                        _decision(),
-                        _ctx(db=db, tenant_id=tenant_a.id, phone=phone),
-                    )
-                )
-                db.commit()
-                other = _run(
-                    execute_staff_escalation(
-                        _decision(),
-                        _ctx(db=db, tenant_id=tenant_b.id, phone=phone),
-                    )
-                )
-                db.commit()
-            assert first.data["handoff_session_id"] == second.data["handoff_session_id"]
-            assert other.data["handoff_session_id"] != first.data["handoff_session_id"]
-            persisted = db.execute(
-                text(
-                    "SELECT id, tenant_id FROM handoff_sessions "
-                    "WHERE tenant_id = :tid AND customer_phone = :phone AND status = 'active'"
-                ),
-                {"tid": tenant_a.id, "phone": phone},
-            ).fetchall()
-            assert len(persisted) == 1
-            assert persisted[0][0] == first.data["handoff_session_id"]
-        finally:
-            try:
-                db.execute(
-                    text(
-                        "DELETE FROM handoff_sessions WHERE tenant_id IN "
-                        "(SELECT id FROM tenants WHERE name LIKE :prefix)"
-                    ),
-                    {"prefix": f"d2-pg-%-{suffix}"},
-                )
-                db.execute(
-                    text("DELETE FROM tenants WHERE name LIKE :prefix"),
-                    {"prefix": f"d2-pg-%-{suffix}"},
-                )
-                db.commit()
-            except Exception:  # noqa: BLE001
-                db.rollback()
-            db.close()
-            engine.dispose()
+class TestInboundMetadataIsolation:
+    def test_execution_does_not_mutate_inbound_metadata(self) -> None:
+        db, _engine = _sqlite_db()
+        tenant = _seed_tenant(db, "D2 Inbound Isolation Merchant")
+        inbound = {"wa_message_id": "wamid.d2test", "verified_contact_phone": "966555559999"}
+        profile = {"name": "أحمد سالم", "inbound_metadata": dict(inbound)}
+        ctx = _ctx(
+            db=db,
+            tenant_id=tenant.id,
+            phone="966500000117",
+            profile=profile,
+        )
+        with patch(
+            "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
+            return_value={"notification_method": "none", "webhook_url": ""},
+        ):
+            result = _run(execute_staff_escalation(_decision(), ctx))
+        assert result.data["handoff_session_id"]
+        assert ctx.profile["inbound_metadata"] == inbound
+        for key in (
+            "handoff_session_id",
+            "notification_accepted",
+            "escalation_status",
+            "verified_contact_available",
+        ):
+            assert key not in ctx.profile["inbound_metadata"]

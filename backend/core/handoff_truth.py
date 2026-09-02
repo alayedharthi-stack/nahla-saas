@@ -4,17 +4,18 @@ core/handoff_truth.py
 Unified handoff truth contract for wire-layer scrubbing and AI
 suppression fail-closed policy.
 
-Truth predicate (``resolve_handoff_truth_active``) aligns with
-``staff_escalation_evidence.evaluate_staff_escalation_evidence``:
+Truth predicate (``resolve_handoff_truth_active``):
 
-  * Active ``HandoffSession`` for tenant + phone.
-  * Conversation flags: ``handoff_active`` AND ``needs_human`` AND
+  * Active ``HandoffSession`` for tenant + phone (queue durability).
+  * Conversation lifecycle flags: ``handoff_active`` AND ``needs_human`` AND
     (``is_human_handoff`` OR ``status == 'human'``) — soft
-    ``needs_human`` alone is NOT sufficient.
+    ``needs_human`` alone is NOT sufficient. Flags are lifecycle/UI
+    state for wire scrub; they do not impersonate a persisted session.
   * ``conversation_handoff_active`` (human_active ownership).
   * Structured execution metadata (session id / notification accepted /
-    verified delivered contact). Action names and chosen_path alone
-    are not operational evidence.
+    verified delivered contact) via ``evaluate_staff_escalation_evidence``.
+    Action names and chosen_path alone are not operational evidence.
+    Conversation flags passed into that helper have zero session authority.
 
 Fail-closed scope is limited to the "may AI reply?" decision when gate
 verification fails while possible human-ownership signals are present.
@@ -46,6 +47,17 @@ class HandoffTruthResult:
     active: bool
     source: str = ""
     verify_failed: bool = False
+
+
+def conversation_flags_lifecycle_active(flags: dict[str, Any] | None) -> bool:
+    """Lifecycle/UI handoff state. Does not prove a persisted HandoffSession."""
+    flags = flags or {}
+    if flags.get("handoff_active") is not True:
+        return False
+    if flags.get("needs_human") is not True:
+        return False
+    status = str(flags.get("status") or "").strip().lower()
+    return flags.get("is_human_handoff") is True or status == "human"
 
 
 def conversation_flags_dict(convo: Any) -> dict[str, Any]:
@@ -176,6 +188,14 @@ def resolve_handoff_truth_active(
                     source="ownership_human_active",
                 )
 
+        for convo in convos:
+            flags = conversation_flags_dict(convo)
+            if conversation_flags_lifecycle_active(flags):
+                return HandoffTruthResult(
+                    active=True,
+                    source="conversation_handoff_flags",
+                )
+
         from modules.ai.brain.postprocess.staff_escalation_evidence import (  # noqa: PLC0415
             evaluate_staff_escalation_evidence,
         )
@@ -187,7 +207,7 @@ def resolve_handoff_truth_active(
                 chosen_path=chosen_path,
                 brain_handoff=brain_handoff,
             )
-            if evidence.evidence_ok:
+            if evidence.queue_evidence_ok or evidence.notification_evidence_ok:
                 return HandoffTruthResult(
                     active=True,
                     source=evidence.evidence_source or "staff_escalation_evidence",
@@ -200,7 +220,7 @@ def resolve_handoff_truth_active(
                 chosen_path=chosen_path,
                 brain_handoff=brain_handoff,
             )
-            if evidence.evidence_ok:
+            if evidence.queue_evidence_ok or evidence.notification_evidence_ok:
                 return HandoffTruthResult(
                     active=True,
                     source=evidence.evidence_source or "metadata_escalation",
@@ -316,6 +336,7 @@ __all__ = [
     "HandoffTruthResult",
     "REASON_GATE_VERIFY_FAILED",
     "aggregate_possible_human_ownership_signals",
+    "conversation_flags_lifecycle_active",
     "conversation_flags_dict",
     "evaluate_gate_error_fail_closed",
     "has_possible_human_ownership_signals",

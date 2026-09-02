@@ -99,6 +99,18 @@ class TestAllowedWithEvidence:
         assert result.action != "allowed"
 
     def test_allows_when_active_handoff_state(self) -> None:
+        evidence = evaluate_staff_escalation_evidence(
+            conversation_flags={
+                "needs_human": True,
+                "handoff_active": True,
+                "is_human_handoff": True,
+                "status": "human",
+            },
+        )
+        assert evidence.handoff_session_present is False
+        assert evidence.queue_evidence_ok is False
+        assert evidence.notification_evidence_ok is False
+
         llm_reply = "تم تحويلك لفريق المتجر"
         result = apply_staff_escalation_truth_guard(
             reply=llm_reply,
@@ -109,8 +121,8 @@ class TestAllowedWithEvidence:
                 "status": "human",
             },
         )
-        assert result.replaced is False
-        assert result.action == "allowed"
+        assert result.staff_escalation_claim_blocked is True
+        assert result.action != "allowed"
 
     def test_action_handoff_path_alone_is_not_evidence(self) -> None:
         evidence = evaluate_staff_escalation_evidence(chosen_path="ACTION_HANDOFF")
@@ -125,7 +137,7 @@ class TestAllowedWithEvidence:
 
     def test_allows_pre_brain_handoff_metadata(self) -> None:
         result = apply_staff_escalation_truth_guard(
-            reply="تم تحويل المحادثة لفريق المتجر",
+            reply="تم تحويلك للدعم",
             inbound_metadata={
                 "deterministic_path": "pre_brain_handoff:clear",
                 "handoff_active": True,
@@ -134,6 +146,33 @@ class TestAllowedWithEvidence:
             },
         )
         assert result.replaced is False
+
+    def test_queue_session_does_not_authorize_notify_promise(self) -> None:
+        result = apply_staff_escalation_truth_guard(
+            reply="سيتواصل معك الفريق قريباً",
+            inbound_metadata={
+                "handoff_session_id": 44,
+                "notification_accepted": False,
+            },
+        )
+        assert result.staff_escalation_claim_blocked is True
+        assert result.action != "allowed"
+        assert result.evidence is not None
+        assert result.evidence.queue_evidence_ok is True
+        assert result.evidence.notification_evidence_ok is False
+
+    def test_notification_evidence_authorizes_notify_promise(self) -> None:
+        result = apply_staff_escalation_truth_guard(
+            reply="سيتواصل معك الفريق قريباً",
+            inbound_metadata={
+                "handoff_session_id": 45,
+                "notification_accepted": True,
+            },
+        )
+        assert result.replaced is False
+        assert result.action == "allowed"
+        assert result.evidence is not None
+        assert result.evidence.notification_evidence_ok is True
 
     def test_pre_brain_path_without_session_is_not_evidence(self) -> None:
         evidence = evaluate_staff_escalation_evidence(

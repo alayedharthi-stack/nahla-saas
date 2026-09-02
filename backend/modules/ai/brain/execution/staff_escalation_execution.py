@@ -14,6 +14,7 @@ Does not pause AI. Does not invent phones, assignment, or notification.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from modules.ai.brain.types import ActionResult, BrainContext, Decision
@@ -42,10 +43,36 @@ _DEFAULT_HANDOFF_SETTINGS: Dict[str, Any] = {
     "notification_method": "webhook",
     "webhook_url": "",
     "staff_whatsapp": "",
-    "auto_pause_ai": True,
 }
 
+NOTIFY_NOT_ATTEMPTED = "not_attempted"
+NOTIFY_UNAVAILABLE = "unavailable"
+NOTIFY_ACCEPTED = "accepted"
+NOTIFY_FAILED = "failed"
+
+_CLOSED_NOTIFY_STATUSES = frozenset(
+    {
+        NOTIFY_NOT_ATTEMPTED,
+        NOTIFY_UNAVAILABLE,
+        NOTIFY_ACCEPTED,
+        NOTIFY_FAILED,
+    }
+)
+
 _NEUTRAL_CUSTOMER_NAME = ""
+_TYPED_STAFF_CONTACT_ATTRS = (
+    "verified_staff_contact_record",
+    "staff_contact_record",
+)
+
+
+@dataclass(frozen=True)
+class NotificationOutcome:
+    attempted: bool
+    accepted: bool
+    status: str
+    failure_code: str = ""
+    reused_previous: bool = False
 
 
 def _flag(value: Any) -> str:
@@ -65,6 +92,7 @@ def format_staff_escalation_facts_overlay(data: Dict[str, Any]) -> str:
         f"session_reused={_flag(bool(data.get('handoff_session_reused')))}",
         f"notification_attempted={_flag(bool(data.get('notification_attempted')))}",
         f"notification_accepted={_flag(bool(data.get('notification_accepted')))}",
+        f"notification_status={_notify_status(data)}",
         f"verified_contact_available={_flag(bool(data.get('verified_contact_available')))}",
     ]
     session_id = data.get("handoff_session_id")
@@ -74,12 +102,28 @@ def format_staff_escalation_facts_overlay(data: Dict[str, Any]) -> str:
         phone = str(data.get("verified_contact_phone") or "").strip()
         if phone:
             lines.append(f"verified_contact_phone={phone}")
+    notify_failure = str(data.get("notification_failure_code") or "").strip()
+    if notify_failure:
+        lines.append(f"notification_failure_code={notify_failure}")
+    if data.get("reused_previous_notification") is True:
+        lines.append("reused_previous_notification=true")
     failure_code = str(data.get("failure_code") or "").strip()
     if failure_code:
         lines.append(f"failure_code={failure_code}")
     if data.get("after_hours") is True:
         lines.append("after_hours=true")
     return "\n".join(lines)
+
+
+def _notify_status(data: Dict[str, Any]) -> str:
+    status = str(data.get("notification_status") or "").strip()
+    if status in _CLOSED_NOTIFY_STATUSES:
+        return status
+    if data.get("notification_accepted") is True:
+        return NOTIFY_ACCEPTED
+    if data.get("notification_attempted") is True:
+        return NOTIFY_FAILED
+    return NOTIFY_NOT_ATTEMPTED
 
 
 def _trusted_customer_name(ctx: BrainContext) -> str:
@@ -93,42 +137,24 @@ def _trusted_customer_name(ctx: BrainContext) -> str:
 
 
 def _trusted_verified_contact(ctx: BrainContext) -> Tuple[bool, str]:
-    """Propagate an already-supplied verified contact. Never invent."""
-    candidates: list[Any] = [
-        getattr(ctx, "verified_staff_contact_phone", None),
-        getattr(ctx, "verified_contact_phone", None),
-    ]
-    profile = getattr(ctx, "profile", None)
-    if isinstance(profile, dict):
-        candidates.append(profile.get("verified_staff_contact_phone"))
-        candidates.append(profile.get("verified_contact_phone"))
-        inbound = profile.get("inbound_metadata")
-        if isinstance(inbound, dict):
-            candidates.append(inbound.get("verified_staff_contact_phone"))
-            candidates.append(inbound.get("verified_contact_phone"))
-    projection = getattr(ctx, "trusted_context_projection", None)
-    if isinstance(projection, dict):
-        candidates.append(projection.get("verified_staff_contact_phone"))
-        candidates.append(projection.get("verified_contact_phone"))
+    """Consume an already-typed tenant-scoped staff record. Never invent.
 
-    for raw in candidates:
-        phone = str(raw or "").strip()
-        if phone:
-            return True, phone
-    return False, ""
-
-
-def _stamp_profile_execution_facts(ctx: BrainContext, payload: Dict[str, Any]) -> None:
-    """In-place stamp so existing pipeline metadata reads see execution truth."""
-    profile = getattr(ctx, "profile", None)
-    if not isinstance(profile, dict):
-        ctx.profile = {"inbound_metadata": dict(payload)}
-        return
-    meta = profile.get("inbound_metadata")
-    if not isinstance(meta, dict):
-        profile["inbound_metadata"] = dict(payload)
-        return
-    meta.update(payload)
+    Inbound metadata and untyped profile strings are not Merchant Truth.
+    D2 does not search manager/owner contact ladders.
+    """
+    record = None
+    for attr in _TYPED_STAFF_CONTACT_ATTRS:
+        candidate = getattr(ctx, attr, None)
+        if candidate is not None:
+            record = candidate
+            break
+    if record is None or isinstance(record, dict):
+        return False, ""
+    phone = str(getattr(record, "phone", "") or "").strip()
+    source = str(getattr(record, "source", "") or "").strip()
+    if not phone or not source:
+        return False, ""
+    return True, phone
 
 
 def _result_payload(
@@ -141,6 +167,9 @@ def _result_payload(
     session_reused: bool = False,
     notification_attempted: bool = False,
     notification_accepted: bool = False,
+    notification_status: str = NOTIFY_NOT_ATTEMPTED,
+    notification_failure_code: str = "",
+    reused_previous_notification: bool = False,
     verified_contact_available: bool = False,
     verified_contact_phone: str = "",
     after_hours: bool = False,
@@ -151,6 +180,9 @@ def _result_payload(
     if status == STATUS_ASSIGNED:
         # D2 has no assignment owner. Never invent assigned.
         status = STATUS_QUEUED if session_id not in (None, "") else STATUS_REQUESTED
+    notify_status = str(notification_status or "").strip()
+    if notify_status not in _CLOSED_NOTIFY_STATUSES:
+        notify_status = NOTIFY_NOT_ATTEMPTED
 
     data: Dict[str, Any] = {
         "type": "handoff",
@@ -162,6 +194,9 @@ def _result_payload(
         "notification_attempted": bool(notification_attempted),
         "notification_accepted": bool(notification_accepted),
         "notification_sent": bool(notification_accepted),
+        "notification_status": notify_status,
+        "notification_failure_code": str(notification_failure_code or ""),
+        "reused_previous_notification": bool(reused_previous_notification),
         "verified_contact_available": bool(verified_contact_available),
         "verified_contact_phone": (
             verified_contact_phone if verified_contact_available else ""
@@ -199,8 +234,8 @@ async def _attempt_notification(
     customer_phone: str,
     customer_name: str,
     last_message: str,
-) -> Tuple[bool, bool]:
-    """Return (attempted, accepted). WhatsApp TODO is not a real attempt."""
+) -> NotificationOutcome:
+    """Real webhook POST only. WhatsApp TODO is not a provider attempt."""
     try:
         settings = _load_tenant_handoff_settings(db, tenant_id)
     except Exception as exc:  # noqa: BLE001
@@ -209,10 +244,26 @@ async def _attempt_notification(
             tenant_id,
             type(exc).__name__,
         )
-        return False, False
+        return NotificationOutcome(
+            attempted=False,
+            accepted=False,
+            status=NOTIFY_UNAVAILABLE,
+            failure_code="settings_unavailable",
+        )
 
+    method = str(settings.get("notification_method") or "").strip().lower()
+    if method in ("", "none"):
+        return NotificationOutcome(
+            attempted=False,
+            accepted=False,
+            status=NOTIFY_NOT_ATTEMPTED,
+        )
     if not _real_webhook_attempt_configured(settings):
-        return False, False
+        return NotificationOutcome(
+            attempted=False,
+            accepted=False,
+            status=NOTIFY_UNAVAILABLE,
+        )
 
     from handoff.notifier import notify_handoff  # noqa: PLC0415
 
@@ -234,8 +285,24 @@ async def _attempt_notification(
             session_id,
             type(exc).__name__,
         )
-        return True, False
-    return True, accepted
+        return NotificationOutcome(
+            attempted=True,
+            accepted=False,
+            status=NOTIFY_FAILED,
+            failure_code="provider_exception",
+        )
+    if accepted:
+        return NotificationOutcome(
+            attempted=True,
+            accepted=True,
+            status=NOTIFY_ACCEPTED,
+        )
+    return NotificationOutcome(
+        attempted=True,
+        accepted=False,
+        status=NOTIFY_FAILED,
+        failure_code="provider_rejected",
+    )
 
 
 def _mark_session_notified(session: Any, accepted: bool) -> None:
@@ -243,6 +310,10 @@ def _mark_session_notified(session: Any, accepted: bool) -> None:
         return
     if hasattr(session, "notification_sent"):
         session.notification_sent = True
+
+
+def _prior_notification_sent(session: Any) -> bool:
+    return getattr(session, "notification_sent", False) is True
 
 
 async def execute_staff_escalation(
@@ -263,17 +334,16 @@ async def execute_staff_escalation(
         tenant_ok = False
 
     if db is None or not tenant_ok or not customer_phone:
-        result = _result_payload(
+        return _result_payload(
             success=False,
             status=STATUS_UNAVAILABLE,
             failure_code="execution_capability_unavailable",
+            notification_status=NOTIFY_NOT_ATTEMPTED,
             verified_contact_available=verified_ok,
             verified_contact_phone=verified_phone,
             after_hours=after_hours,
             error="execution_capability_unavailable",
         )
-        _stamp_profile_execution_facts(ctx, dict(result.data))
-        return result
 
     from handoff.manager import create_handoff_session, get_active_handoff  # noqa: PLC0415
 
@@ -296,77 +366,100 @@ async def execute_staff_escalation(
             tenant_id,
             type(exc).__name__,
         )
-        result = _result_payload(
+        return _result_payload(
             success=False,
             status=STATUS_FAILED,
             failure_code="persistence_failed",
+            notification_status=NOTIFY_NOT_ATTEMPTED,
             verified_contact_available=verified_ok,
             verified_contact_phone=verified_phone,
             after_hours=after_hours,
             error="persistence_failed",
         )
-        _stamp_profile_execution_facts(ctx, dict(result.data))
-        return result
 
     if session is None or getattr(session, "id", None) in (None, ""):
-        result = _result_payload(
+        return _result_payload(
             success=False,
             status=STATUS_FAILED,
             failure_code="persistence_failed",
+            notification_status=NOTIFY_NOT_ATTEMPTED,
             verified_contact_available=verified_ok,
             verified_contact_phone=verified_phone,
             after_hours=after_hours,
             error="persistence_failed",
         )
-        _stamp_profile_execution_facts(ctx, dict(result.data))
-        return result
 
     session_id = session.id
     reused = existing is not None and getattr(existing, "id", None) == session_id
     created = not reused
     ctx.handoff_session_id = session_id  # type: ignore[attr-defined]
 
-    notification_attempted = False
-    notification_accepted = False
-    try:
-        notification_attempted, notification_accepted = await _attempt_notification(
-            db=db,
-            tenant_id=int(tenant_id),
-            session_id=int(session_id),
-            customer_phone=customer_phone,
-            customer_name=customer_name,
-            last_message=last_message,
+    notify = NotificationOutcome(
+        attempted=False,
+        accepted=False,
+        status=NOTIFY_NOT_ATTEMPTED,
+    )
+    if reused and _prior_notification_sent(session):
+        # Durable prior provider acceptance. Do not resend.
+        notify = NotificationOutcome(
+            attempted=False,
+            accepted=True,
+            status=NOTIFY_ACCEPTED,
+            reused_previous=True,
         )
-        if notification_accepted:
-            _mark_session_notified(session, True)
-            try:
-                db.flush()
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "[STAFF_ESCALATION] notify flag flush failed session=%s",
-                    session_id,
-                )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[STAFF_ESCALATION] notify wrapper failed session=%s err=%s",
-            session_id,
-            type(exc).__name__,
+    elif reused:
+        # Prior queue exists without accepted notify. D2 does not retry
+        # on duplicate customer requests (avoids notification spam).
+        notify = NotificationOutcome(
+            attempted=False,
+            accepted=False,
+            status=NOTIFY_NOT_ATTEMPTED,
         )
-        notification_attempted = True
-        notification_accepted = False
+    else:
+        try:
+            notify = await _attempt_notification(
+                db=db,
+                tenant_id=int(tenant_id),
+                session_id=int(session_id),
+                customer_phone=customer_phone,
+                customer_name=customer_name,
+                last_message=last_message,
+            )
+            if notify.accepted:
+                _mark_session_notified(session, True)
+                try:
+                    db.flush()
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "[STAFF_ESCALATION] notify flag flush failed session=%s",
+                        session_id,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[STAFF_ESCALATION] notify wrapper failed session=%s err=%s",
+                session_id,
+                type(exc).__name__,
+            )
+            notify = NotificationOutcome(
+                attempted=True,
+                accepted=False,
+                status=NOTIFY_FAILED,
+                failure_code="provider_exception",
+            )
 
-    status = STATUS_NOTIFIED if notification_accepted else STATUS_QUEUED
-    result = _result_payload(
+    status = STATUS_NOTIFIED if notify.accepted else STATUS_QUEUED
+    return _result_payload(
         success=True,
         status=status,
         session_id=session_id,
         session_created=created,
         session_reused=reused,
-        notification_attempted=notification_attempted,
-        notification_accepted=notification_accepted,
+        notification_attempted=notify.attempted,
+        notification_accepted=notify.accepted,
+        notification_status=notify.status,
+        notification_failure_code=notify.failure_code,
+        reused_previous_notification=notify.reused_previous,
         verified_contact_available=verified_ok,
         verified_contact_phone=verified_phone,
         after_hours=after_hours,
     )
-    _stamp_profile_execution_facts(ctx, dict(result.data))
-    return result
