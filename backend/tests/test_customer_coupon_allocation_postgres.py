@@ -20,7 +20,7 @@ for _entry in (str(_REPO_ROOT), str(_BACKEND), str(_DATABASE)):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
 
-from database.models import Coupon, Customer, Order, Tenant, TenantSettings
+from database.models import Coupon, Customer, Integration, Order, Tenant, TenantSettings
 from routers.coupons import DEFAULT_COUPON_LEVELS, _normalise_levels
 from services.coupon_generator import CouponGeneratorService
 from services.customer_intelligence import normalize_phone
@@ -152,6 +152,41 @@ def _seed_customer_request_tenant(
     session.commit()
     session.refresh(customer)
     return customer
+
+
+def _add_salla_integration(session: Session, tenant_id: int) -> Integration:
+    existing = (
+        session.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .first()
+    )
+    if existing is not None:
+        existing.enabled = True
+        cfg = dict(existing.config or {})
+        cfg["needs_reauth"] = False
+        if not cfg.get("api_key"):
+            cfg["api_key"] = "tok"
+        existing.config = cfg
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(existing, "config")
+        session.commit()
+        return existing
+    row = Integration(
+        tenant_id=tenant_id,
+        provider="salla",
+        external_store_id=f"a1-coupon-{tenant_id}",
+        enabled=True,
+        config={
+            "api_key": "tok",
+            "store_id": f"store-{tenant_id}",
+            "needs_reauth": False,
+        },
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
 
 
 def _add_pool_coupon(session: Session, tenant_id: int, code: str, level: str) -> Coupon:
@@ -331,6 +366,7 @@ def test_same_customer_on_demand_concurrency_creates_at_most_one(postgres_engine
             countable=1,
             phone=PHONE_ON_DEMAND,
         )
+        _add_salla_integration(setup, TEST_TENANT_SAME_CUSTOMER_ON_DEMAND)
         customer_id = int(customer.id)
     finally:
         setup.close()

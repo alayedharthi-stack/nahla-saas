@@ -923,3 +923,6 @@ def test_salla_pool_base_filters_contract_unchanged():
     native_src = inspect.getsource(CouponGeneratorService._native_ai_pool_filters)
     assert "salla_synced" not in native_src
     assert "SHORT_CODE_PREFIX" not in native_src
+    pick_src = inspect.getsource(CouponGeneratorService.pick_native_ai_coupon_for_level)
+    assert "max_attempts = 20" not in pick_src
+    assert "for _ in range(max_attempts)" not in pick_src

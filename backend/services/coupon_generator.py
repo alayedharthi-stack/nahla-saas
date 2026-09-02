@@ -1110,6 +1110,8 @@ class CouponGeneratorService:
         """Coarse SQL for explicit native AI coupons. Python fail-closed follows.
 
         Intentionally separate from ``_pool_base_filters`` (Salla/system).
+        Remaining eligibility (ai_allocatable, usage, remaining hours) is
+        checked in Python so every structurally matching row can be reached.
         """
         now = datetime.now(timezone.utc)
         canonical_level = str(level or "").strip().lower()
@@ -1130,7 +1132,11 @@ class CouponGeneratorService:
         *,
         for_channel: str = "ai",
     ) -> Optional[Coupon]:
-        """Allocate one explicitly AI-marked manual coupon. Never uses Salla pool."""
+        """Allocate one explicitly AI-marked manual coupon. Never uses Salla pool.
+
+        Scan is bounded by remaining matching rows (each id visited once),
+        not by a magic first-N correctness cap. SKIP LOCKED is preserved.
+        """
         canonical_level = str(level_id or "").strip().lower()
         if canonical_level not in CANONICAL_COUPON_LEVELS:
             return None
@@ -1147,13 +1153,12 @@ class CouponGeneratorService:
             policy = _get_ai_policy(self.db, self.tenant_id)
             min_remaining_hours = int(policy.get("min_remaining_hours") or 0)
 
-        skipped_ids: List[int] = []
+        visited: set[int] = set()
         use_skip = self._supports_skip_locked()
-        max_attempts = 20
-        for _ in range(max_attempts):
+        while True:
             filters = list(self._native_ai_pool_filters(canonical_level))
-            if skipped_ids:
-                filters.append(~Coupon.id.in_(skipped_ids))
+            if visited:
+                filters.append(~Coupon.id.in_(tuple(visited)))
             query = (
                 self.db.query(Coupon)
                 .filter(*filters)
@@ -1164,6 +1169,10 @@ class CouponGeneratorService:
             coupon = query.limit(1).first()
             if coupon is None:
                 return None
+            coupon_id = int(coupon.id)
+            if coupon_id in visited:
+                return None
+            visited.add(coupon_id)
             if not is_native_ai_allocatable_coupon(
                 coupon,
                 tenant_id=self.tenant_id,
@@ -1172,7 +1181,6 @@ class CouponGeneratorService:
                 min_remaining_hours=min_remaining_hours,
                 now=now,
             ):
-                skipped_ids.append(int(coupon.id))
                 continue
             self._stamp_customer_assignment(
                 coupon,
@@ -1185,7 +1193,6 @@ class CouponGeneratorService:
                 coupon.allocation_channel = str(for_channel or "ai").lower()
             self._mark_coupon_sent(coupon, sent_at=now, commit=True)
             return coupon
-        return None
 
     async def create_on_demand_for_level(
         self,

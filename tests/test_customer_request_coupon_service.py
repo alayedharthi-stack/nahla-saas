@@ -19,7 +19,7 @@ for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from database.models import Base, Coupon, Customer, Order, Tenant, TenantSettings
+from database.models import Base, Coupon, Customer, Integration, Order, Tenant, TenantSettings
 from backend.routers.coupons import DEFAULT_COUPON_LEVELS, _normalise_levels
 from backend.services.coupon_generator import (
     CouponGeneratorService,
@@ -42,6 +42,12 @@ from backend.services.customer_request_coupon_service import (
     count_customer_orders,
     find_reusable_assigned_coupon,
     issue_customer_coupon,
+)
+from backend.services.coupon_salla_provider_state import (
+    SALLA_ADAPTER_AVAILABLE,
+    SALLA_CONFIGURED_BUT_UNAVAILABLE,
+    SALLA_NOT_CONFIGURED,
+    classify_salla_coupon_provider_state,
 )
 
 
@@ -246,6 +252,31 @@ def _add_native_coupon(
         coupon_level=level,
         allocation_channel=allocation_channel,
         source_type=source_type,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _add_salla_integration(
+    db,
+    tenant_id: int,
+    *,
+    enabled: bool = True,
+    needs_reauth: bool = False,
+    api_key: str = "tok",
+) -> Integration:
+    row = Integration(
+        tenant_id=tenant_id,
+        provider="salla",
+        external_store_id=f"coupon-test-{tenant_id}",
+        enabled=enabled,
+        config={
+            "api_key": api_key,
+            "store_id": f"store-{tenant_id}",
+            "needs_reauth": needs_reauth,
+        },
     )
     db.add(row)
     db.commit()
@@ -488,7 +519,7 @@ def test_expired_pool_coupon_is_not_issued() -> None:
     )
     result = _issue(db, tenant_id, customer.id)
     assert result.issued is False
-    assert result.reason_code in {REASON_POOL_EMPTY, REASON_SALLA_UNAVAILABLE}
+    assert result.reason_code == REASON_POOL_EMPTY
 
 
 def test_used_pool_coupon_is_not_issued() -> None:
@@ -582,6 +613,7 @@ def test_on_demand_only_with_patched_adapter() -> None:
     customer = _add_customer(db, tenant_id, PHONE_A)
     _add_orders(db, tenant_id, PHONE_A, countable=1)
     pool = _add_pool_coupon(db, tenant_id, "NHPL1", "bronze")
+    _add_salla_integration(db, tenant_id)
     with patch.object(
         coupon_request_mod.CouponGeneratorService, "_get_adapter", lambda self: _fake_adapter()
     ):
@@ -605,6 +637,7 @@ def test_pool_first_falls_back_to_on_demand() -> None:
     )
     customer = _add_customer(db, tenant_id, PHONE_A)
     _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_salla_integration(db, tenant_id)
     with patch.object(
         coupon_request_mod.CouponGeneratorService, "_get_adapter", lambda self: _fake_adapter()
     ):
@@ -993,3 +1026,178 @@ def test_zero_orders_first_purchase_enabled_authorizes_bronze() -> None:
     assert result.resolved_level == "bronze"
     assert result.coupon_id == native.id
     assert result.countable_orders == 0
+
+
+def test_provider_state_classifier_is_read_only_closed_set() -> None:
+    import inspect
+
+    src = inspect.getsource(classify_salla_coupon_provider_state)
+    assert "pick_active_salla_integration" not in src
+    assert "get_adapter" not in src
+    assert "commit(" not in src
+    db, tenant_id, _engine = _make_db()
+    assert classify_salla_coupon_provider_state(db, tenant_id) == SALLA_NOT_CONFIGURED
+    disabled = _add_salla_integration(db, tenant_id, enabled=False)
+    assert classify_salla_coupon_provider_state(db, tenant_id) == SALLA_CONFIGURED_BUT_UNAVAILABLE
+    db.refresh(disabled)
+    assert disabled.enabled is False
+    disabled.enabled = True
+    cfg = dict(disabled.config or {})
+    cfg["needs_reauth"] = True
+    disabled.config = cfg
+    flag_modified(disabled, "config")
+    db.commit()
+    assert classify_salla_coupon_provider_state(db, tenant_id) == SALLA_CONFIGURED_BUT_UNAVAILABLE
+    cfg["needs_reauth"] = False
+    disabled.config = cfg
+    flag_modified(disabled, "config")
+    db.commit()
+    assert classify_salla_coupon_provider_state(db, tenant_id) == SALLA_ADAPTER_AVAILABLE
+
+
+def test_salla_configured_disabled_is_salla_unavailable() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    row = _add_salla_integration(db, tenant_id, enabled=False)
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_SALLA_UNAVAILABLE
+    db.refresh(row)
+    assert row.enabled is False
+    assert db.query(Coupon).filter(Coupon.tenant_id == tenant_id).count() == 0
+
+
+def test_salla_needs_reauth_is_salla_unavailable() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    row = _add_salla_integration(db, tenant_id, needs_reauth=True)
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_SALLA_UNAVAILABLE
+    db.refresh(row)
+    assert bool((row.config or {}).get("needs_reauth")) is True
+    assert db.query(Coupon).filter(Coupon.tenant_id == tenant_id).count() == 0
+
+
+def test_salla_adapter_available_create_none_is_pool_empty() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_salla_integration(db, tenant_id)
+
+    async def _no_coupon(*_args, **_kwargs):
+        return None
+
+    with patch.object(
+        coupon_request_mod.CouponGeneratorService,
+        "create_on_demand_for_level",
+        _no_coupon,
+    ):
+        result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    assert db.query(Coupon).filter(Coupon.tenant_id == tenant_id).count() == 0
+
+
+def test_salla_pool_selection_unchanged_with_configured_provider() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_salla_integration(db, tenant_id)
+    salla = _add_pool_coupon(db, tenant_id, "NHAAA", "bronze")
+    native = _add_native_coupon(db, tenant_id, "NATAI7", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == salla.id
+    db.refresh(native)
+    assert (native.extra_metadata or {}).get("customer_id") is None
+
+
+def test_native_pool_over_20_ineligible_still_finds_valid() -> None:
+    db, tenant_id, _engine = _make_db(
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        }
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    near = datetime.now(timezone.utc) + timedelta(hours=1)
+    for idx in range(21):
+        _add_native_coupon(
+            db,
+            tenant_id,
+            f"NAIN{idx:02d}",
+            "bronze",
+            expires_at=near,
+        )
+    valid = _add_native_coupon(db, tenant_id, "NAOK21", "bronze")
+    svc = CouponGeneratorService(db, tenant_id)
+    picked = svc.pick_native_ai_coupon_for_level(
+        "bronze", customer.id, for_channel="ai"
+    )
+    assert picked is not None
+    assert picked.id == valid.id
+    db2, tenant2, _engine2 = _make_db(
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        }
+    )
+    customer2 = _add_customer(db2, tenant2, PHONE_A)
+    _add_orders(db2, tenant2, PHONE_A, countable=1)
+    for idx in range(21):
+        _add_native_coupon(
+            db2,
+            tenant2,
+            f"NAIN{idx:02d}",
+            "bronze",
+            expires_at=near,
+        )
+    valid2 = _add_native_coupon(db2, tenant2, "NAOK21", "bronze")
+    result = _issue(db2, tenant2, customer2.id)
+    assert result.issued is True
+    assert result.coupon_id == valid2.id
+    assert result.reason_code == "issued"
+
+
+def test_native_pool_all_invalid_terminates_pool_empty() -> None:
+    db, tenant_id, _engine = _make_db(
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        }
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    near = datetime.now(timezone.utc) + timedelta(hours=1)
+    seeded = [
+        _add_native_coupon(
+            db,
+            tenant_id,
+            f"NABD{idx:02d}",
+            "bronze",
+            expires_at=near,
+        )
+        for idx in range(21)
+    ]
+    svc = CouponGeneratorService(db, tenant_id)
+    picked = svc.pick_native_ai_coupon_for_level(
+        "bronze", customer.id, for_channel="ai"
+    )
+    assert picked is None
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    for row in seeded:
+        db.refresh(row)
+        assert (row.extra_metadata or {}).get("customer_id") is None
+
