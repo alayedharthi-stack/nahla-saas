@@ -14,7 +14,15 @@ from typing import Any, Optional, Tuple
 
 from ..decision.actions import ACTION_LLM_REPLY, ACTION_SEARCH_PRODUCTS
 from ..types import BrainContext, Decision
-from .contract import OWNER_DISCOVERY, TurnArbitration, TurnUnderstanding
+from .contract import (
+    OWNER_DISCOVERY,
+    OWNER_PERSONA_SOCIAL,
+    OWNER_STAFF_ESCALATION,
+    OWNER_SUPPORT,
+    OWNER_TRACKING,
+    TurnArbitration,
+    TurnUnderstanding,
+)
 from .flags import (
     get_enforce_mismatch_types,
     is_enforce_tenant,
@@ -328,6 +336,19 @@ def maybe_enforce_turn_decision(
     if not telemetry.owner_mismatch:
         return decision, noop
 
+    if _should_preserve_authoritative_order_support(ctx, decision, arbitration):
+        logger.info(
+            "[TURN_ARBITER_ENFORCE] tenant=%s enforced=false "
+            "reason=authoritative_order_support_preserved "
+            "proposed_owner=%s legacy_owner=%s mismatch_type=%s preview=%r",
+            ctx.tenant_id,
+            arbitration.turn_owner,
+            legacy_owner_from_decision(decision),
+            telemetry.mismatch_type,
+            (getattr(ctx, "raw_message", None) or ctx.message or "")[:80],
+        )
+        return decision, noop
+
     mismatch_type = telemetry.mismatch_type
     if mismatch_type not in get_enforce_mismatch_types():
         return decision, noop
@@ -431,6 +452,44 @@ def maybe_enforce_turn_decision(
     ctx.turn_enforce_result = result  # type: ignore[attr-defined]
     ctx.turn_legacy_decision = decision  # type: ignore[attr-defined]
     return enforced_decision, result
+
+
+_ORDER_SUPPORT_PRESERVE_PROPOSED_OWNERS = frozenset({
+    OWNER_SUPPORT,
+    OWNER_PERSONA_SOCIAL,
+    OWNER_STAFF_ESCALATION,
+})
+
+
+def _should_preserve_authoritative_order_support(
+    ctx: BrainContext,
+    decision: Decision,
+    arbitration: TurnArbitration,
+) -> bool:
+    """Keep an engine Order Support decision when a weaker contact signal disagrees.
+
+    Once canonical Order Support ownership is proven and the engine already
+    produced an Order Support-compatible decision (legacy owner tracking),
+    Turn Arbiter must not reinterpret that same turn as staff/support/persona.
+    """
+    try:
+        from ..commerce.order_support_ownership import (  # noqa: PLC0415
+            has_authoritative_order_support_ownership,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[TURN_ARBITER_ENFORCE] order_support_ownership_probe_failed"
+        )
+        return False
+    if not has_authoritative_order_support_ownership(
+        getattr(ctx, "intent", None),
+        state=getattr(ctx, "state", None),
+    ):
+        return False
+    if legacy_owner_from_decision(decision) != OWNER_TRACKING:
+        return False
+    proposed = str(getattr(arbitration, "turn_owner", "") or "")
+    return proposed in _ORDER_SUPPORT_PRESERVE_PROPOSED_OWNERS
 
 
 __all__ = ["TurnEnforceResult", "maybe_enforce_turn_decision"]

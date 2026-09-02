@@ -428,3 +428,48 @@ class TestConcreteProductInformationEnforcement:
         assert result.enforced is True
         assert new_decision.action == ACTION_SEARCH_PRODUCTS
         assert new_decision.args.get("topic") != "product_knowledge_facts"
+
+
+def test_authoritative_order_support_not_replaced_by_support_mismatch(monkeypatch):
+    """ORDER-SUPPORT-D1B — OS + tracking legacy is not rewritten to support."""
+    from dataclasses import replace
+
+    from modules.ai.brain.turn.contract import OWNER_SUPPORT
+    from modules.ai.brain.turn.owner_brief import build_owner_brief
+    from modules.ai.brain.types import INTENT_TRACK_ORDER
+
+    _enable_enforce_platform_wide(monkeypatch)
+    monkeypatch.setenv(
+        "TURN_ARBITER_ENFORCE_MISMATCH_TYPES",
+        "checkout_vs_support,checkout_vs_discovery,staff_vs_persona,unknown_mismatch",
+    )
+    ctx = _ctx(
+        "ابي ارقامها",
+        tenant_id=1,
+        intent_name=INTENT_TRACK_ORDER,
+        state=_stale_checkout_state(),
+        state_relevance=_state_rel(),
+        intent_slots={
+            "classification_provenance": "LAYER2_SEMANTIC_OVERRIDE",
+            "precedence_winner": "layer2",
+        },
+    )
+    ctx.intent.confidence = 0.72
+    prepare_turn_arbitration(ctx)
+    brief = build_owner_brief(OWNER_SUPPORT, ctx.turn_understanding_shadow, ctx)
+    ctx.turn_arbitration_shadow = replace(
+        ctx.turn_arbitration_shadow,
+        turn_owner=OWNER_SUPPORT,
+        reason="forced_false_contact",
+        owner_brief=brief,
+    )
+    legacy = Decision(
+        action=ACTION_LLM_REPLY,
+        args={"topic": "order_history"},
+        reason="order_history",
+    )
+    new_decision, result = maybe_enforce_turn_decision(ctx, legacy)
+    assert result.enforced is False
+    assert new_decision.action == ACTION_LLM_REPLY
+    assert new_decision.args.get("topic") == "order_history"
+    assert new_decision.args.get("block_commerce_escalation") is not True
