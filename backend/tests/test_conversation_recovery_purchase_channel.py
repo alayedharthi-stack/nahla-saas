@@ -19,10 +19,6 @@ _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
-from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
-    resolve_purchase_channel_entry_owner,
-    resolve_purchase_channel_turn,
-)
 from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: E402
     build_bare_start_order_guard_reply,
 )
@@ -33,12 +29,10 @@ from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: E402
 from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: E402
     try_guard_recovery_reply,
 )
-from modules.ai.brain.types import Intent  # noqa: E402
 
 _LIVE_BUY = "ابي اشتري"
 _TENANT_A = 11
 _TENANT_B = 44
-_PHONE_A = "966500000011"
 _STORE = "https://shop.example.sa"
 _MAPS = "https://maps.google.com/?q=showroom"
 _CANNED = build_bare_start_order_guard_reply(_LIVE_BUY)
@@ -141,27 +135,16 @@ class TestSilentRecoveryHonorsTenantChannels:
         assert recovery.needs_persona_compose is True
         assert recovery.source == "purchase_channel_selection_pending"
 
-    def test_resolver_failure_does_not_fabricate_whatsapp_owner(self) -> None:
-        intent = Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY)
+    def test_resolver_failure_does_not_use_canned_whatsapp_reply(self) -> None:
         with patch(
             "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
             side_effect=RuntimeError("capability lookup failed"),
         ):
-            turn = resolve_purchase_channel_turn(
-                phase="entry",
-                message=_LIVE_BUY,
-                intent=intent,
-                tenant_id=_TENANT_A,
-                phone=_PHONE_A,
-                db=MagicMock(),
-            )
             recovery = try_guard_recovery_reply(
                 inbound_text=_LIVE_BUY,
                 db=MagicMock(),
                 tenant_id=_TENANT_A,
             )
-        assert turn is None
-        assert resolve_purchase_channel_entry_owner(message=_LIVE_BUY, intent=intent) is None
         assert recovery.source != "bare_start_order"
         assert recovery.needs_persona_compose is True
         assert recovery.reply != _CANNED

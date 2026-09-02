@@ -214,11 +214,17 @@ def try_guard_recovery_reply(
                     elif hasattr(_op, "to_dict"):
                         _prep = dict(_op.to_dict() or {})
                 _tenant_id = int(tenant_id or 0)
-                if should_block_bare_start_product_prompt(
-                    order_prep=_prep,
-                    db=db,
-                    tenant_id=_tenant_id,
-                ):
+                try:
+                    _block_product = should_block_bare_start_product_prompt(
+                        order_prep=_prep,
+                        db=db,
+                        tenant_id=_tenant_id,
+                    )
+                except TypeError:
+                    _block_product = should_block_bare_start_product_prompt(
+                        order_prep=_prep,
+                    )
+                if _block_product:
                     return ConversationRecoveryResult(
                         needs_persona_compose=True,
                         source="purchase_channel_selection_pending",
@@ -234,6 +240,23 @@ def try_guard_recovery_reply(
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — unknown capability must not invent WhatsApp copy
                         _sales = None
                     if _sales is None:
+                        return ConversationRecoveryResult(
+                            needs_persona_compose=True,
+                            source="purchase_channel_selection_pending",
+                        )
+                    try:
+                        _block_product = should_block_bare_start_product_prompt(
+                            order_prep=_prep,
+                            db=db,
+                            tenant_id=_tenant_id,
+                            merchant_sales_channels=_sales,
+                        )
+                    except TypeError:
+                        _block_product = should_block_bare_start_product_prompt(
+                            order_prep=_prep,
+                            merchant_sales_channels=_sales,
+                        )
+                    if _block_product:
                         return ConversationRecoveryResult(
                             needs_persona_compose=True,
                             source="purchase_channel_selection_pending",
