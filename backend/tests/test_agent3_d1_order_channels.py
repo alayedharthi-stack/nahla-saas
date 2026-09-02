@@ -50,6 +50,7 @@ from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
     apply_selected_purchase_channel,
     extract_structured_purchase_channel_id,
     resolve_explicit_purchase_channel_payload,
+    resolve_available_purchase_channel_facts,
     resolve_purchase_channel_entry_owner,
     resolve_purchase_channel_turn,
     validate_selected_purchase_channel,
@@ -1517,3 +1518,96 @@ class TestLivePickerBypassRegression:
         assert dec_b.args.get("available_purchase_channels") == ["whatsapp_quick_order"]
         assert dec_a.args.get("topic") == "purchase_channel_selection"
         assert dec_b.args.get("topic") != "purchase_channel_selection"
+
+    def test_resolver_exception_does_not_fabricate_whatsapp(self) -> None:
+        intent = Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY)
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            side_effect=RuntimeError("capability lookup failed"),
+        ):
+            turn = resolve_purchase_channel_turn(
+                phase="entry",
+                message=_LIVE_BUY,
+                intent=intent,
+                tenant_id=_TENANT_A,
+                phone=_PHONE_A,
+                db=MagicMock(),
+            )
+        assert turn is None
+        assert resolve_purchase_channel_entry_owner(
+            message=_LIVE_BUY,
+            intent=intent,
+        ) is None
+
+    def test_resolver_returns_none_does_not_fabricate_whatsapp(self) -> None:
+        intent = Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY)
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            return_value=None,
+        ):
+            turn = resolve_purchase_channel_turn(
+                phase="entry",
+                message=_LIVE_BUY,
+                intent=intent,
+                tenant_id=_TENANT_A,
+                phone=_PHONE_A,
+                db=MagicMock(),
+            )
+        assert turn is None
+
+    def test_no_db_empty_facts_does_not_fabricate_whatsapp(self) -> None:
+        intent = Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY)
+        ids = resolve_available_purchase_channel_facts()
+        assert ids == []
+        assert "whatsapp_quick_order" not in ids
+        assert resolve_purchase_channel_entry_owner(
+            message=_LIVE_BUY,
+            intent=intent,
+        ) is None
+        turn = resolve_purchase_channel_turn(
+            phase="entry",
+            message=_LIVE_BUY,
+            intent=intent,
+        )
+        assert turn is None
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            store_url="",
+            maps_url="",
+        )
+        decision = _decide_live(ctx)
+        assert decision.args.get("topic") != "whatsapp_quick_order"
+        assert "whatsapp_quick_order" not in (
+            decision.args.get("available_purchase_channels") or []
+        )
+
+    def test_attached_trusted_sales_object_unchanged(self) -> None:
+        sales = self._three()
+        intent = Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY)
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            side_effect=AssertionError("must not resolve when sales attached"),
+        ):
+            owner = resolve_purchase_channel_entry_owner(
+                message=_LIVE_BUY,
+                intent=intent,
+                merchant_sales_channels=sales,
+            )
+            turn = resolve_purchase_channel_turn(
+                phase="entry",
+                message=_LIVE_BUY,
+                intent=intent,
+                merchant_sales_channels=sales,
+                db=MagicMock(),
+                tenant_id=_TENANT_A,
+                phone=_PHONE_A,
+            )
+        assert owner == "purchase_channel_selection"
+        assert turn is not None
+        assert turn.args.get("topic") == "purchase_channel_selection"
+        assert turn.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]

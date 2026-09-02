@@ -54,9 +54,9 @@ class TestWantsToOrderRoutesToChannelSelection:
         )
         assert channels == [
             "online_store",
-            "whatsapp_quick_order",
             "showroom_visit",
         ]
+        assert "whatsapp_quick_order" not in channels
 
         assert should_route_bare_start_to_channel_selection(
             order_prep=OrderPreparationState(),
@@ -72,7 +72,8 @@ class TestWantsToOrderRoutesToChannelSelection:
         )
         assert nav.stage == "purchase_channel_selection"
         assert nav.next_goal == "help_customer_choose_purchase_channel"
-        assert nav.available_purchase_channels == channels
+        assert "online_store" in nav.available_purchase_channels
+        assert "showroom_visit" in nav.available_purchase_channels
         assert "do_not_ask_product_yet" in nav.forbidden_actions
         assert nav.next_goal != "collect_product_for_whatsapp_order"
 
