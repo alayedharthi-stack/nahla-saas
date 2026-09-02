@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.payment_receipt_field_parser")
 
@@ -153,6 +153,46 @@ _AR_SENDER_RE = re.compile(
     re.IGNORECASE | re.UNICODE | re.MULTILINE,
 )
 
+# Generic labeled transfer-text fields (SMS / app notification). Platform-wide
+# — not a bank-brand parser. Requires explicit labels, not bare keywords.
+_GENERIC_AMOUNT_LABEL_RE = re.compile(
+    r"(?:المبلغ(?:\s*المحول)?|amount)\s*[:\-–]?\s*"
+    r"(?:SAR|SR|USD|EUR|ريال|ر\.?\s*س)?\s*"
+    r"(?P<value>\d{1,9}(?:[.,]\d{1,2})?)",
+    re.IGNORECASE | re.UNICODE,
+)
+_GENERIC_FROM_RE = re.compile(
+    r"(?:من(?:\s*(?:حساب|الحساب))?|from(?:\s*account)?)\s*[:\-–]\s*"
+    r"(?P<acc>[^\n\r]{2,80})",
+    re.IGNORECASE | re.UNICODE,
+)
+_GENERIC_TO_RE = re.compile(
+    r"(?:(?:إلى|الى)(?:\s*(?:حساب|الحساب))?|to(?:\s*account)?|"
+    r"target\s*account|beneficiary\s*account)\s*[:\-–]\s*(?P<acc>[^\n\r]{2,80})",
+    re.IGNORECASE | re.UNICODE,
+)
+# Unlabeled SMS / app notifications: suffixes without colons.
+# Platform-wide structural tokens (from/to/lam), not bank-branded.
+_UNLABELED_FROM_RE = re.compile(
+    r"(?:من|from)\s*(?P<acc>\d{3,6})",
+    re.IGNORECASE | re.UNICODE,
+)
+_UNLABELED_TO_RE = re.compile(
+    r"(?:لـ|ل|إلى|الى|to)\s*(?P<acc>\d{3,6})",
+    re.IGNORECASE | re.UNICODE,
+)
+_UNLABELED_BENEFICIARY_RE = re.compile(
+    r"(?:اسم\s+)?مستفيد\s+(?P<name>[^\d\n\r;؛:]{2,80})",
+    re.UNICODE,
+)
+_CURRENCY_TOKEN_RE = re.compile(
+    r"\b(SAR|SR|USD|EUR|ريال)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_ACCOUNT_SUFFIX_RE = re.compile(
+    r"(?:[*xX•●]+|x{2,}|آخر)\s*(?P<suf>\d{3,6})|(?P<tail>\d{4,6})\s*$",
+)
+
 _GENERIC_ACCOUNT_WORDS = frozenset({
     "account", "حساب", "from", "to", "target", "beneficiary", "reference",
 })
@@ -179,6 +219,8 @@ class PaymentReceiptParsedFields:
     customer_mobile: str = ""
     payer_mobile: str = ""
     amount_confidence: str = "low"
+    source_account_suffix: str = ""
+    dest_account_suffix: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -331,6 +373,21 @@ def _detect_bank(blob: str) -> str:
     return ""
 
 
+def _account_suffix(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    m = _ACCOUNT_SUFFIX_RE.search(text)
+    if m:
+        return str(m.group("suf") or m.group("tail") or "").strip()
+    digits = re.sub(r"\D", "", text)
+    if len(digits) >= 4:
+        return digits[-4:]
+    if len(digits) >= 3:
+        return digits
+    return ""
+
+
 def parse_payment_receipt_fields(
     text: Optional[str],
     *,
@@ -413,6 +470,59 @@ def parse_payment_receipt_fields(
     if m:
         fields.to_account = re.sub(r"\s+", "", m.group("to_acc").strip())
 
+    if not fields.amount:
+        gm = _GENERIC_AMOUNT_LABEL_RE.search(blob)
+        if gm:
+            fields.amount = _clean_amount(gm.group("value"))
+            if fields.amount:
+                fields.amount_confidence = "medium"
+
+    cur = _CURRENCY_TOKEN_RE.search(blob)
+    if cur:
+        token = str(cur.group(1) or "").upper()
+        fields.currency = "SAR" if token in {"SR", "ريال"} else token
+
+    if not fields.from_account_masked:
+        gm = _GENERIC_FROM_RE.search(blob)
+        if gm:
+            fields.from_account_masked = _clean_from_account(gm.group("acc")) or gm.group("acc").strip()[:80]
+    if not fields.to_account:
+        gm = _GENERIC_TO_RE.search(blob)
+        if gm:
+            fields.to_account = re.sub(r"\s+", "", gm.group("acc").strip())
+
+    if not fields.source_account_suffix:
+        um = _UNLABELED_FROM_RE.search(blob)
+        if um:
+            suffix = str(um.group("acc") or "").strip()
+            if suffix:
+                fields.from_account_masked = fields.from_account_masked or suffix
+                fields.source_account_suffix = suffix
+    if not fields.dest_account_suffix:
+        um = _UNLABELED_TO_RE.search(blob)
+        if um:
+            suffix = str(um.group("acc") or "").strip()
+            if suffix:
+                fields.to_account = fields.to_account or suffix
+                fields.dest_account_suffix = suffix
+    if not fields.beneficiary_name:
+        um = _UNLABELED_BENEFICIARY_RE.search(blob)
+        if um:
+            fields.beneficiary_name = _clean_person_name(um.group("name"))
+
+    fields.source_account_suffix = fields.source_account_suffix or _account_suffix(
+        fields.from_account_masked
+    )
+    fields.dest_account_suffix = fields.dest_account_suffix or _account_suffix(
+        fields.to_account
+    )
+    if not fields.dest_account_suffix:
+        iban_m = re.search(r"\bSA\s*\d{2}(?:[\s\-]*\d){20}\b", blob, re.I)
+        if iban_m:
+            compact = re.sub(r"[\s\-]+", "", iban_m.group(0)).upper()
+            fields.to_account = fields.to_account or compact
+            fields.dest_account_suffix = compact[-4:]
+
     fields.reference_number = _parse_reference(blob)
     fields.transfer_datetime = _parse_datetime(blob)
 
@@ -457,11 +567,72 @@ def parsed_fields_to_hints(fields: PaymentReceiptParsedFields) -> Dict[str, str]
         hints["total_charge_amount"] = fields.total_charge_amount
     if fields.amount_confidence in {"high", "medium"}:
         hints["amount_parse_confidence"] = fields.amount_confidence
+    if fields.currency:
+        hints["currency"] = fields.currency
+    if fields.source_account_suffix:
+        hints["source_account_suffix"] = fields.source_account_suffix
+    if fields.dest_account_suffix:
+        hints["dest_account_suffix"] = fields.dest_account_suffix
     return hints
+
+
+@dataclass(frozen=True)
+class TransferTextEvidenceAssessment:
+    sufficient: bool
+    amount_only: bool
+    review_state: str
+    linkage_fields: Tuple[str, ...]
+    fields: PaymentReceiptParsedFields
+
+
+def assess_transfer_text_evidence(
+    text: Optional[str],
+    *,
+    filename: Optional[str] = None,
+) -> TransferTextEvidenceAssessment:
+    """Classify structured transfer text as evidence vs amount-only.
+
+    Sufficient merchant linkage requires at least one of destination
+    suffix, beneficiary, reference, or IBAN — never amount alone.
+    Never marks verified or settled.
+    """
+    fields = parse_payment_receipt_fields(text, filename=filename)
+    linkage: List[str] = []
+    if fields.dest_account_suffix or (fields.to_account and str(fields.to_account).upper().startswith("SA")):
+        linkage.append("destination")
+    if fields.beneficiary_name:
+        linkage.append("beneficiary")
+    if fields.reference_number:
+        linkage.append("reference")
+    amount_present = bool(fields.amount)
+    extras = 0
+    if fields.source_account_suffix:
+        extras += 1
+    if fields.transfer_datetime:
+        extras += 1
+    if fields.currency:
+        extras += 1
+    sufficient = bool(linkage) and (amount_present or extras >= 1)
+    amount_only = bool(amount_present and not linkage)
+    if sufficient:
+        review = "pending_review"
+    elif amount_only:
+        review = "insufficient"
+    else:
+        review = "not_started"
+    return TransferTextEvidenceAssessment(
+        sufficient=sufficient,
+        amount_only=amount_only,
+        review_state=review,
+        linkage_fields=tuple(linkage),
+        fields=fields,
+    )
 
 
 __all__ = [
     "PaymentReceiptParsedFields",
+    "TransferTextEvidenceAssessment",
+    "assess_transfer_text_evidence",
     "parse_payment_receipt_fields",
     "parsed_fields_to_hints",
 ]

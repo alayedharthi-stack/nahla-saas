@@ -666,6 +666,80 @@ def compose_payment_claim_ack(
     return base
 
 
+def _ingest_structured_transfer_text_evidence(
+    *,
+    inbound_text: str,
+    assessment: Any,
+    summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist transfer text as pending-review evidence, never settlement."""
+    from core.reply_instruction import (  # noqa: PLC0415
+        CONSTRAINT_NO_PAYMENT_CONFIRM,
+        CONSTRAINT_NO_SHIPPING_PROMISE,
+        FORBIDDEN_PAYMENT_CONFIRM_MARKERS,
+        PATH_PAYMENT_EVIDENCE_SOFT_ACK,
+        ReplyInstruction,
+        attach_instruction_to_decision,
+    )
+
+    fields = getattr(assessment, "fields", None)
+    field_dict = fields.to_dict() if fields is not None and hasattr(fields, "to_dict") else {}
+    state_patch: Dict[str, Any] = {
+        "payment_method": "bank_transfer",
+        "payment_evidence_received": True,
+        "payment_receipt_received": False,
+        "payment_review_state": "pending_review",
+        "payment_verified": False,
+        "payment_settled": False,
+        "payment_confirmed": False,
+        "payment_verification_status": "pending",
+        "awaiting_payment_receipt": False,
+        "order_status": "pending_payment",
+        "payment_submission_type": "text_evidence",
+        "payment_evidence_metadata": {
+            "source": "structured_transfer_text",
+            "linkage_fields": list(getattr(assessment, "linkage_fields", ()) or ()),
+            "parsed_fields": field_dict,
+        },
+    }
+    instruction = ReplyInstruction(
+        path=PATH_PAYMENT_EVIDENCE_SOFT_ACK,
+        decision_kind="payment_text_evidence_pending_review",
+        facts={
+            "payment_method": "bank_transfer",
+            "payment_evidence_received": True,
+            "payment_review_state": "pending_review",
+            "payment_verified": False,
+            "payment_settled": False,
+            "payment_claim": False,
+            "selected_product": (summary or {}).get("selected_product"),
+        },
+        constraints=(
+            CONSTRAINT_NO_PAYMENT_CONFIRM,
+            CONSTRAINT_NO_SHIPPING_PROMISE,
+        ),
+        forbidden_claims=FORBIDDEN_PAYMENT_CONFIRM_MARKERS,
+        legacy_copy="",
+        decision_owner="core.payment_intent.text_evidence",
+        inbound_text=inbound_text,
+    )
+    logger.info(
+        "[PAYMENT_INTENT] structured transfer text ingested as pending evidence "
+        "linkage=%s",
+        list(getattr(assessment, "linkage_fields", ()) or ()),
+    )
+    return attach_instruction_to_decision(
+        {
+            "reply_text": "",
+            "state_patch": state_patch,
+            "deterministic_path": "payment_text_evidence_pending_review",
+            "payment_verified": False,
+            "payment_settled": False,
+        },
+        instruction,
+    )
+
+
 def maybe_handle_payment_claim(
     db: Any,
     *,
@@ -697,6 +771,99 @@ def maybe_handle_payment_claim(
     """
     if has_attached_media:
         return None
+
+    # Method choice and structured transfer text must be classified
+    # before the short-claim detector (structured SMS often exceeds
+    # the 240-char confirmation cap).
+    try:
+        from core.merchant_payment_methods import (  # noqa: PLC0415
+            inbound_is_payment_method_choice,
+            load_merchant_payment_methods,
+        )
+        from core.order_flow import _focus_summary, _load_brain_state  # noqa: PLC0415
+        from core.payment_receipt_field_parser import (  # noqa: PLC0415
+            assess_transfer_text_evidence,
+        )
+
+        _conv_early, bs_early = _load_brain_state(
+            db, tenant_id=tenant_id, phone=phone,
+        )
+        s_early = _focus_summary(bs_early)
+        op_early = dict(
+            (bs_early or {}).get("order_prep")
+            or (bs_early or {}).get("order_preparation")
+            or {}
+        )
+        methods_early = load_merchant_payment_methods(db, tenant_id)
+        method_choice = inbound_is_payment_method_choice(inbound_text, methods_early)
+        already_has_method = bool(
+            str(s_early.get("payment_method") or op_early.get("payment_method") or "").strip()
+        )
+        if method_choice and not already_has_method:
+            logger.info(
+                "[PAYMENT_INTENT] skip — checkout method choice not a claim "
+                "tenant=%s phone=*%s method=%s",
+                tenant_id, (phone or "")[-4:], method_choice,
+            )
+            return None
+        assessment = assess_transfer_text_evidence(inbound_text)
+        checkout_active = bool(
+            op_early.get("product_id")
+            or op_early.get("line_items")
+            or s_early.get("selected_product")
+            or already_has_method
+            or op_early.get("awaiting_payment_receipt")
+        )
+        in_transfer_context = bool(
+            already_has_method
+            or op_early.get("awaiting_payment_receipt")
+            or str(s_early.get("order_status") or "").lower() in {
+                "pending_payment", "awaiting_receipt", "awaiting_payment",
+            }
+        )
+        if assessment.sufficient and checkout_active:
+            return _ingest_structured_transfer_text_evidence(
+                inbound_text=inbound_text,
+                assessment=assessment,
+                summary=s_early,
+            )
+        if assessment.amount_only and in_transfer_context:
+            logger.info(
+                "[PAYMENT_INTENT] amount-only transfer text insufficient "
+                "tenant=%s phone=*%s",
+                tenant_id, (phone or "")[-4:],
+            )
+            from core.reply_instruction import (  # noqa: PLC0415
+                attach_instruction_to_decision,
+                build_payment_evidence_instruction,
+            )
+
+            return attach_instruction_to_decision(
+                {
+                    "reply_text": "",
+                    "state_patch": {
+                        "payment_verified": False,
+                        "payment_settled": False,
+                        "payment_confirmed": False,
+                    },
+                    "deterministic_path": "payment_evidence_insufficient",
+                    "evidence_insufficient": True,
+                },
+                build_payment_evidence_instruction(
+                    pe_status="needs_confirmation",
+                    pe_reason="amount_without_merchant_linkage",
+                    legacy_copy="",
+                    summary=s_early,
+                    inbound_text=inbound_text,
+                ),
+            )
+    except Exception as _early_exc:  # noqa: BLE001
+        logger.warning(
+            "[PAYMENT_INTENT] early method/evidence probe failed tenant=%s err=%s",
+            tenant_id, _early_exc,
+            extra={"event": "PAYMENT_INTENT_EARLY_PROBE_FAILED"},
+        )
+
     if not has_explicit_payment_receipt_evidence(
         inbound_text,
         has_attached_media=False,
@@ -831,9 +998,10 @@ def maybe_handle_payment_claim(
             trigger="text_claim",
         )
     except Exception as _wa_exc:  # noqa: BLE001
-        logger.debug(
+        logger.warning(
             "[PAYMENT_INTENT] wa payment submission sync failed tenant=%s err=%s",
             tenant_id, _wa_exc,
+            extra={"event": "PAYMENT_INTENT_WA_SUBMISSION_SYNC_FAILED"},
         )
 
     # ── Brain-driven text-claim policy (May 2026 #48) ────────────────

@@ -166,6 +166,14 @@ def reproject_address_ingest_decision_after_persist(
     next_goal = next_goal_for_missing_field(nxt)
     known_facts["next_missing_field"] = nxt or "none"
     known_facts["next_goal"] = next_goal
+    known_facts["address_ack_scope"] = "delivery_only"
+    for _pay_key in list(known_facts.keys()):
+        if (
+            str(_pay_key).startswith("payment_")
+            or str(_pay_key).startswith("awaiting_payment")
+            or str(_pay_key) in {"order_status", "payment_receipt_received"}
+        ):
+            known_facts.pop(_pay_key, None)
     if _prep_str(op_projected, "city"):
         known_facts["checkout_city"] = _prep_str(op_projected, "city")
     if _prep_str(op_projected, "district"):
@@ -178,6 +186,82 @@ def reproject_address_ingest_decision_after_persist(
         ) or _prep_str(op_projected, "delivery_address_url")
 
     from core.merchant_payment_methods import load_merchant_payment_methods  # noqa: PLC0415
+    from core.order_payment_policy import PAYMENT_METHOD_BANK_TRANSFER  # noqa: PLC0415
+    from core.wa_payment_submission import (  # noqa: PLC0415
+        build_verified_destination_state_patch,
+        checkout_may_present_payment_destination,
+        resolve_verified_payment_destinations,
+    )
+
+    method = _prep_str(op_projected, "payment_method")
+    dest_now = op_projected.get("payment_destination") or {}
+    dest_already = bool(
+        isinstance(dest_now, dict) and (dest_now.get("iban") or dest_now.get("candidates"))
+    )
+    evidence_already = bool(
+        op_projected.get("payment_evidence_received")
+        or op_projected.get("payment_receipt_received")
+    )
+    if (
+        checkout_may_present_payment_destination(missing)
+        and method == PAYMENT_METHOD_BANK_TRANSFER
+        and not dest_already
+        and not evidence_already
+    ):
+        destinations = resolve_verified_payment_destinations(
+            db, tenant_id=int(tenant_id),
+        )
+        dest_patch = build_verified_destination_state_patch(
+            destinations, tenant_id=int(tenant_id),
+        )
+        if dest_patch.get("payment_destination"):
+            from core.order_flow import apply_state_patch  # noqa: PLC0415
+
+            apply_state_patch(
+                db,
+                tenant_id=int(tenant_id),
+                phone=str(phone or ""),
+                state_patch=dest_patch,
+            )
+            from modules.ai.brain.postprocess.payment_credential_guard import (  # noqa: PLC0415
+                compose_verified_bank_transfer_block,
+            )
+            from core.reply_instruction import build_payment_method_instruction  # noqa: PLC0415
+
+            reply_text = compose_verified_bank_transfer_block(
+                db, tenant_id=int(tenant_id),
+            )
+            instruction = build_payment_method_instruction(
+                legacy_copy=reply_text,
+                payment_method=PAYMENT_METHOD_BANK_TRANSFER,
+                summary=summary,
+                inbound_text=str(inbound_text or ""),
+                destination_available=True,
+                payment_destination=dest_patch.get("payment_destination") or {},
+                missing_fields=list(missing),
+                next_missing_field=nxt or "none",
+            )
+            logger.info(
+                "[ADDRESS_INGEST_POST_PERSIST] presenting verified destination "
+                "after address complete tenant=%s",
+                tenant_id,
+            )
+            return attach_instruction_to_decision(
+                {
+                    "reply_text": reply_text,
+                    "summary": summary,
+                    "state_patch": dest_patch,
+                    "deterministic_path": "payment_method_ack",
+                    "post_persist_reprojected": True,
+                    "missing_fields": list(missing),
+                    "next_missing_field": nxt,
+                    "next_goal": next_goal,
+                    "known_facts": known_facts,
+                    "payment_claim": False,
+                    "payment_submitted": False,
+                },
+                instruction,
+            )
 
     payment_methods = load_merchant_payment_methods(db, int(tenant_id))
     reply_text = compose_address_reply(

@@ -23,6 +23,12 @@ from services.coupon_generator import (
     _get_ai_policy,
     _get_coupon_dashboard_block,
 )
+from services.coupon_salla_provider_state import (
+    SALLA_ADAPTER_AVAILABLE,
+    SALLA_CONFIGURED_BUT_UNAVAILABLE,
+    SALLA_NOT_CONFIGURED,
+    classify_salla_coupon_provider_state,
+)
 from services.coupon_level_contract import resolve_coupon_level_for_order_count
 from services.customer_intelligence import CustomerIntelligenceService
 from services.order_countability_policy import is_countable_order
@@ -561,6 +567,12 @@ async def issue_customer_coupon(
                 count.customer_id,
                 for_channel=channel,
             )
+            if coupon is None:
+                coupon = generator.pick_native_ai_coupon_for_level(
+                    resolved_level,
+                    count.customer_id,
+                    for_channel=channel,
+                )
 
         if coupon is None and pool_mode == POOL_MODE_POOL_ONLY:
             return _empty_result(
@@ -573,20 +585,46 @@ async def issue_customer_coupon(
             )
 
         if coupon is None:
+            provider_state = classify_salla_coupon_provider_state(db, tenant_id)
+            if provider_state == SALLA_NOT_CONFIGURED:
+                return _empty_result(
+                    customer_id=count.customer_id,
+                    countable_orders=count.countable_orders,
+                    resolved_level=resolved_level,
+                    policy_allowed=True,
+                    reason_code=REASON_POOL_EMPTY,
+                    count=count,
+                )
+            if provider_state == SALLA_CONFIGURED_BUT_UNAVAILABLE:
+                return _empty_result(
+                    customer_id=count.customer_id,
+                    countable_orders=count.countable_orders,
+                    resolved_level=resolved_level,
+                    policy_allowed=True,
+                    reason_code=REASON_SALLA_UNAVAILABLE,
+                    count=count,
+                )
+            if provider_state != SALLA_ADAPTER_AVAILABLE:
+                return _empty_result(
+                    customer_id=count.customer_id,
+                    countable_orders=count.countable_orders,
+                    resolved_level=resolved_level,
+                    policy_allowed=True,
+                    reason_code=REASON_POOL_EMPTY,
+                    count=count,
+                )
             coupon = await generator.create_on_demand_for_level(
                 resolved_level,
                 customer_id=count.customer_id,
                 for_channel=channel,
             )
             if coupon is None:
-                adapter = generator._get_adapter()
-                reason = REASON_SALLA_UNAVAILABLE if adapter is None else REASON_POOL_EMPTY
                 return _empty_result(
                     customer_id=count.customer_id,
                     countable_orders=count.countable_orders,
                     resolved_level=resolved_level,
                     policy_allowed=True,
-                    reason_code=reason,
+                    reason_code=REASON_POOL_EMPTY,
                     count=count,
                 )
 
