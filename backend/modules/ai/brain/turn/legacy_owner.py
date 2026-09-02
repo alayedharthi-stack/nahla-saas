@@ -36,6 +36,15 @@ from .contract import (
     OWNER_TRACKING,
 )
 
+# Exact DecisionEngine Order Support topics. Must be classified before the
+# generic substring checks — ``order_history`` contains "order" and
+# ``existing_order_support`` contains "support".
+_ORDER_SUPPORT_TOPICS = frozenset({
+    "order_history",
+    "latest_order_summary",
+    "existing_order_support",
+})
+
 _ACTION_OWNER_MAP = {
     ACTION_GREET: OWNER_PERSONA_SOCIAL,
     ACTION_SOCIAL_REPLY: OWNER_PERSONA_SOCIAL,
@@ -57,6 +66,8 @@ _ACTION_OWNER_MAP = {
 def _llm_reply_owner(decision: Any) -> str:
     args = dict(getattr(decision, "args", None) or {})
     topic = str(args.get("topic") or args.get("response_goal") or "").lower()
+    if topic in _ORDER_SUPPORT_TOPICS:
+        return OWNER_TRACKING
     if "complaint" in topic or "refund" in topic or "support" in topic:
         return OWNER_SUPPORT
     if "payment" in topic or "receipt" in topic:
