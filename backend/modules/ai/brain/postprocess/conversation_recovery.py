@@ -234,12 +234,14 @@ def try_guard_recovery_reply(
                         _block_product = should_block_bare_start_product_prompt(
                             order_prep=_prep,
                             merchant_sales_channels=_sales,
+                            state=state,
                         )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — should_block error must not invent WhatsApp copy
                         return _pending
                 else:
                     _block_product = should_block_bare_start_product_prompt(
                         order_prep=_prep,
+                        state=state,
                     )
                 if _block_product:
                     return _pending

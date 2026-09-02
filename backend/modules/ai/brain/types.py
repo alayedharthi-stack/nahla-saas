@@ -261,6 +261,10 @@ class OrderPreparationState:
     checkout_channel: str = ""
     awaiting_checkout_channel: bool = False
     offered_purchase_channel_ids: List[str] = field(default_factory=list)
+    # Trusted lifecycle: True only after a verified chrome/structured pick
+    # that is still in its execution phase (no timeout heuristic).
+    purchase_channel_execution_active: bool = False
+    purchase_channel_selection_source: str = ""
     catalog_line_items_authoritative: bool = False
     product_mentions: List[Dict[str, Any]] = field(default_factory=list)
     # Gift / recipient delivery (P0 gift-order gate)
@@ -348,6 +352,12 @@ class OrderPreparationState:
             "checkout_channel": str(self.checkout_channel or ""),
             "awaiting_checkout_channel": bool(self.awaiting_checkout_channel),
             "offered_purchase_channel_ids": list(self.offered_purchase_channel_ids or []),
+            "purchase_channel_execution_active": bool(
+                self.purchase_channel_execution_active
+            ),
+            "purchase_channel_selection_source": str(
+                self.purchase_channel_selection_source or ""
+            ),
             "catalog_line_items_authoritative": bool(self.catalog_line_items_authoritative),
             "product_mentions": list(self.product_mentions or []),
             "recipient_name": str(self.recipient_name or ""),
@@ -438,6 +448,12 @@ class OrderPreparationState:
                 for x in (raw.get("offered_purchase_channel_ids") or [])
                 if str(x).strip()
             ],
+            purchase_channel_execution_active=bool(
+                raw.get("purchase_channel_execution_active", False)
+            ),
+            purchase_channel_selection_source=str(
+                raw.get("purchase_channel_selection_source", "") or ""
+            ),
             catalog_line_items_authoritative=bool(
                 raw.get("catalog_line_items_authoritative", False)
             ),

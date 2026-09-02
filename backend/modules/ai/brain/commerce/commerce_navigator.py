@@ -622,10 +622,13 @@ def resolve_commerce_navigator(
         )
     if channel is None and not awaiting_channel:
         channel = _selected_channel(msg)
+    whatsapp_committed = _whatsapp_checkout_committed(prep)
     genuine_purchase_entry = False
+    leftover_whatsapp_owns = False
     try:
         from .checkout_route_owner import (  # noqa: PLC0415
             is_genuine_purchase_channel_entry,
+            purchase_channel_blocks_new_entry,
         )
 
         genuine_purchase_entry = is_genuine_purchase_channel_entry(
@@ -634,15 +637,23 @@ def resolve_commerce_navigator(
             state=state,
             inbound_metadata=inbound_metadata,
         )
+        leftover_whatsapp_owns = bool(
+            whatsapp_committed
+            and purchase_channel_blocks_new_entry(
+                order_prep=order_prep,
+                state=state,
+                stage=stage,
+            )
+        )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — genuine-entry probe must not block navigator
         genuine_purchase_entry = False
+        leftover_whatsapp_owns = bool(whatsapp_committed)
     if (
         channel is None
         and genuine_purchase_entry
         and len(channels) == 1
     ):
         channel = channels[0]
-    whatsapp_committed = _whatsapp_checkout_committed(prep)
     browse_in_checkout = bool(_BROWSE_SIGNAL_RE.search(_norm(msg)))
     _address_turn = False
     try:
@@ -674,7 +685,7 @@ def resolve_commerce_navigator(
     active_wa = (
         catalog_order
         or channel == "whatsapp_quick_order"
-        or whatsapp_committed
+        or leftover_whatsapp_owns
         or (
             channel is None
             and _is_active_whatsapp_checkout(

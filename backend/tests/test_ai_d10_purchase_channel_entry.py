@@ -516,7 +516,11 @@ class TestControlGHIExplicitCommitment:
         assert decision.args.get("topic") != "purchase_channel_selection"
 
     def test_persisted_channel_commitment_is_not_replayed(self) -> None:
-        prep = OrderPreparationState(checkout_channel="whatsapp_fast")
+        prep = OrderPreparationState(
+            checkout_channel="whatsapp_fast",
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source="verified_button_payload",
+        )
         assert purchase_channel_committed(prep) is True
         owner = resolve_purchase_channel_entry_owner(
             message=MSG_LIVE,
@@ -782,10 +786,27 @@ class TestStaleShellControlGValidDraft:
 
 
 class TestStaleShellControlHCommittedChannel:
-    def test_committed_channel_does_not_replay_selector(self) -> None:
+    def test_channel_only_leftover_reopens_selector(self) -> None:
         state = _stale_ordering_shell()
         state.order_prep.checkout_channel = "whatsapp_fast"
-        assert _actionable(state) is True
+        assert _actionable(state) is False
+        decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        nav = resolve_commerce_navigator(
+            message=MSG_LIVE,
+            intent_name="start_order",
+            stage=state.stage,
+            order_prep=state.order_prep,
+            state=state,
+            merchant_sales_channels=_two_channel_sales(),
+        )
+        assert nav.stage == "purchase_channel_selection"
+
+    def test_verified_execution_does_not_replay_selector(self) -> None:
+        state = _stale_ordering_shell()
+        state.order_prep.checkout_channel = "whatsapp_fast"
+        state.order_prep.purchase_channel_execution_active = True
+        state.order_prep.purchase_channel_selection_source = "verified_button_payload"
         decision = _decide(_stale_shell_ctx(MSG_LIVE, intent_name="start_order", state=state))
         assert decision.args.get("topic") != "purchase_channel_selection"
         nav = resolve_commerce_navigator(
