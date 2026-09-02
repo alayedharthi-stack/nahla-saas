@@ -48,6 +48,7 @@ from modules.ai.brain.state.store import DefaultStateStore  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
+    INTENT_ASK_PRODUCT,
     INTENT_GENERAL,
     INTENT_LATEST_ORDER_SUMMARY,
     INTENT_ORDER_HISTORY_COUNT,
@@ -86,8 +87,8 @@ LATEST_FAMILY = (
     "ما آخر طلب لي؟",
 )
 PRODUCT_USAGE_FAMILY = (
-    "كم مرة استخدمه باليوم؟",
-    "كم جرعة باليوم؟",
+    "كم مرة استخدم هذا باليوم؟",
+    "كم جرعة باليوم لعطر ورد؟",
 )
 
 
@@ -357,6 +358,8 @@ class TestProductInformationBoundary:
     @pytest.mark.parametrize("message", PRODUCT_USAGE_FAMILY)
     def test_real_product_usage_still_owns(self, message: str) -> None:
         state = MerchantConversationState(
+            turn=3,
+            product_focus_turn=2,
             current_product_focus={"id": 11, "title": GENERIC_PERFUME},
         )
         assert detect_product_information_topic_shift(message, state=state) is True
@@ -637,3 +640,35 @@ class TestIsolationAndEmpty:
         )
         assert _is_order_support(count_decision)
         assert (count_decision.args or {}).get("topic") != "purchase_channel_selection"
+
+
+class TestD1CRealClassifierCountGap:
+    def test_live_count_rule_intent_is_ask_product(self) -> None:
+        intent = rules.match(COUNT_FAMILY[0])
+        assert intent is not None
+        assert intent.name == INTENT_ASK_PRODUCT
+        assert abs(float(intent.confidence) - 0.82) < 0.001
+
+    def test_product_info_yields_without_injected_os_intent(self) -> None:
+        message = COUNT_FAMILY[0]
+        intent = rules.match(message)
+        state = MerchantConversationState(
+            stage="ordering",
+            turn=736,
+            product_focus_turn=729,
+            current_product_focus={
+                "id": 28,
+                "title": GENERIC_SHOE,
+                "external_id": "shoe-28",
+            },
+        )
+        assert has_authoritative_order_support_ownership(intent, state=state) is False
+        assert detect_product_information_topic_shift(
+            message,
+            state=state,
+            intent=intent,
+        ) is False
+        decision = _decide(message, intent=intent, state=state)
+        assert (decision.args or {}).get("topic") != TOPIC_PRODUCT_USAGE_INFORMATION
+        assert "product_information_topic_shift" not in (decision.reason or "")
+

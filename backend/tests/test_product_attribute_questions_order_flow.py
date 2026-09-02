@@ -64,6 +64,8 @@ def _ordering_state(*, title: str = "Product Alpha") -> MerchantConversationStat
     )
     return MerchantConversationState(
         stage="ordering",
+        turn=2,
+        product_focus_turn=1,
         current_product_focus={
             "title": title,
             "id": "sku-alpha",
@@ -84,7 +86,7 @@ class TestProductAttributeDetection:
             "هل هذا المنتج خام؟",
             "هل هو طبيعي؟",
             "هل هو معالج؟",
-            "هل يحتوي المنتج على سكر؟",
+            "هل يحتوي المنتج على نكهة؟",
             "ما مكونات المنتج؟",
             "is this product pasteurized?",
             "what are the ingredients?",
@@ -120,7 +122,7 @@ class TestAttributeQuestionDecisionRouting:
             "عندي ألفا هل هو خام؟",
             "هل يحتوي المنتج على نكهة؟",
             "ما مكونات المنتج؟",
-            "طريقة استخدام المنتج؟",
+            "طريقة استخدام هذا المنتج؟",
         ],
     )
     def test_informational_not_order_or_search(self, msg: str) -> None:

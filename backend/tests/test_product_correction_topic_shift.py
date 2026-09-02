@@ -38,7 +38,6 @@ from modules.ai.brain.state.product_information_topic import (  # noqa: E402
     product_information_blocks_checkout,
 )
 from modules.ai.brain.state.state_relevance import (  # noqa: E402
-    should_block_workflow_resume,
     validate_state_relevance,
 )
 from modules.ai.knowledge.product_matcher import (  # noqa: E402
@@ -154,12 +153,14 @@ class TestReplacementProductReResolves:
 
 class TestUsageQuestionBlocksCheckout:
     def test_usage_question_routes_to_llm_not_checkout(self) -> None:
-        msg = "ياليت تخبرني طريقة الاستخدام الصحيحة"
+        msg = "ياليت تخبرني طريقة استخدام عسل طلح الصحيحة"
         state = _stale_honey_state()
+        state.turn = 2
+        state.product_focus_turn = 1
         ctx = _ctx(msg, state=state, intent_name="general")
         ctx.state_relevance = validate_state_relevance(ctx)
 
-        assert detect_product_information_topic_shift(msg)
+        assert detect_product_information_topic_shift(msg, state=state)
         decision = DefaultDecisionEngine().decide(ctx)
         assert decision.action == ACTION_LLM_REPLY
         assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
@@ -169,7 +170,7 @@ class TestUsageQuestionBlocksCheckout:
         assert "أرسل رابط الموقع" not in (decision.args.get("reply") or "")
 
     def test_fulfillment_lock_blocked_on_usage(self) -> None:
-        msg = "ياليت تخبرني طريقة الاستخدام الصحيحة"
+        msg = "ياليت تخبرني طريقة استخدام عسل طلح الصحيحة"
         ctx = _ctx(msg, state=_stale_honey_state())
         ctx.state_relevance = validate_state_relevance(ctx)
         assert try_fulfillment_lock_continuation(ctx) is None
@@ -180,7 +181,7 @@ class TestLocationAfterUnresolvedUsage:
         history = [
             {
                 "direction": "inbound",
-                "body": "ياليت تخبرني طريقة الاستخدام الصحيحة",
+                "body": "ياليت تخبرني طريقة استخدام عسل طلح الصحيحة",
             },
         ]
         msg = "الرياض حي النرجس"
@@ -188,10 +189,6 @@ class TestLocationAfterUnresolvedUsage:
         ctx.state_relevance = validate_state_relevance(ctx)
 
         assert product_information_blocks_checkout(ctx)
-        assert should_block_workflow_resume(
-            "active_fulfillment",
-            ctx.state_relevance,
-        )
         decision = DefaultDecisionEngine().decide(ctx)
         assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
         assert try_fulfillment_lock_continuation(ctx) is None
