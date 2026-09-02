@@ -1732,11 +1732,15 @@ def maybe_handle_payment_method_selection_inbound(
     phone: str,
     inbound_text: str,
 ) -> Optional[Dict[str, Any]]:
-    """Validate and persist customer payment method choice for WA checkout."""
+    """Validate and persist customer payment method choice for WA checkout.
+
+    Owns method selection when checkout still needs ``payment_method``.
+    Must not apply a payment *claim* / submission patch.
+    """
     from core.merchant_payment_methods import (  # noqa: PLC0415
         build_payment_method_state_patch,
+        inbound_is_payment_method_choice,
         load_merchant_payment_methods,
-        resolve_indexed_choice,
         validate_payment_method_choice,
     )
     from core.order_payment_policy import (  # noqa: PLC0415
@@ -1744,14 +1748,18 @@ def maybe_handle_payment_method_selection_inbound(
         PAYMENT_METHOD_CASH_ON_DELIVERY,
         PAYMENT_METHOD_MOYASAR,
     )
-    from core.wa_order_lifecycle import compute_wa_missing_fields  # noqa: PLC0415
+    from modules.ai.order_flow_v2.missing_fields import (  # noqa: PLC0415
+        compute_v2_missing_fields,
+        next_missing_field,
+    )
+    from modules.ai.order_flow_v2.state import has_payment_method  # noqa: PLC0415
 
     text = str(inbound_text or "").strip()
     if not text or len(text) > 120:
         return None
 
     methods = load_merchant_payment_methods(db, tenant_id)
-    chosen = resolve_indexed_choice(text, methods)
+    chosen = inbound_is_payment_method_choice(text, methods)
     if not chosen:
         return None
 
@@ -1761,9 +1769,22 @@ def maybe_handle_payment_method_selection_inbound(
 
     op = dict(bs.get("order_prep") or bs.get("order_preparation") or {})
     summary = _focus_summary(bs)
-    line_items = list(op.get("line_items") or bs.get("cart_items") or [])
-    missing = compute_wa_missing_fields(op, brain_state=bs, line_items=line_items)
-    if missing:
+    if has_payment_method(op) or str(summary.get("payment_method") or "").strip():
+        return None
+
+    missing = compute_v2_missing_fields(
+        op,
+        brain_state=bs,
+        whatsapp_phone=str(phone or ""),
+        db=db,
+        tenant_id=int(tenant_id),
+        conversation=_conv,
+    )
+    nxt = next_missing_field(missing) or ""
+    checkout_expects_method = (
+        nxt == "payment_method" or "payment_method" in (missing or [])
+    )
+    if not checkout_expects_method:
         return None
 
     rejection = validate_payment_method_choice(chosen, methods)
@@ -1775,11 +1796,47 @@ def maybe_handle_payment_method_selection_inbound(
         }
 
     state_patch = build_payment_method_state_patch(chosen)
-    if chosen == PAYMENT_METHOD_BANK_TRANSFER:
-        reply_text = (
-            "تم اختيار التحويل البنكي ✅\n"
-            "بعد التحويل، أرسلي صورة الإيصال أو إثبات الدفع."
+    state_patch["payment_claim_unverified"] = False
+    state_patch["payment_evidence_received"] = False
+    state_patch["payment_verified"] = False
+    state_patch["payment_settled"] = False
+    state_patch["payment_review_state"] = "not_started"
+
+    remaining_missing = [slot for slot in (missing or []) if slot != "payment_method"]
+    next_after_method = next_missing_field(remaining_missing) or ""
+
+    destination_available = False
+    destinations: list = []
+    from core.wa_payment_submission import (  # noqa: PLC0415
+        build_verified_destination_state_patch,
+        checkout_may_present_payment_destination,
+        resolve_verified_payment_destinations,
+    )
+
+    may_present_destination = checkout_may_present_payment_destination(missing)
+    if chosen == PAYMENT_METHOD_BANK_TRANSFER and may_present_destination:
+        destinations = resolve_verified_payment_destinations(
+            db, tenant_id=int(tenant_id),
         )
+        dest_patch = build_verified_destination_state_patch(
+            destinations, tenant_id=int(tenant_id),
+        )
+        state_patch.update(dest_patch)
+        destination_available = bool(dest_patch.get("payment_destination"))
+    elif chosen == PAYMENT_METHOD_BANK_TRANSFER:
+        state_patch["awaiting_payment_receipt"] = False
+        state_patch.pop("payment_destination", None)
+
+    if chosen == PAYMENT_METHOD_BANK_TRANSFER and destination_available:
+        from modules.ai.brain.postprocess.payment_credential_guard import (  # noqa: PLC0415
+            compose_verified_bank_transfer_block,
+        )
+
+        reply_text = compose_verified_bank_transfer_block(
+            db, tenant_id=int(tenant_id),
+        )
+    elif chosen == PAYMENT_METHOD_BANK_TRANSFER:
+        reply_text = "تم اختيار التحويل البنكي ✅"
     elif chosen == PAYMENT_METHOD_CASH_ON_DELIVERY:
         reply_text = "تم اختيار الدفع عند الاستلام ✅"
     elif chosen == PAYMENT_METHOD_MOYASAR:
@@ -1791,10 +1848,15 @@ def maybe_handle_payment_method_selection_inbound(
         reply_text = "تم تسجيل طريقة الدفع ✅"
 
     logger.info(
-        "[ORDER_FLOW_STATE] payment_method short-circuit tenant=%s phone=*%s method=%s",
+        "[ORDER_FLOW_STATE] payment_method short-circuit tenant=%s phone=*%s "
+        "method=%s destination_available=%s address_complete=%s "
+        "next_missing=%s claim=false submitted=false",
         tenant_id,
         (phone or "")[-4:],
         chosen,
+        destination_available,
+        may_present_destination,
+        next_after_method or "none",
     )
     from core.reply_instruction import (  # noqa: PLC0415
         attach_instruction_to_decision,
@@ -1807,12 +1869,20 @@ def maybe_handle_payment_method_selection_inbound(
             "summary":     summary,
             "state_patch": state_patch,
             "deterministic_path": "payment_method_ack",
+            "payment_claim": False,
+            "payment_submitted": False,
+            "missing_fields": list(remaining_missing),
+            "next_missing_field": next_after_method or None,
         },
         build_payment_method_instruction(
             legacy_copy=reply_text,
             payment_method=str(chosen or ""),
             summary=summary,
             inbound_text=text,
+            destination_available=destination_available,
+            payment_destination=state_patch.get("payment_destination") or {},
+            missing_fields=remaining_missing,
+            next_missing_field=next_after_method or "none",
         ),
     )
 

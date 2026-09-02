@@ -114,7 +114,9 @@ def test_create_coupon_sets_manual_source_type(monkeypatch):
 
     assert row.source_type == "manual"
     assert row.extra_metadata["source"] == "dashboard"
+    assert row.extra_metadata.get("ai_allocatable") is False
     assert result["source_type"] == "manual"
+    assert result["ai_allocatable"] is False
     assert result["sync_badge"] == "not_pushed"
 
 
@@ -157,6 +159,7 @@ def test_list_coupons_includes_manual_in_source_counts(monkeypatch):
     assert len(manual_rows) == 1
     assert manual_rows[0]["code"] == "MANUAL01"
     assert manual_rows[0]["sync_badge"] == "not_pushed"
+    assert manual_rows[0]["ai_allocatable"] is False
 
 
 def test_sync_salla_endpoint_imports_coupon(monkeypatch):
@@ -325,3 +328,113 @@ def test_cross_tenant_isolation_for_manual_coupon():
     assert row_a.source_type == "manual"
     assert row_b.source_type == "imported"
     assert row_a.id != row_b.id
+
+
+def test_create_coupon_defaults_not_ai_allocatable(monkeypatch):
+    from backend.routers import coupons as coupons_router  # noqa: E402
+    from backend.routers.coupons import CouponCreateIn, create_coupon  # noqa: E402
+
+    db, tenant_id = _make_db()
+    monkeypatch.setattr(coupons_router, "resolve_tenant_id", lambda _r: tenant_id)
+    monkeypatch.setattr(coupons_router, "get_or_create_tenant", lambda _db, _tid: None)
+    asyncio.run(create_coupon(
+        CouponCreateIn(code="GENPROMO", type="percentage", value="6", limit=1),
+        request=None,
+        db=db,
+    ))
+    row = db.query(Coupon).filter_by(code="GENPROMO").one()
+    assert row.extra_metadata.get("ai_allocatable") is False
+    assert row.coupon_level is None
+
+
+def test_create_native_ai_coupon_requires_level_and_single_use(monkeypatch):
+    from fastapi import HTTPException  # noqa: E402
+    from backend.routers import coupons as coupons_router  # noqa: E402
+    from backend.routers.coupons import CouponCreateIn, create_coupon  # noqa: E402
+    import pytest  # noqa: E402
+
+    db, tenant_id = _make_db()
+    monkeypatch.setattr(coupons_router, "resolve_tenant_id", lambda _r: tenant_id)
+    monkeypatch.setattr(coupons_router, "get_or_create_tenant", lambda _db, _tid: None)
+    with pytest.raises(HTTPException) as missing_level:
+        asyncio.run(create_coupon(
+            CouponCreateIn(
+                code="AI1",
+                type="percentage",
+                value="6",
+                ai_allocatable=True,
+                limit=1,
+            ),
+            request=None,
+            db=db,
+        ))
+    assert missing_level.value.status_code == 400
+
+    with pytest.raises(HTTPException) as bad_limit:
+        asyncio.run(create_coupon(
+            CouponCreateIn(
+                code="AI2",
+                type="percentage",
+                value="6",
+                ai_allocatable=True,
+                coupon_level="bronze",
+                allocation_channel="ai",
+                limit=0,
+            ),
+            request=None,
+            db=db,
+        ))
+    assert bad_limit.value.status_code == 400
+
+    result = asyncio.run(create_coupon(
+        CouponCreateIn(
+            code="AI3",
+            type="percentage",
+            value="6",
+            ai_allocatable=True,
+            coupon_level="bronze",
+            allocation_channel="ai",
+            limit=1,
+        ),
+        request=None,
+        db=db,
+    ))
+    row = db.query(Coupon).filter_by(code="AI3").one()
+    assert result["ai_allocatable"] is True
+    assert row.coupon_level == "bronze"
+    assert row.allocation_channel == "ai"
+    assert row.extra_metadata["ai_allocatable"] is True
+
+
+def test_patch_coupon_enables_native_ai_opt_in(monkeypatch):
+    from backend.routers import coupons as coupons_router  # noqa: E402
+    from backend.routers.coupons import CouponPatchIn, patch_coupon  # noqa: E402
+
+    db, tenant_id = _make_db()
+    coupon = Coupon(
+        tenant_id=tenant_id,
+        code="EDITME",
+        discount_type="percentage",
+        discount_value="6",
+        source_type="manual",
+        extra_metadata={"source": "dashboard", "usage_limit": 1, "active": True},
+    )
+    db.add(coupon)
+    db.commit()
+    db.refresh(coupon)
+    monkeypatch.setattr(coupons_router, "resolve_tenant_id", lambda _r: tenant_id)
+    result = asyncio.run(patch_coupon(
+        coupon.id,
+        CouponPatchIn(
+            ai_allocatable=True,
+            coupon_level="silver",
+            allocation_channel="shared",
+            limit=1,
+        ),
+        request=None,
+        db=db,
+    ))
+    db.refresh(coupon)
+    assert result["ai_allocatable"] is True
+    assert coupon.coupon_level == "silver"
+    assert coupon.allocation_channel == "shared"

@@ -303,7 +303,7 @@ def test_canary_probe_failure_fail_closed(monkeypatch) -> None:
 
 def test_canary_positive_capability_owns_before_llm(monkeypatch) -> None:
     _enable_canary(monkeypatch, 42)
-    assert _ELIGIBLE_FALLBACK_ACTIONS == frozenset({ACTION_LLM_REPLY})
+    assert _ELIGIBLE_FALLBACK_ACTIONS == frozenset({ACTION_LLM_REPLY, ACTION_SEARCH_PRODUCTS})
     out = maybe_own_customer_coupon_request_turn(
         Decision(action=ACTION_LLM_REPLY, args={}),
         tenant_id=42,
@@ -311,6 +311,27 @@ def test_canary_positive_capability_owns_before_llm(monkeypatch) -> None:
     )
     assert out.action == ACTION_CUSTOMER_COUPON_REQUEST
     assert out.args["tenant_canary_enabled"] is True
+
+
+def test_canary_positive_capability_owns_search_products_fallback(monkeypatch) -> None:
+    _enable_canary(monkeypatch, 42)
+    out = maybe_own_customer_coupon_request_turn(
+        Decision(action=ACTION_SEARCH_PRODUCTS, args={}),
+        tenant_id=42,
+        coupon_capability_telemetry=_telemetry(capability="customer_coupon_request"),
+    )
+    assert out.action == ACTION_CUSTOMER_COUPON_REQUEST
+
+
+def test_probe_none_leaves_search_products_unchanged(monkeypatch) -> None:
+    _enable_canary(monkeypatch, 42)
+    original = Decision(action=ACTION_SEARCH_PRODUCTS, args={"query": "perfume"})
+    out = maybe_own_customer_coupon_request_turn(
+        original,
+        tenant_id=42,
+        coupon_capability_telemetry=_telemetry(capability="none", parse_ok=True),
+    )
+    assert out.action == ACTION_SEARCH_PRODUCTS
 
 
 def test_non_fallback_actions_not_stolen(monkeypatch) -> None:
@@ -322,7 +343,6 @@ def test_non_fallback_actions_not_stolen(monkeypatch) -> None:
         ACTION_SEND_PAYMENT_LINK,
         ACTION_PAYMENT_CONTINUATION_REPLY,
         ACTION_PAYMENT_TRANSFER_PROMISE,
-        ACTION_SEARCH_PRODUCTS,
         ACTION_FAQ_REPLY,
         ACTION_SOCIAL_REPLY,
         ACTION_SUGGEST_COUPON,
@@ -669,6 +689,12 @@ def test_no_issuance_on_negative_classification_cases(monkeypatch) -> None:
             coupon_capability_telemetry=_telemetry(capability="none", parse_ok=True),
         )
         assert out.action == ACTION_LLM_REPLY, utterance
+        search_out = maybe_own_customer_coupon_request_turn(
+            Decision(action=ACTION_SEARCH_PRODUCTS, args={"utterance": utterance}),
+            tenant_id=42,
+            coupon_capability_telemetry=_telemetry(capability="none", parse_ok=True),
+        )
+        assert search_out.action == ACTION_SEARCH_PRODUCTS, utterance
 
 
 def test_hesitation_suggest_coupon_unchanged() -> None:

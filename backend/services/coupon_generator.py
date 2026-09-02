@@ -56,6 +56,11 @@ from core.pg_advisory_lock import DedicatedAdvisoryLock  # noqa: E402
 from core.coupon_log_privacy import hash_identifier, redact_coupon_code, safe_exception_class  # noqa: E402
 from services.coupon_remote_compensation import record_unresolved_compensation, retry_pending_compensations  # noqa: E402
 from services.coupon_sync_visibility import extract_salla_coupon_id  # noqa: E402
+from services.native_ai_coupon_eligibility import (  # noqa: E402
+    NATIVE_AI_CHANNELS,
+    NATIVE_AI_SOURCE_TYPE,
+    is_native_ai_allocatable_coupon,
+)
 
 logger = logging.getLogger("nahla-backend")
 
@@ -1100,6 +1105,94 @@ class CouponGeneratorService:
             self._mark_coupon_sent(coupon, sent_at=now, commit=True)
             return coupon
         return None
+
+    def _native_ai_pool_filters(self, level: str):
+        """Coarse SQL for explicit native AI coupons. Python fail-closed follows.
+
+        Intentionally separate from ``_pool_base_filters`` (Salla/system).
+        Remaining eligibility (ai_allocatable, usage, remaining hours) is
+        checked in Python so every structurally matching row can be reached.
+        """
+        now = datetime.now(timezone.utc)
+        canonical_level = str(level or "").strip().lower()
+        return (
+            Coupon.tenant_id == self.tenant_id,
+            Coupon.source_type == NATIVE_AI_SOURCE_TYPE,
+            func.lower(func.coalesce(Coupon.coupon_level, "")) == canonical_level,
+            func.lower(func.coalesce(Coupon.allocation_channel, "")).in_(
+                tuple(NATIVE_AI_CHANNELS)
+            ),
+            (Coupon.expires_at == None) | (Coupon.expires_at > now),  # noqa: E711
+        )
+
+    def pick_native_ai_coupon_for_level(
+        self,
+        level_id: str,
+        customer_id: int,
+        *,
+        for_channel: str = "ai",
+    ) -> Optional[Coupon]:
+        """Allocate one explicitly AI-marked manual coupon. Never uses Salla pool.
+
+        Scan is bounded by remaining matching rows (each id visited once),
+        not by a magic first-N correctness cap. SKIP LOCKED is preserved.
+        """
+        canonical_level = str(level_id or "").strip().lower()
+        if canonical_level not in CANONICAL_COUPON_LEVELS:
+            return None
+        try:
+            owner_id = int(customer_id)
+        except (TypeError, ValueError):
+            return None
+        if owner_id <= 0:
+            return None
+
+        now = datetime.now(timezone.utc)
+        min_remaining_hours = 0
+        if for_channel == "ai":
+            policy = _get_ai_policy(self.db, self.tenant_id)
+            min_remaining_hours = int(policy.get("min_remaining_hours") or 0)
+
+        visited: set[int] = set()
+        use_skip = self._supports_skip_locked()
+        while True:
+            filters = list(self._native_ai_pool_filters(canonical_level))
+            if visited:
+                filters.append(~Coupon.id.in_(tuple(visited)))
+            query = (
+                self.db.query(Coupon)
+                .filter(*filters)
+                .order_by(Coupon.id.asc())
+            )
+            if use_skip:
+                query = query.with_for_update(skip_locked=True)
+            coupon = query.limit(1).first()
+            if coupon is None:
+                return None
+            coupon_id = int(coupon.id)
+            if coupon_id in visited:
+                return None
+            visited.add(coupon_id)
+            if not is_native_ai_allocatable_coupon(
+                coupon,
+                tenant_id=self.tenant_id,
+                resolved_level=canonical_level,
+                for_channel=for_channel,
+                min_remaining_hours=min_remaining_hours,
+                now=now,
+            ):
+                continue
+            self._stamp_customer_assignment(
+                coupon,
+                customer_id=owner_id,
+                for_channel=for_channel,
+                now=now,
+                commit=False,
+            )
+            if not coupon.allocation_channel:
+                coupon.allocation_channel = str(for_channel or "ai").lower()
+            self._mark_coupon_sent(coupon, sent_at=now, commit=True)
+            return coupon
 
     async def create_on_demand_for_level(
         self,

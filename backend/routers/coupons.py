@@ -32,6 +32,12 @@ from services.coupon_salla_push import (
     is_pushable_manual_coupon,
     push_coupon_to_salla,
 )
+from services.native_ai_coupon_eligibility import (
+    NATIVE_AI_CHANNELS,
+    NATIVE_AI_LEVELS,
+    explicit_ai_allocatable,
+    validate_native_ai_opt_in,
+)
 
 router = APIRouter(prefix="/coupons", tags=["Coupons"])
 
@@ -266,6 +272,9 @@ class CouponCreateIn(BaseModel):
     expires: Optional[str] = None
     category: str = "standard"
     active: bool = True
+    ai_allocatable: bool = False
+    coupon_level: Optional[str] = None
+    allocation_channel: Optional[str] = None
 
 
 class CouponPatchIn(BaseModel):
@@ -277,6 +286,9 @@ class CouponPatchIn(BaseModel):
     expires: Optional[str] = None
     category: Optional[str] = None
     active: Optional[bool] = None
+    ai_allocatable: Optional[bool] = None
+    coupon_level: Optional[str] = None
+    allocation_channel: Optional[str] = None
 
 
 class CouponLevelIn(BaseModel):
@@ -707,6 +719,7 @@ async def list_coupons(request: Request, db: Session = Depends(get_db)):
             "source_type": source_type,
             "coupon_level": coupon_level,
             "allocation_channel": allocation_channel,
+            "ai_allocatable": explicit_ai_allocatable(meta),
             "automation_type": meta.get("automation_type") or None,
             "promotion_id":    meta.get("promotion_id") or None,
             "active": active,
@@ -829,11 +842,41 @@ async def create_coupon(body: CouponCreateIn, request: Request, db: Session = De
     if existing:
         raise HTTPException(status_code=409, detail="Coupon code already exists")
 
+    usage_limit = int(body.limit or 0)
+    opt_in_error = validate_native_ai_opt_in(
+        ai_allocatable=bool(body.ai_allocatable),
+        coupon_level=body.coupon_level,
+        allocation_channel=body.allocation_channel,
+        usage_limit=usage_limit,
+    )
+    if opt_in_error:
+        raise HTTPException(status_code=400, detail=opt_in_error)
+
     expires_at = None
     if body.expires:
         expires_at = datetime.fromisoformat(body.expires.replace("Z", "+00:00"))
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    level = str(body.coupon_level or "").strip().lower() or None
+    if level and level not in NATIVE_AI_LEVELS:
+        raise HTTPException(status_code=400, detail="مستوى الكوبون غير صالح.")
+    channel = str(body.allocation_channel or "").strip().lower() or None
+    if channel and channel not in (NATIVE_AI_CHANNELS | {"campaign", "autopilot"}):
+        raise HTTPException(status_code=400, detail="قناة الكوبون غير صالحة.")
+
+    extra_metadata: Dict[str, Any] = {
+        "usage_count": 0,
+        "usage_limit": usage_limit,
+        "category": body.category,
+        "active": body.active,
+        "source": "dashboard",
+        "ai_allocatable": bool(body.ai_allocatable),
+    }
+    if level:
+        extra_metadata["coupon_level"] = level
+    if channel:
+        extra_metadata["allocation_channel"] = channel
 
     coupon = Coupon(
         tenant_id=tenant_id,
@@ -843,13 +886,9 @@ async def create_coupon(body: CouponCreateIn, request: Request, db: Session = De
         discount_value=str(body.value),
         expires_at=expires_at,
         source_type="manual",
-        extra_metadata={
-            "usage_count": 0,
-            "usage_limit": body.limit,
-            "category": body.category,
-            "active": body.active,
-            "source": "dashboard",
-        },
+        coupon_level=level,
+        allocation_channel=channel,
+        extra_metadata=extra_metadata,
     )
     db.add(coupon)
     db.commit()
@@ -880,6 +919,9 @@ async def create_coupon(body: CouponCreateIn, request: Request, db: Session = De
         "id": coupon.id,
         "code": coupon.code,
         "source_type": source_type,
+        "ai_allocatable": explicit_ai_allocatable(meta),
+        "coupon_level": coupon.coupon_level,
+        "allocation_channel": coupon.allocation_channel,
         **sync_fields,
     }
 
@@ -998,12 +1040,54 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
         meta["category"] = body.category
     if body.active is not None:
         meta["active"] = body.active
+    if body.coupon_level is not None:
+        level = str(body.coupon_level or "").strip().lower()
+        if level and level not in NATIVE_AI_LEVELS:
+            raise HTTPException(status_code=400, detail="مستوى الكوبون غير صالح.")
+        coupon.coupon_level = level or None
+        if level:
+            meta["coupon_level"] = level
+        else:
+            meta.pop("coupon_level", None)
+    if body.allocation_channel is not None:
+        channel = str(body.allocation_channel or "").strip().lower()
+        allowed_channels = NATIVE_AI_CHANNELS | {"campaign", "autopilot"}
+        if channel and channel not in allowed_channels:
+            raise HTTPException(status_code=400, detail="قناة الكوبون غير صالحة.")
+        coupon.allocation_channel = channel or None
+        if channel:
+            meta["allocation_channel"] = channel
+        else:
+            meta.pop("allocation_channel", None)
+    if body.ai_allocatable is not None:
+        meta["ai_allocatable"] = bool(body.ai_allocatable)
+
+    next_allocatable = explicit_ai_allocatable(meta)
+    next_limit = meta.get("usage_limit")
+    try:
+        next_limit_int = int(next_limit) if next_limit not in (None, "") else None
+    except (TypeError, ValueError):
+        next_limit_int = None
+    opt_in_error = validate_native_ai_opt_in(
+        ai_allocatable=next_allocatable,
+        coupon_level=coupon.coupon_level,
+        allocation_channel=coupon.allocation_channel,
+        usage_limit=next_limit_int,
+    )
+    if opt_in_error:
+        raise HTTPException(status_code=400, detail=opt_in_error)
+
     coupon.extra_metadata = meta
     flag_modified(coupon, "extra_metadata")
 
     db.add(coupon)
     db.commit()
-    return {"updated": True}
+    return {
+        "updated": True,
+        "ai_allocatable": explicit_ai_allocatable(meta),
+        "coupon_level": coupon.coupon_level,
+        "allocation_channel": coupon.allocation_channel,
+    }
 
 
 @router.delete("/{coupon_id}")
