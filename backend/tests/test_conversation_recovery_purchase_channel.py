@@ -77,12 +77,13 @@ class TestSilentRecoveryHonorsTenantChannels:
         with patch(
             "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
             return_value=_three(),
-        ):
+        ) as mock_resolve:
             recovery = try_guard_recovery_reply(
                 inbound_text=_LIVE_BUY,
                 db=MagicMock(),
                 tenant_id=_TENANT_A,
             )
+        assert mock_resolve.call_count == 1
         assert recovery.needs_persona_compose is True
         assert recovery.source == "purchase_channel_selection_pending"
         assert not recovery.reply
@@ -92,29 +93,34 @@ class TestSilentRecoveryHonorsTenantChannels:
     def test_awaiting_persist_failure_silent_recovery_does_not_use_canned_whatsapp(
         self,
     ) -> None:
-        recovery = try_guard_recovery_reply(
-            inbound_text=_LIVE_BUY,
-            state={
-                "order_prep": {
-                    "awaiting_checkout_channel": True,
-                    "checkout_channel": "",
-                    "offered_purchase_channel_ids": [
-                        "online_store",
-                        "whatsapp_quick_order",
-                        "showroom_visit",
-                    ],
-                }
-            },
-            db=MagicMock(),
-            tenant_id=_TENANT_A,
-        )
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            return_value=_three(),
+        ) as mock_resolve:
+            recovery = try_guard_recovery_reply(
+                inbound_text=_LIVE_BUY,
+                state={
+                    "order_prep": {
+                        "awaiting_checkout_channel": True,
+                        "checkout_channel": "",
+                        "offered_purchase_channel_ids": [
+                            "online_store",
+                            "whatsapp_quick_order",
+                            "showroom_visit",
+                        ],
+                    }
+                },
+                db=MagicMock(),
+                tenant_id=_TENANT_A,
+            )
+        assert mock_resolve.call_count == 1
         assert recovery.needs_persona_compose is True
         assert recovery.source == "purchase_channel_selection_pending"
         assert recovery.reply != _CANNED
         assert "كتالوج واتساب" not in (recovery.reply or "")
 
-    def test_recovery_forwards_db_and_tenant_to_should_block(self) -> None:
-        db = MagicMock()
+    def test_should_block_receives_resolved_sales_object_once(self) -> None:
+        sales = _three()
         captured: dict[str, object] = {}
 
         def _fake_block(**kwargs):
@@ -122,29 +128,57 @@ class TestSilentRecoveryHonorsTenantChannels:
             return True
 
         with patch(
-            "modules.ai.brain.commerce.checkout_route_owner.should_block_bare_start_product_prompt",
-            side_effect=_fake_block,
-        ):
-            recovery = try_guard_recovery_reply(
-                inbound_text=_LIVE_BUY,
-                db=db,
-                tenant_id=_TENANT_A,
-            )
-        assert captured.get("db") is db
-        assert captured.get("tenant_id") == _TENANT_A
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            return_value=sales,
+        ) as mock_resolve:
+            with patch(
+                "modules.ai.brain.commerce.checkout_route_owner.should_block_bare_start_product_prompt",
+                side_effect=_fake_block,
+            ):
+                recovery = try_guard_recovery_reply(
+                    inbound_text=_LIVE_BUY,
+                    db=MagicMock(),
+                    tenant_id=_TENANT_A,
+                )
+        assert mock_resolve.call_count == 1
+        assert captured.get("merchant_sales_channels") is sales
+        assert "db" not in captured
+        assert "tenant_id" not in captured
         assert recovery.needs_persona_compose is True
         assert recovery.source == "purchase_channel_selection_pending"
+
+    def test_should_block_typeerror_fails_closed_no_canned_reply(self) -> None:
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            return_value=_three(),
+        ) as mock_resolve:
+            with patch(
+                "modules.ai.brain.commerce.checkout_route_owner.should_block_bare_start_product_prompt",
+                side_effect=TypeError("unexpected kwargs"),
+            ):
+                recovery = try_guard_recovery_reply(
+                    inbound_text=_LIVE_BUY,
+                    db=MagicMock(),
+                    tenant_id=_TENANT_A,
+                )
+        assert mock_resolve.call_count == 1
+        assert recovery.needs_persona_compose is True
+        assert recovery.source == "purchase_channel_selection_pending"
+        assert recovery.source != "bare_start_order"
+        assert recovery.reply != _CANNED
+        assert "كتالوج واتساب" not in (recovery.reply or "")
 
     def test_resolver_failure_does_not_use_canned_whatsapp_reply(self) -> None:
         with patch(
             "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
             side_effect=RuntimeError("capability lookup failed"),
-        ):
+        ) as mock_resolve:
             recovery = try_guard_recovery_reply(
                 inbound_text=_LIVE_BUY,
                 db=MagicMock(),
                 tenant_id=_TENANT_A,
             )
+        assert mock_resolve.call_count == 1
         assert recovery.source != "bare_start_order"
         assert recovery.needs_persona_compose is True
         assert recovery.reply != _CANNED
@@ -155,14 +189,12 @@ class TestSilentRecoveryHonorsTenantChannels:
 
         def _fake_resolve(db, tenant_id, **kwargs):
             seen.append(int(tenant_id))
-            if int(tenant_id) == _TENANT_A:
-                return _three()
-            return _sales(whatsapp=True)
+            return _three() if int(tenant_id) == _TENANT_A else _sales(whatsapp=True)
 
         with patch(
             "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
             side_effect=_fake_resolve,
-        ):
+        ) as mock_resolve:
             rec_a = try_guard_recovery_reply(
                 inbound_text=_LIVE_BUY,
                 db=MagicMock(),
@@ -173,6 +205,7 @@ class TestSilentRecoveryHonorsTenantChannels:
                 db=MagicMock(),
                 tenant_id=_TENANT_B,
             )
+        assert mock_resolve.call_count == 2
         assert set(seen) == {_TENANT_A, _TENANT_B}
         assert rec_a.source == "purchase_channel_selection_pending"
         assert rec_a.needs_persona_compose is True
