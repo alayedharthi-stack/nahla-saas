@@ -43,6 +43,9 @@ from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: E40
     execute_staff_escalation,
     format_staff_escalation_facts_overlay,
 )
+from modules.ai.brain.postprocess.staff_escalation_semantic_claims import (  # noqa: E402
+    StaffEscalationCandidateClaims,
+)
 from modules.ai.brain.postprocess.staff_escalation_evidence import (  # noqa: E402
     evaluate_staff_escalation_evidence,
 )
@@ -112,6 +115,16 @@ def _ctx(
 
 def _decision(**args: Any) -> Decision:
     return Decision(action=ACTION_HANDOFF, args=dict(args), reason="customer_request")
+
+
+async def _truthful_queue_claims(text: str, capabilities: Any) -> StaffEscalationCandidateClaims:
+    del text, capabilities
+    return StaffEscalationCandidateClaims(
+        claims_request_registered=True,
+        claims_queued=True,
+        valid_parse=True,
+        provenance="test_injected",
+    )
 
 
 def _count_sessions(db, tenant_id: int, phone: str) -> int:
@@ -584,7 +597,10 @@ class TestComposeFacts:
             state=MerchantConversationState(),
             facts=CommerceFacts(),
         )
-        with patch.object(composer, "_llm_compose", new=_fake_llm):
+        with patch.object(composer, "_llm_compose", new=_fake_llm), patch(
+            "modules.ai.brain.postprocess.staff_escalation_semantic_verifier.classify_staff_escalation_claims",
+            new=_truthful_queue_claims,
+        ):
             text = _run(composer.compose(_decision(), result, ctx))
         assert text == "llm-owned wording"
         assert "status=queued" in captured["overlay"]
