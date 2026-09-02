@@ -54,6 +54,11 @@ from modules.ai.brain.commerce.checkout_route_owner import (  # noqa: E402
     resolve_purchase_channel_entry_owner,
     resolve_purchase_channel_turn,
     validate_selected_purchase_channel,
+    has_actionable_active_order_context,
+    has_verified_purchase_channel_execution,
+    persist_checkout_route_state,
+    purchase_channel_blocks_new_entry,
+    should_block_bare_start_product_prompt,
 )
 from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: E402
     MerchantSalesChannels,
@@ -66,6 +71,16 @@ from modules.ai.brain.commerce.commerce_navigator import (  # noqa: E402
 )
 from modules.ai.brain.commerce.store_url_resolver import (  # noqa: E402
     canonical_merchant_storefront_url,
+)
+from modules.ai.brain.commerce.conversation_context_reset import (  # noqa: E402
+    clear_active_order_context,
+    maybe_reset_stale_order_context,
+)
+from modules.ai.brain.commerce.product_ordering_prompt import (  # noqa: E402
+    build_bare_start_order_guard_reply,
+)
+from modules.ai.brain.postprocess.conversation_recovery import (  # noqa: E402
+    try_guard_recovery_reply,
 )
 from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_FAQ_REPLY,
@@ -226,6 +241,26 @@ def _persist_ok_db(offered: list[str] | None = None) -> tuple[MagicMock, MagicMo
     conv.extra_metadata = {"brain_state": {"order_prep": dict(op)}}
     db = MagicMock()
     return db, conv
+
+
+def _run_persist(
+    conv: MagicMock,
+    db: MagicMock,
+    **kwargs: Any,
+) -> bool:
+    with patch(
+        "core.order_flow._load_brain_state",
+        return_value=(
+            conv,
+            dict(conv.extra_metadata.get("brain_state") or {}),
+        ),
+    ):
+        return persist_checkout_route_state(
+            db,
+            tenant_id=_TENANT_A,
+            phone=_PHONE_A,
+            **kwargs,
+        )
 
 
 class TestAvailabilityA1A8:
@@ -1611,3 +1646,813 @@ class TestLivePickerBypassRegression:
             "whatsapp_quick_order",
             "showroom_visit",
         ]
+
+
+class TestD1CStaleChannelCommitment:
+    """Stale checkout_channel without an executable order must not own a new buy."""
+
+    def _three(self) -> MerchantSalesChannels:
+        return _sales(
+            store=True,
+            whatsapp=True,
+            showroom=True,
+            store_url=_STORE,
+            maps_url=_MAPS,
+        )
+
+    def _stale_whatsapp_state(self) -> MerchantConversationState:
+        return MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=12,
+            current_product_focus=None,
+            draft_order_id="",
+            order_prep=OrderPreparationState(
+                checkout_channel="whatsapp_quick_order",
+                awaiting_checkout_channel=False,
+                awaiting_payment_receipt=False,
+                missing_fields=["product", "city", "payment_method"],
+            ),
+        )
+
+    def test_a_stale_channel_only_reopens_picker(self) -> None:
+        state = self._stale_whatsapp_state()
+        assert has_actionable_active_order_context(
+            order_prep=state.order_prep, state=state, stage=state.stage
+        ) is False
+        assert has_verified_purchase_channel_execution(state.order_prep) is False
+        assert purchase_channel_blocks_new_entry(
+            order_prep=state.order_prep, state=state
+        ) is False
+        db, conv = _persist_ok_db()
+        conv.extra_metadata["brain_state"]["order_prep"]["checkout_channel"] = (
+            "whatsapp_quick_order"
+        )
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=self._three(),
+            state=state,
+            db=db,
+        )
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(
+                conv,
+                {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])},
+            ),
+        ):
+            decision = _decide(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]
+        canned = build_bare_start_order_guard_reply(_LIVE_BUY)
+        assert canned not in str(decision.args or {})
+        assert should_block_bare_start_product_prompt(
+            order_prep=state.order_prep,
+            merchant_sales_channels=self._three(),
+        ) is True
+        op = conv.extra_metadata["brain_state"]["order_prep"]
+        assert op.get("checkout_channel") in {None, ""}
+        assert op.get("awaiting_checkout_channel") is True
+        assert op.get("purchase_channel_execution_active") is not True
+
+    def test_b_verified_chrome_pick_preserves_whatsapp(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=4,
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                purchase_channel_execution_active=True,
+                purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+            ),
+        )
+        assert has_verified_purchase_channel_execution(state.order_prep) is True
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=self._three(),
+            state=state,
+            db=MagicMock(),
+        )
+        decision = _decide(ctx)
+        assert decision.args.get("topic") != "purchase_channel_selection"
+        assert should_block_bare_start_product_prompt(
+            order_prep=state.order_prep,
+            merchant_sales_channels=self._three(),
+        ) is False
+
+    def test_c_active_product_order_is_preserved(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=6,
+            current_product_focus={
+                "id": "501",
+                "title": "قميص قطني أزرق",
+            },
+            order_prep=OrderPreparationState(
+                product_id="501",
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            ),
+        )
+        decision = _decide(
+            _ctx(
+                _LIVE_BUY,
+                intent_name="start_order",
+                sales=self._three(),
+                state=state,
+                db=MagicMock(),
+            )
+        )
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_d_payment_receipt_tied_to_current_order_is_preserved(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="checkout",
+            turn=9,
+            current_product_focus={
+                "id": "501",
+                "title": "قميص قطني أزرق",
+            },
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                product_id="501",
+                payment_receipt_received=True,
+                awaiting_payment_receipt=True,
+            ),
+        )
+        assert has_actionable_active_order_context(
+            order_prep=state.order_prep, state=state
+        ) is True
+        decision = _decide(
+            _ctx(
+                _LIVE_BUY,
+                intent_name="start_order",
+                sales=self._three(),
+                state=state,
+                db=MagicMock(),
+            )
+        )
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_d_orphan_receipt_without_current_order_opens_picker(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="checkout",
+            turn=9,
+            current_product_focus=None,
+            draft_order_id="",
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                payment_receipt_received=True,
+                payment_evidence_received=True,
+                awaiting_payment_receipt=True,
+                order_status="paid",
+                checkout_payment_id="old-scope-1",
+            ),
+        )
+        assert has_actionable_active_order_context(
+            order_prep=state.order_prep, state=state
+        ) is False
+        db, conv = _persist_ok_db()
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=self._three(),
+            state=state,
+            db=db,
+        )
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(
+                conv,
+                {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])},
+            ),
+        ):
+            decision = _decide(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+
+    def test_e_delivery_address_is_preserved(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=8,
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                pending_delivery_location={
+                    "city": "الرياض",
+                    "short_address_code": "RRRD1234",
+                },
+            ),
+        )
+        decision = _decide(
+            _ctx(
+                _LIVE_BUY,
+                intent_name="start_order",
+                sales=self._three(),
+                state=state,
+                db=MagicMock(),
+            )
+        )
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_f_capability_counts(self) -> None:
+        stale = OrderPreparationState(checkout_channel="whatsapp_quick_order")
+        three = resolve_purchase_channel_entry_owner(
+            message=_LIVE_BUY,
+            intent=Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY),
+            order_prep=stale,
+            merchant_sales_channels=self._three(),
+        )
+        two = resolve_purchase_channel_entry_owner(
+            message=_LIVE_BUY,
+            intent=Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY),
+            order_prep=stale,
+            merchant_sales_channels=_sales(
+                store=True, whatsapp=True, store_url=_STORE
+            ),
+        )
+        one = resolve_purchase_channel_entry_owner(
+            message=_LIVE_BUY,
+            intent=Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY),
+            order_prep=stale,
+            merchant_sales_channels=_sales(whatsapp=True),
+        )
+        assert three == "purchase_channel_selection"
+        assert two == "purchase_channel_selection"
+        assert one == "whatsapp_quick_order"
+
+    def test_g_capability_failure_is_fail_closed(self) -> None:
+        stale = OrderPreparationState(checkout_channel="whatsapp_quick_order")
+        owner = resolve_purchase_channel_entry_owner(
+            message=_LIVE_BUY,
+            intent=Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY),
+            order_prep=stale,
+            merchant_sales_channels=None,
+        )
+        assert owner is None
+        turn = resolve_purchase_channel_turn(
+            phase="entry",
+            message=_LIVE_BUY,
+            intent=Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY),
+            order_prep=stale,
+            merchant_sales_channels=None,
+            db=None,
+            tenant_id=0,
+            phone=_PHONE_A,
+        )
+        assert turn is None
+
+    def test_h_greeting_does_not_open_picker_or_drop_channel(self) -> None:
+        state = self._stale_whatsapp_state()
+        decision = _decide(
+            _ctx(
+                "مرحبا كيف الحال",
+                intent_name="greeting",
+                sales=self._three(),
+                state=state,
+                db=MagicMock(),
+            )
+        )
+        assert decision.args.get("topic") != "purchase_channel_selection"
+        assert state.order_prep.checkout_channel == "whatsapp_quick_order"
+
+    def test_i_tenant_isolation(self) -> None:
+        prep_a = OrderPreparationState(
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+        )
+        prep_b = OrderPreparationState(checkout_channel="whatsapp_quick_order")
+        owner_a = resolve_purchase_channel_entry_owner(
+            message=_LIVE_BUY,
+            intent=Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY),
+            order_prep=prep_a,
+            merchant_sales_channels=self._three(),
+        )
+        owner_b = resolve_purchase_channel_entry_owner(
+            message=_LIVE_BUY,
+            intent=Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY),
+            order_prep=prep_b,
+            merchant_sales_channels=_sales(whatsapp=True, showroom=True, maps_url=_MAPS),
+        )
+        assert owner_a is None
+        assert owner_b == "purchase_channel_selection"
+        assert prep_a.purchase_channel_execution_active is True
+        assert prep_b.purchase_channel_execution_active is False
+
+    def test_persist_failure_does_not_show_durable_picker(self) -> None:
+        state = self._stale_whatsapp_state()
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=self._three(),
+            state=state,
+            db=MagicMock(),
+        )
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state",
+            return_value=False,
+        ):
+            decision = _decide(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("persist_ok") is False
+        assert decision.args.get("selection_actions_enabled") is False
+        assert decision.args.get("offered_purchase_channel_ids") == []
+        assert state.order_prep.checkout_channel == "whatsapp_quick_order"
+
+    def test_round_trip_execution_stamp(self) -> None:
+        original = OrderPreparationState(
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+        )
+        restored = OrderPreparationState.from_dict(original.to_dict())
+        assert restored.purchase_channel_execution_active is True
+        assert restored.purchase_channel_selection_source == SELECTION_SOURCE_VERIFIED_BUTTON
+        assert has_verified_purchase_channel_execution(restored) is True
+
+    def test_whatsapp_only_auto_commit_does_not_stamp_execution(self) -> None:
+        sales = _sales(whatsapp=True)
+        intent = Intent(name="start_order", confidence=0.9, raw_message=_LIVE_BUY)
+        db, conv = _persist_ok_db(offered=["whatsapp_quick_order"])
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(
+                conv,
+                {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])},
+            ),
+        ):
+            turn = resolve_purchase_channel_turn(
+                phase="entry",
+                message=_LIVE_BUY,
+                intent=intent,
+                merchant_sales_channels=sales,
+                tenant_id=_TENANT_A,
+                phone=_PHONE_A,
+                db=db,
+            )
+        assert turn is not None
+        op = conv.extra_metadata["brain_state"]["order_prep"]
+        assert op["checkout_channel"] == CHECKOUT_CHANNEL_WHATSAPP
+        assert op.get("purchase_channel_execution_active") is not True
+
+
+class TestD1CPaymentIdentityLifecycleAndPersist:
+    """Review follow-up: current-order payment identity, stamp lifecycle, fail-closed persist."""
+
+    def _three(self) -> MerchantSalesChannels:
+        return _sales(
+            store=True,
+            whatsapp=True,
+            showroom=True,
+            store_url=_STORE,
+            maps_url=_MAPS,
+        )
+
+    def test_orphan_receipt_flags_are_not_active_order(self) -> None:
+        prep = OrderPreparationState(
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            payment_receipt_received=True,
+            payment_evidence_received=True,
+            order_status="confirmed",
+            checkout_payment_id="old-scope-1",
+        )
+        assert has_actionable_active_order_context(order_prep=prep) is False
+        assert purchase_channel_blocks_new_entry(order_prep=prep) is False
+
+    def test_receipt_tied_to_cart_preserves_owner(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="checkout",
+            turn=5,
+            cart_items=[
+                {
+                    "id": "701",
+                    "external_id": "sku-white-shoe",
+                    "title": "حذاء رياضي أبيض",
+                    "quantity": 1,
+                    "from_catalog_order": True,
+                    "product_retailer_id": "sku-white-shoe",
+                    "catalog_product_id": 701,
+                    "price": 249,
+                }
+            ],
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                payment_receipt_received=True,
+                catalog_line_items_authoritative=True,
+                line_items=[
+                    {
+                        "id": "701",
+                        "external_id": "sku-white-shoe",
+                        "title": "حذاء رياضي أبيض",
+                        "quantity": 1,
+                        "from_catalog_order": True,
+                        "product_retailer_id": "sku-white-shoe",
+                        "catalog_product_id": 701,
+                        "price": 249,
+                    }
+                ],
+            ),
+        )
+        assert has_actionable_active_order_context(
+            order_prep=state.order_prep, state=state
+        ) is True
+        decision = _decide(
+            _ctx(
+                _LIVE_BUY,
+                intent_name="start_order",
+                sales=self._three(),
+                state=state,
+                db=MagicMock(),
+            )
+        )
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_receipt_tied_to_draft_preserves_owner(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="checkout",
+            turn=6,
+            draft_order_id="draft-901",
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                payment_evidence_received=True,
+                salla_order_id="salla-901",
+            ),
+        )
+        assert has_actionable_active_order_context(
+            order_prep=state.order_prep, state=state
+        ) is True
+        decision = _decide(
+            _ctx(
+                _LIVE_BUY,
+                intent_name="start_order",
+                sales=self._three(),
+                state=state,
+                db=MagicMock(),
+            )
+        )
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    def test_execution_stamp_consumed_when_current_order_exists(self) -> None:
+        prep = OrderPreparationState(
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+            product_id="801",
+        )
+        assert has_verified_purchase_channel_execution(prep) is False
+        assert has_actionable_active_order_context(order_prep=prep) is True
+        assert purchase_channel_blocks_new_entry(order_prep=prep) is True
+
+    def test_completed_order_clears_execution_stamp_on_persist(self) -> None:
+        db, conv = _persist_ok_db()
+        conv.extra_metadata["brain_state"]["order_prep"] = {
+            "checkout_channel": CHECKOUT_CHANNEL_WHATSAPP,
+            "purchase_channel_execution_active": True,
+            "purchase_channel_selection_source": SELECTION_SOURCE_VERIFIED_BUTTON,
+            "product_id": "801",
+            "product_name": "عطر ورد 100ml",
+            "order_status": "completed",
+        }
+        ok = _run_persist(conv, db)
+        assert ok is True
+        written = conv.extra_metadata["brain_state"]["order_prep"]
+        assert written.get("purchase_channel_execution_active") is not True
+        assert not str(written.get("purchase_channel_selection_source") or "").strip()
+        assert has_verified_purchase_channel_execution(written) is False
+
+    def test_cancelled_order_clears_execution_stamp_on_persist(self) -> None:
+        db, conv = _persist_ok_db()
+        conv.extra_metadata["brain_state"]["order_prep"] = {
+            "checkout_channel": CHECKOUT_CHANNEL_WHATSAPP,
+            "purchase_channel_execution_active": True,
+            "purchase_channel_selection_source": SELECTION_SOURCE_VERIFIED_BUTTON,
+            "order_status": "cancelled",
+        }
+        ok = _run_persist(conv, db)
+        assert ok is True
+        written = conv.extra_metadata["brain_state"]["order_prep"]
+        assert written.get("purchase_channel_execution_active") is not True
+        assert has_verified_purchase_channel_execution(written) is False
+
+    def test_reset_clears_execution_stamp(self) -> None:
+        state = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=7,
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                purchase_channel_execution_active=True,
+                purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+                product_id="801",
+            ),
+        )
+        clear_active_order_context(state, reason="customer_cancelled")
+        assert state.order_prep.purchase_channel_execution_active is False
+        assert not str(state.order_prep.purchase_channel_selection_source or "").strip()
+        assert has_verified_purchase_channel_execution(state.order_prep) is False
+        assert has_actionable_active_order_context(
+            order_prep=state.order_prep, state=state
+        ) is False
+
+    def test_persist_execution_active_fails_closed_without_trusted_source(self) -> None:
+        db, conv = _persist_ok_db()
+        before = dict(conv.extra_metadata["brain_state"]["order_prep"])
+        empty = persist_checkout_route_state(
+            db,
+            tenant_id=_TENANT_A,
+            phone=_PHONE_A,
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source="",
+        )
+        untrusted = persist_checkout_route_state(
+            db,
+            tenant_id=_TENANT_A,
+            phone=_PHONE_A,
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source="llm_guess",
+        )
+        assert empty is False
+        assert untrusted is False
+        assert conv.extra_metadata["brain_state"]["order_prep"] == before
+
+    def test_persist_trusted_source_writes_complete_execution_fact(self) -> None:
+        db, conv = _persist_ok_db()
+        ok = _run_persist(
+            conv,
+            db,
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            awaiting_checkout_channel=False,
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+        )
+        assert ok is True
+        written = conv.extra_metadata["brain_state"]["order_prep"]
+        assert written.get("purchase_channel_execution_active") is True
+        assert written.get("purchase_channel_selection_source") == (
+            SELECTION_SOURCE_VERIFIED_BUTTON
+        )
+
+    def test_silent_recovery_current_order_in_state_skips_canned(self) -> None:
+        canned = build_bare_start_order_guard_reply(_LIVE_BUY)
+        state = {
+            "current_product_focus": {
+                "id": "501",
+                "title": "قميص قطني أزرق",
+            },
+            "order_prep": {
+                "product_id": "501",
+                "product_name": "قميص قطني أزرق",
+                "checkout_channel": CHECKOUT_CHANNEL_WHATSAPP,
+                "purchase_channel_execution_active": True,
+                "purchase_channel_selection_source": SELECTION_SOURCE_VERIFIED_BUTTON,
+            },
+        }
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            return_value=self._three(),
+        ):
+            recovery = try_guard_recovery_reply(
+                inbound_text=_LIVE_BUY,
+                state=state,
+                db=MagicMock(),
+                tenant_id=_TENANT_A,
+            )
+        assert recovery.needs_persona_compose is True
+        assert recovery.source == "purchase_channel_selection_pending"
+        assert recovery.reply != canned
+        assert "كتالوج واتساب" not in (recovery.reply or "")
+
+    def test_should_block_consumes_stamp_when_order_exists_in_state_only(self) -> None:
+        prep = OrderPreparationState(
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+        )
+        state = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=3,
+            current_product_focus={
+                "id": "501",
+                "title": "قميص قطني أزرق",
+            },
+            order_prep=prep,
+        )
+        assert has_verified_purchase_channel_execution(prep) is True
+        assert has_verified_purchase_channel_execution(prep, state=state) is False
+        assert should_block_bare_start_product_prompt(
+            order_prep=prep,
+            merchant_sales_channels=self._three(),
+            state=state,
+        ) is True
+        assert should_block_bare_start_product_prompt(
+            order_prep=prep,
+            merchant_sales_channels=self._three(),
+        ) is False
+
+    def test_should_block_consumes_stamp_when_cart_exists_in_state_only(self) -> None:
+        prep = OrderPreparationState(
+            checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+            purchase_channel_execution_active=True,
+            purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+        )
+        state = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=3,
+            cart_items=[
+                {
+                    "id": "701",
+                    "external_id": "sku-white-shoe",
+                    "title": "حذاء رياضي أبيض",
+                    "quantity": 1,
+                    "from_catalog_order": True,
+                    "product_retailer_id": "sku-white-shoe",
+                    "catalog_product_id": 701,
+                    "price": 249,
+                }
+            ],
+            order_prep=prep,
+        )
+        assert not str(prep.product_id or "").strip()
+        assert has_verified_purchase_channel_execution(prep) is True
+        assert has_verified_purchase_channel_execution(prep, state=state) is False
+        assert should_block_bare_start_product_prompt(
+            order_prep=prep,
+            merchant_sales_channels=self._three(),
+            state=state,
+        ) is True
+
+    def test_silent_recovery_focus_only_not_duplicated_in_order_prep(self) -> None:
+        canned = build_bare_start_order_guard_reply(_LIVE_BUY)
+        state = {
+            "current_product_focus": {
+                "id": "501",
+                "title": "قميص قطني أزرق",
+            },
+            "order_prep": {
+                "checkout_channel": CHECKOUT_CHANNEL_WHATSAPP,
+                "purchase_channel_execution_active": True,
+                "purchase_channel_selection_source": SELECTION_SOURCE_VERIFIED_BUTTON,
+            },
+        }
+        assert "product_id" not in state["order_prep"]
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            return_value=self._three(),
+        ):
+            recovery = try_guard_recovery_reply(
+                inbound_text=_LIVE_BUY,
+                state=state,
+                db=MagicMock(),
+                tenant_id=_TENANT_A,
+            )
+        assert recovery.needs_persona_compose is True
+        assert recovery.source == "purchase_channel_selection_pending"
+        assert recovery.reply != canned
+        assert "كتالوج واتساب" not in (recovery.reply or "")
+
+    def test_silent_recovery_cart_only_not_duplicated_in_order_prep(self) -> None:
+        canned = build_bare_start_order_guard_reply(_LIVE_BUY)
+        state = MerchantConversationState(
+            greeted=True,
+            stage="ordering",
+            turn=4,
+            cart_items=[
+                {
+                    "id": "701",
+                    "external_id": "sku-white-shoe",
+                    "title": "حذاء رياضي أبيض",
+                    "quantity": 1,
+                    "from_catalog_order": True,
+                    "product_retailer_id": "sku-white-shoe",
+                    "catalog_product_id": 701,
+                    "price": 249,
+                }
+            ],
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                purchase_channel_execution_active=True,
+                purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+            ),
+        )
+        assert not str(state.order_prep.product_id or "").strip()
+        with patch(
+            "modules.ai.brain.commerce.sales_channel_capabilities.resolve_merchant_sales_channels",
+            return_value=self._three(),
+        ):
+            recovery = try_guard_recovery_reply(
+                inbound_text=_LIVE_BUY,
+                state=state,
+                db=MagicMock(),
+                tenant_id=_TENANT_A,
+            )
+        assert recovery.needs_persona_compose is True
+        assert recovery.source == "purchase_channel_selection_pending"
+        assert recovery.reply != canned
+        assert "كتالوج واتساب" not in (recovery.reply or "")
+
+    def _finished_order_state(self, *, order_status: str) -> MerchantConversationState:
+        return MerchantConversationState(
+            greeted=True,
+            stage="checkout",
+            turn=14,
+            current_product_focus={
+                "id": "801",
+                "title": "عطر ورد 100ml",
+            },
+            order_prep=OrderPreparationState(
+                checkout_channel=CHECKOUT_CHANNEL_WHATSAPP,
+                purchase_channel_execution_active=True,
+                purchase_channel_selection_source=SELECTION_SOURCE_VERIFIED_BUTTON,
+                product_id="801",
+                order_status=order_status,
+            ),
+        )
+
+    def test_engine_alone_does_not_clear_finished_order_stamp(self) -> None:
+        """Complete/cancel clearing is pipeline 1b.4, not DefaultDecisionEngine."""
+        state = self._finished_order_state(order_status="completed")
+        decision = _decide(
+            _ctx(
+                _LIVE_BUY,
+                intent_name="start_order",
+                sales=self._three(),
+                state=state,
+                db=MagicMock(),
+            )
+        )
+        assert state.order_prep.product_id == "801"
+        assert state.order_prep.purchase_channel_execution_active is True
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+    @pytest.mark.parametrize(
+        "order_status,reset_reason",
+        [
+            ("completed", "order_delivered"),
+            ("cancelled", "order_cancelled"),
+        ],
+    )
+    def test_production_complete_cancel_then_start_order_opens_picker(
+        self,
+        order_status: str,
+        reset_reason: str,
+    ) -> None:
+        """Pipeline 1b.4 maybe_reset_stale_order_context clears a finished order.
+
+        That is the production complete/cancel path. persist_checkout_route_state
+        is not the clearer.
+        """
+        state = self._finished_order_state(order_status=order_status)
+        with patch(
+            "modules.ai.brain.commerce.checkout_route_owner.persist_checkout_route_state"
+        ) as persist_during_reset:
+            reason = maybe_reset_stale_order_context(state, _LIVE_BUY)
+            assert persist_during_reset.call_count == 0
+        assert reason == reset_reason
+        assert state.order_prep.purchase_channel_execution_active is False
+        assert not str(state.order_prep.purchase_channel_selection_source or "").strip()
+        assert not str(state.order_prep.product_id or "").strip()
+        assert not str(state.order_prep.checkout_channel or "").strip()
+        assert state.current_product_focus is None
+        assert has_actionable_active_order_context(
+            order_prep=state.order_prep, state=state
+        ) is False
+        assert has_verified_purchase_channel_execution(state.order_prep) is False
+        db, conv = _persist_ok_db()
+        ctx = _ctx(
+            _LIVE_BUY,
+            intent_name="start_order",
+            sales=self._three(),
+            state=state,
+            db=db,
+        )
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=(
+                conv,
+                {"order_prep": dict(conv.extra_metadata["brain_state"]["order_prep"])},
+            ),
+        ):
+            decision = _decide(ctx)
+        assert decision.args.get("topic") == "purchase_channel_selection"
+        assert decision.args.get("available_purchase_channels") == [
+            "online_store",
+            "whatsapp_quick_order",
+            "showroom_visit",
+        ]
+        canned = build_bare_start_order_guard_reply(_LIVE_BUY)
+        assert canned not in str(decision.args or {})
+
