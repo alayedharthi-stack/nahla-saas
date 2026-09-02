@@ -16,6 +16,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -230,7 +231,14 @@ class AcceptanceHarness:
             "type": "text",
             "text": {"body": body},
         }
-        truth = MagicMock(active=handoff_truth_active, source="test", verify_failed=False)
+        truth = SimpleNamespace(
+            active=handoff_truth_active,
+            source="test",
+            verify_failed=False,
+            queue_truth=False,
+            notification_truth=bool(handoff_truth_active),
+            contact_delivery_truth=False,
+        )
         with patch("core.handoff_truth.resolve_handoff_truth_active", return_value=truth):
             out, scrubbed = sanitize_outbound_payload(
                 payload,

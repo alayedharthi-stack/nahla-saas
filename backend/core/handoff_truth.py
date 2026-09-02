@@ -4,18 +4,17 @@ core/handoff_truth.py
 Unified handoff truth contract for wire-layer scrubbing and AI
 suppression fail-closed policy.
 
-Truth predicate (``resolve_handoff_truth_active``):
+Truth predicate (``resolve_handoff_truth_active``) splits claim strength:
 
-  * Active ``HandoffSession`` for tenant + phone (queue durability).
-  * Conversation lifecycle flags: ``handoff_active`` AND ``needs_human`` AND
-    (``is_human_handoff`` OR ``status == 'human'``) — soft
-    ``needs_human`` alone is NOT sufficient. Flags are lifecycle/UI
-    state for wire scrub; they do not impersonate a persisted session.
-  * ``conversation_handoff_active`` (human_active ownership).
-  * Structured execution metadata (session id / notification accepted /
-    verified delivered contact) via ``evaluate_staff_escalation_evidence``.
-    Action names and chosen_path alone are not operational evidence.
-    Conversation flags passed into that helper have zero session authority.
+  * ``active`` — lifecycle/ownership OR durable queue. Existing callers that
+    only need "handoff is happening" keep this flag.
+  * ``queue_truth`` — persisted tenant-scoped ``HandoffSession``.
+  * ``notification_truth`` — ``session.notification_sent is True`` (or
+    equivalent persisted provider acceptance). Queue alone is not notify.
+  * ``contact_delivery_truth`` — verified delivered staff contact.
+  * Conversation lifecycle flags / HUMAN_ACTIVE may set ``active`` but
+    never ``notification_truth``.
+  * Action names and ``chosen_path`` have zero operational authority.
 
 Fail-closed scope is limited to the "may AI reply?" decision when gate
 verification fails while possible human-ownership signals are present.
@@ -47,6 +46,9 @@ class HandoffTruthResult:
     active: bool
     source: str = ""
     verify_failed: bool = False
+    queue_truth: bool = False
+    notification_truth: bool = False
+    contact_delivery_truth: bool = False
 
 
 def conversation_flags_lifecycle_active(flags: dict[str, Any] | None) -> bool:
@@ -173,7 +175,13 @@ def resolve_handoff_truth_active(
     try:
         session = _get_active_handoff_session(db, int(tenant_id), customer_phone)
         if session is not None:
-            return HandoffTruthResult(active=True, source="handoff_session_active")
+            notified = getattr(session, "notification_sent", False) is True
+            return HandoffTruthResult(
+                active=True,
+                source="handoff_session_active",
+                queue_truth=True,
+                notification_truth=notified,
+            )
 
         convos = _find_conversations_for_phone(db, int(tenant_id), customer_phone)
         if conversation is not None:
@@ -207,10 +215,17 @@ def resolve_handoff_truth_active(
                 chosen_path=chosen_path,
                 brain_handoff=brain_handoff,
             )
-            if evidence.queue_evidence_ok or evidence.notification_evidence_ok:
+            if (
+                evidence.queue_evidence_ok
+                or evidence.notification_evidence_ok
+                or evidence.contact_delivery_evidence_ok
+            ):
                 return HandoffTruthResult(
                     active=True,
                     source=evidence.evidence_source or "staff_escalation_evidence",
+                    queue_truth=evidence.queue_evidence_ok,
+                    notification_truth=evidence.notification_evidence_ok,
+                    contact_delivery_truth=evidence.contact_delivery_evidence_ok,
                 )
 
         if outbound_metadata or chosen_path:
@@ -220,10 +235,17 @@ def resolve_handoff_truth_active(
                 chosen_path=chosen_path,
                 brain_handoff=brain_handoff,
             )
-            if evidence.queue_evidence_ok or evidence.notification_evidence_ok:
+            if (
+                evidence.queue_evidence_ok
+                or evidence.notification_evidence_ok
+                or evidence.contact_delivery_evidence_ok
+            ):
                 return HandoffTruthResult(
                     active=True,
                     source=evidence.evidence_source or "metadata_escalation",
+                    queue_truth=evidence.queue_evidence_ok,
+                    notification_truth=evidence.notification_evidence_ok,
+                    contact_delivery_truth=evidence.contact_delivery_evidence_ok,
                 )
 
         return HandoffTruthResult(active=False, source="no_handoff_truth")
@@ -251,17 +273,20 @@ def log_handoff_promise_scrub_decision(
     if scrubbed:
         logger.warning(
             "[HANDOFF_PROMISE_WIRE] decision=scrubbed tenant=%s to=%s "
-            "truth_active=%s truth_source=%s verify_failed=%s",
+            "truth_active=%s queue_truth=%s notification_truth=%s "
+            "truth_source=%s verify_failed=%s",
             tenant_id,
             recipient,
             truth.active,
+            getattr(truth, "queue_truth", False),
+            getattr(truth, "notification_truth", False),
             truth.source,
             truth.verify_failed,
         )
-    elif truth.active:
+    elif getattr(truth, "notification_truth", False) is True:
         logger.info(
             "[HANDOFF_PROMISE_WIRE] decision=allowed tenant=%s to=%s "
-            "truth_source=%s",
+            "truth_source=%s notification_truth=true",
             tenant_id,
             recipient,
             truth.source,

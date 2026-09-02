@@ -412,9 +412,13 @@ def _apply_handoff_promise_scrub(
         tenant_id=tenant_id,
         customer_phone=recipient,
     )
+    notify_authorized = (
+        getattr(truth, "notification_truth", False) is True
+        or getattr(truth, "contact_delivery_truth", False) is True
+    )
     scrubbed_body, was_scrubbed = maybe_scrub_handoff_promise(
         body,
-        handoff_state_active=truth.active,
+        handoff_state_active=notify_authorized,
         tenant_id=tenant_id,
         recipient=recipient,
     )
@@ -659,14 +663,12 @@ def maybe_scrub_handoff_promise(
     """Return ``(text_out, was_scrubbed)``.
 
     When ``handoff_state_active`` is True we let the promise through —
-    the customer is being told the truth. When it's False AND the
-    text contains a handoff promise, we replace the offending text
-    with a neutral acknowledgement so the AI doesn't make a promise
-    the system can't keep.
+    the caller has proven notification/contact-delivery claim strength.
+    Queue-only or lifecycle ``active`` must not be passed here.
 
     Caller is responsible for figuring out ``handoff_state_active`` —
-    typically by checking ``Conversation.is_human_handoff`` /
-    ``needs_human`` / ``handoff_active`` / ``status == 'human'``.
+    typically ``HandoffTruthResult.notification_truth`` (or contact
+    delivery), never queue/lifecycle ``active`` alone.
     """
     if not text or not isinstance(text, str):
         return text or "", False

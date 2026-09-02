@@ -60,10 +60,6 @@ _CLOSED_NOTIFY_STATUSES = frozenset(
 )
 
 _NEUTRAL_CUSTOMER_NAME = ""
-_TYPED_STAFF_CONTACT_ATTRS = (
-    "verified_staff_contact_record",
-    "staff_contact_record",
-)
 
 
 @dataclass(frozen=True)
@@ -137,24 +133,14 @@ def _trusted_customer_name(ctx: BrainContext) -> str:
 
 
 def _trusted_verified_contact(ctx: BrainContext) -> Tuple[bool, str]:
-    """Consume an already-typed tenant-scoped staff record. Never invent.
+    """D2 has no trusted runtime producer of tenant-scoped staff contact.
 
-    Inbound metadata and untyped profile strings are not Merchant Truth.
-    D2 does not search manager/owner contact ladders.
+    Inbound metadata, untyped profile values, and speculative objects
+    with ``.phone``/``.source`` are not Merchant Truth. D3 owns
+    manager/owner contact resolution.
     """
-    record = None
-    for attr in _TYPED_STAFF_CONTACT_ATTRS:
-        candidate = getattr(ctx, attr, None)
-        if candidate is not None:
-            record = candidate
-            break
-    if record is None or isinstance(record, dict):
-        return False, ""
-    phone = str(getattr(record, "phone", "") or "").strip()
-    source = str(getattr(record, "source", "") or "").strip()
-    if not phone or not source:
-        return False, ""
-    return True, phone
+    del ctx
+    return False, ""
 
 
 def _result_payload(

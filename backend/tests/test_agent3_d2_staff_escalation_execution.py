@@ -384,17 +384,16 @@ class TestVerifiedContact:
         assert result.data["verified_contact_available"] is False
         assert result.data["verified_contact_phone"] == ""
 
-    def test_trusted_verified_contact_propagated_exactly(self) -> None:
+    def test_speculative_staff_contact_object_is_not_merchant_truth(self) -> None:
         from modules.ai.brain.commerce.staff_contact_evidence import (  # noqa: PLC0415
             StaffContactRecord,
         )
 
         db, _engine = _sqlite_db()
         tenant = _seed_tenant(db, "D2 Verified Phone Merchant")
-        trusted = "966511112222"
         record = StaffContactRecord(
             lookup_name="خدمة العملاء",
-            phone=trusted,
+            phone="966511112222",
             section_id=1,
             role="customer_service",
             aliases=("خدمة العملاء",),
@@ -413,8 +412,8 @@ class TestVerifiedContact:
             return_value={"notification_method": "none", "webhook_url": ""},
         ):
             result = _run(execute_staff_escalation(_decision(), ctx))
-        assert result.data["verified_contact_available"] is True
-        assert result.data["verified_contact_phone"] == trusted
+        assert result.data["verified_contact_available"] is False
+        assert result.data["verified_contact_phone"] == ""
 
 
 class TestTenantIsolation:
@@ -521,6 +520,15 @@ class TestEvidence:
             assert evidence.queue_evidence_ok is False
             assert evidence.notification_evidence_ok is False
             assert evidence.contact_delivery_evidence_ok is False
+
+    def test_boolean_session_created_is_not_queue_authority(self) -> None:
+        evidence = evaluate_staff_escalation_evidence(
+            inbound_metadata={"handoff_session_created": True},
+        )
+        assert evidence.handoff_session_present is False
+        assert evidence.queue_evidence_ok is False
+        assert evidence.evidence_ok is False
+        assert evidence.notification_evidence_ok is False
 
 
 class TestComposeFacts:
@@ -637,3 +645,120 @@ class TestInboundMetadataIsolation:
             "verified_contact_available",
         ):
             assert key not in ctx.profile["inbound_metadata"]
+
+
+class TestWireDefenceInDepth:
+    _NOTIFY_PROMISE = "سيتواصل معك الفريق قريباً"
+
+    def _queued_session(self, *, notified: bool = False):
+        db, _engine = _sqlite_db()
+        tenant = _seed_tenant(db, "D2 Wire Defence Merchant")
+        phone = "966500000119"
+        ctx = _ctx(db=db, tenant_id=tenant.id, phone=phone)
+        with patch(
+            "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
+            return_value={"notification_method": "none", "webhook_url": ""},
+        ):
+            result = _run(execute_staff_escalation(_decision(), ctx))
+        session = db.query(HandoffSession).filter_by(id=result.data["handoff_session_id"]).one()
+        session.notification_sent = notified
+        db.commit()
+        return db, tenant, phone, session
+
+    def test_queue_only_session_authorizes_queue_truth_not_notify(self) -> None:
+        from core.handoff_truth import resolve_handoff_truth_active  # noqa: PLC0415
+
+        db, tenant, phone, session = self._queued_session(notified=False)
+        truth = resolve_handoff_truth_active(
+            db,
+            tenant_id=tenant.id,
+            customer_phone=phone,
+        )
+        assert session.id is not None
+        assert session.notification_sent is not True
+        assert truth.queue_truth is True
+        assert truth.notification_truth is False
+        assert truth.active is True
+
+    def test_guard_exception_queue_only_promise_is_scrubbed_on_wire(self) -> None:
+        from core.outbound_sanitizer import sanitize_outbound_payload  # noqa: PLC0415
+        from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
+            run_post_compose_truth_guards,
+        )
+
+        db, tenant, phone, session = self._queued_session(notified=False)
+        convo = SimpleNamespace(
+            id=1,
+            needs_human=False,
+            handoff_active=False,
+            is_human_handoff=False,
+            status="active",
+        )
+        with patch(
+            "modules.ai.brain.postprocess.staff_escalation_truth_guard.apply_staff_escalation_truth_guard",
+            side_effect=RuntimeError("d2_injected_guard_failure"),
+        ), patch(
+            "core.order_flow._load_brain_state",
+            return_value=(None, None),
+        ):
+            post = run_post_compose_truth_guards(
+                db=db,
+                tenant_id=tenant.id,
+                to=phone,
+                text="ابي موظف",
+                reply=self._NOTIFY_PROMISE,
+                convo=convo,
+                inbound_metadata={},
+                brain_handoff=True,
+                brain_nc_block=False,
+                brain_nc_category="",
+                br_action="ACTION_HANDOFF",
+                brain_persona_compose_event=None,
+                mode="primary",
+            )
+        assert post.reply == self._NOTIFY_PROMISE
+        assert any(event.reason == "guard_exception" for event in post.events)
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "text",
+            "text": {"body": post.reply},
+        }
+        out, scrubbed = sanitize_outbound_payload(
+            payload,
+            tenant_id=tenant.id,
+            recipient=phone,
+            db=db,
+        )
+        assert session.notification_sent is not True
+        assert scrubbed is True
+        assert self._NOTIFY_PROMISE not in (out.get("text") or {}).get("body", "")
+
+    def test_persisted_notification_sent_allows_notify_promise_on_wire(self) -> None:
+        from core.handoff_truth import resolve_handoff_truth_active  # noqa: PLC0415
+        from core.outbound_sanitizer import sanitize_outbound_payload  # noqa: PLC0415
+
+        db, tenant, phone, _session = self._queued_session(notified=True)
+        truth = resolve_handoff_truth_active(
+            db,
+            tenant_id=tenant.id,
+            customer_phone=phone,
+        )
+        assert truth.queue_truth is True
+        assert truth.notification_truth is True
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "text",
+            "text": {"body": self._NOTIFY_PROMISE},
+        }
+        out, scrubbed = sanitize_outbound_payload(
+            payload,
+            tenant_id=tenant.id,
+            recipient=phone,
+            db=db,
+        )
+        assert scrubbed is False
+        assert out["text"]["body"] == self._NOTIFY_PROMISE
+

@@ -157,6 +157,22 @@ def test_handoff_session_persists_idempotent_isolated_and_notification_sent(
         assert row_b.tenant_id == tenant_b.id
         assert row_a.notification_sent is True
         assert row_a.status == "active"
+        from core.handoff_truth import resolve_handoff_truth_active  # noqa: PLC0415
+
+        truth_a = resolve_handoff_truth_active(
+            db,
+            tenant_id=tenant_a.id,
+            customer_phone=phone,
+        )
+        assert truth_a.queue_truth is True
+        assert truth_a.notification_truth is True
+        truth_b = resolve_handoff_truth_active(
+            db,
+            tenant_id=tenant_b.id,
+            customer_phone=phone,
+        )
+        assert truth_b.queue_truth is True
+        assert truth_b.notification_truth is False
         assert (
             db.query(HandoffSession)
             .filter_by(tenant_id=tenant_a.id, customer_phone=phone, status="active")

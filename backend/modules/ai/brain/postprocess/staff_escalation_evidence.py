@@ -102,21 +102,13 @@ def evaluate_staff_escalation_evidence(
     if path in _ACTION_NAME_PATHS:
         path = ""
 
-    session_present = _session_id_present(md) or md.get("handoff_session_created") is True
+    session_present = _session_id_present(md)
     notification = _notification_accepted(md)
     contact = _verified_contact_delivered(md)
 
     if _session_id_present(md):
         return _result(
             source="metadata.handoff_session_id",
-            queue=True,
-            notification=notification,
-            contact=contact,
-            session_present=True,
-        )
-    if md.get("handoff_session_created") is True:
-        return _result(
-            source="metadata.handoff_session_created",
             queue=True,
             notification=notification,
             contact=contact,
