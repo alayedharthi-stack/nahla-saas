@@ -34,6 +34,8 @@ def test_create_modal_code_field_and_generate_button():
     assert "توليد تلقائي" in text
     assert "generateStoreCouponCode" in text
     assert "validateCouponCode" in text
+    assert "COUPON_PURPOSE_GENERAL_LABEL_AR" in text
+    assert "EnableAiAllocationModal" in text
 
 
 def test_create_modal_expiry_ux_strings():
@@ -57,6 +59,8 @@ def test_store_coupon_utils_code_format_contract():
     assert "NH" in text
     assert COUPON_CODE_VALIDATION_AR_MSG in text
     assert all(c in text for c in CODE_ALPHABET_NO_AMBIG[:5])  # charset present
+    assert "COUPON_PURPOSE_GENERAL" in text
+    assert "validateAiAllocationFields" in text
 
 
 def test_generated_code_shape_regex_matches_examples():
