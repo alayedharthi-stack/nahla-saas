@@ -473,6 +473,21 @@ _PAYMENT_FULFILLMENT_STATUSES = frozenset({
     "created",
 })
 
+_TERMINAL_ORDER_STATUSES = frozenset({
+    "complete",
+    "completed",
+    "delivered",
+    "fulfilled",
+    "done",
+    "cancelled",
+    "canceled",
+    "closed",
+    "تم التسليم",
+    "مكتمل",
+    "ملغي",
+    "ملغى",
+})
+
 _COMMITTED_CHECKOUT_CHANNELS = frozenset({
     CHECKOUT_CHANNEL_WHATSAPP,
     CHECKOUT_CHANNEL_STORE,
@@ -576,12 +591,62 @@ def _trusted_channel_selection_source(source: str) -> str:
     return raw if raw in _TRUSTED_CHANNEL_SELECTION_SOURCES else ""
 
 
-def has_verified_purchase_channel_execution(order_prep: Any = None) -> bool:
+def _has_current_commerce_identity(
+    *,
+    order_prep: Any = None,
+    state: Any = None,
+) -> bool:
+    """True for a current product, cart, draft, or order id — not payment flags."""
+    state = _project_actionable_state(order_prep=order_prep, state=state)
+    if _has_order_prep_product(order_prep):
+        return True
+    if _has_authoritative_commerce_items(order_prep=order_prep, state=state):
+        return True
+    if _has_valid_draft_order(order_prep=order_prep, state=state):
+        return True
+    if _has_session_product(state):
+        return True
+    return _product_focus_owns_turn(_state_product_focus(state))
+
+
+def _order_status_is_terminal(order_prep: Any = None) -> bool:
+    status = str(_order_prep_mapping(order_prep).get("order_status") or "").strip().lower()
+    return status in _TERMINAL_ORDER_STATUSES
+
+
+def _purchase_channel_execution_spent(
+    *,
+    order_prep: Any = None,
+    state: Any = None,
+) -> bool:
+    """True when the execution stamp must no longer own the turn.
+
+    Consumed once a current commerce object exists. Cleared on complete,
+    cancel, or reset. Not a timeout.
+    """
+    if _order_status_is_terminal(order_prep):
+        return True
+    return _has_current_commerce_identity(order_prep=order_prep, state=state)
+
+
+def _clear_purchase_channel_execution_stamp(prep: Dict[str, Any]) -> None:
+    prep["purchase_channel_execution_active"] = False
+    prep["purchase_channel_selection_source"] = ""
+
+
+def has_verified_purchase_channel_execution(
+    order_prep: Any = None,
+    *,
+    state: Any = None,
+) -> bool:
     """True when a verified chrome/structured pick is still in execution.
 
     Channel field alone is not enough. Missing stamp on leftover
     ``checkout_channel`` is the stale-commitment signal — no timeout.
+    Spent when a current order exists or the order is complete/cancelled.
     """
+    if _purchase_channel_execution_spent(order_prep=order_prep, state=state):
+        return False
     prep = _order_prep_mapping(order_prep)
     if not _has_committed_checkout_channel(prep):
         return False
@@ -594,7 +659,19 @@ def has_verified_purchase_channel_execution(order_prep: Any = None) -> bool:
     )
 
 
-def _has_payment_or_receipt_progress(order_prep: Any = None) -> bool:
+def _has_payment_or_receipt_progress(
+    *,
+    order_prep: Any = None,
+    state: Any = None,
+) -> bool:
+    """Payment flags own the turn only when tied to a current order identity.
+
+    Agent-2 / PR #915: ``payment_receipt_received``, ``payment_evidence_received``,
+    leftover ``checkout_payment_id``, and a stale payment ``order_status`` are
+    not current on their own. History belongs in ``payment_evidence_history``.
+    """
+    if not _has_current_commerce_identity(order_prep=order_prep, state=state):
+        return False
     prep = _order_prep_mapping(order_prep)
     if bool(prep.get("awaiting_payment_receipt") or prep.get("payment_receipt_received")):
         return True
@@ -607,8 +684,6 @@ def _has_payment_or_receipt_progress(order_prep: Any = None) -> bool:
         return True
     status = str(prep.get("order_status") or "").strip().lower()
     if status in _PAYMENT_FULFILLMENT_STATUSES:
-        return True
-    if _nonempty_text(prep.get("salla_order_id")):
         return True
     if _nonempty_text(prep.get("checkout_payment_id")):
         return True
@@ -654,7 +729,7 @@ def purchase_channel_blocks_new_entry(
     stage: str = "",
 ) -> bool:
     """True when a committed channel may still own a new purchase-entry turn."""
-    if has_verified_purchase_channel_execution(order_prep):
+    if has_verified_purchase_channel_execution(order_prep, state=state):
         return True
     return has_actionable_active_order_context(
         order_prep=order_prep,
@@ -712,7 +787,7 @@ def has_actionable_active_order_context(
         return True
     if _has_order_prep_product(order_prep) or _has_session_product(state):
         return True
-    if _has_payment_or_receipt_progress(order_prep):
+    if _has_payment_or_receipt_progress(order_prep=order_prep, state=state):
         return True
     if _has_delivery_or_address_progress(order_prep=order_prep, state=state):
         return True
@@ -965,10 +1040,17 @@ def should_block_bare_start_product_prompt(
     merchant_sales_channels: Any = None,
     db: Any = None,
     tenant_id: int = 0,
+    state: Any = None,
 ) -> bool:
-    """Block deterministic product prompts until purchase channel is chosen."""
+    """Block deterministic product prompts until purchase channel is chosen.
+
+    An actual current order in ``order_prep`` / ``state`` also blocks canned
+    catalog prompts so silent recovery cannot overwrite in-flight checkout.
+    """
     prep = _order_prep_mapping(order_prep)
-    if purchase_channel_blocks_new_entry(order_prep=order_prep):
+    if has_actionable_active_order_context(order_prep=order_prep, state=state):
+        return True
+    if purchase_channel_blocks_new_entry(order_prep=order_prep, state=state):
         return False
     if _awaiting_channel(prep):
         return True
@@ -986,6 +1068,7 @@ def should_block_bare_start_product_prompt(
         maps_url=maps_url,
         store_url_source=store_url_source,
         merchant_sales_channels=sales,
+        state=state,
     )
 
 
@@ -2347,6 +2430,13 @@ def persist_checkout_route_state(
 ) -> bool:
     if not db or not tenant_id or not phone:
         return False
+    trusted_source = ""
+    if purchase_channel_execution_active is True:
+        trusted_source = _trusted_channel_selection_source(
+            purchase_channel_selection_source
+        )
+        if not trusted_source or not str(checkout_channel or "").strip():
+            return False
     try:
         from core.order_flow import _load_brain_state  # noqa: PLC0415
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
@@ -2356,12 +2446,16 @@ def persist_checkout_route_state(
             return False
         bs = dict(bs or {})
         op = dict(bs.get("order_prep") or {})
+        if purchase_channel_execution_active is True and _purchase_channel_execution_spent(
+            order_prep=op,
+            state=bs,
+        ):
+            return False
         if awaiting_checkout_channel:
             clear_committed_channel = True
         if clear_committed_channel:
             op["checkout_channel"] = ""
-            op["purchase_channel_execution_active"] = False
-            op["purchase_channel_selection_source"] = ""
+            _clear_purchase_channel_execution_stamp(op)
         if checkout_channel:
             op["checkout_channel"] = checkout_channel
         if awaiting_checkout_channel is not None:
@@ -2374,15 +2468,12 @@ def persist_checkout_route_state(
                 if str(x).strip() in CANONICAL_PURCHASE_CHANNEL_IDS
             ]
         if purchase_channel_execution_active is True:
-            trusted_source = _trusted_channel_selection_source(
-                purchase_channel_selection_source
-            )
-            if trusted_source and checkout_channel:
-                op["purchase_channel_execution_active"] = True
-                op["purchase_channel_selection_source"] = trusted_source
+            op["purchase_channel_execution_active"] = True
+            op["purchase_channel_selection_source"] = trusted_source
         elif purchase_channel_execution_active is False:
-            op["purchase_channel_execution_active"] = False
-            op["purchase_channel_selection_source"] = ""
+            _clear_purchase_channel_execution_stamp(op)
+        elif _purchase_channel_execution_spent(order_prep=op, state=bs):
+            _clear_purchase_channel_execution_stamp(op)
         bs["order_prep"] = op
         meta = dict(getattr(conv, "extra_metadata", None) or {})
         meta["brain_state"] = bs
@@ -2419,7 +2510,9 @@ def persist_checkout_route_state(
             trusted_written = _trusted_channel_selection_source(
                 str(written.get("purchase_channel_selection_source") or "")
             )
-            if trusted_written and not bool(written.get("purchase_channel_execution_active")):
+            if trusted_written != trusted_source:
+                return False
+            if not bool(written.get("purchase_channel_execution_active")):
                 return False
         return True
     except Exception as exc:  # noqa: BLE001
