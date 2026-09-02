@@ -19,7 +19,7 @@ for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from database.models import Base, Coupon, Customer, Order, Tenant, TenantSettings
+from database.models import Base, Coupon, Customer, Integration, Order, Tenant, TenantSettings
 from backend.routers.coupons import DEFAULT_COUPON_LEVELS, _normalise_levels
 from backend.services.coupon_generator import (
     CouponGeneratorService,
@@ -42,6 +42,12 @@ from backend.services.customer_request_coupon_service import (
     count_customer_orders,
     find_reusable_assigned_coupon,
     issue_customer_coupon,
+)
+from backend.services.coupon_salla_provider_state import (
+    SALLA_ADAPTER_AVAILABLE,
+    SALLA_CONFIGURED_BUT_UNAVAILABLE,
+    SALLA_NOT_CONFIGURED,
+    classify_salla_coupon_provider_state,
 )
 
 
@@ -203,6 +209,74 @@ def _add_pool_coupon(
         extra_metadata=_pool_meta(level=level, used=used, extra=extra),
         coupon_level=level,
         source_type="system",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _add_native_coupon(
+    db,
+    tenant_id: int,
+    code: str,
+    level: str,
+    *,
+    used: str = "false",
+    expires_at: Optional[datetime] = None,
+    extra: Optional[dict] = None,
+    allocation_channel: str = "ai",
+    usage_limit: int = 1,
+    ai_allocatable: Any = True,
+    source_type: str = "manual",
+) -> Coupon:
+    meta = {
+        "source": "dashboard",
+        "used": used,
+        "active": True,
+        "ai_allocatable": ai_allocatable,
+        "coupon_level": level,
+        "allocation_channel": allocation_channel,
+        "usage_limit": usage_limit,
+        "usage_count": 0,
+    }
+    if extra:
+        meta.update(extra)
+    row = Coupon(
+        tenant_id=tenant_id,
+        code=code,
+        discount_type="percentage",
+        discount_value="6",
+        expires_at=expires_at or (datetime.now(timezone.utc) + timedelta(days=3)),
+        extra_metadata=meta,
+        coupon_level=level,
+        allocation_channel=allocation_channel,
+        source_type=source_type,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _add_salla_integration(
+    db,
+    tenant_id: int,
+    *,
+    enabled: bool = True,
+    needs_reauth: bool = False,
+    api_key: str = "tok",
+) -> Integration:
+    row = Integration(
+        tenant_id=tenant_id,
+        provider="salla",
+        external_store_id=f"coupon-test-{tenant_id}",
+        enabled=enabled,
+        config={
+            "api_key": api_key,
+            "store_id": f"store-{tenant_id}",
+            "needs_reauth": needs_reauth,
+        },
     )
     db.add(row)
     db.commit()
@@ -445,7 +519,7 @@ def test_expired_pool_coupon_is_not_issued() -> None:
     )
     result = _issue(db, tenant_id, customer.id)
     assert result.issued is False
-    assert result.reason_code in {REASON_POOL_EMPTY, REASON_SALLA_UNAVAILABLE}
+    assert result.reason_code == REASON_POOL_EMPTY
 
 
 def test_used_pool_coupon_is_not_issued() -> None:
@@ -539,6 +613,7 @@ def test_on_demand_only_with_patched_adapter() -> None:
     customer = _add_customer(db, tenant_id, PHONE_A)
     _add_orders(db, tenant_id, PHONE_A, countable=1)
     pool = _add_pool_coupon(db, tenant_id, "NHPL1", "bronze")
+    _add_salla_integration(db, tenant_id)
     with patch.object(
         coupon_request_mod.CouponGeneratorService, "_get_adapter", lambda self: _fake_adapter()
     ):
@@ -562,6 +637,7 @@ def test_pool_first_falls_back_to_on_demand() -> None:
     )
     customer = _add_customer(db, tenant_id, PHONE_A)
     _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_salla_integration(db, tenant_id)
     with patch.object(
         coupon_request_mod.CouponGeneratorService, "_get_adapter", lambda self: _fake_adapter()
     ):
@@ -760,3 +836,368 @@ def test_reuse_query_is_tenant_scoped() -> None:
     db.refresh(foreign)
     assert int((foreign.extra_metadata or {}).get("customer_id")) == customer.id
     assert foreign.tenant_id == other.id
+
+
+def test_general_manual_promo_is_not_ai_allocated() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    promo = _add_native_coupon(
+        db, tenant_id, "AYRDIS", "bronze", ai_allocatable=False
+    )
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    db.refresh(promo)
+    assert (promo.extra_metadata or {}).get("customer_id") is None
+    assert (promo.extra_metadata or {}).get("used") != "true"
+
+
+def test_legacy_manual_without_marker_is_excluded() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    row = Coupon(
+        tenant_id=tenant_id,
+        code="AYODIS",
+        discount_type="percentage",
+        discount_value="6",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=3),
+        extra_metadata={"source": "dashboard", "active": True, "usage_limit": 1},
+        source_type="manual",
+    )
+    db.add(row)
+    db.commit()
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    db.refresh(row)
+    assert (row.extra_metadata or {}).get("customer_id") is None
+
+
+def test_native_ai_coupon_is_issued_without_salla() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    native = _add_native_coupon(db, tenant_id, "NATAI1", "bronze")
+    with patch.object(
+        coupon_request_mod.CouponGeneratorService, "_get_adapter", lambda self: None
+    ):
+        result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.code == "NATAI1"
+    assert result.reason_code == "issued"
+    db.refresh(native)
+    assert int((native.extra_metadata or {}).get("customer_id")) == customer.id
+    assert (native.extra_metadata or {}).get("issued_reason") == ISSUED_REASON_CUSTOMER_REQUEST
+    assert (native.extra_metadata or {}).get("issued_channel") == "ai"
+
+
+def test_native_wrong_level_is_excluded() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    wrong = _add_native_coupon(db, tenant_id, "NASLV1", "silver")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    db.refresh(wrong)
+    assert (wrong.extra_metadata or {}).get("customer_id") is None
+
+
+def test_native_wrong_channel_is_excluded() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    wrong = _add_native_coupon(
+        db, tenant_id, "NACMP1", "bronze", allocation_channel="campaign"
+    )
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    db.refresh(wrong)
+    assert (wrong.extra_metadata or {}).get("customer_id") is None
+
+
+def test_native_expired_and_used_and_bound_are_excluded() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    other = _add_customer(db, tenant_id, PHONE_B)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_native_coupon(
+        db,
+        tenant_id,
+        "NAEXP1",
+        "bronze",
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    _add_native_coupon(db, tenant_id, "NAUSD1", "bronze", used="true")
+    bound = _add_native_coupon(db, tenant_id, "NABND1", "bronze")
+    _stamp_owned(db, bound, other.id)
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+
+
+def test_native_repeat_request_reuses_assignment() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    native = _add_native_coupon(db, tenant_id, "NAREU1", "bronze")
+    spare = _add_native_coupon(db, tenant_id, "NAREU2", "bronze")
+    first = _issue(db, tenant_id, customer.id)
+    second = _issue(db, tenant_id, customer.id)
+    assert first.issued and second.issued
+    assert first.coupon_id == second.coupon_id == native.id
+    db.refresh(spare)
+    assert (spare.extra_metadata or {}).get("customer_id") is None
+
+
+def test_two_customers_cannot_share_native_coupon() -> None:
+    db, tenant_id, _engine = _make_db()
+    a = _add_customer(db, tenant_id, PHONE_A)
+    b = _add_customer(db, tenant_id, PHONE_B)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_orders(db, tenant_id, PHONE_B, countable=1)
+    native = _add_native_coupon(db, tenant_id, "NASHR1", "bronze")
+    first = _issue(db, tenant_id, a.id)
+    second = _issue(db, tenant_id, b.id)
+    assert first.issued is True
+    assert first.coupon_id == native.id
+    assert second.issued is False
+    assert second.reason_code == REASON_POOL_EMPTY
+
+
+def test_salla_pool_is_selected_ahead_of_native() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    salla = _add_pool_coupon(db, tenant_id, "NHAAA", "bronze")
+    native = _add_native_coupon(db, tenant_id, "NATAI9", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.coupon_id == salla.id
+    db.refresh(native)
+    assert (native.extra_metadata or {}).get("customer_id") is None
+
+
+def test_salla_pool_pick_ignores_native_manual() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    native = _add_native_coupon(db, tenant_id, "NATAI8", "bronze")
+    svc = CouponGeneratorService(db, tenant_id)
+    picked = svc.pick_coupon_for_level("bronze", customer.id, for_channel="ai")
+    assert picked is None
+    native_picked = svc.pick_native_ai_coupon_for_level(
+        "bronze", customer.id, for_channel="ai"
+    )
+    assert native_picked is not None
+    assert native_picked.id == native.id
+
+
+def test_no_salla_empty_native_is_pool_empty_not_salla_unavailable() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    with patch.object(
+        coupon_request_mod.CouponGeneratorService, "_get_adapter", lambda self: None
+    ):
+        result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    assert db.query(Coupon).filter(Coupon.tenant_id == tenant_id).count() == 0
+
+
+def test_unlimited_manual_usage_is_not_one_customer_safe() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    promo = _add_native_coupon(
+        db, tenant_id, "NAUNL1", "bronze", usage_limit=0, extra={"usage_limit": 0}
+    )
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    db.refresh(promo)
+    assert (promo.extra_metadata or {}).get("customer_id") is None
+
+
+def test_zero_orders_first_purchase_enabled_authorizes_bronze() -> None:
+    db, tenant_id, _engine = _make_db(first_purchase=True)
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    native = _add_native_coupon(db, tenant_id, "NAFP01", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.resolved_level == "bronze"
+    assert result.coupon_id == native.id
+    assert result.countable_orders == 0
+
+
+def test_provider_state_classifier_is_read_only_closed_set() -> None:
+    import inspect
+
+    src = inspect.getsource(classify_salla_coupon_provider_state)
+    assert "pick_active_salla_integration" not in src
+    assert "get_adapter" not in src
+    assert "commit(" not in src
+    db, tenant_id, _engine = _make_db()
+    assert classify_salla_coupon_provider_state(db, tenant_id) == SALLA_NOT_CONFIGURED
+    disabled = _add_salla_integration(db, tenant_id, enabled=False)
+    assert classify_salla_coupon_provider_state(db, tenant_id) == SALLA_CONFIGURED_BUT_UNAVAILABLE
+    db.refresh(disabled)
+    assert disabled.enabled is False
+    disabled.enabled = True
+    cfg = dict(disabled.config or {})
+    cfg["needs_reauth"] = True
+    disabled.config = cfg
+    flag_modified(disabled, "config")
+    db.commit()
+    assert classify_salla_coupon_provider_state(db, tenant_id) == SALLA_CONFIGURED_BUT_UNAVAILABLE
+    cfg["needs_reauth"] = False
+    disabled.config = cfg
+    flag_modified(disabled, "config")
+    db.commit()
+    assert classify_salla_coupon_provider_state(db, tenant_id) == SALLA_ADAPTER_AVAILABLE
+
+
+def test_salla_configured_disabled_is_salla_unavailable() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    row = _add_salla_integration(db, tenant_id, enabled=False)
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_SALLA_UNAVAILABLE
+    db.refresh(row)
+    assert row.enabled is False
+    assert db.query(Coupon).filter(Coupon.tenant_id == tenant_id).count() == 0
+
+
+def test_salla_needs_reauth_is_salla_unavailable() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    row = _add_salla_integration(db, tenant_id, needs_reauth=True)
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_SALLA_UNAVAILABLE
+    db.refresh(row)
+    assert bool((row.config or {}).get("needs_reauth")) is True
+    assert db.query(Coupon).filter(Coupon.tenant_id == tenant_id).count() == 0
+
+
+def test_salla_adapter_available_create_none_is_pool_empty() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_salla_integration(db, tenant_id)
+
+    async def _no_coupon(*_args, **_kwargs):
+        return None
+
+    with patch.object(
+        coupon_request_mod.CouponGeneratorService,
+        "create_on_demand_for_level",
+        _no_coupon,
+    ):
+        result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    assert db.query(Coupon).filter(Coupon.tenant_id == tenant_id).count() == 0
+
+
+def test_salla_pool_selection_unchanged_with_configured_provider() -> None:
+    db, tenant_id, _engine = _make_db()
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_salla_integration(db, tenant_id)
+    salla = _add_pool_coupon(db, tenant_id, "NHAAA", "bronze")
+    native = _add_native_coupon(db, tenant_id, "NATAI7", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == salla.id
+    db.refresh(native)
+    assert (native.extra_metadata or {}).get("customer_id") is None
+
+
+def test_native_pool_over_20_ineligible_still_finds_valid() -> None:
+    db, tenant_id, _engine = _make_db(
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        }
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    near = datetime.now(timezone.utc) + timedelta(hours=1)
+    for idx in range(21):
+        _add_native_coupon(
+            db,
+            tenant_id,
+            f"NAIN{idx:02d}",
+            "bronze",
+            expires_at=near,
+        )
+    valid = _add_native_coupon(db, tenant_id, "NAOK21", "bronze")
+    svc = CouponGeneratorService(db, tenant_id)
+    picked = svc.pick_native_ai_coupon_for_level(
+        "bronze", customer.id, for_channel="ai"
+    )
+    assert picked is not None
+    assert picked.id == valid.id
+    db2, tenant2, _engine2 = _make_db(
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        }
+    )
+    customer2 = _add_customer(db2, tenant2, PHONE_A)
+    _add_orders(db2, tenant2, PHONE_A, countable=1)
+    for idx in range(21):
+        _add_native_coupon(
+            db2,
+            tenant2,
+            f"NAIN{idx:02d}",
+            "bronze",
+            expires_at=near,
+        )
+    valid2 = _add_native_coupon(db2, tenant2, "NAOK21", "bronze")
+    result = _issue(db2, tenant2, customer2.id)
+    assert result.issued is True
+    assert result.coupon_id == valid2.id
+    assert result.reason_code == "issued"
+
+
+def test_native_pool_all_invalid_terminates_pool_empty() -> None:
+    db, tenant_id, _engine = _make_db(
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        }
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    near = datetime.now(timezone.utc) + timedelta(hours=1)
+    seeded = [
+        _add_native_coupon(
+            db,
+            tenant_id,
+            f"NABD{idx:02d}",
+            "bronze",
+            expires_at=near,
+        )
+        for idx in range(21)
+    ]
+    svc = CouponGeneratorService(db, tenant_id)
+    picked = svc.pick_native_ai_coupon_for_level(
+        "bronze", customer.id, for_channel="ai"
+    )
+    assert picked is None
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    for row in seeded:
+        db.refresh(row)
+        assert (row.extra_metadata or {}).get("customer_id") is None
+

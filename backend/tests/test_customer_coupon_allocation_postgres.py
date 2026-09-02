@@ -20,7 +20,7 @@ for _entry in (str(_REPO_ROOT), str(_BACKEND), str(_DATABASE)):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
 
-from database.models import Coupon, Customer, Order, Tenant, TenantSettings
+from database.models import Coupon, Customer, Integration, Order, Tenant, TenantSettings
 from routers.coupons import DEFAULT_COUPON_LEVELS, _normalise_levels
 from services.coupon_generator import CouponGeneratorService
 from services.customer_intelligence import normalize_phone
@@ -152,6 +152,41 @@ def _seed_customer_request_tenant(
     session.commit()
     session.refresh(customer)
     return customer
+
+
+def _add_salla_integration(session: Session, tenant_id: int) -> Integration:
+    existing = (
+        session.query(Integration)
+        .filter(Integration.tenant_id == tenant_id, Integration.provider == "salla")
+        .first()
+    )
+    if existing is not None:
+        existing.enabled = True
+        cfg = dict(existing.config or {})
+        cfg["needs_reauth"] = False
+        if not cfg.get("api_key"):
+            cfg["api_key"] = "tok"
+        existing.config = cfg
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(existing, "config")
+        session.commit()
+        return existing
+    row = Integration(
+        tenant_id=tenant_id,
+        provider="salla",
+        external_store_id=f"a1-coupon-{tenant_id}",
+        enabled=True,
+        config={
+            "api_key": "tok",
+            "store_id": f"store-{tenant_id}",
+            "needs_reauth": False,
+        },
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
 
 
 def _add_pool_coupon(session: Session, tenant_id: int, code: str, level: str) -> Coupon:
@@ -331,6 +366,7 @@ def test_same_customer_on_demand_concurrency_creates_at_most_one(postgres_engine
             countable=1,
             phone=PHONE_ON_DEMAND,
         )
+        _add_salla_integration(setup, TEST_TENANT_SAME_CUSTOMER_ON_DEMAND)
         customer_id = int(customer.id)
     finally:
         setup.close()
@@ -393,5 +429,102 @@ def test_same_customer_on_demand_concurrency_creates_at_most_one(postgres_engine
         assert len(customer_request_rows) == 1
         assert int(customer_request_rows[0].id) == results[0]
         assert int((customer_request_rows[0].extra_metadata or {}).get("customer_id")) == customer_id
+    finally:
+        verify.close()
+
+
+TEST_TENANT_NATIVE = 991_883
+PHONE_NATIVE = "+966500000883"
+
+
+def _add_native_coupon(session: Session, tenant_id: int, code: str, level: str) -> Coupon:
+    row = Coupon(
+        tenant_id=tenant_id,
+        code=code,
+        discount_type="percentage",
+        discount_value="6",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=3),
+        extra_metadata={
+            "source": "dashboard",
+            "used": "false",
+            "active": True,
+            "ai_allocatable": True,
+            "coupon_level": level,
+            "allocation_channel": "ai",
+            "usage_limit": 1,
+            "usage_count": 0,
+        },
+        coupon_level=level,
+        allocation_channel="ai",
+        source_type="manual",
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def test_native_same_customer_concurrency_reuses_one_assignment(postgres_engine) -> None:
+    setup = sessionmaker(bind=postgres_engine, expire_on_commit=False)()
+    try:
+        customer = _seed_customer_request_tenant(
+            setup,
+            TEST_TENANT_NATIVE,
+            pool_mode="pool_first",
+            countable=1,
+            phone=PHONE_NATIVE,
+        )
+        customer_id = int(customer.id)
+        c1 = _add_native_coupon(setup, TEST_TENANT_NATIVE, "NAT01", "bronze")
+        c2 = _add_native_coupon(setup, TEST_TENANT_NATIVE, "NAT02", "bronze")
+        pool_ids = {int(c1.id), int(c2.id)}
+    finally:
+        setup.close()
+
+    results: list[Optional[int]] = [None, None]
+    reasons: list[Optional[str]] = [None, None]
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(2)
+
+    def worker(index: int) -> None:
+        connection = postgres_engine.connect()
+        session = sessionmaker(bind=connection, expire_on_commit=False)()
+        try:
+            barrier.wait(timeout=10)
+            issued = asyncio.run(
+                issue_customer_coupon(
+                    session,
+                    TEST_TENANT_NATIVE,
+                    customer_id,
+                    allow_issuance=True,
+                )
+            )
+            results[index] = issued.coupon_id
+            reasons[index] = issued.reason_code
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            session.close()
+            connection.close()
+
+    t1 = threading.Thread(target=worker, args=(0,))
+    t2 = threading.Thread(target=worker, args=(1,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=40)
+    t2.join(timeout=40)
+    assert not errors, errors
+    assert results[0] is not None and results[1] is not None, reasons
+    assert results[0] == results[1]
+    assert results[0] in pool_ids
+    verify = sessionmaker(bind=postgres_engine, expire_on_commit=False)()
+    try:
+        assigned = [
+            row
+            for row in verify.query(Coupon).filter(Coupon.tenant_id == TEST_TENANT_NATIVE).all()
+            if (row.extra_metadata or {}).get("customer_id")
+        ]
+        assert len(assigned) == 1
+        assert int((assigned[0].extra_metadata or {}).get("customer_id")) == customer_id
     finally:
         verify.close()

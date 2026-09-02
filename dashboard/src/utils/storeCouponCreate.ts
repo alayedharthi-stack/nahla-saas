@@ -104,3 +104,31 @@ export function isGeneratedCodeShape(code: string): boolean {
   if (/[OIL01]/.test(normalized)) return false
   return normalized.length >= 6 && normalized.length <= CODE_MAX_LEN
 }
+
+export const COUPON_PURPOSE_GENERAL = 'general' as const
+export const COUPON_PURPOSE_AI = 'ai_allocation' as const
+export type CouponPurpose = typeof COUPON_PURPOSE_GENERAL | typeof COUPON_PURPOSE_AI
+
+export const COUPON_PURPOSE_GENERAL_LABEL_AR = 'كوبون ترويجي عام'
+export const COUPON_PURPOSE_AI_LABEL_AR = 'متاح لتخصيص الذكاء الاصطناعي'
+export const COUPON_PURPOSE_HINT_AR =
+  'الكوبون الترويجي العام يبقى مشتركاً ولا يُمنح لعميل واحد تلقائياً. تخصيص الذكاء يمنح الكود لعميل واحد مؤهل بعد موافقتك الصريحة.'
+
+export function validateAiAllocationFields(input: {
+  purpose: CouponPurpose
+  couponLevel: string
+  allocationChannel: string
+  limit: number
+}): string | null {
+  if (input.purpose !== COUPON_PURPOSE_AI) return null
+  if (!['bronze', 'silver', 'gold', 'vip'].includes(input.couponLevel)) {
+    return 'اختر مستوى صالحاً لتخصيص الذكاء الاصطناعي.'
+  }
+  if (!['ai', 'shared'].includes(input.allocationChannel)) {
+    return 'اختر قناة متوافقة (ذكاء أو مشتركة).'
+  }
+  if (input.limit !== 1) {
+    return 'كوبون تخصيص الذكاء يجب أن يكون لعميل واحد (حد الاستخدام = 1).'
+  }
+  return null
+}

@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 from modules.ai.brain.decision.actions import (
     ACTION_CUSTOMER_COUPON_REQUEST,
     ACTION_LLM_REPLY,
+    ACTION_SEARCH_PRODUCTS,
 )
 from modules.ai.brain.commerce.fact_answer import STATUS_KNOWN_EMPTY, STATUS_KNOWN_VALUE
 from modules.ai.brain.types import Decision
@@ -26,8 +27,9 @@ logger = logging.getLogger("nahla.brain.customer_coupon_request_owner")
 
 CAPABILITY_CUSTOMER_COUPON_REQUEST = "customer_coupon_request"
 
-# Coupon capability may replace proven generic LLM fallback only.
-_ELIGIBLE_FALLBACK_ACTIONS = frozenset({ACTION_LLM_REPLY})
+# Positive takeover of non-mutating fallback owners only. Canary + parse_ok
+# + capability=customer_coupon_request are still required by should_own.
+_ELIGIBLE_FALLBACK_ACTIONS = frozenset({ACTION_LLM_REPLY, ACTION_SEARCH_PRODUCTS})
 
 
 def global_live_routing_enabled() -> bool:

@@ -57,7 +57,14 @@ import {
   generateStoreCouponCode,
   normalizeCouponCode,
   splitDatetimeLocal,
+  validateAiAllocationFields,
   validateCouponCode,
+  COUPON_PURPOSE_AI,
+  COUPON_PURPOSE_AI_LABEL_AR,
+  COUPON_PURPOSE_GENERAL,
+  COUPON_PURPOSE_GENERAL_LABEL_AR,
+  COUPON_PURPOSE_HINT_AR,
+  type CouponPurpose,
 } from '../utils/storeCouponCreate'
 import {
   CouponSallaSyncErrorHint,
@@ -316,6 +323,7 @@ export default function Coupons() {
   const [apiSyncEnabled, setApiSyncEnabled] = useState<boolean | null>(null)
   const [pushingId, setPushingId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  const [aiEnableCoupon, setAiEnableCoupon] = useState<DashboardCoupon | null>(null)
   const { t } = useLanguage()
 
   const levels = data.levels && data.levels.length === 4 ? data.levels : DEFAULT_LEVELS
@@ -389,6 +397,9 @@ export default function Coupons() {
     value: string
     expires?: string
     limit?: number
+    ai_allocatable?: boolean
+    coupon_level?: CouponLevelId
+    allocation_channel?: CouponChannel
   }) => {
     await featureRealityApi.createCoupon({
       code: payload.code,
@@ -398,6 +409,9 @@ export default function Coupons() {
       limit: payload.limit,
       category: 'standard',
       active: true,
+      ai_allocatable: payload.ai_allocatable === true,
+      coupon_level: payload.coupon_level,
+      allocation_channel: payload.allocation_channel,
     })
     setCreateOpen(false)
     setFilter('manual')
@@ -853,7 +867,15 @@ export default function Coupons() {
                         : <span className="text-xs text-slate-400">—</span>}
                     </td>
                     <td className="px-5 py-3.5" title={om.hint}>
-                      <Badge label={c.source_label || sMeta.label} variant={sMeta.variant} />
+                      <div className="flex flex-col gap-1">
+                        <Badge label={c.source_label || sMeta.label} variant={sMeta.variant} />
+                        {sourceType === 'manual' ? (
+                          <Badge
+                            label={c.ai_allocatable ? COUPON_PURPOSE_AI_LABEL_AR : COUPON_PURPOSE_GENERAL_LABEL_AR}
+                            variant={c.ai_allocatable ? 'green' : 'slate'}
+                          />
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-5 py-3.5">
                       {c.sync_badge_label ? (
@@ -922,6 +944,15 @@ export default function Coupons() {
                             )}
                           </button>
                         ) : null}
+                        {sourceType === 'manual' && !c.ai_allocatable ? (
+                          <button
+                            type="button"
+                            onClick={() => setAiEnableCoupon(c)}
+                            className="text-[10px] px-2 py-1 rounded-md border border-slate-200 text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                          >
+                            إتاحة لتخصيص الذكاء
+                          </button>
+                        ) : null}
                         <button className="text-slate-300 hover:text-red-500 transition-colors" onClick={() => handleDeleteCoupon(c)}>
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -948,6 +979,14 @@ export default function Coupons() {
         onClose={() => setCreateOpen(false)}
         onCreate={handleCreateCouponSubmit}
       />
+      <EnableAiAllocationModal
+        coupon={aiEnableCoupon}
+        onClose={() => setAiEnableCoupon(null)}
+        onSaved={() => {
+          setAiEnableCoupon(null)
+          load()
+        }}
+      />
     </div>
   )
 }
@@ -963,6 +1002,9 @@ interface CreateStoreCouponModalProps {
     value: string
     expires?: string
     limit?: number
+    ai_allocatable?: boolean
+    coupon_level?: CouponLevelId
+    allocation_channel?: CouponChannel
   }) => void | Promise<void>
 }
 
@@ -973,6 +1015,9 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
   const [expiresDate, setExpiresDate] = useState('')
   const [expiresTime, setExpiresTime] = useState('23:59')
   const [limit, setLimit] = useState('1')
+  const [purpose, setPurpose] = useState<CouponPurpose>(COUPON_PURPOSE_GENERAL)
+  const [couponLevel, setCouponLevel] = useState<CouponLevelId | ''>('')
+  const [allocationChannel, setAllocationChannel] = useState<CouponChannel>('ai')
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [codeErr, setCodeErr] = useState<string | null>(null)
@@ -989,6 +1034,9 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
       setExpiresDate(date)
       setExpiresTime(time)
       setLimit('1')
+      setPurpose(COUPON_PURPOSE_GENERAL)
+      setCouponLevel('')
+      setAllocationChannel('ai')
       setErr(null)
       setCodeErr(null)
       setSaving(false)
@@ -1047,9 +1095,21 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
       }
       expiresIso = d.toISOString()
     }
-    const limitNum = limit.trim() === '' ? 0 : Number(limit)
+    const limitNum = purpose === COUPON_PURPOSE_AI
+      ? 1
+      : (limit.trim() === '' ? 0 : Number(limit))
     if (!Number.isFinite(limitNum) || limitNum < 0) {
       setErr('حد الاستخدام غير صالح')
+      return
+    }
+    const purposeErr = validateAiAllocationFields({
+      purpose,
+      couponLevel,
+      allocationChannel,
+      limit: limitNum,
+    })
+    if (purposeErr) {
+      setErr(purposeErr)
       return
     }
     setSaving(true)
@@ -1060,6 +1120,9 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
         value: String(numValue),
         expires: expiresIso,
         limit: limitNum,
+        ai_allocatable: purpose === COUPON_PURPOSE_AI,
+        coupon_level: purpose === COUPON_PURPOSE_AI ? (couponLevel as CouponLevelId) : undefined,
+        allocation_channel: purpose === COUPON_PURPOSE_AI ? allocationChannel : undefined,
       })
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : 'تعذّر إنشاء الكوبون')
@@ -1199,15 +1262,79 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
               <label className="block text-xs font-medium text-slate-700 mb-1">حد الاستخدام</label>
               <input
                 type="number"
-                min={0}
-                value={limit}
+                min={purpose === COUPON_PURPOSE_AI ? 1 : 0}
+                value={purpose === COUPON_PURPOSE_AI ? '1' : limit}
                 onChange={e => setLimit(e.target.value)}
-                className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+                disabled={purpose === COUPON_PURPOSE_AI}
+                className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200 disabled:bg-slate-50"
                 placeholder="1"
               />
-              <p className="text-[10px] text-slate-400 mt-1">0 = غير محدود</p>
+              <p className="text-[10px] text-slate-400 mt-1">
+                {purpose === COUPON_PURPOSE_AI ? 'تخصيص الذكاء: عميل واحد فقط.' : '0 = غير محدود'}
+              </p>
             </div>
           </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-2">نوع الكوبون</label>
+            <p className="text-[10px] text-slate-500 mb-2">{COUPON_PURPOSE_HINT_AR}</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {([
+                { id: COUPON_PURPOSE_GENERAL, label: COUPON_PURPOSE_GENERAL_LABEL_AR },
+                { id: COUPON_PURPOSE_AI, label: COUPON_PURPOSE_AI_LABEL_AR },
+              ] as const).map(option => {
+                const active = purpose === option.id
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => {
+                      setPurpose(option.id)
+                      if (option.id === COUPON_PURPOSE_AI) setLimit('1')
+                    }}
+                    className={`px-3 py-2 rounded-lg border text-sm text-start transition ${
+                      active
+                        ? 'border-brand-400 bg-brand-50 text-brand-700'
+                        : 'border-slate-200 hover:border-slate-300 text-slate-700'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          {purpose === COUPON_PURPOSE_AI ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">المستوى *</label>
+                <select
+                  value={couponLevel}
+                  onChange={e => setCouponLevel(e.target.value as CouponLevelId | '')}
+                  className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+                  required
+                >
+                  <option value="">اختر المستوى</option>
+                  <option value="bronze">برونزي</option>
+                  <option value="silver">فضي</option>
+                  <option value="gold">ذهبي</option>
+                  <option value="vip">استثنائي</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">القناة *</label>
+                <select
+                  value={allocationChannel}
+                  onChange={e => setAllocationChannel(e.target.value as CouponChannel)}
+                  className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+                >
+                  <option value="ai">ذكاء</option>
+                  <option value="shared">مشتركة</option>
+                </select>
+              </div>
+            </div>
+          ) : null}
 
           {err ? (
             <p className="text-xs text-red-600">{err}</p>
@@ -1220,6 +1347,114 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
             <button type="submit" disabled={saving} className="btn-primary text-sm px-4 py-2 rounded-lg inline-flex items-center gap-2 disabled:opacity-60">
               {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
               حفظ الكوبون
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+function EnableAiAllocationModal({
+  coupon,
+  onClose,
+  onSaved,
+}: {
+  coupon: DashboardCoupon | null
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [couponLevel, setCouponLevel] = useState<CouponLevelId | ''>('')
+  const [allocationChannel, setAllocationChannel] = useState<CouponChannel>('ai')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (coupon) {
+      setCouponLevel((coupon.coupon_level as CouponLevelId) || '')
+      setAllocationChannel((coupon.allocation_channel === 'shared' ? 'shared' : 'ai'))
+      setErr(null)
+      setSaving(false)
+    }
+  }, [coupon])
+
+  if (!coupon) return null
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const purposeErr = validateAiAllocationFields({
+      purpose: COUPON_PURPOSE_AI,
+      couponLevel,
+      allocationChannel,
+      limit: 1,
+    })
+    if (purposeErr) {
+      setErr(purposeErr)
+      return
+    }
+    setSaving(true)
+    try {
+      await featureRealityApi.updateCoupon(coupon.id, {
+        ai_allocatable: true,
+        coupon_level: couponLevel,
+        allocation_channel: allocationChannel,
+        limit: 1,
+      })
+      onSaved()
+    } catch (e2) {
+      setErr(e2 instanceof Error ? e2.message : 'تعذّر تحديث الكوبون')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+      <div className="card w-full max-w-md">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+          <div>
+            <h2 className="text-base font-bold text-slate-900">إتاحة لتخصيص الذكاء</h2>
+            <p className="text-xs text-slate-500 mt-0.5">{COUPON_PURPOSE_HINT_AR}</p>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <p className="text-xs text-slate-600 font-mono" dir="ltr">{coupon.code}</p>
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">المستوى *</label>
+            <select
+              value={couponLevel}
+              onChange={e => setCouponLevel(e.target.value as CouponLevelId | '')}
+              className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+              required
+            >
+              <option value="">اختر المستوى</option>
+              <option value="bronze">برونزي</option>
+              <option value="silver">فضي</option>
+              <option value="gold">ذهبي</option>
+              <option value="vip">استثنائي</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">القناة *</label>
+            <select
+              value={allocationChannel}
+              onChange={e => setAllocationChannel(e.target.value as CouponChannel)}
+              className="w-full text-sm px-3 py-2 rounded-lg border border-slate-200"
+            >
+              <option value="ai">ذكاء</option>
+              <option value="shared">مشتركة</option>
+            </select>
+          </div>
+          {err ? <p className="text-xs text-red-600">{err}</p> : null}
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} className="text-sm px-4 py-2 rounded-lg border border-slate-200">
+              إلغاء
+            </button>
+            <button type="submit" disabled={saving} className="btn-primary text-sm px-4 py-2 rounded-lg disabled:opacity-60">
+              {saving ? 'جاري الحفظ…' : 'حفظ'}
             </button>
           </div>
         </form>
