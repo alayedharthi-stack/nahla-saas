@@ -145,27 +145,11 @@ def compose_operational_expression_goal(instruction: ReplyInstruction) -> str:
                 "field. Do not invent other missing fields."
             )
     elif kind == DECISION_KIND_PAYMENT_METHOD:
-        nxt = str(instruction.facts.get("next_missing_field") or "none").strip() or "none"
-        dest_ok = bool(instruction.facts.get("payment_destination_available"))
-        if nxt not in {"none", "", "payment_method"}:
-            context_note = (
-                "The customer selected a payment method during checkout. "
-                "Confirm the choice. Payment destination must not be presented yet. "
-                f"The platform owns next_missing_field={nxt}. Ask only for that "
-                "field. Do not ask for payment proof."
-            )
-        elif dest_ok:
-            context_note = (
-                "The customer selected a payment method during checkout. "
-                "Confirm the choice and present the verified tenant destination. "
-                "Ask for payment evidence after the destination is shown. "
-                "Do not confirm payment."
-            )
-        else:
-            context_note = (
-                "The customer selected a payment method during checkout. "
-                "Confirm the choice and give the next step without confirming payment."
-            )
+        context_note = (
+            "The customer selected a payment method during checkout. "
+            "Confirm the choice and give the next step (e.g. send receipt "
+            "after bank transfer) without confirming payment."
+        )
     elif kind == DECISION_KIND_ORDER_SLOT:
         slot = instruction.facts.get("missing_slot", "")
         context_note = (

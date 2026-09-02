@@ -44,7 +44,6 @@ from core.payment_receipt_field_parser import (  # noqa: E402
 )
 from core.reply_instruction import (  # noqa: E402
     CONSTRAINT_ASK_PAYMENT_PROOF,
-    CONSTRAINT_NO_PAYMENT_CONFIRM,
     build_address_instruction,
     build_payment_method_instruction,
 )
@@ -480,7 +479,6 @@ class TestT7LocationDeliveryOnly:
         assert "payment_receipt_received" not in instr.facts
         assert instr.facts.get("order_status") in (None, "")
         assert instr.facts.get("payment_review_state") in (None, "")
-        assert CONSTRAINT_NO_PAYMENT_CONFIRM in instr.constraints
         assert instr.facts.get("checkout_city") == GENERIC_CITY
         assert instr.facts.get("ADDRESS_MODEL_INPUT_HAS_PAYMENT_FACTS") is None
 

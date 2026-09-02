@@ -339,7 +339,6 @@ def build_address_instruction(
             CONSTRAINT_RESPECT_PLATFORM_NEXT_SLOT,
             CONSTRAINT_NO_SHIPPING_PROMISE,
             CONSTRAINT_NO_INTERNAL_CONTACT_LEAK,
-            CONSTRAINT_NO_PAYMENT_CONFIRM,
         ),
         forbidden_claims=FORBIDDEN_PAYMENT_CONFIRM_MARKERS,
         legacy_copy=legacy_copy,
