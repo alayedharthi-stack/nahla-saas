@@ -290,18 +290,63 @@ def available_channels(caps: CheckoutChannelCapabilities) -> List[str]:
     return out
 
 
+def _resolve_turn_sales_channels(
+    merchant_sales_channels: Any = None,
+    *,
+    db: Any = None,
+    tenant_id: int = 0,
+    store_url: str = "",
+    maps_url: str = "",
+    store_url_source: str = "",
+) -> Any:
+    """Use the attached sales object, else the tenant's resolved capabilities.
+
+    Fail closed: resolver exceptions, ``None``, or missing db/tenant never
+    invent WhatsApp. Trusted store/maps URL facts may still activate those
+    channels independently.
+    """
+    if merchant_sales_channels is not None:
+        return merchant_sales_channels
+    tid = int(tenant_id or 0)
+    if not db or not tid:
+        return None
+    try:
+        from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
+            resolve_merchant_sales_channels,
+        )
+
+        sales = resolve_merchant_sales_channels(
+            db,
+            tid,
+            store_url=store_url,
+            store_url_source=store_url_source,
+            maps_url=maps_url,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — fail closed, no WhatsApp default
+        return None
+    if sales is None:
+        return None
+    return sales
+
+
 def resolve_available_purchase_channel_facts(
     *,
     store_url: str = "",
     maps_url: str = "",
-    whatsapp_available: bool = True,
+    whatsapp_available: bool = False,
     store_url_source: str = "",
     merchant_sales_channels: Any = None,
 ) -> List[str]:
-    """Structured channel ids for navigator/compose — mirrors tenant capabilities."""
+    """Structured channel ids for navigator/compose — mirrors tenant capabilities.
+
+    WhatsApp requires a trusted ``MerchantSalesChannels`` object. The
+    ``whatsapp_available`` flag is ignored on the facts-only path so a
+    missing capability never fabricates ``whatsapp_quick_order``.
+    """
     if merchant_sales_channels is not None:
         return list(merchant_sales_channels.available_purchase_channel_ids())
 
+    del whatsapp_available  # never invent WhatsApp without MerchantSalesChannels
     out: List[str] = []
     try:
         from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
@@ -327,8 +372,6 @@ def resolve_available_purchase_channel_facts(
                 out.append("online_store")
         except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical URL probe must not invent online_store
             pass
-    if whatsapp_available:
-        out.append("whatsapp_quick_order")
     try:
         from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
             canonical_merchant_storefront_url as _canon_maps,
@@ -373,7 +416,7 @@ def should_route_bare_start_to_channel_selection(
     order_prep: Any = None,
     store_url: str = "",
     maps_url: str = "",
-    whatsapp_available: bool = True,
+    whatsapp_available: bool = False,
     store_url_source: str = "",
     merchant_sales_channels: Any = None,
 ) -> bool:
@@ -749,7 +792,7 @@ def resolve_purchase_channel_entry_owner(
     inbound_metadata: Optional[Dict[str, Any]] = None,
     store_url: str = "",
     maps_url: str = "",
-    whatsapp_available: bool = True,
+    whatsapp_available: bool = False,
     store_url_source: str = "",
     merchant_sales_channels: Any = None,
     stage: str = "",
@@ -810,6 +853,8 @@ def should_block_bare_start_product_prompt(
     maps_url: str = "",
     store_url_source: str = "",
     merchant_sales_channels: Any = None,
+    db: Any = None,
+    tenant_id: int = 0,
 ) -> bool:
     """Block deterministic product prompts until purchase channel is chosen."""
     prep = _order_prep_mapping(order_prep)
@@ -817,12 +862,20 @@ def should_block_bare_start_product_prompt(
         return False
     if _awaiting_channel(prep):
         return True
+    sales = _resolve_turn_sales_channels(
+        merchant_sales_channels,
+        db=db,
+        tenant_id=tenant_id,
+        store_url=store_url,
+        maps_url=maps_url,
+        store_url_source=store_url_source,
+    )
     return should_route_bare_start_to_channel_selection(
         order_prep=order_prep,
         store_url=store_url,
         maps_url=maps_url,
         store_url_source=store_url_source,
-        merchant_sales_channels=merchant_sales_channels,
+        merchant_sales_channels=sales,
     )
 
 
@@ -2002,7 +2055,14 @@ def resolve_purchase_channel_turn(
     stage: str = "",
 ) -> Optional[PurchaseChannelTurnDecision]:
     """D1A: chrome selection while awaiting. Natural-language selection is D1B."""
-    sales = merchant_sales_channels
+    sales = _resolve_turn_sales_channels(
+        merchant_sales_channels,
+        db=db,
+        tenant_id=tenant_id,
+        store_url=store_url,
+        maps_url=maps_url,
+        store_url_source=store_url_source,
+    )
     available = resolve_available_purchase_channel_facts(
         store_url=store_url,
         maps_url=maps_url,
