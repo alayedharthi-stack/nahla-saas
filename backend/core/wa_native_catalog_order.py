@@ -453,11 +453,12 @@ def apply_native_order_to_state(
             reason="native_catalog_order",
             tenant_id=int(tenant_id) if tenant_id else None,
         )
-    except Exception:  # noqa: BLE001
-        logger.debug(
-            "[WA_NATIVE_ORDER] payment isolation skipped tenant=%s",
+    except Exception as extra_exc:  # noqa: BLE001
+        logger.warning(
+            "[WA_NATIVE_ORDER] payment isolation failed tenant=%s err=%s",
             tenant_id,
-            exc_info=True,
+            extra_exc,
+            extra={"event": "WA_NATIVE_ORDER_PAYMENT_ISOLATION_FAILED"},
         )
 
     prep.line_items = list(resolution.line_items)

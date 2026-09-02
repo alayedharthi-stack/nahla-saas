@@ -687,17 +687,16 @@ def _ingest_structured_transfer_text_evidence(
     state_patch: Dict[str, Any] = {
         "payment_method": "bank_transfer",
         "payment_evidence_received": True,
-        "payment_receipt_received": True,
+        "payment_receipt_received": False,
         "payment_review_state": "pending_review",
         "payment_verified": False,
         "payment_settled": False,
         "payment_confirmed": False,
         "payment_verification_status": "pending",
         "awaiting_payment_receipt": False,
-        "order_status": "under_review",
+        "order_status": "pending_payment",
         "payment_submission_type": "text_evidence",
-        "payment_receipt_at": _utcnow_iso(),
-        "payment_receipt_metadata": {
+        "payment_evidence_metadata": {
             "source": "structured_transfer_text",
             "linkage_fields": list(getattr(assessment, "linkage_fields", ()) or ()),
             "parsed_fields": field_dict,
@@ -859,9 +858,10 @@ def maybe_handle_payment_claim(
                 ),
             )
     except Exception as _early_exc:  # noqa: BLE001
-        logger.debug(
+        logger.warning(
             "[PAYMENT_INTENT] early method/evidence probe failed tenant=%s err=%s",
             tenant_id, _early_exc,
+            extra={"event": "PAYMENT_INTENT_EARLY_PROBE_FAILED"},
         )
 
     if not has_explicit_payment_receipt_evidence(
@@ -998,9 +998,10 @@ def maybe_handle_payment_claim(
             trigger="text_claim",
         )
     except Exception as _wa_exc:  # noqa: BLE001
-        logger.debug(
+        logger.warning(
             "[PAYMENT_INTENT] wa payment submission sync failed tenant=%s err=%s",
             tenant_id, _wa_exc,
+            extra={"event": "PAYMENT_INTENT_WA_SUBMISSION_SYNC_FAILED"},
         )
 
     # ── Brain-driven text-claim policy (May 2026 #48) ────────────────

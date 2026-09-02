@@ -356,6 +356,8 @@ def build_payment_method_instruction(
     inbound_text: str = "",
     destination_available: bool = False,
     payment_destination: Optional[Dict[str, Any]] = None,
+    missing_fields: Optional[List[str]] = None,
+    next_missing_field: Optional[str] = None,
 ) -> ReplyInstruction:
     facts: Dict[str, Any] = {
         "payment_claim": False,
@@ -363,6 +365,8 @@ def build_payment_method_instruction(
         "payment_verified": False,
         "payment_settled": False,
         "payment_destination_available": bool(destination_available),
+        "missing_fields": list(missing_fields or []),
+        "next_missing_field": next_missing_field or "none",
     }
     if payment_method:
         facts["payment_method"] = payment_method
@@ -380,7 +384,8 @@ def build_payment_method_instruction(
         CONSTRAINT_NO_PAYMENT_CONFIRM,
         CONSTRAINT_NO_SHIPPING_PROMISE,
     ]
-    if payment_method == "bank_transfer" and destination_available:
+    nxt = str(next_missing_field or "none").strip() or "none"
+    if payment_method == "bank_transfer" and destination_available and nxt in {"none", "payment_method"}:
         constraints.append(CONSTRAINT_ASK_PAYMENT_PROOF)
     return ReplyInstruction(
         path=PATH_PAYMENT_METHOD_ACK,

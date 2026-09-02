@@ -1802,30 +1802,30 @@ def maybe_handle_payment_method_selection_inbound(
     state_patch["payment_settled"] = False
     state_patch["payment_review_state"] = "not_started"
 
+    remaining_missing = [slot for slot in (missing or []) if slot != "payment_method"]
+    next_after_method = next_missing_field(remaining_missing) or ""
+
     destination_available = False
     destinations: list = []
-    if chosen == PAYMENT_METHOD_BANK_TRANSFER:
-        from core.wa_payment_submission import (  # noqa: PLC0415
-            resolve_verified_payment_destinations,
-        )
+    from core.wa_payment_submission import (  # noqa: PLC0415
+        build_verified_destination_state_patch,
+        checkout_may_present_payment_destination,
+        resolve_verified_payment_destinations,
+    )
 
+    may_present_destination = checkout_may_present_payment_destination(missing)
+    if chosen == PAYMENT_METHOD_BANK_TRANSFER and may_present_destination:
         destinations = resolve_verified_payment_destinations(
             db, tenant_id=int(tenant_id),
         )
-        if len(destinations) == 1:
-            state_patch["payment_destination"] = dict(destinations[0])
-            destination_available = True
-        elif len(destinations) > 1:
-            state_patch["payment_destination"] = {
-                "source": "tenant_payment_accounts",
-                "tenant_id": int(tenant_id),
-                "complete": True,
-                "verified_or_eligible": True,
-                "candidates": list(destinations),
-            }
-            destination_available = True
-        else:
-            state_patch["awaiting_payment_receipt"] = False
+        dest_patch = build_verified_destination_state_patch(
+            destinations, tenant_id=int(tenant_id),
+        )
+        state_patch.update(dest_patch)
+        destination_available = bool(dest_patch.get("payment_destination"))
+    elif chosen == PAYMENT_METHOD_BANK_TRANSFER:
+        state_patch["awaiting_payment_receipt"] = False
+        state_patch.pop("payment_destination", None)
 
     if chosen == PAYMENT_METHOD_BANK_TRANSFER and destination_available:
         from modules.ai.brain.postprocess.payment_credential_guard import (  # noqa: PLC0415
@@ -1849,11 +1849,14 @@ def maybe_handle_payment_method_selection_inbound(
 
     logger.info(
         "[ORDER_FLOW_STATE] payment_method short-circuit tenant=%s phone=*%s "
-        "method=%s destination_available=%s claim=false submitted=false",
+        "method=%s destination_available=%s address_complete=%s "
+        "next_missing=%s claim=false submitted=false",
         tenant_id,
         (phone or "")[-4:],
         chosen,
         destination_available,
+        may_present_destination,
+        next_after_method or "none",
     )
     from core.reply_instruction import (  # noqa: PLC0415
         attach_instruction_to_decision,
@@ -1868,6 +1871,8 @@ def maybe_handle_payment_method_selection_inbound(
             "deterministic_path": "payment_method_ack",
             "payment_claim": False,
             "payment_submitted": False,
+            "missing_fields": list(remaining_missing),
+            "next_missing_field": next_after_method or None,
         },
         build_payment_method_instruction(
             legacy_copy=reply_text,
@@ -1876,6 +1881,8 @@ def maybe_handle_payment_method_selection_inbound(
             inbound_text=text,
             destination_available=destination_available,
             payment_destination=state_patch.get("payment_destination") or {},
+            missing_fields=remaining_missing,
+            next_missing_field=next_after_method or "none",
         ),
     )
 

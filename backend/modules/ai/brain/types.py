@@ -248,6 +248,7 @@ class OrderPreparationState:
     payment_settled: bool = False
     payment_review_state: str = "not_started"
     payment_evidence_received: bool = False
+    payment_evidence_metadata: Dict[str, Any] = field(default_factory=dict)
     payment_destination: Dict[str, Any] = field(default_factory=dict)
     checkout_payment_id: str = ""
     payment_evidence_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -336,6 +337,7 @@ class OrderPreparationState:
             "payment_settled":             bool(self.payment_settled),
             "payment_review_state":        str(self.payment_review_state or "not_started"),
             "payment_evidence_received":   bool(self.payment_evidence_received),
+            "payment_evidence_metadata":   dict(self.payment_evidence_metadata or {}),
             "payment_destination":         dict(self.payment_destination or {}),
             "checkout_payment_id":         str(self.checkout_payment_id or ""),
             "payment_evidence_history":    list(self.payment_evidence_history or []),
@@ -418,6 +420,7 @@ class OrderPreparationState:
             payment_settled=bool(raw.get("payment_settled", False)),
             payment_review_state=str(raw.get("payment_review_state", "") or "not_started"),
             payment_evidence_received=bool(raw.get("payment_evidence_received", False)),
+            payment_evidence_metadata=dict(raw.get("payment_evidence_metadata") or {}),
             payment_destination=dict(raw.get("payment_destination") or {}),
             checkout_payment_id=str(raw.get("checkout_payment_id", "") or ""),
             payment_evidence_history=[

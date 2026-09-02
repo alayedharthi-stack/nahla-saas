@@ -10,19 +10,30 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
+from sqlalchemy import JSON, create_engine
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import sessionmaker
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
+_REPO = os.path.abspath(os.path.join(_BACKEND, ".."))
+for _p in (_BACKEND, os.path.join(_REPO, "database"), _REPO):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
+from core.address_ingest_post_persist import (  # noqa: E402
+    reproject_address_ingest_decision_after_persist,
+)
 from core.merchant_payment_methods import (  # noqa: E402
     PAYMENT_METHOD_BANK_TRANSFER,
     inbound_is_payment_method_choice,
     parse_payment_method_from_text,
 )
 from core.order_flow import (  # noqa: E402
+    apply_state_patch,
     maybe_handle_payment_method_selection_inbound,
     maybe_handle_wa_address_inbound,
+    persist_checkout_location_outcome,
 )
 from core.payment_intent import (  # noqa: E402
     detect_payment_confirmation_text,
@@ -42,20 +53,34 @@ from core.wa_native_catalog_order import (  # noqa: E402
     NativeCatalogOrderPayload,
     apply_native_order_to_state,
 )
+from core.wa_order_lifecycle import (  # noqa: E402
+    STATUS_PAID,
+    has_payment_submission,
+    is_payment_verified,
+    resolve_wa_order_status,
+)
 from core.wa_payment_submission import (  # noqa: E402
     build_payment_submission_prep_patch,
+    checkout_may_present_payment_destination,
     isolate_active_payment_for_new_checkout,
     resolve_verified_payment_destinations,
 )
-from modules.ai.brain.postprocess.operational_reply_validator import (  # noqa: E402
-    validate_operational_reply,
+from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: E402
+    attach_commerce_turn_contract,
+    build_commerce_turn_contract,
+    canonical_checkout_next_slot,
 )
 from modules.ai.brain.types import (  # noqa: E402
+    BrainContext,
+    CommerceFacts,
+    Intent,
     MerchantConversationState,
     OrderPreparationState,
 )
 from modules.ai.order_flow_v2.missing_fields import next_missing_field  # noqa: E402
+from modules.ai.order_flow_v2.payment_evidence import payment_confirmation_allowed  # noqa: E402
 from modules.ai.order_flow_v2.state import has_payment_method  # noqa: E402
+from models import Base, Conversation, Customer, Tenant  # noqa: E402
 
 GENERIC_MERCHANT = "متجر تجريبي عام"
 GENERIC_CUSTOMER_FIRST = "أحمد"
@@ -87,6 +112,10 @@ EN_TRANSFER_TEXT = (
     "Time: 2026-09-01 14:22"
 )
 AMOUNT_ONLY_TEXT = "المبلغ: 126 ريال"
+UNPUNCTUATED_TRANSFER_TEXT = (
+    "حوالة صادرة بـSR 85 من4412 لـ9012؛\n"
+    "اسم مستفيد عام 26/9/1 21:48"
+)
 
 
 def _methods(*, bank: bool = True) -> Any:
@@ -452,21 +481,36 @@ class TestT7LocationDeliveryOnly:
         assert instr.facts.get("payment_review_state") in (None, "")
         assert CONSTRAINT_NO_PAYMENT_CONFIRM in instr.constraints
         assert instr.facts.get("checkout_city") == GENERIC_CITY
+        assert instr.facts.get("ADDRESS_MODEL_INPUT_HAS_PAYMENT_FACTS") is None
 
-    def test_uncommitted_payment_review_claim_fails_validator(self) -> None:
+    def test_address_model_input_has_no_payment_facts(self) -> None:
         instr = build_address_instruction(
             legacy_copy="تم",
-            summary={"selected_product": SHOE_TITLE},
-            checkout_facts={"checkout_maps_url": GENERIC_MAPS},
+            summary={
+                "selected_product": SHOE_TITLE,
+                "payment_receipt_received": True,
+                "payment_evidence_received": True,
+                "payment_review_state": "pending_review",
+            },
+            checkout_facts={
+                "checkout_maps_url": GENERIC_MAPS,
+                "payment_method": PAYMENT_METHOD_BANK_TRANSFER,
+                "payment_destination": {"iban": COMPLETE_IBAN},
+                "awaiting_payment_receipt": True,
+            },
         )
-        bad = validate_operational_reply(
-            "تم تسجيل التحويل للمراجعة ووصل الموقع",
-            instr,
-        )
-        assert bad.ok is False
-        assert bad.reason == "address_ack_uncommitted_payment_claim"
+        payment_keys = [
+            key for key in instr.facts
+            if str(key).startswith("payment_")
+            or str(key).startswith("awaiting_payment")
+            or key in {"order_status"}
+        ]
+        assert payment_keys == ["payment_state_committed"]
+        assert instr.facts.get("payment_state_committed") is False
+        assert "iban" not in str(instr.facts).lower()
+        assert COMPLETE_IBAN not in str(instr.facts)
 
-    def test_native_location_patch_has_no_payment_keys(self) -> None:
+    def test_address_action_cannot_mutate_payment_state(self) -> None:
         op = _checkout_op(
             payment_receipt_received=False,
             payment_method=PAYMENT_METHOD_BANK_TRANSFER,
@@ -545,6 +589,7 @@ class TestT8T9T10TextEvidence:
         patch_out = decision["state_patch"]
         assert patch_out["payment_method"] == PAYMENT_METHOD_BANK_TRANSFER
         assert patch_out["payment_evidence_received"] is True
+        assert patch_out["payment_receipt_received"] is False
         assert patch_out["payment_review_state"] == "pending_review"
         assert patch_out["payment_verified"] is False
         assert patch_out["payment_settled"] is False
@@ -670,3 +715,374 @@ class TestT11T12ProductAndSingleExecution:
         assert claim_decision is None
         assert "state_patch" in method_decision
         assert isinstance(method_decision["state_patch"], dict)
+
+
+def _incomplete_location_op(**overrides: Any) -> Dict[str, Any]:
+    op = _checkout_op()
+    op.pop("google_maps_url", None)
+    op.pop("latitude", None)
+    op.pop("longitude", None)
+    op.update(overrides)
+    return op
+
+
+def _sqlite_session():
+    engine = create_engine("sqlite:///:memory:")
+    saved: list = []
+    for table in Base.metadata.sorted_tables:
+        for col in table.columns:
+            if isinstance(col.type, JSONB):
+                saved.append((col, col.type))
+                col.type = JSON()
+    Base.metadata.create_all(engine)
+    for col, orig in saved:
+        col.type = orig
+    return sessionmaker(bind=engine)(), engine
+
+
+def _seed_checkout_row(db, *, prep: Dict[str, Any], phone: str = "966500000001"):
+    tenant = Tenant(name=GENERIC_MERCHANT, is_active=True)
+    db.add(tenant)
+    db.commit()
+    db.refresh(tenant)
+    customer = Customer(
+        tenant_id=tenant.id,
+        phone=phone,
+        normalized_phone=phone.lstrip("+"),
+        name=f"{GENERIC_CUSTOMER_FIRST} {GENERIC_CUSTOMER_LAST}",
+    )
+    db.add(customer)
+    db.commit()
+    db.refresh(customer)
+    conv = Conversation(
+        tenant_id=tenant.id,
+        customer_id=customer.id,
+        status="open",
+        extra_metadata={"brain_state": {"order_prep": dict(prep)}},
+    )
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    return tenant, customer, conv
+
+
+def _commerce_facts() -> CommerceFacts:
+    return CommerceFacts(
+        store_name=GENERIC_MERCHANT,
+        has_products=True,
+        product_count=4,
+        in_stock_count=4,
+        orderable=True,
+        snapshot_fresh=True,
+    )
+
+
+class TestEarlyMethodDoesNotPresentIban:
+    def test_method_persists_while_location_missing_without_iban(self) -> None:
+        op = _incomplete_location_op()
+        dest = [{
+            "iban": COMPLETE_IBAN,
+            "source": "tenant_payment_accounts",
+            "tenant_id": 10,
+            "complete": True,
+            "verified_or_eligible": True,
+        }]
+        missing = ["delivery_address", "payment_method"]
+        assert checkout_may_present_payment_destination(missing) is False
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=_load_state(op),
+        ), patch(
+            "core.merchant_payment_methods.load_merchant_payment_methods",
+            return_value=_methods(),
+        ), patch(
+            "modules.ai.order_flow_v2.missing_fields.compute_v2_missing_fields",
+            return_value=missing,
+        ), patch(
+            "core.wa_payment_submission.resolve_verified_payment_destinations",
+            return_value=dest,
+        ), patch(
+            "modules.ai.brain.postprocess.payment_credential_guard.compose_verified_bank_transfer_block",
+            return_value=f"IBAN {COMPLETE_IBAN}",
+        ) as compose_dest:
+            decision = maybe_handle_payment_method_selection_inbound(
+                db=MagicMock(),
+                tenant_id=10,
+                phone="966500000001",
+                inbound_text="تحويل",
+            )
+        assert decision is not None
+        patch_out = decision["state_patch"]
+        assert patch_out["payment_method"] == PAYMENT_METHOD_BANK_TRANSFER
+        assert not patch_out.get("payment_destination")
+        assert patch_out.get("awaiting_payment_receipt") is False
+        assert decision.get("payment_claim") is False
+        assert decision.get("next_missing_field") == "delivery_address"
+        compose_dest.assert_not_called()
+        assert COMPLETE_IBAN not in str(decision.get("reply_text") or "")
+        instr = decision.get("reply_instruction") or {}
+        facts = instr.get("facts") if isinstance(instr, dict) else {}
+        constraints = instr.get("constraints") if isinstance(instr, dict) else []
+        assert facts.get("payment_destination_available") is False
+        assert CONSTRAINT_ASK_PAYMENT_PROOF not in constraints
+        assert facts.get("next_missing_field") == "delivery_address"
+
+
+class TestLiveCatalogThenEarlyMethodThenLocation:
+    def test_full_sequence_presents_iban_only_after_address_complete(self) -> None:
+        db, _engine = _sqlite_session()
+        prep = _incomplete_location_op(
+            customer_first_name=GENERIC_CUSTOMER_FIRST,
+            customer_last_name=GENERIC_CUSTOMER_LAST,
+            city=GENERIC_CITY,
+        )
+        tenant, _customer, _conv = _seed_checkout_row(db, prep=prep)
+        dest = [{
+            "iban": COMPLETE_IBAN,
+            "source": "tenant_payment_accounts",
+            "tenant_id": tenant.id,
+            "complete": True,
+            "verified_or_eligible": True,
+        }]
+        with patch(
+            "core.order_missing_fields_engine.missing_fields_engine_enabled",
+            return_value=False,
+        ), patch(
+            "core.merchant_payment_methods.load_merchant_payment_methods",
+            return_value=_methods(),
+        ), patch(
+            "core.wa_payment_submission.resolve_verified_payment_destinations",
+            return_value=dest,
+        ), patch(
+            "modules.ai.brain.postprocess.payment_credential_guard.compose_verified_bank_transfer_block",
+            return_value=f"الآيبان الخاص بالمتجر: {COMPLETE_IBAN}",
+        ):
+            early = maybe_handle_payment_method_selection_inbound(
+                db=db,
+                tenant_id=tenant.id,
+                phone="966500000001",
+                inbound_text="تحويل",
+            )
+            assert early is not None
+            assert early["state_patch"]["payment_method"] == PAYMENT_METHOD_BANK_TRANSFER
+            assert not early["state_patch"].get("payment_destination")
+            assert COMPLETE_IBAN not in str(early.get("reply_text") or "")
+            assert apply_state_patch(
+                db,
+                tenant_id=tenant.id,
+                phone="966500000001",
+                state_patch=early["state_patch"],
+            ) is True
+
+            location_decision = maybe_handle_wa_address_inbound(
+                db=db,
+                tenant_id=tenant.id,
+                phone="966500000001",
+                inbound_normalized_type="location",
+                inbound_metadata={
+                    "location": {"latitude": 24.7136, "longitude": 46.6753},
+                },
+            )
+            assert location_decision is not None
+            for key in (
+                "payment_method",
+                "payment_destination",
+                "payment_receipt_received",
+                "payment_evidence_received",
+            ):
+                assert key not in (location_decision.get("state_patch") or {})
+            ok, reason = persist_checkout_location_outcome(
+                db,
+                tenant_id=tenant.id,
+                phone="966500000001",
+                state_patch=location_decision.get("state_patch") or {},
+            )
+            assert ok is True, reason
+
+            rebuilt = reproject_address_ingest_decision_after_persist(
+                db,
+                tenant_id=tenant.id,
+                phone="966500000001",
+                inbound_text="",
+                address_type="whatsapp_location",
+            )
+        assert rebuilt.get("deterministic_path") == "payment_method_ack"
+        dest_out = (rebuilt.get("state_patch") or {}).get("payment_destination") or {}
+        assert dest_out.get("iban") == COMPLETE_IBAN
+        assert COMPLETE_IBAN in str(rebuilt.get("reply_text") or "")
+        _, bs = _load_state_from_db(db, tenant_id=tenant.id, phone="966500000001")
+        op_now = dict(bs.get("order_prep") or {})
+        assert op_now.get("payment_method") == PAYMENT_METHOD_BANK_TRANSFER
+        assert (op_now.get("payment_destination") or {}).get("iban") == COMPLETE_IBAN
+        assert op_now.get("awaiting_payment_receipt") is True
+
+
+def _load_state_from_db(db, *, tenant_id: int, phone: str):
+    from core.order_flow import _load_brain_state  # noqa: PLC0415
+
+    return _load_brain_state(db, tenant_id=tenant_id, phone=phone)
+
+
+class TestDotContinuationOperational:
+    def test_persisted_bank_transfer_is_not_reasked_on_dot(self) -> None:
+        db, _engine = _sqlite_session()
+        prep = _checkout_op(payment_method=PAYMENT_METHOD_BANK_TRANSFER)
+        tenant, _customer, _conv = _seed_checkout_row(db, prep=prep)
+        assert apply_state_patch(
+            db,
+            tenant_id=tenant.id,
+            phone="966500000001",
+            state_patch={"payment_method": PAYMENT_METHOD_BANK_TRANSFER},
+        ) is True
+        _, bs = _load_state_from_db(db, tenant_id=tenant.id, phone="966500000001")
+        restored = OrderPreparationState.from_dict(dict(bs.get("order_prep") or {}))
+        assert restored.payment_method == PAYMENT_METHOD_BANK_TRANSFER
+        assert inbound_is_payment_method_choice(".", _methods()) is None
+
+        ctx = BrainContext(
+            tenant_id=int(tenant.id),
+            customer_phone="966500000001",
+            message=".",
+            intent=Intent(name="ask_product", confidence=0.4, raw_message="."),
+            state=MerchantConversationState(stage="ordering", order_prep=restored),
+            facts=_commerce_facts(),
+            history=[],
+            profile={"name": f"{GENERIC_CUSTOMER_FIRST} {GENERIC_CUSTOMER_LAST}"},
+        )
+        with patch(
+            "modules.ai.brain.commerce.commerce_turn_contract._load_order_context_for_contract",
+            return_value=SimpleNamespace(
+                known_previous_address=None,
+                prefill=SimpleNamespace(shipping_edit_requested=False),
+                customer_id=1,
+            ),
+        ), patch(
+            "modules.ai.brain.commerce.catalog_order_checkout.is_current_catalog_order_submitted",
+            return_value=False,
+        ), patch(
+            "modules.ai.brain.commerce.catalog_order_checkout.try_active_catalog_checkout_continue_decision",
+            return_value=None,
+        ), patch(
+            "core.order_missing_fields_engine.missing_fields_engine_enabled",
+            return_value=False,
+        ):
+            contract = build_commerce_turn_contract(ctx, db=db)
+            attach_commerce_turn_contract(ctx, contract)
+            missing, nxt = canonical_checkout_next_slot(ctx)
+        assert has_payment_method(restored.to_dict()) is True
+        assert "payment_method" not in missing
+        assert nxt != "payment_method"
+
+
+class TestUnpunctuatedTransferText:
+    def test_unlabeled_sms_is_evidence_not_receipt_or_settlement(self) -> None:
+        assessment = assess_transfer_text_evidence(UNPUNCTUATED_TRANSFER_TEXT)
+        assert assessment.sufficient is True
+        assert assessment.review_state == "pending_review"
+        assert assessment.fields.amount
+        assert assessment.fields.source_account_suffix or assessment.fields.dest_account_suffix
+
+        op = _checkout_op(payment_method=PAYMENT_METHOD_BANK_TRANSFER)
+        with patch(
+            "core.order_flow._load_brain_state",
+            return_value=_load_state(op),
+        ), patch(
+            "core.merchant_payment_methods.load_merchant_payment_methods",
+            return_value=_methods(),
+        ):
+            decision = maybe_handle_payment_claim(
+                MagicMock(),
+                tenant_id=10,
+                phone="966500000001",
+                inbound_text=UNPUNCTUATED_TRANSFER_TEXT,
+                has_attached_media=False,
+            )
+        assert decision is not None
+        patch_out = decision["state_patch"]
+        assert patch_out["payment_method"] == PAYMENT_METHOD_BANK_TRANSFER
+        assert patch_out["payment_evidence_received"] is True
+        assert patch_out["payment_receipt_received"] is False
+        assert patch_out["payment_review_state"] == "pending_review"
+        assert patch_out["payment_verified"] is False
+        assert patch_out["payment_settled"] is False
+        assert patch_out.get("payment_submission_received") is not True
+        assert "payment_receipt_metadata" not in patch_out
+
+
+class TestTextEvidenceDoesNotVerifyOrShip:
+    def test_evidence_alone_is_not_verified_settled_or_shipping_ready(self) -> None:
+        prep = {
+            "payment_method": PAYMENT_METHOD_BANK_TRANSFER,
+            "payment_evidence_received": True,
+            "payment_receipt_received": False,
+            "payment_review_state": "pending_review",
+            "payment_verified": False,
+            "payment_settled": False,
+            "payment_confirmed": False,
+            "product_id": SHOE_PRODUCT_ID,
+            "line_items": _checkout_op()["line_items"],
+            "customer_first_name": GENERIC_CUSTOMER_FIRST,
+            "customer_last_name": GENERIC_CUSTOMER_LAST,
+            "city": GENERIC_CITY,
+            "google_maps_url": GENERIC_MAPS,
+        }
+        assert has_payment_submission(prep) is False
+        assert is_payment_verified(prep) is False
+        assert payment_confirmation_allowed(prep) is False
+        assert prep.get("payment_verified") is False
+        assert prep.get("payment_settled") is False
+        status, _missing, _addr = resolve_wa_order_status(prep, {})
+        assert status != STATUS_PAID
+        assert status != "paid"
+
+
+class TestHistoricalEvidenceOwner:
+    def test_new_history_row_does_not_drop_older_rows(self) -> None:
+        history = [
+            {
+                "checkout_payment_id": f"old-{idx}",
+                "evidence": {"payment_receipt_received": True, "product_id": f"p-{idx}"},
+            }
+            for idx in range(21)
+        ]
+        prep = OrderPreparationState(
+            payment_receipt_received=True,
+            payment_receipt_metadata={"filename": "new-receipt.pdf"},
+            checkout_payment_id="active-old",
+            payment_evidence_history=list(history),
+            product_id="new-item",
+        )
+        result = isolate_active_payment_for_new_checkout(
+            prep, reason="native_catalog_order", tenant_id=10,
+        )
+        assert result["archived"] is True
+        kept = list(prep.payment_evidence_history or [])
+        assert len(kept) == 22
+        assert kept[0]["checkout_payment_id"] == "old-0"
+        assert kept[20]["checkout_payment_id"] == "old-20"
+        assert kept[-1]["checkout_payment_id"] == "active-old"
+        assert kept[-1]["evidence"]["payment_receipt_metadata"]["filename"] == "new-receipt.pdf"
+        assert prep.payment_receipt_received is False
+        assert prep.checkout_payment_id != "active-old"
+
+    def test_old_receipt_stays_tied_to_old_checkout_not_active(self) -> None:
+        prep = OrderPreparationState(
+            payment_receipt_received=True,
+            payment_receipt_metadata={"filename": "Transaction-Receipt.pdf"},
+            checkout_payment_id="checkout-old",
+            product_id="old-99",
+        )
+        isolate_active_payment_for_new_checkout(
+            prep, reason="native_catalog_order", tenant_id=10,
+        )
+        history = list(prep.payment_evidence_history or [])
+        assert history[-1]["checkout_payment_id"] == "checkout-old"
+        assert history[-1]["evidence"]["payment_receipt_received"] is True
+        assert prep.payment_receipt_received is False
+        assert prep.payment_receipt_metadata in ({}, None)
+        assert prep.checkout_payment_id != "checkout-old"
+        assert all(
+            row.get("checkout_payment_id") != prep.checkout_payment_id
+            for row in history
+        )
+

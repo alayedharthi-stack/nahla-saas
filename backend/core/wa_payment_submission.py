@@ -37,6 +37,7 @@ _ACTIVE_PAYMENT_KEYS = (
     "payment_resolution_state",
     "payment_review_state",
     "payment_evidence_received",
+    "payment_evidence_metadata",
     "payment_destination",
     "requested_bank",
     "payment_bank",
@@ -75,6 +76,7 @@ _ACTIVE_PAYMENT_RESET: Dict[str, Any] = {
     "payment_resolution_state": "",
     "payment_review_state": "not_started",
     "payment_evidence_received": False,
+    "payment_evidence_metadata": {},
     "payment_destination": {},
     "requested_bank": "",
     "payment_bank": "",
@@ -99,10 +101,7 @@ def _prep_set(prep: Any, key: str, value: Any) -> None:
     if isinstance(prep, dict):
         prep[key] = value
         return
-    try:
-        setattr(prep, key, value)
-    except Exception:
-        pass
+    setattr(prep, key, value)
 
 
 def _copy_payment_value(value: Any) -> Any:
@@ -166,9 +165,9 @@ def isolate_active_payment_for_new_checkout(
             "product_id": snapshot.get("product_id") or None,
             "evidence": snapshot,
         })
-        _prep_set(prep, "payment_evidence_history", history[-20:])
+        _prep_set(prep, "payment_evidence_history", history)
         result["archived"] = True
-        result["history_len"] = len(history[-20:])
+        result["history_len"] = len(history)
 
     for key, value in _ACTIVE_PAYMENT_RESET.items():
         _prep_set(prep, key, _copy_payment_value(value))
@@ -217,6 +216,48 @@ def resolve_verified_payment_destinations(
             "verified_or_eligible": True,
         })
     return out
+
+
+_DESTINATION_BLOCKING_SLOTS = frozenset({
+    "delivery_address",
+    "city",
+    "customer_name",
+    "product",
+})
+
+
+def checkout_may_present_payment_destination(
+    missing_fields: Optional[List[str]] = None,
+) -> bool:
+    """True only when address/identity slots are already complete."""
+    return not any(
+        str(slot) in _DESTINATION_BLOCKING_SLOTS for slot in (missing_fields or [])
+    )
+
+
+def build_verified_destination_state_patch(
+    destinations: List[Dict[str, Any]],
+    *,
+    tenant_id: int,
+) -> Dict[str, Any]:
+    """Persist destination and receipt-wait only when a complete IBAN exists."""
+    if len(destinations) == 1:
+        return {
+            "payment_destination": dict(destinations[0]),
+            "awaiting_payment_receipt": True,
+        }
+    if len(destinations) > 1:
+        return {
+            "payment_destination": {
+                "source": "tenant_payment_accounts",
+                "tenant_id": int(tenant_id),
+                "complete": True,
+                "verified_or_eligible": True,
+                "candidates": list(destinations),
+            },
+            "awaiting_payment_receipt": True,
+        }
+    return {"awaiting_payment_receipt": False}
 
 
 def build_payment_submission_prep_patch(
@@ -400,6 +441,8 @@ __all__ = [
     "apply_wa_payment_submission",
     "build_payment_submission_order_metadata",
     "build_payment_submission_prep_patch",
+    "build_verified_destination_state_patch",
+    "checkout_may_present_payment_destination",
     "isolate_active_payment_for_new_checkout",
     "record_unlinked_payment_claim",
     "resolve_verified_payment_destinations",

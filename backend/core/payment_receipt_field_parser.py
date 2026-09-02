@@ -171,6 +171,20 @@ _GENERIC_TO_RE = re.compile(
     r"target\s*account|beneficiary\s*account)\s*[:\-–]\s*(?P<acc>[^\n\r]{2,80})",
     re.IGNORECASE | re.UNICODE,
 )
+# Unlabeled SMS / app notifications: suffixes without colons.
+# Platform-wide structural tokens (from/to/lam), not bank-branded.
+_UNLABELED_FROM_RE = re.compile(
+    r"(?:من|from)\s*(?P<acc>\d{3,6})",
+    re.IGNORECASE | re.UNICODE,
+)
+_UNLABELED_TO_RE = re.compile(
+    r"(?:لـ|ل|إلى|الى|to)\s*(?P<acc>\d{3,6})",
+    re.IGNORECASE | re.UNICODE,
+)
+_UNLABELED_BENEFICIARY_RE = re.compile(
+    r"(?:اسم\s+)?مستفيد\s+(?P<name>[^\d\n\r;؛:]{2,80})",
+    re.UNICODE,
+)
 _CURRENCY_TOKEN_RE = re.compile(
     r"\b(SAR|SR|USD|EUR|ريال)\b",
     re.IGNORECASE | re.UNICODE,
@@ -477,8 +491,31 @@ def parse_payment_receipt_fields(
         if gm:
             fields.to_account = re.sub(r"\s+", "", gm.group("acc").strip())
 
-    fields.source_account_suffix = _account_suffix(fields.from_account_masked)
-    fields.dest_account_suffix = _account_suffix(fields.to_account)
+    if not fields.source_account_suffix:
+        um = _UNLABELED_FROM_RE.search(blob)
+        if um:
+            suffix = str(um.group("acc") or "").strip()
+            if suffix:
+                fields.from_account_masked = fields.from_account_masked or suffix
+                fields.source_account_suffix = suffix
+    if not fields.dest_account_suffix:
+        um = _UNLABELED_TO_RE.search(blob)
+        if um:
+            suffix = str(um.group("acc") or "").strip()
+            if suffix:
+                fields.to_account = fields.to_account or suffix
+                fields.dest_account_suffix = suffix
+    if not fields.beneficiary_name:
+        um = _UNLABELED_BENEFICIARY_RE.search(blob)
+        if um:
+            fields.beneficiary_name = _clean_person_name(um.group("name"))
+
+    fields.source_account_suffix = fields.source_account_suffix or _account_suffix(
+        fields.from_account_masked
+    )
+    fields.dest_account_suffix = fields.dest_account_suffix or _account_suffix(
+        fields.to_account
+    )
     if not fields.dest_account_suffix:
         iban_m = re.search(r"\bSA\s*\d{2}(?:[\s\-]*\d){20}\b", blob, re.I)
         if iban_m:
