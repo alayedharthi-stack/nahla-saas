@@ -10,18 +10,31 @@ import re
 from typing import Any, Iterable, List, Sequence
 
 # Usage, dosage, benefits, suitability (existing coverage).
+# Frequency tokens («كم مرة») are ambiguous: they are product usage only when
+# a usage/dosage continuation is present. Bare frequency is handled separately
+# and requires product semantic evidence before this owner may steal the turn.
 _PRODUCT_USAGE_RE = re.compile(
     r"(?:"
     r"طريق(?:ه|ة)\s*(?:ال)?(?:استخدام|استعمال|الاستخدام|الاستعمال)"
     r"|(?:كيف|وش|متى|هل)\s+(?:استخدم|استعمل|اخذ|آخذ|أخذ|اشرب|آكل|استعمال|الاستخدام)"
     r"|(?:ي|ت)?(?:اليت|اليت)\s+(?:ت)?(?:خبر|وضح|قول)"
     r"|(?:طريقة|طريقه)\s*(?:ال)?(?:استخدام|استعمال)"
-    r"|(?:كم\s*(?:مر(?:ه|ة)|جر(?:عه|عة)|حبه|حبة|ملع(?:ق|قة)))\s*(?:بال)?(?:اليوم|الاسبوع|الأسبوع|الاسبوع)?"
+    r"|(?:كم\s*(?:مر(?:ه|ة)|جر(?:عه|عة)|حبه|حبة|ملع(?:ق|قة)))\s+"
+    r"(?:استخدم|استعمل|اخذ|آخذ|أخذ|اشرب|آكل|استعمال|الاستخدام)"
+    r"|(?:كم\s*(?:مر(?:ه|ة)|جر(?:عه|عة)|حبه|حبة|ملع(?:ق|قة)))\s*"
+    r"(?:بال)?(?:اليوم|الاسبوع|الأسبوع|الاسبوع)"
     r"|(?:متى\s*(?:ي|ت)?(?:ؤخذ|اخذ|آخذ|أخذ|يؤخذ|تؤخذ))"
     r"|(?:هل\s*(?:يناسب|يصلح|ينفع|يفيد|مسموح))"
     r"|(?:وش\s*(?:فائد(?:ت(?:ه|ها))?|فايد(?:ت(?:ه|ها))?|فائدة|فايدة))"
     r"|how\s+(?:to\s+)?use|usage|dosage|benefits?"
     r")",
+    re.UNICODE | re.IGNORECASE,
+)
+
+# Ambiguous frequency without a usage/dosage continuation. Must not own
+# order-history «كم مرة» turns. Owns only with product referent/focus/intent.
+_BARE_FREQUENCY_RE = re.compile(
+    r"كم\s*(?:مر(?:ه|ة)|جر(?:عه|عة)|حبه|حبة|ملع(?:ق|قة))",
     re.UNICODE | re.IGNORECASE,
 )
 
@@ -113,7 +126,39 @@ def detect_product_attribute_question(message: str) -> bool:
     return False
 
 
-def detect_product_information_topic_shift(message: str) -> bool:
+def _has_product_semantic_evidence(
+    *,
+    state: Any = None,
+    intent: Any = None,
+) -> bool:
+    """True when an existing product referent/focus/intent can own usage."""
+    intent_name = str(getattr(intent, "name", "") or "").strip()
+    if intent_name in {"ask_product", "ask_price", "product_visual_request"}:
+        return True
+    if state is None:
+        return False
+    if getattr(state, "current_product_focus", None):
+        return True
+    if getattr(state, "selected_product", None):
+        return True
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+        )
+
+        referent = canonical_product_referent(state)
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(has_structured_catalog_identity(referent))
+
+
+def detect_product_information_topic_shift(
+    message: str,
+    *,
+    state: Any = None,
+    intent: Any = None,
+) -> bool:
     try:
         from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
             product_knowledge_blocks_product_information,
@@ -136,7 +181,11 @@ def detect_product_information_topic_shift(message: str) -> bool:
         _PRODUCT_ATTRIBUTE_RE.search(norm) or _PRODUCT_USAGE_RE.search(norm)
     ):
         return True
-    return bool(_PRODUCT_INFO_RE.search(norm))
+    if _PRODUCT_USAGE_RE.search(norm):
+        return True
+    if _BARE_FREQUENCY_RE.search(norm):
+        return _has_product_semantic_evidence(state=state, intent=intent)
+    return bool(_PRODUCT_ATTRIBUTE_RE.search(norm))
 
 
 def resolve_product_information_llm_topic(message: str) -> str:
@@ -184,12 +233,13 @@ def recent_unresolved_product_information(
 
 def product_information_blocks_checkout(ctx: Any) -> bool:
     msg = str(getattr(ctx, "message", "") or "")
-    if detect_product_information_topic_shift(msg):
+    state = getattr(ctx, "state", None)
+    intent = getattr(ctx, "intent", None)
+    if detect_product_information_topic_shift(msg, state=state, intent=intent):
         return True
     history = getattr(ctx, "history", None) or []
     if not recent_unresolved_product_information(history, current_message=msg):
         return False
-    state = getattr(ctx, "state", None)
     stage = str(getattr(state, "stage", "") or "")
     op = getattr(state, "order_prep", None)
     if stage not in ("ordering", "deciding", "checkout"):

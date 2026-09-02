@@ -2089,7 +2089,11 @@ class DefaultDecisionEngine:
             if (
                 not _pk_blocks_info
                 and (
-                    detect_product_information_topic_shift(ctx.message or "")
+                    detect_product_information_topic_shift(
+                        ctx.message or "",
+                        state=state,
+                        intent=intent,
+                    )
                     or product_information_blocks_checkout(ctx)
                 )
             ):
@@ -2502,6 +2506,9 @@ class DefaultDecisionEngine:
                     )
                     and not _explicit_status
                 ):
+                    from ..commerce.ledger_follow_up import stamp_ledger_context  # noqa: PLC0415
+
+                    stamp_ledger_context(state)
                     return Decision(
                         action=ACTION_LLM_REPLY,
                         args={
@@ -5496,6 +5503,15 @@ def _try_active_order_review_decision(ctx: BrainContext) -> Optional[Decision]:
 
 def _try_order_resume_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resume/checkout phrases — never catalog search or invented orders."""
+    try:
+        from ..current_turn_social_non_commerce import (  # noqa: PLC0415
+            has_authoritative_order_support_intent,
+        )
+
+        if has_authoritative_order_support_intent(getattr(ctx, "intent", None)):
+            return None
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — order-support probe must not block resume
+        pass
     try:
         from ..commerce.start_order_verb_guard import (  # noqa: PLC0415
             is_order_resume_or_completion_phrase,

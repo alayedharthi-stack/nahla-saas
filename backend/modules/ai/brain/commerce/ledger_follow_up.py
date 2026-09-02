@@ -60,6 +60,16 @@ _ORDER_BOUND_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+# When ledger/order-support context is already active, a pronoun-bound
+# number ask («أرقامها» / «أرقامهم») is an order-reference follow-up
+# regardless of a leading verb. The pronoun suffix is the structural
+# owner — this is not a customer-phrase list. Noun-bound contact asks
+# («أرقام خدمة العملاء») do not carry the pronoun suffix and stay out.
+_CONTEXTUAL_PRONOUN_NUMBER_RE = re.compile(
+    r"ارقام(?:ها|هم)\s*[\?؟!.]*$",
+    re.UNICODE | re.IGNORECASE,
+)
+
 
 def _norm_ar(text: str) -> str:
     if not text:
@@ -116,12 +126,16 @@ def is_ledger_context_active(state: Any) -> bool:
     return is_recent_topic_active(state, current_turn=turn)
 
 
-def is_order_reference_follow_up(message: str) -> bool:
+def is_order_reference_follow_up(message: str, *, context_active: bool = False) -> bool:
     """True for pronoun or order-bound reference follow-ups to a prior ledger turn."""
     text = _norm_ar(str(message or "").strip())
     if not text:
         return False
-    return bool(_PRONOUN_HEAD_RE.match(text) or _ORDER_BOUND_RE.match(text))
+    if _PRONOUN_HEAD_RE.match(text) or _ORDER_BOUND_RE.match(text):
+        return True
+    if context_active and _CONTEXTUAL_PRONOUN_NUMBER_RE.search(text):
+        return True
+    return False
 
 
 def try_ledger_follow_up_decision(ctx: Any) -> Optional[Decision]:
@@ -150,7 +164,7 @@ def try_ledger_follow_up_decision(ctx: Any) -> Optional[Decision]:
 
     if not is_ledger_context_active(state):
         return None
-    if not is_order_reference_follow_up(message):
+    if not is_order_reference_follow_up(message, context_active=True):
         return None
     return Decision(
         action=ACTION_CUSTOMER_LEDGER_REPLY,
