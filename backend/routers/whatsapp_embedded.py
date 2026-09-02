@@ -24,12 +24,11 @@ import hmac as _hmac
 import json
 import logging
 import os
-import secrets as _secrets
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, NamedTuple, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -46,6 +45,17 @@ from core.config import (
     meta_embedded_disabled_reason,
 )
 from core.database import get_db
+from core.whatsapp_oauth_nonce import (
+    NonceRejected,
+    NonceStorageUnavailable,
+    OAUTH_STATE_TTL_SECONDS as _OAUTH_STATE_TTL_SECONDS,
+    consume_oauth_nonce,
+    expiry_from_now,
+    generate_oauth_nonce,
+    normalize_connection_mode,
+    persist_oauth_nonce,
+    safe_oauth_error_fields,
+)
 from database.models import WhatsAppConnection
 from services.whatsapp_platform.service import graph_get_with_context, graph_post_with_context
 from services.whatsapp_platform.token_manager import (
@@ -151,6 +161,8 @@ def resolve_tenant_id(request: Request) -> int:
 class _OAuthState(NamedTuple):
     tenant_id: int
     redirect_uri: str
+    connection_mode: str
+    nonce: str
 
 
 async def _exchange_code_for_token(code: str, redirect_uri: Optional[str] = None) -> dict:
@@ -1426,10 +1438,14 @@ async def get_config():
 # returns. The server-side flow falls back to a normal top-level
 # navigation, which always works.
 
-# OAuth state TTL — the merchant has 10 minutes to complete the
-# Meta dialog before we reject the callback. Plenty for the human
-# but short enough that a stolen state value isn't useful.
-_OAUTH_STATE_TTL_SECONDS = 600
+def _oauth_http_reject(status_code: int, *, log_reason: str) -> HTTPException:
+    logger.warning("[EmbeddedSignup] oauth rejected reason=%s", log_reason)
+    detail = (
+        "انتهت صلاحية رابط الربط مع Meta. أعد فتح صفحة ربط واتساب في نحلة وأعد المحاولة."
+        if log_reason == "state_expired"
+        else "رابط ربط Meta غير صالح أو منتهي الصلاحية. أعد المحاولة من نحلة."
+    )
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 def _sign_oauth_state(
@@ -1437,75 +1453,71 @@ def _sign_oauth_state(
     nonce: str,
     issued_at: int,
     redirect_uri: str,
+    connection_mode: str = "embedded",
 ) -> str:
     """Return a compact, URL-safe HMAC-signed state token.
 
-    Payload binds tenant + the exact canonical redirect_uri used to start
-    the dialog so token exchange cannot reconstruct a different value.
+    Payload binds tenant, redirect_uri, connection_mode, and nonce.
     Format: ``b64(json).b64(hmac_sha256)``. Uses JWT_SECRET as the signing
     key because it's already required in production; rotating it invalidates
     open OAuth sessions (correct security behaviour).
     """
     body = json.dumps(
         {
-            "v": 1,
+            "v": 2,
             "t": int(tenant_id),
             "n": nonce,
             "iat": int(issued_at),
             "ru": redirect_uri,
+            "m": connection_mode,
         },
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
     sig = _hmac.new(JWT_SECRET.encode("utf-8"), body, _hashlib.sha256).digest()
-    return f"{_b64.urlsafe_b64encode(body).rstrip(b'=').decode()}." \
-           f"{_b64.urlsafe_b64encode(sig).rstrip(b'=').decode()}"
+    return (
+        f"{_b64.urlsafe_b64encode(body).rstrip(b'=').decode()}."
+        f"{_b64.urlsafe_b64encode(sig).rstrip(b'=').decode()}"
+    )
 
 
 def _verify_oauth_state(state: str) -> _OAuthState:
-    """Verify the signed state and return tenant_id + bound redirect_uri.
-
-    Raises HTTPException(400) on malformed input, tampered signature,
-    missing redirect binding, or expired token.
-    """
+    """Verify HMAC, expiry, redirect, and connection_mode before nonce consume."""
     try:
         body_b64, sig_b64 = state.split(".", 1)
         body = _b64.urlsafe_b64decode(body_b64 + "=" * (-len(body_b64) % 4))
         sig = _b64.urlsafe_b64decode(sig_b64 + "=" * (-len(sig_b64) % 4))
         expected = _hmac.new(JWT_SECRET.encode("utf-8"), body, _hashlib.sha256).digest()
         if not _hmac.compare_digest(sig, expected):
-            raise ValueError("state signature mismatch")
+            raise ValueError("state_signature_mismatch")
         payload = json.loads(body.decode("utf-8"))
         if not isinstance(payload, dict):
-            raise ValueError("state payload is not an object")
+            raise ValueError("state_payload_invalid")
         tenant_id = int(payload["t"])
         issued_at = int(payload["iat"])
         redirect_uri = str(payload.get("ru") or "")
+        nonce = str(payload.get("n") or "")
+        mode = normalize_connection_mode(payload.get("m"))
         if not redirect_uri:
-            raise ValueError("state missing bound redirect_uri")
+            raise ValueError("state_missing_redirect_uri")
+        if not nonce:
+            raise ValueError("state_missing_nonce")
     except HTTPException:
         raise
-    except Exception as exc:
-        logger.warning("[EmbeddedSignup] oauth/callback rejected — bad state: %s", exc)
-        raise HTTPException(
-            status_code=400,
-            detail="رابط ربط Meta غير صالح أو منتهي الصلاحية. أعد المحاولة من نحلة.",
-        ) from exc
+    except NonceRejected:
+        raise _oauth_http_reject(400, log_reason="connection_mode_invalid")
+    except Exception:
+        raise _oauth_http_reject(400, log_reason="state_invalid") from None
 
     now = int(datetime.now(timezone.utc).timestamp())
     if now - issued_at > _OAUTH_STATE_TTL_SECONDS:
-        logger.info(
-            "[EmbeddedSignup] oauth/callback rejected — state expired (age=%ds, max=%ds)",
-            now - issued_at, _OAUTH_STATE_TTL_SECONDS,
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "انتهت صلاحية رابط الربط مع Meta. "
-                "أعد فتح صفحة ربط واتساب في نحلة وأعد المحاولة."
-            ),
-        )
-    return _OAuthState(tenant_id=tenant_id, redirect_uri=redirect_uri)
+        raise _oauth_http_reject(400, log_reason="state_expired")
+    return _OAuthState(
+        tenant_id=tenant_id,
+        redirect_uri=redirect_uri,
+        connection_mode=mode,
+        nonce=nonce,
+    )
 
 
 def _build_meta_oauth_authorize_url(state: str, redirect_uri: str) -> str:
@@ -1549,16 +1561,36 @@ def _build_meta_oauth_authorize_url(state: str, redirect_uri: str) -> str:
     return f"{base}?{urlencode(params)}"
 
 
+def _consume_verified_nonce(oauth_state: _OAuthState) -> None:
+    """Commit single-use consumption independently before any Graph call."""
+    try:
+        consume_oauth_nonce(
+            nonce=oauth_state.nonce,
+            tenant_id=oauth_state.tenant_id,
+            connection_mode=oauth_state.connection_mode,
+            redirect_uri=oauth_state.redirect_uri,
+        )
+    except NonceStorageUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="تعذر إكمال ربط واتساب حالياً. أعد المحاولة من نحلة.",
+        ) from None
+    except NonceRejected:
+        raise _oauth_http_reject(400, log_reason="nonce_replay_or_mismatch") from None
+
+
 @router.get("/oauth/start")
-async def oauth_start(request: Request):
+async def oauth_start(
+    request: Request,
+    db: Session = Depends(get_db),
+    connection_mode: str = Query("embedded"),
+):
     """Server-side entry point for the Embedded Signup flow.
 
-    The dashboard navigates the merchant's browser to this URL; we
-    verify the tenant session, sign a state token, and 302 to Meta.
+    JWT-protected. Persists a hashed nonce and commits it before issuing
+    signed state. Fail closed if storage is unavailable.
     """
     if not is_meta_embedded_signup_enabled():
-        # The dashboard should never link here when the FF is off,
-        # but a defensive 503 keeps us honest if it does.
         raise HTTPException(
             status_code=503,
             detail=meta_embedded_disabled_reason()
@@ -1571,14 +1603,41 @@ async def oauth_start(request: Request):
             status_code=503,
             detail="عنوان رجوع OAuth لـ Meta غير مُعد على الخادم.",
         )
-    nonce = _secrets.token_urlsafe(16)
+    try:
+        mode = normalize_connection_mode(connection_mode)
+    except NonceRejected:
+        raise _oauth_http_reject(400, log_reason="connection_mode_invalid") from None
+
+    nonce = generate_oauth_nonce()
     issued_at = int(datetime.now(timezone.utc).timestamp())
-    state = _sign_oauth_state(tenant_id, nonce, issued_at, redirect_uri)
+    try:
+        persist_oauth_nonce(
+            db,
+            nonce=nonce,
+            tenant_id=tenant_id,
+            connection_mode=mode,
+            redirect_uri=redirect_uri,
+            expires_at=expiry_from_now(),
+        )
+        db.commit()
+    except NonceStorageUnavailable:
+        db.rollback()
+        logger.exception("[EmbeddedSignup] oauth/start nonce persist failed closed")
+        raise HTTPException(
+            status_code=503,
+            detail="تعذر إكمال ربط واتساب حالياً. أعد المحاولة من نحلة.",
+        ) from None
+    except Exception:
+        db.rollback()
+        logger.exception("[EmbeddedSignup] oauth/start nonce persist failed closed")
+        raise HTTPException(
+            status_code=503,
+            detail="تعذر إكمال ربط واتساب حالياً. أعد المحاولة من نحلة.",
+        ) from None
+
+    state = _sign_oauth_state(tenant_id, nonce, issued_at, redirect_uri, mode)
     url = _build_meta_oauth_authorize_url(state, redirect_uri)
-    logger.info(
-        "[EmbeddedSignup] oauth/start tenant=%s redirect_uri=%s",
-        tenant_id, redirect_uri,
-    )
+    logger.info("[EmbeddedSignup] oauth/start tenant=%s mode=%s", tenant_id, mode)
     return RedirectResponse(url=url, status_code=302)
 
 
@@ -1592,38 +1651,25 @@ async def oauth_callback(
     error_reason: Optional[str] = None,
     error_description: Optional[str] = None,
 ):
-    """Receive Meta's redirect after the user approves the dialog.
-
-    Steps:
-      1. Verify the HMAC state and resolve the tenant_id.
-      2. Surface BSP/TP entitlement errors gracefully (no raw Meta
-         English copy reaches the merchant).
-      3. Exchange ``code`` for a user token using the SAME redirect_uri
-         bound into ``state`` at start (Meta requires byte-for-byte match).
-      4. Discover the merchant's WABA + persist credentials via the
-         shared service path used by the JS-SDK ``/exchange`` endpoint.
-      5. Redirect the browser back to the dashboard with a result
-         hash (``#meta=ok`` / ``#meta=error&reason=…``) so the SPA
-         can render a final-step toast.
-    """
+    """Meta browser callback. JWT-public exact path. Nonce consumed before Graph."""
     if not state:
-        raise HTTPException(status_code=400, detail="رابط الربط مع Meta ناقص (state).")
+        raise HTTPException(status_code=400, detail="رابط الربط مع Meta ناقص.")
     oauth_state = _verify_oauth_state(state)
+    _consume_verified_nonce(oauth_state)
     tenant_id = oauth_state.tenant_id
     redirect_uri = oauth_state.redirect_uri
 
-    # Meta sometimes redirects back with error= when the merchant
-    # cancels or our app lacks the right entitlement. Translate
-    # before bouncing the merchant to the dashboard.
     if error:
+        safe = safe_oauth_error_fields(
+            {"error": error, "error_reason": error_reason},
+        )
         friendly = _meta_embedded_error_message(
-            {"message": error_description or error_reason or error},
+            {"message": error_reason or error},
             "تم إلغاء الربط مع Meta أو رفضته. يمكنك المحاولة لاحقاً أو استخدام الربط عبر 360dialog.",
         )
         logger.warning(
-            "[EmbeddedSignup] oauth/callback Meta returned error tenant=%s "
-            "error=%s reason=%s desc=%s",
-            tenant_id, error, error_reason, error_description,
+            "[EmbeddedSignup] oauth/callback Meta error tenant=%s error=%s reason=%s",
+            tenant_id, safe["error"], safe["error_reason"],
         )
         return _oauth_callback_finish(ok=False, reason=friendly)
 
@@ -1636,8 +1682,6 @@ async def oauth_callback(
     try:
         token_data = await _exchange_code_for_token(code, redirect_uri)
     except HTTPException as exc:
-        # Catch the BSP/TP variant explicitly so the merchant lands
-        # on the "use 360dialog" message instead of a raw Meta error.
         return _oauth_callback_finish(ok=False, reason=str(exc.detail))
 
     short_token = token_data["access_token"]
