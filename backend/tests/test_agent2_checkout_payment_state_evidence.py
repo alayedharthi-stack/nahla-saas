@@ -282,6 +282,7 @@ class TestT2MethodChoiceNotClaim:
         assert inbound_is_payment_method_choice("تحويل", methods) == PAYMENT_METHOD_BANK_TRANSFER
         assert inbound_is_payment_method_choice("تحويل بنكي", methods) == PAYMENT_METHOD_BANK_TRANSFER
         assert inbound_is_payment_method_choice("تم التحويل", methods) is None
+        assert inbound_is_payment_method_choice("لا هذا ايصال مدفوع", methods) is None
         assert detect_payment_confirmation_text("تم التحويل") is True
 
     def test_checkout_payment_method_slot_persists_bank_transfer_not_claim(self) -> None:

@@ -239,13 +239,6 @@ def inbound_is_payment_method_choice(
     if not raw or len(raw) > 120:
         return None
     compact = re.sub(r"\s+", " ", raw).strip()
-    indexed = resolve_indexed_choice(compact, methods)
-    if indexed and not str(indexed).startswith("__"):
-        return indexed
-    parsed = parse_payment_method_from_text(compact)
-    if parsed and not str(parsed).startswith("__"):
-        if parsed in methods.available_methods:
-            return parsed
     for method in methods.available_methods:
         label = METHOD_LABELS_AR.get(method, method)
         if compact == method or compact == label:
@@ -253,6 +246,22 @@ def inbound_is_payment_method_choice(
         tokens = [tok for tok in str(label).split() if len(tok) >= 3]
         if compact in tokens:
             return method
+    parsed = parse_payment_method_from_text(compact)
+    if parsed in ("__choice_index_1__", "__choice_index_2__", "__choice_index_3__"):
+        indexed = resolve_indexed_choice(compact, methods)
+        if indexed and not str(indexed).startswith("__"):
+            return indexed
+    try:
+        from core.payment_intent import detect_payment_confirmation_text  # noqa: PLC0415
+
+        if detect_payment_confirmation_text(raw):
+            return None
+    except Exception:
+        logger.exception(
+            "[PAYMENT_METHODS] confirmation-vs-choice probe failed"
+        )
+    if parsed and not str(parsed).startswith("__") and parsed in methods.available_methods:
+        return parsed
     return None
 
 
