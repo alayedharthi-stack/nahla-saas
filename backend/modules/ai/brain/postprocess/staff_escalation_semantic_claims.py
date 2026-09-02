@@ -92,6 +92,7 @@ class StaffEscalationCandidateClaims:
     valid_parse: bool = False
     confidence: float = 0.0
     provenance: str = ""
+    model: str = ""
 
     def asserted_claims(self) -> FrozenSet[str]:
         if not self.valid_parse:
@@ -105,6 +106,7 @@ class StaffEscalationCandidateClaims:
         payload["valid_parse"] = bool(self.valid_parse)
         payload["confidence"] = float(self.confidence)
         payload["provenance"] = str(self.provenance or "")
+        payload["model"] = str(self.model or "")
         return payload
 
 
@@ -122,9 +124,10 @@ def capabilities_from_execution_data(data: Optional[Dict[str, Any]]) -> StaffEsc
     )
     assigned = md.get("staff_assigned") is True
     followup = md.get("future_followup_committed") is True
+    # Availability of a verified contact is not delivery evidence.
     contact = (
-        md.get("verified_contact_available") is True
-        and bool(str(md.get("verified_contact_phone") or "").strip())
+        md.get("contact_delivered") is True
+        or md.get("verified_contact_delivered") is True
     )
     if notified:
         requested = True
@@ -238,7 +241,7 @@ async def enforce_staff_escalation_semantic_truth(
     ctx: BrainContext,
     compose_impl: Callable[[Decision, ActionResult, BrainContext], Awaitable[str]],
     classify_claims: Optional[
-        Callable[[str, StaffEscalationTruthCapabilities], Awaitable[StaffEscalationCandidateClaims]]
+        Callable[[str], Awaitable[StaffEscalationCandidateClaims]]
     ] = None,
 ) -> str:
     """Primary claim authority for ACTION_HANDOFF customer-facing candidates."""
@@ -246,7 +249,6 @@ async def enforce_staff_escalation_semantic_truth(
         classify_staff_escalation_claims,
     )
 
-    classifier = classify_claims or classify_staff_escalation_claims
     if not isinstance(result.data, dict):
         result.data = {}
     data = result.data
@@ -281,7 +283,14 @@ async def enforce_staff_escalation_semantic_truth(
 
     async def _verify(candidate_text: str, attempt: int) -> tuple[StaffEscalationCandidateClaims, FrozenSet[str], str]:
         try:
-            claims = await classifier(candidate_text, capabilities)
+            if classify_claims is None:
+                claims = await classify_staff_escalation_claims(
+                    candidate_text,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                )
+            else:
+                claims = await classify_claims(candidate_text)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[STAFF_ESCALATION_SEMANTIC_VERIFY] classifier_exception tenant_id=%s err=%s",

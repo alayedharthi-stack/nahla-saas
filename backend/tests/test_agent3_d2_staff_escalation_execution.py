@@ -117,8 +117,8 @@ def _decision(**args: Any) -> Decision:
     return Decision(action=ACTION_HANDOFF, args=dict(args), reason="customer_request")
 
 
-async def _truthful_queue_claims(text: str, capabilities: Any) -> StaffEscalationCandidateClaims:
-    del text, capabilities
+async def _truthful_queue_claims(text: str, **_kwargs: Any) -> StaffEscalationCandidateClaims:
+    del text
     return StaffEscalationCandidateClaims(
         claims_request_registered=True,
         claims_queued=True,
