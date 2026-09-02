@@ -144,11 +144,11 @@ def try_ledger_follow_up_decision(ctx: Any) -> Optional[Decision]:
     intent = getattr(ctx, "intent", None)
     intent_name = str(getattr(intent, "name", "") or "")
 
-    if (
-        intent_name == INTENT_ORDER_REFERENCE_LIST
-        and has_authoritative_order_support_ownership(intent, state=state)
-    ):
-        stamp_ledger_context(state)
+    if intent_name == INTENT_ORDER_REFERENCE_LIST:
+        if not has_authoritative_order_support_ownership(intent, state=state):
+            return None
+        if should_stamp_ledger_context(intent, state=state):
+            stamp_ledger_context(state)
         return Decision(
             action=ACTION_CUSTOMER_LEDGER_REPLY,
             args={"ledger_topic": INTENT_ORDER_REFERENCE_LIST},
@@ -158,40 +158,12 @@ def try_ledger_follow_up_decision(ctx: Any) -> Optional[Decision]:
 
     if not is_ledger_context_active(state):
         return None
-    if is_order_reference_follow_up(message):
-        return Decision(
-            action=ACTION_CUSTOMER_LEDGER_REPLY,
-            args={"ledger_topic": INTENT_ORDER_REFERENCE_LIST},
-            reason="ledger context — order reference list follow-up",
-            confidence=0.94,
-        )
-
-    # Structural continuation: Order Support still owns the turn after a
-    # proven ledger/order-support turn. No customer-phrase detector.
-    if not has_authoritative_order_support_ownership(intent, state=state):
+    if not is_order_reference_follow_up(message):
         return None
-    if intent_name in {INTENT_ORDER_HISTORY_COUNT, INTENT_LATEST_ORDER_SUMMARY}:
-        return None
-    try:
-        from .order_tracking_intent_guard import (  # noqa: PLC0415
-            is_explicit_order_tracking_request,
-        )
-
-        if is_explicit_order_tracking_request(
-            message,
-            state=state,
-            history=getattr(ctx, "history", None),
-            commerce_bundle=getattr(ctx, "commerce_bundle", None),
-        ):
-            return None
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — tracking probe must not block ledger continuation
-        return None
-    if should_stamp_ledger_context(intent, state=state):
-        stamp_ledger_context(state)
     return Decision(
         action=ACTION_CUSTOMER_LEDGER_REPLY,
         args={"ledger_topic": INTENT_ORDER_REFERENCE_LIST},
-        reason="ledger context — authoritative order-support continuation",
+        reason="ledger context — order reference list follow-up",
         confidence=0.94,
     )
 

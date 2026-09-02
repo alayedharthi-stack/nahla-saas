@@ -19,6 +19,7 @@ if _BACKEND not in sys.path:
 from core.customer_commerce_ledger import resolve_customer_commerce_profile  # noqa: E402
 from modules.ai.brain.commerce.customer_order_evidence import (  # noqa: E402
     collect_customer_order_evidence,
+    customer_order_evidence_available,
 )
 from modules.ai.brain.commerce.ledger_follow_up import (  # noqa: E402
     is_ledger_context_active,
@@ -54,6 +55,7 @@ from modules.ai.brain.types import (  # noqa: E402
     INTENT_TRACK_ORDER,
     Intent,
     MerchantConversationState,
+    OrderPreparationState,
 )
 from tests.commerce_scenario_fixtures import (  # noqa: E402
     DEFAULT_PHONE_E164,
@@ -175,6 +177,48 @@ def _is_order_support(decision) -> bool:
 
 def _commerce_blocked(decision) -> bool:
     return bool((decision.args or {}).get("block_commerce_escalation"))
+
+
+def _is_reference_list(decision) -> bool:
+    args = decision.args or {}
+    return (
+        decision.action == ACTION_CUSTOMER_LEDGER_REPLY
+        and args.get("ledger_topic") == INTENT_ORDER_REFERENCE_LIST
+    )
+
+
+def _compose_keeps_order_evidence(decision) -> bool:
+    """Pipeline pops customer_order_evidence on social-NC / non-sales topics."""
+    if _commerce_blocked(decision):
+        return False
+    topic = str((decision.args or {}).get("topic") or "")
+    return topic not in {
+        "non_sales_ambiguous",
+        "persona_social",
+        "persona_identity",
+        "identity_collaboration",
+    }
+
+
+def _ledger_os_state() -> MerchantConversationState:
+    state = MerchantConversationState()
+    state.last_intent = INTENT_ORDER_HISTORY_COUNT
+    state.last_action = ACTION_CUSTOMER_LEDGER_REPLY
+    state.recent_topic = "customer_ledger"
+    state.recent_topic_turn = 0
+    state.turn = 1
+    return state
+
+
+def _local_order_truth(world):
+    evidence = collect_customer_order_evidence(
+        db=world.db,
+        tenant_id=world.tenant_id,
+        phone=world.phone,
+        customer_id=world.customer_id,
+        conversation_id=world.conversation_id,
+    )
+    return evidence
 
 
 @pytest.fixture()
@@ -415,18 +459,38 @@ class TestLiveFixtureReplay:
         turn1_intent = _layer2_track_order(turn1_msg)
         turn1 = _decide(turn1_msg, intent=turn1_intent, state=state)
         assert _is_order_support(turn1)
+        if turn1.action == ACTION_CUSTOMER_LEDGER_REPLY:
+            assert (turn1.args or {}).get("ledger_topic") == INTENT_ORDER_HISTORY_COUNT
+        else:
+            assert turn1.action == ACTION_LLM_REPLY
+            assert (turn1.args or {}).get("topic") == "order_history"
         assert (turn1.args or {}).get("topic") != TOPIC_PRODUCT_USAGE_INFORMATION
+        assert (turn1.args or {}).get("topic") != "non_sales_ambiguous"
         assert _commerce_blocked(turn1) is False
         assert is_ledger_context_active(state) is True
+
+        evidence = _local_order_truth(world)
+        assert customer_order_evidence_available(evidence) is True
+        assert int(evidence.get("order_count") or 0) == 7
 
         state = store.transition(state, turn1_intent, turn1)
         state.last_action = turn1.action
         turn2_msg = NUMBER_FOLLOW_FAMILY[0]
         turn2_intent = _layer2_track_order(turn2_msg)
         turn2 = _decide(turn2_msg, intent=turn2_intent, state=state)
-        assert turn2.action == ACTION_CUSTOMER_LEDGER_REPLY
-        assert (turn2.args or {}).get("ledger_topic") == INTENT_ORDER_REFERENCE_LIST
+        assert _is_order_support(turn2)
+        assert _is_reference_list(turn2) is False
+        assert turn2.action == ACTION_LLM_REPLY
+        assert (turn2.args or {}).get("topic") == "order_history"
+        assert (turn2.args or {}).get("topic") != "non_sales_ambiguous"
         assert _commerce_blocked(turn2) is False
+        assert _compose_keeps_order_evidence(turn2) is True
+        refs = {
+            str(row.get("display_reference") or "")
+            for row in (evidence.get("orders") or [])
+        }
+        assert LATEST_REF in refs or any(item.endswith("628") for item in refs)
+        assert "999888777" not in refs
 
         state = store.transition(state, turn2_intent, turn2)
         state.last_action = turn2.action
@@ -434,8 +498,15 @@ class TestLiveFixtureReplay:
         turn3_intent = _layer2_track_order(turn3_msg)
         turn3 = _decide(turn3_msg, intent=turn3_intent, state=state)
         assert _is_order_support(turn3)
+        assert _is_reference_list(turn3) is False
+        assert turn3.action == ACTION_LLM_REPLY
+        assert (turn3.args or {}).get("topic") in {"order_history", "latest_order_summary"}
         assert (turn3.args or {}).get("topic") != "non_sales_ambiguous"
         assert _commerce_blocked(turn3) is False
+        assert _compose_keeps_order_evidence(turn3) is True
+        latest = evidence.get("latest_order") or {}
+        latest_ref = str(latest.get("display_reference") or "")
+        assert latest_ref.endswith("628") or any(item.endswith("628") for item in refs)
 
         profile = resolve_customer_commerce_profile(
             world.db,
@@ -445,43 +516,67 @@ class TestLiveFixtureReplay:
             include_abandoned=False,
             include_cancelled=True,
         )
-        evidence = collect_customer_order_evidence(
-            db=world.db,
-            tenant_id=world.tenant_id,
-            phone=world.phone,
-            customer_id=world.customer_id,
-            conversation_id=world.conversation_id,
-        )
         assert int(profile.order_counts.total_orders or 0) == 7
-        assert evidence is not None
-        assert int(evidence.get("order_count") or 0) == 7
-        latest = evidence.get("latest_order") or {}
-        assert str(latest.get("display_reference") or LATEST_REF).endswith("628")
-        refs = {
-            str(row.get("display_reference") or "")
-            for row in (evidence.get("orders") or [])
-        }
-        assert LATEST_REF in refs or any(item.endswith("628") for item in refs)
-        assert "999888777" not in refs
 
     def test_second_count_paraphrase_same_owner(self) -> None:
         decision = _decide(COUNT_FAMILY[1], intent=_layer2_track_order(COUNT_FAMILY[1]))
         assert _is_order_support(decision)
+        assert _is_reference_list(decision) is False
 
     def test_second_number_follow_up_same_owner(self) -> None:
-        state = MerchantConversationState()
-        state.last_intent = INTENT_ORDER_HISTORY_COUNT
-        state.last_action = ACTION_CUSTOMER_LEDGER_REPLY
-        state.recent_topic = "customer_ledger"
-        state.recent_topic_turn = 0
-        state.turn = 1
+        state = _ledger_os_state()
         decision = _decide(
             NUMBER_FOLLOW_FAMILY[1],
             intent=_layer2_track_order(NUMBER_FOLLOW_FAMILY[1]),
             state=state,
         )
-        assert decision.action == ACTION_CUSTOMER_LEDGER_REPLY
-        assert (decision.args or {}).get("ledger_topic") == INTENT_ORDER_REFERENCE_LIST
+        assert _is_order_support(decision)
+        assert _is_reference_list(decision) is False
+        assert decision.action == ACTION_LLM_REPLY
+        assert (decision.args or {}).get("topic") == "order_history"
+        assert _compose_keeps_order_evidence(decision) is True
+
+
+class TestOrderSupportDoesNotForceReferenceList:
+    def test_status_question_is_not_reference_list(self) -> None:
+        state = _ledger_os_state()
+        decision = _decide("وين طلبي؟", intent=_layer2_track_order("وين طلبي؟"), state=state)
+        assert _is_reference_list(decision) is False
+        assert decision.action == ACTION_TRACK_ORDER
+
+    def test_amount_question_is_not_reference_list(self) -> None:
+        state = _ledger_os_state()
+        state.stage = "ordering"
+        state.order_prep = OrderPreparationState(
+            product_id="101",
+            order_status="awaiting_address",
+            line_items=[{"product_name": GENERIC_SHOE, "quantity": 1, "unit_price": 120}],
+            catalog_checkout_total=120,
+            catalog_checkout_currency="SAR",
+        )
+        state.cart_items = list(state.order_prep.line_items)
+        message = "عارف كم قيمة طلبي؟"
+        decision = _decide(message, intent=_layer2_track_order(message), state=state)
+        assert _is_reference_list(decision) is False
+        assert (decision.args or {}).get("topic") != "non_sales_ambiguous"
+
+    def test_cancelled_order_question_is_not_reference_list(self) -> None:
+        state = _ledger_os_state()
+        message = "وش وضع الطلب الملغي؟"
+        decision = _decide(message, intent=_layer2_track_order(message), state=state)
+        assert _is_reference_list(decision) is False
+        assert _is_order_support(decision)
+        assert (decision.args or {}).get("topic") != "non_sales_ambiguous"
+        assert _commerce_blocked(decision) is False
+
+    def test_generic_existing_order_support_is_not_reference_list(self) -> None:
+        state = _ledger_os_state()
+        message = COUNT_FAMILY[0]
+        decision = _decide(message, intent=_layer2_track_order(message), state=state)
+        assert _is_reference_list(decision) is False
+        assert _is_order_support(decision)
+        assert decision.action == ACTION_LLM_REPLY
+        assert (decision.args or {}).get("topic") == "order_history"
 
 
 class TestIsolationAndEmpty:
