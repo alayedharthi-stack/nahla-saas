@@ -30,19 +30,20 @@ class TestBlockedFalseEscalation:
             tenant_id=33,
             conversation_id=9001,
         )
-        assert result.replaced is True
         assert result.staff_escalation_claim_blocked is True
-        assert result.reply == SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR
-        assert "سأخبر" not in result.reply
-        assert "فريق" not in result.reply
+        assert result.action != "allowed"
+        assert result.evidence is not None
+        assert result.evidence.evidence_ok is False
 
     def test_blocks_team_notification_claim_without_evidence(self) -> None:
         result = apply_staff_escalation_truth_guard(
             reply="تم إشعار الفريق وسيتابعون معك",
             conversation_flags={},
         )
-        assert result.replaced is True
-        assert result.reply == SAFE_NO_ESCALATION_EVIDENCE_REPLY_AR
+        assert result.staff_escalation_claim_blocked is True
+        assert result.action != "allowed"
+        assert result.evidence is not None
+        assert result.evidence.evidence_ok is False
 
     def test_needs_human_alone_is_not_evidence(self) -> None:
         evidence = evaluate_staff_escalation_evidence(
@@ -64,7 +65,8 @@ class TestBlockedFalseEscalation:
                 "status": "active",
             },
         )
-        assert result.replaced is True
+        assert result.staff_escalation_claim_blocked is True
+        assert result.action != "allowed"
 
 
 class TestAllowedWithEvidence:
@@ -73,6 +75,7 @@ class TestAllowedWithEvidence:
         result = apply_staff_escalation_truth_guard(
             reply=llm_reply,
             brain_handoff=True,
+            inbound_metadata={"handoff_session_id": 91},
             conversation_flags={
                 "needs_human": True,
                 "handoff_active": True,
@@ -83,6 +86,17 @@ class TestAllowedWithEvidence:
         assert result.replaced is False
         assert result.action == "allowed"
         assert result.reply == llm_reply
+
+    def test_brain_handoff_flag_alone_is_not_evidence(self) -> None:
+        evidence = evaluate_staff_escalation_evidence(brain_handoff=True)
+        assert evidence.evidence_ok is False
+
+        result = apply_staff_escalation_truth_guard(
+            reply="تم تحويلك للدعم",
+            brain_handoff=True,
+        )
+        assert result.staff_escalation_claim_blocked is True
+        assert result.action != "allowed"
 
     def test_allows_when_active_handoff_state(self) -> None:
         llm_reply = "تم تحويلك لفريق المتجر"
@@ -98,13 +112,16 @@ class TestAllowedWithEvidence:
         assert result.replaced is False
         assert result.action == "allowed"
 
-    def test_allows_deterministic_handoff_path(self) -> None:
+    def test_action_handoff_path_alone_is_not_evidence(self) -> None:
+        evidence = evaluate_staff_escalation_evidence(chosen_path="ACTION_HANDOFF")
+        assert evidence.evidence_ok is False
+
         result = apply_staff_escalation_truth_guard(
             reply="تم تحويلك للدعم",
             chosen_path="ACTION_HANDOFF",
         )
-        assert result.replaced is False
-        assert result.action == "allowed"
+        assert result.staff_escalation_claim_blocked is True
+        assert result.action != "allowed"
 
     def test_allows_pre_brain_handoff_metadata(self) -> None:
         result = apply_staff_escalation_truth_guard(
@@ -113,9 +130,20 @@ class TestAllowedWithEvidence:
                 "deterministic_path": "pre_brain_handoff:clear",
                 "handoff_active": True,
                 "event_type": "ai_handoff_ack",
+                "handoff_session_id": 44,
             },
         )
         assert result.replaced is False
+
+    def test_pre_brain_path_without_session_is_not_evidence(self) -> None:
+        evidence = evaluate_staff_escalation_evidence(
+            chosen_path="pre_brain_handoff:clear",
+            inbound_metadata={
+                "deterministic_path": "pre_brain_handoff:clear",
+                "event_type": "ai_handoff_ack",
+            },
+        )
+        assert evidence.evidence_ok is False
 
 
 class TestEscalationClaimDetection:

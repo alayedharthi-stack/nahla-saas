@@ -2,14 +2,15 @@
 modules/ai/brain/postprocess/staff_escalation_evidence.py
 ──────────────────────────────────────────────────────────
 Structured staff-escalation evidence only — never infer from LLM
-wording, customer frustration alone, or stale ``needs_human`` flags.
+wording, customer frustration alone, stale ``needs_human`` flags,
+or decision/action names.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-_DETERMINISTIC_ESCALATION_PATHS = frozenset({
+_ACTION_NAME_PATHS = frozenset({
     "ACTION_HANDOFF",
     "action_handoff",
     "handoff",
@@ -27,51 +28,50 @@ class StaffEscalationEvidenceResult:
     reason: str
 
 
-def _deterministic_path_grants_evidence(chosen_path: str) -> tuple[bool, str]:
+def _session_id_present(metadata: Dict[str, Any]) -> bool:
+    return bool(str(metadata.get("handoff_session_id") or "").strip())
+
+
+def _notification_accepted(metadata: Dict[str, Any]) -> bool:
+    return (
+        metadata.get("notification_accepted") is True
+        or metadata.get("notification_sent") is True
+    )
+
+
+def _verified_contact_delivered(metadata: Dict[str, Any]) -> bool:
+    if metadata.get("verified_contact_available") is not True:
+        return False
+    return bool(str(metadata.get("verified_contact_phone") or "").strip())
+
+
+def _pre_brain_path(chosen_path: str, metadata: Dict[str, Any]) -> bool:
     path = str(chosen_path or "").strip()
-    if not path:
-        return False, ""
-    if path in _DETERMINISTIC_ESCALATION_PATHS:
-        return True, f"deterministic_path={path}"
-    if path.startswith("pre_brain_handoff:"):
-        return True, f"deterministic_path={path}"
-    return False, ""
+    dp = str(metadata.get("deterministic_path") or "").strip()
+    return path.startswith("pre_brain_handoff:") or dp.startswith("pre_brain_handoff:")
 
 
-def _metadata_grants_evidence(metadata: Optional[Dict[str, Any]]) -> tuple[bool, str, bool, bool]:
+def _metadata_execution_evidence(
+    metadata: Optional[Dict[str, Any]],
+) -> tuple[bool, str, bool, bool]:
     md = metadata or {}
-    session_present = bool(str(md.get("handoff_session_id") or "").strip())
-    notification_present = md.get("notification_sent") is True
+    session_present = _session_id_present(md) or md.get("handoff_session_created") is True
+    notification_present = _notification_accepted(md)
 
-    if session_present:
+    if _session_id_present(md):
         return True, "metadata.handoff_session_id", True, notification_present
+    if md.get("handoff_session_created") is True:
+        return True, "metadata.handoff_session_created", True, notification_present
     if notification_present:
-        return True, "metadata.notification_sent", session_present, True
-    if str(md.get("escalation_event") or "").strip() == "handoff_created":
-        return True, "metadata.escalation_event", session_present, notification_present
-    if str(md.get("event_type") or "").strip() == "ai_handoff_ack":
-        return True, "metadata.ai_handoff_ack", session_present, notification_present
-
-    dp = str(md.get("deterministic_path") or "").strip()
-    if dp.startswith("pre_brain_handoff:"):
-        if md.get("handoff_active") or md.get("handoff_session_created"):
-            return True, f"metadata.{dp}", session_present, notification_present
-
-    ok, source = _deterministic_path_grants_evidence(dp)
-    if ok:
-        return True, source, session_present, notification_present
-
+        return True, "metadata.notification_accepted", session_present, True
+    if _verified_contact_delivered(md):
+        return True, "metadata.verified_contact", session_present, notification_present
     return False, "", session_present, notification_present
 
 
 def _conversation_grants_evidence(
     conversation_flags: Optional[Dict[str, Any]],
-    *,
-    brain_handoff: bool = False,
 ) -> tuple[bool, str]:
-    if brain_handoff:
-        return True, "brain_handoff_session_created"
-
     flags = conversation_flags or {}
     needs_human = bool(flags.get("needs_human"))
     handoff_active = bool(flags.get("handoff_active"))
@@ -92,40 +92,50 @@ def evaluate_staff_escalation_evidence(
     chosen_path: str = "",
     brain_handoff: bool = False,
 ) -> StaffEscalationEvidenceResult:
-    """Return whether trusted staff-escalation evidence exists for this turn."""
-    ok, source = _deterministic_path_grants_evidence(chosen_path)
-    if ok:
-        return StaffEscalationEvidenceResult(
-            evidence_ok=True,
-            evidence_source=source,
-            handoff_session_present=brain_handoff,
-            notification_present=False,
-            reason=source,
-        )
+    """Return whether trusted staff-escalation *execution* evidence exists.
 
-    conv_ok, conv_source = _conversation_grants_evidence(
-        conversation_flags,
-        brain_handoff=brain_handoff,
-    )
-    if conv_ok:
-        return StaffEscalationEvidenceResult(
-            evidence_ok=True,
-            evidence_source=conv_source,
-            handoff_session_present=brain_handoff or conv_source.startswith("conversation"),
-            notification_present=False,
-            reason=conv_source,
-        )
+    ``brain_handoff`` and action/chosen_path names have zero authority.
+    They remain accepted kwargs for telemetry/routing callers only.
+    """
+    del brain_handoff  # decision-level flag is not operational evidence
+
+    md = inbound_metadata or {}
+    path = str(chosen_path or "").strip()
+    if path in _ACTION_NAME_PATHS:
+        path = ""
 
     meta_ok, meta_source, session_present, notification_present = (
-        _metadata_grants_evidence(inbound_metadata)
+        _metadata_execution_evidence(md)
     )
     if meta_ok:
         return StaffEscalationEvidenceResult(
             evidence_ok=True,
             evidence_source=meta_source,
-            handoff_session_present=session_present or brain_handoff,
+            handoff_session_present=session_present,
             notification_present=notification_present,
             reason=meta_source,
+        )
+
+    if _pre_brain_path(chosen_path, md):
+        # Legitimate pre-brain only with real session/contact execution.
+        if session_present or _verified_contact_delivered(md):
+            source = "pre_brain_handoff_execution"
+            return StaffEscalationEvidenceResult(
+                evidence_ok=True,
+                evidence_source=source,
+                handoff_session_present=session_present,
+                notification_present=notification_present,
+                reason=source,
+            )
+
+    conv_ok, conv_source = _conversation_grants_evidence(conversation_flags)
+    if conv_ok:
+        return StaffEscalationEvidenceResult(
+            evidence_ok=True,
+            evidence_source=conv_source,
+            handoff_session_present=True,
+            notification_present=False,
+            reason=conv_source,
         )
 
     return StaffEscalationEvidenceResult(

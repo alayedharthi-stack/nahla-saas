@@ -130,7 +130,7 @@ class TestHandoffTruthPredicate:
                 customer_phone="966551459303",
                 chosen_path="ACTION_HANDOFF",
             )
-        assert result.active is True
+        assert result.active is False
 
 
 class TestWireLayerHandoffScrub:

@@ -56,7 +56,9 @@ class _GreetHandler:
 
 class _HandoffHandler:
     async def handle(self, decision: Decision, ctx: BrainContext) -> ActionResult:
-        return ActionResult(success=True, data={"type": "handoff"})
+        from .staff_escalation_execution import execute_staff_escalation
+
+        return await execute_staff_escalation(decision, ctx)
 
 
 # Direct-compose actions: the responder produces the text deterministically,

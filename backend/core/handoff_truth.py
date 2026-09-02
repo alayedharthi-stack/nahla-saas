@@ -12,7 +12,9 @@ Truth predicate (``resolve_handoff_truth_active``) aligns with
     (``is_human_handoff`` OR ``status == 'human'``) — soft
     ``needs_human`` alone is NOT sufficient.
   * ``conversation_handoff_active`` (human_active ownership).
-  * Deterministic escalation metadata / chosen_path when supplied.
+  * Structured execution metadata (session id / notification accepted /
+    verified delivered contact). Action names and chosen_path alone
+    are not operational evidence.
 
 Fail-closed scope is limited to the "may AI reply?" decision when gate
 verification fails while possible human-ownership signals are present.
