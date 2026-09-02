@@ -213,11 +213,31 @@ def try_guard_recovery_reply(
                         _prep = dict(_op)
                     elif hasattr(_op, "to_dict"):
                         _prep = dict(_op.to_dict() or {})
-                if should_block_bare_start_product_prompt(order_prep=_prep):
+                _tenant_id = int(tenant_id or 0)
+                if should_block_bare_start_product_prompt(
+                    order_prep=_prep,
+                    db=db,
+                    tenant_id=_tenant_id,
+                ):
                     return ConversationRecoveryResult(
                         needs_persona_compose=True,
                         source="purchase_channel_selection_pending",
                     )
+                if db and _tenant_id:
+                    _sales = None
+                    try:
+                        from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
+                            resolve_merchant_sales_channels,
+                        )
+
+                        _sales = resolve_merchant_sales_channels(db, _tenant_id)
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — unknown capability must not invent WhatsApp copy
+                        _sales = None
+                    if _sales is None:
+                        return ConversationRecoveryResult(
+                            needs_persona_compose=True,
+                            source="purchase_channel_selection_pending",
+                        )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — channel gate must not break recovery
                 pass
             return ConversationRecoveryResult(
