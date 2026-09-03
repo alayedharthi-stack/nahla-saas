@@ -445,6 +445,90 @@ def maybe_enforce_catalog_order_continue_checkout(
     )
 
 
+_ADDRESS_AWAITED_FIELDS = frozenset({
+    "address",
+    "address_location",
+    "address_line",
+    "short_address_code",
+    "google_maps_url",
+    "delivery_address",
+    "location",
+    "city",
+    "district",
+    "street",
+    "postal_code",
+})
+
+_PAYMENT_AWAITED_FIELDS = frozenset({"payment_method"})
+
+_EXTRACTED_SLOT_TO_AWAITED = {
+    "customer_first_name": frozenset({
+        "customer_first_name",
+        "customer_last_name",
+        "customer_name",
+        "name",
+        "full_name",
+    }),
+    "customer_last_name": frozenset({
+        "customer_first_name",
+        "customer_last_name",
+        "customer_name",
+        "name",
+        "full_name",
+    }),
+    "customer_name": frozenset({
+        "customer_first_name",
+        "customer_last_name",
+        "customer_name",
+        "name",
+        "full_name",
+    }),
+    "name": frozenset({
+        "customer_first_name",
+        "customer_last_name",
+        "customer_name",
+        "name",
+        "full_name",
+    }),
+    "city": frozenset({"city"}),
+    "customer_phone": frozenset({
+        "phone",
+        "customer_phone",
+        "customer_phone_number",
+        "mobile",
+    }),
+    "phone": frozenset({
+        "phone",
+        "customer_phone",
+        "customer_phone_number",
+        "mobile",
+    }),
+    "short_address_code": _ADDRESS_AWAITED_FIELDS,
+    "google_maps_url": _ADDRESS_AWAITED_FIELDS,
+    "latitude": _ADDRESS_AWAITED_FIELDS,
+    "longitude": _ADDRESS_AWAITED_FIELDS,
+    "address_line": _ADDRESS_AWAITED_FIELDS,
+    "delivery_address": _ADDRESS_AWAITED_FIELDS,
+    "street": _ADDRESS_AWAITED_FIELDS,
+    "district": _ADDRESS_AWAITED_FIELDS,
+    "postal_code": _ADDRESS_AWAITED_FIELDS,
+    "building_number": _ADDRESS_AWAITED_FIELDS,
+    "additional_number": _ADDRESS_AWAITED_FIELDS,
+    "quantity": frozenset({"quantity", "qty"}),
+    "qty": frozenset({"quantity", "qty"}),
+}
+
+
+def _awaited_checkout_fields(order_prep: Any) -> frozenset[str]:
+    if order_prep is None:
+        return frozenset()
+    if isinstance(order_prep, dict):
+        raw = order_prep.get("missing_fields") or []
+    else:
+        raw = getattr(order_prep, "missing_fields", None) or []
+    return frozenset(str(item or "").strip() for item in raw if str(item or "").strip())
+
+
 def _inbound_is_structured_location_event(ctx: BrainContext) -> bool:
     """True for a native WhatsApp location payload, not free-text location questions."""
     meta = _inbound_metadata(ctx)
@@ -459,21 +543,74 @@ def _inbound_is_structured_location_event(ctx: BrainContext) -> bool:
     return False
 
 
-def _inbound_is_payment_method_choice(ctx: BrainContext) -> bool:
-    """Reuse the merchant payment-method extractor — no new wording rules."""
+def _tenant_payment_methods(ctx: BrainContext) -> Any:
+    """Load merchant payment truth. Fail closed when tenant settings are unavailable."""
+    db = getattr(ctx, "_db", None) or getattr(ctx, "db", None)
+    try:
+        tenant_id = int(getattr(ctx, "tenant_id", 0) or 0)
+    except (TypeError, ValueError):
+        tenant_id = 0
+    if db is None or tenant_id <= 0:
+        return None
+    try:
+        from core.merchant_payment_methods import load_merchant_payment_methods  # noqa: PLC0415
+
+        methods = load_merchant_payment_methods(db, tenant_id)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing tenant payment truth must not invent ownership
+        return None
+    if methods is None:
+        return None
+    if str(getattr(methods, "source", "") or "").strip().lower() == "fallback":
+        return None
+    if not list(getattr(methods, "available_methods", None) or []):
+        return None
+    return methods
+
+
+def _inbound_is_tenant_payment_method_choice(ctx: BrainContext, awaited: frozenset[str]) -> bool:
+    if not (awaited & _PAYMENT_AWAITED_FIELDS):
+        return False
     message = str(getattr(ctx, "message", "") or "")
     if not message.strip():
         return False
+    methods = _tenant_payment_methods(ctx)
+    if methods is None:
+        return False
     try:
-        from core.merchant_payment_methods import (  # noqa: PLC0415
-            inbound_is_payment_method_choice,
-            resolve_merchant_payment_methods,
-        )
+        from core.merchant_payment_methods import inbound_is_payment_method_choice  # noqa: PLC0415
 
-        methods = resolve_merchant_payment_methods()
         return bool(inbound_is_payment_method_choice(message, methods))
     except Exception:  # noqa: BLE001  # noqa: silent-ok — payment extractor probe must not invent checkout ownership
         return False
+
+
+def _current_extracted_checkout_slots(ctx: BrainContext) -> Dict[str, Any]:
+    extracted: Dict[str, Any] = {}
+    intent = getattr(ctx, "intent", None)
+    slots = dict(getattr(intent, "slots", None) or {})
+    for key, value in slots.items():
+        if key in _EXTRACTED_SLOT_TO_AWAITED and value not in (None, "", [], {}):
+            extracted[key] = value
+    message = str(getattr(ctx, "message", "") or "")
+    try:
+        from modules.ai.brain.intent.ordering_extractor import extract_ordering_slots  # noqa: PLC0415
+
+        extracted.update(extract_ordering_slots(message) or {})
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing slot extractor must not invent ownership
+        pass
+    return extracted
+
+
+def _extracted_slots_match_awaited(ctx: BrainContext, awaited: frozenset[str]) -> bool:
+    if not awaited:
+        return False
+    extracted = _current_extracted_checkout_slots(ctx)
+    supplied: set[str] = set()
+    for key, value in extracted.items():
+        if value in (None, "", [], {}):
+            continue
+        supplied.update(_EXTRACTED_SLOT_TO_AWAITED.get(key, ()))
+    return bool(supplied & awaited)
 
 
 def current_turn_continues_catalog_checkout(ctx: BrainContext) -> bool:
@@ -481,40 +618,33 @@ def current_turn_continues_catalog_checkout(ctx: BrainContext) -> bool:
     True when THIS inbound structurally owns checkout.
 
     Distinct from :func:`is_active_catalog_checkout`, which only means
-    resumable checkout context exists.
+    resumable checkout context exists. Does not use the broad
+    awaited-slot arbiter (option confirmation / receipt catch-alls).
     """
     if is_current_catalog_order_submitted(ctx):
         return True
     if not is_active_catalog_checkout(ctx):
         return False
-    if _inbound_is_structured_location_event(ctx):
-        return True
 
-    message = str(getattr(ctx, "message", "") or "")
     state = getattr(ctx, "state", None)
     prep = getattr(state, "order_prep", None) if state else None
+    awaited = _awaited_checkout_fields(prep)
+    message = str(getattr(ctx, "message", "") or "")
 
-    try:
-        from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
-            message_fulfills_awaited_checkout_slot,
-        )
+    if _inbound_is_structured_location_event(ctx) and (awaited & _ADDRESS_AWAITED_FIELDS):
+        return True
 
-        if message_fulfills_awaited_checkout_slot(
-            message,
-            order_prep=prep,
-            customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
-        ):
-            return True
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing slot contract probe must not invent ownership
-        pass
+    if _extracted_slots_match_awaited(ctx, awaited):
+        return True
 
-    try:
-        from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
+    if awaited & _ADDRESS_AWAITED_FIELDS:
+        try:
+            from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
 
-        if is_address_like_delivery_text(message):
-            return True
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing address extractor must not invent ownership
-        pass
+            if is_address_like_delivery_text(message):
+                return True
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — existing address extractor must not invent ownership
+            pass
 
     try:
         from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
@@ -527,7 +657,7 @@ def current_turn_continues_catalog_checkout(ctx: BrainContext) -> bool:
     except Exception:  # noqa: BLE001  # noqa: silent-ok — existing continuation contracts must not invent ownership
         pass
 
-    if _inbound_is_payment_method_choice(ctx):
+    if _inbound_is_tenant_payment_method_choice(ctx, awaited):
         return True
     return False
 
