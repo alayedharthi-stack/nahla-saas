@@ -7,6 +7,12 @@ Maps customer browse turns to ``ProductGroup`` evidence (slug, label,
 catalog_match, membership) instead of inferring collections only from
 product category strings or stale token guards.
 
+Group lock requires current-turn structured scope: the turn must uniquely
+name a merchant group (label/slug/catalog_match covered by the query), or
+continue a previously selected group when this turn introduces no new
+catalog subject. A broad family token must not lock a more specific child
+group.
+
 Operational — evidence + state only; no LLM wording.
 """
 from __future__ import annotations
@@ -78,17 +84,120 @@ def _group_match_candidates(group: Mapping[str, Any]) -> List[str]:
     return out
 
 
-def _text_matches_group(text: str, group: Mapping[str, Any]) -> Optional[str]:
+def _specifier_in_text(specifier: str, text: str) -> bool:
+    """True when the group specifier is named by current-turn text.
+
+    A shorter family token must not lock a longer child-group label.
+    """
+    c_norm = _norm_token(specifier)
+    q_norm = _norm_token(text)
+    if not c_norm or not q_norm:
+        return False
+    return c_norm == q_norm or c_norm in q_norm
+
+
+def _best_covered_specifier(
+    text: str,
+    group: Mapping[str, Any],
+) -> Optional[Tuple[int, str]]:
     q_norm = _norm_token(text)
     if not q_norm:
         return None
+    best: Optional[Tuple[int, str]] = None
     for candidate in _group_match_candidates(group):
         c_norm = _norm_token(candidate)
         if not c_norm:
             continue
-        if c_norm == q_norm or c_norm in q_norm or q_norm in c_norm:
-            return candidate
-    return None
+        if c_norm == q_norm or c_norm in q_norm:
+            scored = (len(c_norm), candidate)
+            if best is None or scored[0] > best[0]:
+                best = scored
+    return best
+
+
+def _unique_longest_group_from_text(
+    groups: Sequence[Mapping[str, Any]],
+    text: str,
+) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Lock only when current-turn text uniquely names one group specifier.
+
+    Multiple child groups that share a shorter family token are ambiguous and
+    must not exclusive-lock broad family discovery.
+    """
+    scored: List[Tuple[int, Dict[str, Any], str]] = []
+    for group in groups:
+        hit = _best_covered_specifier(text, group)
+        if hit is None:
+            continue
+        scored.append((hit[0], dict(group), hit[1]))
+    if not scored:
+        return None
+    max_len = max(item[0] for item in scored)
+    winners = [item for item in scored if item[0] == max_len]
+    winner_ids = {int(item[1]["id"]) for item in winners}
+    if len(winner_ids) != 1:
+        return None
+    winner = winners[0]
+    return winner[1], winner[2]
+
+
+def _current_turn_names_group(text: str, group: Mapping[str, Any]) -> bool:
+    """Session continuation requires the group label or slug in current-turn text.
+
+    Shared catalog_match family tokens must not confirm a more specific child.
+    """
+    if not _norm_token(text):
+        return False
+    for key in ("label", "slug"):
+        raw = str(group.get(key) or "").strip()
+        if raw and _specifier_in_text(raw, text):
+            return True
+    return False
+
+
+def _text_matches_group(text: str, group: Mapping[str, Any]) -> Optional[str]:
+    hit = _best_covered_specifier(text, group)
+    return hit[1] if hit is not None else None
+
+
+def _resolution_from_group(
+    group: Mapping[str, Any],
+    *,
+    match_source: str,
+    hit: str = "",
+) -> BrowseScopeResolution:
+    gid = int(group["id"])
+    evidence: Dict[str, Any] = {
+        "group_id": gid,
+        "slug": group.get("slug"),
+        "current_turn_structured_scope": True,
+    }
+    if hit:
+        evidence["matched_on"] = hit
+    return BrowseScopeResolution(
+        matched=True,
+        group_id=gid,
+        group_slug=str(group.get("slug") or ""),
+        group_label=str(group.get("label") or ""),
+        scope_query=str(group.get("catalog_match") or group.get("label") or hit or ""),
+        match_source=match_source,
+        evidence=evidence,
+    )
+
+
+def _extract_current_turn_subject(message: str, query: str) -> str:
+    subject = str(query or "").strip()
+    if subject:
+        return subject
+    try:
+        from ..commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            extract_browse_category_scope,
+        )
+
+        return str(extract_browse_category_scope(message or "", query or "") or "").strip()
+    except Exception:  # noqa: BLE001
+        logger.exception("[CATALOG_BROWSE_SCOPE] subject_extract_failed")
+        return ""
 
 
 def load_merchant_catalog_groups(db: Any, tenant_id: int) -> List[Dict[str, Any]]:
@@ -293,33 +402,47 @@ def resolve_catalog_category_scope(
             match_source=str(group_match.match_source or "product_group"),
         )
 
+    s_norm = _norm_token(subject)
+    label_hits: List[Tuple[int, str, str]] = []
     for source_name, labels in (
         ("snapshot_category", _load_snapshot_categories(db, tenant_id)),
         ("product_metadata_category", _load_product_metadata_categories(db, tenant_id)),
     ):
         for label in labels:
-            if _category_labels_match(subject, label):
-                return CatalogCategoryScope(
-                    intent="category_price_browse",
-                    matched_category=label,
-                    category_id=_norm_token(label),
-                    query_subject=subject,
-                    must_filter_by_category=True,
-                    use_catalog_prices_only=True,
-                    specific_product=False,
-                    match_source=source_name,
-                )
+            c_norm = _norm_token(label)
+            if not c_norm or not s_norm:
+                continue
+            if c_norm == s_norm or c_norm in s_norm:
+                label_hits.append((len(c_norm), source_name, label))
+    if label_hits:
+        max_len = max(item[0] for item in label_hits)
+        winners = [item for item in label_hits if item[0] == max_len]
+        unique_labels = {item[2] for item in winners}
+        if len(unique_labels) == 1:
+            _hit_len, source_name, label = winners[0]
+            return CatalogCategoryScope(
+                intent="category_price_browse",
+                matched_category=label,
+                category_id=_norm_token(label),
+                query_subject=subject,
+                must_filter_by_category=True,
+                use_catalog_prices_only=True,
+                specific_product=False,
+                match_source=source_name,
+            )
 
     try:
         from ..product_discovery_gate import is_generic_category_noun  # noqa: PLC0415
 
         if is_generic_category_noun(subject):
+            # Family noun without a uniquely named child group is broad
+            # discovery, not an exclusive category lock.
             return CatalogCategoryScope(
                 intent="category_price_browse",
                 matched_category=subject,
                 category_id=_norm_token(subject),
                 query_subject=subject,
-                must_filter_by_category=True,
+                must_filter_by_category=False,
                 use_catalog_prices_only=True,
                 specific_product=False,
                 match_source="subject_token",
@@ -360,57 +483,62 @@ def match_catalog_group(
     active_group_slug: str = "",
     active_category: str = "",
 ) -> Optional[BrowseScopeResolution]:
-    """Pick the best merchant group for this browse turn."""
+    """Pick a merchant group only when current-turn structured scope names it.
+
+    Broad family text that merely shares tokens with a more specific child
+    group must not exclusive-lock. Stale session slug/category may continue
+    only when this turn does not introduce a different catalog subject.
+    """
     active_groups = [dict(g) for g in (groups or []) if g.get("is_active", True)]
     if not active_groups:
         return None
 
     locked = _group_by_slug(active_groups, active_group_slug)
-    if locked:
-        gid = int(locked["id"])
-        return BrowseScopeResolution(
-            matched=True,
-            group_id=gid,
-            group_slug=str(locked.get("slug") or ""),
-            group_label=str(locked.get("label") or ""),
-            scope_query=str(locked.get("catalog_match") or locked.get("label") or ""),
-            match_source="session_slug",
-            evidence={"group_id": gid, "slug": locked.get("slug")},
-        )
-
+    text_hit: Optional[Tuple[Dict[str, Any], str]] = None
     for candidate in (query, message):
         text = str(candidate or "").strip()
         if not text:
             continue
-        for group in sorted(active_groups, key=lambda g: (g.get("priority", 100), g.get("label", ""))):
-            hit = _text_matches_group(text, group)
-            if hit:
-                gid = int(group["id"])
-                return BrowseScopeResolution(
-                    matched=True,
-                    group_id=gid,
-                    group_slug=str(group.get("slug") or ""),
-                    group_label=str(group.get("label") or ""),
-                    scope_query=str(group.get("catalog_match") or group.get("label") or hit),
-                    match_source="text",
-                    evidence={"matched_on": hit, "group_id": gid},
-                )
+        unique = _unique_longest_group_from_text(active_groups, text)
+        if unique is not None:
+            text_hit = unique
+            break
+
+    if locked is not None:
+        if text_hit is not None:
+            hit_group, hit_str = text_hit
+            if int(hit_group["id"]) == int(locked["id"]):
+                return _resolution_from_group(locked, match_source="session_slug", hit=hit_str)
+            return _resolution_from_group(hit_group, match_source="text", hit=hit_str)
+        if (
+            _current_turn_names_group(query or "", locked)
+            or _current_turn_names_group(message or "", locked)
+        ):
+            return _resolution_from_group(locked, match_source="session_slug")
+        subject = _extract_current_turn_subject(message, query)
+        if subject and any(
+            _best_covered_specifier(subject, group) is not None
+            for group in active_groups
+        ):
+            # Family/shared token or other group specifier — not continuity.
+            return None
+        return _resolution_from_group(locked, match_source="session_slug")
+
+    if text_hit is not None:
+        hit_group, hit_str = text_hit
+        return _resolution_from_group(hit_group, match_source="text", hit=hit_str)
 
     cat = _norm_token(active_category)
     if cat:
+        subject = _extract_current_turn_subject(message, query)
+        if subject and not _specifier_in_text(active_category, subject) and not _specifier_in_text(
+            active_category, message or ""
+        ):
+            return None
         for group in active_groups:
             for candidate in _group_match_candidates(group):
                 if _norm_token(candidate) == cat:
-                    gid = int(group["id"])
-                    return BrowseScopeResolution(
-                        matched=True,
-                        group_id=gid,
-                        group_slug=str(group.get("slug") or ""),
-                        group_label=str(group.get("label") or ""),
-                        scope_query=str(group.get("catalog_match") or group.get("label") or ""),
-                        match_source="session_category",
-                        evidence={"group_id": gid},
-                    )
+                    return _resolution_from_group(group, match_source="session_category")
 
     return None
 
