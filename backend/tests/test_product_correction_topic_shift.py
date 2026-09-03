@@ -12,6 +12,8 @@ from typing import Optional
 
 import pytest
 
+pytestmark = pytest.mark.governance_contract
+
 _here = os.path.dirname(os.path.abspath(__file__))
 _backend = os.path.dirname(_here)
 for _p in [_backend, os.path.join(_backend, "..")]:

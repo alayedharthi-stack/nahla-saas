@@ -9,7 +9,8 @@ Nahla engineering policy:
 1. No PR may be merged into `main` unless required CI checks are green.
 2. CI jobs that exist today:
    - `lint-and-test`
-   - `constitution-compliance` (constitutional governance gate)
+   - `constitution-compliance` (constitutional pytest + HEAD-controlled GOV-002 bootstrap step)
+   - `gov002-trusted-base-scanner` (dedicated GOV-002 runner; `pull_request_target` loads YAML from BASE after #924 merges)
    - `Scan repository for leaked secrets` / gitleaks
 3. **Important:** GitHub branch protection for `main` currently requires `constitution-compliance`, `lint-and-test`, and `Scan repository for leaked secrets` / gitleaks as merge-blocking status checks. Repository files cannot themselves enforce GitHub branch protection; that configuration is external. A required check is not the same as a non-bypassable gate — admin bypass and CODEOWNERS enforcement are documented separately below and are **not** claimed proven here.
 4. Local test claims are not enough if GitHub CI is red.
@@ -28,9 +29,11 @@ Nahla engineering policy:
 
 Proven current required status checks on `main` (GitHub branch protection, external to this repository):
 
-1. **`constitution-compliance`** — required / merge-blocking.
+1. **`constitution-compliance`** — required / merge-blocking. Workflow YAML lives in `.github/workflows/ci.yml` and is PR-HEAD-controlled.
 2. **`lint-and-test`** — required / merge-blocking.
 3. **`Scan repository for leaked secrets`** / gitleaks — required / merge-blocking.
+
+`gov002-trusted-base-scanner` is the dedicated GOV-002 check name. Treat it as required only after GitHub API readback shows it in branch protection or a ruleset. See `docs/engineering/gov002-workflow-trust-root.md`. A repository unit test is not proof of that external setting.
 
 Repository files cannot themselves create or enforce those GitHub settings.
 
