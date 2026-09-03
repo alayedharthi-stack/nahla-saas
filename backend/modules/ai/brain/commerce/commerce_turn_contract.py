@@ -5,8 +5,7 @@ Unified pre-decide commerce turn contract.
 
 Phase 1: build + attach + divergence telemetry before DecisionEngine.decide().
 Phase 2: enforce catalog_order_current_turn at decide-time (browse → checkout).
-Phase 2.5: active catalog checkout is resumable context. Follow-up turns
-are not forced into checkout unless current-turn structured ownership exists.
+Phase 2.5: extend to active catalog checkout continuity on follow-up turns.
 """
 from __future__ import annotations
 
@@ -108,18 +107,6 @@ _ADDRESS_COLLECT_GOALS = frozenset({
     "collect_next_whatsapp_order_field",
 })
 
-_FORCED_CHECKOUT_RESPONSE_GOALS = (
-    _IDENTITY_COLLECT_GOALS
-    | _ADDRESS_COLLECT_GOALS
-    | frozenset({
-        "collect_payment_method_for_whatsapp_order",
-        "continue_checkout",
-        "continue_checkout_from_catalog_order",
-        "confirm_known_address",
-        "confirm_whatsapp_order_before_payment",
-    })
-)
-
 _SAME_ORDER_CONFIRM_RE = re.compile(
     r"(?:^|\s)(?:نفس\s*(?:ال)?(?:طلب|طلبي|طلبيتي)|نفسه|نفسها|زي\s*قبل)(?:\s*[\?؟!.]*)?$",
     re.UNICODE | re.IGNORECASE,
@@ -160,6 +147,18 @@ _ADDRESS_ON_FILE_CLAIM_RE = re.compile(
     r"|(?:اسم(?:ي|نا)?|عنوان(?:ي|نا)?).{0,30}عند(?:كم|ك)"
     r")",
     re.UNICODE | re.IGNORECASE,
+)
+
+_FORCED_CHECKOUT_RESPONSE_GOALS = (
+    _IDENTITY_COLLECT_GOALS
+    | _ADDRESS_COLLECT_GOALS
+    | frozenset({
+        "collect_payment_method_for_whatsapp_order",
+        "continue_checkout",
+        "continue_checkout_from_catalog_order",
+        "confirm_known_address",
+        "confirm_whatsapp_order_before_payment",
+    })
 )
 
 

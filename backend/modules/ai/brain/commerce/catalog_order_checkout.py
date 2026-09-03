@@ -6,11 +6,6 @@ Phase 1 enforce: WhatsApp native catalog order → continue checkout.
 Operational only. This module never writes customer-facing text and never
 routes to staff/contact surfaces. It only turns a current WhatsApp
 ``type=order`` payload into the existing checkout action.
-
-Active catalog checkout is persistent/resumable context. It is not
-current-turn ownership. Follow-up turns continue checkout only when
-existing structured contracts prove the inbound is a checkout slot
-or a current native catalog_order event.
 """
 from __future__ import annotations
 
@@ -297,6 +292,159 @@ def _prep_dict(order_prep: Any) -> Dict[str, Any]:
     return dict(getattr(order_prep, "__dict__", {}) or {})
 
 
+def is_active_catalog_checkout(ctx: BrainContext) -> bool:
+    """
+    True when a native catalog checkout session is still in progress — including
+    follow-up turns after the initial catalog_order event.
+    """
+    if is_current_catalog_order_submitted(ctx):
+        return True
+    state = getattr(ctx, "state", None)
+    prep = getattr(state, "order_prep", None) if state else None
+    prep_d = _prep_dict(prep)
+    if is_catalog_line_items_authoritative_from_prep(prep):
+        return True
+    line_items = list(prep_d.get("line_items") or [])
+    if line_items and prep_d.get("catalog_checkout_total") is not None:
+        return True
+    if prep_d.get("order_flow_v2_active") and prep_d.get("order_flow_v2_trusted_price"):
+        return True
+    for item in line_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("from_native_catalog_order") or str(item.get("source") or "") == "whatsapp_native_catalog_order":
+            return True
+    focus = getattr(state, "current_product_focus", None) if state else None
+    if isinstance(focus, dict) and (
+        focus.get("from_catalog_order") or focus.get("from_native_catalog_order")
+    ):
+        if line_items or prep_d.get("catalog_checkout_total") is not None:
+            return True
+    return False
+
+
+def try_active_catalog_checkout_continue_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Continue checkout from order_prep / active draft — not only current-turn catalog_order."""
+    if not catalog_order_continue_checkout_enabled():
+        return None
+    if not is_active_catalog_checkout(ctx) or not current_turn_continues_catalog_checkout(ctx):
+        return None
+    product = _product_from_state(ctx)
+    address_like = False
+    try:
+        from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
+
+        address_like = is_address_like_delivery_text(str(getattr(ctx, "message", "") or ""))
+    except Exception:  # noqa: BLE001
+        address_like = False
+    if not product and not address_like:
+        return None
+    reason = (
+        "active_catalog_checkout_address_like → continue_checkout"
+        if address_like
+        else "active_catalog_checkout → continue_checkout"
+    )
+    return Decision(
+        action=ACTION_PROPOSE_DRAFT_ORDER,
+        args=_catalog_order_continue_args(
+            ctx,
+            product or {},
+            reason=reason,
+        ),
+        reason=reason,
+        confidence=0.98,
+    )
+
+
+def is_catalog_line_items_authoritative_from_prep(order_prep: Any) -> bool:
+    """True when native catalog line items must not be cleared or re-prompted."""
+    if order_prep is None:
+        return False
+    if isinstance(order_prep, dict):
+        if order_prep.get("catalog_line_items_authoritative"):
+            return True
+        line_items = order_prep.get("line_items") or []
+        if isinstance(line_items, list) and line_items:
+            if order_prep.get("catalog_checkout_total") is not None:
+                return True
+        return False
+    if bool(getattr(order_prep, "catalog_line_items_authoritative", False)):
+        return True
+    line_items = list(getattr(order_prep, "line_items", None) or [])
+    if line_items and getattr(order_prep, "catalog_checkout_total", None) is not None:
+        return True
+    return False
+
+
+def is_catalog_line_items_authoritative(ctx: BrainContext) -> bool:
+    state = getattr(ctx, "state", None)
+    prep = getattr(state, "order_prep", None) if state else None
+    if is_catalog_line_items_authoritative_from_prep(prep):
+        return True
+    meta = _inbound_metadata(ctx)
+    if str(meta.get("source_type") or "").strip().lower() == "catalog_order":
+        items = meta.get("product_items") or []
+        return isinstance(items, list) and bool(items)
+    return False
+
+
+def maybe_enforce_catalog_order_continue_checkout(
+    ctx: BrainContext,
+    decision: Decision,
+) -> Decision:
+    """
+    Force current native catalog order events into checkout continuation.
+
+    This prevents regressions where a submitted catalog order drifts back into
+    product browse/listing ("وش المتوفر؟", sections, catalog replay) even
+    though the customer already selected a concrete product in WhatsApp.
+    """
+    if not catalog_order_continue_checkout_enabled():
+        return decision
+    if not current_turn_continues_catalog_checkout(ctx):
+        return decision
+
+    from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+        decision_owned_by_existing_order_support,
+    )
+
+    if decision_owned_by_existing_order_support(decision):
+        return decision
+
+    product = _product_from_state(ctx)
+    if not product:
+        fallback = try_catalog_order_extraction_fallback_decision(ctx)
+        return fallback or decision
+
+    args = dict(decision.args or {})
+    args.update(
+        _catalog_order_continue_args(
+            ctx,
+            product,
+            reason="catalog_order_submitted → continue_checkout",
+        ),
+    )
+
+    if decision.action == ACTION_PROPOSE_DRAFT_ORDER:
+        return Decision(
+            action=decision.action,
+            args=args,
+            reason=decision.reason or "catalog_order_submitted already in checkout",
+            confidence=max(decision.confidence, 0.98),
+        )
+
+    if decision.action not in _BROWSE_OR_LISTING_ACTIONS:
+        # Do not hijack unrelated operational owners; only prevent browse/listing drift.
+        return decision
+
+    return Decision(
+        action=ACTION_PROPOSE_DRAFT_ORDER,
+        args=args,
+        reason="catalog_order_submitted → continue_checkout",
+        confidence=1.0,
+    )
+
+
 def _inbound_is_structured_location_event(ctx: BrainContext) -> bool:
     """True for a native WhatsApp location payload, not free-text location questions."""
     meta = _inbound_metadata(ctx)
@@ -382,166 +530,6 @@ def current_turn_continues_catalog_checkout(ctx: BrainContext) -> bool:
     if _inbound_is_payment_method_choice(ctx):
         return True
     return False
-
-
-def is_active_catalog_checkout(ctx: BrainContext) -> bool:
-    """
-    True when a native catalog checkout session is still in progress — including
-    follow-up turns after the initial catalog_order event.
-
-    This is ACTIVE_CHECKOUT_CONTEXT, not current-turn checkout ownership.
-    """
-    if is_current_catalog_order_submitted(ctx):
-        return True
-    state = getattr(ctx, "state", None)
-    prep = getattr(state, "order_prep", None) if state else None
-    prep_d = _prep_dict(prep)
-    if is_catalog_line_items_authoritative_from_prep(prep):
-        return True
-    line_items = list(prep_d.get("line_items") or [])
-    if line_items and prep_d.get("catalog_checkout_total") is not None:
-        return True
-    if prep_d.get("order_flow_v2_active") and prep_d.get("order_flow_v2_trusted_price"):
-        return True
-    for item in line_items:
-        if not isinstance(item, dict):
-            continue
-        if item.get("from_native_catalog_order") or str(item.get("source") or "") == "whatsapp_native_catalog_order":
-            return True
-    focus = getattr(state, "current_product_focus", None) if state else None
-    if isinstance(focus, dict) and (
-        focus.get("from_catalog_order") or focus.get("from_native_catalog_order")
-    ):
-        if line_items or prep_d.get("catalog_checkout_total") is not None:
-            return True
-    return False
-
-
-def try_active_catalog_checkout_continue_decision(ctx: BrainContext) -> Optional[Decision]:
-    """Continue checkout only for a current catalog event or a structural follow-up slot."""
-    if not catalog_order_continue_checkout_enabled():
-        return None
-    if not is_active_catalog_checkout(ctx):
-        return None
-    if not current_turn_continues_catalog_checkout(ctx):
-        return None
-    product = _product_from_state(ctx)
-    address_like = False
-    try:
-        from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
-
-        address_like = is_address_like_delivery_text(str(getattr(ctx, "message", "") or ""))
-    except Exception:  # noqa: BLE001
-        address_like = False
-    if not product and not address_like:
-        return None
-    reason = (
-        "active_catalog_checkout_address_like → continue_checkout"
-        if address_like
-        else "active_catalog_checkout → continue_checkout"
-    )
-    return Decision(
-        action=ACTION_PROPOSE_DRAFT_ORDER,
-        args=_catalog_order_continue_args(
-            ctx,
-            product or {},
-            reason=reason,
-        ),
-        reason=reason,
-        confidence=0.98,
-    )
-
-
-def is_catalog_line_items_authoritative_from_prep(order_prep: Any) -> bool:
-    """True when native catalog line items must not be cleared or re-prompted."""
-    if order_prep is None:
-        return False
-    if isinstance(order_prep, dict):
-        if order_prep.get("catalog_line_items_authoritative"):
-            return True
-        line_items = order_prep.get("line_items") or []
-        if isinstance(line_items, list) and line_items:
-            if order_prep.get("catalog_checkout_total") is not None:
-                return True
-        return False
-    if bool(getattr(order_prep, "catalog_line_items_authoritative", False)):
-        return True
-    line_items = list(getattr(order_prep, "line_items", None) or [])
-    if line_items and getattr(order_prep, "catalog_checkout_total", None) is not None:
-        return True
-    return False
-
-
-def is_catalog_line_items_authoritative(ctx: BrainContext) -> bool:
-    state = getattr(ctx, "state", None)
-    prep = getattr(state, "order_prep", None) if state else None
-    if is_catalog_line_items_authoritative_from_prep(prep):
-        return True
-    meta = _inbound_metadata(ctx)
-    if str(meta.get("source_type") or "").strip().lower() == "catalog_order":
-        items = meta.get("product_items") or []
-        return isinstance(items, list) and bool(items)
-    return False
-
-
-def maybe_enforce_catalog_order_continue_checkout(
-    ctx: BrainContext,
-    decision: Decision,
-) -> Decision:
-    """
-    Force current native catalog order events into checkout continuation.
-
-    Follow-up active checkout does not override an unrelated owner merely
-    because persisted checkout context exists.
-    """
-    if not catalog_order_continue_checkout_enabled():
-        return decision
-    if is_current_catalog_order_submitted(ctx):
-        pass
-    elif is_active_catalog_checkout(ctx) and current_turn_continues_catalog_checkout(ctx):
-        pass
-    else:
-        return decision
-
-    from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
-        decision_owned_by_existing_order_support,
-    )
-
-    if decision_owned_by_existing_order_support(decision):
-        return decision
-
-    product = _product_from_state(ctx)
-    if not product:
-        fallback = try_catalog_order_extraction_fallback_decision(ctx)
-        return fallback or decision
-
-    args = dict(decision.args or {})
-    args.update(
-        _catalog_order_continue_args(
-            ctx,
-            product,
-            reason="catalog_order_submitted → continue_checkout",
-        ),
-    )
-
-    if decision.action == ACTION_PROPOSE_DRAFT_ORDER:
-        return Decision(
-            action=decision.action,
-            args=args,
-            reason=decision.reason or "catalog_order_submitted already in checkout",
-            confidence=max(decision.confidence, 0.98),
-        )
-
-    if decision.action not in _BROWSE_OR_LISTING_ACTIONS:
-        # Do not hijack unrelated operational owners; only prevent browse/listing drift.
-        return decision
-
-    return Decision(
-        action=ACTION_PROPOSE_DRAFT_ORDER,
-        args=args,
-        reason="catalog_order_submitted → continue_checkout",
-        confidence=1.0,
-    )
 
 
 __all__ = [
