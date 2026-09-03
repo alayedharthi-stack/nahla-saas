@@ -14,6 +14,7 @@ import asyncio
 import os
 import sys
 import uuid
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -32,6 +33,7 @@ from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: E40
     STATUS_NOTIFIED,
     STATUS_QUEUED,
     execute_staff_escalation,
+    execute_staff_escalation_for_safety_signal,
 )
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
@@ -194,6 +196,70 @@ def test_handoff_session_persists_idempotent_isolated_and_notification_sent(
                 text("DELETE FROM tenants WHERE name IN (:a, :b)"),
                 {"a": name_a, "b": name_b},
             )
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+        db.close()
+
+
+def test_safety_signal_wrapper_reuses_same_d2_session(postgres_engine) -> None:
+    Session = sessionmaker(bind=postgres_engine)
+    db = Session()
+    suffix = uuid.uuid4().hex[:10]
+    name = f"d2-pg-safety-{suffix}"
+    phone = f"96650009{suffix[:4]}"
+    try:
+        tenant = Tenant(name=name, is_active=True)
+        db.add(tenant)
+        db.commit()
+        db.refresh(tenant)
+        convo = SimpleNamespace(id=None, needs_human=False)
+        settings = {"notification_method": "none", "webhook_url": ""}
+        with patch(
+            "modules.ai.brain.execution.staff_escalation_execution._load_tenant_handoff_settings",
+            return_value=settings,
+        ):
+            first = _run(
+                execute_staff_escalation_for_safety_signal(
+                    db=db,
+                    tenant_id=tenant.id,
+                    customer_phone=phone,
+                    message="أريد التحدث مع موظف من المتجر",
+                    convo=convo,
+                )
+            )
+            second = _run(
+                execute_staff_escalation_for_safety_signal(
+                    db=db,
+                    tenant_id=tenant.id,
+                    customer_phone=phone,
+                    message="نعم أريد موظف يساعدني",
+                    convo=convo,
+                )
+            )
+        db.commit()
+        assert first.success is True
+        assert second.data["handoff_session_id"] == first.data["handoff_session_id"]
+        assert second.data["handoff_session_reused"] is True
+        assert convo.needs_human is True
+        assert (
+            db.query(HandoffSession)
+            .filter_by(tenant_id=tenant.id, customer_phone=phone, status="active")
+            .count()
+            == 1
+        )
+    finally:
+        from sqlalchemy import text  # noqa: PLC0415
+
+        try:
+            db.execute(
+                text(
+                    "DELETE FROM handoff_sessions WHERE tenant_id IN "
+                    "(SELECT id FROM tenants WHERE name = :n)"
+                ),
+                {"n": name},
+            )
+            db.execute(text("DELETE FROM tenants WHERE name = :n"), {"n": name})
             db.commit()
         except Exception:  # noqa: BLE001
             db.rollback()

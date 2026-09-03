@@ -449,3 +449,146 @@ async def execute_staff_escalation(
         verified_contact_phone=verified_phone,
         after_hours=after_hours,
     )
+
+
+def should_defer_generic_prebrain_execution(
+    *,
+    is_handoff: bool,
+    is_owner_contact: bool,
+    is_post_pay_mod: bool,
+    tier: str,
+) -> bool:
+    """True when generic staff-request must continue to Brain/D2.
+
+    Owner/admin and post-payment PRE-BRAIN execution stay unchanged (D3).
+    """
+    if not is_handoff:
+        return False
+    if is_owner_contact or is_post_pay_mod:
+        return False
+    from core.handoff_detector import GENERIC_HANDOFF_TIER  # noqa: PLC0415
+
+    return str(tier or "").strip() in {"", GENERIC_HANDOFF_TIER}
+
+
+def action_handoff_already_executed(
+    *,
+    brain_handoff: bool,
+    decision_action: str,
+) -> bool:
+    from modules.ai.brain.decision.actions import ACTION_HANDOFF  # noqa: PLC0415
+
+    return bool(brain_handoff) or str(decision_action or "") == ACTION_HANDOFF
+
+
+def build_staff_escalation_context(
+    *,
+    db: Any,
+    tenant_id: int,
+    customer_phone: str,
+    message: str,
+    conversation_id: Optional[int] = None,
+    profile: Optional[Dict[str, Any]] = None,
+) -> BrainContext:
+    from modules.ai.brain.types import (  # noqa: PLC0415
+        CommerceFacts,
+        Intent,
+        MerchantConversationState,
+    )
+
+    ctx = BrainContext(
+        tenant_id=int(tenant_id),
+        customer_phone=str(customer_phone or ""),
+        message=str(message or ""),
+        intent=Intent(
+            name="talk_to_human",
+            confidence=0.95,
+            raw_message=str(message or ""),
+        ),
+        state=MerchantConversationState(),
+        facts=CommerceFacts(),
+        profile=dict(profile or {}),
+        conversation_id=conversation_id,
+    )
+    ctx._db = db  # type: ignore[attr-defined]
+    return ctx
+
+
+def _mark_queue_visible(convo: Any, db: Any) -> None:
+    if convo is None:
+        return
+    try:
+        convo.needs_human = True
+        db.flush()
+    except Exception:  # noqa: BLE001
+        logger.warning("[STAFF_ESCALATION] queue flag flush failed")
+
+
+async def execute_staff_escalation_for_safety_signal(
+    *,
+    db: Any,
+    tenant_id: int,
+    customer_phone: str,
+    message: str,
+    convo: Any = None,
+    profile: Optional[Dict[str, Any]] = None,
+) -> ActionResult:
+    """Same D2 core as ``_HandoffHandler``. Safety fallback only."""
+    from modules.ai.brain.decision.actions import ACTION_HANDOFF  # noqa: PLC0415
+
+    decision = Decision(
+        action=ACTION_HANDOFF,
+        args={},
+        reason="customer_request",
+    )
+    ctx = build_staff_escalation_context(
+        db=db,
+        tenant_id=int(tenant_id),
+        customer_phone=customer_phone,
+        message=message,
+        conversation_id=getattr(convo, "id", None),
+        profile=profile,
+    )
+    result = await execute_staff_escalation(decision, ctx)
+    if result.success:
+        _mark_queue_visible(convo, db)
+    return result
+
+
+async def compose_staff_escalation_with_verifier(
+    *,
+    db: Any,
+    tenant_id: int,
+    customer_phone: str,
+    message: str,
+    result: ActionResult,
+    conversation_id: Optional[int] = None,
+    profile: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Canonical ACTION_HANDOFF compose + #920 semantic verifier."""
+    from core.fallback_policy import empty_reply_fallback  # noqa: PLC0415
+    from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+    from modules.ai.brain.decision.actions import ACTION_HANDOFF  # noqa: PLC0415
+
+    decision = Decision(
+        action=ACTION_HANDOFF,
+        args={},
+        reason="customer_request",
+    )
+    ctx = build_staff_escalation_context(
+        db=db,
+        tenant_id=int(tenant_id),
+        customer_phone=customer_phone,
+        message=message,
+        conversation_id=conversation_id,
+        profile=profile,
+    )
+    try:
+        text = await DefaultComposer().compose(decision, result, ctx)
+        return str(text or "").strip() or empty_reply_fallback()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[STAFF_ESCALATION] safety compose failed tenant=%s",
+            tenant_id,
+        )
+        return empty_reply_fallback()
