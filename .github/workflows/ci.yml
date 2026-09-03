@@ -257,7 +257,8 @@ jobs:
               --trusted-base-scanner
           else
             if [ -f "${SCANNER_REL}" ]; then
-              echo "GOV-002 bootstrap: BASE has no trusted scanner; using HEAD scanner once"
+              echo "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME"
+              echo "BASE has no scanner; HEAD scanner is used only because GOV-002 is landing."
               python "${SCANNER_REL}" \
                 --repo . \
                 --base "${SCAN_BASE}" \

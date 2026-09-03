@@ -31,6 +31,7 @@ CHANGE_CLASSES: Tuple[str, ...] = (
     "PROTECTED_CONTRACT_WEAKENING",
     "UNSAFE_PARTIAL_REPAIR",
     "BASE_NOT_AVAILABLE",
+    "MALFORMED_EXCEPTION_REGISTRY",
 )
 
 
@@ -51,6 +52,7 @@ class ChangeClass(str, Enum):
     PROTECTED_CONTRACT_WEAKENING = "PROTECTED_CONTRACT_WEAKENING"
     UNSAFE_PARTIAL_REPAIR = "UNSAFE_PARTIAL_REPAIR"
     BASE_NOT_AVAILABLE = "BASE_NOT_AVAILABLE"
+    MALFORMED_EXCEPTION_REGISTRY = "MALFORMED_EXCEPTION_REGISTRY"
 
 
 SEMANTIC_SURFACE_PREFIXES: Tuple[str, ...] = (
@@ -120,6 +122,7 @@ GOVERNANCE_CORE_PATHS: Tuple[str, ...] = (
     "backend/tests/test_intelligence_non_interference_guard.py",
     "backend/tests/test_constitution_compliance.py",
     ".github/workflows/ci.yml",
+    ".github/workflows/gov002-intelligence-non-interference.yml",
 )
 
 GOVERNANCE_DOC_PATHS: FrozenSet[str] = frozenset(
@@ -127,6 +130,7 @@ GOVERNANCE_DOC_PATHS: FrozenSet[str] = frozenset(
         "AGENTS.md",
         "docs/engineering/intelligence-non-interference-policy.md",
         "docs/engineering/ai-pr-constitution-checklist.md",
+        "docs/engineering/gov002-workflow-trust-root.md",
         "pytest.ini",
         ".github/CODEOWNERS",
     }
@@ -201,9 +205,14 @@ class OwnerException:
     owner_approval_ref: str
     created_at: str
     expires_at: str
+    expected_change_digest: str = ""
+    exact_symbol_scope: str = ""
+    single_use: bool = True
+    consumed: bool = False
 
 
 def load_exceptions_from_text(raw: str) -> List[OwnerException]:
+    """Load valid BASE exceptions. Malformed rows are omitted (fail closed)."""
     if not (raw or "").strip():
         return []
     payload = json.loads(raw)
@@ -215,15 +224,35 @@ def load_exceptions_from_text(raw: str) -> List[OwnerException]:
         scope = row.get("exact_file_scope") or []
         if isinstance(scope, str):
             scope = [scope]
+        digest = str(row.get("expected_change_digest") or "").strip()
+        owner_ref = str(row.get("owner_approval_ref") or "").strip()
+        expires = str(row.get("expires_at") or "").strip()
+        if not (
+            row.get("exception_id")
+            and row.get("change_class")
+            and scope
+            and digest
+            and owner_ref
+            and expires
+            and isinstance(row.get("single_use"), bool)
+            and isinstance(row.get("consumed"), bool)
+        ):
+            continue
+        if bool(row.get("consumed")):
+            continue
         out.append(
             OwnerException(
                 exception_id=str(row.get("exception_id") or ""),
                 change_class=str(row.get("change_class") or ""),
                 exact_file_scope=tuple(str(s) for s in scope),
                 exact_reason=str(row.get("exact_reason") or ""),
-                owner_approval_ref=str(row.get("owner_approval_ref") or ""),
+                owner_approval_ref=owner_ref,
                 created_at=str(row.get("created_at") or ""),
-                expires_at=str(row.get("expires_at") or ""),
+                expires_at=expires,
+                expected_change_digest=digest,
+                exact_symbol_scope=str(row.get("exact_symbol_scope") or ""),
+                single_use=bool(row.get("single_use")),
+                consumed=bool(row.get("consumed")),
             )
         )
     return out
@@ -232,14 +261,17 @@ def load_exceptions_from_text(raw: str) -> List[OwnerException]:
 def exception_is_active(exc: OwnerException, *, as_of: Optional[date] = None) -> bool:
     if not exc.exception_id or not exc.change_class:
         return False
+    if not exc.expected_change_digest or not exc.owner_approval_ref or not exc.expires_at:
+        return False
+    if exc.consumed:
+        return False
     as_of = as_of or date.today()
-    if exc.expires_at:
-        try:
-            exp = datetime.strptime(exc.expires_at, "%Y-%m-%d").date()
-        except ValueError:
-            return False
-        if as_of > exp:
-            return False
+    try:
+        exp = datetime.strptime(exc.expires_at, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    if as_of > exp:
+        return False
     return True
 
 
@@ -248,6 +280,8 @@ def match_exception(
     *,
     change_class: str,
     file: str,
+    change_digest: str,
+    symbol: str = "",
     as_of: Optional[date] = None,
 ) -> Optional[OwnerException]:
     posix = file.replace("\\", "/")
@@ -256,6 +290,11 @@ def match_exception(
             continue
         if not exception_is_active(exc, as_of=as_of):
             continue
-        if posix in exc.exact_file_scope:
-            return exc
+        if posix not in exc.exact_file_scope:
+            continue
+        if exc.exact_symbol_scope and exc.exact_symbol_scope != (symbol or ""):
+            continue
+        if exc.expected_change_digest != change_digest:
+            continue
+        return exc
     return None

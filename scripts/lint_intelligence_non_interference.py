@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ CHANGE_CLASSES = (
     "PROTECTED_CONTRACT_WEAKENING",
     "UNSAFE_PARTIAL_REPAIR",
     "BASE_NOT_AVAILABLE",
+    "MALFORMED_EXCEPTION_REGISTRY",
 )
 
 SEMANTIC_PREFIXES = (
@@ -105,6 +107,7 @@ GOVERNANCE_CORE = frozenset(
         "backend/tests/test_intelligence_non_interference_guard.py",
         "backend/tests/test_constitution_compliance.py",
         ".github/workflows/ci.yml",
+        ".github/workflows/gov002-intelligence-non-interference.yml",
     }
 )
 GOVERNANCE_DOCS = frozenset(
@@ -112,6 +115,7 @@ GOVERNANCE_DOCS = frozenset(
         "AGENTS.md",
         "docs/engineering/intelligence-non-interference-policy.md",
         "docs/engineering/ai-pr-constitution-checklist.md",
+        "docs/engineering/gov002-workflow-trust-root.md",
         "pytest.ini",
         ".github/CODEOWNERS",
     }
@@ -181,6 +185,27 @@ _IDENTITY_NAMES = frozenset(
 _PHONE_NAMES = frozenset({"phone", "customer_phone", "phone_number_id"})
 _PRODUCT_NAMES = frozenset({"sku", "product_id", "external_id"})
 _TENANT_NAMES = frozenset({"tenant_id", "tenant"})
+_STATUS_ENUMS = frozenset(
+    {
+        "ordering",
+        "checkout",
+        "confirmed",
+        "pending",
+        "shipped",
+        "delivered",
+        "cancelled",
+        "canceled",
+        "draft",
+        "paid",
+        "unpaid",
+        "true",
+        "false",
+        "none",
+        "llm",
+        "inbound",
+        "outbound",
+    }
+)
 _GOV_MARK_NAMES = frozenset({"governance_contract"})
 _HISTORICAL_PROMPT_EXCEPTION_COMMIT = "02aff3455c777b2d7cc6a4d4a234ae1b0b0b3c00"
 _HISTORICAL_PROMPT_EXCEPTION_FILE = (
@@ -196,6 +221,8 @@ class Finding:
     reason: str
     authorized_exception_id: str = ""
     diff_hunk: str = ""
+    symbol: str = ""
+    change_digest: str = ""
 
 
 @dataclass
@@ -207,6 +234,12 @@ class OwnerException:
     owner_approval_ref: str
     created_at: str
     expires_at: str
+    expected_change_digest: str = ""
+    exact_symbol_scope: str = ""
+    single_use: bool = True
+    consumed: bool = False
+    valid: bool = True
+    malformed_reason: str = ""
 
 
 @dataclass
@@ -215,6 +248,7 @@ class ScanResult:
     bootstrap: bool = False
     trusted_base_scanner: bool = False
     flags: Dict[str, str] = field(default_factory=dict)
+    used_exception_ids: Set[str] = field(default_factory=set)
 
     @property
     def unauthorized(self) -> List[Finding]:
@@ -238,6 +272,41 @@ def looks_customer_language(text: str) -> bool:
     if " " in s and len(s) >= 8 and any(c.isalpha() for c in s):
         return True
     return False
+
+
+def is_customer_semantic_literal(text: str) -> bool:
+    """True for customer-language literals, not IDs/URLs/enums/protocol values."""
+    s = (text or "").strip()
+    if not s or not looks_customer_language(s):
+        return False
+    if s.lower() in _STATUS_ENUMS:
+        return False
+    if regex_is_structural(s):
+        return False
+    if re.match(r"^https?://", s, re.IGNORECASE):
+        return False
+    if re.match(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        s,
+        re.IGNORECASE,
+    ):
+        return False
+    if re.match(r"^[A-Z]{2,8}-?\d{4,}$", s):
+        return False
+    if re.match(r"^\+?\d{8,15}$", s):
+        return False
+    return True
+
+
+def compute_change_digest(
+    *,
+    change_class: str,
+    file: str,
+    symbol: str,
+    payload: str,
+) -> str:
+    raw = f"{change_class}\n{posix(file)}\n{symbol or ''}\n{payload or ''}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _run_git(repo: str, args: Sequence[str]) -> Tuple[int, str, str]:
@@ -473,14 +542,17 @@ def phrase_map_assigns(source: str) -> Dict[str, Tuple[int, str]]:
         if value is None:
             continue
         strings = collection_strings(value)
-        if not strings or len(strings) < 2:
+        if not strings:
             continue
-        customerish = [s for s in strings if looks_customer_language(s)]
+        customerish = [s for s in strings if is_customer_semantic_literal(s)]
         name_hit = any(
             any(tok in (n or "").upper() for tok in ("PHRASE", "KEYWORD", "TRIGGER", "DENYLIST", "ALLOWLIST"))
             for n in names
         )
-        if name_hit or (len(customerish) >= 2 and len(customerish) >= max(2, len(strings) // 2)):
+        if name_hit and customerish:
+            key = ",".join(names) or f"line{getattr(node, 'lineno', 1)}"
+            out[key] = (getattr(node, "lineno", 1), dump_node(value))
+        elif customerish:
             key = ",".join(names) or f"line{getattr(node, 'lineno', 1)}"
             out[key] = (getattr(node, "lineno", 1), dump_node(value))
     return out
@@ -492,22 +564,58 @@ def keyword_in_checks(source: str) -> Set[str]:
     if tree is None:
         return hits
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Compare):
+        if isinstance(node, ast.Compare):
+            for op, comparator in zip(node.ops, node.comparators):
+                texts = [const_str(node.left), const_str(comparator)]
+                for text in texts:
+                    if not text or not is_customer_semantic_literal(text):
+                        continue
+                    if isinstance(op, (ast.Eq, ast.NotEq)):
+                        hits.add(f"{getattr(node, 'lineno', 1)}:eq:{text}")
+                    elif isinstance(op, (ast.In, ast.NotIn)):
+                        hits.add(f"{getattr(node, 'lineno', 1)}:in:{text}")
+        if not isinstance(node, ast.Call):
             continue
-        ops = node.ops
-        if not ops:
-            continue
-        left_s = const_str(node.left)
-        if left_s and looks_customer_language(left_s) and any(isinstance(op, ast.In) for op in ops):
-            hits.add(f"{getattr(node, 'lineno', 1)}:{left_s}")
-        for op, comparator in zip(ops, node.comparators):
-            if isinstance(op, ast.In):
-                cs = const_str(comparator) if False else None
-                _ = cs
-            if isinstance(op, (ast.Eq, ast.NotEq, ast.In, ast.NotIn)):
-                text = const_str(node.left) or const_str(comparator)
-                if text and looks_customer_language(text) and isinstance(op, (ast.In, ast.NotIn)):
-                    hits.add(f"{getattr(node, 'lineno', 1)}:{text}")
+        func = node.func
+        attr = ""
+        if isinstance(func, ast.Attribute):
+            attr = func.attr
+        elif isinstance(func, ast.Name):
+            attr = func.id
+        arg0 = const_str(node.args[0]) if node.args else None
+        if attr in {"startswith", "endswith"} and arg0 and is_customer_semantic_literal(arg0):
+            hits.add(f"{getattr(node, 'lineno', 1)}:{attr}:{arg0}")
+        if attr in {"search", "match", "fullmatch"} and arg0 and is_customer_semantic_literal(arg0):
+            hits.add(f"{getattr(node, 'lineno', 1)}:re_{attr}:{arg0}")
+    return hits
+
+
+def helper_literal_hits(source: str) -> Set[str]:
+    """Customer literals passed into helper calls used as ownership branches."""
+    tree = parse_ast(source)
+    hits: Set[str] = set()
+    if tree is None:
+        return hits
+
+    def _calls_in(expr: ast.AST) -> None:
+        for node in ast.walk(expr):
+            if not isinstance(node, ast.Call):
+                continue
+            args = list(node.args) + [kw.value for kw in node.keywords]
+            for arg in args:
+                text = const_str(arg)
+                if text and is_customer_semantic_literal(text):
+                    hits.add(f"{getattr(node, 'lineno', 1)}:helper:{text}")
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.While)):
+            _calls_in(node.test)
+        elif isinstance(node, ast.IfExp):
+            _calls_in(node.test)
+        elif isinstance(node, ast.Assert):
+            _calls_in(node.test)
+        elif isinstance(node, ast.Return) and node.value is not None:
+            _calls_in(node.value)
     return hits
 
 
@@ -662,62 +770,131 @@ def marked_test_names(source: str) -> Set[str]:
     return names
 
 
-def load_exceptions(raw: Optional[str]) -> List[OwnerException]:
+def load_exceptions(raw: Optional[str]) -> Tuple[List[OwnerException], List[str]]:
     if not (raw or "").strip():
-        return []
+        return [], []
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return []
+        return [], ["exception registry is not valid JSON"]
     rows = payload.get("exceptions") if isinstance(payload, dict) else payload
-    out: List[OwnerException] = []
-    for row in rows or []:
+    if rows is None:
+        return [], []
+    if not isinstance(rows, list):
+        return [], ["exceptions must be a list"]
+    valid: List[OwnerException] = []
+    malformed: List[str] = []
+    for idx, row in enumerate(rows):
         if not isinstance(row, dict):
+            malformed.append(f"exceptions[{idx}] is not an object")
             continue
         scope = row.get("exact_file_scope") or []
         if isinstance(scope, str):
             scope = [scope]
-        out.append(
+        if not isinstance(scope, list) or not scope:
+            malformed.append(f"exceptions[{idx}] missing exact_file_scope")
+            continue
+        digest = str(row.get("expected_change_digest") or "").strip()
+        owner_ref = str(row.get("owner_approval_ref") or "").strip()
+        created = str(row.get("created_at") or "").strip()
+        expires = str(row.get("expires_at") or "").strip()
+        exception_id = str(row.get("exception_id") or "").strip()
+        change_class = str(row.get("change_class") or "").strip()
+        missing = []
+        if not exception_id:
+            missing.append("exception_id")
+        if not change_class:
+            missing.append("change_class")
+        if not digest:
+            missing.append("expected_change_digest")
+        if not owner_ref:
+            missing.append("owner_approval_ref")
+        if not created:
+            missing.append("created_at")
+        if not expires:
+            missing.append("expires_at")
+        if "single_use" not in row:
+            missing.append("single_use")
+        if "consumed" not in row:
+            missing.append("consumed")
+        if missing:
+            malformed.append(
+                f"exceptions[{idx}] ({exception_id or 'unknown'}) missing {','.join(missing)}"
+            )
+            continue
+        try:
+            datetime.strptime(created, "%Y-%m-%d")
+            datetime.strptime(expires, "%Y-%m-%d")
+        except ValueError:
+            malformed.append(f"exceptions[{idx}] has invalid created_at/expires_at")
+            continue
+        single_use = row.get("single_use")
+        consumed = row.get("consumed")
+        if not isinstance(single_use, bool):
+            malformed.append(f"exceptions[{idx}] single_use must be boolean")
+            continue
+        if not isinstance(consumed, bool):
+            malformed.append(f"exceptions[{idx}] consumed must be boolean")
+            continue
+        valid.append(
             OwnerException(
-                exception_id=str(row.get("exception_id") or ""),
-                change_class=str(row.get("change_class") or ""),
+                exception_id=exception_id,
+                change_class=change_class,
                 exact_file_scope=tuple(str(s) for s in scope),
                 exact_reason=str(row.get("exact_reason") or ""),
-                owner_approval_ref=str(row.get("owner_approval_ref") or ""),
-                created_at=str(row.get("created_at") or ""),
-                expires_at=str(row.get("expires_at") or ""),
+                owner_approval_ref=owner_ref,
+                created_at=created,
+                expires_at=expires,
+                expected_change_digest=digest,
+                exact_symbol_scope=str(row.get("exact_symbol_scope") or ""),
+                single_use=single_use,
+                consumed=consumed,
             )
         )
-    return out
+    return valid, malformed
 
 
 def exception_active(exc: OwnerException, *, as_of: Optional[date] = None) -> bool:
-    if not exc.exception_id or not exc.change_class:
+    if not exc.valid or not exc.exception_id or not exc.change_class:
+        return False
+    if exc.consumed:
+        return False
+    if not exc.expected_change_digest or not exc.owner_approval_ref or not exc.expires_at:
         return False
     as_of = as_of or date.today()
-    if exc.expires_at:
-        try:
-            exp = datetime.strptime(exc.expires_at, "%Y-%m-%d").date()
-        except ValueError:
-            return False
-        if as_of > exp:
-            return False
+    try:
+        exp = datetime.strptime(exc.expires_at, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    if as_of > exp:
+        return False
     return True
 
 
 def authorize(
     exceptions: Sequence[OwnerException],
     finding: Finding,
+    *,
+    used_ids: Optional[Set[str]] = None,
 ) -> Finding:
     posix_file = posix(finding.file)
+    used_ids = used_ids if used_ids is not None else set()
     for exc in exceptions:
         if exc.change_class != finding.change_class:
             continue
         if not exception_active(exc):
             continue
-        if posix_file in exc.exact_file_scope:
-            finding.authorized_exception_id = exc.exception_id
-            return finding
+        if posix_file not in exc.exact_file_scope:
+            continue
+        if exc.exact_symbol_scope and exc.exact_symbol_scope != (finding.symbol or ""):
+            continue
+        if exc.expected_change_digest != finding.change_digest:
+            continue
+        if exc.single_use and exc.exception_id in used_ids:
+            continue
+        finding.authorized_exception_id = exc.exception_id
+        used_ids.add(exc.exception_id)
+        return finding
     return finding
 
 
@@ -730,15 +907,27 @@ def add_finding(
     change_class: str,
     reason: str,
     diff_hunk: str = "",
+    symbol: str = "",
+    payload: str = "",
 ) -> None:
+    digest = compute_change_digest(
+        change_class=change_class,
+        file=file,
+        symbol=symbol,
+        payload=payload or diff_hunk or reason,
+    )
     finding = Finding(
         file=posix(file),
         line=line,
         change_class=change_class,
         reason=reason,
         diff_hunk=diff_hunk[:240],
+        symbol=symbol,
+        change_digest=digest,
     )
-    result.findings.append(authorize(exceptions, finding))
+    result.findings.append(
+        authorize(exceptions, finding, used_ids=result.used_exception_ids)
+    )
 
 
 def _scan_regex(
@@ -784,6 +973,8 @@ def _scan_regex(
         change_class="CUSTOMER_REGEX_CHANGE",
         reason=f"{kind} in semantic ownership surface",
         diff_hunk="; ".join(sorted(added | removed)[:4]),
+        symbol="",
+        payload="\n".join(sorted(added | removed)),
     )
 
 
@@ -799,7 +990,7 @@ def _scan_phrase_keyword(
     base_maps = phrase_map_assigns(base_src or "")
     head_maps = phrase_map_assigns(head_src)
     for key, (line, dump) in head_maps.items():
-        if base_maps.get(key) != (line, dump) and base_maps.get(key, (0, ""))[1] != dump:
+        if base_maps.get(key, (0, ""))[1] != dump:
             add_finding(
                 result,
                 exceptions,
@@ -807,19 +998,49 @@ def _scan_phrase_keyword(
                 line=line,
                 change_class="PHRASE_MAP_CHANGE",
                 reason=f"customer-language collection '{key}' added or modified",
+                symbol=key,
+                payload=dump,
             )
     base_kw = keyword_in_checks(base_src or "")
     head_kw = keyword_in_checks(head_src)
     for extra in sorted(head_kw - base_kw):
-        line_s, _, text = extra.partition(":")
+        parts = extra.split(":", 2)
+        line_s = parts[0] if parts else "1"
+        kind = parts[1] if len(parts) > 1 else "in"
+        text = parts[2] if len(parts) > 2 else extra
+        if kind.startswith("re_"):
+            cls = "CUSTOMER_REGEX_CHANGE"
+            reason = f"customer-language {kind} in semantic ownership surface"
+        else:
+            cls = "KEYWORD_ROUTER_CHANGE"
+            reason = f"customer-language {kind} branch in semantic ownership surface"
+        add_finding(
+            result,
+            exceptions,
+            file=path,
+            line=int(line_s) if line_s.isdigit() else 1,
+            change_class=cls,
+            reason=reason,
+            diff_hunk=text[:120],
+            symbol=kind,
+            payload=extra,
+        )
+    base_helpers = helper_literal_hits(base_src or "")
+    head_helpers = helper_literal_hits(head_src)
+    for extra in sorted(head_helpers - base_helpers):
+        parts = extra.split(":", 2)
+        line_s = parts[0] if parts else "1"
+        text = parts[2] if len(parts) > 2 else extra
         add_finding(
             result,
             exceptions,
             file=path,
             line=int(line_s) if line_s.isdigit() else 1,
             change_class="KEYWORD_ROUTER_CHANGE",
-            reason="new customer-language membership/equality branch",
+            reason="helper call wrapping a customer-language literal in an ownership branch",
             diff_hunk=text[:120],
+            symbol="helper",
+            payload=extra,
         )
 
 
@@ -1109,7 +1330,17 @@ def scan_repository(
         )
         return result
 
-    exceptions = load_exceptions(git_show(repo, base_sha, EXCEPTIONS_REL))
+    exceptions, malformed = load_exceptions(git_show(repo, base_sha, EXCEPTIONS_REL))
+    for msg in malformed:
+        add_finding(
+            result,
+            [],
+            file=EXCEPTIONS_REL,
+            line=1,
+            change_class="MALFORMED_EXCEPTION_REGISTRY",
+            reason=msg,
+            payload=msg,
+        )
     try:
         changed = changed_paths(repo, base_sha, head_sha)
     except RuntimeError as exc:
@@ -1174,9 +1405,20 @@ def _flags_from_findings(findings: Sequence[Finding]) -> Dict[str, str]:
 
 
 def format_report(result: ScanResult) -> str:
+    if result.bootstrap:
+        bootstrap_line = "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME"
+        trusted_line = "TRUSTED_BASE_SCANNER_REQUIRED=no"
+    else:
+        bootstrap_line = "BOOTSTRAP_HEAD_TRUST_EXCEPTION=no"
+        trusted_line = (
+            "TRUSTED_BASE_SCANNER_REQUIRED=yes"
+            if result.trusted_base_scanner
+            else "TRUSTED_BASE_SCANNER_REQUIRED=no"
+        )
     lines = [
         "INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE",
-        f"TRUSTED_BASE_SCANNER_REQUIRED={'yes' if result.trusted_base_scanner else 'no'}",
+        trusted_line,
+        bootstrap_line,
         f"GOV002_BOOTSTRAP={'yes' if result.bootstrap else 'no'}",
     ]
     for key in (
@@ -1197,6 +1439,8 @@ def format_report(result: ScanResult) -> str:
         lines.append(f"LINE={finding.line}")
         lines.append(f"CHANGE_CLASS={finding.change_class}")
         lines.append(f"REASON={finding.reason}")
+        lines.append(f"SYMBOL={finding.symbol or ''}")
+        lines.append(f"CHANGE_DIGEST={finding.change_digest or ''}")
         lines.append(f"AUTHORIZED_EXCEPTION_ID={finding.authorized_exception_id or ''}")
         if finding.diff_hunk:
             lines.append(f"DIFF_HUNK={finding.diff_hunk}")

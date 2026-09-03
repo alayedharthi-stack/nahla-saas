@@ -256,16 +256,27 @@ GOV-001 is law. GOV-002 is the CI mechanism that inspects the actual diff.
 
 Authoritative scanner: `scripts/lint_intelligence_non_interference.py`
 
-On `pull_request` CI, the scanner is loaded from **BASE**, never from HEAD:
+On `pull_request` CI for **future** PRs, the scanner is loaded from **BASE**.
+PR **#924** is the bootstrap: BASE has no scanner, so
+`BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME` — the HEAD scanner is used
+because this PR is owner-reviewed. After #924:
 
 ```text
-git show "$BASE_SHA:scripts/lint_intelligence_non_interference.py"
-python /tmp/nahla_intelligence_guard.py --repo . --base "$BASE_SHA" --head "$HEAD_SHA"
+TRUSTED_BASE_SCANNER_REQUIRED=yes
 ```
 
-A PR must not edit the guard in the same change and teach it to accept the violation.
+Workflow YAML in `.github/workflows/ci.yml` is still PR-controlled for the
+legacy `constitution-compliance` job. The dedicated trust root is
+`.github/workflows/gov002-intelligence-non-interference.yml` on
+`pull_request_target` (Actions loads BASE YAML) plus a repository ruleset
+workflow pin documented in `docs/engineering/gov002-workflow-trust-root.md`.
 
-After GOV-002 reaches `main`: `TRUSTED_BASE_SCANNER_REQUIRED=yes`. The one-time bootstrap path exists only while BASE does not yet contain the scanner. `BASE_NOT_AVAILABLE` fails closed.
+A PR must not edit the guard in the same change and teach it to accept the
+violation.
+
+`HEAD_SCANNER_CAN_SELF_BYPASS=no` is **not** claimed at the complete workflow
+level until the ruleset/required-check readback proves
+`HEAD_CAN_SKIP_GOV002_AND_STILL_SATISFY_REQUIRED_CHECK=no`.
 
 Wired into the required **`constitution-compliance`** job — not an optional check.
 
@@ -281,7 +292,19 @@ Structured evidence serialization (`customer_order_evidence`, merchant truth, to
 
 Registry: `backend/modules/ai/governance/intelligence_exceptions.json`
 
-The trusted scanner reads exceptions from **BASE**. Implementation + new exception in the same PR is `SAME_PR_SELF_WAIVER`.
+The trusted scanner reads exceptions from **BASE**. Matching is exact:
+
+```text
+change_class + exact_file_scope + exact_symbol_scope + expected_change_digest
+```
+
+`exact_reason` is descriptive only. `owner_approval_ref`, `expires_at`,
+`expected_change_digest`, `single_use`, and `consumed` are required.
+Malformed rows fail closed. Digest mismatch does not authorize. Consumed or
+expired exceptions do not authorize. Same file + same class + a
+different change is a new digest and fails. Implementation + new exception in
+the same PR is `SAME_PR_SELF_WAIVER`. Historical commit `02aff345` is
+retrospective-only and is not a runtime registry waiver.
 
 Sequence:
 

@@ -1,0 +1,94 @@
+name: GOV-002 trusted intelligence guard
+
+# Trust root: GitHub loads this workflow from the BASE ref for
+# pull_request_target / merge_group. Feature PR HEAD cannot replace it.
+#
+# pull_request is a one-time bootstrap so PR #924 can emit the check
+# before this file exists on main. After merge, pull_request_target is
+# the enforcement path. Do not treat pull_request as the trust root.
+
+on:
+  pull_request_target:
+  merge_group:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gov002-trusted-base-scanner:
+    name: gov002-trusted-base-scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout BASE (trusted workflow ref)
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+
+      - name: Checkout PR HEAD (GOV-002 bootstrap of #924 only)
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: GOV-002 — trusted BASE intelligence scanner
+        env:
+          NAHLA_EVENT_NAME: ${{ github.event_name }}
+          NAHLA_PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          NAHLA_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          SCANNER_REL="scripts/lint_intelligence_non_interference.py"
+          BASE_SHA="${NAHLA_PR_BASE_SHA:-}"
+          HEAD_SHA="${NAHLA_PR_HEAD_SHA:-}"
+          if [ -z "${BASE_SHA}" ] || [ -z "${HEAD_SHA}" ]; then
+            echo "BASE_NOT_AVAILABLE"
+            exit 1
+          fi
+          git fetch --no-tags origin "${BASE_SHA}" "${HEAD_SHA}" || {
+            echo "BASE_NOT_AVAILABLE: git fetch failed"
+            exit 1
+          }
+          MERGE_BASE="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}" || true)"
+          if [ -z "${MERGE_BASE}" ]; then
+            echo "BASE_NOT_AVAILABLE: merge-base could not be resolved"
+            exit 1
+          fi
+          if git cat-file -e "${MERGE_BASE}:${SCANNER_REL}" 2>/dev/null; then
+            git show "${MERGE_BASE}:${SCANNER_REL}" > /tmp/nahla_intelligence_guard.py
+            python /tmp/nahla_intelligence_guard.py \
+              --repo . \
+              --base "${MERGE_BASE}" \
+              --head "${HEAD_SHA}" \
+              --trusted-base-scanner
+          elif git cat-file -e "${BASE_SHA}:${SCANNER_REL}" 2>/dev/null; then
+            git show "${BASE_SHA}:${SCANNER_REL}" > /tmp/nahla_intelligence_guard.py
+            python /tmp/nahla_intelligence_guard.py \
+              --repo . \
+              --base "${MERGE_BASE}" \
+              --head "${HEAD_SHA}" \
+              --trusted-base-scanner
+          else
+            echo "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME"
+            echo "BASE has no scanner; HEAD scanner is used only because GOV-002 is landing."
+            if [ ! -f "${SCANNER_REL}" ]; then
+              echo "BASE_NOT_AVAILABLE: scanner missing on BASE and HEAD"
+              exit 1
+            fi
+            python "${SCANNER_REL}" \
+              --repo . \
+              --base "${MERGE_BASE}" \
+              --head "${HEAD_SHA}" \
+              --bootstrap
+          fi

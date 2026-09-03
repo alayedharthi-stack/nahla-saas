@@ -479,3 +479,263 @@ def test_cli_success_output_contract(tmp_path: Path) -> None:
         ["--repo", str(repo), "--base", base, "--head", head, "--trusted-base-scanner"]
     )
     assert code == 0
+
+
+def _append_rules(repo: Path, body: str) -> None:
+    _write(repo, "backend/modules/ai/brain/intent/rules.py", RULES_BASE + body)
+
+
+def test_c1_direct_equality_customer_phrase(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _append_rules(
+        repo,
+        "\ndef route(normalized):\n    if normalized == 'customer phrase':\n        return 'own'\n    return None\n",
+    )
+    head = _commit(repo, "eq")
+    result = _scan(repo, base, head)
+    assert "KEYWORD_ROUTER_CHANGE" in _classes(result)
+
+
+def test_c2_startswith_customer_phrase(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _append_rules(
+        repo,
+        "\ndef route(normalized):\n    if normalized.startswith('customer phrase'):\n        return 'own'\n    return None\n",
+    )
+    result = _scan(repo, base, _commit(repo, "startswith"))
+    assert "KEYWORD_ROUTER_CHANGE" in _classes(result)
+
+
+def test_c3_endswith_customer_phrase(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _append_rules(
+        repo,
+        "\ndef route(normalized):\n    if normalized.endswith('customer phrase'):\n        return 'own'\n    return None\n",
+    )
+    result = _scan(repo, base, _commit(repo, "endswith"))
+    assert "KEYWORD_ROUTER_CHANGE" in _classes(result)
+
+
+def test_c4_re_search_customer_phrase(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _append_rules(
+        repo,
+        "\ndef route(normalized):\n    if re.search('customer phrase', normalized):\n        return 'own'\n    return None\n",
+    )
+    result = _scan(repo, base, _commit(repo, "search"))
+    assert "CUSTOMER_REGEX_CHANGE" in _classes(result)
+
+
+def test_c5_re_match_customer_phrase(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _append_rules(
+        repo,
+        "\ndef route(normalized):\n    if re.match('customer phrase', normalized):\n        return 'own'\n    return None\n",
+    )
+    result = _scan(repo, base, _commit(repo, "match"))
+    assert "CUSTOMER_REGEX_CHANGE" in _classes(result)
+
+
+def test_c6_singleton_phrase_router(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _append_rules(repo, "\nPHRASE_MAP = {'customer phrase'}\n")
+    result = _scan(repo, base, _commit(repo, "singleton"))
+    assert "PHRASE_MAP_CHANGE" in _classes(result)
+
+
+def test_c7_helper_wrapping_customer_literal(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _append_rules(
+        repo,
+        "\ndef owns(msg, needle): return needle in msg\n"
+        "def route(message):\n    if owns(message, 'customer phrase'):\n        return 'own'\n    return None\n",
+    )
+    result = _scan(repo, base, _commit(repo, "helper"))
+    assert "KEYWORD_ROUTER_CHANGE" in _classes(result)
+
+
+def test_structural_enum_url_uuid_not_customer_semantics(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _append_rules(
+        repo,
+        "\ndef route(stage, url, ident, phone):\n"
+        "    if stage == 'ordering':\n        return 'ok'\n"
+        "    if url == 'https://example.com/orders':\n        return 'ok'\n"
+        "    if ident == '550e8400-e29b-41d4-a716-446655440000':\n        return 'ok'\n"
+        "    if phone == '+966500000000':\n        return 'ok'\n"
+        "    return None\n",
+    )
+    result = _scan(repo, base, _commit(repo, "structural"))
+    assert "KEYWORD_ROUTER_CHANGE" not in _classes(result)
+    assert "CUSTOMER_REGEX_CHANGE" not in _classes(result)
+
+
+def test_exception_digest_mismatch_does_not_authorize(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    payload = "كم مرة"
+    digest = GUARD.compute_change_digest(
+        change_class="CUSTOMER_REGEX_CHANGE",
+        file="backend/modules/ai/brain/intent/rules.py",
+        symbol="",
+        payload=payload + "-other",
+    )
+    _write(
+        repo,
+        "backend/modules/ai/governance/intelligence_exceptions.json",
+        json_exc(digest),
+    )
+    base = _commit(repo, "base with mismatch digest")
+    _append_rules(repo, "\n_USAGE_RE = re.compile(r'كم مرة')\n")
+    result = _scan(repo, base, _commit(repo, "regex"))
+    assert "CUSTOMER_REGEX_CHANGE" in _classes(result)
+
+
+def test_exception_exact_digest_authorizes_only_that_change(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    payload = "كم مرة"
+    digest = GUARD.compute_change_digest(
+        change_class="CUSTOMER_REGEX_CHANGE",
+        file="backend/modules/ai/brain/intent/rules.py",
+        symbol="",
+        payload=payload,
+    )
+    _write(
+        repo,
+        "backend/modules/ai/governance/intelligence_exceptions.json",
+        json_exc(digest),
+    )
+    base = _commit(repo, "base with exact digest")
+    _append_rules(repo, "\n_USAGE_RE = re.compile(r'كم مرة')\n")
+    result = _scan(repo, base, _commit(repo, "authorized regex"))
+    assert "CUSTOMER_REGEX_CHANGE" not in _classes(result)
+    assert any(f.authorized_exception_id == "EX-DIGEST" for f in result.findings)
+
+
+def test_same_file_different_change_not_covered_by_prior_digest(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    digest = GUARD.compute_change_digest(
+        change_class="CUSTOMER_REGEX_CHANGE",
+        file="backend/modules/ai/brain/intent/rules.py",
+        symbol="",
+        payload="كم مرة",
+    )
+    _write(
+        repo,
+        "backend/modules/ai/governance/intelligence_exceptions.json",
+        json_exc(digest),
+    )
+    base = _commit(repo, "base")
+    _append_rules(repo, "\n_USAGE_RE = re.compile(r'كيف استخدم')\n")
+    result = _scan(repo, base, _commit(repo, "different regex"))
+    assert "CUSTOMER_REGEX_CHANGE" in _classes(result)
+
+
+def test_expired_exception_does_not_authorize(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    payload = "كم مرة"
+    digest = GUARD.compute_change_digest(
+        change_class="CUSTOMER_REGEX_CHANGE",
+        file="backend/modules/ai/brain/intent/rules.py",
+        symbol="",
+        payload=payload,
+    )
+    _write(
+        repo,
+        "backend/modules/ai/governance/intelligence_exceptions.json",
+        json_exc(digest, expires="2020-01-01"),
+    )
+    base = _commit(repo, "expired")
+    _append_rules(repo, "\n_USAGE_RE = re.compile(r'كم مرة')\n")
+    result = _scan(repo, base, _commit(repo, "regex"))
+    assert "CUSTOMER_REGEX_CHANGE" in _classes(result)
+
+
+def test_consumed_exception_does_not_authorize(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    payload = "كم مرة"
+    digest = GUARD.compute_change_digest(
+        change_class="CUSTOMER_REGEX_CHANGE",
+        file="backend/modules/ai/brain/intent/rules.py",
+        symbol="",
+        payload=payload,
+    )
+    _write(
+        repo,
+        "backend/modules/ai/governance/intelligence_exceptions.json",
+        json_exc(digest, consumed="true"),
+    )
+    base = _commit(repo, "consumed")
+    _append_rules(repo, "\n_USAGE_RE = re.compile(r'كم مرة')\n")
+    result = _scan(repo, base, _commit(repo, "regex"))
+    assert "CUSTOMER_REGEX_CHANGE" in _classes(result)
+
+
+def test_malformed_exception_registry_fails_closed(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    _write(
+        repo,
+        "backend/modules/ai/governance/intelligence_exceptions.json",
+        '{"schema_version":1,"exceptions":[{"exception_id":"EX-BAD","change_class":"CUSTOMER_REGEX_CHANGE","exact_file_scope":["backend/modules/ai/brain/intent/rules.py"]}]}\n',
+    )
+    base = _commit(repo, "malformed")
+    _write(repo, "README.md", "x\n")
+    result = _scan(repo, base, _commit(repo, "touch"))
+    assert "MALFORMED_EXCEPTION_REGISTRY" in _classes(result)
+
+
+def test_removing_trusted_workflow_with_semantic_change_is_caught_if_scanner_runs(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    _write(
+        repo,
+        ".github/workflows/gov002-intelligence-non-interference.yml",
+        "name: GOV-002 trusted intelligence guard\non: [pull_request_target]\njobs:\n  gov002-trusted-base-scanner:\n    runs-on: ubuntu-latest\n    steps: [{run: echo ok}]\n",
+    )
+    base = _commit(repo, "base with trusted workflow")
+    (repo / ".github/workflows/gov002-intelligence-non-interference.yml").unlink()
+    _append_rules(repo, "\n_USAGE_RE = re.compile(r'كم مرة')\n")
+    result = _scan(repo, base, _commit(repo, "drop guard plus regex"))
+    assert "GOVERNANCE_CORE_CHANGE" in _classes(result)
+    assert "CUSTOMER_REGEX_CHANGE" in _classes(result)
+
+
+def json_exc(
+    digest: str, expires: str = "2027-01-01", *, consumed: str = "false"
+) -> str:
+    return (
+        '{"schema_version":1,"exceptions":[{'
+        '"exception_id":"EX-DIGEST",'
+        '"change_class":"CUSTOMER_REGEX_CHANGE",'
+        '"exact_file_scope":["backend/modules/ai/brain/intent/rules.py"],'
+        '"exact_reason":"bounded regex change",'
+        '"owner_approval_ref":"owner-review-gov002",'
+        '"created_at":"2026-09-03",'
+        f'"expires_at":"{expires}",'
+        f'"expected_change_digest":"{digest}",'
+        '"single_use":true,'
+        f'"consumed":{consumed}}}]}}'
+    )

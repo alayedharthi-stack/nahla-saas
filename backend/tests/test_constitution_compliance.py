@@ -575,7 +575,26 @@ class TestGOV002ExecutableGuardWiring:
         assert "git merge-base" in ci
         assert "git show" in ci and "nahla_intelligence_guard.py" in ci
         assert "BASE_NOT_AVAILABLE" in ci
+        assert "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME" in ci
         assert "test_intelligence_non_interference_guard.py" in ci
+
+    def test_workflow_trust_root_doc_is_not_github_enforcement_proof(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        text = (
+            root / "docs" / "engineering" / "gov002-workflow-trust-root.md"
+        ).read_text(encoding="utf-8")
+        assert "unit test cannot prove GitHub branch protection" in text
+        assert "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME" in text
+
+    def test_trusted_workflow_uses_pull_request_target(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        wf = (
+            root / ".github" / "workflows" / "gov002-intelligence-non-interference.yml"
+        ).read_text(encoding="utf-8")
+        assert "pull_request_target" in wf
+        assert "gov002-trusted-base-scanner" in wf
+        assert "persist-credentials: false" in wf
+        assert "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME" in wf
 
     def test_exception_registry_starts_empty(self) -> None:
         from modules.ai.governance.intelligence_non_interference import (  # noqa: PLC0415
