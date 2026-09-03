@@ -594,6 +594,7 @@ class TestGOV002ExecutableGuardWiring:
         assert "pull_request_target" in wf
         assert "gov002-trusted-base-scanner" in wf
         assert "persist-credentials: false" in wf
+        assert "submodules: false" in wf
         assert "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME" in wf
 
     def test_exception_registry_starts_empty(self) -> None:

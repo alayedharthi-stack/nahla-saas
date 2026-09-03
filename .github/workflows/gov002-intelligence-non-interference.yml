@@ -28,6 +28,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          submodules: false
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
 
       - name: Checkout PR HEAD (GOV-002 bootstrap of #924 only)
@@ -36,6 +37,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          submodules: false
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
