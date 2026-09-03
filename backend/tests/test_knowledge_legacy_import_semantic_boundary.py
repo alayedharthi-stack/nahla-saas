@@ -16,10 +16,9 @@ FORBIDDEN_WORD_LIST_CHANGED=NO
 PREFERRED_WORD_LIST_CHANGED=NO
 POSTPROCESS_STYLE_REWRITE_CHANGED=NO
 
-Repair-advisor hits are suspicion/review metadata only. Write-time
-approval requires the existing canonical classifier at the few-shot
-confidence floor. Tests use synthetic merchant-document authoring
-text only — they do not add incident headings to production rules.
+Classifier output is a structural suggestion only. Imported rows stay
+needs_review until a merchant action. Tests use synthetic merchant
+document input only.
 """
 from __future__ import annotations
 
@@ -49,7 +48,7 @@ def _ai_visible(item: Dict[str, Any]) -> bool:
     )
 
 
-def _classifier_kind(kind: str, *, confidence: float = 0.9) -> Dict[str, Any]:
+def _classifier_kind(kind: str, *, confidence: float = 0.95) -> Dict[str, Any]:
     return {
         "fallback_used": False,
         "confidence": confidence,
@@ -58,7 +57,6 @@ def _classifier_kind(kind: str, *, confidence: float = 0.9) -> Dict[str, Any]:
 
 
 def test_heading_table_does_not_learn_incident_phrases() -> None:
-    """Production heading keywords must not grow incident-specific rules."""
     from routers.knowledge import _HEADING_KEYWORDS
 
     joined = " ".join(kw for kw, _kind in _HEADING_KEYWORDS)
@@ -67,7 +65,6 @@ def test_heading_table_does_not_learn_incident_phrases() -> None:
 
 
 def test_heading_hint_still_maps_benefits_substring() -> None:
-    """Splitter hint is unchanged; it is not write-time authority."""
     from routers.knowledge import _classify_heading, _split_legacy_text
 
     assert _classify_heading("الفوائد") == "product_benefit"
@@ -77,19 +74,99 @@ def test_heading_hint_still_maps_benefits_substring() -> None:
     assert blocks[0]["kind"] == "product_benefit"
 
 
-def test_confidence_floor_comes_from_classifier_fewshots() -> None:
-    from modules.ai.knowledge.classifier import _FEW_SHOT_EXAMPLES
-    from routers.knowledge import _legacy_classifier_confidence_floor
+def test_high_confidence_behavioral_classification_stays_in_review() -> None:
+    from routers.knowledge import _plan_legacy_import
+    from services.knowledge_section_kinds import is_behavioral_kind
 
-    fewshot_min = min(float(ex["expected"]["confidence"]) for ex in _FEW_SHOT_EXAMPLES)
-    assert _legacy_classifier_confidence_floor() == fewshot_min
-    assert fewshot_min == 0.90
+    blob = (
+        "# الفوائد\n"
+        "عند وصف المنتج ابق داخل إطار الاستخدام اليومي فقط.\n"
+        "لا تتجاوز نطاق وصف المنتج.\n"
+    )
+    planned = _plan_legacy_import(
+        blob,
+        classifier_fn=lambda _text: _classifier_kind("compliance_rules", confidence=0.97),
+    )
+    item = planned[0]
+    assert item["kind"] == "compliance_rules"
+    assert is_behavioral_kind(item["kind"]) is True
+    assert item["ai_status"] == "needs_review"
+    assert item["classification_source"] == "canonical_classifier"
+    assert _ai_visible(item) is False
+    assert "إطار الاستخدام اليومي" in item["body"]
 
 
-def test_repair_advisor_alone_cannot_auto_approve_final_kind(
+def test_high_confidence_commerce_classification_stays_in_review() -> None:
+    from routers.knowledge import _plan_legacy_import
+
+    blob = "# الشحن\nنشحن بسمسا خلال 2-3 أيام عمل.\n"
+    planned = _plan_legacy_import(
+        blob,
+        classifier_fn=lambda _text: _classifier_kind("shipping_zones", confidence=0.95),
+    )
+    item = planned[0]
+    assert item["kind"] == "shipping_zones"
+    assert item["ai_status"] == "needs_review"
+    assert _ai_visible(item) is False
+    assert "سمسا" in item["body"]
+
+
+def test_low_confidence_classification_stays_in_review() -> None:
+    from routers.knowledge import _plan_legacy_import
+    from services.knowledge_section_kinds import is_behavioral_kind
+
+    blob = (
+        "# أسلوب الرد\n"
+        "استخدم لهجة خليجية مختصرة.\n"
+    )
+    planned = _plan_legacy_import(
+        blob,
+        classifier_fn=lambda _text: _classifier_kind("response_tone", confidence=0.2),
+    )
+    item = planned[0]
+    assert item["kind"] == "response_tone"
+    assert is_behavioral_kind(item["kind"]) is True
+    assert item["ai_status"] == "needs_review"
+    assert _ai_visible(item) is False
+
+
+def test_classifier_unavailable_stays_in_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Case 1: advisor suspicion is metadata only, never approved kind."""
+    from modules.ai.knowledge import classifier as kbc
+    from routers.knowledge import _plan_legacy_import
+
+    monkeypatch.setattr(kbc, "_API_KEY", "")
+    body = "الحذاء الرياضي الأبيض خفيف ومناسب للمشي اليومي."
+    blob = f"# الفوائد\n{body}\n"
+    planned = _plan_legacy_import(blob)
+    item = planned[0]
+    assert item["kind"] == "quick_update"
+    assert item["ai_status"] == "needs_review"
+    assert _ai_visible(item) is False
+    assert body in item["body"]
+    assert item["proven_product_ids"] == ()
+
+
+def test_heading_only_stays_in_review() -> None:
+    from routers.knowledge import _plan_legacy_import
+
+    shipping_body = "نشحن بسمسا خلال 2-3 أيام عمل.\nالشحن المجاني للطلبات فوق 200 ريال."
+    payment_body = "نقبل مدى وفيزا والتحويل البنكي."
+    blob = f"# الشحن\n{shipping_body}\n\n# الدفع\n{payment_body}\n"
+    planned = _plan_legacy_import(blob, max_classifier_calls=0)
+    assert len(planned) == 2
+    for item in planned:
+        assert item["ai_status"] == "needs_review"
+        assert _ai_visible(item) is False
+        assert item["kind"] == "quick_update"
+    shipping = next(i for i in planned if i["heading_hint_kind"] == "shipping_zones")
+    payment = next(i for i in planned if i["heading_hint_kind"] == "payment_method")
+    assert shipping_body in shipping["body"]
+    assert payment_body in payment["body"]
+
+
+def test_advisor_only_stays_in_review(monkeypatch: pytest.MonkeyPatch) -> None:
     from modules.ai.knowledge import classifier as kbc
     from routers.knowledge import _plan_legacy_import
     from services.knowledge_section_kinds import is_behavioral_kind
@@ -102,94 +179,17 @@ def test_repair_advisor_alone_cannot_auto_approve_final_kind(
     )
     planned = _plan_legacy_import(blob)
     item = planned[0]
-    assert item["heading_hint_kind"] == "product_benefit"
     assert item["metadata_json"]["repair_advisor_suspicion"] is True
     assert item["metadata_json"]["repair_advisor_suggested_kind"]
-    assert item["classification_source"] != "repair_advisor_behavioral"
+    assert item["ai_status"] == "needs_review"
+    assert _ai_visible(item) is False
     assert not (
         is_behavioral_kind(item["kind"]) and item["ai_status"] == "approved"
     )
-    assert item["ai_status"] == "needs_review"
-    assert _ai_visible(item) is False
     assert "ممنوع ادعاء علاجي للعسل" in item["body"]
-    assert item["proven_product_ids"] == ()
 
 
-def test_high_confidence_behavioral_classifier_may_approve() -> None:
-    """Case 2: canonical high-confidence behavioral kind may be approved."""
-    from routers.knowledge import _plan_legacy_import
-    from services.knowledge_section_kinds import is_behavioral_kind
-
-    blob = (
-        "# الفوائد\n"
-        "عند وصف المنتج ابق داخل إطار الاستخدام اليومي فقط.\n"
-        "لا تتجاوز نطاق وصف المنتج.\n"
-    )
-    planned = _plan_legacy_import(
-        blob,
-        classifier_fn=lambda _text: _classifier_kind("compliance_rules", confidence=0.95),
-    )
-    item = planned[0]
-    assert item["kind"] == "compliance_rules"
-    assert is_behavioral_kind(item["kind"]) is True
-    assert item["ai_status"] == "approved"
-    assert item["classification_source"] == "canonical_classifier"
-    assert _ai_visible(item) is True
-    assert "إطار الاستخدام اليومي" in item["body"]
-
-
-def test_low_confidence_behavioral_classifier_is_not_ai_visible() -> None:
-    """Case 3: valid kind + fallback_used=false + low confidence → review."""
-    from routers.knowledge import (
-        _legacy_classifier_confidence_floor,
-        _plan_legacy_import,
-    )
-    from services.knowledge_section_kinds import is_behavioral_kind
-
-    floor = _legacy_classifier_confidence_floor()
-    blob = (
-        "# أسلوب الرد\n"
-        "استخدم لهجة خليجية مختصرة.\n"
-    )
-    planned = _plan_legacy_import(
-        blob,
-        classifier_fn=lambda _text: _classifier_kind(
-            "response_tone", confidence=floor - 0.4,
-        ),
-    )
-    item = planned[0]
-    assert item["kind"] == "response_tone"
-    assert is_behavioral_kind(item["kind"]) is True
-    assert item["ai_status"] == "needs_review"
-    assert item["classification_source"] == "canonical_classifier_low_confidence"
-    assert _ai_visible(item) is False
-    assert item["classification_confidence"] < floor
-
-
-def test_heading_shipping_payment_without_classifier_is_not_approved() -> None:
-    """Case 4: heading substring is not sole authority for an AI-visible fact."""
-    from routers.knowledge import _plan_legacy_import
-
-    shipping_body = "نشحن بسمسا خلال 2-3 أيام عمل.\nالشحن المجاني للطلبات فوق 200 ريال."
-    payment_body = "نقبل مدى وفيزا والتحويل البنكي."
-    blob = f"# الشحن\n{shipping_body}\n\n# الدفع\n{payment_body}\n"
-    planned = _plan_legacy_import(blob, max_classifier_calls=0)
-    assert len(planned) == 2
-    for item in planned:
-        assert item["ai_status"] == "needs_review"
-        assert _ai_visible(item) is False
-        assert item["kind"] == "quick_update"
-        assert item["classification_source"] != "heading_hint"
-    shipping = next(i for i in planned if i["heading_hint_kind"] == "shipping_zones")
-    payment = next(i for i in planned if i["heading_hint_kind"] == "payment_method")
-    assert shipping_body in shipping["body"]
-    assert payment_body in payment["body"]
-    assert shipping["proven_product_ids"] == ()
-    assert payment["proven_product_ids"] == ()
-
-
-def test_unscoped_product_bound_classifier_result_is_held_for_review() -> None:
-    """Case 5: product-bound classified kind with zero product scope is not AI-visible."""
+def test_product_bound_without_scope_stays_in_review() -> None:
     from routers.knowledge import _plan_legacy_import
 
     blob = (
@@ -208,47 +208,25 @@ def test_unscoped_product_bound_classifier_result_is_held_for_review() -> None:
     assert _ai_visible(item) is False
 
 
-def test_classifier_unavailable_fails_to_review(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Case 6: classifier unavailable → safe review, text kept, no product links."""
-    from modules.ai.knowledge import classifier as kbc
+def test_scoped_product_bound_still_stays_in_review() -> None:
     from routers.knowledge import _plan_legacy_import
 
-    monkeypatch.setattr(kbc, "_API_KEY", "")
-    body = "الحذاء الرياضي الأبيض خفيف ومناسب للمشي اليومي."
-    blob = f"# الفوائد\n{body}\n"
-    planned = _plan_legacy_import(blob)
-    item = planned[0]
-    assert item["kind"] == "quick_update"
-    assert item["ai_status"] == "needs_review"
-    assert item["classification_source"] == "fail_safe_unknown"
-    assert _ai_visible(item) is False
-    assert body in item["body"]
-    assert item["proven_product_ids"] == ()
-
-
-def test_merchant_text_preserved_and_no_product_links_fabricated() -> None:
-    """Cases 7–8: original authoring text is kept; no product ids are invented."""
-    from routers.knowledge import _plan_legacy_import
-
-    heading = "الفوائد"
-    body = "الحذاء الرياضي الأبيض خفيف ومناسب للمشي اليومي في الجو الحار."
-    blob = f"# {heading}\n{body}\n"
+    blob = (
+        "# الفوائد\n"
+        "الحذاء الرياضي الأبيض خفيف ومناسب للمشي اليومي في الجو الحار.\n"
+    )
     planned = _plan_legacy_import(
         blob,
         classifier_fn=lambda _text: _classifier_kind("product_benefit", confidence=0.95),
+        proven_product_ids=(101,),
     )
     item = planned[0]
-    assert item["title"] == heading
-    assert item["body"] == body
-    assert item["proven_product_ids"] == ()
-    assert "product_id" not in item["metadata_json"]
-    assert item["metadata_json"].get("unscoped_product_bound") is True
+    assert item["kind"] == "product_benefit"
+    assert item["ai_status"] == "needs_review"
+    assert _ai_visible(item) is False
 
 
 def test_classifier_prose_rewrite_is_not_stored_as_payload() -> None:
-    """GOV-003: classifier may set kind/confidence; it must not replace merchant text."""
     from routers.knowledge import _plan_legacy_import
 
     heading = "الفوائد"
@@ -274,7 +252,6 @@ def test_classifier_prose_rewrite_is_not_stored_as_payload() -> None:
     )
     item = planned[0]
     assert item["kind"] == "product_benefit"
-    assert item["classification_source"] == "canonical_classifier"
     assert item["title"] == heading
     assert item["body"] == body
     assert rewritten_title not in item["title"]
@@ -283,27 +260,23 @@ def test_classifier_prose_rewrite_is_not_stored_as_payload() -> None:
     assert _ai_visible(item) is False
 
 
-def test_high_confidence_scoped_product_benefit_may_be_approved() -> None:
+def test_original_merchant_text_preserved() -> None:
     from routers.knowledge import _plan_legacy_import
 
-    blob = (
-        "# الفوائد\n"
-        "الحذاء الرياضي الأبيض خفيف ومناسب للمشي اليومي في الجو الحار.\n"
-    )
+    heading = "الفوائد"
+    body = "الحذاء الرياضي الأبيض خفيف ومناسب للمشي اليومي في الجو الحار."
     planned = _plan_legacy_import(
-        blob,
-        classifier_fn=lambda _text: _classifier_kind("product_benefit", confidence=0.95),
-        proven_product_ids=(101,),
+        f"# {heading}\n{body}\n",
+        classifier_fn=lambda _text: _classifier_kind("product_benefit"),
     )
     item = planned[0]
-    assert item["kind"] == "product_benefit"
-    assert item["ai_status"] == "approved"
-    assert item["classification_source"] == "canonical_classifier"
-    assert item["proven_product_ids"] == (101,)
-    assert _ai_visible(item) is True
+    assert item["title"] == heading
+    assert item["body"] == body
+    assert item["proven_product_ids"] == ()
+    assert "product_id" not in item["metadata_json"]
 
 
-def test_classifier_call_limit_fails_remaining_candidates_to_review() -> None:
+def test_classifier_call_limit_does_not_create_activation_privilege() -> None:
     from routers.knowledge import _MAX_CLASSIFIER_CALLS_PER_IMPORT, _plan_legacy_import
 
     calls: List[str] = []
@@ -321,26 +294,22 @@ def test_classifier_call_limit_fails_remaining_candidates_to_review() -> None:
     planned = _plan_legacy_import(blob, classifier_fn=_clf)
     assert _MAX_CLASSIFIER_CALLS_PER_IMPORT == 1
     assert len(calls) == 1
-    assert sum(1 for item in planned if item["classifier_attempted"]) == 1
-    unconfirmed = [item for item in planned if not item["classifier_attempted"]]
-    assert len(unconfirmed) == 1
-    leftover = unconfirmed[0]
-    assert leftover["ai_status"] == "needs_review"
-    assert _ai_visible(leftover) is False
-    assert leftover["kind"] == "quick_update"
-    assert leftover["metadata_json"].get("fail_safe_reason") == "classifier_call_limit"
+    assert all(item["ai_status"] == "needs_review" for item in planned)
+    assert all(_ai_visible(item) is False for item in planned)
 
 
-def test_confirmed_shipping_kind_may_be_approved() -> None:
-    from routers.knowledge import _plan_legacy_import
+def test_existing_merchant_draft_approve_path_exists() -> None:
+    """Existing merchant approval is the draft approve endpoint, not confidence."""
+    from routers.knowledge import router
 
-    blob = "# الشحن\nنشحن بسمسا خلال 2-3 أيام عمل.\n"
-    planned = _plan_legacy_import(
-        blob,
-        classifier_fn=lambda _text: _classifier_kind("shipping_zones", confidence=0.95),
-    )
-    item = planned[0]
-    assert item["kind"] == "shipping_zones"
-    assert item["ai_status"] == "approved"
-    assert item["classification_source"] == "canonical_classifier"
-    assert "سمسا" in item["body"]
+    paths = {getattr(r, "path", "") for r in router.routes}
+    assert "/knowledge/drafts/{draft_id}/approve" in paths
+
+
+def test_visibility_gate_requires_merchant_approved_status_not_confidence() -> None:
+    from core.knowledge import kb_row_is_ai_visible
+
+    review = SimpleNamespace(deleted_at=None, is_active=True, ai_status="needs_review")
+    approved = SimpleNamespace(deleted_at=None, is_active=True, ai_status="approved")
+    assert kb_row_is_ai_visible(review) is False
+    assert kb_row_is_ai_visible(approved) is True

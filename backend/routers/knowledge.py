@@ -873,10 +873,10 @@ async def backfill_payment_media_keys(
 #      That table is NOT the final semantic authority for customer-visible
 #      kinds (especially product-bound kinds).
 #   3. Preserve every candidate's original merchant text. Canonical
-#      ``classify_quick_update`` may confirm a kind (bounded to one call
-#      per import). Repair-advisor hits are suspicion/review metadata
-#      only. Unconfirmed candidates are stored as ``quick_update`` +
-#      ``needs_review`` and are not AI-visible.
+#      ``classify_quick_update`` may suggest a kind. Repair-advisor hits
+#      are suspicion/review metadata only. Imported candidates are stored
+#      as ``needs_review`` and are not AI-visible. Classifier prose is
+#      discarded; original merchant text remains the payload.
 #   4. If we find at least one mappable heading, create one section per
 #      block. Otherwise we create a single ``custom`` section with the
 #      whole text — the merchant can split it later from the UI.
@@ -1038,6 +1038,7 @@ _FAIL_SAFE_KIND = "quick_update"
 _REVIEW_STATUS = "needs_review"
 # Existing format-with-AI is one ``classify_quick_update`` per request.
 # A 121-row legacy import must not fan out into 121 synchronous LLM calls.
+# The call budget only generates suggestions. It never activates AI visibility.
 _MAX_CLASSIFIER_CALLS_PER_IMPORT = 1
 
 
@@ -1048,26 +1049,6 @@ def _kind_is_product_bound(kind: Optional[str]) -> bool:
 
 def _legacy_candidate_text(title: str, body: str) -> str:
     return f"{(title or '').strip()}\n{(body or '').strip()}".strip()
-
-
-def _legacy_classifier_confidence_floor() -> float:
-    """Acceptance floor from the existing classifier few-shot contract.
-
-    ``classify_quick_update`` has no separate min-confidence setting.
-    Successful few-shot examples in ``_FEW_SHOT_EXAMPLES`` all report
-    ``confidence >= 0.90``; the deterministic fallback reports ``0.0``.
-    Import auto-approval reuses that documented successful floor.
-    """
-    from modules.ai.knowledge.classifier import _FEW_SHOT_EXAMPLES  # noqa: PLC0415
-
-    confs: List[float] = []
-    for example in _FEW_SHOT_EXAMPLES:
-        expected = example.get("expected") or {}
-        try:
-            confs.append(float(expected.get("confidence")))
-        except (TypeError, ValueError):
-            continue
-    return min(confs) if confs else 0.90
 
 
 def _kind_from_classifier_proposal(proposal: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -1156,10 +1137,10 @@ def _finalize_legacy_import_block(
     """Resolve a legacy split candidate into a write-safe section.
 
     Heading-table kind and repair-advisor suggestions are hints /
-    suspicion only. A section becomes AI-visible only when the
-    existing canonical ``classify_quick_update`` result is
-    trustworthy (not fallback, valid op, confidence at the few-shot
-    floor) and product-bound rows have proven product scope.
+    suspicion only. Canonical ``classify_quick_update`` may suggest a
+    structural ``kind`` and confidence. That suggestion is never merchant
+    approval: imported rows stay ``needs_review`` and are not AI-visible.
+    Original merchant title/body remain the stored payload (GOV-003).
     """
     hint = hint_kind if is_valid_kind(hint_kind) else "custom"
     metadata: Dict[str, Any] = {
@@ -1171,7 +1152,6 @@ def _finalize_legacy_import_block(
         metadata["repair_advisor_suggested_kind"] = advisor_suggested_kind
 
     kind = _FAIL_SAFE_KIND
-    ai_status = _REVIEW_STATUS
     classification_source = "fail_safe_unconfirmed"
     confidence = _proposal_confidence(proposal)
     reason = fail_safe_reason or "unconfirmed_semantic_kind"
@@ -1179,7 +1159,6 @@ def _finalize_legacy_import_block(
     if proposal is not None or classifier_attempted:
         if not isinstance(proposal, dict) or proposal.get("fallback_used"):
             kind = _FAIL_SAFE_KIND
-            ai_status = _REVIEW_STATUS
             classification_source = "fail_safe_unknown"
             reason = (
                 str((proposal or {}).get("fallback_reason") or "classifier_unavailable")
@@ -1188,27 +1167,20 @@ def _finalize_legacy_import_block(
             )
         else:
             classified = _kind_from_classifier_proposal(proposal)
-            floor = _legacy_classifier_confidence_floor()
             if classified is None:
                 kind = _FAIL_SAFE_KIND
-                ai_status = _REVIEW_STATUS
                 classification_source = "fail_safe_unknown"
                 reason = "no_trustworthy_op"
-            elif confidence is None:
-                kind = classified
-                ai_status = _REVIEW_STATUS
-                classification_source = "canonical_classifier_low_confidence"
-                reason = "malformed_confidence"
-            elif confidence < floor:
-                kind = classified
-                ai_status = _REVIEW_STATUS
-                classification_source = "canonical_classifier_low_confidence"
-                reason = "low_confidence"
             else:
                 kind = classified
                 classification_source = "canonical_classifier"
-                ai_status = "approved"
                 reason = None
+                metadata["suggested_kind"] = classified
+                if confidence is not None:
+                    metadata["suggested_confidence"] = confidence
+
+    # Classifier / heading / advisor never activate AI visibility.
+    ai_status = _REVIEW_STATUS
 
     metadata["classification_source"] = classification_source
     if reason:
@@ -1216,7 +1188,6 @@ def _finalize_legacy_import_block(
 
     proven = tuple(int(pid) for pid in (proven_product_ids or ()) if pid)
     if _kind_is_product_bound(kind) and not proven:
-        ai_status = _REVIEW_STATUS
         metadata["unscoped_product_bound"] = True
 
     sk = get_kind(kind)
@@ -1249,9 +1220,9 @@ def _plan_legacy_import(
     """Split then finalize. Used by migrate-from-legacy and tests.
 
     At most ``_MAX_CLASSIFIER_CALLS_PER_IMPORT`` canonical classifier
-    calls run per import (default 1, matching format-with-AI). Advisor
-    suspicion and product-bound hints get first claim on that budget.
-    Remaining candidates fail closed to ``needs_review``.
+    calls run per import (default 1, matching format-with-AI). The
+    budget only generates structural suggestions. Every imported row
+    stays ``needs_review`` and is not AI-visible.
     """
     blocks = _split_legacy_text(text)
     if not blocks and (text or "").strip():
