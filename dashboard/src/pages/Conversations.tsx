@@ -26,6 +26,12 @@ import {
 } from '../components/conversations/conversationFilterConfig'
 
 import { formatRiyadh, formatRiyadhDate, formatRiyadhTime } from '../lib/datetime'
+import {
+  aiToggleKind,
+  isAiPaused,
+  isConversationAiOn,
+  isSupervisionActive,
+} from '../lib/conversationAiControl'
 import { useDashboardPoll } from '../lib/dashboardPolling'
 import {
   loadConversationListCache,
@@ -965,13 +971,11 @@ export default function Conversations() {
       })
       _optimisticUpdate(selected.phone, {
         status: 'human',
-        isAI: false,
+        isAI: isConversationAiOn(selected),
         handoffReason: 'customer_request',
         needsHuman: true,
         handoffActive: true,
         takenOverAt: new Date().toISOString(),
-        aiPaused: true,
-        aiPausedReason: 'manual_takeover',
       })
       refreshListInBackground()
     } catch (e) {
@@ -990,8 +994,6 @@ export default function Conversations() {
       aiPaused: state.aiPaused,
       aiPausedReason: state.aiPausedReason,
       aiPausedAt: state.aiPausedAt,
-      // ``isAI`` reflects the merged state: AI is "on" only when not
-      // paused AND there's no human takeover in progress.
       isAI: !state.aiPaused,
     }
     _optimisticUpdate(phone, patch)
@@ -1068,11 +1070,7 @@ export default function Conversations() {
 
   const endHumanSupervisionForSelected = async () => {
     if (!selected) return
-    const inTakeover =
-      !!selected.needsHuman ||
-      !!selected.handoffActive ||
-      selected.status === 'human'
-    if (!inTakeover) return
+    if (!isSupervisionActive(selected)) return
 
     setEndingSupervision(true)
     try {
@@ -1093,31 +1091,21 @@ export default function Conversations() {
 
   const resumeIntelligenceForSelected = async () => {
     if (!selected || resumingAI) return
-    const inTakeover =
-      !!selected.needsHuman ||
-      !!selected.handoffActive ||
-      selected.status === 'human'
+    if (!isAiPaused(selected)) return
     console.log(
-      `[AI_RESUME_UI] phone=${selected.phone} takeover=${inTakeover}`,
+      `[AI_RESUME_UI] phone=${selected.phone} path=resumeConversationAI`,
     )
     setResumingAI(true)
     try {
-      if (inTakeover) {
-        await featureRealityApi.returnHandoffToAI({
-          customer_phone: selected.phone,
-        })
-        _applyReturnToAIState(selected.phone)
-      } else {
-        const res = await featureRealityApi.resumeConversationAI({
-          customer_phone: selected.phone,
-        })
-        _applyAIState(selected.phone, {
-          aiPaused: !!res.aiPaused,
-          aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
-          aiPausedAt: res.aiPausedAt ?? null,
-        })
-        if (!res.aiPaused) _bumpPausedFilterCounts(false)
-      }
+      const res = await featureRealityApi.resumeConversationAI({
+        customer_phone: selected.phone,
+      })
+      _applyAIState(selected.phone, {
+        aiPaused: !!res.aiPaused,
+        aiPausedReason: (res.aiPausedReason ?? null) as AIPauseReason | null,
+        aiPausedAt: res.aiPausedAt ?? null,
+      })
+      if (!res.aiPaused) _bumpPausedFilterCounts(false)
       refreshListInBackground()
       void loadMessagesForOpenChat(selected.phone)
     } catch (e) {
@@ -1261,8 +1249,7 @@ export default function Conversations() {
   // ─────────────────────────────────────────────────────────────────────────────
   const BackIcon = isRTL ? ArrowRight : ArrowLeft
 
-  const showAiPausedBadge = !!selected?.aiPaused
-    && !(selected.needsHuman || selected.handoffActive || selected.status === 'human')
+  const showAiPausedBadge = !!selected && isAiPaused(selected)
 
   return (
     <div
@@ -1451,7 +1438,7 @@ export default function Conversations() {
                     the badge below is scrolled off the row. */}
                 <div className="relative shrink-0">
                   <div className={`w-11 h-11 rounded-full flex items-center justify-center font-semibold text-sm ${
-                    c.isAI ? 'bg-brand-100 text-brand-600' : 'bg-slate-100 text-slate-600'
+                    isConversationAiOn(c) ? 'bg-brand-100 text-brand-600' : 'bg-slate-100 text-slate-600'
                   }`}>
                     {initials(c.customer)}
                   </div>
@@ -1577,7 +1564,7 @@ export default function Conversations() {
 
               {/* Avatar */}
               <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 font-semibold text-sm ${
-                selected.isAI ? 'bg-brand-100 text-brand-600' : 'bg-slate-100 text-slate-600'
+                isConversationAiOn(selected) ? 'bg-brand-100 text-brand-600' : 'bg-slate-100 text-slate-600'
               }`}>
                 {initials(selected.customer)}
               </div>
@@ -1652,13 +1639,7 @@ export default function Conversations() {
 
               {/* Desktop: pause/resume + menu. Mobile: menu only (AI toggle in reply bar). */}
               <div className="flex items-center gap-1 shrink-0">
-                {!_isBlocked(selected) && (() => {
-                  const humanTakeover =
-                    !!selected.needsHuman ||
-                    !!selected.handoffActive ||
-                    selected.status === 'human'
-                  const intelligenceOff = humanTakeover || !!selected.aiPaused
-                  return intelligenceOff ? (
+                {!_isBlocked(selected) && (aiToggleKind(selected) === 'resume' ? (
                     <button
                       className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50"
                       onClick={resumeIntelligenceForSelected}
@@ -1680,8 +1661,7 @@ export default function Conversations() {
                       <Pause className="w-3.5 h-3.5" />
                       {cp.actions.pauseAI}
                     </button>
-                  )
-                })()}
+                  ))}
 
                 <div className="relative" ref={headerMenuRef}>
                   <button
@@ -1695,16 +1675,13 @@ export default function Conversations() {
                   </button>
 
                   {headerMenuOpen && selected && (() => {
-                    const humanTakeover =
-                      !!selected.needsHuman ||
-                      !!selected.handoffActive ||
-                      selected.status === 'human'
+                    const supervisionActive = isSupervisionActive(selected)
                     return (
                       <div
                         className="absolute end-0 top-full mt-1 w-56 bg-white rounded-xl shadow-lg border border-slate-200 py-1 z-50"
                         dir={dir}
                       >
-                        {!_isBlocked(selected) && !humanTakeover && (
+                        {!_isBlocked(selected) && !supervisionActive && (
                           <button
                             type="button"
                             className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
@@ -1717,7 +1694,7 @@ export default function Conversations() {
                             {cp.actions.takeOver}
                           </button>
                         )}
-                        {humanTakeover && (
+                        {supervisionActive && (
                           <button
                             type="button"
                             className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-50"
@@ -1847,7 +1824,7 @@ export default function Conversations() {
             />
 
             {/* AI paused banner — desktop only; mobile uses header badge */}
-            {selected.aiPaused && !(selected.needsHuman || selected.handoffActive || selected.status === 'human') && (
+            {isAiPaused(selected) && (
               <div className="hidden md:flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700 shrink-0">
                 <Pause className="w-4 h-4 shrink-0 text-amber-500" />
                 <span>
@@ -2226,26 +2203,22 @@ export default function Conversations() {
             <div className="sm:hidden flex items-center gap-2 px-3 py-2">
               {!_isBlocked(selected) &&
                 (() => {
-                  const humanTakeover =
-                    !!selected.needsHuman ||
-                    !!selected.handoffActive ||
-                    selected.status === 'human'
-                  const intelligenceOff = humanTakeover || !!selected.aiPaused
+                  const toggle = aiToggleKind(selected)
                   return (
                     <button
                       type="button"
                       className={`w-full flex items-center justify-center gap-1.5 text-xs py-2 px-3 rounded-lg font-medium active:opacity-90 ${
-                        intelligenceOff
+                        toggle === 'resume'
                           ? 'bg-emerald-50 text-emerald-700'
                           : 'bg-amber-50 text-amber-700'
                       }`}
                       onClick={
-                        intelligenceOff
+                        toggle === 'resume'
                           ? resumeIntelligenceForSelected
                           : pauseIntelligenceForSelected
                       }
                     >
-                      {intelligenceOff ? (
+                      {toggle === 'resume' ? (
                         <>
                           <Play className="w-3.5 h-3.5" /> {cp.actions.resumeAI}
                         </>
