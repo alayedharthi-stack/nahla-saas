@@ -6190,6 +6190,16 @@ async def _handle_merchant_message(
     _outbound_abort_audited = False
     _outbound_customer_id: int | None = None
     _t_merchant_entry_gates = None
+    _generic_handoff_signal = False
+    _d2_execution_result = None
+    try:
+        from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: PLC0415
+            clear_current_turn_d2_result as _d2_clear_turn,
+        )
+
+        _d2_clear_turn(db)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — leftover D2 stamp clear must not block turn
+        pass
 
     def _sync_persona_observability() -> None:
         _sync_po_trace(_trace, _persona_ownership)
@@ -6593,192 +6603,208 @@ async def _handle_merchant_message(
         _do_create_session     = _ho_policy["do_create_session"]
         _do_pause_ai           = _ho_policy["do_pause_ai"]
 
-        _handoff_vcard_target = None
-        if (
-            not _is_owner_contact
-            and _ho_tier == _GENERIC_HANDOFF_TIER
-            and not _is_post_pay_mod
-        ):
-            try:
-                from modules.ai.brain.commerce.staff_contact_policy import (  # noqa: PLC0415
-                    evaluate_generic_handoff_contact_policy as _eval_gh_policy,
-                )
-                _gh_policy = _eval_gh_policy(
-                    db,
-                    tenant_id=tenant_id,
-                    message=text or "",
-                    customer_phone=to or "",
-                )
-                if _gh_policy is not None:
-                    _HANDOFF_ACK_TEXT = _gh_policy.reply_text
-                    if _gh_policy.deliver_contact:
-                        _handoff_vcard_target = _gh_policy.call_target
-            except Exception as _gh_pol_exc:  # noqa: BLE001
-                logger.debug(
-                    "[Merchant/HANDOFF_GUARD] generic contact policy failed: %s",
-                    _gh_pol_exc,
-                )
-
-        logger.info(
-            "[Merchant/HANDOFF_GUARD] PRE-BRAIN handoff fired | tenant=%s "
-            "to=%s text_snippet=%r owner_contact=%s tier=%s "
-            "full_flip=%s create_session=%s pause_ai=%s",
-            tenant_id, to, (text or "")[:80], _is_owner_contact, _ho_tier,
-            _do_full_handoff_flip, _do_create_session, _do_pause_ai,
+        from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: PLC0415
+            should_defer_generic_prebrain_execution as _defer_generic_prebrain,
         )
-        _ho_convo = None
-        try:
-            from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
-            _ho_convo = _get_or_create_conversation(db, tenant_id, to)
-        except Exception as _ho_conv_exc:  # noqa: BLE001
-            logger.warning(
-                "[Merchant/HANDOFF_GUARD] conversation lookup failed | "
-                "tenant=%s err=%s",
-                tenant_id, _ho_conv_exc,
+        if _defer_generic_prebrain(
+            is_handoff=True,
+            is_owner_contact=bool(_is_owner_contact),
+            is_post_pay_mod=bool(_is_post_pay_mod),
+            tier=_ho_tier,
+        ):
+            _generic_handoff_signal = True
+            logger.info(
+                "[Merchant/HANDOFF_GUARD] generic_handoff deferred to Brain/D2 "
+                "| tenant=%s to=%s snippet=%r",
+                tenant_id, to, (text or "")[:80],
             )
-        if _ho_convo is not None:
-            try:
-                if _do_full_handoff_flip:
-                    # Queue flags for the staff inbox. Do not mark the
-                    # conversation human-owned — notify-only must keep AI.
-                    _ho_convo.is_human_handoff  = True
-                    _ho_convo.needs_human       = True
-                    _ho_convo.handoff_active    = True
-                else:
-                    # VAGUE tier — soft flag only. We deliberately
-                    # leave status / is_human_handoff / handoff_active
-                    # untouched so the conversation remains
-                    # AI-served and the next inbound goes through
-                    # the brain.
-                    _ho_convo.needs_human       = True
-                db.flush()
-            except Exception as _ho_flag_exc:  # noqa: BLE001
-                logger.warning(
-                    "[Merchant/HANDOFF_GUARD] flag flip failed | "
-                    "tenant=%s err=%s",
-                    tenant_id, _ho_flag_exc,
-                )
-        if _do_create_session:
-            try:
-                from handoff.manager import create_handoff_session  # noqa: PLC0415
-                create_handoff_session(
-                    db, tenant_id, to, to, text or "",
-                    reason="customer_request",
-                    context_snapshot={"pre_brain_tier": _ho_tier},
-                )
-            except Exception as _ho_sess_exc:  # noqa: BLE001
-                logger.warning(
-                    "[Merchant/HANDOFF_GUARD] session creation failed | "
-                    "tenant=%s err=%s",
-                    tenant_id, _ho_sess_exc,
-                )
-        if _do_pause_ai and _ho_convo is not None:
-            try:
-                from core.ai_pause_guard import (  # noqa: PLC0415
-                    pause_ai as _ho_pause_ai,
-                    REASON_HUMAN_HANDOFF as _HO_R_HOFF,
-                )
-                _ho_pause_ai(db, _ho_convo, reason=_HO_R_HOFF,
-                             by=f"webhook:pre_brain_handoff:{_ho_tier}")
-            except Exception as _ho_pause_exc:  # noqa: BLE001
-                logger.debug(
-                    "[Merchant/HANDOFF_GUARD] pause_ai failed: %s",
-                    _ho_pause_exc,
-                )
-        try:
-            await _send_whatsapp_message(
-                phone_id=phone_id, to=to,
-                text=_HANDOFF_ACK_TEXT,
-                _tenant_id=tenant_id, _db=db,
-            )
-            if _handoff_vcard_target is not None and _staff_call_marker_enabled():
+        else:
+            _handoff_vcard_target = None
+            if (
+                not _is_owner_contact
+                and _ho_tier == _GENERIC_HANDOFF_TIER
+                and not _is_post_pay_mod
+            ):
                 try:
-                    from services.call_resolver import (  # noqa: PLC0415
-                        build_contacts_payload as _ho_build_contacts,
+                    from modules.ai.brain.commerce.staff_contact_policy import (  # noqa: PLC0415
+                        evaluate_generic_handoff_contact_policy as _eval_gh_policy,
                     )
-                    _ho_payload = _ho_build_contacts(
-                        [_handoff_vcard_target], to=to,
+                    _gh_policy = _eval_gh_policy(
+                        db,
+                        tenant_id=tenant_id,
+                        message=text or "",
+                        customer_phone=to or "",
                     )
-                    await _send_contacts_message(
-                        phone_id=phone_id, to=to,
-                        payload=_ho_payload,
-                        _tenant_id=tenant_id, _db=db,
-                        customer_message=text or "",
-                        delivery_path="handoff",
-                        escalation_reason="handoff",
+                    if _gh_policy is not None:
+                        _HANDOFF_ACK_TEXT = _gh_policy.reply_text
+                        if _gh_policy.deliver_contact:
+                            _handoff_vcard_target = _gh_policy.call_target
+                except Exception as _gh_pol_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[Merchant/HANDOFF_GUARD] generic contact policy failed: %s",
+                        _gh_pol_exc,
                     )
-                except Exception as _ho_card_exc:  # noqa: BLE001
-                    logger.warning(
-                        "[Merchant/HANDOFF_GUARD] vCard send failed | tenant=%s err=%s",
-                        tenant_id, _ho_card_exc,
-                    )
-            _trace.mark_outbound_sent(
-                source="pre_brain_handoff",
-                length=len(_HANDOFF_ACK_TEXT),
+
+            logger.info(
+                "[Merchant/HANDOFF_GUARD] PRE-BRAIN handoff fired | tenant=%s "
+                "to=%s text_snippet=%r owner_contact=%s tier=%s "
+                "full_flip=%s create_session=%s pause_ai=%s",
+                tenant_id, to, (text or "")[:80], _is_owner_contact, _ho_tier,
+                _do_full_handoff_flip, _do_create_session, _do_pause_ai,
             )
-        except Exception as _ho_send_exc:  # noqa: BLE001
-            logger.exception(
-                "[Merchant/HANDOFF_GUARD] ack send failed | tenant=%s to=%s",
-                tenant_id, to,
-            )
-            # Pre-brain silent-drop visibility (May 2026 #22): the customer
-            # explicitly asked for a human, the handoff guard fired, but the
-            # acknowledgement send raised. The customer sees nothing AND
-            # the brain pipeline is bypassed — exactly the class of drop the
-            # owner dashboard's "إسقاطات الإدخال" tab is meant to surface.
+            _ho_convo = None
             try:
-                from core.inbound_observability import (  # noqa: PLC0415
-                    record_inbound_drop,
-                    DROP_PRE_BRAIN_HANDOFF,
+                from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+                _ho_convo = _get_or_create_conversation(db, tenant_id, to)
+            except Exception as _ho_conv_exc:  # noqa: BLE001
+                logger.warning(
+                    "[Merchant/HANDOFF_GUARD] conversation lookup failed | "
+                    "tenant=%s err=%s",
+                    tenant_id, _ho_conv_exc,
                 )
-                record_inbound_drop(
-                    tenant_id=tenant_id,
-                    drop_kind=DROP_PRE_BRAIN_HANDOFF,
-                    customer_phone=to or "",
-                    conversation_id=getattr(_ho_convo, "id", None),
-                    inbound_preview=text or "",
-                    chosen_path="handoff_guard_ack_send",
-                    detail=(
-                        f"ack_send_exception={_ho_send_exc.__class__.__name__}: "
-                        f"{str(_ho_send_exc)[:120]}"
-                    ),
+            if _ho_convo is not None:
+                try:
+                    if _do_full_handoff_flip:
+                        # Queue flags for the staff inbox. Do not mark the
+                        # conversation human-owned — notify-only must keep AI.
+                        _ho_convo.is_human_handoff  = True
+                        _ho_convo.needs_human       = True
+                        _ho_convo.handoff_active    = True
+                    else:
+                        # VAGUE tier — soft flag only. We deliberately
+                        # leave status / is_human_handoff / handoff_active
+                        # untouched so the conversation remains
+                        # AI-served and the next inbound goes through
+                        # the brain.
+                        _ho_convo.needs_human       = True
+                    db.flush()
+                except Exception as _ho_flag_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Merchant/HANDOFF_GUARD] flag flip failed | "
+                        "tenant=%s err=%s",
+                        tenant_id, _ho_flag_exc,
+                    )
+            if _do_create_session:
+                try:
+                    from handoff.manager import create_handoff_session  # noqa: PLC0415
+                    create_handoff_session(
+                        db, tenant_id, to, to, text or "",
+                        reason="customer_request",
+                        context_snapshot={"pre_brain_tier": _ho_tier},
+                    )
+                except Exception as _ho_sess_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Merchant/HANDOFF_GUARD] session creation failed | "
+                        "tenant=%s err=%s",
+                        tenant_id, _ho_sess_exc,
+                    )
+            if _do_pause_ai and _ho_convo is not None:
+                try:
+                    from core.ai_pause_guard import (  # noqa: PLC0415
+                        pause_ai as _ho_pause_ai,
+                        REASON_HUMAN_HANDOFF as _HO_R_HOFF,
+                    )
+                    _ho_pause_ai(db, _ho_convo, reason=_HO_R_HOFF,
+                                 by=f"webhook:pre_brain_handoff:{_ho_tier}")
+                except Exception as _ho_pause_exc:  # noqa: BLE001
+                    logger.debug(
+                        "[Merchant/HANDOFF_GUARD] pause_ai failed: %s",
+                        _ho_pause_exc,
+                    )
+            try:
+                await _send_whatsapp_message(
+                    phone_id=phone_id, to=to,
+                    text=_HANDOFF_ACK_TEXT,
+                    _tenant_id=tenant_id, _db=db,
                 )
-            except Exception as _obs_exc:  # noqa: BLE001
-                logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
-        try:
-            from routers.conversations import record_outbound_message  # noqa: PLC0415
-            record_outbound_message(
-                db, tenant_id, to, _HANDOFF_ACK_TEXT,
-                event_type="ai_handoff_ack",
-                extra={
-                    "is_ai":              True,
-                    "deterministic_path": f"pre_brain_handoff:{_ho_tier}",
-                    "handoff_active":     bool(_do_full_handoff_flip),
-                    "needs_human":        True,
-                    "ai_paused":          bool(_do_pause_ai),
-                    "owner_contact":      bool(_is_owner_contact),
-                    "owner_tier":         _ho_tier,
-                    **(_persona_ownership.to_metadata()),
-                },
-            )
-        except Exception as _ho_rec_exc:  # noqa: BLE001
-            logger.debug(
-                "[Merchant/HANDOFF_GUARD] outbound record failed: %s",
-                _ho_rec_exc,
-            )
-        try:
-            _persona_ownership.mark_bypass(
-                _POReason.PRE_BRAIN_HANDOFF,
-                owner=f"pre_brain_handoff:{_ho_tier}",
-            )
-            _trace.fallback_source = f"pre_brain_handoff:{_ho_tier}"
-            _trace.response_goal   = "handoff"
-            _trace.intent          = "talk_to_human"
-            _sync_persona_observability()
-            _trace.emit()
-        except Exception:  # noqa: BLE001
-            pass
-        return
+                if _handoff_vcard_target is not None and _staff_call_marker_enabled():
+                    try:
+                        from services.call_resolver import (  # noqa: PLC0415
+                            build_contacts_payload as _ho_build_contacts,
+                        )
+                        _ho_payload = _ho_build_contacts(
+                            [_handoff_vcard_target], to=to,
+                        )
+                        await _send_contacts_message(
+                            phone_id=phone_id, to=to,
+                            payload=_ho_payload,
+                            _tenant_id=tenant_id, _db=db,
+                            customer_message=text or "",
+                            delivery_path="handoff",
+                            escalation_reason="handoff",
+                        )
+                    except Exception as _ho_card_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[Merchant/HANDOFF_GUARD] vCard send failed | tenant=%s err=%s",
+                            tenant_id, _ho_card_exc,
+                        )
+                _trace.mark_outbound_sent(
+                    source="pre_brain_handoff",
+                    length=len(_HANDOFF_ACK_TEXT),
+                )
+            except Exception as _ho_send_exc:  # noqa: BLE001
+                logger.exception(
+                    "[Merchant/HANDOFF_GUARD] ack send failed | tenant=%s to=%s",
+                    tenant_id, to,
+                )
+                # Pre-brain silent-drop visibility (May 2026 #22): the customer
+                # explicitly asked for a human, the handoff guard fired, but the
+                # acknowledgement send raised. The customer sees nothing AND
+                # the brain pipeline is bypassed — exactly the class of drop the
+                # owner dashboard's "إسقاطات الإدخال" tab is meant to surface.
+                try:
+                    from core.inbound_observability import (  # noqa: PLC0415
+                        record_inbound_drop,
+                        DROP_PRE_BRAIN_HANDOFF,
+                    )
+                    record_inbound_drop(
+                        tenant_id=tenant_id,
+                        drop_kind=DROP_PRE_BRAIN_HANDOFF,
+                        customer_phone=to or "",
+                        conversation_id=getattr(_ho_convo, "id", None),
+                        inbound_preview=text or "",
+                        chosen_path="handoff_guard_ack_send",
+                        detail=(
+                            f"ack_send_exception={_ho_send_exc.__class__.__name__}: "
+                            f"{str(_ho_send_exc)[:120]}"
+                        ),
+                    )
+                except Exception as _obs_exc:  # noqa: BLE001
+                    logger.warning("[INBOUND_OBS] hook failed: %s", _obs_exc)
+            try:
+                from routers.conversations import record_outbound_message  # noqa: PLC0415
+                record_outbound_message(
+                    db, tenant_id, to, _HANDOFF_ACK_TEXT,
+                    event_type="ai_handoff_ack",
+                    extra={
+                        "is_ai":              True,
+                        "deterministic_path": f"pre_brain_handoff:{_ho_tier}",
+                        "handoff_active":     bool(_do_full_handoff_flip),
+                        "needs_human":        True,
+                        "ai_paused":          bool(_do_pause_ai),
+                        "owner_contact":      bool(_is_owner_contact),
+                        "owner_tier":         _ho_tier,
+                        **(_persona_ownership.to_metadata()),
+                    },
+                )
+            except Exception as _ho_rec_exc:  # noqa: BLE001
+                logger.debug(
+                    "[Merchant/HANDOFF_GUARD] outbound record failed: %s",
+                    _ho_rec_exc,
+                )
+            try:
+                _persona_ownership.mark_bypass(
+                    _POReason.PRE_BRAIN_HANDOFF,
+                    owner=f"pre_brain_handoff:{_ho_tier}",
+                )
+                _trace.fallback_source = f"pre_brain_handoff:{_ho_tier}"
+                _trace.response_goal   = "handoff"
+                _trace.intent          = "talk_to_human"
+                _sync_persona_observability()
+                _trace.emit()
+            except Exception:  # noqa: BLE001
+                pass
+            return
 
     try:
         if _t_merchant_entry_gates is not None:
@@ -8747,6 +8773,15 @@ async def _handle_merchant_message(
             )
             _scp_decision = None
 
+        if _scp_decision is not None and _generic_handoff_signal:
+            logger.info(
+                "[STAFF_CONTACT_POLICY] yield to Brain/D2 generic_handoff_signal "
+                "tenant=%s kind=%s",
+                tenant_id,
+                getattr(_scp_decision, "request_kind", "") or "",
+            )
+            _scp_decision = None
+
         if _scp_decision is not None:
             _persona_ownership.mark_bypass(
                 _POReason.STAFF_CONTACT_RECOVERY,
@@ -9366,63 +9401,133 @@ async def _handle_merchant_message(
                             }
                     except Exception:  # noqa: BLE001
                         _ship_info_for_fallback = {}
-                    _decision = choose_intent_aware_fallback(
-                        text or "",
-                        reason=FALLBACK_REASON_BRAIN_EXCEPTION,
-                        store_has_live_agent=False,
-                        shipping_info=_ship_info_for_fallback,
-                    )
-                    _trace.fallback_source = _decision.kind
-                    _trace.response_goal = _decision.response_goal
-                    try:
-                        from services.fallback_policy import (  # noqa: PLC0415
-                            STAGE_BRAIN_EXCEPTION as _STG_BRAIN_EXC,
-                            emit_temp_error_fallback_log as _emit_temp_err,
+                    _safe_reply = ""
+                    _d2_compose_ok = False
+                    if _generic_handoff_signal:
+                        from core.fallback_policy import (  # noqa: PLC0415
+                            empty_reply_fallback as _d2_empty_fb,
                         )
+                        from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: PLC0415
+                            compose_staff_escalation_with_verifier as _d2_compose,
+                            d2_operational_escalation_succeeded as _d2_ok,
+                            execute_staff_escalation_for_safety_signal as _d2_safety,
+                        )
+                        try:
+                            _d2_safety_result = await _d2_safety(
+                                db=db,
+                                tenant_id=int(tenant_id),
+                                customer_phone=to,
+                                message=text or "",
+                                convo=convo,
+                            )
+                            _d2_execution_result = _d2_safety_result
+                            logger.info(
+                                "[Merchant/HANDOFF_GUARD] Brain exception D2 safety "
+                                "tenant=%s success=%s",
+                                tenant_id,
+                                bool(_d2_safety_result.success),
+                            )
+                        except Exception as _d2_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[Merchant/HANDOFF_GUARD] Brain exception D2 safety "
+                                "failed tenant=%s err=%s",
+                                tenant_id,
+                                type(_d2_exc).__name__,
+                            )
+                            _d2_execution_result = None
+                        try:
+                            if _d2_ok(_d2_execution_result):
+                                _safe_reply = await _d2_compose(
+                                    db=db,
+                                    tenant_id=int(tenant_id),
+                                    customer_phone=to,
+                                    message=text or "",
+                                    result=_d2_execution_result,
+                                    conversation_id=getattr(convo, "id", None),
+                                )
+                            else:
+                                _safe_reply = _d2_empty_fb()
+                        except Exception as _d2_cmp_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[Merchant/HANDOFF_GUARD] Brain exception D2 compose "
+                                "failed tenant=%s err=%s",
+                                tenant_id,
+                                type(_d2_cmp_exc).__name__,
+                            )
+                            _safe_reply = _d2_empty_fb()
+                        _safe_reply = str(_safe_reply or "").strip() or _d2_empty_fb()
+                        _d2_compose_ok = True
+                    if not _d2_compose_ok:
+                        _decision = choose_intent_aware_fallback(
+                            text or "",
+                            reason=FALLBACK_REASON_BRAIN_EXCEPTION,
+                            store_has_live_agent=False,
+                            shipping_info=_ship_info_for_fallback,
+                            escalation_evidence_ok=False,
+                        )
+                        _trace.fallback_source = _decision.kind
+                        _trace.response_goal = _decision.response_goal
+                        try:
+                            from services.fallback_policy import (  # noqa: PLC0415
+                                STAGE_BRAIN_EXCEPTION as _STG_BRAIN_EXC,
+                                emit_temp_error_fallback_log as _emit_temp_err,
+                            )
 
-                        _emit_temp_err(
-                            tenant_id=tenant_id,
-                            conversation_id=getattr(convo, "id", None),
-                            sender=to or "",
-                            inbound_msg_id=str(wa_msg_id or ""),
-                            msg_type=str(getattr(_trace, "msg_type", "") or "text"),
-                            intent=str(getattr(_trace, "intent", "") or ""),
-                            stage=_STG_BRAIN_EXC,
-                            exception=brain_exc,
-                            fallback_kind=str(_decision.kind),
-                            response_goal=str(_decision.response_goal),
+                            _emit_temp_err(
+                                tenant_id=tenant_id,
+                                conversation_id=getattr(convo, "id", None),
+                                sender=to or "",
+                                inbound_msg_id=str(wa_msg_id or ""),
+                                msg_type=str(getattr(_trace, "msg_type", "") or "text"),
+                                intent=str(getattr(_trace, "intent", "") or ""),
+                                stage=_STG_BRAIN_EXC,
+                                exception=brain_exc,
+                                fallback_kind=str(_decision.kind),
+                                response_goal=str(_decision.response_goal),
+                            )
+                        except Exception:  # noqa: silent-ok — fallback telemetry must not block reply
+                            pass
+                        if _decision.kind == FALLBACK_KIND_SOFT_RETRY:
+                            _trace.clarification_triggered = True
+                            _trace.clarification_reason = (
+                                "no_confident_intent" if not _trace.top_intents
+                                else f"top_conf_{_trace.intent_confidence:.2f}_below_threshold"
+                            )
+                        elif _decision.kind == FALLBACK_KIND_INTENT_DETERMINISTIC:
+                            _trace.clarification_triggered = False
+                            _trace.clarification_reason = "suppressed_by_confident_intent"
+                        logger.info(
+                            "[FALLBACK_POLICY] tenant=%s to=%s kind=%s goal=%s rationale=%s",
+                            tenant_id, to, _decision.kind, _decision.response_goal,
+                            _decision.rationale,
                         )
-                    except Exception:  # noqa: silent-ok — fallback telemetry must not block reply
-                        pass
-                    if _decision.kind == FALLBACK_KIND_SOFT_RETRY:
-                        _trace.clarification_triggered = True
-                        _trace.clarification_reason = (
-                            "no_confident_intent" if not _trace.top_intents
-                            else f"top_conf_{_trace.intent_confidence:.2f}_below_threshold"
+                        _safe_reply = _decision.text
+                        _persona_ownership.mark_bypass(
+                            _POReason.FALLBACK_REPLY,
+                            owner=f"brain_exception:{_decision.kind}",
                         )
-                    elif _decision.kind == FALLBACK_KIND_INTENT_DETERMINISTIC:
-                        _trace.clarification_triggered = False
-                        _trace.clarification_reason = "suppressed_by_confident_intent"
-                    logger.info(
-                        "[FALLBACK_POLICY] tenant=%s to=%s kind=%s goal=%s rationale=%s",
-                        tenant_id, to, _decision.kind, _decision.response_goal,
-                        _decision.rationale,
-                    )
+                    else:
+                        _trace.fallback_source = "staff_escalation_compose"
+                        _trace.response_goal = "handoff"
+                        _persona_ownership.mark_bypass(
+                            _POReason.FALLBACK_REPLY,
+                            owner="brain_exception:staff_escalation_compose",
+                        )
                     if not _trace.outbound_lock_acquired():
                         return
-                    _safe_reply = _decision.text
-                    _persona_ownership.mark_bypass(
-                        _POReason.FALLBACK_REPLY,
-                        owner=f"brain_exception:{_decision.kind}",
-                    )
                     _fallback_meta = _persona_ownership.to_metadata()
                     try:
                         from core.outbound_text_policy import OutboundTextTracker  # noqa: PLC0415
 
                         _fb_tracker = OutboundTextTracker()
+                        _fb_kind = (
+                            "staff_escalation_compose"
+                            if _d2_compose_ok
+                            else str(getattr(_decision, "kind", "") or "")
+                        )
                         _fb_tracker.mark_fallback(
                             reason=FALLBACK_REASON_BRAIN_EXCEPTION,
-                            kind=str(_decision.kind),
+                            kind=_fb_kind,
                             intent=str(getattr(_trace, "intent", "") or ""),
                             decision_action=str(
                                 getattr(_trace, "decision_action", "") or ""
@@ -9454,6 +9559,29 @@ async def _handle_merchant_message(
                         source=_TS.SOURCE_BRAIN_EXCEPTION,
                         length=len(_safe_reply),
                     )
+                    if _generic_handoff_signal:
+                        try:
+                            from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: PLC0415
+                                d2_operational_escalation_succeeded as _d2_exc_ok,
+                                read_current_turn_d2_result as _d2_read,
+                            )
+
+                            _vcard_d2 = _d2_execution_result or _d2_read(db)
+                            if _d2_exc_ok(_vcard_d2):
+                                await _maybe_deliver_generic_handoff_vcard(
+                                    phone_id=phone_id,
+                                    to=to,
+                                    tenant_id=tenant_id,
+                                    db=db,
+                                    message=text or "",
+                                    d2_result=_vcard_d2,
+                                )
+                        except Exception as _gh_vcard_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[Merchant/HANDOFF_GUARD] post-D2 vCard failed tenant=%s err=%s",
+                                tenant_id,
+                                type(_gh_vcard_exc).__name__,
+                            )
                     return
             elif _turn_eval.status == "evaluated":
                 _turn_eval_applied = True
@@ -9472,6 +9600,51 @@ async def _handle_merchant_message(
                 _br_action = _turn_eval.br_action
                 _br_dec_action = _turn_eval.br_dec_action
                 _br_dec_args = dict(_turn_eval.br_dec_args or {})
+                if _generic_handoff_signal:
+                    from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: PLC0415
+                        action_handoff_already_executed as _d2_already,
+                        compose_staff_escalation_with_verifier as _d2_compose,
+                        execute_staff_escalation_for_safety_signal as _d2_safety,
+                        read_current_turn_d2_result as _d2_read,
+                    )
+                    if _d2_execution_result is None:
+                        _d2_execution_result = _d2_read(db)
+                    if not _d2_already(
+                        brain_handoff=_brain_handoff,
+                        decision_action=str(_br_dec_action or ""),
+                    ):
+                        try:
+                            _d2_miss = await _d2_safety(
+                                db=db,
+                                tenant_id=int(tenant_id),
+                                customer_phone=to,
+                                message=text or "",
+                                convo=convo,
+                            )
+                            _d2_execution_result = _d2_miss
+                            if _d2_miss.success:
+                                reply = await _d2_compose(
+                                    db=db,
+                                    tenant_id=int(tenant_id),
+                                    customer_phone=to,
+                                    message=text or "",
+                                    result=_d2_miss,
+                                    conversation_id=getattr(convo, "id", None),
+                                )
+                                _brain_handoff = True
+                                logger.info(
+                                    "[Merchant/HANDOFF_GUARD] semantic-miss D2 fallback "
+                                    "tenant=%s session=%s",
+                                    tenant_id,
+                                    (_d2_miss.data or {}).get("handoff_session_id"),
+                                )
+                        except Exception as _d2_miss_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[Merchant/HANDOFF_GUARD] semantic-miss D2 fallback "
+                                "failed tenant=%s err=%s",
+                                tenant_id,
+                                type(_d2_miss_exc).__name__,
+                            )
                 _outbound_abort_suppressor = _turn_eval.outbound_abort_suppressor
                 _brain_persona_compose_event = _turn_eval.brain_persona_compose_event
                 _outbound_text_tracker = _turn_eval.outbound_text_tracker
@@ -13012,6 +13185,29 @@ async def _handle_merchant_message(
         if _send_ok:
             logger.info("[TRACE][5/6] MERCHANT_AI_SENT | tenant=%s to=%s", tenant_id, to)
             logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)
+            if _generic_handoff_signal:
+                try:
+                    from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: PLC0415
+                        d2_operational_escalation_succeeded as _d2_vcard_ok,
+                        read_current_turn_d2_result as _d2_vcard_read,
+                    )
+
+                    _vcard_d2 = _d2_execution_result or _d2_vcard_read(db)
+                    if _d2_vcard_ok(_vcard_d2):
+                        await _maybe_deliver_generic_handoff_vcard(
+                            phone_id=phone_id,
+                            to=to,
+                            tenant_id=tenant_id,
+                            db=db,
+                            message=text or "",
+                            d2_result=_vcard_d2,
+                        )
+                except Exception as _gh_vcard_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Merchant/HANDOFF_GUARD] post-D2 vCard failed tenant=%s err=%s",
+                        tenant_id,
+                        type(_gh_vcard_exc).__name__,
+                    )
             _outbound_source = (
                 "loop_guard_recovery" if _loop_replaced_with_recovery
                 else ("brain" if (_brain_active and not MERCHANT_BRAIN_ENABLED_FALLBACK) else "legacy")
@@ -15916,6 +16112,56 @@ async def _send_contacts_message(
         _tenant_id=_tenant_id,
         _db=_db,
         _treat_dedup_as_success=False,
+    )
+
+
+async def _maybe_deliver_generic_handoff_vcard(
+    *,
+    phone_id: str,
+    to: str,
+    tenant_id: int,
+    db,
+    message: str,
+    d2_result=None,
+) -> None:
+    """Preserve configured generic staff vCard after proven D2 execution.
+
+    Detector / decision / chosen_path / brain_handoff are not enough.
+    D3 owner/admin contact resolution is not used here.
+    """
+    from modules.ai.brain.execution.staff_escalation_execution import (  # noqa: PLC0415
+        d2_operational_escalation_succeeded,
+    )
+
+    if not d2_operational_escalation_succeeded(d2_result):
+        return
+    if not _staff_call_marker_enabled():
+        return
+    from modules.ai.brain.commerce.staff_contact_policy import (  # noqa: PLC0415
+        evaluate_generic_handoff_contact_policy,
+    )
+
+    policy = evaluate_generic_handoff_contact_policy(
+        db,
+        tenant_id=tenant_id,
+        message=message or "",
+        customer_phone=to or "",
+    )
+    if policy is None or not policy.deliver_contact or policy.call_target is None:
+        return
+    from services.call_resolver import build_contacts_payload  # noqa: PLC0415
+
+    payload = build_contacts_payload([policy.call_target], to=to)
+    await _send_contacts_message(
+        phone_id=phone_id,
+        to=to,
+        payload=payload,
+        _tenant_id=tenant_id,
+        _db=db,
+        customer_message=message or "",
+        delivery_path="handoff",
+        escalation_reason="handoff",
+        policy_deliver_contact=True,
     )
 
 
