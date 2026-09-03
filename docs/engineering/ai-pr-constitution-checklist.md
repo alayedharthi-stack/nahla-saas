@@ -39,3 +39,7 @@ Enforcement: `constitution-compliance` CI check.
 - [ ] Fix order followed: state → truth → context → routing → capability → execution → persistence → postprocess → only then raw model evaluation.
 - [ ] No phrase maps, keyword routers, or customer-regex intent repair.
 - [ ] Model/prompt/persona unchanged unless MODEL-BLAME GATE passed **and** `OWNER_APPROVAL_REQUIRED=YES`.
+- [ ] GOV-002: for PRs after #924, the trusted BASE scanner is green. PR #924 only: `BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME` (BASE has no scanner yet). Do not treat a repository unit test as GitHub ruleset proof. Check name `gov002-trusted-base-scanner` is the dedicated runner; `constitution-compliance` in `ci.yml` remains PR-HEAD-controlled until the external ruleset/required-check readback.
+- [ ] No same-PR self-waiver of `intelligence_exceptions.json`. Exceptions match `change_class + file + symbol + expected_change_digest`; `exact_reason` is descriptive only.
+- [ ] Protected `governance_contract` tests were not removed or weakened.
+- [ ] If this is a partial first-divergence repair and replay shows a worse next owner, keep Draft — do not merge or deploy.

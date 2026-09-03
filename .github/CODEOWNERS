@@ -2,7 +2,13 @@
 AGENTS.md @alayedharthi-stack
 backend/modules/ai/compose/constitutional_policy.py @alayedharthi-stack
 backend/modules/ai/compose/tracked_violations_baseline.json @alayedharthi-stack
+backend/modules/ai/governance/ @alayedharthi-stack
 backend/tests/test_constitution_compliance.py @alayedharthi-stack
+backend/tests/test_intelligence_non_interference_guard.py @alayedharthi-stack
+scripts/lint_intelligence_non_interference.py @alayedharthi-stack
 .github/workflows/ci.yml @alayedharthi-stack
+.github/workflows/gov002-intelligence-non-interference.yml @alayedharthi-stack
 docs/engineering/ai-pr-constitution-checklist.md @alayedharthi-stack
+docs/engineering/intelligence-non-interference-policy.md @alayedharthi-stack
+docs/engineering/gov002-workflow-trust-root.md @alayedharthi-stack
 docs/engineering/merge-and-ci-policy.md @alayedharthi-stack

@@ -247,3 +247,82 @@ IF SOMETHING BREAKS AFTER THE MODEL, FIX THAT DOWNSTREAM OWNER.
 KEEP THE MODEL FREE.
 FIX THE SYSTEM AROUND THE MODEL.
 ```
+
+---
+
+## GOV-002 — executable enforcement
+
+GOV-001 is law. GOV-002 is the CI mechanism that inspects the actual diff.
+
+Authoritative scanner: `scripts/lint_intelligence_non_interference.py`
+
+On `pull_request` CI for **future** PRs, the scanner is loaded from **BASE**.
+PR **#924** is the bootstrap: BASE has no scanner, so
+`BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME` — the HEAD scanner is used
+because this PR is owner-reviewed. After #924:
+
+```text
+TRUSTED_BASE_SCANNER_REQUIRED=yes
+```
+
+Workflow YAML in `.github/workflows/ci.yml` is still PR-controlled for the
+legacy `constitution-compliance` job. The dedicated trust root is
+`.github/workflows/gov002-intelligence-non-interference.yml` on
+`pull_request_target` (Actions loads BASE YAML) plus a repository ruleset
+workflow pin documented in `docs/engineering/gov002-workflow-trust-root.md`.
+
+A PR must not edit the guard in the same change and teach it to accept the
+violation.
+
+`HEAD_SCANNER_CAN_SELF_BYPASS=no` is **not** claimed at the complete workflow
+level until the ruleset/required-check readback proves
+`HEAD_CAN_SKIP_GOV002_AND_STILL_SATISFY_REQUIRED_CHECK=no`.
+
+Wired into the required **`constitution-compliance`** job — not an optional check.
+
+### Change classes (default FAIL without a BASE-owned exception)
+
+`MODEL_CHANGE` `PROMPT_CHANGE` `PERSONA_CHANGE` `PHRASE_MAP_CHANGE` `KEYWORD_ROUTER_CHANGE` `CUSTOMER_REGEX_CHANGE` `CANNED_REPLY_CHANGE` `TENANT_SPECIFIC_SEMANTIC_CHANGE` `PHONE_SPECIFIC_SEMANTIC_CHANGE` `PRODUCT_SPECIFIC_SEMANTIC_CHANGE`
+
+Customer wording is reproduction/regression/acceptance input only. It is not the repair mechanism.
+
+Structured evidence serialization (`customer_order_evidence`, merchant truth, tool facts) is not automatically `PROMPT_CHANGE`. URL/ID/parser regex outside customer-semantic ownership is not automatically `CUSTOMER_REGEX_CHANGE`.
+
+### Owner exceptions — anti-self-waiver
+
+Registry: `backend/modules/ai/governance/intelligence_exceptions.json`
+
+The trusted scanner reads exceptions from **BASE**. Matching is exact:
+
+```text
+change_class + exact_file_scope + exact_symbol_scope + expected_change_digest
+```
+
+`exact_reason` is descriptive only. `owner_approval_ref`, `expires_at`,
+`expected_change_digest`, `single_use`, and `consumed` are required.
+`single_use` must be `true`; `false` is malformed. Consumption is
+`SINGLE_USE_SCOPE=PER_SCAN` and `PERSISTENT_CONSUMPTION=NO` — the scanner
+does not mutate the BASE registry. `consumed=true` never authorizes.
+Malformed rows fail closed. Digest is bound to the canonical BASE→HEAD
+delta, not a generic reason. Digest mismatch does not authorize. Expired
+exceptions do not authorize. Same file + same class + a
+different change is a new digest and fails. Implementation + new exception in
+the same PR is `SAME_PR_SELF_WAIVER`. Historical commit `02aff345` is
+retrospective-only and is not a runtime registry waiver.
+
+Sequence:
+
+```text
+authorization-only PR (AUTHORIZATION_PR_RUNTIME_AI_CHANGES=ZERO)
+→ merge
+→ implementation PR
+→ BASE scanner sees the authorization
+```
+
+### Protected contracts
+
+Tests marked `pytest.mark.governance_contract` (and the initial Order Support / Product Information modules listed in the registry) are fingerprinted from BASE. Removal, rename-to-evade, or assertion/fixture weakening fails unless a pre-existing BASE exception exists.
+
+### Partial-repair release safety
+
+A partial first-divergence repair may remain Draft. It must **not** merge or deploy when deterministic replay proves the customer-visible path becomes worse at the next known owner. Combining a semantic-ownership production change with protected-contract weakening is `UNSAFE_PARTIAL_REPAIR`.

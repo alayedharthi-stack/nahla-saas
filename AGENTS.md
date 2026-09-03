@@ -202,6 +202,20 @@ CI job: **`constitution-compliance`** (`backend/tests/test_constitution_complian
 
 `constitution-compliance` is currently a **required merge-blocking check on `main`** through GitHub branch protection. It must be green together with the other required checks (`lint-and-test`, `Scan repository for leaked secrets`). Repository files cannot themselves enforce GitHub branch protection; that configuration lives in GitHub. See `docs/engineering/merge-and-ci-policy.md`.
 
+GOV-002 makes GOV-001 executable: the required `constitution-compliance` job
+still runs constitutional pytest. The **trusted runner** is a dedicated
+workflow (`.github/workflows/gov002-intelligence-non-interference.yml`) loaded
+from BASE via `pull_request_target`, with a ruleset pin documented in
+`docs/engineering/gov002-workflow-trust-root.md`.
+
+PR #924 only: `BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME` because BASE has
+no scanner yet. After merge: `TRUSTED_BASE_SCANNER_REQUIRED=yes`.
+`BASE_NOT_AVAILABLE` fails closed.
+
+Owner exceptions cannot be created in the same PR as the runtime change. Authorization-only PRs must have zero AI runtime changes. Protected tests marked `governance_contract` cannot be removed or weakened without a pre-existing BASE exception.
+
+A partial first-divergence repair may remain Draft, but must not merge or deploy when deterministic replay proves the customer-visible path becomes worse at the next known owner.
+
 Pre-existing violations must be tracked in `tracked_violations_baseline.json` with violation ID, owner, `added_at`, `expiry_date`, `approved_by`, and removal reference — never silently grandfathered. New violation IDs require `governance_baseline_version` bump in a dedicated governance PR.
 
 ### AI PR review checklist

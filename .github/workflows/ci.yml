@@ -198,11 +198,14 @@ jobs:
 
   constitution-compliance:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -217,8 +220,72 @@ jobs:
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
           pip install pytest
 
+      - name: GOV-002 — Intelligence non-interference diff guard
+        env:
+          NAHLA_EVENT_NAME: ${{ github.event_name }}
+          NAHLA_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          NAHLA_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NAHLA_PUSH_BEFORE: ${{ github.event.before }}
+          NAHLA_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SCANNER_REL="scripts/lint_intelligence_non_interference.py"
+          if [ "${NAHLA_EVENT_NAME}" = "pull_request" ]; then
+            BASE_SHA="${NAHLA_PR_BASE_SHA:-}"
+            HEAD_SHA="${NAHLA_PR_HEAD_SHA:-}"
+          else
+            BASE_SHA="${NAHLA_PUSH_BEFORE:-}"
+            HEAD_SHA="${NAHLA_SHA:-}"
+          fi
+          if [ -z "${BASE_SHA}" ] || [ -z "${HEAD_SHA}" ] || [ "${BASE_SHA}" = "0000000000000000000000000000000000000000" ]; then
+            echo "BASE_NOT_AVAILABLE"
+            exit 1
+          fi
+          git fetch --no-tags origin "${BASE_SHA}" "${HEAD_SHA}" || {
+            echo "BASE_NOT_AVAILABLE: git fetch failed"
+            exit 1
+          }
+          MERGE_BASE="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}" || true)"
+          if [ -z "${MERGE_BASE}" ]; then
+            echo "BASE_NOT_AVAILABLE: merge-base could not be resolved"
+            exit 1
+          fi
+          SCAN_BASE="${MERGE_BASE}"
+          if git cat-file -e "${SCAN_BASE}:${SCANNER_REL}" 2>/dev/null; then
+            git show "${SCAN_BASE}:${SCANNER_REL}" > /tmp/nahla_intelligence_guard.py
+            python /tmp/nahla_intelligence_guard.py \
+              --repo . \
+              --base "${SCAN_BASE}" \
+              --head "${HEAD_SHA}" \
+              --trusted-base-scanner
+          elif git cat-file -e "${BASE_SHA}:${SCANNER_REL}" 2>/dev/null; then
+            git show "${BASE_SHA}:${SCANNER_REL}" > /tmp/nahla_intelligence_guard.py
+            python /tmp/nahla_intelligence_guard.py \
+              --repo . \
+              --base "${SCAN_BASE}" \
+              --head "${HEAD_SHA}" \
+              --trusted-base-scanner
+          else
+            if [ -f "${SCANNER_REL}" ]; then
+              echo "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME"
+              echo "BASE has no scanner; HEAD scanner is used only because GOV-002 is landing."
+              python "${SCANNER_REL}" \
+                --repo . \
+                --base "${SCAN_BASE}" \
+                --head "${HEAD_SHA}" \
+                --bootstrap
+            else
+              echo "BASE_NOT_AVAILABLE: scanner missing on BASE and HEAD"
+              exit 1
+            fi
+          fi
+
       - name: Constitution compliance
-        run: python -m pytest backend/tests/test_constitution_compliance.py -q
+        run: |
+          python -m pytest \
+            backend/tests/test_constitution_compliance.py \
+            backend/tests/test_intelligence_non_interference_guard.py \
+            -q
 
   trusted-context-layer1:
     runs-on: ubuntu-latest
