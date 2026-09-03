@@ -2328,6 +2328,30 @@ class WhatsAppConnection(Base):
     tenant = relationship('Tenant', back_populates='whatsapp_connection')
 
 
+class WhatsAppOAuthNonce(Base):
+    """Hashed, tenant-bound, single-use OAuth nonce. Raw nonce is never stored."""
+
+    __tablename__ = "whatsapp_oauth_nonces"
+    __table_args__ = (
+        UniqueConstraint("nonce_hash", name="uq_whatsapp_oauth_nonces_hash"),
+        Index("ix_whatsapp_oauth_nonces_expires_at", "expires_at"),
+        Index("ix_whatsapp_oauth_nonces_tenant_id", "tenant_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    nonce_hash = Column(String(64), nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    connection_mode = Column(String(32), nullable=False)
+    redirect_uri_fingerprint = Column(String(64), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 # ── Store Knowledge Sync ──────────────────────────────────────────────────────
 
 class StoreSyncJob(Base):

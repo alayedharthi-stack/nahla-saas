@@ -202,6 +202,9 @@ JWT_PUBLIC_PREFIXES = (
 JWT_PUBLIC_EXACT_PATHS = frozenset({
     "/salla/app",                       # legacy embedded HTML landing (iframe)
     "/api/salla/embedded/reconcile-telemetry",  # embedded reconcile CTA telemetry (no secrets)
+    # Meta server-side Embedded Signup callback — browser has no JWT.
+    # Durable hashed nonce must be consumed before any Graph/WABA mutation.
+    "/whatsapp/embedded/oauth/callback",
 })
 
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.

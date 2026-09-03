@@ -45,6 +45,15 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
+      - name: WhatsApp OAuth callback auth boundary
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            backend/tests/test_whatsapp_oauth_callback_auth_boundary.py \
+            -v --tb=short --maxfail=1 \
+            --junitxml=/tmp/whatsapp-oauth-auth-boundary.xml
+          python scripts/check_junit_clean.py /tmp/whatsapp-oauth-auth-boundary.xml
+
       - name: Canonical sibling identity unit tests
         run: |
           python -m pytest \
@@ -335,6 +344,7 @@ jobs:
       TENANT_CLONE_PG_SOURCE_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/tenant_clone_source
       TENANT_CLONE_PG_TARGET_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/tenant_clone_target
       LEGACY_MIG_PG_INTEGRATION_REQUIRED: "1"
+      WHATSAPP_OAUTH_NONCE_PG_REQUIRED: "1"
 
     steps:
       - name: Checkout
@@ -380,6 +390,15 @@ jobs:
               python -m alembic upgrade 0093
             )
           done
+
+      - name: WhatsApp OAuth durable nonce PostgreSQL
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            backend/tests/test_whatsapp_oauth_nonce_pg.py \
+            -v --tb=short --maxfail=1 \
+            --junitxml=/tmp/whatsapp-oauth-nonce-pg.xml
+          python scripts/check_junit_clean.py /tmp/whatsapp-oauth-nonce-pg.xml
 
       - name: WhatsApp provider schema PostgreSQL migration suite
         run: |
