@@ -264,3 +264,62 @@ def test_safety_signal_wrapper_reuses_same_d2_session(postgres_engine) -> None:
         except Exception:  # noqa: BLE001
             db.rollback()
         db.close()
+
+
+def test_brain_exception_inbound_message_event_survives_rollback(postgres_engine) -> None:
+    from core.conversation_engine import StateManager  # noqa: PLC0415
+    from models import Conversation, MessageEvent  # noqa: PLC0415
+
+    Session = sessionmaker(bind=postgres_engine)
+    db = Session()
+    suffix = uuid.uuid4().hex[:10]
+    name = f"d2-pg-inbound-{suffix}"
+    tenant_id = None
+    try:
+        tenant = Tenant(name=name, is_active=True)
+        db.add(tenant)
+        db.commit()
+        db.refresh(tenant)
+        tenant_id = tenant.id
+        convo = Conversation(status="active", tenant_id=tenant.id)
+        db.add(convo)
+        db.commit()
+        db.refresh(convo)
+        StateManager.save_message(
+            db,
+            "966500000580",
+            "أريد التحدث مع موظف من المتجر",
+            "inbound",
+            conversation_id=convo.id,
+            tenant_id=tenant.id,
+            extra_metadata={"wa_message_id": f"wamid.durable.{suffix}"},
+        )
+        db.rollback()
+        rows = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.tenant_id == tenant.id,
+                MessageEvent.direction == "inbound",
+            )
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].body == "أريد التحدث مع موظف من المتجر"
+    finally:
+        from sqlalchemy import text  # noqa: PLC0415
+
+        try:
+            if tenant_id is not None:
+                db.execute(
+                    text("DELETE FROM message_events WHERE tenant_id = :tid"),
+                    {"tid": tenant_id},
+                )
+                db.execute(
+                    text("DELETE FROM conversations WHERE tenant_id = :tid"),
+                    {"tid": tenant_id},
+                )
+            db.execute(text("DELETE FROM tenants WHERE name = :n"), {"n": name})
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+        db.close()

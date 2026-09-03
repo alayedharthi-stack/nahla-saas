@@ -61,6 +61,10 @@ _CLOSED_NOTIFY_STATUSES = frozenset(
 
 _NEUTRAL_CUSTOMER_NAME = ""
 
+# Current-turn ActionResult evidence. Session-scoped, not a global flag.
+_D2_TURN_RESULT_KEY = "d2_current_turn_action_result"
+_D2_TURN_RESULT_ATTR = "_nahla_d2_current_turn_action_result"
+
 
 @dataclass(frozen=True)
 class NotificationOutcome:
@@ -73,6 +77,71 @@ class NotificationOutcome:
 
 def _flag(value: Any) -> str:
     return "true" if value is True else "false"
+
+
+def stamp_current_turn_d2_result(db: Any, result: ActionResult) -> ActionResult:
+    """Bind this-turn D2 ActionResult onto the current DB session.
+
+    Not a process-global flag. Webhook vCard reads this object.
+    """
+    if db is None or result is None:
+        return result
+    try:
+        info = getattr(db, "info", None)
+        if isinstance(info, dict):
+            info[_D2_TURN_RESULT_KEY] = result
+            return result
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — session stamp must not block D2
+        pass
+    try:
+        setattr(db, _D2_TURN_RESULT_ATTR, result)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — session stamp must not block D2
+        pass
+    return result
+
+
+def read_current_turn_d2_result(db: Any) -> Optional[ActionResult]:
+    if db is None:
+        return None
+    try:
+        info = getattr(db, "info", None)
+        if isinstance(info, dict):
+            stamped = info.get(_D2_TURN_RESULT_KEY)
+            if isinstance(stamped, ActionResult):
+                return stamped
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing session stamp is fail-closed
+        pass
+    stamped = getattr(db, _D2_TURN_RESULT_ATTR, None)
+    return stamped if isinstance(stamped, ActionResult) else None
+
+
+def clear_current_turn_d2_result(db: Any) -> None:
+    """Drop leftover session-bound D2 evidence. Current-turn only."""
+    if db is None:
+        return
+    try:
+        info = getattr(db, "info", None)
+        if isinstance(info, dict):
+            info.pop(_D2_TURN_RESULT_KEY, None)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — leftover stamp clear is best-effort
+        pass
+    try:
+        if hasattr(db, _D2_TURN_RESULT_ATTR):
+            delattr(db, _D2_TURN_RESULT_ATTR)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — leftover stamp clear is best-effort
+        pass
+
+
+def d2_execution_succeeded_this_turn(result: Optional[ActionResult]) -> bool:
+    """True only when this-turn D2 produced a real session id.
+
+    Detector, decision.action, chosen_path, and brain_handoff are not
+    operational truth here.
+    """
+    if result is None or not bool(getattr(result, "success", False)):
+        return False
+    data = result.data if isinstance(getattr(result, "data", None), dict) else {}
+    return data.get("handoff_session_id") not in (None, "")
 
 
 def format_staff_escalation_facts_overlay(data: Dict[str, Any]) -> str:
@@ -314,13 +383,16 @@ async def execute_staff_escalation(
     tenant_id = getattr(ctx, "tenant_id", None)
     customer_phone = str(getattr(ctx, "customer_phone", None) or "").strip()
 
+    def _finish(result: ActionResult) -> ActionResult:
+        return stamp_current_turn_d2_result(db, result)
+
     try:
         tenant_ok = int(tenant_id) > 0
     except (TypeError, ValueError):
         tenant_ok = False
 
     if db is None or not tenant_ok or not customer_phone:
-        return _result_payload(
+        return _finish(_result_payload(
             success=False,
             status=STATUS_UNAVAILABLE,
             failure_code="execution_capability_unavailable",
@@ -329,7 +401,7 @@ async def execute_staff_escalation(
             verified_contact_phone=verified_phone,
             after_hours=after_hours,
             error="execution_capability_unavailable",
-        )
+        ))
 
     from handoff.manager import create_handoff_session, get_active_handoff  # noqa: PLC0415
 
@@ -352,7 +424,7 @@ async def execute_staff_escalation(
             tenant_id,
             type(exc).__name__,
         )
-        return _result_payload(
+        return _finish(_result_payload(
             success=False,
             status=STATUS_FAILED,
             failure_code="persistence_failed",
@@ -361,10 +433,10 @@ async def execute_staff_escalation(
             verified_contact_phone=verified_phone,
             after_hours=after_hours,
             error="persistence_failed",
-        )
+        ))
 
     if session is None or getattr(session, "id", None) in (None, ""):
-        return _result_payload(
+        return _finish(_result_payload(
             success=False,
             status=STATUS_FAILED,
             failure_code="persistence_failed",
@@ -373,7 +445,7 @@ async def execute_staff_escalation(
             verified_contact_phone=verified_phone,
             after_hours=after_hours,
             error="persistence_failed",
-        )
+        ))
 
     session_id = session.id
     reused = existing is not None and getattr(existing, "id", None) == session_id
@@ -434,7 +506,7 @@ async def execute_staff_escalation(
             )
 
     status = STATUS_NOTIFIED if notify.accepted else STATUS_QUEUED
-    return _result_payload(
+    return _finish(_result_payload(
         success=True,
         status=status,
         session_id=session_id,
@@ -448,7 +520,7 @@ async def execute_staff_escalation(
         verified_contact_available=verified_ok,
         verified_contact_phone=verified_phone,
         after_hours=after_hours,
-    )
+    ))
 
 
 def should_defer_generic_prebrain_execution(
@@ -479,6 +551,16 @@ def action_handoff_already_executed(
     from modules.ai.brain.decision.actions import ACTION_HANDOFF  # noqa: PLC0415
 
     return bool(brain_handoff) or str(decision_action or "") == ACTION_HANDOFF
+
+
+def d2_operational_escalation_succeeded(result: Optional[ActionResult]) -> bool:
+    """Current-turn D2 execution success with a real session id.
+
+    Detector signals, decision.action, chosen_path, and brain_handoff
+    are not operational execution truth. Queue-only success is not a
+    notification, assignment, or future-followup capability.
+    """
+    return d2_execution_succeeded_this_turn(result)
 
 
 def build_staff_escalation_context(
