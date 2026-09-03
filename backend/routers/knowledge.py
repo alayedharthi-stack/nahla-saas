@@ -1071,7 +1071,11 @@ def _legacy_classifier_confidence_floor() -> float:
 
 
 def _kind_from_classifier_proposal(proposal: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Extract a validated kind from one classifier proposal (may be untrusted)."""
+    """Extract a validated ``kind`` only.
+
+    Classifier ``title`` / ``body`` prose is never used as the stored
+    merchant payload (GOV-003). Original split text remains source of truth.
+    """
     if not isinstance(proposal, dict):
         return None
     ops = proposal.get("proposed_ops") or []
@@ -1216,6 +1220,8 @@ def _finalize_legacy_import_block(
         metadata["unscoped_product_bound"] = True
 
     sk = get_kind(kind)
+    # Original merchant heading/body stay the stored payload. Classifier
+    # prose (op title/body) is classification-only and is discarded (GOV-003).
     resolved_title = (title or "").strip()[:255] or (sk.label_ar if sk else kind)
     return {
         "kind": kind,

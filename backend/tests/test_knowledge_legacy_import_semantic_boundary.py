@@ -2,12 +2,19 @@
 LIVE-KNOWLEDGE-LEAK-D1A — legacy import semantic boundary.
 
 INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+GOV003_ACTIVE=YES
+MODEL_EXPRESSION_POLICY=MODEL_CHOOSES_ITS_OWN_WORDS
 MODEL_CHANGED=NO
 PROMPT_CHANGED=NO
 PERSONA_CHANGED=NO
 PHRASE_MAP_CHANGED=NO
 KEYWORD_ROUTER_CHANGED=NO
 CUSTOMER_REGEX_CHANGED=NO
+EXACT_REPLY_TEMPLATE_CHANGED=NO
+MANDATORY_PHRASE_CHANGED=NO
+FORBIDDEN_WORD_LIST_CHANGED=NO
+PREFERRED_WORD_LIST_CHANGED=NO
+POSTPROCESS_STYLE_REWRITE_CHANGED=NO
 
 Repair-advisor hits are suspicion/review metadata only. Write-time
 approval requires the existing canonical classifier at the few-shot
@@ -238,6 +245,42 @@ def test_merchant_text_preserved_and_no_product_links_fabricated() -> None:
     assert item["proven_product_ids"] == ()
     assert "product_id" not in item["metadata_json"]
     assert item["metadata_json"].get("unscoped_product_bound") is True
+
+
+def test_classifier_prose_rewrite_is_not_stored_as_payload() -> None:
+    """GOV-003: classifier may set kind/confidence; it must not replace merchant text."""
+    from routers.knowledge import _plan_legacy_import
+
+    heading = "الفوائد"
+    body = "الحذاء الرياضي الأبيض خفيف ومناسب للمشي اليومي."
+    rewritten_title = "عنوان معاد صياغته من المصنف"
+    rewritten_body = "نص معاد صياغته من المصنف وليس النص الأصلي."
+
+    def _clf(_text: str) -> Dict[str, Any]:
+        return {
+            "fallback_used": False,
+            "confidence": 0.95,
+            "proposed_ops": [{
+                "op": "create",
+                "kind": "product_benefit",
+                "title": rewritten_title,
+                "body": rewritten_body,
+            }],
+        }
+
+    planned = _plan_legacy_import(
+        f"# {heading}\n{body}\n",
+        classifier_fn=_clf,
+    )
+    item = planned[0]
+    assert item["kind"] == "product_benefit"
+    assert item["classification_source"] == "canonical_classifier"
+    assert item["title"] == heading
+    assert item["body"] == body
+    assert rewritten_title not in item["title"]
+    assert rewritten_body not in item["body"]
+    assert item["ai_status"] == "needs_review"
+    assert _ai_visible(item) is False
 
 
 def test_high_confidence_scoped_product_benefit_may_be_approved() -> None:
