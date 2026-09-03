@@ -157,11 +157,13 @@ def _resolve_operational_name(
                 if name:
                     return name, str(snap.customer_name_source or "customer_db").strip()
         except Exception:  # noqa: BLE001  # noqa: silent-ok — customer identity read must not block checkout
-            pass
-        for key in ("full_name", "name"):
-            val = str(getattr(customer, key, "") or "").strip()
-            if _valid_customer_name(val):
-                return val, "customer_db"
+            logger.debug(
+                "[CATALOG_CHECKOUT_IDENTITY] operational name read failed",
+                exc_info=True,
+            )
+        # Customer row exists but is not operationally eligible. Proposed /
+        # display names are confirmation context, not checkout identity.
+        return "", ""
 
     for key in ("customer_name", "name", "display_name", "full_name"):
         val = str(profile.get(key) or "").strip()

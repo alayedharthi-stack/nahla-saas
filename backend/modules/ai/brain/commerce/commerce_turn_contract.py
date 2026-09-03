@@ -309,6 +309,8 @@ def _build_existing_order_support_decision(
 def _derive_active_checkout_next_goal(
     message: str,
     missing_fields: Sequence[str],
+    *,
+    identity_missing_mode: str = "",
 ) -> str:
     from modules.ai.brain.commerce.current_order_amount import is_current_order_inquiry  # noqa: PLC0415
 
@@ -325,11 +327,79 @@ def _derive_active_checkout_next_goal(
             return "collect_missing_city"
         if first in {"delivery_address", "address", "address_line", "short_address_code"}:
             return "collect_missing_address"
-        if first in {"customer_first_name", "customer_last_name", "name"}:
+        if first in {"customer_first_name", "customer_last_name", "name", "customer_name"}:
+            mode = str(identity_missing_mode or "").strip()
+            if mode == "confirm":
+                return "confirm_customer_name_once"
+            if mode == "edit_requested":
+                return "collect_customer_name_only"
             return "collect_customer_name_for_whatsapp_order"
         if first == "payment_method":
             return "collect_payment_method_for_whatsapp_order"
+        return "collect_next_whatsapp_order_field"
     return "continue_checkout"
+
+
+def _identity_missing_mode_from_order_context(order_context: Any) -> str:
+    if order_context is None:
+        return ""
+    identity = getattr(order_context, "identity", None)
+    prefill = getattr(order_context, "prefill", None)
+    mode = str(getattr(identity, "missing_mode", "") or "").strip()
+    if mode:
+        return mode
+    return str(getattr(prefill, "identity_missing_mode", "") or "").strip()
+
+
+def _project_identity_confirmation_into_known_facts(
+    known_facts: Dict[str, Any],
+    order_context: Any,
+) -> None:
+    if order_context is None:
+        return
+    identity = getattr(order_context, "identity", None)
+    mode = _identity_missing_mode_from_order_context(order_context)
+    if mode:
+        known_facts.setdefault("name_mode", mode)
+    candidate = str(getattr(identity, "confirmation_candidate", "") or "").strip()
+    if mode == "confirm" and candidate:
+        known_facts["name_confirmation_candidate"] = candidate
+        known_facts["name_operational"] = False
+        source = str(getattr(identity, "name_source", "") or "").strip()
+        status = str(getattr(identity, "name_status", "") or "").strip()
+        if source:
+            known_facts.setdefault("name_source", source)
+        if status:
+            known_facts.setdefault("name_status", status)
+        confidence = getattr(identity, "confidence", None)
+        if confidence is not None:
+            known_facts.setdefault("name_confidence", float(confidence or 0.0))
+    elif mode == "skip":
+        operational = str(getattr(identity, "operational_name", "") or "").strip()
+        if operational:
+            known_facts.setdefault("name_operational", True)
+    elif mode:
+        known_facts.setdefault("name_operational", False)
+
+
+def _preserve_confirm_name_goal(
+    next_goal: Optional[str],
+    missing_fields: Sequence[str],
+    *,
+    identity_missing_mode: str,
+) -> str:
+    goal = str(next_goal or "").strip()
+    mode = str(identity_missing_mode or "").strip()
+    if mode != "confirm":
+        return goal
+    if not any(m in _NAME_FIELD_NAMES for m in missing_fields):
+        return goal
+    if goal in {
+        "collect_customer_name_for_whatsapp_order",
+        "collect_customer_name_only",
+    }:
+        return "confirm_customer_name_once"
+    return goal
 
 
 def _resolve_active_checkout_known_facts(
@@ -765,6 +835,9 @@ def build_commerce_turn_contract(
             next_goal = _derive_active_checkout_next_goal(
                 str(getattr(ctx, "message", "") or ""),
                 missing_fields,
+                identity_missing_mode=_identity_missing_mode_from_order_context(
+                    order_context
+                ),
             )
             allowed_actions = [ACTION_PROPOSE_DRAFT_ORDER, "llm_compose"]
             from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
@@ -867,6 +940,9 @@ def build_commerce_turn_contract(
                 next_goal = _derive_active_checkout_next_goal(
                     str(getattr(ctx, "message", "") or ""),
                     missing_fields,
+                    identity_missing_mode=_identity_missing_mode_from_order_context(
+                        order_context
+                    ),
                 )
                 reasons.append("identity_next_goal_refreshed_after_known_facts")
         except Exception:  # noqa: BLE001
@@ -906,6 +982,9 @@ def build_commerce_turn_contract(
                 next_goal = _derive_active_checkout_next_goal(
                     str(getattr(ctx, "message", "") or ""),
                     missing_fields,
+                    identity_missing_mode=_identity_missing_mode_from_order_context(
+                        order_context
+                    ),
                 )
                 reasons.append("accepted_location_outranks_stale_address_goal")
             elif _address_collect_goal_is_stale(next_goal, missing_fields):
@@ -919,6 +998,9 @@ def build_commerce_turn_contract(
                     next_goal = _derive_active_checkout_next_goal(
                         str(getattr(ctx, "message", "") or ""),
                         missing_fields,
+                        identity_missing_mode=_identity_missing_mode_from_order_context(
+                            order_context
+                        ),
                     )
                 reasons.append("saved_address_next_goal_refreshed_after_hydration")
             known_facts["next_goal_after_hydration"] = next_goal
@@ -929,6 +1011,17 @@ def build_commerce_turn_contract(
                 "[COMMERCE_TURN_CONTRACT] saved address apply failed tenant=%s",
                 getattr(ctx, "tenant_id", None),
             )
+
+    identity_mode = _identity_missing_mode_from_order_context(order_context)
+    _project_identity_confirmation_into_known_facts(known_facts, order_context)
+    preserved_goal = _preserve_confirm_name_goal(
+        next_goal,
+        missing_fields,
+        identity_missing_mode=identity_mode,
+    )
+    if preserved_goal != str(next_goal or "").strip():
+        next_goal = preserved_goal
+        reasons.append("identity_confirm_mode_preserves_confirmation_goal")
 
     return CommerceTurnContract(
         commerce_state=commerce_state,

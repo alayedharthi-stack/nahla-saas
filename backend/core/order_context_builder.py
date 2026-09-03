@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.customer_identity_resolver import (
+    SOURCE_WHATSAPP_PROFILE,
     STATUS_MISSING,
     STATUS_PROPOSED,
     STATUS_REJECTED,
@@ -20,6 +21,7 @@ from core.customer_identity_resolver import (
     is_manual_name_locked,
     is_official_name_status,
     read_customer_identity,
+    resolve_name_confirmation_candidate,
 )
 from core.wa_order_lifecycle import has_accepted_delivery_address
 from services.nahla_order_bridge import nahla_wa_external_id
@@ -68,6 +70,7 @@ class OrderIdentityContext:
     missing_name_reason: str = ""
     missing_mode: str = "ask"
     can_use_for_shipping_label: bool = False
+    confirmation_candidate: str = ""
 
 
 @dataclass(frozen=True)
@@ -292,6 +295,10 @@ def build_order_identity(
     ):
         name_source = "order_customer_info"
 
+    confirmation_candidate = resolve_name_confirmation_candidate(snapshot=snap)
+    if confirmation_candidate and not name_source:
+        name_source = SOURCE_WHATSAPP_PROFILE
+
     return OrderIdentityContext(
         customer_id=customer_id,
         phone=phone or str(getattr(customer, "phone", None) or ""),
@@ -304,8 +311,9 @@ def build_order_identity(
         confidence=float(snap.customer_name_confidence or 0.0),
         locked_by_merchant=locked,
         has_verified_name=has_verified,
-        has_proposed_name=bool(snap.proposed_name),
+        has_proposed_name=bool(confirmation_candidate),
         missing_name_reason=_missing_name_reason(customer, snap),
+        confirmation_candidate=confirmation_candidate,
     )
 
 

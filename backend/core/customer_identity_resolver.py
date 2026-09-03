@@ -301,6 +301,41 @@ def can_use_name_for_operations(customer: Any) -> bool:
     return is_official_name_status(snap.customer_name_status) and bool(snap.customer_name)
 
 
+def resolve_name_confirmation_candidate(
+    customer: Any = None,
+    *,
+    snapshot: Optional[CustomerIdentitySnapshot] = None,
+) -> str:
+    """Validated proposed/display name for confirmation context.
+
+    Never operational truth. Official names are not confirmation candidates.
+    Invalid, generic, or noisy WhatsApp display values yield ``""``.
+    """
+    snap = snapshot
+    if snap is None:
+        if customer is None:
+            return ""
+        snap = read_customer_identity(customer)
+    if is_official_name_status(snap.customer_name_status) and str(
+        snap.customer_name or ""
+    ).strip():
+        return ""
+    ordered: list[str] = []
+    proposed = str(snap.proposed_name or "").strip()
+    display = str(snap.display_name or "").strip()
+    if proposed:
+        ordered.append(proposed)
+    if display and display not in ordered and (
+        snap.customer_name_status == STATUS_PROPOSED or proposed
+    ):
+        ordered.append(display)
+    for raw in ordered:
+        result = validate_customer_name(raw)
+        if result.valid:
+            return result.cleaned
+    return ""
+
+
 def _should_overwrite(
     *,
     existing_status: str,
