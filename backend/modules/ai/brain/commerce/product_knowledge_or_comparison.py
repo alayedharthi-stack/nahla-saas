@@ -151,7 +151,6 @@ _PRODUCT_KB_KINDS = frozenset({
     "product_usage",
     "product_info",
 })
-_KB_RELEVANCE_THRESHOLD = 0.35
 
 
 class ProductKnowledgeKind(str, Enum):
@@ -585,6 +584,9 @@ def _combine_kb_relevance(
 ) -> float:
     """Product subject and current question are independent relevance dimensions."""
     return max(float(subject_relevance or 0.0), float(question_relevance or 0.0))
+
+
+_KB_RELEVANCE_THRESHOLD = 0.35
 
 
 def _retrieve_product_kb_sections(
