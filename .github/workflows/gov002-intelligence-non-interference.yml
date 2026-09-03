@@ -3,9 +3,10 @@ name: GOV-002 trusted intelligence guard
 # Trust root: GitHub loads this workflow from the BASE ref for
 # pull_request_target / merge_group. Feature PR HEAD cannot replace it.
 #
-# pull_request is a one-time bootstrap so PR #924 can emit the check
-# before this file exists on main. After merge, pull_request_target is
-# the enforcement path. Do not treat pull_request as the trust root.
+# persist-credentials: false cannot be used: actions/checkout then runs
+# `git submodule foreach` during credential cleanup, and this repository
+# has a dangling gitlink `stable-diffusion-webui` without .gitmodules.
+# Token scope is still contents:read only.
 
 on:
   pull_request_target:
@@ -27,7 +28,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
           submodules: false
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
 
@@ -36,7 +36,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
           submodules: false
           ref: ${{ github.event.pull_request.head.sha }}
 

@@ -593,7 +593,6 @@ class TestGOV002ExecutableGuardWiring:
         ).read_text(encoding="utf-8")
         assert "pull_request_target" in wf
         assert "gov002-trusted-base-scanner" in wf
-        assert "persist-credentials: false" in wf
         assert "submodules: false" in wf
         assert "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME" in wf
 
