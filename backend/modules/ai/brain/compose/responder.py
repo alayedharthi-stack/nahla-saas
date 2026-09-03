@@ -138,7 +138,29 @@ class DefaultComposer:
         result: ActionResult,
         ctx: BrainContext,
     ) -> str:
+        original_action = str(getattr(decision, "action", "") or "")
         text = await self._compose_impl(decision, result, ctx)
+        try:
+            from modules.ai.brain.postprocess.staff_escalation_semantic_claims import (  # noqa: PLC0415
+                maybe_enforce_staff_escalation_semantic_truth,
+            )
+
+            text = await maybe_enforce_staff_escalation_semantic_truth(
+                original_action=original_action,
+                text=text,
+                decision=decision,
+                result=result,
+                ctx=ctx,
+                compose_impl=self._compose_impl,
+            )
+        except Exception:  # noqa: BLE001
+            if original_action == ACTION_HANDOFF:
+                from core.fallback_policy import empty_reply_fallback  # noqa: PLC0415
+
+                logger.exception(
+                    "[STAFF_ESCALATION_SEMANTIC_VERIFY] compose_hook_failed"
+                )
+                text = empty_reply_fallback()
         try:
             from core.outbound_text_policy import attach_compose_provenance  # noqa: PLC0415
 
