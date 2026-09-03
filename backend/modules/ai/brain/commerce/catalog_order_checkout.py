@@ -6,6 +6,11 @@ Phase 1 enforce: WhatsApp native catalog order → continue checkout.
 Operational only. This module never writes customer-facing text and never
 routes to staff/contact surfaces. It only turns a current WhatsApp
 ``type=order`` payload into the existing checkout action.
+
+Active catalog checkout is persistent/resumable context. It is not
+current-turn ownership. Follow-up turns continue checkout only when
+existing structured contracts prove the inbound is a checkout slot
+or a current native catalog_order event.
 """
 from __future__ import annotations
 
@@ -292,10 +297,99 @@ def _prep_dict(order_prep: Any) -> Dict[str, Any]:
     return dict(getattr(order_prep, "__dict__", {}) or {})
 
 
+def _inbound_is_structured_location_event(ctx: BrainContext) -> bool:
+    """True for a native WhatsApp location payload, not free-text location questions."""
+    meta = _inbound_metadata(ctx)
+    source = str(meta.get("source_type") or meta.get("type") or "").strip().lower()
+    if source in {"location", "location_pin", "whatsapp_location"}:
+        return True
+    loc = meta.get("location") if isinstance(meta.get("location"), dict) else {}
+    if loc.get("latitude") is not None or loc.get("longitude") is not None:
+        return True
+    if meta.get("latitude") is not None and meta.get("longitude") is not None:
+        return True
+    return False
+
+
+def _inbound_is_payment_method_choice(ctx: BrainContext) -> bool:
+    """Reuse the merchant payment-method extractor — no new wording rules."""
+    message = str(getattr(ctx, "message", "") or "")
+    if not message.strip():
+        return False
+    try:
+        from core.merchant_payment_methods import (  # noqa: PLC0415
+            inbound_is_payment_method_choice,
+            resolve_merchant_payment_methods,
+        )
+
+        methods = resolve_merchant_payment_methods()
+        return bool(inbound_is_payment_method_choice(message, methods))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — payment extractor probe must not invent checkout ownership
+        return False
+
+
+def current_turn_continues_catalog_checkout(ctx: BrainContext) -> bool:
+    """
+    True when THIS inbound structurally owns checkout.
+
+    Distinct from :func:`is_active_catalog_checkout`, which only means
+    resumable checkout context exists.
+    """
+    if is_current_catalog_order_submitted(ctx):
+        return True
+    if not is_active_catalog_checkout(ctx):
+        return False
+    if _inbound_is_structured_location_event(ctx):
+        return True
+
+    message = str(getattr(ctx, "message", "") or "")
+    state = getattr(ctx, "state", None)
+    prep = getattr(state, "order_prep", None) if state else None
+
+    try:
+        from modules.ai.brain.commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
+            message_fulfills_awaited_checkout_slot,
+        )
+
+        if message_fulfills_awaited_checkout_slot(
+            message,
+            order_prep=prep,
+            customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+        ):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing slot contract probe must not invent ownership
+        pass
+
+    try:
+        from core.wa_address_ingestion import is_address_like_delivery_text  # noqa: PLC0415
+
+        if is_address_like_delivery_text(message):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing address extractor must not invent ownership
+        pass
+
+    try:
+        from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
+            is_address_on_file_claim,
+            is_same_order_confirmation,
+        )
+
+        if is_same_order_confirmation(message) or is_address_on_file_claim(message):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — existing continuation contracts must not invent ownership
+        pass
+
+    if _inbound_is_payment_method_choice(ctx):
+        return True
+    return False
+
+
 def is_active_catalog_checkout(ctx: BrainContext) -> bool:
     """
     True when a native catalog checkout session is still in progress — including
     follow-up turns after the initial catalog_order event.
+
+    This is ACTIVE_CHECKOUT_CONTEXT, not current-turn checkout ownership.
     """
     if is_current_catalog_order_submitted(ctx):
         return True
@@ -324,10 +418,12 @@ def is_active_catalog_checkout(ctx: BrainContext) -> bool:
 
 
 def try_active_catalog_checkout_continue_decision(ctx: BrainContext) -> Optional[Decision]:
-    """Continue checkout from order_prep / active draft — not only current-turn catalog_order."""
+    """Continue checkout only for a current catalog event or a structural follow-up slot."""
     if not catalog_order_continue_checkout_enabled():
         return None
     if not is_active_catalog_checkout(ctx):
+        return None
+    if not current_turn_continues_catalog_checkout(ctx):
         return None
     product = _product_from_state(ctx)
     address_like = False
@@ -395,13 +491,16 @@ def maybe_enforce_catalog_order_continue_checkout(
     """
     Force current native catalog order events into checkout continuation.
 
-    This prevents regressions where a submitted catalog order drifts back into
-    product browse/listing ("وش المتوفر؟", sections, catalog replay) even
-    though the customer already selected a concrete product in WhatsApp.
+    Follow-up active checkout does not override an unrelated owner merely
+    because persisted checkout context exists.
     """
     if not catalog_order_continue_checkout_enabled():
         return decision
-    if not is_current_catalog_order_submitted(ctx) and not is_active_catalog_checkout(ctx):
+    if is_current_catalog_order_submitted(ctx):
+        pass
+    elif is_active_catalog_checkout(ctx) and current_turn_continues_catalog_checkout(ctx):
+        pass
+    else:
         return decision
 
     from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
@@ -448,6 +547,7 @@ def maybe_enforce_catalog_order_continue_checkout(
 __all__ = [
     "catalog_order_extraction_facts",
     "catalog_order_continue_checkout_enabled",
+    "current_turn_continues_catalog_checkout",
     "is_active_catalog_checkout",
     "is_catalog_line_items_authoritative",
     "is_catalog_line_items_authoritative_from_prep",

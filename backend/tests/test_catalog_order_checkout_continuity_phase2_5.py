@@ -182,7 +182,7 @@ class TestActiveCheckoutContractEnforce:
         assert contract.known_facts.get("catalog_order_current_turn") is not True
         assert contract.known_facts.get("active_catalog_checkout") is True
 
-    def test_backup_enforce_also_covers_followup(
+    def test_unrelated_browse_followup_is_not_forced_into_checkout(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -192,7 +192,8 @@ class TestActiveCheckoutContractEnforce:
             ctx,
             Decision(action=ACTION_SEARCH_PRODUCTS, args={}),
         )
-        assert enforced.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert enforced.action == ACTION_SEARCH_PRODUCTS
+        assert try_active_catalog_checkout_continue_decision(ctx) is None
 
     def test_normal_browse_unaffected_without_active_checkout(self) -> None:
         ctx = BrainContext(
