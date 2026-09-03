@@ -151,6 +151,7 @@ _PRODUCT_KB_KINDS = frozenset({
     "product_usage",
     "product_info",
 })
+_KB_RELEVANCE_THRESHOLD = 0.35
 
 
 class ProductKnowledgeKind(str, Enum):
@@ -577,6 +578,15 @@ def _score_kb_section(*, title: str, body: str, subject: str) -> float:
     return min(1.0, hits / max(1, len(subj_tokens)) + (0.2 if hits >= 2 else 0.0))
 
 
+def _combine_kb_relevance(
+    *,
+    subject_relevance: float,
+    question_relevance: float,
+) -> float:
+    """Product subject and current question are independent relevance dimensions."""
+    return max(float(subject_relevance or 0.0), float(question_relevance or 0.0))
+
+
 def _retrieve_product_kb_sections(
     db: Any,
     tenant_id: int,
@@ -601,6 +611,7 @@ def _retrieve_product_kb_sections(
 
     try:
         kind_tuple = tuple(kinds_filter or _PRODUCT_KB_KINDS)
+        allowed_kinds = frozenset(kind_tuple)
         rows = (
             apply_ai_visible_kb_query_filters(db.query(MerchantKnowledgeSection))
             .filter(
@@ -618,8 +629,17 @@ def _retrieve_product_kb_sections(
         logger.debug("[PRODUCT_KNOWLEDGE] KB query failed tenant=%s err=%s", tenant_id, exc)
         return []
 
-    scored: List[tuple[float, Dict[str, Any]]] = []
+    scored: List[tuple[float, float, Dict[str, Any]]] = []
     for row in rows:
+        try:
+            row_tenant = int(getattr(row, "tenant_id", 0) or 0)
+        except (TypeError, ValueError):
+            row_tenant = 0
+        if row_tenant and row_tenant != int(tenant_id):
+            continue
+        row_kind = str(getattr(row, "kind", "") or "").strip().lower()
+        if row_kind not in allowed_kinds:
+            continue
         linked_product_ids: set[int] = set()
         for link in (getattr(row, "product_links", None) or []):
             try:
@@ -637,23 +657,39 @@ def _retrieve_product_kb_sections(
         body = str(getattr(row, "body", "") or "").strip()
         if not title and not body:
             continue
-        score = _score_kb_section(title=title, body=body, subject=subject or probe)
-        if score < 0.35:
+        subject_relevance = _score_kb_section(
+            title=title,
+            body=body,
+            subject=str(subject or "").strip(),
+        )
+        question_relevance = _score_kb_section(
+            title=title,
+            body=body,
+            subject=str(message or "").strip(),
+        )
+        combined = _combine_kb_relevance(
+            subject_relevance=subject_relevance,
+            question_relevance=question_relevance,
+        )
+        if combined < _KB_RELEVANCE_THRESHOLD:
             continue
         scored.append(
             (
-                score,
+                combined,
+                question_relevance,
                 {
                     "section_id": getattr(row, "id", None),
                     "title": title,
                     "body": body[:800],
-                    "kind": str(getattr(row, "kind", "") or ""),
-                    "match_score": round(score, 3),
+                    "kind": row_kind,
+                    "match_score": round(combined, 3),
+                    "subject_score": round(subject_relevance, 3),
+                    "question_score": round(question_relevance, 3),
                 },
             )
         )
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [item for _, item in scored[:limit]]
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [payload for _, _, payload in scored[:limit]]
 
 
 def gather_product_knowledge_facts(
