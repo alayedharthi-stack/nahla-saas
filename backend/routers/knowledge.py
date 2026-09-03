@@ -67,7 +67,6 @@ from services.knowledge_section_kinds import (
     all_kinds,
     get_kind,
     group_for,
-    is_behavioral_kind,
     is_valid_kind,
     is_valid_link_role,
 )
@@ -873,8 +872,11 @@ async def backfill_payment_media_keys(
 #   2. Map each heading to a *structural hint* via a keyword table.
 #      That table is NOT the final semantic authority for customer-visible
 #      kinds (especially product-bound kinds).
-#   3. Finalize each candidate through the existing canonical knowledge
-#      classification boundary (KB-2 advisor + ``classify_quick_update``).
+#   3. Preserve every candidate's original merchant text. Canonical
+#      ``classify_quick_update`` may confirm a kind (bounded to one call
+#      per import). Repair-advisor hits are suspicion/review metadata
+#      only. Unconfirmed candidates are stored as ``quick_update`` +
+#      ``needs_review`` and are not AI-visible.
 #   4. If we find at least one mappable heading, create one section per
 #      block. Otherwise we create a single ``custom`` section with the
 #      whole text — the merchant can split it later from the UI.
@@ -1034,6 +1036,9 @@ def _split_legacy_text(text: str) -> List[Dict[str, str]]:
 
 _FAIL_SAFE_KIND = "quick_update"
 _REVIEW_STATUS = "needs_review"
+# Existing format-with-AI is one ``classify_quick_update`` per request.
+# A 121-row legacy import must not fan out into 121 synchronous LLM calls.
+_MAX_CLASSIFIER_CALLS_PER_IMPORT = 1
 
 
 def _kind_is_product_bound(kind: Optional[str]) -> bool:
@@ -1045,14 +1050,29 @@ def _legacy_candidate_text(title: str, body: str) -> str:
     return f"{(title or '').strip()}\n{(body or '').strip()}".strip()
 
 
-def _kind_from_classifier_proposal(proposal: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Extract a validated kind from the existing classifier contract.
+def _legacy_classifier_confidence_floor() -> float:
+    """Acceptance floor from the existing classifier few-shot contract.
 
-    ``fallback_used`` means the canonical classifier did not produce a
-    trusted semantic kind. The heading table must not fill that gap for
-    product-bound facts.
+    ``classify_quick_update`` has no separate min-confidence setting.
+    Successful few-shot examples in ``_FEW_SHOT_EXAMPLES`` all report
+    ``confidence >= 0.90``; the deterministic fallback reports ``0.0``.
+    Import auto-approval reuses that documented successful floor.
     """
-    if not isinstance(proposal, dict) or proposal.get("fallback_used"):
+    from modules.ai.knowledge.classifier import _FEW_SHOT_EXAMPLES  # noqa: PLC0415
+
+    confs: List[float] = []
+    for example in _FEW_SHOT_EXAMPLES:
+        expected = example.get("expected") or {}
+        try:
+            confs.append(float(expected.get("confidence")))
+        except (TypeError, ValueError):
+            continue
+    return min(confs) if confs else 0.90
+
+
+def _kind_from_classifier_proposal(proposal: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Extract a validated kind from one classifier proposal (may be untrusted)."""
+    if not isinstance(proposal, dict):
         return None
     ops = proposal.get("proposed_ops") or []
     if not isinstance(ops, list):
@@ -1066,6 +1086,15 @@ def _kind_from_classifier_proposal(proposal: Optional[Dict[str, Any]]) -> Option
         if is_valid_kind(kind):
             return kind
     return None
+
+
+def _proposal_confidence(proposal: Optional[Dict[str, Any]]) -> Optional[float]:
+    if not isinstance(proposal, dict) or proposal.get("confidence") is None:
+        return None
+    try:
+        return float(proposal.get("confidence"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _call_canonical_legacy_classifier(raw_text: str) -> Dict[str, Any]:
@@ -1096,86 +1125,95 @@ def _call_canonical_legacy_classifier(raw_text: str) -> Dict[str, Any]:
         }
 
 
-def _finalize_legacy_import_block(
-    *,
-    hint_kind: str,
-    title: str,
-    body: str,
-    classifier_fn: Optional[Callable[[str], Dict[str, Any]]] = None,
-    proven_product_ids: Optional[Sequence[int]] = None,
-) -> Dict[str, Any]:
-    """Resolve a legacy split candidate into a write-safe section.
-
-    Heading-table kind is a structural hint only. Customer-visible
-    semantic kind is taken from the existing KB-2 advisor (deterministic
-    structural contract) and, for product-bound hints, the existing
-    canonical ``classify_quick_update`` boundary. Unknown results fail
-    to ``quick_update`` + ``needs_review``. Unscoped product-bound kinds
-    are never written as AI-visible global facts.
-    """
+def _advisor_suspicion(text: str) -> tuple[bool, Optional[str]]:
+    """Preview-only repair-advisor signal. Never authorizes a write kind."""
     from modules.ai.knowledge.repair_advisor import (  # noqa: PLC0415
         _has_behavioral_signal,
         _suggest_behavioral_kind,
     )
 
+    if not _has_behavioral_signal(text):
+        return False, None
+    return True, _suggest_behavioral_kind(text)
+
+
+def _finalize_legacy_import_block(
+    *,
+    hint_kind: str,
+    title: str,
+    body: str,
+    proposal: Optional[Dict[str, Any]] = None,
+    classifier_attempted: bool = False,
+    advisor_suspected: bool = False,
+    advisor_suggested_kind: Optional[str] = None,
+    fail_safe_reason: Optional[str] = None,
+    proven_product_ids: Optional[Sequence[int]] = None,
+) -> Dict[str, Any]:
+    """Resolve a legacy split candidate into a write-safe section.
+
+    Heading-table kind and repair-advisor suggestions are hints /
+    suspicion only. A section becomes AI-visible only when the
+    existing canonical ``classify_quick_update`` result is
+    trustworthy (not fallback, valid op, confidence at the few-shot
+    floor) and product-bound rows have proven product scope.
+    """
     hint = hint_kind if is_valid_kind(hint_kind) else "custom"
-    text = _legacy_candidate_text(title, body)
     metadata: Dict[str, Any] = {
         "imported_from": "manual_knowledge_base",
         "heading_hint_kind": hint,
+        "repair_advisor_suspicion": bool(advisor_suspected),
     }
-    kind = hint
-    ai_status = "approved"
-    classification_source = "heading_hint"
-    confidence: Optional[float] = None
+    if advisor_suggested_kind:
+        metadata["repair_advisor_suggested_kind"] = advisor_suggested_kind
 
-    if _has_behavioral_signal(text):
-        kind = _suggest_behavioral_kind(text)
-        classification_source = "repair_advisor_behavioral"
-    elif _kind_is_product_bound(hint):
-        classify = classifier_fn or _call_canonical_legacy_classifier
-        proposal = classify(text)
-        classified = _kind_from_classifier_proposal(proposal)
-        if isinstance(proposal, dict) and proposal.get("confidence") is not None:
-            try:
-                confidence = float(proposal.get("confidence"))
-            except (TypeError, ValueError):
-                confidence = None
-        if classified:
-            kind = classified
-            classification_source = "canonical_classifier"
-        else:
+    kind = _FAIL_SAFE_KIND
+    ai_status = _REVIEW_STATUS
+    classification_source = "fail_safe_unconfirmed"
+    confidence = _proposal_confidence(proposal)
+    reason = fail_safe_reason or "unconfirmed_semantic_kind"
+
+    if proposal is not None or classifier_attempted:
+        if not isinstance(proposal, dict) or proposal.get("fallback_used"):
             kind = _FAIL_SAFE_KIND
             ai_status = _REVIEW_STATUS
             classification_source = "fail_safe_unknown"
-            metadata["fail_safe_reason"] = (
-                str(proposal.get("fallback_reason") or "classifier_unavailable")
+            reason = (
+                str((proposal or {}).get("fallback_reason") or "classifier_unavailable")
                 if isinstance(proposal, dict)
                 else "classifier_unavailable"
             )
+        else:
+            classified = _kind_from_classifier_proposal(proposal)
+            floor = _legacy_classifier_confidence_floor()
+            if classified is None:
+                kind = _FAIL_SAFE_KIND
+                ai_status = _REVIEW_STATUS
+                classification_source = "fail_safe_unknown"
+                reason = "no_trustworthy_op"
+            elif confidence is None:
+                kind = classified
+                ai_status = _REVIEW_STATUS
+                classification_source = "canonical_classifier_low_confidence"
+                reason = "malformed_confidence"
+            elif confidence < floor:
+                kind = classified
+                ai_status = _REVIEW_STATUS
+                classification_source = "canonical_classifier_low_confidence"
+                reason = "low_confidence"
+            else:
+                kind = classified
+                classification_source = "canonical_classifier"
+                ai_status = "approved"
+                reason = None
 
     metadata["classification_source"] = classification_source
+    if reason:
+        metadata["fail_safe_reason"] = reason
 
     proven = tuple(int(pid) for pid in (proven_product_ids or ()) if pid)
     if _kind_is_product_bound(kind) and not proven:
         ai_status = _REVIEW_STATUS
         metadata["unscoped_product_bound"] = True
-
-    # Heading-only product-bound kinds must never be auto-promoted.
-    if classification_source == "heading_hint" and _kind_is_product_bound(kind):
-        kind = _FAIL_SAFE_KIND
-        ai_status = _REVIEW_STATUS
-        classification_source = "fail_safe_unknown"
-        metadata["classification_source"] = classification_source
-        metadata["fail_safe_reason"] = "heading_only_product_bound"
-        metadata.pop("unscoped_product_bound", None)
-
-    if is_behavioral_kind(kind):
-        # Group-7 is the correct overlay for assistant guidance. Keep it
-        # approved so the behavioral layer can use it; facts retrieval
-        # already excludes these kinds.
-        ai_status = "approved"
-        metadata.pop("unscoped_product_bound", None)
 
     sk = get_kind(kind)
     resolved_title = (title or "").strip()[:255] or (sk.label_ar if sk else kind)
@@ -1191,6 +1229,7 @@ def _finalize_legacy_import_block(
         "classification_confidence": confidence,
         "heading_hint_kind": hint,
         "proven_product_ids": proven,
+        "classifier_attempted": classifier_attempted,
     }
 
 
@@ -1199,21 +1238,79 @@ def _plan_legacy_import(
     *,
     classifier_fn: Optional[Callable[[str], Dict[str, Any]]] = None,
     proven_product_ids: Optional[Sequence[int]] = None,
+    max_classifier_calls: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """Split then finalize. Used by migrate-from-legacy and tests."""
+    """Split then finalize. Used by migrate-from-legacy and tests.
+
+    At most ``_MAX_CLASSIFIER_CALLS_PER_IMPORT`` canonical classifier
+    calls run per import (default 1, matching format-with-AI). Advisor
+    suspicion and product-bound hints get first claim on that budget.
+    Remaining candidates fail closed to ``needs_review``.
+    """
     blocks = _split_legacy_text(text)
     if not blocks and (text or "").strip():
         blocks = [{"kind": "custom", "title": "ملاحظات عامة", "body": text}]
-    return [
-        _finalize_legacy_import_block(
-            hint_kind=b["kind"],
-            title=b.get("title") or "",
-            body=b.get("body") or "",
-            classifier_fn=classifier_fn,
-            proven_product_ids=proven_product_ids,
+
+    budget = (
+        _MAX_CLASSIFIER_CALLS_PER_IMPORT
+        if max_classifier_calls is None
+        else max(0, int(max_classifier_calls))
+    )
+    classify = classifier_fn or _call_canonical_legacy_classifier
+
+    annotated: List[Dict[str, Any]] = []
+    for block in blocks:
+        candidate_text = _legacy_candidate_text(
+            block.get("title") or "", block.get("body") or "",
         )
-        for b in blocks
-    ]
+        suspected, suggested = _advisor_suspicion(candidate_text)
+        annotated.append({
+            "hint": block["kind"],
+            "title": block.get("title") or "",
+            "body": block.get("body") or "",
+            "text": candidate_text,
+            "advisor_suspected": suspected,
+            "advisor_suggested_kind": suggested,
+        })
+
+    def _priority(index: int) -> tuple[int, int]:
+        item = annotated[index]
+        if item["advisor_suspected"]:
+            return (0, index)
+        if _kind_is_product_bound(item["hint"]):
+            return (1, index)
+        return (2, index)
+
+    classify_indexes = {
+        index
+        for rank, index in enumerate(sorted(range(len(annotated)), key=_priority))
+        if rank < budget
+    }
+
+    planned: List[Dict[str, Any]] = []
+    for index, item in enumerate(annotated):
+        proposal: Optional[Dict[str, Any]] = None
+        attempted = False
+        limit_reason: Optional[str] = None
+        if index in classify_indexes:
+            attempted = True
+            proposal = classify(item["text"])
+        elif budget == 0 or classify_indexes:
+            limit_reason = "classifier_call_limit"
+        planned.append(
+            _finalize_legacy_import_block(
+                hint_kind=item["hint"],
+                title=item["title"],
+                body=item["body"],
+                proposal=proposal,
+                classifier_attempted=attempted,
+                advisor_suspected=item["advisor_suspected"],
+                advisor_suggested_kind=item["advisor_suggested_kind"],
+                fail_safe_reason=limit_reason,
+                proven_product_ids=proven_product_ids,
+            )
+        )
+    return planned
 
 
 class MigrateRequest(BaseModel):
