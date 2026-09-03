@@ -309,6 +309,11 @@ def compute_change_digest(
     return hashlib.sha256(raw).hexdigest()
 
 
+def delta_payload(base_fp: str, head_fp: str) -> str:
+    """Canonical BASE→HEAD change used for exception digests. Never a generic reason."""
+    return f"BASE\n{base_fp or ''}\nHEAD\n{head_fp or ''}"
+
+
 def _run_git(repo: str, args: Sequence[str]) -> Tuple[int, str, str]:
     proc = subprocess.run(
         ["git", "-C", repo, *args],
@@ -830,8 +835,8 @@ def load_exceptions(raw: Optional[str]) -> Tuple[List[OwnerException], List[str]
             continue
         single_use = row.get("single_use")
         consumed = row.get("consumed")
-        if not isinstance(single_use, bool):
-            malformed.append(f"exceptions[{idx}] single_use must be boolean")
+        if single_use is not True:
+            malformed.append(f"exceptions[{idx}] single_use must be true")
             continue
         if not isinstance(consumed, bool):
             malformed.append(f"exceptions[{idx}] consumed must be boolean")
@@ -858,6 +863,8 @@ def exception_active(exc: OwnerException, *, as_of: Optional[date] = None) -> bo
     if not exc.valid or not exc.exception_id or not exc.change_class:
         return False
     if exc.consumed:
+        return False
+    if exc.single_use is not True:
         return False
     if not exc.expected_change_digest or not exc.owner_approval_ref or not exc.expires_at:
         return False
@@ -910,11 +917,13 @@ def add_finding(
     symbol: str = "",
     payload: str = "",
 ) -> None:
+    # Authorization digest is bound to the caller-supplied canonical delta.
+    # Generic reason/diff_hunk must not become the digest authority.
     digest = compute_change_digest(
         change_class=change_class,
         file=file,
         symbol=symbol,
-        payload=payload or diff_hunk or reason,
+        payload=payload,
     )
     finding = Finding(
         file=posix(file),
@@ -974,7 +983,10 @@ def _scan_regex(
         reason=f"{kind} in semantic ownership surface",
         diff_hunk="; ".join(sorted(added | removed)[:4]),
         symbol="",
-        payload="\n".join(sorted(added | removed)),
+        payload=delta_payload(
+            "\n".join(f"{k}:{v[1]}" for k, v in sorted(base_fp.items())),
+            "\n".join(f"{k}:{v[1]}" for k, v in sorted(head_fp.items())),
+        ),
     )
 
 
@@ -999,7 +1011,7 @@ def _scan_phrase_keyword(
                 change_class="PHRASE_MAP_CHANGE",
                 reason=f"customer-language collection '{key}' added or modified",
                 symbol=key,
-                payload=dump,
+                payload=delta_payload(base_maps.get(key, (0, ""))[1], dump),
             )
     base_kw = keyword_in_checks(base_src or "")
     head_kw = keyword_in_checks(head_src)
@@ -1076,6 +1088,8 @@ def _scan_identity(
             line=line,
             change_class=cls,
             reason=f"semantic branch conditioned on {name}=={value}",
+            symbol=name,
+            payload=delta_payload("", f"{name}=={value}"),
         )
 
 
@@ -1088,7 +1102,9 @@ def _scan_model(
 ) -> None:
     if not is_model_selection(path) or head_src is None:
         return
-    if model_selection_fingerprint(base_src or "") == model_selection_fingerprint(head_src):
+    base_fp = model_selection_fingerprint(base_src or "")
+    head_fp = model_selection_fingerprint(head_src)
+    if base_fp == head_fp:
         return
     add_finding(
         result,
@@ -1097,6 +1113,7 @@ def _scan_model(
         line=1,
         change_class="MODEL_CHANGE",
         reason="model identifier / routing / fallback selection changed",
+        payload=delta_payload(base_fp, head_fp),
     )
 
 
@@ -1109,7 +1126,9 @@ def _scan_prompt(
 ) -> None:
     if not is_prompt_instruction(path) or head_src is None:
         return
-    if prompt_instruction_fingerprint(base_src or "") == prompt_instruction_fingerprint(head_src):
+    base_fp = prompt_instruction_fingerprint(base_src or "")
+    head_fp = prompt_instruction_fingerprint(head_src)
+    if base_fp == head_fp:
         return
     add_finding(
         result,
@@ -1118,6 +1137,7 @@ def _scan_prompt(
         line=1,
         change_class="PROMPT_CHANGE",
         reason="model instruction / system prompt text changed",
+        payload=delta_payload(base_fp, head_fp),
     )
 
 
@@ -1144,9 +1164,15 @@ def _scan_persona(
             line=1,
             change_class="PERSONA_CHANGE",
             reason="persona runtime file is unparseable on HEAD",
+            payload=delta_payload(
+                dump_node(base_tree or ast.parse("pass")),
+                "UNPARSEABLE",
+            ),
         )
         return
-    if dump_node(base_tree or ast.parse("pass")) == dump_node(head_tree):
+    base_fp = dump_node(base_tree or ast.parse("pass"))
+    head_fp = dump_node(head_tree)
+    if base_fp == head_fp:
         return
     add_finding(
         result,
@@ -1155,6 +1181,7 @@ def _scan_persona(
         line=1,
         change_class="PERSONA_CHANGE",
         reason="persona runtime behavior surface changed",
+        payload=delta_payload(base_fp, head_fp),
     )
 
 
@@ -1181,6 +1208,8 @@ def _scan_canned(
             change_class="CANNED_REPLY_CHANGE",
             reason="new fixed customer-facing return in compose/persona surface",
             diff_hunk=text[:160],
+            symbol=line_s,
+            payload=delta_payload("", item),
         )
 
 
@@ -1218,6 +1247,7 @@ def _scan_protected_contracts(
                 line=1,
                 change_class="PROTECTED_CONTRACT_REMOVAL",
                 reason="protected governance contract module removed",
+                payload=delta_payload(base_src or "", ""),
             )
             weakened = True
             continue
@@ -1233,6 +1263,8 @@ def _scan_protected_contracts(
                 line=1,
                 change_class="PROTECTED_CONTRACT_REMOVAL",
                 reason=f"protected test '{name}' removed or renamed",
+                symbol=name,
+                payload=delta_payload(base_fp.get(name, ""), ""),
             )
             weakened = True
         for name in sorted(base_names & head_names):
@@ -1244,6 +1276,8 @@ def _scan_protected_contracts(
                     line=1,
                     change_class="PROTECTED_CONTRACT_WEAKENING",
                     reason=f"protected test '{name}' body/assertions/fixtures changed",
+                    symbol=name,
+                    payload=delta_payload(base_fp[name], head_fp[name]),
                 )
                 weakened = True
         _ = changed_map
@@ -1255,6 +1289,9 @@ def _scan_governance_and_waiver(
     exceptions: Sequence[OwnerException],
     changed: Sequence[Tuple[str, str]],
     *,
+    repo: str,
+    base: str,
+    head: str,
     bootstrap: bool,
 ) -> None:
     paths = [posix(p) for _s, p in changed]
@@ -1262,6 +1299,17 @@ def _scan_governance_and_waiver(
     runtime_hits = [p for p in paths if is_runtime_ai(p)]
     auth_hits = [p for p in paths if p in AUTHORIZATION_ONLY]
     non_auth = [p for p in paths if p not in AUTHORIZATION_ONLY and not is_governance_doc(p)]
+
+    def _paths_delta(rel_paths: Sequence[str]) -> str:
+        parts: List[str] = []
+        for rel in sorted(rel_paths):
+            parts.append(
+                delta_payload(
+                    git_show(repo, base, rel) or "",
+                    git_show(repo, head, rel) or "",
+                )
+            )
+        return "\n".join(parts)
 
     if "backend/modules/ai/governance/intelligence_exceptions.json" in paths:
         if runtime_hits:
@@ -1272,6 +1320,12 @@ def _scan_governance_and_waiver(
                 line=1,
                 change_class="SAME_PR_SELF_WAIVER",
                 reason="exception registry changed in the same PR as AI runtime code",
+                payload=delta_payload(
+                    git_show(repo, base, EXCEPTIONS_REL) or "",
+                    git_show(repo, head, EXCEPTIONS_REL) or "",
+                )
+                + "\nRUNTIME\n"
+                + "\n".join(sorted(runtime_hits)),
             )
 
     if core_hits and runtime_hits and not bootstrap:
@@ -1282,10 +1336,9 @@ def _scan_governance_and_waiver(
             line=1,
             change_class="GOVERNANCE_CORE_CHANGE",
             reason="governance scanner/CI/registry changed in a non-governance (runtime) PR",
+            payload=_paths_delta(core_hits) + "\nRUNTIME\n" + "\n".join(sorted(runtime_hits)),
         )
     elif core_hits and not bootstrap:
-        # Governance-only changes to the mechanism are allowed as the
-        # governance process, but mixing with unrelated feature files is not.
         allowed_with_core = set(GOVERNANCE_CORE) | set(GOVERNANCE_DOCS) | set(
             PROTECTED_CONTRACT_MODULES
         )
@@ -1304,6 +1357,7 @@ def _scan_governance_and_waiver(
                 line=1,
                 change_class="GOVERNANCE_CORE_CHANGE",
                 reason="governance core changed together with unrelated files",
+                payload=_paths_delta(core_hits) + "\nFEATURE\n" + "\n".join(sorted(featureish)),
             )
     _ = auth_hits
 
@@ -1327,6 +1381,7 @@ def scan_repository(
             line=1,
             change_class="BASE_NOT_AVAILABLE",
             reason="BASE_SHA or HEAD_SHA could not be resolved; fail closed",
+            payload="unresolved-sha",
         )
         return result
 
@@ -1351,10 +1406,19 @@ def scan_repository(
             line=1,
             change_class="BASE_NOT_AVAILABLE",
             reason=str(exc),
+            payload=str(exc),
         )
         return result
 
-    _scan_governance_and_waiver(result, exceptions, changed, bootstrap=bootstrap)
+    _scan_governance_and_waiver(
+        result,
+        exceptions,
+        changed,
+        repo=repo,
+        base=base_sha,
+        head=head_sha,
+        bootstrap=bootstrap,
+    )
     weakened = _scan_protected_contracts(
         result, exceptions, repo, base_sha, head_sha, changed
     )
@@ -1375,6 +1439,17 @@ def scan_repository(
             _scan_canned(result, exceptions, path, base_src, head_src)
 
     if weakened and ownership_changed:
+        own_paths = [
+            posix(p)
+            for _s, p in changed
+            if is_ownership_production(p) and not p.startswith("backend/tests/")
+        ]
+        weak = [
+            f"{f.file}:{f.symbol}:{f.change_digest}"
+            for f in result.findings
+            if f.change_class
+            in {"PROTECTED_CONTRACT_REMOVAL", "PROTECTED_CONTRACT_WEAKENING"}
+        ]
         add_finding(
             result,
             exceptions,
@@ -1385,6 +1460,7 @@ def scan_repository(
                 "semantic ownership production change combined with protected "
                 "contract weakening; partial first-divergence repair is unsafe to merge"
             ),
+            payload="OWN\n" + "\n".join(sorted(own_paths)) + "\nWEAK\n" + "\n".join(weak),
         )
 
     result.flags = _flags_from_findings(result.findings)
@@ -1420,6 +1496,8 @@ def format_report(result: ScanResult) -> str:
         trusted_line,
         bootstrap_line,
         f"GOV002_BOOTSTRAP={'yes' if result.bootstrap else 'no'}",
+        "SINGLE_USE_SCOPE=PER_SCAN",
+        "PERSISTENT_CONSUMPTION=NO",
     ]
     for key in (
         "MODEL_CHANGED",

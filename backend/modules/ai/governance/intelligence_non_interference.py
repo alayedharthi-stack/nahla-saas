@@ -234,8 +234,8 @@ def load_exceptions_from_text(raw: str) -> List[OwnerException]:
             and digest
             and owner_ref
             and expires
-            and isinstance(row.get("single_use"), bool)
             and isinstance(row.get("consumed"), bool)
+            and row.get("single_use") is True
         ):
             continue
         if bool(row.get("consumed")):
@@ -263,7 +263,7 @@ def exception_is_active(exc: OwnerException, *, as_of: Optional[date] = None) ->
         return False
     if not exc.expected_change_digest or not exc.owner_approval_ref or not exc.expires_at:
         return False
-    if exc.consumed:
+    if exc.consumed or exc.single_use is not True:
         return False
     as_of = as_of or date.today()
     try:

@@ -7,12 +7,19 @@ triggered. A repository unit test cannot prove GitHub branch protection.
 
 ```text
 BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME
+POST_MERGE_DEDICATED_TRIGGER=pull_request_target
+DEDICATED_WORKFLOW_HEAD_TRIGGER=NO
+MERGE_BLOCKING_TRUST_ROOT_AVAILABLE=no
 ```
 
-BASE (`main` at `a11ead57f7df6e934cdeef407433df31ab7bce73`) does not contain
-the scanner or the dedicated workflow. PR #924 therefore uses the HEAD scanner
-and HEAD workflow copies, which are owner-reviewed in this PR. That is not a
-standing trust model.
+BASE does not contain the scanner. PR #924 uses the HEAD scanner once via the
+`constitution-compliance` job in `.github/workflows/ci.yml`, which is
+owner-reviewed in this PR. The dedicated workflow
+`.github/workflows/gov002-intelligence-non-interference.yml` must not also
+define a `pull_request` trigger: after merge it runs only as
+`pull_request_target` / `merge_group` from BASE. It is not a required
+branch-protection check. That missing check on #924 after removing
+`pull_request` is expected.
 
 After #924 merges:
 

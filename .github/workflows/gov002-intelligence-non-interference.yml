@@ -3,6 +3,15 @@ name: GOV-002 trusted intelligence guard
 # Trust root: GitHub loads this workflow from the BASE ref for
 # pull_request_target / merge_group. Feature PR HEAD cannot replace it.
 #
+# BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME
+# POST_MERGE_DEDICATED_TRIGGER=pull_request_target
+# DEDICATED_WORKFLOW_HEAD_TRIGGER=NO
+#
+# #924 may use the HEAD scanner once via constitution-compliance in ci.yml.
+# This dedicated workflow must not also emit a HEAD-defined check with the
+# same identity. Do not add pull_request. Do not claim this job is required
+# by branch protection.
+#
 # persist-credentials: false cannot be used: actions/checkout then runs
 # `git submodule foreach` during credential cleanup, and this repository
 # has a dangling gitlink `stable-diffusion-webui` without .gitmodules.
@@ -11,7 +20,6 @@ name: GOV-002 trusted intelligence guard
 on:
   pull_request_target:
   merge_group:
-  pull_request:
 
 permissions:
   contents: read
@@ -24,20 +32,11 @@ jobs:
 
     steps:
       - name: Checkout BASE (trusted workflow ref)
-        if: github.event_name != 'pull_request'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: false
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-
-      - name: Checkout PR HEAD (GOV-002 bootstrap of #924 only)
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: false
-          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -83,14 +82,7 @@ jobs:
               --trusted-base-scanner
           else
             echo "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME"
-            echo "BASE has no scanner; HEAD scanner is used only because GOV-002 is landing."
-            if [ ! -f "${SCANNER_REL}" ]; then
-              echo "BASE_NOT_AVAILABLE: scanner missing on BASE and HEAD"
-              exit 1
-            fi
-            python "${SCANNER_REL}" \
-              --repo . \
-              --base "${MERGE_BASE}" \
-              --head "${HEAD_SHA}" \
-              --bootstrap
+            echo "BASE has no scanner; dedicated workflow cannot self-bootstrap from HEAD."
+            echo "BASE_NOT_AVAILABLE: scanner missing on BASE"
+            exit 1
           fi

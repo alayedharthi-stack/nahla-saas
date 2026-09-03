@@ -586,15 +586,29 @@ def test_structural_enum_url_uuid_not_customer_semantics(tmp_path: Path) -> None
     assert "CUSTOMER_REGEX_CHANGE" not in _classes(result)
 
 
+def _regex_delta_digest(base_src: str, head_src: str, path: str = "backend/modules/ai/brain/intent/rules.py") -> str:
+    base_fp = GUARD.regex_fingerprints(base_src)
+    head_fp = GUARD.regex_fingerprints(head_src)
+    payload = GUARD.delta_payload(
+        "\n".join(f"{k}:{v[1]}" for k, v in sorted(base_fp.items())),
+        "\n".join(f"{k}:{v[1]}" for k, v in sorted(head_fp.items())),
+    )
+    return GUARD.compute_change_digest(
+        change_class="CUSTOMER_REGEX_CHANGE",
+        file=path,
+        symbol="",
+        payload=payload,
+    )
+
+
 def test_exception_digest_mismatch_does_not_authorize(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _seed_governance(repo)
-    payload = "كم مرة"
     digest = GUARD.compute_change_digest(
         change_class="CUSTOMER_REGEX_CHANGE",
         file="backend/modules/ai/brain/intent/rules.py",
         symbol="",
-        payload=payload + "-other",
+        payload="not-the-canonical-delta",
     )
     _write(
         repo,
@@ -610,13 +624,7 @@ def test_exception_digest_mismatch_does_not_authorize(tmp_path: Path) -> None:
 def test_exception_exact_digest_authorizes_only_that_change(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _seed_governance(repo)
-    payload = "كم مرة"
-    digest = GUARD.compute_change_digest(
-        change_class="CUSTOMER_REGEX_CHANGE",
-        file="backend/modules/ai/brain/intent/rules.py",
-        symbol="",
-        payload=payload,
-    )
+    digest = _regex_delta_digest(RULES_BASE, RULES_BASE + "\n_USAGE_RE = re.compile(r'كم مرة')\n")
     _write(
         repo,
         "backend/modules/ai/governance/intelligence_exceptions.json",
@@ -632,12 +640,7 @@ def test_exception_exact_digest_authorizes_only_that_change(tmp_path: Path) -> N
 def test_same_file_different_change_not_covered_by_prior_digest(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _seed_governance(repo)
-    digest = GUARD.compute_change_digest(
-        change_class="CUSTOMER_REGEX_CHANGE",
-        file="backend/modules/ai/brain/intent/rules.py",
-        symbol="",
-        payload="كم مرة",
-    )
+    digest = _regex_delta_digest(RULES_BASE, RULES_BASE + "\n_USAGE_RE = re.compile(r'كم مرة')\n")
     _write(
         repo,
         "backend/modules/ai/governance/intelligence_exceptions.json",
@@ -652,13 +655,7 @@ def test_same_file_different_change_not_covered_by_prior_digest(tmp_path: Path) 
 def test_expired_exception_does_not_authorize(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _seed_governance(repo)
-    payload = "كم مرة"
-    digest = GUARD.compute_change_digest(
-        change_class="CUSTOMER_REGEX_CHANGE",
-        file="backend/modules/ai/brain/intent/rules.py",
-        symbol="",
-        payload=payload,
-    )
+    digest = _regex_delta_digest(RULES_BASE, RULES_BASE + "\n_USAGE_RE = re.compile(r'كم مرة')\n")
     _write(
         repo,
         "backend/modules/ai/governance/intelligence_exceptions.json",
@@ -673,13 +670,7 @@ def test_expired_exception_does_not_authorize(tmp_path: Path) -> None:
 def test_consumed_exception_does_not_authorize(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _seed_governance(repo)
-    payload = "كم مرة"
-    digest = GUARD.compute_change_digest(
-        change_class="CUSTOMER_REGEX_CHANGE",
-        file="backend/modules/ai/brain/intent/rules.py",
-        symbol="",
-        payload=payload,
-    )
+    digest = _regex_delta_digest(RULES_BASE, RULES_BASE + "\n_USAGE_RE = re.compile(r'كم مرة')\n")
     _write(
         repo,
         "backend/modules/ai/governance/intelligence_exceptions.json",
@@ -721,6 +712,96 @@ def test_removing_trusted_workflow_with_semantic_change_is_caught_if_scanner_run
     result = _scan(repo, base, _commit(repo, "drop guard plus regex"))
     assert "GOVERNANCE_CORE_CHANGE" in _classes(result)
     assert "CUSTOMER_REGEX_CHANGE" in _classes(result)
+
+
+def test_single_use_false_is_malformed(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    digest = _regex_delta_digest(RULES_BASE, RULES_BASE + "\n_USAGE_RE = re.compile(r'كم مرة')\n")
+    raw = json_exc(digest).replace('"single_use":true', '"single_use":false')
+    _write(repo, "backend/modules/ai/governance/intelligence_exceptions.json", raw)
+    base = _commit(repo, "single_use false")
+    _write(repo, "README.md", "x\n")
+    result = _scan(repo, base, _commit(repo, "touch"))
+    assert "MALFORMED_EXCEPTION_REGISTRY" in _classes(result)
+
+
+def test_same_file_same_class_same_symbol_different_model_delta_different_digest(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    _write(
+        repo,
+        "backend/modules/ai/orchestrator/customer_chat_models.py",
+        'MODEL_LUNA = "gpt-5.6-terra"\n',
+    )
+    first = _scan(repo, base, _commit(repo, "model terra"))
+    terra = [f for f in first.findings if f.change_class == "MODEL_CHANGE"]
+    assert terra
+    _write(
+        repo,
+        "backend/modules/ai/orchestrator/customer_chat_models.py",
+        'MODEL_LUNA = "gpt-5.6-opus"\n',
+    )
+    # reset file to base then second delta from the same BASE
+    _git(repo, "checkout", "-f", base, "--", "backend/modules/ai/orchestrator/customer_chat_models.py")
+    _write(
+        repo,
+        "backend/modules/ai/orchestrator/customer_chat_models.py",
+        'MODEL_LUNA = "gpt-5.6-opus"\n',
+    )
+    second = _scan(repo, base, _commit(repo, "model opus"))
+    opus = [f for f in second.findings if f.change_class == "MODEL_CHANGE"]
+    assert opus
+    assert terra[0].file == opus[0].file
+    assert terra[0].change_class == opus[0].change_class
+    assert terra[0].symbol == opus[0].symbol
+    assert terra[0].change_digest != opus[0].change_digest
+
+
+def test_protected_contract_same_symbol_different_delta_different_digest(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    _seed_governance(repo)
+    base = _commit(repo, "base")
+    path = "backend/tests/test_order_support_d1_natural_ownership.py"
+    _write(
+        repo,
+        path,
+        PROTECTED_BASE + "\n# weaken-one\n",
+    )
+    # Need to change the test body, not a comment ignored by fingerprint.
+    _write(
+        repo,
+        path,
+        PROTECTED_BASE.replace("assert True", "assert True or False"),
+    )
+    first = _scan(repo, base, _commit(repo, "weaken A"))
+    a = [
+        f
+        for f in first.findings
+        if f.change_class == "PROTECTED_CONTRACT_WEAKENING"
+        and f.symbol == "test_count_not_product_usage"
+    ]
+    assert a
+    _git(repo, "checkout", "-f", base, "--", path)
+    _write(
+        repo,
+        path,
+        PROTECTED_BASE.replace("assert True", "assert 1 == 1"),
+    )
+    second = _scan(repo, base, _commit(repo, "weaken B"))
+    b = [
+        f
+        for f in second.findings
+        if f.change_class == "PROTECTED_CONTRACT_WEAKENING"
+        and f.symbol == "test_count_not_product_usage"
+    ]
+    assert b
+    assert a[0].change_digest != b[0].change_digest
 
 
 def json_exc(

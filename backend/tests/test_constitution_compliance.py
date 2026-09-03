@@ -585,6 +585,7 @@ class TestGOV002ExecutableGuardWiring:
         ).read_text(encoding="utf-8")
         assert "unit test cannot prove GitHub branch protection" in text
         assert "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME" in text
+        assert "DEDICATED_WORKFLOW_HEAD_TRIGGER=NO" in text
 
     def test_trusted_workflow_uses_pull_request_target(self) -> None:
         root = Path(__file__).resolve().parents[2]
@@ -595,6 +596,9 @@ class TestGOV002ExecutableGuardWiring:
         assert "gov002-trusted-base-scanner" in wf
         assert "submodules: false" in wf
         assert "BOOTSTRAP_HEAD_TRUST_EXCEPTION=YES_ONE_TIME" in wf
+        assert "DEDICATED_WORKFLOW_HEAD_TRIGGER=NO" in wf
+        assert "POST_MERGE_DEDICATED_TRIGGER=pull_request_target" in wf
+        assert "\n  pull_request:\n" not in wf
 
     def test_exception_registry_starts_empty(self) -> None:
         from modules.ai.governance.intelligence_non_interference import (  # noqa: PLC0415

@@ -300,8 +300,12 @@ change_class + exact_file_scope + exact_symbol_scope + expected_change_digest
 
 `exact_reason` is descriptive only. `owner_approval_ref`, `expires_at`,
 `expected_change_digest`, `single_use`, and `consumed` are required.
-Malformed rows fail closed. Digest mismatch does not authorize. Consumed or
-expired exceptions do not authorize. Same file + same class + a
+`single_use` must be `true`; `false` is malformed. Consumption is
+`SINGLE_USE_SCOPE=PER_SCAN` and `PERSISTENT_CONSUMPTION=NO` — the scanner
+does not mutate the BASE registry. `consumed=true` never authorizes.
+Malformed rows fail closed. Digest is bound to the canonical BASE→HEAD
+delta, not a generic reason. Digest mismatch does not authorize. Expired
+exceptions do not authorize. Same file + same class + a
 different change is a new digest and fails. Implementation + new exception in
 the same PR is `SAME_PR_SELF_WAIVER`. Historical commit `02aff345` is
 retrospective-only and is not a runtime registry waiver.
