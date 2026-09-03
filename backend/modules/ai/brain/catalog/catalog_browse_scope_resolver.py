@@ -8,10 +8,10 @@ catalog_match, membership) instead of inferring collections only from
 product category strings or stale token guards.
 
 Group lock requires current-turn structured scope: the turn must uniquely
-name a merchant group (label/slug/catalog_match covered by the query), or
-continue a previously selected group when this turn introduces no new
-catalog subject. A broad family token must not lock a more specific child
-group.
+name exactly one merchant group by label or slug identity, or continue a
+previously selected group when this turn introduces no new catalog subject.
+catalog_match is recall-only and cannot exclusive-lock a child group.
+A broad family token must not lock a more specific child group.
 
 Operational — evidence + state only; no LLM wording.
 """
@@ -84,22 +84,55 @@ def _group_match_candidates(group: Mapping[str, Any]) -> List[str]:
     return out
 
 
-def _specifier_in_text(specifier: str, text: str) -> bool:
-    """True when the group specifier is named by current-turn text.
+def _identity_specifiers(group: Mapping[str, Any]) -> List[str]:
+    """Label and slug only — catalog_match is recall, not exclusive ownership."""
+    out: List[str] = []
+    for key in ("label", "slug"):
+        raw = str(group.get(key) or "").strip()
+        if raw:
+            out.append(raw)
+    return out
 
-    A shorter family token must not lock a longer child-group label.
+
+def _identity_named(specifier: str, text: str) -> bool:
+    """True when current-turn text names this group label/slug identity.
+
+    Definite-article variants of the same noun count as the same identity.
+    A shorter family token must not count as naming a longer child label.
     """
     c_norm = _norm_token(specifier)
     q_norm = _norm_token(text)
     if not c_norm or not q_norm:
         return False
-    return c_norm == q_norm or c_norm in q_norm
+    if c_norm == q_norm or c_norm in q_norm:
+        return True
+    if c_norm.startswith("ال") and c_norm[2:] == q_norm:
+        return True
+    if q_norm.startswith("ال") and q_norm[2:] == c_norm:
+        return True
+    return False
+
+
+def _best_identity_hit(
+    text: str,
+    group: Mapping[str, Any],
+) -> Optional[Tuple[int, str]]:
+    """Longest label/slug alias of THIS group named by text. Not catalog_match."""
+    best: Optional[Tuple[int, str]] = None
+    for candidate in _identity_specifiers(group):
+        if not _identity_named(candidate, text):
+            continue
+        scored = (len(_norm_token(candidate)), candidate)
+        if best is None or scored[0] > best[0]:
+            best = scored
+    return best
 
 
 def _best_covered_specifier(
     text: str,
     group: Mapping[str, Any],
 ) -> Optional[Tuple[int, str]]:
+    """Recall overlap including catalog_match — not exclusive ownership."""
     q_norm = _norm_token(text)
     if not q_norm:
         return None
@@ -115,48 +148,75 @@ def _best_covered_specifier(
     return best
 
 
-def _unique_longest_group_from_text(
+def _drop_nested_named_groups(
+    named: Sequence[Tuple[Dict[str, Any], str]],
+) -> List[Tuple[Dict[str, Any], str]]:
+    """Drop a named group whose identity is only a prefix of another named group.
+
+    Sibling groups whose labels do not contain each other stay independent.
+    Length is not used to pick a winner among independent groups.
+    """
+    kept: List[Tuple[Dict[str, Any], str]] = []
+    norms = [(item, _norm_token(item[1])) for item in named]
+    for item, item_norm in norms:
+        if not item_norm:
+            continue
+        nested = False
+        for other, other_norm in norms:
+            if other[0] is item[0] or int(other[0]["id"]) == int(item[0]["id"]):
+                continue
+            if item_norm != other_norm and item_norm in other_norm:
+                nested = True
+                break
+        if not nested:
+            kept.append(item)
+    return kept
+
+
+def _explicitly_named_groups(
     groups: Sequence[Mapping[str, Any]],
     text: str,
-) -> Optional[Tuple[Dict[str, Any], str]]:
-    """Lock only when current-turn text uniquely names one group specifier.
-
-    Multiple child groups that share a shorter family token are ambiguous and
-    must not exclusive-lock broad family discovery.
-    """
-    scored: List[Tuple[int, Dict[str, Any], str]] = []
+) -> List[Tuple[Dict[str, Any], str]]:
+    by_id: Dict[int, Tuple[Dict[str, Any], str]] = {}
     for group in groups:
-        hit = _best_covered_specifier(text, group)
+        hit = _best_identity_hit(text, group)
         if hit is None:
             continue
-        scored.append((hit[0], dict(group), hit[1]))
-    if not scored:
+        gid = int(group["id"])
+        prev = by_id.get(gid)
+        if prev is None or hit[0] > len(_norm_token(prev[1])):
+            by_id[gid] = (dict(group), hit[1])
+    return _drop_nested_named_groups(list(by_id.values()))
+
+
+def _unique_named_group_from_text(
+    groups: Sequence[Mapping[str, Any]],
+    *texts: str,
+) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Exclusive lock only when current-turn text names exactly one group id."""
+    by_id: Dict[int, Tuple[Dict[str, Any], str]] = {}
+    for text in texts:
+        blob = str(text or "").strip()
+        if not blob:
+            continue
+        for group, hit in _explicitly_named_groups(groups, blob):
+            gid = int(group["id"])
+            prev = by_id.get(gid)
+            if prev is None or len(_norm_token(hit)) > len(_norm_token(prev[1])):
+                by_id[gid] = (group, hit)
+    independent = _drop_nested_named_groups(list(by_id.values()))
+    if len(independent) != 1:
         return None
-    max_len = max(item[0] for item in scored)
-    winners = [item for item in scored if item[0] == max_len]
-    winner_ids = {int(item[1]["id"]) for item in winners}
-    if len(winner_ids) != 1:
-        return None
-    winner = winners[0]
-    return winner[1], winner[2]
+    return independent[0]
 
 
 def _current_turn_names_group(text: str, group: Mapping[str, Any]) -> bool:
-    """Session continuation requires the group label or slug in current-turn text.
-
-    Shared catalog_match family tokens must not confirm a more specific child.
-    """
-    if not _norm_token(text):
-        return False
-    for key in ("label", "slug"):
-        raw = str(group.get(key) or "").strip()
-        if raw and _specifier_in_text(raw, text):
-            return True
-    return False
+    """True when current-turn text names this group's label or slug."""
+    return _best_identity_hit(text, group) is not None
 
 
 def _text_matches_group(text: str, group: Mapping[str, Any]) -> Optional[str]:
-    hit = _best_covered_specifier(text, group)
+    hit = _best_identity_hit(text, group)
     return hit[1] if hit is not None else None
 
 
@@ -165,12 +225,15 @@ def _resolution_from_group(
     *,
     match_source: str,
     hit: str = "",
+    current_turn_group_scope: bool = False,
+    session_continuation: bool = False,
 ) -> BrowseScopeResolution:
     gid = int(group["id"])
     evidence: Dict[str, Any] = {
         "group_id": gid,
         "slug": group.get("slug"),
-        "current_turn_structured_scope": True,
+        "current_turn_group_scope": bool(current_turn_group_scope),
+        "session_continuation": bool(session_continuation),
     }
     if hit:
         evidence["matched_on"] = hit
@@ -483,62 +546,85 @@ def match_catalog_group(
     active_group_slug: str = "",
     active_category: str = "",
 ) -> Optional[BrowseScopeResolution]:
-    """Pick a merchant group only when current-turn structured scope names it.
+    """Pick a merchant group only when current-turn identity names exactly one.
 
-    Broad family text that merely shares tokens with a more specific child
-    group must not exclusive-lock. Stale session slug/category may continue
-    only when this turn does not introduce a different catalog subject.
+    Exclusive lock requires distinct named group ids == 1 (label/slug identity).
+    catalog_match overlap is not ownership. Stale session slug/category may
+    continue only when this turn does not introduce a different catalog subject.
     """
     active_groups = [dict(g) for g in (groups or []) if g.get("is_active", True)]
     if not active_groups:
         return None
 
     locked = _group_by_slug(active_groups, active_group_slug)
-    text_hit: Optional[Tuple[Dict[str, Any], str]] = None
-    for candidate in (query, message):
-        text = str(candidate or "").strip()
-        if not text:
-            continue
-        unique = _unique_longest_group_from_text(active_groups, text)
-        if unique is not None:
-            text_hit = unique
-            break
+    text_hit = _unique_named_group_from_text(active_groups, query, message)
 
     if locked is not None:
         if text_hit is not None:
             hit_group, hit_str = text_hit
             if int(hit_group["id"]) == int(locked["id"]):
-                return _resolution_from_group(locked, match_source="session_slug", hit=hit_str)
-            return _resolution_from_group(hit_group, match_source="text", hit=hit_str)
-        if (
-            _current_turn_names_group(query or "", locked)
-            or _current_turn_names_group(message or "", locked)
+                return _resolution_from_group(
+                    locked,
+                    match_source="text",
+                    hit=hit_str,
+                    current_turn_group_scope=True,
+                    session_continuation=False,
+                )
+            return _resolution_from_group(
+                hit_group,
+                match_source="text",
+                hit=hit_str,
+                current_turn_group_scope=True,
+                session_continuation=False,
+            )
+        if _current_turn_names_group(query or "", locked) or _current_turn_names_group(
+            message or "", locked
         ):
-            return _resolution_from_group(locked, match_source="session_slug")
+            return _resolution_from_group(
+                locked,
+                match_source="text",
+                current_turn_group_scope=True,
+                session_continuation=False,
+            )
         subject = _extract_current_turn_subject(message, query)
         if subject and any(
             _best_covered_specifier(subject, group) is not None
             for group in active_groups
         ):
-            # Family/shared token or other group specifier — not continuity.
             return None
-        return _resolution_from_group(locked, match_source="session_slug")
+        return _resolution_from_group(
+            locked,
+            match_source="session_slug",
+            current_turn_group_scope=False,
+            session_continuation=True,
+        )
 
     if text_hit is not None:
         hit_group, hit_str = text_hit
-        return _resolution_from_group(hit_group, match_source="text", hit=hit_str)
+        return _resolution_from_group(
+            hit_group,
+            match_source="text",
+            hit=hit_str,
+            current_turn_group_scope=True,
+            session_continuation=False,
+        )
 
     cat = _norm_token(active_category)
     if cat:
         subject = _extract_current_turn_subject(message, query)
-        if subject and not _specifier_in_text(active_category, subject) and not _specifier_in_text(
+        if subject and not _identity_named(active_category, subject) and not _identity_named(
             active_category, message or ""
         ):
             return None
         for group in active_groups:
-            for candidate in _group_match_candidates(group):
+            for candidate in _identity_specifiers(group):
                 if _norm_token(candidate) == cat:
-                    return _resolution_from_group(group, match_source="session_category")
+                    return _resolution_from_group(
+                        group,
+                        match_source="session_category",
+                        current_turn_group_scope=False,
+                        session_continuation=True,
+                    )
 
     return None
 

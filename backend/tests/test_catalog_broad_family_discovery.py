@@ -21,6 +21,7 @@ if _BACKEND not in sys.path:
 os.environ.setdefault("NAHLA_TEST_NO_DB", "1")
 
 from modules.ai.brain.catalog.catalog_browse_scope_resolver import (  # noqa: E402
+    _explicitly_named_groups,
     match_catalog_group,
     resolve_catalog_category_scope,
 )
@@ -194,7 +195,8 @@ class TestBroadFamilyDoesNotLockChildGroup:
         assert hit is not None
         assert hit.group_slug == "family-all"
         assert hit.match_source == "text"
-        assert hit.evidence.get("current_turn_structured_scope") is True
+        assert hit.evidence.get("current_turn_group_scope") is True
+        assert hit.evidence.get("session_continuation") is False
 
     def test_specific_child_group_named_in_turn_still_locks(self) -> None:
         hit = match_catalog_group(
@@ -205,6 +207,55 @@ class TestBroadFamilyDoesNotLockChildGroup:
         assert hit is not None
         assert hit.group_slug == "family-kilo"
         assert hit.match_source == "text"
+        assert hit.evidence.get("current_turn_group_scope") is True
+        assert hit.evidence.get("session_continuation") is False
+
+    def test_named_child_wins_over_nested_family_label(self) -> None:
+        hit = match_catalog_group(
+            [_FAMILY_GROUP, *_CHILD_GROUPS],
+            message="وريني العسل بالكيلو",
+            query="العسل بالكيلو",
+        )
+        assert hit is not None
+        assert hit.group_slug == "family-kilo"
+
+    def test_one_child_shared_catalog_match_cannot_lock_family_query(self) -> None:
+        hit = match_catalog_group(
+            [_KILO_GROUP],
+            message=_LIVE_BROAD_INQUIRY,
+            query="العسل",
+        )
+        assert hit is None
+
+    def test_one_child_shared_catalog_match_cannot_lock_generic_family_query(self) -> None:
+        hit = match_catalog_group(
+            [_SHIRT_DOZEN],
+            message="أبغى قميص",
+            query="قميص",
+        )
+        assert hit is None
+
+    def test_two_named_groups_do_not_exclusive_lock(self) -> None:
+        message = "وريني العسل بالكيلو و عسل السدر"
+        named = _explicitly_named_groups(_CHILD_GROUPS, message)
+        assert {int(g["id"]) for g, _hit in named} == {101, 103}
+        hit = match_catalog_group(
+            _CHILD_GROUPS,
+            message=message,
+            query=message,
+        )
+        assert hit is None
+
+    def test_two_named_generic_groups_do_not_exclusive_lock(self) -> None:
+        message = "قمصان بالدرزن و قمصان رياضية"
+        named = _explicitly_named_groups([_SHIRT_DOZEN, _SHIRT_SPORT], message)
+        assert {int(g["id"]) for g, _hit in named} == {202, 203}
+        hit = match_catalog_group(
+            [_SHIRT_DOZEN, _SHIRT_SPORT],
+            message=message,
+            query=message,
+        )
+        assert hit is None
 
 
 class TestSessionAndStaleState:
@@ -218,6 +269,8 @@ class TestSessionAndStaleState:
         assert hit is not None
         assert hit.group_slug == "family-kilo"
         assert hit.match_source == "session_slug"
+        assert hit.evidence.get("current_turn_group_scope") is False
+        assert hit.evidence.get("session_continuation") is True
 
     def test_stale_child_group_cannot_narrow_new_family_inquiry(self) -> None:
         hit = match_catalog_group(
@@ -238,6 +291,8 @@ class TestSessionAndStaleState:
         assert hit is not None
         assert hit.group_slug == "family-sidr"
         assert hit.match_source == "text"
+        assert hit.evidence.get("current_turn_group_scope") is True
+        assert hit.evidence.get("session_continuation") is False
 
     def test_show_more_without_new_subject_keeps_group(self) -> None:
         hit = match_catalog_group(
@@ -248,9 +303,9 @@ class TestSessionAndStaleState:
         )
         assert hit is not None
         assert hit.group_slug == "family-kilo"
-
-
-class TestFilterPipelineComposeInput:
+        assert hit.match_source == "session_slug"
+        assert hit.evidence.get("current_turn_group_scope") is False
+        assert hit.evidence.get("session_continuation") is True
     def test_live_shaped_broad_query_keeps_multiple_family_candidates(
         self,
         monkeypatch: pytest.MonkeyPatch,
