@@ -149,6 +149,18 @@ _ADDRESS_ON_FILE_CLAIM_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 
+_FORCED_CHECKOUT_RESPONSE_GOALS = (
+    _IDENTITY_COLLECT_GOALS
+    | _ADDRESS_COLLECT_GOALS
+    | frozenset({
+        "collect_payment_method_for_whatsapp_order",
+        "continue_checkout",
+        "continue_checkout_from_catalog_order",
+        "confirm_known_address",
+        "confirm_whatsapp_order_before_payment",
+    })
+)
+
 
 def _norm_msg(text: str) -> str:
     if not text:
@@ -161,7 +173,8 @@ def _contract_checkout_enforced(contract: CommerceTurnContract) -> bool:
     facts = contract.known_facts
     return bool(
         facts.get("catalog_order_current_turn")
-        or facts.get("active_catalog_checkout")
+        or facts.get("current_turn_checkout_owner")
+        or facts.get("checkout_owner_active")
     )
 
 
@@ -346,7 +359,9 @@ def _resolve_active_checkout_known_facts(
 
     facts: Dict[str, Any] = {
         "active_catalog_checkout": True,
-        "checkout_owner_active": True,
+        "active_checkout_context_available": True,
+        "checkout_owner_active": False,
+        "current_turn_checkout_owner": False,
     }
     state = getattr(ctx, "state", None)
     prep = getattr(state, "order_prep", None) if state else None
@@ -762,19 +777,46 @@ def build_commerce_turn_contract(
                 m for m in missing_fields
                 if m not in _PRODUCT_QUANTITY_FIELDS
             ]
-            next_goal = _derive_active_checkout_next_goal(
-                str(getattr(ctx, "message", "") or ""),
-                missing_fields,
-            )
-            allowed_actions = [ACTION_PROPOSE_DRAFT_ORDER, "llm_compose"]
+            resume_slot = missing_fields[0] if missing_fields else ""
+            try:
+                from modules.ai.order_flow_v2.missing_fields import (  # noqa: PLC0415
+                    next_missing_field as _resume_next_missing_field,
+                )
+
+                resume_slot = _resume_next_missing_field(missing_fields) or resume_slot
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — resume slot is metadata only
+                pass
+            known_facts["resume_missing_fields"] = list(missing_fields)
+            known_facts["resume_next_slot"] = resume_slot or "none"
             from modules.ai.brain.commerce.catalog_order_checkout import (  # noqa: PLC0415
+                current_turn_continues_catalog_checkout,
                 try_active_catalog_checkout_continue_decision,
             )
+            from modules.ai.brain.commerce.current_order_amount import (  # noqa: PLC0415
+                is_current_order_inquiry,
+            )
 
-            active_decision = try_active_catalog_checkout_continue_decision(ctx)
-            if active_decision is not None:
-                action_to_execute = active_decision.action
-                reasons.append("active_catalog_checkout_continue_candidate")
+            turn_owns_checkout = current_turn_continues_catalog_checkout(ctx)
+            known_facts["current_turn_checkout_owner"] = bool(turn_owns_checkout)
+            known_facts["checkout_owner_active"] = bool(turn_owns_checkout)
+            if turn_owns_checkout:
+                next_goal = _derive_active_checkout_next_goal(
+                    str(getattr(ctx, "message", "") or ""),
+                    missing_fields,
+                )
+                allowed_actions = [ACTION_PROPOSE_DRAFT_ORDER, "llm_compose"]
+                active_decision = try_active_catalog_checkout_continue_decision(ctx)
+                if active_decision is not None:
+                    action_to_execute = active_decision.action
+                    reasons.append("active_catalog_checkout_continue_candidate")
+            else:
+                reasons.append("active_catalog_checkout_resumable_context")
+                if is_current_order_inquiry(str(getattr(ctx, "message", "") or "")):
+                    next_goal = "summarize_active_draft_order"
+                    reasons.append("current_order_inquiry_summarize_goal")
+                elif str(next_goal or "") in _FORCED_CHECKOUT_RESPONSE_GOALS:
+                    known_facts["resume_next_goal"] = next_goal
+                    next_goal = None
         elif commerce_state == "whatsapp_quick_order":
             allowed_actions = [ACTION_PROPOSE_DRAFT_ORDER, "llm_compose"]
         elif commerce_state == "browse":
@@ -930,6 +972,38 @@ def build_commerce_turn_contract(
                 getattr(ctx, "tenant_id", None),
             )
 
+    if (
+        known_facts.get("catalog_order_current_turn")
+        or known_facts.get("active_catalog_checkout")
+    ):
+        missing_fields = [
+            m for m in missing_fields
+            if m not in _PRODUCT_QUANTITY_FIELDS
+        ]
+
+    if (
+        known_facts.get("active_checkout_context_available")
+        and not known_facts.get("catalog_order_current_turn")
+        and not known_facts.get("current_turn_checkout_owner")
+    ):
+        known_facts["checkout_owner_active"] = False
+        action_to_execute = None
+        if str(next_goal or "") in _FORCED_CHECKOUT_RESPONSE_GOALS:
+            known_facts.setdefault("resume_next_goal", next_goal)
+            next_goal = None
+            reasons.append("active_checkout_context_does_not_own_turn")
+        known_facts["resume_missing_fields"] = list(missing_fields)
+        resume_slot = missing_fields[0] if missing_fields else ""
+        try:
+            from modules.ai.order_flow_v2.missing_fields import (  # noqa: PLC0415
+                next_missing_field as _final_resume_slot,
+            )
+
+            resume_slot = _final_resume_slot(missing_fields) or resume_slot
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — resume slot is metadata only
+            pass
+        known_facts["resume_next_slot"] = resume_slot or "none"
+
     return CommerceTurnContract(
         commerce_state=commerce_state,
         known_facts=known_facts,
@@ -1047,8 +1121,12 @@ def maybe_enforce_commerce_turn_contract_decision(
     decision: Decision,
 ) -> Decision:
     """
-    Phase 2 — when contract marks catalog order or active catalog checkout, override
-    browse / discovery / LLM-fallback decisions into checkout continuation.
+    Phase 2 — when the current inbound is a native catalog order, or the
+    current turn structurally owns checkout, override browse / discovery
+    drift into checkout continuation.
+
+    Persisted active checkout context alone does not override ACTION_LLM_REPLY
+    or another unrelated owner.
     """
     if _contract_existing_order_support_enforced(contract):
         raw_action = str(getattr(decision, "action", "") or "")
