@@ -39,3 +39,7 @@ Enforcement: `constitution-compliance` CI check.
 - [ ] Fix order followed: state → truth → context → routing → capability → execution → persistence → postprocess → only then raw model evaluation.
 - [ ] No phrase maps, keyword routers, or customer-regex intent repair.
 - [ ] Model/prompt/persona unchanged unless MODEL-BLAME GATE passed **and** `OWNER_APPROVAL_REQUIRED=YES`.
+- [ ] GOV-002 trusted BASE scanner is green on `constitution-compliance` (not a HEAD-owned self-check).
+- [ ] No same-PR self-waiver of `intelligence_exceptions.json`.
+- [ ] Protected `governance_contract` tests were not removed or weakened.
+- [ ] If this is a partial first-divergence repair and replay shows a worse next owner, keep Draft — do not merge or deploy.

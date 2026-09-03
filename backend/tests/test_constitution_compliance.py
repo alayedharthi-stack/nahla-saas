@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from datetime import date
+from pathlib import Path
 from typing import Any, Dict, Mapping
 
 import pytest
@@ -555,3 +556,33 @@ class TestFixedTenantAcceptancePolicy:
 
         violations = scan_fixed_tenant_violations(zone="ops")
         assert violations == [], format_violation_report(violations)
+
+
+class TestGOV002ExecutableGuardWiring:
+    def test_scanner_exists(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        scanner = root / "scripts" / "lint_intelligence_non_interference.py"
+        assert scanner.is_file()
+        text = scanner.read_text(encoding="utf-8")
+        assert "--trusted-base-scanner" in text
+        assert "BASE_NOT_AVAILABLE" in text
+
+    def test_constitution_job_runs_trusted_base_scanner(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        assert "GOV-002 — Intelligence non-interference diff guard" in ci
+        assert "fetch-depth: 0" in ci
+        assert "git merge-base" in ci
+        assert "git show" in ci and "nahla_intelligence_guard.py" in ci
+        assert "BASE_NOT_AVAILABLE" in ci
+        assert "test_intelligence_non_interference_guard.py" in ci
+
+    def test_exception_registry_starts_empty(self) -> None:
+        from modules.ai.governance.intelligence_non_interference import (  # noqa: PLC0415
+            EXCEPTIONS_PATH,
+            load_exceptions_from_text,
+        )
+
+        root = Path(__file__).resolve().parents[2]
+        raw = (root / EXCEPTIONS_PATH).read_text(encoding="utf-8")
+        assert load_exceptions_from_text(raw) == []

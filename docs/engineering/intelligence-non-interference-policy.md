@@ -247,3 +247,55 @@ IF SOMETHING BREAKS AFTER THE MODEL, FIX THAT DOWNSTREAM OWNER.
 KEEP THE MODEL FREE.
 FIX THE SYSTEM AROUND THE MODEL.
 ```
+
+---
+
+## GOV-002 — executable enforcement
+
+GOV-001 is law. GOV-002 is the CI mechanism that inspects the actual diff.
+
+Authoritative scanner: `scripts/lint_intelligence_non_interference.py`
+
+On `pull_request` CI, the scanner is loaded from **BASE**, never from HEAD:
+
+```text
+git show "$BASE_SHA:scripts/lint_intelligence_non_interference.py"
+python /tmp/nahla_intelligence_guard.py --repo . --base "$BASE_SHA" --head "$HEAD_SHA"
+```
+
+A PR must not edit the guard in the same change and teach it to accept the violation.
+
+After GOV-002 reaches `main`: `TRUSTED_BASE_SCANNER_REQUIRED=yes`. The one-time bootstrap path exists only while BASE does not yet contain the scanner. `BASE_NOT_AVAILABLE` fails closed.
+
+Wired into the required **`constitution-compliance`** job — not an optional check.
+
+### Change classes (default FAIL without a BASE-owned exception)
+
+`MODEL_CHANGE` `PROMPT_CHANGE` `PERSONA_CHANGE` `PHRASE_MAP_CHANGE` `KEYWORD_ROUTER_CHANGE` `CUSTOMER_REGEX_CHANGE` `CANNED_REPLY_CHANGE` `TENANT_SPECIFIC_SEMANTIC_CHANGE` `PHONE_SPECIFIC_SEMANTIC_CHANGE` `PRODUCT_SPECIFIC_SEMANTIC_CHANGE`
+
+Customer wording is reproduction/regression/acceptance input only. It is not the repair mechanism.
+
+Structured evidence serialization (`customer_order_evidence`, merchant truth, tool facts) is not automatically `PROMPT_CHANGE`. URL/ID/parser regex outside customer-semantic ownership is not automatically `CUSTOMER_REGEX_CHANGE`.
+
+### Owner exceptions — anti-self-waiver
+
+Registry: `backend/modules/ai/governance/intelligence_exceptions.json`
+
+The trusted scanner reads exceptions from **BASE**. Implementation + new exception in the same PR is `SAME_PR_SELF_WAIVER`.
+
+Sequence:
+
+```text
+authorization-only PR (AUTHORIZATION_PR_RUNTIME_AI_CHANGES=ZERO)
+→ merge
+→ implementation PR
+→ BASE scanner sees the authorization
+```
+
+### Protected contracts
+
+Tests marked `pytest.mark.governance_contract` (and the initial Order Support / Product Information modules listed in the registry) are fingerprinted from BASE. Removal, rename-to-evade, or assertion/fixture weakening fails unless a pre-existing BASE exception exists.
+
+### Partial-repair release safety
+
+A partial first-divergence repair may remain Draft. It must **not** merge or deploy when deterministic replay proves the customer-visible path becomes worse at the next known owner. Combining a semantic-ownership production change with protected-contract weakening is `UNSAFE_PARTIAL_REPAIR`.
