@@ -189,11 +189,11 @@ def _explicitly_named_groups(
     return _drop_nested_named_groups(list(by_id.values()))
 
 
-def _unique_named_group_from_text(
+def _independent_named_groups_from_text(
     groups: Sequence[Mapping[str, Any]],
     *texts: str,
-) -> Optional[Tuple[Dict[str, Any], str]]:
-    """Exclusive lock only when current-turn text names exactly one group id."""
+) -> List[Tuple[Dict[str, Any], str]]:
+    """Distinct independent group identities named by the current turn."""
     by_id: Dict[int, Tuple[Dict[str, Any], str]] = {}
     for text in texts:
         blob = str(text or "").strip()
@@ -204,7 +204,15 @@ def _unique_named_group_from_text(
             prev = by_id.get(gid)
             if prev is None or len(_norm_token(hit)) > len(_norm_token(prev[1])):
                 by_id[gid] = (group, hit)
-    independent = _drop_nested_named_groups(list(by_id.values()))
+    return _drop_nested_named_groups(list(by_id.values()))
+
+
+def _unique_named_group_from_text(
+    groups: Sequence[Mapping[str, Any]],
+    *texts: str,
+) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Exclusive lock only when current-turn text names exactly one group id."""
+    independent = _independent_named_groups_from_text(groups, *texts)
     if len(independent) != 1:
         return None
     return independent[0]
@@ -549,43 +557,30 @@ def match_catalog_group(
     """Pick a merchant group only when current-turn identity names exactly one.
 
     Exclusive lock requires distinct named group ids == 1 (label/slug identity).
-    catalog_match overlap is not ownership. Stale session slug/category may
-    continue only when this turn does not introduce a different catalog subject.
+    If the current turn names more than one independent group, session slug
+    and session category must not exclusive-lock one of them. catalog_match
+    overlap is not ownership. Stale session may continue only when this turn
+    introduces no explicit group identities.
     """
     active_groups = [dict(g) for g in (groups or []) if g.get("is_active", True)]
     if not active_groups:
         return None
 
-    locked = _group_by_slug(active_groups, active_group_slug)
-    text_hit = _unique_named_group_from_text(active_groups, query, message)
+    named = _independent_named_groups_from_text(active_groups, query, message)
+    if len(named) > 1:
+        return None
+    if len(named) == 1:
+        hit_group, hit_str = named[0]
+        return _resolution_from_group(
+            hit_group,
+            match_source="text",
+            hit=hit_str,
+            current_turn_group_scope=True,
+            session_continuation=False,
+        )
 
+    locked = _group_by_slug(active_groups, active_group_slug)
     if locked is not None:
-        if text_hit is not None:
-            hit_group, hit_str = text_hit
-            if int(hit_group["id"]) == int(locked["id"]):
-                return _resolution_from_group(
-                    locked,
-                    match_source="text",
-                    hit=hit_str,
-                    current_turn_group_scope=True,
-                    session_continuation=False,
-                )
-            return _resolution_from_group(
-                hit_group,
-                match_source="text",
-                hit=hit_str,
-                current_turn_group_scope=True,
-                session_continuation=False,
-            )
-        if _current_turn_names_group(query or "", locked) or _current_turn_names_group(
-            message or "", locked
-        ):
-            return _resolution_from_group(
-                locked,
-                match_source="text",
-                current_turn_group_scope=True,
-                session_continuation=False,
-            )
         subject = _extract_current_turn_subject(message, query)
         if subject and any(
             _best_covered_specifier(subject, group) is not None
@@ -597,16 +592,6 @@ def match_catalog_group(
             match_source="session_slug",
             current_turn_group_scope=False,
             session_continuation=True,
-        )
-
-    if text_hit is not None:
-        hit_group, hit_str = text_hit
-        return _resolution_from_group(
-            hit_group,
-            match_source="text",
-            hit=hit_str,
-            current_turn_group_scope=True,
-            session_continuation=False,
         )
 
     cat = _norm_token(active_category)

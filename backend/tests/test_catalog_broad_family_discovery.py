@@ -219,7 +219,16 @@ class TestBroadFamilyDoesNotLockChildGroup:
         assert hit is not None
         assert hit.group_slug == "family-kilo"
 
-    def test_one_child_shared_catalog_match_cannot_lock_family_query(self) -> None:
+    def test_nested_family_child_is_one_identity_even_with_family_session(self) -> None:
+        hit = match_catalog_group(
+            [_FAMILY_GROUP, *_CHILD_GROUPS],
+            message="وريني العسل بالكيلو",
+            query="العسل بالكيلو",
+            active_group_slug="family-all",
+        )
+        assert hit is not None
+        assert hit.group_slug == "family-kilo"
+        assert hit.evidence.get("current_turn_group_scope") is True
         hit = match_catalog_group(
             [_KILO_GROUP],
             message=_LIVE_BROAD_INQUIRY,
@@ -256,6 +265,39 @@ class TestBroadFamilyDoesNotLockChildGroup:
             query=message,
         )
         assert hit is None
+
+    def test_two_named_groups_do_not_lock_via_active_slug(self) -> None:
+        message = "وريني العسل بالكيلو و عسل السدر"
+        hit = match_catalog_group(
+            _CHILD_GROUPS,
+            message=message,
+            query=message,
+            active_group_slug="family-kilo",
+        )
+        assert hit is None
+
+    def test_two_named_groups_do_not_lock_via_active_category(self) -> None:
+        message = "وريني العسل بالكيلو و عسل السدر"
+        hit = match_catalog_group(
+            _CHILD_GROUPS,
+            message=message,
+            query=message,
+            active_category="العسل بالكيلو",
+        )
+        assert hit is None
+
+    def test_single_named_group_may_own_matching_active_slug(self) -> None:
+        hit = match_catalog_group(
+            _CHILD_GROUPS,
+            message="وريني العسل بالكيلو",
+            query="العسل بالكيلو",
+            active_group_slug="family-kilo",
+        )
+        assert hit is not None
+        assert hit.group_slug == "family-kilo"
+        assert hit.match_source == "text"
+        assert hit.evidence.get("current_turn_group_scope") is True
+        assert hit.evidence.get("session_continuation") is False
 
 
 class TestSessionAndStaleState:
@@ -306,6 +348,9 @@ class TestSessionAndStaleState:
         assert hit.match_source == "session_slug"
         assert hit.evidence.get("current_turn_group_scope") is False
         assert hit.evidence.get("session_continuation") is True
+
+
+class TestFilterPipelineComposeInput:
     def test_live_shaped_broad_query_keeps_multiple_family_candidates(
         self,
         monkeypatch: pytest.MonkeyPatch,
