@@ -1,0 +1,267 @@
+# Merge-freeze status gate
+#
+# Trust root: GitHub loads this workflow from the default branch for
+# pull_request_target / issues / workflow_dispatch. Feature PR HEAD cannot
+# replace the gate until this YAML itself is merged to the default branch.
+#
+# Security:
+# - Do not checkout PR HEAD.
+# - Do not execute scripts or actions from the PR branch.
+# - Do not use repository secrets.
+# - Do not treat PR body text (MERGE_AUTHORIZED / DEPLOY_AUTHORIZED) as a gate.
+# - Do not treat labels such as owner-approved as a security control.
+#
+# Source of truth: an OPEN GitHub Issue in this repository with the exact
+# label `merge-freeze`. Labeled pull requests are ignored.
+#
+# Posted commit status context: merge-freeze-gate
+#   freeze active      → failure
+#   freeze absent      → success
+#   API uncertainty    → failure
+#
+# Job name is publish-merge-freeze-gate so the Actions check run is not
+# confused with the required commit-status context.
+
+name: Merge freeze gate
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issues:
+    types: [opened, reopened, closed, labeled, unlabeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  publish-merge-freeze-gate:
+    name: publish-merge-freeze-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: Evaluate merge freeze and publish statuses
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          CONTEXT = "merge-freeze-gate"
+          LABEL = "merge-freeze"
+          API_VERSION = "2022-11-28"
+          MAX_PAGES = 10
+
+          TOKEN = os.environ.get("GH_TOKEN") or ""
+          API = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
+          REPO = os.environ.get("GITHUB_REPOSITORY") or ""
+          EVENT = os.environ.get("GITHUB_EVENT_NAME") or ""
+          PR_HEAD_SHA = (os.environ.get("PR_HEAD_SHA") or "").strip()
+          GITHUB_SHA = (os.environ.get("GITHUB_SHA") or "").strip()
+
+          def fail_closed(reason: str) -> int:
+              print(f"MERGE_FREEZE_GATE_FAIL_CLOSED={reason}", flush=True)
+              return 1
+
+          def request(method: str, path: str, params=None, payload=None):
+              if not TOKEN or not REPO:
+                  return 0, None
+              url = API + path
+              if params:
+                  url += "?" + urllib.parse.urlencode(params)
+              body = None if payload is None else json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(url, data=body, method=method)
+              req.add_header("Accept", "application/vnd.github+json")
+              req.add_header("Authorization", f"Bearer {TOKEN}")
+              req.add_header("X-GitHub-Api-Version", API_VERSION)
+              req.add_header("User-Agent", "nahla-merge-freeze-gate")
+              if body is not None:
+                  req.add_header("Content-Type", "application/json")
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      raw = resp.read()
+                      if not raw:
+                          return int(resp.status), None
+                      return int(resp.status), json.loads(raw.decode("utf-8"))
+              except urllib.error.HTTPError as exc:
+                  print(f"github_http_error method={method} path={path} status={exc.code}", flush=True)
+                  return int(exc.code), None
+              except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError) as exc:
+                  print(f"github_request_error method={method} path={path} type={type(exc).__name__}", flush=True)
+                  return 0, None
+
+          def get_paginated(path: str, params: dict):
+              items = []
+              page = 1
+              while page <= MAX_PAGES:
+                  query = dict(params)
+                  query["page"] = str(page)
+                  query["per_page"] = "100"
+                  status, body = request("GET", path, params=query)
+                  if status < 200 or status >= 300 or not isinstance(body, list):
+                      return None
+                  items.extend(body)
+                  if len(body) < 100:
+                      return items
+                  page += 1
+              print("github_pagination_cap_reached", flush=True)
+              return None
+
+          def is_open_freeze_issue(item) -> bool:
+              if not isinstance(item, dict):
+                  return False
+              if item.get("pull_request"):
+                  return False
+              if item.get("state") != "open":
+                  return False
+              names = set()
+              for lab in item.get("labels") or []:
+                  if isinstance(lab, dict):
+                      names.add(str(lab.get("name") or ""))
+                  else:
+                      names.add(str(lab))
+              return LABEL in names
+
+          def count_open_freeze_issues():
+              items = get_paginated(
+                  f"/repos/{REPO}/issues",
+                  {"state": "open", "labels": LABEL},
+              )
+              if items is None:
+                  return None
+              return sum(1 for item in items if is_open_freeze_issue(item))
+
+          def decide_status(open_freeze_issues):
+              if open_freeze_issues is None or open_freeze_issues < 0:
+                  return "failure"
+              return "failure" if open_freeze_issues > 0 else "success"
+
+          def description_for(state: str, open_freeze_issues) -> str:
+              if open_freeze_issues is None or open_freeze_issues < 0:
+                  return "Merge freeze gate failed closed"
+              if state == "pending":
+                  return "Evaluating merge freeze"
+              if state == "success":
+                  return "No open merge-freeze issue"
+              if open_freeze_issues > 1:
+                  return "Multiple open merge-freeze issues block merging"
+              return "Open merge-freeze issue blocks merging"
+
+          def collect_pr_head_shas():
+              pulls = get_paginated(
+                  f"/repos/{REPO}/pulls",
+                  {"state": "open"},
+              )
+              if pulls is None:
+                  return None
+              shas = []
+              seen = set()
+              for pull in pulls:
+                  if not isinstance(pull, dict):
+                      continue
+                  sha = str(((pull.get("head") or {}) if isinstance(pull.get("head"), dict) else {}).get("sha") or "").strip()
+                  if sha and sha not in seen:
+                      seen.add(sha)
+                      shas.append(sha)
+              return shas
+
+          def target_shas():
+              if EVENT == "pull_request_target":
+                  if not PR_HEAD_SHA:
+                      return None
+                  return [PR_HEAD_SHA]
+              shas = collect_pr_head_shas()
+              if shas is None:
+                  return None
+              if EVENT == "workflow_dispatch" and GITHUB_SHA and GITHUB_SHA not in shas:
+                  shas.append(GITHUB_SHA)
+              return shas
+
+          def post_status(sha: str, state: str, open_freeze_issues) -> bool:
+              status, _body = request(
+                  "POST",
+                  f"/repos/{REPO}/statuses/{sha}",
+                  payload={
+                      "state": state,
+                      "context": CONTEXT,
+                      "description": description_for(state, open_freeze_issues)[:140],
+                  },
+              )
+              ok = 200 <= status < 300
+              print(f"status_write sha={sha[:12]} state={state} http={status} ok={ok}", flush=True)
+              return ok
+
+          def publish(shas, state: str, open_freeze_issues) -> bool:
+              ok = True
+              for sha in shas:
+                  if not post_status(sha, state, open_freeze_issues):
+                      ok = False
+              return ok
+
+          def main() -> int:
+              if not TOKEN:
+                  return fail_closed("missing_github_token")
+              if not REPO:
+                  return fail_closed("missing_repository")
+
+              shas = target_shas()
+              if shas is None:
+                  if EVENT == "pull_request_target":
+                      return fail_closed("missing_pr_head_sha")
+                  return fail_closed("open_pulls_query_failed")
+              if not shas:
+                  print("MERGE_FREEZE_GATE_NO_OPEN_PRS=1", flush=True)
+                  if not GITHUB_SHA:
+                      freeze_count = count_open_freeze_issues()
+                      state = decide_status(freeze_count)
+                      print(
+                          f"CONTEXT={CONTEXT} freeze_issues={freeze_count} state={state} targets=0",
+                          flush=True,
+                      )
+                      return 0 if freeze_count is not None else fail_closed("freeze_issue_query_failed")
+                  shas = [GITHUB_SHA]
+
+              if not publish(shas, "pending", None):
+                  if not publish(shas, "failure", None):
+                      return fail_closed("status_write_failed")
+                  freeze_count = count_open_freeze_issues()
+                  final_state = decide_status(freeze_count)
+                  publish(shas, final_state, freeze_count)
+                  return fail_closed("pending_status_write_failed")
+
+              freeze_count = count_open_freeze_issues()
+              final_state = decide_status(freeze_count)
+              print(
+                  f"CONTEXT={CONTEXT} freeze_issues={freeze_count} state={final_state} targets={len(shas)}",
+                  flush=True,
+              )
+              if not publish(shas, final_state, freeze_count):
+                  return fail_closed("final_status_write_failed")
+              if freeze_count is None:
+                  return fail_closed("freeze_issue_query_failed")
+              return 0
+
+          sys.exit(main())
+          PY
