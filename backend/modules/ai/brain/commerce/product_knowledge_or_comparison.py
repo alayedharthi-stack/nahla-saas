@@ -14,7 +14,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger("nahla.brain.product_knowledge")
 
@@ -587,6 +587,32 @@ def _combine_kb_relevance(
 
 
 _KB_RELEVANCE_THRESHOLD = 0.35
+_KB_SECTION_BODY_LIMIT = 800
+_KB_SECTION_RESULT_LIMIT = 4
+
+
+def _normalize_candidate_product_ids(
+    product_id: Any = None,
+    product_ids: Any = None,
+) -> set[int]:
+    """Deduplicated catalog ids. ``product_id`` remains the single-product contract."""
+    values: List[Any] = []
+    if product_ids is not None:
+        if isinstance(product_ids, (str, bytes)):
+            values.append(product_ids)
+        elif isinstance(product_ids, Iterable):
+            values.extend(list(product_ids))
+        else:
+            values.append(product_ids)
+    if product_id is not None:
+        values.append(product_id)
+    out: set[int] = set()
+    for raw in values:
+        try:
+            out.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _retrieve_product_kb_sections(
@@ -596,6 +622,7 @@ def _retrieve_product_kb_sections(
     subject: str,
     message: str,
     product_id: Any = None,
+    product_ids: Any = None,
     limit: int = 4,
     kinds_filter: Optional[frozenset] = None,
 ) -> List[Dict[str, Any]]:
@@ -649,11 +676,11 @@ def _retrieve_product_kb_sections(
             except (TypeError, ValueError):
                 continue
         if linked_product_ids:
-            try:
-                subject_product_id = int(product_id)
-            except (TypeError, ValueError):
-                continue
-            if subject_product_id not in linked_product_ids:
+            allowed_ids = _normalize_candidate_product_ids(
+                product_id=product_id,
+                product_ids=product_ids,
+            )
+            if not allowed_ids or allowed_ids.isdisjoint(linked_product_ids):
                 continue
         title = str(getattr(row, "title", "") or "").strip()
         body = str(getattr(row, "body", "") or "").strip()
@@ -682,7 +709,7 @@ def _retrieve_product_kb_sections(
                 {
                     "section_id": getattr(row, "id", None),
                     "title": title,
-                    "body": body[:800],
+                    "body": body[:_KB_SECTION_BODY_LIMIT],
                     "kind": row_kind,
                     "match_score": round(combined, 3),
                     "subject_score": round(subject_relevance, 3),
@@ -691,7 +718,55 @@ def _retrieve_product_kb_sections(
             )
         )
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [payload for _, _, payload in scored[:limit]]
+    result_limit = int(limit or _KB_SECTION_RESULT_LIMIT)
+    return [payload for _, _, payload in scored[:result_limit]]
+
+
+def retrieve_catalog_candidate_kb_sections(
+    db: Any,
+    tenant_id: int,
+    *,
+    subject: str = "",
+    message: str = "",
+    product_ids: Any = None,
+    product_id: Any = None,
+    limit: int = _KB_SECTION_RESULT_LIMIT,
+) -> Dict[str, Any]:
+    """One tenant-safe KB retrieval for catalog-owned compose.
+
+    Public wrapper for responder use. Does not classify intent or change scoring.
+    Empty result after a call is ``missing_kb``, distinct from retrieval never running.
+    """
+    sections = _retrieve_product_kb_sections(
+        db,
+        tenant_id,
+        subject=subject,
+        message=message,
+        product_id=product_id,
+        product_ids=product_ids,
+        limit=limit,
+    )
+    unique: List[Dict[str, Any]] = []
+    seen_ids: set[Any] = set()
+    for row in sections:
+        sid = row.get("section_id")
+        if sid is not None:
+            if sid in seen_ids:
+                continue
+            seen_ids.add(sid)
+        unique.append(row)
+    ids = [row.get("section_id") for row in unique if row.get("section_id") is not None]
+    has_sections = bool(unique)
+    return {
+        "kb_sections": unique,
+        "kb_section_ids": ids,
+        "has_kb_sections": has_sections,
+        "knowledge_source": (
+            "tenant_knowledge_base" if has_sections else "missing_kb"
+        ),
+        "kb_retrieval_ran": True,
+        "kb_fact_absent": not has_sections,
+    }
 
 
 def gather_product_knowledge_facts(
@@ -959,5 +1034,6 @@ __all__ = [
     "pin_product_knowledge_session",
     "product_knowledge_blocks_product_information",
     "resolve_subject_product",
+    "retrieve_catalog_candidate_kb_sections",
     "try_product_knowledge_decision",
 ]
