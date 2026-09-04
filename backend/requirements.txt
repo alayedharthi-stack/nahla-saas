@@ -59,4 +59,4 @@ Pillow>=10.0.0,<12.0.0
 # read text out of PDFs that customers send (bank receipts, invoices).
 # When extraction returns empty text (scanned image-only PDF), the
 # normalizer falls back to OpenAI Vision on the raw PDF bytes.
-pypdf>=4.0.0
+pypdf>=6.11.0
