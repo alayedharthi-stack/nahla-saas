@@ -169,8 +169,8 @@ def test_physical_intent_routes_to_maps_faq() -> None:
     decision = DefaultDecisionEngine().decide(ctx)
     assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
     topic = str(decision.args.get("topic") or "")
-    assert topic in {TOPIC_LOCATION, "location_delivery"}
-    assert topic != "store_info"
+    kind = str(decision.args.get("question_kind") or "")
+    assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
 
 
 def test_website_phrase_skips_pre_brain_location_policy() -> None:

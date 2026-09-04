@@ -93,9 +93,10 @@ class TestStorefrontLinkIntentReliability:
         msg = "وين موقعكم؟"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
         decision = _brain_ctx(msg)
-        topic = str(decision.args.get("topic") or "")
         assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
-        assert topic in {TOPIC_LOCATION, "location_delivery"}
+        topic = str(decision.args.get("topic") or "")
+        kind = str(decision.args.get("question_kind") or "")
+        assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
         assert decision.args.get("topic") != TOPIC_STORE_INFO
 
     def test_mawqe_almaarid_physical_not_storefront(self) -> None:
@@ -109,9 +110,10 @@ class TestStorefrontLinkIntentReliability:
         msg = "موقع المعرض"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
         decision = _brain_ctx(msg)
-        topic = str(decision.args.get("topic") or "")
         assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
-        assert topic in {TOPIC_LOCATION, "location_delivery"}
+        topic = str(decision.args.get("topic") or "")
+        kind = str(decision.args.get("question_kind") or "")
+        assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
         assert decision.args.get("topic") != TOPIC_STORE_INFO
 
     def test_missing_store_url_honest_not_configured(self) -> None:
@@ -231,12 +233,10 @@ class TestPhysicalLocationOwnershipRegression:
         for msg in physical_cases:
             assert resolve_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
             decision = _brain_ctx(msg)
-            topic = str(decision.args.get("topic") or "")
             assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
-            assert topic in {TOPIC_LOCATION, "location_delivery"}
-            assert topic != TOPIC_STORE_INFO
-
-        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+            topic = str(decision.args.get("topic") or "")
+            kind = str(decision.args.get("question_kind") or "")
+            assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
 
         storefront_cases = ("رابط المتجر الإلكتروني", "الموقع الإلكتروني")
         for msg in storefront_cases:

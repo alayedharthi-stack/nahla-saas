@@ -1135,6 +1135,12 @@ class MerchantBrain:
         human_priority: bool = False,
     ) -> Dict[str, Any]:
         t0 = time.monotonic()
+        try:
+            from core.wa_link_buttons import consume_authorized_cta as _reset_cta  # noqa: PLC0415
+
+            _reset_cta()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — leftover CTA must not block a turn
+            pass
         _coupon_capability_shadow: Dict[str, Any] = {
             "coupon_capability_probe_run": False,
             "coupon_capability_shadow_only": True,
@@ -6389,20 +6395,38 @@ class MerchantBrain:
                 extract_inbound_url_spans,
                 url_matches_inbound_span,
             )
-            from core.wa_link_buttons import bind_authorized_cta  # noqa: PLC0415
+            from core.wa_link_buttons import (  # noqa: PLC0415
+                bind_authorized_cta,
+                consume_authorized_cta,
+            )
 
+            consume_authorized_cta()
             _inbound_url_spans = extract_inbound_url_spans(message or "")
             if _authorized_cta_url and url_matches_inbound_span(
                 _authorized_cta_url,
                 _inbound_url_spans,
             ):
                 _authorized_cta_url = ""
-            bind_authorized_cta(
-                url=_authorized_cta_url,
-                inbound_url_spans=_inbound_url_spans,
+            _bind_cta = (
+                bool(_authorized_cta_url)
+                and not pending_buttons
+                and not pending_product_cards
+                and decision.action != ACTION_HANDOFF
             )
+            if _bind_cta:
+                bind_authorized_cta(
+                    url=_authorized_cta_url,
+                    inbound_url_spans=_inbound_url_spans,
+                )
+            else:
+                consume_authorized_cta()
         except Exception:  # noqa: BLE001  # noqa: silent-ok — CTA bind must not rewrite prose
-            pass
+            try:
+                from core.wa_link_buttons import consume_authorized_cta as _clear_cta  # noqa: PLC0415
+
+                _clear_cta()
+            except Exception:  # noqa: BLE001
+                pass
 
         _out = {
             "reply": reply,

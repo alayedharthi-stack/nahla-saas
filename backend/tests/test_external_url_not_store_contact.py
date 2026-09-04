@@ -351,3 +351,533 @@ class TestRawMessagePreserved:
         assert matched is not None
         assert matched.raw_message == msg
         assert TIKTOK_LIVE in matched.raw_message
+
+
+TIKTOK_CTA = "https://social.example/merchant"
+INSTAGRAM_CTA = "https://instagram.example/merchant"
+MODEL_BODY = "هذا رد نموذجي بدون رابط خام."
+
+
+def _http_boom_patches(calls: list[str]):
+    class _Boom:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            calls.append("init")
+            raise AssertionError("external fetch not authorized")
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            calls.append("call")
+            raise AssertionError("external fetch not authorized")
+
+        def __enter__(self) -> "_Boom":
+            return self
+
+        def __exit__(self, *_exc: Any) -> bool:
+            return False
+
+        def get(self, *args: Any, **kwargs: Any) -> Any:
+            calls.append("get")
+            raise AssertionError("external fetch not authorized")
+
+        def head(self, *args: Any, **kwargs: Any) -> Any:
+            calls.append("head")
+            raise AssertionError("external fetch not authorized")
+
+        def request(self, *args: Any, **kwargs: Any) -> Any:
+            calls.append("request")
+            raise AssertionError("external fetch not authorized")
+
+        async def __aenter__(self) -> "_Boom":
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> bool:
+            return False
+
+    import importlib
+    from contextlib import ExitStack
+    from unittest.mock import patch as _patch
+
+    stack = ExitStack()
+    targets = [
+        "urllib.request.urlopen",
+        "urllib.request.Request",
+        "http.client.HTTPConnection",
+        "http.client.HTTPSConnection",
+        "socket.getaddrinfo",
+    ]
+    optional = [
+        "httpx.Client",
+        "httpx.AsyncClient",
+        "httpx.get",
+        "httpx.head",
+        "httpx.request",
+        "requests.get",
+        "requests.head",
+        "requests.request",
+        "requests.Session",
+        "aiohttp.ClientSession",
+    ]
+    for target in targets:
+        stack.enter_context(_patch(target, _Boom))
+    for target in optional:
+        mod_name = target.split(".", 1)[0]
+        try:
+            importlib.import_module(mod_name)
+        except Exception:
+            continue
+        stack.enter_context(_patch(target, _Boom))
+    return stack
+
+
+def _simulate_webhook_split(reply: str):
+    """Production wire boundary: whatsapp_webhook.py calls split with reply only."""
+    from core.wa_link_buttons import split_text_for_cta_buttons as _split_cta
+
+    return _split_cta(reply or "")
+
+
+def _wire_send_kwargs(reply: str, msgs) -> dict[str, Any]:
+    """Mirrors whatsapp_webhook.py single-CTA `_send_cta_url` arguments."""
+    if not msgs or msgs[0].cta is None:
+        return {"body_text": reply, "btn_url": None}
+    msg = msgs[0]
+    return {
+        "body_text": msg.body or reply,
+        "btn_url": msg.cta.url,
+        "btn_label": msg.cta.button_title,
+    }
+
+
+class TestTrustValidatorFailClosed:
+    def test_import_failure_no_cta(self) -> None:
+        import sys
+        import types
+
+        fake = types.ModuleType("modules.ai.brain.commerce.storefront_product_url")
+        with patch.dict(sys.modules, {"modules.ai.brain.commerce.storefront_product_url": fake}):
+            cta = authorized_profile_cta_url(
+                topic="store_info",
+                message="وش رابط المتجر؟",
+                facts=_facts(),
+            )
+        assert cta == ""
+
+    def test_validator_raises_no_cta(self) -> None:
+        with patch(
+            "modules.ai.brain.commerce.storefront_product_url.is_trusted_merchant_http_url",
+            side_effect=RuntimeError("validator exploded"),
+        ):
+            cta = authorized_profile_cta_url(
+                topic="store_info",
+                message="وش رابط المتجر؟",
+                facts=_facts(),
+            )
+        assert cta == ""
+
+    def test_malformed_non_http_no_cta(self) -> None:
+        for bad in ("javascript:alert(1)", "not a url", "ftp://files.example/x"):
+            cta = authorized_profile_cta_url(
+                topic="store_info",
+                message="وش رابط المتجر؟",
+                facts=_facts(store_url=bad),
+            )
+            assert cta == "", bad
+
+    def test_customer_url_identical_to_candidate_no_cta(self) -> None:
+        facts = _facts(store_url=TIKTOK_LIVE)
+        cta = authorized_profile_cta_url(
+            topic="store_info",
+            message=TIKTOK_LIVE,
+            facts=facts,
+        )
+        assert cta == ""
+
+    def test_valid_tenant_store_url_cta_allowed(self) -> None:
+        cta = authorized_profile_cta_url(
+            topic="store_info",
+            message="وش رابط المتجر؟",
+            facts=_facts(store_url=GENERIC_STORE_URL),
+        )
+        assert cta == GENERIC_STORE_URL
+
+
+class TestEmptyModelBodyNoDeterministicCtaProse:
+    def test_authorized_cta_empty_body_does_not_invent_prose(self) -> None:
+        consume_authorized_cta()
+        msgs = split_text_for_cta_buttons(
+            "",
+            authorized_cta_url=GENERIC_STORE_URL,
+        )
+        assert len(msgs) == 1
+        assert msgs[0].cta is None
+        assert msgs[0].body == ""
+        assert "اضغط" not in (msgs[0].body or "")
+        assert "متجرنا" not in (msgs[0].body or "")
+
+    def test_contextvar_empty_body_same_contract(self) -> None:
+        consume_authorized_cta()
+        bind_authorized_cta(url=GENERIC_STORE_URL)
+        msgs = split_text_for_cta_buttons("")
+        assert msgs[0].cta is None
+        assert msgs[0].body == ""
+
+
+class TestConfiguredSocialChannel:
+    def test_arabic_tiktok_uses_configured_cta(self) -> None:
+        facts = _facts(social={"tiktok": TIKTOK_CTA, "instagram": INSTAGRAM_CTA})
+        decision = _decide("وش حسابكم في تيك توك؟", facts)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "owner_contact"
+        assert decision.args.get("authorized_cta_url") == TIKTOK_CTA
+        assert decision.args.get("authorized_cta_url") != GENERIC_STORE_URL
+        assert TIKTOK_LIVE not in str(decision.args.get("authorized_cta_url") or "")
+
+    def test_configured_instagram_channel(self) -> None:
+        facts = _facts(social={"tiktok": TIKTOK_CTA, "instagram": INSTAGRAM_CTA})
+        decision = _decide("وش حسابكم في انستقرام؟", facts)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "owner_contact"
+        assert decision.args.get("authorized_cta_url") == INSTAGRAM_CTA
+
+    def test_missing_channel_no_store_substitute(self) -> None:
+        facts = _facts(social={"instagram": INSTAGRAM_CTA})
+        decision = _decide("وش حسابكم في تيك توك؟", facts)
+        assert decision.action == ACTION_LLM_REPLY
+        assert not decision.args.get("authorized_cta_url")
+
+    def test_generic_contact_no_automatic_store_or_social_cta(self) -> None:
+        facts = _facts(social={"tiktok": TIKTOK_CTA})
+        decision = _decide("كيف أتواصل معكم؟", facts)
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "owner_contact"
+        assert not decision.args.get("authorized_cta_url")
+
+    def test_social_cta_tenant_isolation(self) -> None:
+        facts_a = _facts(social={"tiktok": TIKTOK_CTA})
+        facts_b = _facts(social={"tiktok": "https://social.example/other"})
+        setattr(facts_b, "tenant_id", 2)
+        a = _decide("وش حسابكم في تيك توك؟", facts_a)
+        b = _decide("وش حسابكم في تيك توك؟", facts_b)
+        assert a.args.get("authorized_cta_url") == TIKTOK_CTA
+        assert b.args.get("authorized_cta_url") == "https://social.example/other"
+        assert a.args.get("authorized_cta_url") != b.args.get("authorized_cta_url")
+
+
+class TestResponseGoalProseRemoved:
+    def test_contact_and_store_decisions_have_no_new_response_goal(self) -> None:
+        contact = _decide("كيف أتواصل معكم؟")
+        store = _decide("وش رابط المتجر؟")
+        for decision in (contact, store):
+            assert "response_goal" not in (decision.args or {})
+            blob = str(decision.args)
+            assert "Do not invent" not in blob
+            assert "customer-supplied URL" not in blob
+            assert "Answer the contact" not in blob
+            assert "Answer the store URL" not in blob
+
+    def test_compose_goal_does_not_carry_new_english_script(self) -> None:
+        from modules.ai.brain.pipeline import _compose_base_response_goal
+        from modules.ai.brain.types import SuggestionSnapshot
+
+        for args in (
+            {
+                "topic": "owner_contact",
+                "question_kind": "owner_contact",
+                "authorized_cta_url": TIKTOK_CTA,
+            },
+            {
+                "topic": "store_info",
+                "question_kind": "store_url",
+                "authorized_cta_url": GENERIC_STORE_URL,
+            },
+        ):
+            goal = _compose_base_response_goal(
+                Decision(action=ACTION_LLM_REPLY, args=args, reason="t"),
+                SuggestionSnapshot(),
+            )
+            assert "Do not invent URLs" not in goal
+            assert "customer-supplied URL" not in goal
+            assert "Answer the contact / social-channel" not in goal
+
+
+class TestCtaContextVarIsolation:
+    def test_consume_occurs_exactly_once(self) -> None:
+        consume_authorized_cta()
+        bind_authorized_cta(url=GENERIC_STORE_URL)
+        first = split_text_for_cta_buttons(MODEL_BODY)
+        second = split_text_for_cta_buttons(MODEL_BODY)
+        assert first[0].cta is not None
+        assert first[0].cta.url.rstrip("/") == GENERIC_STORE_URL.rstrip("/")
+        assert second[0].cta is None
+
+    def test_sequential_turns_do_not_inherit(self) -> None:
+        consume_authorized_cta()
+        bind_authorized_cta(url=GENERIC_STORE_URL)
+        _simulate_webhook_split(MODEL_BODY)
+        leftover = consume_authorized_cta()
+        assert leftover is None or not str(getattr(leftover, "url", "") or "")
+        bind_authorized_cta(url=TIKTOK_CTA)
+        msgs = _simulate_webhook_split("second-turn-body")
+        assert msgs[0].cta is not None
+        assert msgs[0].cta.url == TIKTOK_CTA
+        assert GENERIC_STORE_URL not in (msgs[0].cta.url or "")
+
+    def test_buttons_branch_does_not_leave_cta(self) -> None:
+        consume_authorized_cta()
+        bind_authorized_cta(url=GENERIC_STORE_URL)
+        consume_authorized_cta()
+        msgs = _simulate_webhook_split("later-turn")
+        assert all(item.cta is None for item in msgs)
+
+    def test_exception_clears_stale_binding(self) -> None:
+        consume_authorized_cta()
+        bind_authorized_cta(url=GENERIC_STORE_URL)
+        try:
+            raise RuntimeError("cancelled send")
+        except RuntimeError:
+            consume_authorized_cta()
+        msgs = _simulate_webhook_split(MODEL_BODY)
+        assert all(item.cta is None for item in msgs)
+
+    def test_concurrent_turns_do_not_exchange_cta(self) -> None:
+        import asyncio
+
+        async def _turn(url: str, body: str) -> str:
+            bind_authorized_cta(url=url)
+            await asyncio.sleep(0)
+            msgs = split_text_for_cta_buttons(body)
+            assert msgs[0].cta is not None
+            return str(msgs[0].cta.url)
+
+        async def _run() -> None:
+            consume_authorized_cta()
+            first, second = await asyncio.gather(
+                _turn(GENERIC_STORE_URL, "body-a"),
+                _turn(TIKTOK_CTA, "body-b"),
+            )
+            assert first.rstrip("/") == GENERIC_STORE_URL.rstrip("/")
+            assert second == TIKTOK_CTA
+
+        asyncio.run(_run())
+
+
+class TestNoExternalFetchStrengthened(TestNNoExternalFetch):
+    def test_classify_and_decide_do_not_http(self) -> None:
+        calls: list[str] = []
+        with _http_boom_patches(calls):
+            classify_store_profile_topic(TIKTOK_LIVE)
+            rules_match(TIKTOK_LIVE)
+            _decide(TIKTOK_LIVE)
+            authorized_profile_cta_url(
+                topic="store_info",
+                message=f"{TIKTOK_LIVE} وش رابط المتجر؟",
+                facts=_facts(),
+            )
+        assert calls == []
+
+
+def _d3_brain_process_stack(brain: Any, *, message: str, decision: Decision, model_body: str):
+    import asyncio
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from modules.ai.brain.types import MerchantConversationState
+
+    stack = ExitStack()
+    stack.enter_context(patch("core.billing.has_billing_access", return_value=True))
+    stack.enter_context(
+        patch(
+            "core.wa_usage.check_limit",
+            return_value=SimpleNamespace(allowed=True, used_total=0, limit=1000, reason=""),
+        )
+    )
+    stack.enter_context(
+        patch(
+            "core.ai_disabled_gate.is_ai_disabled_for_conversation",
+            return_value=SimpleNamespace(disabled=False, reason=None),
+        )
+    )
+    intent = _intent_for(message)
+    state = MerchantConversationState(stage="browsing", greeted=True)
+    stack.enter_context(patch.object(brain._classifier, "classify", return_value=intent))
+    stack.enter_context(patch.object(brain._decision_engine, "decide", return_value=decision))
+    stack.enter_context(patch.object(brain._policy_gate, "gate", side_effect=lambda d, _ctx: d))
+    stack.enter_context(patch.object(brain._state_store, "load", return_value=state))
+    stack.enter_context(patch.object(brain._state_store, "save"))
+    stack.enter_context(patch.object(brain._facts_loader, "load", return_value=_facts()))
+    stack.enter_context(patch.object(brain._memory_updater, "update"))
+    llm_mock = stack.enter_context(
+        patch.object(
+            brain._composer,
+            "compose",
+            new_callable=AsyncMock,
+            return_value=model_body,
+        )
+    )
+    faq_contact = stack.enter_context(
+        patch(
+            "modules.ai.brain.compose.templates.faq_owner_contact",
+            side_effect=AssertionError("faq_owner_contact invoked"),
+        )
+    )
+    faq_store = stack.enter_context(
+        patch(
+            "modules.ai.brain.compose.templates.faq_store_info",
+            side_effect=AssertionError("faq_store_info invoked"),
+        )
+    )
+    persona = stack.enter_context(
+        patch(
+            "modules.ai.brain.persona.fact_bound_composer.FactBoundPersonaComposer.compose",
+            new_callable=AsyncMock,
+        )
+    )
+    return stack, llm_mock, faq_contact, faq_store, persona, asyncio, MagicMock
+
+
+def _process_then_wire(brain, *, db, message: str):
+    async def _run():
+        result = await brain.process(
+            db=db,
+            tenant_id=1,
+            customer_phone="966500000001",
+            message=message,
+            history=[],
+            profile={"preferred_language": "ar"},
+            conversation_id=42,
+        )
+        msgs = _simulate_webhook_split(result.get("reply") or "")
+        return result, msgs
+
+    import asyncio as _asyncio
+
+    return _asyncio.run(_run())
+
+
+class TestModelOwnershipComposeOnce:
+    def test_contact_and_store_are_model_owned(self) -> None:
+        from modules.ai.brain.pipeline import get_brain
+
+        cases = (
+            ("كيف أتواصل معكم؟", "owner_contact"),
+            ("وش رابط المتجر؟", "store_info"),
+        )
+        for message, topic in cases:
+            decision = _decide(message)
+            assert decision.action == ACTION_LLM_REPLY
+            assert decision.args.get("topic") == topic
+            consume_authorized_cta()
+            brain = get_brain()
+            stack, llm_mock, _fc, _fs, _persona, asyncio, MagicMock = _d3_brain_process_stack(
+                brain, message=message, decision=decision, model_body=MODEL_BODY
+            )
+            db = MagicMock()
+            with stack:
+                result = asyncio.run(
+                    brain.process(
+                        db=db,
+                        tenant_id=1,
+                        customer_phone="966500000001",
+                        message=message,
+                        history=[],
+                        profile={"preferred_language": "ar"},
+                        conversation_id=42,
+                    )
+                )
+            assert llm_mock.await_count == 1
+            assert _persona.await_count == 0
+            assert result.get("reply") == MODEL_BODY
+            assert result.get("compose_reply_candidate") == MODEL_BODY
+            assert GENERIC_STORE_URL not in (result.get("reply") or "")
+            assert TIKTOK_LIVE not in (result.get("reply") or "")
+            if topic == "store_info":
+                assert result.get("authorized_cta_url") == GENERIC_STORE_URL
+            else:
+                assert not result.get("authorized_cta_url")
+            follow = DefaultSuggestionEngine().suggest(
+                _ctx(message, _intent_for(message)),
+                decision,
+                __import__(
+                    "modules.ai.brain.types", fromlist=["ActionResult"]
+                ).ActionResult(success=True, data={"topic": topic}),
+            )
+            assert "إذا تحب أساعدك هنا مباشرة قبل التواصل" not in str(
+                getattr(follow, "follow_up_question", "") or ""
+            )
+
+
+class TestPipelineToWireCta:
+    def test_store_request_wire_consumes_authorized_cta(self) -> None:
+        from modules.ai.brain.pipeline import get_brain
+
+        message = "وش رابط المتجر؟"
+        decision = _decide(message)
+        consume_authorized_cta()
+        brain = get_brain()
+        stack, llm_mock, _fc, _fs, _persona, asyncio, MagicMock = _d3_brain_process_stack(
+            brain, message=message, decision=decision, model_body=MODEL_BODY
+        )
+        db = MagicMock()
+        with stack:
+            result, msgs = _process_then_wire(brain, db=db, message=message)
+        send = _wire_send_kwargs(result.get("reply") or "", msgs)
+        assert llm_mock.await_count == 1
+        assert result.get("reply") == MODEL_BODY
+        assert GENERIC_STORE_URL not in (result.get("reply") or "")
+        assert result.get("authorized_cta_url") == GENERIC_STORE_URL
+        assert send["btn_url"].rstrip("/") == GENERIC_STORE_URL.rstrip("/")
+        assert send["body_text"] == MODEL_BODY
+        assert TIKTOK_LIVE not in str(send["btn_url"] or "")
+
+    def test_bare_external_url_has_no_merchant_cta_on_wire(self) -> None:
+        from modules.ai.brain.pipeline import get_brain
+
+        message = TIKTOK_LIVE
+        decision = _decide(message)
+        consume_authorized_cta()
+        brain = get_brain()
+        stack, _llm, _fc, _fs, _persona, asyncio, MagicMock = _d3_brain_process_stack(
+            brain, message=message, decision=decision, model_body=MODEL_BODY
+        )
+        db = MagicMock()
+        with stack:
+            result, msgs = _process_then_wire(brain, db=db, message=message)
+        send = _wire_send_kwargs(result.get("reply") or "", msgs)
+        assert not result.get("authorized_cta_url")
+        assert send["btn_url"] is None
+        assert all(item.cta is None for item in msgs)
+        assert send["body_text"] == MODEL_BODY
+
+    def test_handoff_branch_does_not_leave_cta_for_later_split(self) -> None:
+        from modules.ai.brain.decision.actions import ACTION_HANDOFF
+        from modules.ai.brain.pipeline import get_brain
+
+        consume_authorized_cta()
+        brain = get_brain()
+        decision = Decision(
+            action=ACTION_HANDOFF,
+            args={"authorized_cta_url": GENERIC_STORE_URL, "topic": "store_info"},
+            reason="t",
+        )
+        stack, _llm, _fc, _fs, _persona, asyncio, MagicMock = _d3_brain_process_stack(
+            brain, message="وش رابط المتجر؟", decision=decision, model_body=MODEL_BODY
+        )
+        db = MagicMock()
+        with stack:
+            async def _run():
+                await brain.process(
+                    db=db,
+                    tenant_id=1,
+                    customer_phone="966500000001",
+                    message="وش رابط المتجر؟",
+                    history=[],
+                    profile={"preferred_language": "ar"},
+                    conversation_id=42,
+                )
+                leftover = consume_authorized_cta()
+                msgs = _simulate_webhook_split(MODEL_BODY)
+                return leftover, msgs
+
+            leftover, msgs = asyncio.run(_run())
+        assert leftover is None or not str(getattr(leftover, "url", "") or "")
+        assert all(item.cta is None for item in msgs)

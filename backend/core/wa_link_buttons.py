@@ -634,11 +634,11 @@ def split_text_for_cta_buttons(
 
     body_text = strip_empty_markdown_links(text or "").strip()
     if auth_url:
-        classification = classify_url(auth_url, store_domain=store_domain)
         if not body_text:
-            body_text = _DEFAULT_BODY_BY_KIND.get(
-                classification.kind, "اضغط على الزر للمتابعة 👇"
-            )
+            # Authorized CTA is not a compose owner. Empty model body
+            # must not be replaced with deterministic conversational prose.
+            return [CtaMessage(body="", cta=None)]
+        classification = classify_url(auth_url, store_domain=store_domain)
         return [CtaMessage(body=body_text, cta=classification)]
 
     if not text or not text.strip():

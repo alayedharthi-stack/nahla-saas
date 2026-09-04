@@ -10,8 +10,11 @@ Routing contract:
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
+
+logger = logging.getLogger("nahla.brain.merchant_profile_intents")
 
 _ABOUT_RE = re.compile(
     r"("
@@ -91,6 +94,32 @@ _SOCIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+def _social_key_requested_in_haystack(key: str, haystack: str) -> bool:
+    """True when Pack A2 `_SOCIAL_RE` tokens for a profile key appear.
+
+    Canonical keys are `core.merchant_profile._manual_social`. Token
+    strings are the alternatives already listed in `_SOCIAL_RE` — not a
+    new D3 phrase map and not a new compiled customer-language regex.
+    """
+    key_l = str(key or "").strip().lower()
+    text = str(haystack or "")
+    if not key_l or not text:
+        return False
+    hay_l = text.lower()
+    if key_l in hay_l:
+        return True
+    compact = hay_l.replace(" ", "").replace("\u00a0", "")
+    if key_l == "tiktok":
+        return "تيك توك" in hay_l or "تيكتوك" in compact
+    if key_l == "instagram":
+        return "انستقرام" in hay_l or "إنستغرام" in text
+    if key_l == "twitter":
+        return "تويتر" in hay_l
+    if key_l == "snapchat":
+        return "سناب" in hay_l
+    return False
+
 _CURRENCY_RE = re.compile(
     r"("
     r"عمل(?:ة|تكم|ة\s*المتجر)|"
@@ -149,14 +178,30 @@ def _trusted_http_url(value: str) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
+    low = raw.lower()
+    if not low.startswith(("http://", "https://")):
+        return ""
+    if any(ch.isspace() for ch in raw):
+        return ""
     try:
         from modules.ai.brain.commerce.storefront_product_url import (  # noqa: PLC0415
             is_trusted_merchant_http_url,
         )
-    except Exception:  # noqa: BLE001
-        return raw if raw.lower().startswith(("http://", "https://")) else ""
-    if is_trusted_merchant_http_url(raw):
-        return raw
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PROFILE_CTA] trusted_url_validator_unavailable err=%s",
+            type(exc).__name__,
+        )
+        return ""
+    try:
+        if is_trusted_merchant_http_url(raw):
+            return raw
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PROFILE_CTA] trusted_url_validator_raised err=%s",
+            type(exc).__name__,
+        )
+        return ""
     return ""
 
 
@@ -217,9 +262,14 @@ def authorized_profile_cta_url(
         if isinstance(raw_social, dict):
             social = raw_social
     haystack_l = haystack.lower()
+    # Canonical keys already exist on merchant_profile. Token groups are
+    # the Pack A2 _SOCIAL_RE alternatives already in this module — not a
+    # new D3 phrase map.
     for key, val in social.items():
         key_l = str(key or "").strip().lower()
-        if key_l and key_l in haystack_l:
+        if not key_l:
+            continue
+        if key_l in haystack_l or _social_key_requested_in_haystack(key_l, haystack):
             return _reject_inbound_cta(str(val or ""), inbound)
     return ""
 
@@ -340,17 +390,8 @@ def build_merchant_profile_decision(
                 "profile_surface": "merchant_profile",
                 "question_kind": "owner_contact",
                 "authorized_cta_url": cta,
-                "response_goal": (
-                    "Answer the contact / social-channel question using only "
-                    "trusted merchant_profile phone, email, and social_links. "
-                    "If a requested channel is not configured, say so. "
-                    "Do not invent URLs, phones, or emails. "
-                    "Do not use any customer-supplied URL. "
-                    "Do not substitute the store URL unless that is the "
-                    "configured channel the customer asked for."
-                ),
             },
-            reason="customer asked contact/social — structured profile channels only",
+            reason="owner_contact",
         )
 
     if topic == "store_currency":
@@ -401,7 +442,7 @@ def llm_store_info_decision(
     message: str,
     facts: Any = None,
     merchant_context: Any = None,
-    reason: str = "customer asked store URL / store info",
+    reason: str = "store_info",
     confidence: float = 0.90,
 ) -> Any:
     """Model-owned store-link Decision with out-of-band authorized CTA."""
@@ -422,12 +463,6 @@ def llm_store_info_decision(
             "profile_surface": "merchant_profile",
             "question_kind": "store_url",
             "authorized_cta_url": cta,
-            "response_goal": (
-                "Answer the store URL / website question using only "
-                "trusted merchant_profile.domain / store_url when known. "
-                "If unknown, say the store link is not configured. "
-                "Do not invent a URL. Do not use any customer-supplied URL."
-            ),
         },
         reason=reason,
         confidence=confidence,

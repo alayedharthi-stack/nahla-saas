@@ -245,8 +245,8 @@ def test_order_from_website_does_not_trigger_checkout_slots() -> None:
         history=[],
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    topic = str(decision.args.get("topic") or "")
     assert decision.action == ACTION_LLM_REPLY
+    topic = str(decision.args.get("topic") or "")
     assert topic in {TOPIC_STORE_INFO, "storefront_self_checkout"}
     assert "customer_first_name" not in str(decision.args)
 
