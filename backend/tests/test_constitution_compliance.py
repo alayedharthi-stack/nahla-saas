@@ -9,7 +9,8 @@ import copy
 import json
 import os
 import sys
-from datetime import date
+import re
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
@@ -600,12 +601,182 @@ class TestGOV002ExecutableGuardWiring:
         assert "POST_MERGE_DEDICATED_TRIGGER=pull_request_target" in wf
         assert "\n  pull_request:\n" not in wf
 
-    def test_exception_registry_starts_empty(self) -> None:
+    def test_exception_registry_integrity(self) -> None:
         from modules.ai.governance.intelligence_non_interference import (  # noqa: PLC0415
             EXCEPTIONS_PATH,
-            load_exceptions_from_text,
         )
 
         root = Path(__file__).resolve().parents[2]
         raw = (root / EXCEPTIONS_PATH).read_text(encoding="utf-8")
-        assert load_exceptions_from_text(raw) == []
+        assert_gov002_exception_registry_integrity(raw)
+
+
+_GOV002_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_GOV002_REQUIRED_FIELDS = (
+    "exception_id",
+    "change_class",
+    "exact_file_scope",
+    "expected_change_digest",
+    "owner_approval_ref",
+    "created_at",
+    "expires_at",
+    "exact_reason",
+)
+
+
+def _gov002_valid_row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "exception_id": "EX-SYNTHETIC-REGISTRY-1",
+        "change_class": "PROMPT_CHANGE",
+        "exact_file_scope": ["backend/modules/ai/brain/persona/synthetic_surface.py"],
+        "exact_symbol_scope": "",
+        "expected_change_digest": "ab" * 32,
+        "single_use": True,
+        "consumed": False,
+        "created_at": "2026-09-04",
+        "expires_at": "2026-09-18",
+        "owner_approval_ref": "synthetic-owner-approval",
+        "exact_reason": "synthetic registry integrity fixture",
+    }
+    row.update(overrides)
+    return row
+
+
+def _gov002_registry_json(rows: list[dict[str, Any]]) -> str:
+    return json.dumps({"schema_version": 1, "exceptions": rows})
+
+
+def assert_gov002_exception_registry_integrity(raw: str) -> list[dict[str, Any]]:
+    """Generic GOV-002 registry contract. Empty and valid non-empty registries pass."""
+    from modules.ai.governance.intelligence_non_interference import (  # noqa: PLC0415
+        load_exceptions_from_text,
+    )
+
+    payload = json.loads(raw)
+    assert isinstance(payload, dict)
+    assert payload.get("schema_version") == 1
+    rows = payload.get("exceptions")
+    assert isinstance(rows, list)
+    ids: list[str] = []
+    for idx, row in enumerate(rows):
+        assert isinstance(row, dict), f"exceptions[{idx}] is not an object"
+        for field in _GOV002_REQUIRED_FIELDS:
+            value = row.get(field)
+            if field == "exact_file_scope":
+                assert isinstance(value, list) and value, (
+                    f"exceptions[{idx}] missing {field}"
+                )
+                assert all(str(item).strip() for item in value)
+            else:
+                assert isinstance(value, str) and value.strip(), (
+                    f"exceptions[{idx}] missing {field}"
+                )
+        exception_id = str(row["exception_id"]).strip()
+        ids.append(exception_id)
+        assert row.get("single_use") is True, f"exceptions[{idx}] single_use"
+        assert isinstance(row.get("consumed"), bool), f"exceptions[{idx}] consumed"
+        digest = str(row["expected_change_digest"]).strip()
+        assert _GOV002_DIGEST_RE.fullmatch(digest), f"exceptions[{idx}] digest"
+        created = datetime.strptime(str(row["created_at"]).strip(), "%Y-%m-%d").date()
+        expires = datetime.strptime(str(row["expires_at"]).strip(), "%Y-%m-%d").date()
+        assert expires >= created, f"exceptions[{idx}] expires_at precedes created_at"
+    assert len(ids) == len(set(ids)), "duplicate exception_id"
+    loaded = load_exceptions_from_text(raw)
+    loaded_ids = {exc.exception_id for exc in loaded}
+    for row in rows:
+        exception_id = str(row["exception_id"]).strip()
+        if row.get("consumed") is True:
+            assert exception_id not in loaded_ids
+        else:
+            assert exception_id in loaded_ids
+    for exc in loaded:
+        assert exc.consumed is False
+        assert exc.single_use is True
+    return list(rows)
+
+
+class TestGOV002ExceptionRegistryIntegrity:
+    def test_a_empty_registry_passes(self) -> None:
+        rows = assert_gov002_exception_registry_integrity(_gov002_registry_json([]))
+        assert rows == []
+
+    def test_b_one_valid_unconsumed_entry_passes(self) -> None:
+        from modules.ai.governance.intelligence_non_interference import (  # noqa: PLC0415
+            load_exceptions_from_text,
+        )
+
+        raw = _gov002_registry_json([_gov002_valid_row()])
+        rows = assert_gov002_exception_registry_integrity(raw)
+        assert len(rows) == 1
+        loaded = load_exceptions_from_text(raw)
+        assert len(loaded) == 1
+        assert loaded[0].exception_id == "EX-SYNTHETIC-REGISTRY-1"
+
+    def test_c_duplicate_exception_ids_fail(self) -> None:
+        raw = _gov002_registry_json(
+            [
+                _gov002_valid_row(),
+                _gov002_valid_row(exact_reason="second synthetic row"),
+            ]
+        )
+        with pytest.raises(AssertionError, match="duplicate exception_id"):
+            assert_gov002_exception_registry_integrity(raw)
+
+    def test_d_malformed_digest_fails(self) -> None:
+        raw = _gov002_registry_json(
+            [_gov002_valid_row(expected_change_digest="not-a-sha256")]
+        )
+        with pytest.raises(AssertionError, match="digest"):
+            assert_gov002_exception_registry_integrity(raw)
+
+    def test_e_single_use_false_fails(self) -> None:
+        raw = _gov002_registry_json([_gov002_valid_row(single_use=False)])
+        with pytest.raises(AssertionError, match="single_use"):
+            assert_gov002_exception_registry_integrity(raw)
+
+    def test_f_non_boolean_consumed_fails(self) -> None:
+        raw = _gov002_registry_json([_gov002_valid_row(consumed="false")])
+        with pytest.raises(AssertionError, match="consumed"):
+            assert_gov002_exception_registry_integrity(raw)
+
+    def test_g_missing_owner_approval_reference_fails(self) -> None:
+        raw = _gov002_registry_json([_gov002_valid_row(owner_approval_ref="")])
+        with pytest.raises(AssertionError, match="owner_approval_ref"):
+            assert_gov002_exception_registry_integrity(raw)
+
+    def test_h_expires_at_earlier_than_created_at_fails(self) -> None:
+        raw = _gov002_registry_json(
+            [_gov002_valid_row(created_at="2026-09-18", expires_at="2026-09-04")]
+        )
+        with pytest.raises(AssertionError, match="expires_at precedes created_at"):
+            assert_gov002_exception_registry_integrity(raw)
+
+    def test_i_consumed_audit_entry_is_not_active_authorization(self) -> None:
+        from modules.ai.governance.intelligence_non_interference import (  # noqa: PLC0415
+            exception_is_active,
+            load_exceptions_from_text,
+        )
+
+        raw = _gov002_registry_json([_gov002_valid_row(consumed=True)])
+        rows = assert_gov002_exception_registry_integrity(raw)
+        assert len(rows) == 1
+        loaded = load_exceptions_from_text(raw)
+        assert loaded == []
+        leftover = _gov002_valid_row(consumed=True)
+        from modules.ai.governance.intelligence_non_interference import (  # noqa: PLC0415
+            OwnerException,
+        )
+
+        audit = OwnerException(
+            exception_id=str(leftover["exception_id"]),
+            change_class=str(leftover["change_class"]),
+            exact_file_scope=tuple(leftover["exact_file_scope"]),
+            exact_reason=str(leftover["exact_reason"]),
+            owner_approval_ref=str(leftover["owner_approval_ref"]),
+            created_at=str(leftover["created_at"]),
+            expires_at=str(leftover["expires_at"]),
+            expected_change_digest=str(leftover["expected_change_digest"]),
+            single_use=True,
+            consumed=True,
+        )
+        assert exception_is_active(audit) is False
