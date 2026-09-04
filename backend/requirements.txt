@@ -20,7 +20,7 @@ python-dotenv==1.0.1
 # ── Security ─────────────────────────────────────────────────────────────────
 python-multipart==0.0.9
 python-jose[cryptography]==3.3.0
-bcrypt==4.1.3
+bcrypt==5.0.0
 
 # ── TOTP 2FA (Phase 2A Sprint 1) ────────────────────────────────────────────
 # pyotp generates + verifies RFC 6238 TOTP codes (Google Authenticator etc.).
