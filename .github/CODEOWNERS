@@ -1,4 +1,6 @@
 # Nahla constitutional governance — require explicit review for waiver/allowlist changes.
+# Default owner for every path. Later rules keep explicit governance ownership.
+* @alayedharthi-stack
 AGENTS.md @alayedharthi-stack
 backend/modules/ai/compose/constitutional_policy.py @alayedharthi-stack
 backend/modules/ai/compose/tracked_violations_baseline.json @alayedharthi-stack
