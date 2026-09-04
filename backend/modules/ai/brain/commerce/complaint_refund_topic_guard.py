@@ -236,9 +236,7 @@ def should_block_order_draft_injection(
     args = getattr(decision, "args", None) or {}
     if str(args.get("topic") or "") == "support_complaint_refund":
         return True
-    if args.get("block_order_flow"):
-        return True
-    if args.get("block_commerce_escalation"):
+    if args.get("block_order_flow") or args.get("block_commerce_escalation"):
         return True
     try:
         from .commerce_turn_contract import is_placed_order_statement  # noqa: PLC0415
