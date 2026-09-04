@@ -913,11 +913,7 @@ class DefaultComposer:
                     "question_kind": _question_kind,
                     "category_filter_dropped": _facts_category_dropped,
                     "display_count": len(candidates),
-                    "decision_args": attach_catalog_candidate_kb_to_decision_args(
-                        ctx,
-                        compose_products=list(compose_products),
-                        decision_args=dict(decision.args or {}),
-                    ),
+                    "decision_args": attach_catalog_candidate_kb_to_decision_args(ctx, compose_products=list(compose_products), decision_args=dict(decision.args or {})),
                     "ai_settings": _ai_settings_from_ctx(ctx),
                 }
                 if _question_kind in _CATALOG_QA_QUESTION_KINDS:
