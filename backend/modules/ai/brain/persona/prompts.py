@@ -203,6 +203,14 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             lines.append(" | ".join(parts))
         if not facts.get("has_catalog_products"):
             lines.append("catalog_products: none")
+        if facts.get("has_kb_sections"):
+            for section in facts.get("kb_sections") or []:
+                if not isinstance(section, dict):
+                    continue
+                title = str(section.get("title") or "").strip()
+                body = str(section.get("body") or "").strip()
+                if title or body:
+                    lines.append(f"kb_section: {title} — {body}")
         if (
             not facts.get("has_eligible_products")
             and qkind not in {"price", "availability", "compound"}
@@ -214,8 +222,11 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                 "no name/address/payment/quantity prompts"
             )
         else:
+            truth_rule = "rules: use only supplied catalog products"
+            if facts.get("has_kb_sections"):
+                truth_rule += " and supplied authorized kb_sections"
             rule_parts = [
-                "rules: use only supplied catalog products",
+                truth_rule,
                 "brief Saudi merchant tone",
                 "no invented products/prices/availability/discounts",
                 "no الأفضل/superiority claims",

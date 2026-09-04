@@ -18,6 +18,77 @@ from .integration import (
 
 logger = logging.getLogger("nahla.brain.persona.catalog_product_answer")
 
+_KB_SECTION_BODY_LIMIT = 800
+_KB_SECTION_RESULT_LIMIT = 4
+
+
+def _precomputed_catalog_kb_facts(args: dict[str, Any]) -> dict[str, Any]:
+    """Normalize caller-supplied KB facts. No database access."""
+    raw_sections = args.get("kb_sections")
+    sections: list[dict[str, Any]] = []
+    seen_ids: set[Any] = set()
+    if isinstance(raw_sections, list):
+        for item in raw_sections:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            body = str(item.get("body") or "").strip()[:_KB_SECTION_BODY_LIMIT]
+            if not title and not body:
+                continue
+            sid = item.get("section_id")
+            if sid is not None:
+                if sid in seen_ids:
+                    continue
+                seen_ids.add(sid)
+            row: dict[str, Any] = {
+                "section_id": sid,
+                "title": title,
+                "body": body,
+                "kind": str(item.get("kind") or "").strip(),
+            }
+            if item.get("match_score") is not None:
+                row["match_score"] = item.get("match_score")
+            if item.get("subject_score") is not None:
+                row["subject_score"] = item.get("subject_score")
+            if item.get("question_score") is not None:
+                row["question_score"] = item.get("question_score")
+            sections.append(row)
+            if len(sections) >= _KB_SECTION_RESULT_LIMIT:
+                break
+    ids = [row.get("section_id") for row in sections if row.get("section_id") is not None]
+    failed = (
+        args.get("kb_retrieval_failed") is True
+        or args.get("kb_retrieval_succeeded") is False
+    )
+    if failed:
+        return {
+            "kb_sections": [],
+            "kb_section_ids": [],
+            "has_kb_sections": False,
+            "kb_retrieval_attempted": True,
+            "kb_retrieval_succeeded": False,
+            "kb_retrieval_ran": False,
+            "kb_retrieval_failed": True,
+            "kb_fact_absent": False,
+        }
+    ran = args.get("kb_retrieval_ran") is True or args.get("kb_retrieval_succeeded") is True
+    if not ran:
+        return {}
+    has_sections = bool(sections)
+    return {
+        "kb_sections": sections,
+        "kb_section_ids": ids,
+        "has_kb_sections": has_sections,
+        "kb_retrieval_attempted": True,
+        "kb_retrieval_succeeded": True,
+        "kb_retrieval_ran": True,
+        "kb_retrieval_failed": False,
+        "kb_fact_absent": not has_sections,
+        "knowledge_source": (
+            "tenant_knowledge_base" if has_sections else "missing_kb"
+        ),
+    }
+
 CATALOG_GROUNDED_PERSONA_CHOSEN_PATHS = frozenset({
     "catalog_miss_resolved_subject",
     "catalog_navigation_top_products_fallback",
@@ -643,6 +714,7 @@ def build_catalog_product_answer_facts_bundle(
         verified_facts["price_source"] = "catalog"
     if include_availability and any_availability:
         verified_facts["availability_source"] = "catalog"
+    verified_facts.update(_precomputed_catalog_kb_facts(args))
     return PersonaFactsBundle(
         surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
         inbound_text=inbound,
@@ -720,6 +792,25 @@ def build_catalog_product_answer_event_metadata(
         fact_rows = catalog_fact_product_rows(catalog_fact_products)
         if fact_rows:
             meta["catalog_fact_products"] = fact_rows
+    if facts.get("kb_retrieval_failed") is True or facts.get("kb_retrieval_succeeded") is False:
+        meta["kb_retrieval_attempted"] = True
+        meta["kb_retrieval_succeeded"] = False
+        meta["kb_retrieval_ran"] = False
+        meta["kb_retrieval_failed"] = True
+        meta["kb_fact_absent"] = False
+        meta["has_kb_sections"] = False
+        meta["kb_section_ids"] = []
+    elif facts.get("kb_retrieval_ran") is True or facts.get("kb_retrieval_succeeded") is True:
+        meta["kb_retrieval_attempted"] = True
+        meta["kb_retrieval_succeeded"] = True
+        meta["kb_retrieval_ran"] = True
+        meta["kb_retrieval_failed"] = False
+        meta["kb_fact_absent"] = bool(facts.get("kb_fact_absent"))
+        meta["has_kb_sections"] = bool(facts.get("has_kb_sections"))
+        meta["kb_section_ids"] = list(facts.get("kb_section_ids") or [])
+        source = str(facts.get("knowledge_source") or "").strip()
+        if source:
+            meta["knowledge_source"] = source
     return meta
 
 

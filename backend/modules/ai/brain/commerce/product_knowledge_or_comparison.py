@@ -14,7 +14,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger("nahla.brain.product_knowledge")
 
@@ -587,29 +587,63 @@ def _combine_kb_relevance(
 
 
 _KB_RELEVANCE_THRESHOLD = 0.35
+_KB_SECTION_BODY_LIMIT = 800
+_KB_SECTION_RESULT_LIMIT = 4
 
 
-def _retrieve_product_kb_sections(
+def _normalize_candidate_product_ids(
+    product_id: Any = None,
+    product_ids: Any = None,
+) -> set[int]:
+    """Deduplicated catalog ids. ``product_id`` remains the single-product contract."""
+    values: List[Any] = []
+    if product_ids is not None:
+        if isinstance(product_ids, (str, bytes)):
+            values.append(product_ids)
+        elif isinstance(product_ids, Iterable):
+            values.extend(list(product_ids))
+        else:
+            values.append(product_ids)
+    if product_id is not None:
+        values.append(product_id)
+    out: set[int] = set()
+    for raw in values:
+        try:
+            out.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _retrieve_product_kb_sections_status(
     db: Any,
     tenant_id: int,
     *,
     subject: str,
     message: str,
     product_id: Any = None,
+    product_ids: Any = None,
     limit: int = 4,
     kinds_filter: Optional[frozenset] = None,
-) -> List[Dict[str, Any]]:
-    if not db or not tenant_id:
-        return []
+) -> tuple[bool, List[Dict[str, Any]]]:
+    """Tenant-safe KB lookup. ``succeeded=False`` is operational failure, not empty facts."""
+    if db is None:
+        return False, []
+    try:
+        tenant = int(tenant_id or 0)
+    except (TypeError, ValueError):
+        tenant = 0
+    if tenant <= 0:
+        return False, []
     probe = " ".join(x for x in (subject, message) if x).strip()
     if len(_norm(probe)) < 2:
-        return []
+        return True, []
 
     try:
         from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
         from models import MerchantKnowledgeSection  # noqa: PLC0415
     except Exception:  # noqa: BLE001  # noqa: silent-ok — optional KB models in tests
-        return []
+        return False, []
 
     try:
         kind_tuple = tuple(kinds_filter or _PRODUCT_KB_KINDS)
@@ -617,7 +651,7 @@ def _retrieve_product_kb_sections(
         rows = (
             apply_ai_visible_kb_query_filters(db.query(MerchantKnowledgeSection))
             .filter(
-                MerchantKnowledgeSection.tenant_id == int(tenant_id),
+                MerchantKnowledgeSection.tenant_id == tenant,
                 MerchantKnowledgeSection.kind.in_(kind_tuple),
             )
             .order_by(
@@ -628,8 +662,8 @@ def _retrieve_product_kb_sections(
             .all()
         )
     except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — KB query is best-effort
-        logger.debug("[PRODUCT_KNOWLEDGE] KB query failed tenant=%s err=%s", tenant_id, exc)
-        return []
+        logger.debug("[PRODUCT_KNOWLEDGE] KB query failed tenant=%s err=%s", tenant, exc)
+        return False, []
 
     scored: List[tuple[float, float, Dict[str, Any]]] = []
     for row in rows:
@@ -637,7 +671,7 @@ def _retrieve_product_kb_sections(
             row_tenant = int(getattr(row, "tenant_id", 0) or 0)
         except (TypeError, ValueError):
             row_tenant = 0
-        if row_tenant and row_tenant != int(tenant_id):
+        if row_tenant and row_tenant != tenant:
             continue
         row_kind = str(getattr(row, "kind", "") or "").strip().lower()
         if row_kind not in allowed_kinds:
@@ -649,11 +683,11 @@ def _retrieve_product_kb_sections(
             except (TypeError, ValueError):
                 continue
         if linked_product_ids:
-            try:
-                subject_product_id = int(product_id)
-            except (TypeError, ValueError):
-                continue
-            if subject_product_id not in linked_product_ids:
+            allowed_ids = _normalize_candidate_product_ids(
+                product_id=product_id,
+                product_ids=product_ids,
+            )
+            if not allowed_ids or allowed_ids.isdisjoint(linked_product_ids):
                 continue
         title = str(getattr(row, "title", "") or "").strip()
         body = str(getattr(row, "body", "") or "").strip()
@@ -682,7 +716,7 @@ def _retrieve_product_kb_sections(
                 {
                     "section_id": getattr(row, "id", None),
                     "title": title,
-                    "body": body[:800],
+                    "body": body[:_KB_SECTION_BODY_LIMIT],
                     "kind": row_kind,
                     "match_score": round(combined, 3),
                     "subject_score": round(subject_relevance, 3),
@@ -691,7 +725,99 @@ def _retrieve_product_kb_sections(
             )
         )
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [payload for _, _, payload in scored[:limit]]
+    result_limit = int(limit or _KB_SECTION_RESULT_LIMIT)
+    return True, [payload for _, _, payload in scored[:result_limit]]
+
+
+def _retrieve_product_kb_sections(
+    db: Any,
+    tenant_id: int,
+    *,
+    subject: str,
+    message: str,
+    product_id: Any = None,
+    product_ids: Any = None,
+    limit: int = 4,
+    kinds_filter: Optional[frozenset] = None,
+) -> List[Dict[str, Any]]:
+    """Existing single-product callers still see failure as an empty list."""
+    _succeeded, sections = _retrieve_product_kb_sections_status(
+        db,
+        tenant_id,
+        subject=subject,
+        message=message,
+        product_id=product_id,
+        product_ids=product_ids,
+        limit=limit,
+        kinds_filter=kinds_filter,
+    )
+    return sections
+
+
+def catalog_kb_retrieval_failure_payload() -> Dict[str, Any]:
+    """Operational failure is not fact-absence."""
+    return {
+        "kb_sections": [],
+        "kb_section_ids": [],
+        "has_kb_sections": False,
+        "kb_retrieval_attempted": True,
+        "kb_retrieval_succeeded": False,
+        "kb_retrieval_ran": False,
+        "kb_retrieval_failed": True,
+        "kb_fact_absent": False,
+    }
+
+
+def retrieve_catalog_candidate_kb_sections(
+    db: Any,
+    tenant_id: int,
+    *,
+    subject: str = "",
+    message: str = "",
+    product_ids: Any = None,
+    product_id: Any = None,
+    limit: int = _KB_SECTION_RESULT_LIMIT,
+) -> Dict[str, Any]:
+    """One tenant-safe KB retrieval for catalog-owned compose.
+
+    Public wrapper for responder use. Does not classify intent or change scoring.
+    Successful empty is ``missing_kb``. Operational failure is not fact-absence.
+    """
+    succeeded, sections = _retrieve_product_kb_sections_status(
+        db,
+        tenant_id,
+        subject=subject,
+        message=message,
+        product_id=product_id,
+        product_ids=product_ids,
+        limit=limit,
+    )
+    if not succeeded:
+        return catalog_kb_retrieval_failure_payload()
+    unique: List[Dict[str, Any]] = []
+    seen_ids: set[Any] = set()
+    for row in sections:
+        sid = row.get("section_id")
+        if sid is not None:
+            if sid in seen_ids:
+                continue
+            seen_ids.add(sid)
+        unique.append(row)
+    ids = [row.get("section_id") for row in unique if row.get("section_id") is not None]
+    has_sections = bool(unique)
+    return {
+        "kb_sections": unique,
+        "kb_section_ids": ids,
+        "has_kb_sections": has_sections,
+        "knowledge_source": (
+            "tenant_knowledge_base" if has_sections else "missing_kb"
+        ),
+        "kb_retrieval_attempted": True,
+        "kb_retrieval_succeeded": True,
+        "kb_retrieval_ran": True,
+        "kb_retrieval_failed": False,
+        "kb_fact_absent": not has_sections,
+    }
 
 
 def gather_product_knowledge_facts(
@@ -947,6 +1073,7 @@ __all__ = [
     "ProductKnowledgeKind",
     "ProductKnowledgeFactsBundle",
     "classify_product_knowledge_kind",
+    "catalog_kb_retrieval_failure_payload",
     "clear_product_knowledge_session",
     "compose_product_knowledge_response_goal",
     "detect_explicit_health_benefits_question",
@@ -959,5 +1086,6 @@ __all__ = [
     "pin_product_knowledge_session",
     "product_knowledge_blocks_product_information",
     "resolve_subject_product",
+    "retrieve_catalog_candidate_kb_sections",
     "try_product_knowledge_decision",
 ]

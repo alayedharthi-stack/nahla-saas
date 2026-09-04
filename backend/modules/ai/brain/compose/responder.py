@@ -38,7 +38,7 @@ from dataclasses import asdict
 import logging
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("nahla.brain.responder")
 
@@ -913,7 +913,7 @@ class DefaultComposer:
                     "question_kind": _question_kind,
                     "category_filter_dropped": _facts_category_dropped,
                     "display_count": len(candidates),
-                    "decision_args": dict(decision.args or {}),
+                    "decision_args": attach_catalog_candidate_kb_to_decision_args(ctx, compose_products=list(compose_products), decision_args=dict(decision.args or {})),
                     "ai_settings": _ai_settings_from_ctx(ctx),
                 }
                 if _question_kind in _CATALOG_QA_QUESTION_KINDS:
@@ -3287,3 +3287,90 @@ def _as_ai_history(
     elif messages[-1]["content"] != current_message:
         messages.append({"role": "user", "content": current_message})
     return messages
+
+
+def _catalog_int_id(value: Any) -> Optional[int]:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number
+
+
+def _canonical_kb_link_product_id(row: Dict[str, Any]) -> Optional[int]:
+    """KB links target ``products.id``, never ``product_variants.id``.
+
+    Search rows use ``id`` as the parent product PK. Variant identity stays on
+    ``variant_id`` and must not enter the KB link intersection set.
+    """
+    parent = _catalog_int_id(row.get("product_id"))
+    if parent is not None:
+        return parent
+    row_id = _catalog_int_id(row.get("id"))
+    variant_id = _catalog_int_id(row.get("variant_id"))
+    if row_id is not None and row_id != variant_id:
+        return row_id
+    return None
+
+
+def _catalog_candidate_ids_and_subject(
+    compose_products: list[Dict[str, Any]] | None,
+) -> tuple[list[int], str]:
+    """Deduplicate canonical parent product ids; join titles for subject scoring only."""
+    seen: set[int] = set()
+    ids: list[int] = []
+    titles: list[str] = []
+    for raw in compose_products or []:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or raw.get("name") or "").strip()
+        if title:
+            titles.append(title)
+        ipid = _canonical_kb_link_product_id(raw)
+        if ipid is None or ipid in seen:
+            continue
+        seen.add(ipid)
+        ids.append(ipid)
+    return ids, " ".join(titles)
+
+
+def attach_catalog_candidate_kb_to_decision_args(
+    ctx: Any,
+    *,
+    compose_products: list[Dict[str, Any]] | None,
+    decision_args: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """One catalog-owned KB retrieval after candidates are finalized."""
+    merged = dict(decision_args or {})
+    product_ids, subject = _catalog_candidate_ids_and_subject(compose_products)
+    try:
+        from ..commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            catalog_kb_retrieval_failure_payload,
+            retrieve_catalog_candidate_kb_sections,
+        )
+
+        payload = retrieve_catalog_candidate_kb_sections(
+            getattr(ctx, "_db", None),
+            int(getattr(ctx, "tenant_id", 0) or 0),
+            subject=subject,
+            message=str(getattr(ctx, "message", "") or ""),
+            product_ids=product_ids,
+        )
+        if isinstance(payload, dict):
+            merged.update(payload)
+        else:
+            merged.update(catalog_kb_retrieval_failure_payload())
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog compose must not fail closed on KB
+        logger.debug(
+            "[CATALOG_KB] retrieval skipped tenant=%s",
+            getattr(ctx, "tenant_id", None),
+            exc_info=True,
+        )
+        from ..commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            catalog_kb_retrieval_failure_payload,
+        )
+
+        merged.update(catalog_kb_retrieval_failure_payload())
+    return merged
