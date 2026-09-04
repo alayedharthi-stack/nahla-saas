@@ -238,6 +238,8 @@ def should_block_order_draft_injection(
         return True
     if args.get("block_order_flow"):
         return True
+    if args.get("block_commerce_escalation"):
+        return True
     try:
         from .commerce_turn_contract import is_placed_order_statement  # noqa: PLC0415
         from .order_tracking_intent_guard import (  # noqa: PLC0415
