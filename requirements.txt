@@ -56,7 +56,7 @@ phonenumbers>=8.13.0
 
 # ── Spreadsheet parsing (customer import) ────────────────────────────────────
 # Pure-Python XLSX reader; CSV is handled by the stdlib `csv` module.
-openpyxl>=3.1.2
+openpyxl>=3.1.5
 
 # ── AI / Claude (used by ai-orchestrator) ────────────────────────────────────
 # The orchestrator calls the Anthropic Messages API directly via httpx —
