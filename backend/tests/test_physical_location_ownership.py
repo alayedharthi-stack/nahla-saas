@@ -191,24 +191,24 @@ class TestPhysicalLocationOwnership:
 
     def test_t4_website_stays_website(self) -> None:
         from modules.ai.brain.commerce.link_intent import LinkIntentType, resolve_link_intent
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
 
         msg = "رابط المتجر الإلكتروني"
         assert resolve_link_intent(msg) == LinkIntentType.WEBSITE_URL
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == TOPIC_STORE_INFO
 
     def test_t5_almawqe_alelectroni_stays_website(self) -> None:
         from modules.ai.brain.commerce.link_intent import LinkIntentType, resolve_link_intent
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
 
         msg = "الموقع الإلكتروني"
         assert resolve_link_intent(msg) == LinkIntentType.WEBSITE_URL
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == TOPIC_STORE_INFO
 
     def test_t6_missing_maps_no_catalog_substitute(self, monkeypatch: pytest.MonkeyPatch) -> None:

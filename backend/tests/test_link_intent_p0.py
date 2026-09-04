@@ -66,7 +66,7 @@ def test_physical_phrases_classify_as_location(message: str) -> None:
 
 
 def test_website_intent_routes_to_store_info_not_maps() -> None:
-    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
     from modules.ai.brain.types import (
@@ -100,13 +100,13 @@ def test_website_intent_routes_to_store_info_not_maps() -> None:
         facts=facts,
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_FAQ_REPLY
+    assert decision.action == ACTION_LLM_REPLY
     assert decision.args.get("topic") == TOPIC_STORE_INFO
     assert decision.args.get("topic") != "location"
 
 
 def test_rabt_almawqe_routes_to_store_info_not_maps() -> None:
-    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
     from modules.ai.brain.types import (
@@ -134,12 +134,12 @@ def test_rabt_almawqe_routes_to_store_info_not_maps() -> None:
         ),
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_FAQ_REPLY
+    assert decision.action == ACTION_LLM_REPLY
     assert decision.args.get("topic") == TOPIC_STORE_INFO
 
 
 def test_physical_intent_routes_to_maps_faq() -> None:
-    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.execution.faq import TOPIC_LOCATION
     from modules.ai.brain.types import (
@@ -167,8 +167,10 @@ def test_physical_intent_routes_to_maps_faq() -> None:
         ),
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_FAQ_REPLY
-    assert decision.args.get("topic") == TOPIC_LOCATION
+    assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
+    topic = str(decision.args.get("topic") or "")
+    assert topic in {TOPIC_LOCATION, "location_delivery"}
+    assert topic != "store_info"
 
 
 def test_website_phrase_skips_pre_brain_location_policy() -> None:

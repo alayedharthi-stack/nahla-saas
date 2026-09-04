@@ -59,13 +59,13 @@ class TestStorefrontLinkIntentReliability:
             LinkIntentType,
             resolve_inbound_link_intent,
         )
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
 
         msg = "رابط المتجر الإلكتروني"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.WEBSITE_URL
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == TOPIC_STORE_INFO
 
     def test_almawqe_alelectroni_storefront_route(self) -> None:
@@ -73,13 +73,13 @@ class TestStorefrontLinkIntentReliability:
             LinkIntentType,
             resolve_inbound_link_intent,
         )
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
 
         msg = "الموقع الإلكتروني"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.WEBSITE_URL
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == TOPIC_STORE_INFO
 
     def test_wain_mawqecom_physical_not_storefront(self) -> None:
@@ -87,14 +87,15 @@ class TestStorefrontLinkIntentReliability:
             LinkIntentType,
             resolve_inbound_link_intent,
         )
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
 
         msg = "وين موقعكم؟"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_FAQ_REPLY
-        assert decision.args.get("topic") == TOPIC_LOCATION
+        topic = str(decision.args.get("topic") or "")
+        assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
+        assert topic in {TOPIC_LOCATION, "location_delivery"}
         assert decision.args.get("topic") != TOPIC_STORE_INFO
 
     def test_mawqe_almaarid_physical_not_storefront(self) -> None:
@@ -102,29 +103,31 @@ class TestStorefrontLinkIntentReliability:
             LinkIntentType,
             resolve_inbound_link_intent,
         )
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
 
         msg = "موقع المعرض"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_FAQ_REPLY
-        assert decision.args.get("topic") == TOPIC_LOCATION
+        topic = str(decision.args.get("topic") or "")
+        assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
+        assert topic in {TOPIC_LOCATION, "location_delivery"}
         assert decision.args.get("topic") != TOPIC_STORE_INFO
 
     def test_missing_store_url_honest_not_configured(self) -> None:
         from core.native_catalog_fallback import compose_native_catalog_failure_decision
         from modules.ai.brain.commerce.link_intent import LinkIntentType, resolve_inbound_link_intent
         from modules.ai.brain.compose.templates import MSG_STORE_LINK_NOT_CONFIGURED, faq_store_info
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
 
         msg = "رابط المتجر الإلكتروني"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.WEBSITE_URL
         decision = _brain_ctx(msg, store_url="")
-        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == TOPIC_STORE_INFO
         assert decision.args.get("topic") != TOPIC_LOCATION
+        assert not decision.args.get("authorized_cta_url")
 
         reply = faq_store_info(store_url="", store_name="متجر")
         assert reply == MSG_STORE_LINK_NOT_CONFIGURED
@@ -159,13 +162,13 @@ class TestStorefrontLinkIntentReliability:
             LinkIntentType,
             resolve_inbound_link_intent,
         )
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
 
         msg = f"رابط المتجر الإلكتروني\n\n{_VISION_STOREFRONT_OCR}"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.WEBSITE_URL
         decision = _brain_ctx(msg)
-        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == TOPIC_STORE_INFO
 
     def test_link_intent_message_plain_text_passthrough(self) -> None:
@@ -221,19 +224,23 @@ class TestD5StaffMediaGuardRegression:
 class TestPhysicalLocationOwnershipRegression:
     def test_pr337_storefront_and_physical_cases_still_hold(self) -> None:
         from modules.ai.brain.commerce.link_intent import LinkIntentType, resolve_link_intent
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
         from modules.ai.brain.execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
 
         physical_cases = ("وين موقعكم؟", "موقع المعرض")
         for msg in physical_cases:
             assert resolve_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
             decision = _brain_ctx(msg)
-            assert decision.action == ACTION_FAQ_REPLY
-            assert decision.args.get("topic") == TOPIC_LOCATION
+            topic = str(decision.args.get("topic") or "")
+            assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
+            assert topic in {TOPIC_LOCATION, "location_delivery"}
+            assert topic != TOPIC_STORE_INFO
+
+        from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
 
         storefront_cases = ("رابط المتجر الإلكتروني", "الموقع الإلكتروني")
         for msg in storefront_cases:
             assert resolve_link_intent(msg) == LinkIntentType.WEBSITE_URL
             decision = _brain_ctx(msg)
-            assert decision.action == ACTION_FAQ_REPLY
+            assert decision.action == ACTION_LLM_REPLY
             assert decision.args.get("topic") == TOPIC_STORE_INFO

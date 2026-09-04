@@ -27,6 +27,8 @@ from typing import Any, Dict, List
 
 from ..state.stages import STAGE_CHECKOUT, STAGE_DECIDING, STAGE_ORDERING
 from ..types import (
+    INTENT_ASK_OWNER_CONTACT,
+    INTENT_ASK_STORE_INFO,
     INTENT_GENERAL,
     INTENT_PICK_LIST_ITEM,
     INTENT_PRODUCT_VISUAL_REQUEST,
@@ -256,6 +258,26 @@ class DefaultIntentClassifier:
             )
             return rule_intent
 
+        # URL-only inbounds: do not let Layer 1 or Layer 2 rebuild
+        # ask_owner_contact / ask_store_info from a token inside a URL.
+        # Raw message stays on Intent.raw_message for model context/storage.
+        try:
+            from core.inbound_url_spans import is_url_only_inbound  # noqa: PLC0415
+
+            if not in_order_flow and is_url_only_inbound(message):
+                logger.info(
+                    "[Classifier] url-only inbound → general (skip layer2) | preview=%r",
+                    (message or "")[:60],
+                )
+                return Intent(
+                    name=INTENT_GENERAL,
+                    confidence=0.50,
+                    raw_message=message,
+                    extraction_method="rules",
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — projection must not block classify
+            pass
+
         if (
             rule_intent
             and rule_intent.confidence >= RULES_ONLY_THRESHOLD
@@ -326,6 +348,42 @@ class DefaultIntentClassifier:
         base_conf   = rule_intent.confidence if rule_intent else 0.50
 
         llm_hint = slots.pop("intent_hint", None) or INTENT_GENERAL
+
+        if str(llm_hint or "") in {INTENT_ASK_OWNER_CONTACT, INTENT_ASK_STORE_INFO}:
+            try:
+                from modules.ai.brain.commerce.merchant_profile_intents import (  # noqa: PLC0415
+                    classify_store_profile_topic,
+                )
+
+                _profile_topic = classify_store_profile_topic(message)
+                _hint_ok = (
+                    (
+                        llm_hint == INTENT_ASK_OWNER_CONTACT
+                        and _profile_topic == "owner_contact"
+                    )
+                    or (
+                        llm_hint == INTENT_ASK_STORE_INFO
+                        and _profile_topic in {
+                            "store_info",
+                            "store_about",
+                            "store_currency",
+                            "store_status",
+                        }
+                    )
+                )
+                if not _hint_ok:
+                    logger.info(
+                        "[Classifier] drop layer2 profile hint | hint=%s topic=%s preview=%r",
+                        llm_hint,
+                        _profile_topic,
+                        (message or "")[:60],
+                    )
+                    llm_hint = base_intent if base_intent not in {
+                        INTENT_ASK_OWNER_CONTACT,
+                        INTENT_ASK_STORE_INFO,
+                    } else INTENT_GENERAL
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — profile gate must not block classify
+                pass
 
         # ── Guard: never let LLM hijack an in-order-flow turn into handoff ──
         # When the customer is mid-checkout and provides order data

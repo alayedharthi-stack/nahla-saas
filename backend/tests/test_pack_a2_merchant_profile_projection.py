@@ -255,7 +255,9 @@ class TestProfileIntents:
         assert about.args["topic"] == "store_about"
         assert about_missing is None
         assert url is not None and url.args["topic"] == "store_info"
+        assert url.action == ACTION_LLM_REPLY
         assert contact is not None and contact.args["topic"] == "owner_contact"
+        assert contact.action == ACTION_LLM_REPLY
         assert currency is not None and currency.action == ACTION_LLM_REPLY
         assert currency.args["question_kind"] == "currency"
         assert status is not None and status.action == ACTION_LLM_REPLY

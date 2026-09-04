@@ -153,9 +153,6 @@ class TestContactFaqGrounding:
 
     def test_staff_policy_generic_when_no_channels(self) -> None:
         from core.merchant_profile import ResolvedMerchantProfile
-        from modules.ai.brain.commerce.entity_extraction_guard import (
-            MSG_GENERAL_CONTACT_HOW_TO,
-        )
         from modules.ai.brain.commerce.staff_contact_policy import (
             evaluate_staff_contact_policy,
         )
@@ -171,8 +168,17 @@ class TestContactFaqGrounding:
                 message="كيف أتواصل معكم؟",
                 customer_phone="966500000001",
             )
-        assert decision is not None
-        assert decision.reply_text == MSG_GENERAL_CONTACT_HOW_TO
+        # Unstructured contact is Brain-owned; staff policy must not emit
+        # a canned how-to reply on the normal path.
+        assert decision is None
+        brain = build_merchant_profile_decision(
+            message="كيف أتواصل معكم؟",
+            facts=_profile_facts(email="", phone="", social={}),
+        )
+        assert brain is not None
+        assert brain.action == ACTION_LLM_REPLY
+        assert brain.args.get("topic") == "owner_contact"
+        assert not brain.args.get("authorized_cta_url")
 
 
 class TestProductionEquivalentProfileRouting:
@@ -242,7 +248,7 @@ class TestProductionEquivalentProfileRouting:
         ctx._db = object()
         assert nav.try_catalog_navigation_decision(ctx) is None
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "owner_contact"
 
     def test_store_url_not_catalog_top_fallback(self, monkeypatch: Any) -> None:
@@ -260,7 +266,7 @@ class TestProductionEquivalentProfileRouting:
         ctx._db = object()
         assert nav.try_catalog_navigation_decision(ctx) is None
         decision = DefaultDecisionEngine().decide(ctx)
-        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "store_info"
 
     def test_genuine_browse_still_catalog(self, monkeypatch: Any) -> None:

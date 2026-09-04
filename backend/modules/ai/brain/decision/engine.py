@@ -1811,7 +1811,7 @@ class DefaultDecisionEngine:
                 LinkIntentType,
                 resolve_inbound_link_intent,
             )
-            from ..execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
+            from ..execution.faq import TOPIC_LOCATION
 
             # Pack A2 — structured profile ownership before catalog / link steal.
             # Must not steal Pack B capability turns or open-now working-hours.
@@ -1843,16 +1843,38 @@ class DefaultDecisionEngine:
 
             _link_intent = resolve_inbound_link_intent(ctx.message or "")
             if _link_intent == LinkIntentType.WEBSITE_URL:
-                logger.info(
-                    "[LINK_INTENT] tenant=%s route=store_info",
-                    ctx.tenant_id,
-                )
-                return Decision(
-                    action=ACTION_FAQ_REPLY,
-                    args={"topic": TOPIC_STORE_INFO},
-                    reason="customer asked for online store / website URL",
-                    confidence=0.94,
-                )
+                _haystack_link = _link_intent
+                try:
+                    from core.inbound_url_spans import (  # noqa: PLC0415
+                        semantic_text_excluding_url_spans,
+                    )
+
+                    _link_haystack = semantic_text_excluding_url_spans(
+                        ctx.message or ""
+                    )
+                    _haystack_link = (
+                        resolve_inbound_link_intent(_link_haystack)
+                        if _link_haystack
+                        else LinkIntentType.UNKNOWN_LINK
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — URL projection must not block link route
+                    _haystack_link = _link_intent
+                if _haystack_link == LinkIntentType.WEBSITE_URL:
+                    from ..commerce.merchant_profile_intents import (  # noqa: PLC0415
+                        llm_store_info_decision,
+                    )
+
+                    logger.info(
+                        "[LINK_INTENT] tenant=%s route=store_info",
+                        ctx.tenant_id,
+                    )
+                    return llm_store_info_decision(
+                        message=ctx.message or "",
+                        facts=getattr(ctx, "facts", None),
+                        merchant_context=getattr(ctx, "merchant_context", None),
+                        reason="customer asked for online store / website URL",
+                        confidence=0.94,
+                    )
 
             _maps_url = str(getattr(facts, "maps_url", "") or "").strip()
             if _link_intent == LinkIntentType.PHYSICAL_LOCATION:
@@ -3675,10 +3697,15 @@ class DefaultDecisionEngine:
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — A3 story fallback optional
                     pass
                 if intent.name == INTENT_ONLINE_STORE_INQUIRY:
-                    return Decision(
-                        action=ACTION_FAQ_REPLY,
-                        args={"topic": "store_info"},
-                        reason="online store inquiry — store URL FAQ",
+                    from ..commerce.merchant_profile_intents import (  # noqa: PLC0415
+                        llm_store_info_decision,
+                    )
+
+                    return llm_store_info_decision(
+                        message=_store_msg,
+                        facts=getattr(ctx, "facts", None),
+                        merchant_context=getattr(ctx, "merchant_context", None),
+                        reason="online store inquiry — trusted store URL",
                     )
 
         if intent.name == INTENT_ASK_LOCATION:
@@ -3796,11 +3823,18 @@ class DefaultDecisionEngine:
             )
 
         if intent.name == INTENT_ASK_OWNER_CONTACT:
-            return Decision(
-                action=ACTION_FAQ_REPLY,
-                args={"topic": "owner_contact"},
-                reason="customer asked for contact details",
+            from ..commerce.merchant_profile_intents import (  # noqa: PLC0415
+                build_merchant_profile_decision,
             )
+
+            _contact_decision = build_merchant_profile_decision(
+                message=ctx.message or "",
+                facts=getattr(ctx, "facts", None),
+                merchant_context=getattr(ctx, "merchant_context", None),
+            )
+            if _contact_decision is not None:
+                return _contact_decision
+            # URL-only / false contact match: do not emit FAQ owner_contact.
 
         # ── 5. Greeting (explicit greeting or first-turn generic help) ─────
         # Three hard rules to prevent the "bot keeps re-greeting mid-order"
