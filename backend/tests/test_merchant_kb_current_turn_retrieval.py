@@ -36,6 +36,7 @@ from modules.ai.brain.commerce.product_knowledge_or_comparison import (  # noqa:
 from modules.ai.brain.compose.responder import (  # noqa: E402
     DefaultComposer,
     attach_catalog_candidate_kb_to_decision_args,
+    _catalog_candidate_ids_and_subject,
 )
 from modules.ai.brain.decision.actions import ACTION_LLM_REPLY, ACTION_SEARCH_PRODUCTS  # noqa: E402
 from modules.ai.brain.persona.catalog_product_answer import (  # noqa: E402
@@ -103,6 +104,21 @@ _IRRELEVANT_STYLE = {
     "title": "مكتبة إيموجيات الترحيب التسويقية",
     "body": "استخدم رموز الترحيب بلطف في رسائل الافتتاح فقط دون ذكر الخامات.",
 }
+_VARIANT_ID_COLLISION_PRODUCT = 9001
+_LINKED_VARIANT_COLLISION = {
+    "section_id": 8014,
+    "kind": "product_info",
+    "title": "خامة الحقيبة الشبكية القابلة للتنفس",
+    "body": "حقيبة السفر التجريبية تُصنع من خامة شبكية قابلة للتنفس.",
+    "product_ids": [_VARIANT_ID_COLLISION_PRODUCT],
+}
+_OPERATIONAL_KB_FLAGS = (
+    "kb_retrieval_attempted",
+    "kb_retrieval_succeeded",
+    "kb_retrieval_ran",
+    "kb_retrieval_failed",
+    "kb_fact_absent",
+)
 
 
 class _Col:
@@ -236,7 +252,11 @@ class TestAGlobalKbWithCatalog:
     ) -> None:
         db = _install_kb_stubs(monkeypatch, [_section(**_GLOBAL_MATERIAL)])
         payload = _payload(db, message=_ATTR_QUESTION, products=[_SHOE_42, _SHOE_43])
+        assert payload["kb_retrieval_attempted"] is True
+        assert payload["kb_retrieval_succeeded"] is True
         assert payload["kb_retrieval_ran"] is True
+        assert payload["kb_retrieval_failed"] is False
+        assert payload["kb_fact_absent"] is False
         assert payload["has_kb_sections"] is True
         assert payload["knowledge_source"] == "tenant_knowledge_base"
         assert 8011 in payload["kb_section_ids"]
@@ -354,7 +374,10 @@ class TestFFactAbsence:
     ) -> None:
         db = _install_kb_stubs(monkeypatch, [_section(**_IRRELEVANT_STYLE)])
         payload = _payload(db, message=_ATTR_QUESTION, products=[_SHOE_42])
+        assert payload["kb_retrieval_attempted"] is True
+        assert payload["kb_retrieval_succeeded"] is True
         assert payload["kb_retrieval_ran"] is True
+        assert payload["kb_retrieval_failed"] is False
         assert payload["kb_fact_absent"] is True
         assert payload["knowledge_source"] == "missing_kb"
         assert payload["kb_section_ids"] == []
@@ -618,3 +641,188 @@ class TestBoundsAndDump:
         assert "kb_sections" not in event
         dumped = str(event)
         assert _GLOBAL_MATERIAL["body"] not in dumped
+
+
+def _assert_operational_failure(payload: dict) -> None:
+    assert payload["kb_retrieval_attempted"] is True
+    assert payload["kb_retrieval_succeeded"] is False
+    assert payload["kb_retrieval_ran"] is False
+    assert payload["kb_retrieval_failed"] is True
+    assert payload["kb_fact_absent"] is False
+    assert payload.get("knowledge_source") != "missing_kb"
+    assert "knowledge_source" not in payload or not payload.get("knowledge_source")
+    assert payload["kb_section_ids"] == []
+    assert payload["has_kb_sections"] is False
+
+
+class TestMFailureIsNotAbsence:
+    def test_missing_db_is_failure_not_absence(self) -> None:
+        payload = retrieve_catalog_candidate_kb_sections(
+            None,
+            _TENANT_A,
+            subject=_SHOE_42["title"],
+            message=_ATTR_QUESTION,
+            product_ids=[801],
+        )
+        _assert_operational_failure(payload)
+
+    def test_query_exception_is_failure_not_absence(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _install_kb_stubs(monkeypatch, [_section(**_GLOBAL_MATERIAL)])
+
+        class _BoomDB:
+            def query(self, model: Any) -> Any:
+                raise RuntimeError("kb query unavailable")
+
+        payload = retrieve_catalog_candidate_kb_sections(
+            _BoomDB(),
+            _TENANT_A,
+            subject=_SHOE_42["title"],
+            message=_ATTR_QUESTION,
+            product_ids=[801],
+        )
+        _assert_operational_failure(payload)
+
+    def test_wrapper_exception_is_failure_not_absence(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _install_kb_stubs(monkeypatch, [_section(**_GLOBAL_MATERIAL)])
+        ctx = BrainContext(
+            tenant_id=_TENANT_A,
+            customer_phone="966500000001",
+            message=_ATTR_QUESTION,
+            intent=Intent(name=INTENT_ASK_PRODUCT, confidence=0.9, raw_message=_ATTR_QUESTION),
+            state=MerchantConversationState(greeted=True),
+            facts=CommerceFacts(has_products=True, product_count=1, orderable=True),
+        )
+        ctx._db = db  # type: ignore[attr-defined]
+        with patch(
+            "modules.ai.brain.commerce.product_knowledge_or_comparison.retrieve_catalog_candidate_kb_sections",
+            side_effect=RuntimeError("catalog kb wrapper failed"),
+        ):
+            merged = attach_catalog_candidate_kb_to_decision_args(
+                ctx,
+                compose_products=[_SHOE_42],
+                decision_args={"query": "حذاء"},
+            )
+        _assert_operational_failure(merged)
+        facts = _bundle_from_payload(
+            merged, products=[_SHOE_42], inbound=_ATTR_QUESTION,
+        ).verified_facts
+        assert facts["kb_retrieval_failed"] is True
+        assert facts["kb_fact_absent"] is False
+        assert facts.get("knowledge_source") != "missing_kb"
+        text, result, event = build_catalog_product_answer_emergency_outcome(
+            tenant_id=_TENANT_A,
+            customer_phone="966500000001",
+            inbound_text=_ATTR_QUESTION,
+            products=[_SHOE_42],
+            catalog_search_query="حذاء",
+            question_kind="browse",
+            decision_args=merged,
+            reason="compose_unavailable",
+        )
+        assert result.source == "fallback_deterministic"
+        assert event["kb_retrieval_failed"] is True
+        assert event["kb_fact_absent"] is False
+        assert event.get("knowledge_source") != "missing_kb"
+        assert _GLOBAL_MATERIAL["body"] not in (text or "")
+
+    def test_successful_empty_and_successful_facts(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        empty_db = _install_kb_stubs(monkeypatch, [_section(**_IRRELEVANT_STYLE)])
+        empty = _payload(empty_db, message=_ATTR_QUESTION, products=[_SHOE_42])
+        assert empty["kb_retrieval_succeeded"] is True
+        assert empty["kb_retrieval_failed"] is False
+        assert empty["kb_fact_absent"] is True
+        assert empty["knowledge_source"] == "missing_kb"
+        facts_db = _install_kb_stubs(monkeypatch, [_section(**_GLOBAL_MATERIAL)])
+        found = _payload(facts_db, message=_ATTR_QUESTION, products=[_SHOE_42])
+        assert found["kb_retrieval_succeeded"] is True
+        assert found["kb_retrieval_failed"] is False
+        assert found["kb_fact_absent"] is False
+        assert found["knowledge_source"] == "tenant_knowledge_base"
+
+
+class TestNOperationalFlagsNotInModelPrompt:
+    def test_flag_names_absent_on_empty_and_failed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        empty_db = _install_kb_stubs(monkeypatch, [_section(**_IRRELEVANT_STYLE)])
+        empty_prompt = build_user_prompt(
+            _bundle_from_payload(
+                _payload(empty_db, message=_ATTR_QUESTION, products=[_SHOE_42]),
+                products=[_SHOE_42],
+                inbound=_ATTR_QUESTION,
+            ),
+        )
+        failed = retrieve_catalog_candidate_kb_sections(
+            None,
+            _TENANT_A,
+            subject=_SHOE_42["title"],
+            message=_ATTR_QUESTION,
+            product_ids=[801],
+        )
+        failed_prompt = build_user_prompt(
+            _bundle_from_payload(failed, products=[_SHOE_42], inbound=_ATTR_QUESTION),
+        )
+        for prompt in (empty_prompt, failed_prompt):
+            for flag in _OPERATIONAL_KB_FLAGS:
+                assert flag not in prompt
+        facts_db = _install_kb_stubs(monkeypatch, [_section(**_GLOBAL_MATERIAL)])
+        facts_prompt = build_user_prompt(
+            _bundle_from_payload(
+                _payload(facts_db, message=_ATTR_QUESTION, products=[_SHOE_42]),
+                products=[_SHOE_42],
+                inbound=_ATTR_QUESTION,
+            ),
+        )
+        assert "kb_section:" in facts_prompt
+        for flag in _OPERATIONAL_KB_FLAGS:
+            assert flag not in facts_prompt
+
+
+class TestOCanonicalProductVsVariantLinkIdentity:
+    def test_parent_product_link_not_variant_id(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        db = _install_kb_stubs(
+            monkeypatch,
+            [_section(**_LINKED_SHOE), _section(**_LINKED_VARIANT_COLLISION)],
+        )
+        candidate = {
+            "id": 801,
+            "product_id": 801,
+            "variant_id": _VARIANT_ID_COLLISION_PRODUCT,
+            "title": _SHOE_42["title"],
+            "price": 249,
+            "can_checkout": True,
+        }
+        ids, _subject = _catalog_candidate_ids_and_subject([candidate])
+        assert ids == [801]
+        confused = {
+            "id": _VARIANT_ID_COLLISION_PRODUCT,
+            "product_id": 801,
+            "variant_id": _VARIANT_ID_COLLISION_PRODUCT,
+            "title": _SHOE_42["title"],
+            "price": 249,
+            "can_checkout": True,
+        }
+        confused_ids, _ = _catalog_candidate_ids_and_subject([confused])
+        assert confused_ids == [801]
+        payload = retrieve_catalog_candidate_kb_sections(
+            db,
+            _TENANT_A,
+            subject=_SHOE_42["title"],
+            message=_ATTR_QUESTION,
+            product_ids=ids,
+        )
+        assert 8012 in payload["kb_section_ids"]
+        assert 8014 not in payload["kb_section_ids"]
+        simple = _payload(db, message=_ATTR_QUESTION, products=[_SHOE_42])
+        assert 8012 in simple["kb_section_ids"]
+        assert 8014 not in simple["kb_section_ids"]
+        simple_ids, _ = _catalog_candidate_ids_and_subject([_SHOE_42])
+        assert simple_ids == [801]

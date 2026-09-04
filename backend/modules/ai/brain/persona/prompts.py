@@ -203,10 +203,6 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             lines.append(" | ".join(parts))
         if not facts.get("has_catalog_products"):
             lines.append("catalog_products: none")
-        if facts.get("kb_retrieval_ran"):
-            lines.append("kb_retrieval_ran: true")
-            lines.append(f"has_kb_sections: {bool(facts.get('has_kb_sections'))}")
-            lines.append(f"kb_fact_absent: {bool(facts.get('kb_fact_absent'))}")
         if facts.get("has_kb_sections"):
             for section in facts.get("kb_sections") or []:
                 if not isinstance(section, dict):

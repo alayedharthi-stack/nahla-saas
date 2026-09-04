@@ -913,7 +913,11 @@ class DefaultComposer:
                     "question_kind": _question_kind,
                     "category_filter_dropped": _facts_category_dropped,
                     "display_count": len(candidates),
-                    "decision_args": attach_catalog_candidate_kb_to_decision_args(ctx, compose_products=list(compose_products), decision_args=dict(decision.args or {})),
+                    "decision_args": attach_catalog_candidate_kb_to_decision_args(
+                        ctx,
+                        compose_products=list(compose_products),
+                        decision_args=dict(decision.args or {}),
+                    ),
                     "ai_settings": _ai_settings_from_ctx(ctx),
                 }
                 if _question_kind in _CATALOG_QA_QUESTION_KINDS:
@@ -3289,10 +3293,36 @@ def _as_ai_history(
     return messages
 
 
+def _catalog_int_id(value: Any) -> Optional[int]:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number
+
+
+def _canonical_kb_link_product_id(row: Dict[str, Any]) -> Optional[int]:
+    """KB links target ``products.id``, never ``product_variants.id``.
+
+    Search rows use ``id`` as the parent product PK. Variant identity stays on
+    ``variant_id`` and must not enter the KB link intersection set.
+    """
+    parent = _catalog_int_id(row.get("product_id"))
+    if parent is not None:
+        return parent
+    row_id = _catalog_int_id(row.get("id"))
+    variant_id = _catalog_int_id(row.get("variant_id"))
+    if row_id is not None and row_id != variant_id:
+        return row_id
+    return None
+
+
 def _catalog_candidate_ids_and_subject(
     compose_products: list[Dict[str, Any]] | None,
 ) -> tuple[list[int], str]:
-    """Deduplicate candidate ids; join titles for subject scoring only."""
+    """Deduplicate canonical parent product ids; join titles for subject scoring only."""
     seen: set[int] = set()
     ids: list[int] = []
     titles: list[str] = []
@@ -3302,14 +3332,8 @@ def _catalog_candidate_ids_and_subject(
         title = str(raw.get("title") or raw.get("name") or "").strip()
         if title:
             titles.append(title)
-        pid = raw.get("id")
-        if pid is None:
-            pid = raw.get("product_id")
-        try:
-            ipid = int(pid)
-        except (TypeError, ValueError):
-            continue
-        if ipid in seen:
+        ipid = _canonical_kb_link_product_id(raw)
+        if ipid is None or ipid in seen:
             continue
         seen.add(ipid)
         ids.append(ipid)
@@ -3327,6 +3351,7 @@ def attach_catalog_candidate_kb_to_decision_args(
     product_ids, subject = _catalog_candidate_ids_and_subject(compose_products)
     try:
         from ..commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            catalog_kb_retrieval_failure_payload,
             retrieve_catalog_candidate_kb_sections,
         )
 
@@ -3340,22 +3365,16 @@ def attach_catalog_candidate_kb_to_decision_args(
         if isinstance(payload, dict):
             merged.update(payload)
         else:
-            merged["kb_retrieval_ran"] = True
-            merged["kb_fact_absent"] = True
-            merged["kb_sections"] = []
-            merged["kb_section_ids"] = []
-            merged["has_kb_sections"] = False
-            merged["knowledge_source"] = "missing_kb"
+            merged.update(catalog_kb_retrieval_failure_payload())
     except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog compose must not fail closed on KB
         logger.debug(
             "[CATALOG_KB] retrieval skipped tenant=%s",
             getattr(ctx, "tenant_id", None),
             exc_info=True,
         )
-        merged["kb_retrieval_ran"] = True
-        merged["kb_fact_absent"] = True
-        merged["kb_sections"] = []
-        merged["kb_section_ids"] = []
-        merged["has_kb_sections"] = False
-        merged["knowledge_source"] = "missing_kb"
+        from ..commerce.product_knowledge_or_comparison import (  # noqa: PLC0415
+            catalog_kb_retrieval_failure_payload,
+        )
+
+        merged.update(catalog_kb_retrieval_failure_payload())
     return merged
