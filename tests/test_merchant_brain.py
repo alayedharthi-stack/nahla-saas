@@ -827,12 +827,10 @@ class TestStateDrivenSimplification:
 
     # --- DecisionEngine: mid-order checkout lock (87e028ea) + fulfillment slots (0526ae17) ---
 
-    def test_ask_product_mid_order_with_order_prep_continues_checkout(self):
-        """Mid-order ASK_PRODUCT with default order_prep → rule_based_checkout since 87e028ea.
+    def test_ask_product_mid_order_with_order_prep_does_not_auto_continue_checkout(self):
+        """Mid-order ASK_PRODUCT is not current-turn checkout evidence (D4).
 
-        Section 3.7 no longer treats ASK_PRODUCT as continuation, but the earlier
-        deterministic checkout block still fires while order_prep is active unless
-        has_explicit_commerce_topic_change bypasses it.
+        Persisted order_prep/focus must survive, but must not own this turn.
         """
         from modules.ai.brain.decision.engine import DefaultDecisionEngine
         eng = DefaultDecisionEngine()
@@ -841,11 +839,14 @@ class TestStateDrivenSimplification:
             stage="ordering",
             current_product_focus={"id": 1, "external_id": "ext-1", "title": "فستان"},
         )
+        focus_before = dict(state.current_product_focus or {})
         ctx = self._ctx(INTENT_ASK_PRODUCT, state, _make_facts(),
                         message="تعرض لي المنتجات بالصور؟")
         d = eng.decide(ctx)
-        assert d.action == ACTION_PROPOSE_DRAFT_ORDER
-        assert "rule_based_checkout" in (d.reason or "")
+        assert d.action != ACTION_PROPOSE_DRAFT_ORDER
+        assert "order_prep active" not in (d.reason or "")
+        assert state.current_product_focus == focus_before
+        assert state.stage == "ordering"
 
     def test_address_message_mid_order_captures_fulfillment_slots(self):
         """City + short code mid-order → order_context_update since 0526ae17."""

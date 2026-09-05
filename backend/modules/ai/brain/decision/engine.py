@@ -2136,9 +2136,10 @@ class DefaultDecisionEngine:
         #   • stage is ordering or deciding
         #   • a product is already in focus (current_product_focus)
         #   • the store can actually fulfil orders (facts.orderable)
-        #   • the message looks like a checkout continuation (keyword list
-        #     OR any message while order_prep exists — customer is answering
-        #     our slot-fill questions)
+        #   • this inbound carries current-turn checkout evidence
+        #     (existing confirm/resume, start_order/pay_now, or a slot
+        #     value present in the current message). Persisted order_prep
+        #     keeps the draft but does not own an unrelated turn.
         _CONFIRM_KEYWORDS = frozenset({
             # Arabic: "confirm", "place order", "done", "continue", "go ahead",
             # "yes", "agreed", "I agree", "OK", "sure", "proceed",
@@ -2162,6 +2163,18 @@ class DefaultDecisionEngine:
             _explicit_commerce_switch = has_explicit_commerce_topic_change(ctx.message or "")
         except Exception:  # noqa: BLE001
             _explicit_commerce_switch = False
+
+        try:
+            from .checkout_continuation_evidence import (  # noqa: PLC0415
+                has_current_turn_checkout_continuation_evidence,
+            )
+
+            _checkout_turn_evidence = has_current_turn_checkout_continuation_evidence(
+                ctx,
+                confirm_keyword_matched=_is_confirm,
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — evidence probe must not block decide
+            _checkout_turn_evidence = bool(_is_confirm)
 
         if (
             state.stage in (STAGE_ORDERING, STAGE_DECIDING)
@@ -2214,24 +2227,25 @@ class DefaultDecisionEngine:
                         ),
                         confidence=0.91,
                     )
-            _focus_title = (state.current_product_focus or {}).get("title")
-            logger.info(
-                "[ORDER FLOW] FORCED action=propose_draft_order "
-                "reason=rule_based_checkout | tenant=%s product=%r "
-                "is_confirm=%s has_prep=%s intent=%s stage=%s",
-                ctx.tenant_id, _focus_title,
-                _is_confirm, _has_prep, intent.name, state.stage,
-            )
-            return Decision(
-                action=ACTION_PROPOSE_DRAFT_ORDER,
-                args={"product": state.current_product_focus},
-                reason=(
-                    "rule_based_checkout: confirmation keyword detected"
-                    if _is_confirm
-                    else "rule_based_checkout: order_prep active — continue collecting slots"
-                ),
-                confidence=0.97,
-            )
+            if _checkout_turn_evidence:
+                _focus_title = (state.current_product_focus or {}).get("title")
+                logger.info(
+                    "[ORDER FLOW] FORCED action=propose_draft_order "
+                    "reason=rule_based_checkout | tenant=%s product=%r "
+                    "is_confirm=%s has_prep=%s intent=%s stage=%s",
+                    ctx.tenant_id, _focus_title,
+                    _is_confirm, _has_prep, intent.name, state.stage,
+                )
+                return Decision(
+                    action=ACTION_PROPOSE_DRAFT_ORDER,
+                    args={"product": state.current_product_focus},
+                    reason=(
+                        "rule_based_checkout: confirmation keyword detected"
+                        if _is_confirm
+                        else "rule_based_checkout: current-turn checkout evidence"
+                    ),
+                    confidence=0.97,
+                )
 
         # ── 1. Handoff ────────────────────────────────────────────────────
         # The customer explicitly asked for a human agent. We honour that
@@ -3158,27 +3172,15 @@ class DefaultDecisionEngine:
             _is_global_browse = False
 
         # ── 3.7 Continue order preparation while collecting checkout details ──
-        # While ordering we treat slot-bearing messages and a small set of
-        # "neutral" intents as continuation so the funnel doesn't reset.
+        # While ordering, continue only when THIS inbound carries checkout
+        # evidence (confirm/resume, start_order/pay_now, or a slot value
+        # present in the current message). Persisted stage, focus, order_prep,
+        # general/greeting/hesitation, and stale intent.slots are not enough.
         #
         # GUARD: Never fire this block when there is an active candidate list
         # (last_search_candidates non-empty).  A pending list means the
         # customer is browsing — the continuation intent should not hijack
         # their next message and route it to a stale current_product_focus.
-        #
-        # Two more rules to keep this from over-firing:
-        #   a) ASK_PRODUCT / ASK_PRICE are NOT continuation intents on their
-        #      own. A real product/price question mid-order is a request to
-        #      browse, not a slot fill.
-        #   b) Greeting / general / hesitation stay in the list so a polite
-        #      "هلا" or "تمام" doesn't bounce the customer to the greeting
-        #      template.
-        _CONTINUATION_INTENTS = (
-            INTENT_START_ORDER,
-            INTENT_GENERAL,
-            INTENT_GREETING,
-            INTENT_HESITATION,
-        )
         if (
             state.stage in (STAGE_ORDERING, STAGE_DECIDING)
             and state.current_product_focus
@@ -3188,10 +3190,7 @@ class DefaultDecisionEngine:
             and not _is_global_browse
             and not _checkout_topic_blocks()
             and not getattr(_current_social_nc, "matched", False)
-            and (
-                intent.name in _CONTINUATION_INTENTS
-                or any(slot in intent.slots for slot in checkout_slots)
-            )
+            and _checkout_turn_evidence
         ):
             logger.info(
                 "[ORDER FLOW] numeric pick source | source=current_product_focus "
@@ -4509,7 +4508,6 @@ class DefaultDecisionEngine:
         if state.stage in (STAGE_ORDERING, STAGE_DECIDING) and _actionable_ordering:
             if (
                 state.current_product_focus
-                and facts.orderable
                 and not state.checkout_url
                 and not _is_global_browse
                 and not _checkout_topic_blocks()
@@ -4518,20 +4516,24 @@ class DefaultDecisionEngine:
                 _eos_dec = _try_existing_order_support_ownership_decision(ctx)
                 if _eos_dec is not None:
                     return _eos_dec
-                logger.info(
-                    "[ORDER FLOW] FORCED action=propose_draft_order "
-                    "reason=ordering_stage_safety_net | tenant=%s product=%r intent=%s "
-                    "— preventing llm_reply during active checkout",
-                    ctx.tenant_id,
-                    (state.current_product_focus or {}).get("title"),
-                    intent.name,
-                )
-                return Decision(
-                    action=ACTION_PROPOSE_DRAFT_ORDER,
-                    args={"product": state.current_product_focus},
-                    reason=f"ordering_stage_safety_net: intent={intent.name} fell through all rules — force checkout continuation",
-                    confidence=0.80,
-                )
+                if _checkout_turn_evidence and facts.orderable:
+                    logger.info(
+                        "[ORDER FLOW] FORCED action=propose_draft_order "
+                        "reason=ordering_stage_safety_net | tenant=%s product=%r intent=%s "
+                        "— preventing llm_reply during active checkout",
+                        ctx.tenant_id,
+                        (state.current_product_focus or {}).get("title"),
+                        intent.name,
+                    )
+                    return Decision(
+                        action=ACTION_PROPOSE_DRAFT_ORDER,
+                        args={"product": state.current_product_focus},
+                        reason=(
+                            f"ordering_stage_safety_net: intent={intent.name} "
+                            "current-turn checkout evidence"
+                        ),
+                        confidence=0.80,
+                    )
             # Product focus was lost but order_prep still remembers which
             # product the customer was buying — recover it from cached
             # candidates / recommendations so the funnel never resets.
@@ -4554,6 +4556,7 @@ class DefaultDecisionEngine:
                 not state.current_product_focus
                 and _prep_has_progress
                 and facts.orderable
+                and _checkout_turn_evidence
             ):
                 _recovered = _find_product_by_external_id(
                     _prep_product_id,
@@ -4785,9 +4788,24 @@ class DefaultDecisionEngine:
         if _qty_dec is not None:
             return _qty_dec
 
+        _fallback_args: Dict[str, Any] = {}
+        _fallback_reason = f"no rule matched for intent={intent.name} — LLM fallback"
+        if (
+            state.stage in (STAGE_ORDERING, STAGE_DECIDING)
+            and state.current_product_focus
+            and not _checkout_turn_evidence
+        ):
+            _fallback_args = {
+                "block_order_flow": True,
+                "suppress_checkout": True,
+            }
+            _fallback_reason = (
+                "no current-turn checkout evidence — preserve draft, LLM fallback"
+            )
         return Decision(
             action=ACTION_LLM_REPLY,
-            reason=f"no rule matched for intent={intent.name} — LLM fallback",
+            args=_fallback_args,
+            reason=_fallback_reason,
             confidence=0.50,
         )
 
