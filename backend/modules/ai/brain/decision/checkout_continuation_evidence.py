@@ -169,6 +169,28 @@ def has_current_turn_checkout_continuation_evidence(
         pass
 
     try:
+        from ..commerce.prebrain_order_flow_arbiter import (  # noqa: PLC0415
+            message_fulfills_awaited_checkout_slot,
+        )
+
+        prep = getattr(getattr(ctx, "state", None), "order_prep", None)
+        awaiting_option = bool(getattr(prep, "awaiting_option_confirmation", False))
+        awaiting_receipt = bool(getattr(prep, "awaiting_payment_receipt", False))
+        if (
+            prep is not None
+            and not awaiting_option
+            and not awaiting_receipt
+            and message_fulfills_awaited_checkout_slot(
+                message,
+                order_prep=prep,
+                customer_phone=str(getattr(ctx, "customer_phone", "") or ""),
+            )
+        ):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — awaited-slot probe must not block decide
+        pass
+
+    try:
         from ..commerce.catalog_order_checkout import (  # noqa: PLC0415
             current_turn_continues_catalog_checkout,
         )

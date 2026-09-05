@@ -346,6 +346,14 @@ class TestEvidencePredicateFreshness:
             GENERIC_CITY, ctx.intent.slots
         )
 
+    def test_pending_quantity_answer_continues(self) -> None:
+        state = _active_checkout_state()
+        state.order_prep.missing_fields = ["quantity"]
+        ctx = _ctx("نص كيلو", state=state, orderable=True)
+        decision = _decide(ctx)
+        assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+        assert _snapshot(state)["line_items"]
+
 
 class TestIGreetingGeneralHesitationDoNotAutoContinue:
     def test_greeting_without_slot_does_not_continue(self) -> None:
