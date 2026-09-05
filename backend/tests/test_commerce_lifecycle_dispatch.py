@@ -621,7 +621,7 @@ class TestLifecycleDispatcher:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.service_template_resolver.resolve_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
-    def test_out_for_delivery_is_not_dispatched(
+    def test_out_for_delivery_dispatches_shipping_template(
         self,
         mock_caps,
         mock_resolve_tpl,
@@ -629,6 +629,7 @@ class TestLifecycleDispatcher:
     ):
         mock_caps.return_value = _merchant_caps()
         mock_resolve_tpl.return_value = _approved_template()
+        mock_send.return_value = ("sent", {"wa_message_id": "wamid.ofd"})
 
         db, _ = _make_db()
         order = _generic_order(
@@ -657,10 +658,10 @@ class TestLifecycleDispatcher:
                 },
             )
         )
-        assert result.dispatched is False
-        assert result.reason_code == "intent_not_dispatchable"
-        assert mock_send.await_count == 0
-        assert db.query(CommerceLifecycleNotificationLedger).count() == 0
+        assert result.dispatched is True
+        assert mock_send.await_count == 1
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        assert row.template_service_key == "shipping_tracking"
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.service_template_resolver.resolve_template_for_send")
@@ -888,7 +889,7 @@ class TestLifecycleDispatcher:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.service_template_resolver.resolve_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
-    def test_payment_needed_not_dispatched(
+    def test_payment_needed_dispatches_payment_reminder(
         self,
         mock_caps,
         mock_resolve_tpl,
@@ -896,6 +897,7 @@ class TestLifecycleDispatcher:
     ):
         mock_caps.return_value = _merchant_caps()
         mock_resolve_tpl.return_value = _approved_template()
+        mock_send.return_value = ("sent", {"wa_message_id": "wamid.pay"})
 
         db, _ = _make_db()
         order = _generic_order(status="payment_pending")
@@ -914,8 +916,40 @@ class TestLifecycleDispatcher:
             raw_payload={"event_id": "evt-pay", "updated_at": "2026-07-30T12:30:00Z"},
             )
         )
+        assert result.dispatched is True
+        assert mock_send.await_count == 1
+
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    def test_missing_payment_confirmation_template_fails_closed(
+        self,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_send,
+    ):
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = None
+        db, _ = _make_db()
+        order = _generic_order(status="paid")
+        result = _run_async(
+            dispatch_external_lifecycle_notification(
+                db,
+                tenant_id=20,
+                order=order,
+                provider="salla",
+                raw_previous_status="payment_pending",
+                raw_current_status="paid",
+                normalized_order={
+                    "external_id": "salla-ord-8801",
+                    "status": "paid",
+                    "external_order_number": "ORD-8801",
+                },
+                raw_payload={"event_id": "evt-paid", "updated_at": "2026-07-30T12:40:00Z"},
+            )
+        )
         assert result.dispatched is False
-        assert result.reason_code == "intent_not_dispatchable"
+        assert result.reason_code == "no_approved_template"
         assert mock_send.await_count == 0
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)

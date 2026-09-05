@@ -193,6 +193,19 @@ _SERVICE_NAME_PATTERNS: Dict[str, List[str]] = {
         "order_confirmation", "order_confirm", "order_placed",
         "تأكيد_الطلب", "تأكيد الطلب",
     ],
+    "order_delivered": [
+        "order_delivered", "delivered", "تم_التسليم", "تم التسليم",
+    ],
+    "payment_confirmation": [
+        "payment_confirmation", "payment_confirmed", "تأكيد_الدفع", "تأكيد الدفع",
+    ],
+    "order_cancelled": [
+        "order_cancelled", "order_canceled", "cancelled", "canceled",
+        "الغاء", "إلغاء",
+    ],
+    "order_refunded": [
+        "order_refunded", "refunded", "refund", "مسترجع", "استرجاع",
+    ],
     "shipping_update": [
         "shipping", "shipment", "tracking", "delivery",
         "شحن", "تتبع", "توصيل",

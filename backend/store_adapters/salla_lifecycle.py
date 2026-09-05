@@ -22,6 +22,11 @@ _PAYMENT_PENDING_STATUSES = frozenset({
     "awaiting_payment",
     "pending_payment",
 })
+_PAYMENT_CONFIRMED_STATUSES = frozenset({
+    "paid",
+    "completed",
+    "payment_completed",
+})
 _CONFIRMATION_STATUSES = frozenset({
     "under_review",
     "pending",
@@ -70,6 +75,8 @@ def normalize_salla_lifecycle_business_intent(
         return BusinessIntent.SHIPMENT_AVAILABLE
     if curr in _PAYMENT_PENDING_STATUSES and prev not in _PAYMENT_PENDING_STATUSES:
         return BusinessIntent.PAYMENT_NEEDED
+    if curr in _PAYMENT_CONFIRMED_STATUSES and prev in _PAYMENT_PENDING_STATUSES:
+        return BusinessIntent.PAYMENT_CONFIRMED
 
     return None
 

@@ -77,7 +77,14 @@ def commerce_lifecycle_send_audit_schema_ready(db: Session) -> bool:
 # First production slice — confirmation + shipment only.
 _DISPATCHABLE_INTENTS: frozenset[BusinessIntent] = frozenset({
     BusinessIntent.ORDER_CONFIRMED,
+    BusinessIntent.PAYMENT_NEEDED,
+    BusinessIntent.PAYMENT_CONFIRMED,
     BusinessIntent.SHIPMENT_AVAILABLE,
+    BusinessIntent.OUT_FOR_DELIVERY,
+    BusinessIntent.ORDER_DELIVERED,
+    BusinessIntent.ORDER_CANCELLED,
+    BusinessIntent.ORDER_REFUNDED,
+    BusinessIntent.INCOMPLETE_ORDER,
 })
 
 
@@ -170,7 +177,12 @@ class LifecycleDispatchResult:
 def _resolve_service_key(
     intent: BusinessIntent,
     definition: Any,
+    evidence: Any = None,
 ) -> Optional[str]:
+    if intent == BusinessIntent.PAYMENT_NEEDED and evidence is not None:
+        method = str(getattr(evidence, "payment_method", "") or "").strip().lower()
+        if method in {"cod", "cash_on_delivery", "cod_payment"}:
+            return "cod_confirmation"
     if definition is not None and getattr(definition, "service_key", None):
         return str(definition.service_key)
     return None
@@ -555,15 +567,6 @@ async def dispatch_external_lifecycle_notification(
                 reason_code="no_intent",
             )
 
-        if intent == BusinessIntent.OUT_FOR_DELIVERY:
-            return LifecycleDispatchResult(
-                ledger_id=None,
-                dispatched=False,
-                duplicate=False,
-                outcome="skipped",
-                reason_code="intent_not_dispatchable",
-            )
-
         external_order_id = str(
             getattr(order, "external_id", None)
             or normalized_order.get("external_id")
@@ -646,7 +649,7 @@ async def dispatch_external_lifecycle_notification(
                 reason_code=reason_code,
             )
 
-        service_key = _resolve_service_key(intent, definition)
+        service_key = _resolve_service_key(intent, definition, evidence)
         if not service_key:
             return LifecycleDispatchResult(
                 ledger_id=None,

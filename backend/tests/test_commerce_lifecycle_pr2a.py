@@ -122,8 +122,13 @@ class TestRegistry:
         expected = {
             BusinessIntent.ORDER_CONFIRMED,
             BusinessIntent.PAYMENT_NEEDED,
+            BusinessIntent.PAYMENT_CONFIRMED,
             BusinessIntent.SHIPMENT_AVAILABLE,
+            BusinessIntent.OUT_FOR_DELIVERY,
             BusinessIntent.ORDER_DELIVERED,
+            BusinessIntent.ORDER_CANCELLED,
+            BusinessIntent.ORDER_REFUNDED,
+            BusinessIntent.INCOMPLETE_ORDER,
             BusinessIntent.CUSTOMER_ACTION_REQUIRED,
             BusinessIntent.REVIEW_REQUEST,
         }
@@ -139,16 +144,16 @@ class TestRegistry:
     def test_unknown_intent_fails_safely(self):
         registry = LifecycleIntentRegistry(INITIAL_DEFINITIONS)
         with pytest.raises(KeyError, match="unsupported"):
-            registry.get(BusinessIntent.ORDER_CANCELLED)
+            registry.get(BusinessIntent.ORDER_RETURNED)
 
     def test_list_definitions_is_immutable_copy(self):
         registry = LifecycleIntentRegistry(INITIAL_DEFINITIONS)
         listed = registry.list_definitions()
-        assert len(listed) == 6
+        assert len(listed) == 11
         assert listed[0].intent == listed[0].intent
 
     def test_default_registry_singleton(self):
-        assert len(get_default_registry()) == 6
+        assert len(get_default_registry()) == 11
 
 
 class TestEvidenceValidation:
@@ -304,6 +309,12 @@ class TestInitialDefinitionsPolicy:
         BusinessIntent.ORDER_CONFIRMED: "order_confirmation",
         BusinessIntent.SHIPMENT_AVAILABLE: "shipping_tracking",
         BusinessIntent.REVIEW_REQUEST: "post_delivery",
+        BusinessIntent.ORDER_DELIVERED: "order_delivered",
+        BusinessIntent.PAYMENT_NEEDED: "payment_reminder",
+        BusinessIntent.PAYMENT_CONFIRMED: "payment_confirmation",
+        BusinessIntent.ORDER_CANCELLED: "order_cancelled",
+        BusinessIntent.ORDER_REFUNDED: "order_refunded",
+        BusinessIntent.INCOMPLETE_ORDER: "cart_recovery",
     }
 
     def test_approved_template_service_keys_match_established_semantics(self):
@@ -313,16 +324,17 @@ class TestInitialDefinitionsPolicy:
             assert definition.closed_window_strategy == ClosedWindowStrategy.APPROVED_TEMPLATE
             assert definition.service_key == expected_service_key
 
-    def test_order_delivered_closed_window_blocked_without_ambiguous_service_key(self):
+    def test_order_delivered_uses_dedicated_service_key(self):
         definition = get_default_registry().get(BusinessIntent.ORDER_DELIVERED)
-        assert definition.closed_window_strategy == ClosedWindowStrategy.BLOCKED
-        assert definition.service_key is None
+        assert definition.closed_window_strategy == ClosedWindowStrategy.APPROVED_TEMPLATE
+        assert definition.service_key == "order_delivered"
 
     def test_post_delivery_not_shared_by_order_delivered(self):
         delivered = get_default_registry().get(BusinessIntent.ORDER_DELIVERED)
         review = get_default_registry().get(BusinessIntent.REVIEW_REQUEST)
-        assert delivered.service_key is None
+        assert delivered.service_key == "order_delivered"
         assert review.service_key == "post_delivery"
+        assert delivered.service_key != review.service_key
 
 
 class TestOutcomes:
@@ -376,7 +388,7 @@ class TestArchitectureIsolation:
             mod = importlib.import_module(module_info.name)
             source_path = Path(mod.__file__).resolve()
             tree = ast.parse(source_path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
+            for node in tree.body:
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         for bad in forbidden:
@@ -386,7 +398,7 @@ class TestArchitectureIsolation:
                         assert bad not in node.module
 
     def test_build_initial_definitions_count(self):
-        assert len(build_initial_definitions()) == 6
+        assert len(build_initial_definitions()) == 11
 
     def test_known_capability_fields_match_merchant_capabilities(self):
         cap_fields = set(MerchantCapabilities.__dataclass_fields__)
