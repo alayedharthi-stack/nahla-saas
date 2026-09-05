@@ -3576,8 +3576,30 @@ class MerchantBrain:
                     [p.get("title") for p in _raw_sales if not _has_external_id(p)],
                 )
             new_state.last_recommended_products = _filtered_sales
-        new_state.recommended_next_step = suggestion.suggested_next_step
-        new_state.pending_action = suggestion.suggested_next_step or new_state.pending_action
+        try:
+            from .decision.checkout_continuation_evidence import (  # noqa: PLC0415
+                select_pending_action,
+            )
+
+            new_state.recommended_next_step = select_pending_action(
+                previous=str(getattr(state, "recommended_next_step", "") or ""),
+                suggested=str(suggestion.suggested_next_step or ""),
+                decision=decision,
+                ctx=ctx,
+            )
+            new_state.pending_action = select_pending_action(
+                previous=str(getattr(state, "pending_action", "") or ""),
+                suggested=str(
+                    suggestion.suggested_next_step or new_state.pending_action or ""
+                ),
+                decision=decision,
+                ctx=ctx,
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — stamp gate must not block pipeline
+            new_state.recommended_next_step = str(
+                getattr(state, "recommended_next_step", "") or ""
+            )
+            new_state.pending_action = str(getattr(state, "pending_action", "") or "")
         ctx.suggestion = suggestion
         _tenant_tone = ""
         _tenant_overlay = ""
@@ -4219,7 +4241,7 @@ class MerchantBrain:
                 should_block_order_draft_injection,
             )
 
-            if not should_block_order_draft_injection(
+            _block_draft_inject = should_block_order_draft_injection(
                 brain_state=new_state,
                 customer_message=ctx.message or "",
                 decision=decision,
@@ -4229,7 +4251,9 @@ class MerchantBrain:
                     if isinstance(getattr(ctx, "profile", None), dict)
                     else None
                 ),
-            ):
+                ctx=ctx,
+            )
+            if not _block_draft_inject:
                 reply = maybe_inject_draft_flow_reply(
                     reply=reply or "",
                     order_prep=new_state.order_prep,
@@ -4239,7 +4263,9 @@ class MerchantBrain:
                     customer_message=ctx.message or "",
                     history=list(getattr(ctx, "history", None) or []),
                 )
-            if reply and result.data.get("wa_draft_reply_injected") is None:
+            if _block_draft_inject:
+                result.data["wa_draft_reply_injected"] = False
+            elif reply and result.data.get("wa_draft_reply_injected") is None:
                 result.data["wa_draft_reply_injected"] = bool(_cart_changed or _catalog_resolution)
         except Exception as _draft_reply_exc:  # noqa: BLE001
             logger.warning(
@@ -4403,12 +4429,26 @@ class MerchantBrain:
             ).strip()
 
         asked_now = _infer_last_question(decision, result, suggestion)
-        if asked_now:
-            new_state.last_question_asked = asked_now
-            new_state.last_question_answered = False
-        else:
+        try:
+            from .decision.checkout_continuation_evidence import (  # noqa: PLC0415
+                select_last_question,
+            )
+
+            new_state.last_question_asked, new_state.last_question_answered = (
+                select_last_question(
+                    previous_question=str(getattr(state, "last_question_asked", "") or ""),
+                    previous_answered=bool(getattr(state, "last_question_answered", True)),
+                    asked_now=asked_now,
+                    suggested_next_step=str(suggestion.suggested_next_step or ""),
+                    decision=decision,
+                    ctx=ctx,
+                )
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — stamp gate must not block pipeline
             new_state.last_question_asked = state.last_question_asked
-            new_state.last_question_answered = True if state.last_question_asked else state.last_question_answered
+            new_state.last_question_answered = (
+                True if state.last_question_asked else state.last_question_answered
+            )
 
         # ── 7c. First-contact welcome gate — prepend salaam acknowledgment ─
         # When ``intent.slots["embedded_greeting"]`` is True the customer

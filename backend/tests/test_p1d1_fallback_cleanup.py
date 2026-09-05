@@ -134,6 +134,7 @@ class TestOperationalDeterministicPreserved:
                 history=[],
                 default_fallback="",
                 inbound_text="تمام",
+                decision_action="propose_draft_order",
             )
         finally:
             of._load_brain_state = orig_load
@@ -171,6 +172,7 @@ class TestOperationalDeterministicPreserved:
                 history=[],
                 default_fallback="",
                 inbound_text="ok",
+                decision_action="propose_draft_order",
             )
         finally:
             of._load_brain_state = orig_load

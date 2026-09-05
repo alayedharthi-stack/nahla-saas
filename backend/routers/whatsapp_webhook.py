@@ -416,6 +416,9 @@ def _dedup_operational_substitute(
     inbound_text: str,
     inbound_metadata: dict | None,
     normalized_type: str | None,
+    decision: object | None = None,
+    decision_action: str = "",
+    decision_args: dict | None = None,
 ) -> str:
     """Operational dedup fallback only — empty when no state-backed message."""
     try:
@@ -430,6 +433,9 @@ def _dedup_operational_substitute(
             inbound_text=inbound_text,
             inbound_metadata=inbound_metadata,
             normalized_type=normalized_type,
+            decision=decision,
+            decision_action=decision_action,
+            decision_args=decision_args,
         )
     except Exception as _ctx_exc:  # noqa: BLE001
         logger.debug(
@@ -9994,6 +10000,8 @@ async def _handle_merchant_message(
                             inbound_text=text,
                             inbound_metadata=_meta_for_dedup,
                             normalized_type=_norm_type,
+                            decision_action=str(_br_dec_action or ""),
+                            decision_args=dict(_br_dec_args or {}),
                         )
                         if not (reply or "").strip():
                             logger.info(
