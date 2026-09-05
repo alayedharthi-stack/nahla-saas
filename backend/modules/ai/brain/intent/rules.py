@@ -1012,9 +1012,26 @@ def match(message: str) -> Optional[Intent]:
         is_product_visual_request = None  # type: ignore[misc, assignment]
         _regex_surface = message
 
+    try:
+        from core.inbound_url_spans import semantic_text_excluding_url_spans  # noqa: PLC0415
+
+        _contact_store_haystack = semantic_text_excluding_url_spans(_regex_surface)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — haystack must not block intent match
+        _contact_store_haystack = _regex_surface
+
+    _CONTACT_STORE_RULE_INTENTS = {
+        INTENT_ASK_OWNER_CONTACT,
+        INTENT_ASK_STORE_INFO,
+    }
+
     for ruleset, compiled in _RULES:
+        surface = (
+            _contact_store_haystack
+            if ruleset.intent in _CONTACT_STORE_RULE_INTENTS
+            else _regex_surface
+        )
         for pattern in compiled:
-            if not pattern.search(_regex_surface):
+            if not pattern.search(surface):
                 continue
             if (
                 ruleset.intent == INTENT_PRODUCT_VISUAL_REQUEST

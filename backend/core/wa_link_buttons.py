@@ -43,11 +43,61 @@ from __future__ import annotations
 
 import logging
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AuthorizedCtaBinding:
+    """Out-of-band trusted CTA for the current turn (not customer prose)."""
+
+    url: str = ""
+    inbound_url_spans: Tuple[str, ...] = ()
+
+
+_AUTHORIZED_CTA: ContextVar[Optional[AuthorizedCtaBinding]] = ContextVar(
+    "nahla_authorized_cta",
+    default=None,
+)
+
+
+def bind_authorized_cta(
+    *,
+    url: str = "",
+    inbound_url_spans: Sequence[str] = (),
+) -> None:
+    """Bind a trusted CTA + inbound URL exclusions for the wire splitter."""
+    _AUTHORIZED_CTA.set(
+        AuthorizedCtaBinding(
+            url=str(url or "").strip(),
+            inbound_url_spans=tuple(
+                str(span or "").strip()
+                for span in (inbound_url_spans or ())
+                if str(span or "").strip()
+            ),
+        )
+    )
+
+
+def consume_authorized_cta() -> Optional[AuthorizedCtaBinding]:
+    bound = _AUTHORIZED_CTA.get()
+    _AUTHORIZED_CTA.set(None)
+    return bound
+
+
+def _url_matches_excluded(url: str, excluded: Sequence[str]) -> bool:
+    if not url or not excluded:
+        return False
+    try:
+        from core.inbound_url_spans import url_matches_inbound_span  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        lowered = {str(item or "").strip().lower().rstrip("/") for item in excluded}
+        return str(url or "").strip().lower().rstrip("/") in lowered
+    return url_matches_inbound_span(url, excluded)
 
 
 def strip_empty_markdown_links(text: str) -> str:
@@ -472,6 +522,7 @@ def extract_first_cta_url(
     text: str,
     *,
     store_domain: Optional[str] = None,
+    excluded_urls: Sequence[str] = (),
 ) -> Optional[CtaExtraction]:
     """Pull the *first* URL out of ``text`` and return cleaned body +
     classification. Returns ``None`` when no URL is found.
@@ -489,6 +540,8 @@ def extract_first_cta_url(
         return None
     raw_url = match.group(0).rstrip(".,:;!?)\u061B\u061F،")
     if not raw_url:
+        return None
+    if _url_matches_excluded(raw_url, excluded_urls):
         return None
 
     classification = classify_url(raw_url, store_domain=store_domain)
@@ -543,6 +596,8 @@ def split_text_for_cta_buttons(
     text: str,
     *,
     store_domain: Optional[str] = None,
+    authorized_cta_url: str = "",
+    inbound_url_spans: Optional[Sequence[str]] = None,
 ) -> list[CtaMessage]:
     """Split *text* into an ordered list of WhatsApp messages where
     every URL gets its own CTA button.
@@ -565,17 +620,49 @@ def split_text_for_cta_buttons(
 
     Per the merchant UX spec: ONE product = ONE message = ONE CTA.
     """
+    bound = None
+    if not str(authorized_cta_url or "").strip() and inbound_url_spans is None:
+        bound = consume_authorized_cta()
+    auth_url = str(
+        authorized_cta_url or (bound.url if bound is not None else "") or ""
+    ).strip()
+    excluded: Sequence[str] = (
+        inbound_url_spans
+        if inbound_url_spans is not None
+        else (bound.inbound_url_spans if bound is not None else ())
+    )
+
+    body_text = strip_empty_markdown_links(text or "").strip()
+    if auth_url:
+        if not body_text:
+            # Authorized CTA is not a compose owner. Empty model body
+            # must not be replaced with deterministic conversational prose.
+            return [CtaMessage(body="", cta=None)]
+        classification = classify_url(auth_url, store_domain=store_domain)
+        return [CtaMessage(body=body_text, cta=classification)]
+
     if not text or not text.strip():
         return [CtaMessage(body=(text or "").strip(), cta=None)]
 
-    all_urls = list(_URL_RE.finditer(text))
+    all_urls = [
+        match
+        for match in _URL_RE.finditer(text)
+        if not _url_matches_excluded(
+            match.group(0).rstrip(".,:;!?)\u061B\u061F،"),
+            excluded,
+        )
+    ]
     if not all_urls:
         return [CtaMessage(body=text.strip(), cta=None)]
 
     if len(all_urls) == 1:
         # Preserve byte-identical behaviour with the legacy single-CTA
         # path so the existing webhook flow + tests don't move.
-        ext = extract_first_cta_url(text, store_domain=store_domain)
+        ext = extract_first_cta_url(
+            text,
+            store_domain=store_domain,
+            excluded_urls=excluded,
+        )
         if ext is None:
             return [CtaMessage(body=text.strip(), cta=None)]
         return [CtaMessage(body=ext.cleaned_text, cta=ext.classification)]
@@ -593,7 +680,11 @@ def split_text_for_cta_buttons(
             messages.append(CtaMessage(body=paragraph, cta=None))
             continue
         if len(urls_in_para) == 1:
-            ext = extract_first_cta_url(paragraph, store_domain=store_domain)
+            ext = extract_first_cta_url(
+                paragraph,
+                store_domain=store_domain,
+                excluded_urls=excluded,
+            )
             if ext is None:
                 messages.append(CtaMessage(body=paragraph, cta=None))
             else:
@@ -622,6 +713,11 @@ def split_text_for_cta_buttons(
             # and emit default-bodies for the rest so each still gets
             # its own CTA.
             first_url_raw = line_urls[0].group(0).rstrip(".,:;!?)\u061B\u061F،")
+            if _url_matches_excluded(first_url_raw, excluded):
+                stripped = _strip_url_from_line(line, first_url_raw)
+                if stripped:
+                    pending_label_parts.append(stripped)
+                continue
             first_cls = classify_url(first_url_raw, store_domain=store_domain)
             first_body_label = _strip_url_from_line(line, first_url_raw)
             label_parts = [p for p in pending_label_parts if p]
@@ -635,6 +731,8 @@ def split_text_for_cta_buttons(
             pending_label_parts = []
             for extra_match in line_urls[1:]:
                 extra_url_raw = extra_match.group(0).rstrip(".,:;!?)\u061B\u061F،")
+                if _url_matches_excluded(extra_url_raw, excluded):
+                    continue
                 extra_cls = classify_url(extra_url_raw, store_domain=store_domain)
                 messages.append(CtaMessage(
                     body=_DEFAULT_BODY_BY_KIND.get(
@@ -663,7 +761,9 @@ __all__ = [
     "CtaMessage",
     "ONLINE_STORE_BUTTON_IDS",
     "PURCHASE_CHANNEL_SELECTION_TOPIC",
+    "bind_authorized_cta",
     "classify_url",
+    "consume_authorized_cta",
     "extract_first_cta_url",
     "prepare_cta_body_text",
     "prepare_purchase_channel_selector_presentation",

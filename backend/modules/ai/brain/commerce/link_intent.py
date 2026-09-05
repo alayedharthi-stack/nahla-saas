@@ -288,6 +288,14 @@ def resolve_inbound_link_intent(message: str) -> LinkIntentType:
 def resolve_link_intent(message: str) -> LinkIntentType:
     """Classify link-related customer messages deterministically."""
     raw = message or ""
+    try:
+        from core.inbound_url_spans import (  # noqa: PLC0415
+            semantic_text_excluding_url_spans,
+        )
+
+        raw = semantic_text_excluding_url_spans(raw)
+    except Exception:
+        raw = message or ""
     norm = _normalise(raw)
     if not norm:
         return LinkIntentType.UNKNOWN_LINK

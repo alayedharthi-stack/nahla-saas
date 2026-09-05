@@ -10,8 +10,11 @@ Routing contract:
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
+
+logger = logging.getLogger("nahla.brain.merchant_profile_intents")
 
 _ABOUT_RE = re.compile(
     r"("
@@ -138,14 +141,99 @@ def is_open_now_question(message: str) -> bool:
     return bool(_OPEN_NOW_RE.search(str(message or "")))
 
 
+def _contact_store_keyword_haystack(message: str) -> str:
+    """Keyword haystack for contact/store classifiers. Raw message is unchanged."""
+    from core.inbound_url_spans import semantic_text_excluding_url_spans  # noqa: PLC0415
+
+    return semantic_text_excluding_url_spans(message)
+
+
+def _trusted_http_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+    if not low.startswith(("http://", "https://")):
+        return ""
+    if any(ch.isspace() for ch in raw):
+        return ""
+    try:
+        from modules.ai.brain.commerce.storefront_product_url import (  # noqa: PLC0415
+            is_trusted_merchant_http_url,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PROFILE_CTA] trusted_url_validator_unavailable err=%s",
+            type(exc).__name__,
+        )
+        return ""
+    try:
+        if is_trusted_merchant_http_url(raw):
+            return raw
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PROFILE_CTA] trusted_url_validator_raised err=%s",
+            type(exc).__name__,
+        )
+        return ""
+    return ""
+
+
+def _inbound_url_texts(message: str) -> list[str]:
+    from core.inbound_url_spans import extract_inbound_url_spans  # noqa: PLC0415
+
+    return extract_inbound_url_spans(message)
+
+
+def _reject_inbound_cta(url: str, inbound_spans: list[str]) -> str:
+    from core.inbound_url_spans import url_matches_inbound_span  # noqa: PLC0415
+
+    trusted = _trusted_http_url(url)
+    if not trusted:
+        return ""
+    if url_matches_inbound_span(trusted, inbound_spans):
+        return ""
+    return trusted
+
+
+def authorized_profile_cta_url(
+    *,
+    topic: str,
+    message: str,
+    facts: Any = None,
+    merchant_context: Any = None,
+) -> str:
+    """Tenant-authorized CTA destination, never the customer-supplied URL.
+
+    store_info → merchant store_url only.
+    owner_contact → empty (no store-link substitute, no social-channel
+    button selection). The model answers from trusted profile facts.
+    """
+    inbound = _inbound_url_texts(message)
+    mc = merchant_context if isinstance(merchant_context, dict) else {}
+    mp = mc.get("merchant_profile") if isinstance(mc, dict) else None
+    mp = mp if isinstance(mp, dict) else {}
+
+    if topic == "store_info":
+        store_url = ""
+        if facts is not None:
+            store_url = str(getattr(facts, "store_url", "") or "").strip()
+        if not store_url:
+            store_url = str(mp.get("domain") or "").strip()
+        return _reject_inbound_cta(store_url, inbound)
+
+    return ""
+
+
 def classify_store_profile_topic(message: str) -> Optional[str]:
     """Return answer topic for structured profile questions, else None.
 
     Topics:
       store_about | store_info | owner_contact | store_currency | store_status
     Social maps to owner_contact (existing FAQ). Open-now returns None.
+    Keyword matching uses URL-span-excluded haystack; raw *message* is kept.
     """
-    text = str(message or "").strip()
+    text = _contact_store_keyword_haystack(message)
     if not text:
         return None
     if _PACK_B_RE.search(text):
@@ -232,17 +320,29 @@ def build_merchant_profile_decision(
         )
 
     if topic == "store_info":
-        return Decision(
-            action=ACTION_FAQ_REPLY,
-            args={"topic": "store_info"},
-            reason="customer asked store URL / store info",
+        return llm_store_info_decision(
+            message=message,
+            facts=facts,
+            merchant_context=merchant_context,
         )
 
     if topic == "owner_contact":
+        cta = authorized_profile_cta_url(
+            topic="owner_contact",
+            message=message,
+            facts=facts,
+            merchant_context=merchant_context,
+        )
         return Decision(
-            action=ACTION_FAQ_REPLY,
-            args={"topic": "owner_contact"},
-            reason="customer asked contact/social — structured profile channels only",
+            action=ACTION_LLM_REPLY,
+            args={
+                "topic": "owner_contact",
+                "topic_hint": "merchant_profile",
+                "profile_surface": "merchant_profile",
+                "question_kind": "owner_contact",
+                "authorized_cta_url": cta,
+            },
+            reason="owner_contact",
         )
 
     if topic == "store_currency":
@@ -288,6 +388,38 @@ def build_merchant_profile_decision(
     return None
 
 
+def llm_store_info_decision(
+    *,
+    message: str,
+    facts: Any = None,
+    merchant_context: Any = None,
+    reason: str = "store_info",
+    confidence: float = 0.90,
+) -> Any:
+    """Model-owned store-link Decision with out-of-band authorized CTA."""
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: PLC0415
+    from modules.ai.brain.types import Decision  # noqa: PLC0415
+
+    cta = authorized_profile_cta_url(
+        topic="store_info",
+        message=message,
+        facts=facts,
+        merchant_context=merchant_context,
+    )
+    return Decision(
+        action=ACTION_LLM_REPLY,
+        args={
+            "topic": "store_info",
+            "topic_hint": "merchant_profile",
+            "profile_surface": "merchant_profile",
+            "question_kind": "store_url",
+            "authorized_cta_url": cta,
+        },
+        reason=reason,
+        confidence=confidence,
+    )
+
+
 def should_yield_catalog_for_merchant_profile(
     *,
     intent_name: str = "",
@@ -297,17 +429,23 @@ def should_yield_catalog_for_merchant_profile(
     if classify_store_profile_topic(message):
         return True
     name = str(intent_name or "").strip()
-    return name in {
+    if name not in {
         "ask_store_info",
         "online_store_inquiry",
         "ask_owner_contact",
-    }
+    }:
+        return False
+    # Intent name alone is not enough: a URL-only inbound must not yield
+    # catalog just because a social token sat inside the hostname.
+    return bool(_contact_store_keyword_haystack(message))
 
 
 __all__ = [
+    "authorized_profile_cta_url",
     "build_merchant_profile_decision",
     "classify_store_profile_topic",
     "is_open_now_question",
+    "llm_store_info_decision",
     "prepared_store_description",
     "should_yield_catalog_for_merchant_profile",
 ]

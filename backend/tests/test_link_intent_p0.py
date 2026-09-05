@@ -66,7 +66,7 @@ def test_physical_phrases_classify_as_location(message: str) -> None:
 
 
 def test_website_intent_routes_to_store_info_not_maps() -> None:
-    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
     from modules.ai.brain.types import (
@@ -100,13 +100,13 @@ def test_website_intent_routes_to_store_info_not_maps() -> None:
         facts=facts,
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_FAQ_REPLY
+    assert decision.action == ACTION_LLM_REPLY
     assert decision.args.get("topic") == TOPIC_STORE_INFO
     assert decision.args.get("topic") != "location"
 
 
 def test_rabt_almawqe_routes_to_store_info_not_maps() -> None:
-    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
+    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
     from modules.ai.brain.types import (
@@ -134,7 +134,7 @@ def test_rabt_almawqe_routes_to_store_info_not_maps() -> None:
         ),
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_FAQ_REPLY
+    assert decision.action == ACTION_LLM_REPLY
     assert decision.args.get("topic") == TOPIC_STORE_INFO
 
 
