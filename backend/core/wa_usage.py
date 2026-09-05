@@ -137,6 +137,19 @@ def _naive(dt: datetime) -> datetime:
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
+def _elapsed_within_conservative_window(
+    window_start: datetime,
+    now_naive: datetime,
+) -> bool:
+    """True when elapsed time is strictly less than 24 hours.
+
+    Conservative Meta-safe bound for session sends:
+    23:59:59 inside, exact 24:00:00 outside, 24:00:01 outside.
+    """
+    start_naive = _naive(window_start)
+    return (now_naive - start_naive) < timedelta(hours=WINDOW_HOURS)
+
+
 # Sentinel returned for unlimited plans (Scale). We use a finite integer
 # rather than ``math.inf`` so it can be stored in the ``conversations_limit``
 # integer column without overflow and so existing ``limit > 0`` and
@@ -719,8 +732,6 @@ def _open_new_window(
     """
     from models import WaConversationWindow, ConversationLog  # noqa: PLC0415
 
-    cutoff = now_naive - timedelta(hours=WINDOW_HOURS)
-
     # Lock the row for this tenant+customer — prevents race conditions
     window = (
         db.query(WaConversationWindow)
@@ -732,8 +743,16 @@ def _open_new_window(
         .first()
     )
 
-    if window is not None and window.window_start >= cutoff:
-        # Still inside the 24-h window — no new conversation
+    if window is not None and _elapsed_within_conservative_window(
+        window.window_start, now_naive
+    ):
+        # Still inside the conservative 24-h window — no new billable conversation.
+        # A later customer inbound refreshes the rolling session/billing anchor
+        # without opening a second Meta conversation.
+        if source == "inbound" and category == "service":
+            window.window_start = now_naive
+            window.category = "service"
+            window.updated_at = now_naive
         return False
 
     # ── New window starts now ────────────────────────────────────────────────
@@ -783,7 +802,6 @@ def has_open_service_window(
     from models import WaConversationWindow  # noqa: PLC0415
 
     now_naive = _naive(now or _utcnow())
-    cutoff = now_naive - timedelta(hours=WINDOW_HOURS)
     window = (
         db.query(WaConversationWindow)
         .filter(
@@ -795,7 +813,7 @@ def has_open_service_window(
     return bool(
         window is not None
         and window.category == "service"
-        and window.window_start >= cutoff
+        and _elapsed_within_conservative_window(window.window_start, now_naive)
     )
 
 
@@ -832,6 +850,8 @@ def track_conversation(
     is_new = _open_new_window(db, tenant_id, customer_phone, category, source, now_naive)
 
     if not is_new:
+        # Persist rolling-window refresh from a later inbound.
+        db.commit()
         total = usage.service_conversations_used + usage.marketing_conversations_used
         return TrackResult(
             counted=False,
