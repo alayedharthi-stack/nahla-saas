@@ -120,6 +120,1371 @@
       "expires_at": "2026-09-19",
       "owner_approval_ref": "OWNER_EXCEPTION_APPROVAL=GRANTED LIVE-EXTERNAL-LINK-MISROUTED-TO-STORE-CONTACT-D3 KEYWORD_ROUTER_CHANGE in backend/modules/ai/brain/pipeline.py 2987f62cfb09b48524a410b54e78c5ae64cac25a793e6731821c671feec27cd8 IMPLEMENTATION_PR=943 IMPLEMENTATION_HEAD_SHA=33edaa14f8a018922fb4685697601502e5203bde",
       "exact_reason": "Authorize the exact Linux GOV-002 findings for D3 only: structurally exclude customer-supplied URL spans from store/contact ownership, preserve model-owned conversational wording, and transport only a trusted tenant store URL as an out-of-band structured CTA. This does not authorize a phrase map, social alias map, prompt/persona/model change, customer-domain denylist, deterministic conversational reply, or any different digest."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-001",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "",
+      "expected_change_digest": "9417706bd49ea163c10e606a704feec15a1d56d028ea3934b53c7f024b420732",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-002",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "196bc03aacab5608356aa08fd0a32fd5a9b3b482427af2d0acaa8bdd9b8d7035",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-003",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "7def98cb40cc8d41a3e3d48f9ef5bec1a0014c86782c82910b2e81ce98db0e52",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-004",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "feb57507a070aa54b6f9a1e6023e4c8ce8b848ccb7b8137378ab3fea01815cfc",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-005",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "48a38a23aae9588ccfbb908dd27a192c1d1a79aac6b6503b8547f95a1ecc287f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-006",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "b94f12103457bf2120992ffadd5e4fd8f720cac971841035d6de1c365e5c744b",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-007",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b1b8d021fe868ef9987ae04cfc88fd06a34fec7bf47a503a8a856c31a9ddaf48",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-008",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "2bc7b84ac4bde49feaff7e675bd243ad8a7e94cc3c8f26c43fb18da2978695a4",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-009",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "635221e601c06d340c2d4ede041d44ea921b86823183f38e1947efda0b525483",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-010",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "50d55c2148e127f41944ca5a920fa5d1b6362fa1ca1dfa5e0a9ac5f10b9e054a",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-011",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "a683bba688acda3097347735ecce9b2347dbc3f8f96b3bbc6bfe1bff6d6ef845",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-012",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "80a7b7d8e164025e9552727703262f7d3958323b5a4114cd012d4077eff5b159",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-013",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "622cd03d709095fb3aa00f8dc0eba674a584cea3bdfbcad468216c47c8f551bf",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-014",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "7df77587d9ccfb88b606cb0c5337cd1c9fd3c642abe5258d30db2c4332b30248",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-015",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "062f0f09ebc9eabb2d41daa39ec6dd44c371ebb62119c6c7954b84e4d3951915",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-016",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "abda5d9579943024b605c7332e7298ab24f44f7b5cd2a85f093431856e9ef205",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-017",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "5372b09cbc46d5cb5a065238d3c745e8225d4a06966d5ec7964e3e0a81068276",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-018",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "132e732c96bb70bc972b7d218043eb2f8a04c0027d9963b98d5ffaed2872247e",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-019",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "6aa28677601df325fd6156c47397943920d4a02b9486f5c4dcb0a70a95238bae",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-020",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "ae52a1b03c99b21533de9f0332139f058cb172569006afdd6df430efd8225b9f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-021",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "98b0df877be02402d6b89ff36c7c4154ab73d1e209761319be96e5b250cb8478",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-022",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "63221be369cc1aacef65950d24aea09dae3cb11b63a71f0b83c8400e32358b6a",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-023",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "93a3a4acaeadd122aedbbdb3aa4b60de611634d8e5df81ac22e5ae5b38c08904",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-024",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "84415733f949f87016cd28c11039b6ffb8d63effb72bb97216df39f591b48c2b",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-025",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "1e36ecf76f14e353ed1ea51dc5fe825fb4486ca15b35ef0c6b51f0ebab84c43f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-026",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "de9a1a4e7e3ce7db428f7de38f0b9182ad3b99bdd1c0352a4b271347e70a390d",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-027",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "ce233c381462c4ce570a9d26fd02e0d3107e10ddddb553be488b93131c4ed60d",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-028",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "264302881fae8faba5e7e69b259e47069d363e778c724986a4c9a06610e042c9",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-029",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b86770b333261d9061439f0b216a67cb56c788a1e20ff20e3644622c91b7d68d",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-030",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "f2d42d4517459441776a913dfa54e2fecd031dc67ea7daa801d8ea9e495b7ab0",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-031",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "1f36fd1de03138477bdc58a0c539d9361dd4c56a49d460258a15e889a524b967",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-032",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "66c5fadaea5d8cf1a1923739b5fc34124d27424c100f0d3376229962ff2d2d90",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-033",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "7e195af69aa425d8ce3e8b5933a5967c5bcdc83f4731d27fbf8ff66194fb76b5",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-034",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "116cbbe1c7a2b9010b163d697da21c54558c917965ef1e103b316026267281b3",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-035",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "d5aa085d325e13300bbb451349a11b1d53e8604da91d63b2fe6b5b5b3c1ac72a",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-036",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "0ce3aa4b97786d6da40933793e3ead5356ff7f5b884506e82337360750e936a2",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-037",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "1e9ed40bc9817f7af4b03bc1062afd7b1b75924b7e01874fae3c441e6ed67b35",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-038",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "52b9d990360e197227ba5917578ed0f1e55c953c0a9814f68f766867451c3a28",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-039",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b9ec8b1e64af87d892499f5177fed4ebac9ce90f18790848433307ed8f68eaf3",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-040",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b7c10e9da19e581b7b8959377770295c0d8ce1a4a6c425863042cf963e886405",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-041",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "6d0dcaf15b546fc0ef54372e36bedae0963a08f0a826c536556bddfe32028e28",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-042",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "79c7e346c3f18f9efa5ad6ba046cf2469bcae2531f6020a7b7f25ef6b75955d4",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-043",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "378d9735979d9a8aed5aa8ace38b9f8d678223a8140ff0a28eff71d6ce77f510",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-044",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "8ab57a126cecd032ab92ffff6714863a74eb933441f08b4402d3ebd9e1573972",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-045",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "cf3590f949585e213b541d91fb4dff6eb2521a40e324baf1fe4958ec27ee35d3",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-046",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "c8dd62315cd6cff22e7394effb5e1c3ee924200a31a67a82794ad179f5cb69a2",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-047",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e1242f0144133b56bf0f9752fc2a3b605f7f0a9666119bd5190a02890cca003a",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-048",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "a75d4b516510b8131e2073c2c69a950664a4139049921739df362b7654efdba6",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-049",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "0144461017eae65ffe1e8b72e76b1ffc034a5da4b34eb43226fd9f58e7778939",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-050",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "2f7e251913823bc045d8f714458baff70890b9c4f7bef08675fc62030d633d50",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-051",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "639e774679d86287470ac417cfcf0294f2395e76562c90e562a29a147d20cf69",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-052",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "81846d90c68372af33cfa876383bb88c868570565513ca69d64147859b582133",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-053",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "df545af8a440bbe905c7ac27a151c043d11c8d513261614e3088814198d38f7f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-054",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "836e3ccb1a4f95b6beb7db2241af16e36dc17cf5c8c817a28ac91b31120a7b4c",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-055",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e066140f8a854a1dd5fbe8065522072bdb60c79eaef8a2a9b43303c183d31a37",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-056",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "fc3c6e26ded042ec7f3d88c1746f34e1167e40e99572491200804f5fa5b99b59",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-057",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "586638e3f95fd6c12fd14884fd6c1d2392b71a55c298c474da99e106fc9d1997",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-058",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "ae5c410841370c4ffccb7bf782f891446fc8c220c6288bafc45eba9f4aee8f0a",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-059",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "fdaca77fd5a3df1cd09c1735bf04272a05ee0ebb79a957e83008e7651ab3bcbe",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-060",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "d36920034babb77d043f0fe6705b89ac4852c3d613375dc972b1660bf44261fc",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-061",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "4030a6bf7870a9dcdb2e645d0bb04f06ded7daa9fab620ac2692bce7392a832f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-062",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b2c71e1f11fa88700dd67e24da9cd0f16fe333bd9ae21c9c4a4dbe74c2ca1ef6",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-063",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "0b300739b8b9cfaaa222fd82a991cf474f2e313b225c72c1a727c3e4113ce7c2",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-064",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "20ffbd71769487193a16af0b0efa24a65a29dfbbe6e238c8d8152e8a2ead3c1c",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-065",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "39911cac18fd6a24aaca8078e8b60823dd243bb447afe7966713d3e13ab4a07c",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-066",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "1c0b8faa3871d22d88428585d7ff0f819d7d98b90e12956eeeff2ec0c3ebbb58",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-067",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "18b1416c97794cd1a73c13350edd4e5d93fa4cef4de07f3dacc577e44e9c8698",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-068",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "0dee0a66ea60ca07bf96e8d13810cf5df31a7695d8652ea645ef1691df800e4d",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-069",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "db5a6a3fea950b4604d6b349223ce88d71a1b268b4106ac82cafea5c7fdc6a50",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-070",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e0164422268adf4db2184e5583047392333d3b86abf24fcc2e881ce05c7b5aa1",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-071",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "5a10c82483ed7c24a55dea8f342a19ce90015e83b734c60abecf3f6bc26246cd",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-072",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "698d7cb243375bec5c15c2c6fb3410611e0b523f9d4b587ee64854949380ce43",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-073",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "5a3494c12dbcd5fcbed99ded3acb5636cda3185316371c029b42057f842cd071",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-074",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "36e213aacd7118df69abe2c28751deb24cf1e05cad4adfb747fad062c5052f3f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-075",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "7b163216e70de448dd31033ea303b4a329ce84d52f0d6aeb8c67369679cdf540",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-076",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "66c9869f9438f84b785fa2a0af9d78fba1b7f2adc57fd923a9bf4422d3013e1e",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-077",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "970f3737db3d0a18201964b8d9e3f1211c41dcc59025b105741e14b6101980b5",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-078",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "30349f14615d1e0096bc8a7d67986103aefc7276f501190fe5cc3dc1eb81eb42",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-079",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "cd613abaec45933812c0d42df676d327a092a9743c74fc6c9a0a23dadac6fad3",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-080",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e4bf4688a1cb15a38f24c683760eb801501788e277746329a68480442bdd6c9f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-081",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b742cf78d3e20097b4fc48ddf4270cba5aa07db709b4d51c5ea218e3d6f8f622",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-082",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "f341fa2b6e63592d83179ea3d12da99f4c2e55af5f5d0dd9f90b1e9eed61c22b",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-083",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "68d41cbe749ad7a76422b9da198b0db50f45972647f53ece8c7b0c869647aa1c",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-084",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "1bab95558ae0bcbc9b8f1b697475e6b474b74499aa58b720643fc42cc8eb9d70",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-085",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "754b01655859071feb068e89ec2f8dbebcee0a251ce59231afeb8507f2822dc8",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-086",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "fe35f9c3e000df6af8d2fc1882ba76a5f9d0a54dda071836dbc3bb91b5a36324",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-087",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "fa6ef6915ceb0620cf4311f45d1587187d422e41382b4401f4167fa1c7205fe3",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-088",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "fb7dc2b04a42eb563d38050c5846451f62fdc55c6229814f8e8aacc6146cfa61",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-089",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "ed87f2b278a497f29da38c2e913497b35e976cfeaa0e61a2ed4752eb5ff5cfdc",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-090",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "eba1846312a2220ced14e76e3b5d4586f4ec3199b5e8de5f15ebac8258cf2c5b",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-PR946-091",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b1a57ddf90d63ce162207a8e64b4fbcc1752d979d6b603edc29d1d40c89083b6",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-05",
+      "expires_at": "2026-09-19",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
     }
   ]
 }
