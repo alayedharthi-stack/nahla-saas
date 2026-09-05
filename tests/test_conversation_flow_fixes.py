@@ -497,7 +497,12 @@ def test_decision_engine_treats_name_message_as_continuation():
     engine = DefaultDecisionEngine()
     state = _make_state(STAGE_ORDERING, product={"id": 1, "title": "فستان"})
     decision = engine.decide(
-        _ctx(state, INTENT_GENERAL, slots={"customer_name": "تركي الحارثي"}),
+        _ctx(
+            state,
+            INTENT_GENERAL,
+            slots={"customer_name": "تركي الحارثي"},
+            message="تركي الحارثي",
+        ),
     )
 
     assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
@@ -956,7 +961,12 @@ def test_after_pick_name_message_continues_order_flow():
     state = _make_state(STAGE_ORDERING, product={"id": 42, "title": "فستان", "price": 189})
 
     decision = engine.decide(
-        _ctx(state, INTENT_GENERAL, {"customer_first_name": "تركي", "customer_last_name": "الحارثي"})
+        _ctx(
+            state,
+            INTENT_GENERAL,
+            {"customer_first_name": "تركي", "customer_last_name": "الحارثي"},
+            message="تركي الحارثي",
+        )
     )
     assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
 
@@ -973,7 +983,12 @@ def test_after_pick_maps_url_continues_order_flow():
     state = _make_state(STAGE_ORDERING, product={"id": 42, "title": "فستان", "price": 189})
 
     decision = engine.decide(
-        _ctx(state, INTENT_GENERAL, {"google_maps_url": "https://maps.app.goo.gl/abc123"})
+        _ctx(
+            state,
+            INTENT_GENERAL,
+            {"google_maps_url": "https://maps.app.goo.gl/abc123"},
+            message="https://maps.app.goo.gl/abc123",
+        )
     )
     assert decision.action == ACTION_ORDER_CONTEXT_UPDATE
     assert decision.args.get("google_maps_url") == "https://maps.app.goo.gl/abc123"
