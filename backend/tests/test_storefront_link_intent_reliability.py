@@ -87,16 +87,14 @@ class TestStorefrontLinkIntentReliability:
             LinkIntentType,
             resolve_inbound_link_intent,
         )
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
+        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
         from modules.ai.brain.execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
 
         msg = "وين موقعكم؟"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
         decision = _brain_ctx(msg)
-        assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
-        topic = str(decision.args.get("topic") or "")
-        kind = str(decision.args.get("question_kind") or "")
-        assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
+        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.args.get("topic") == TOPIC_LOCATION
         assert decision.args.get("topic") != TOPIC_STORE_INFO
 
     def test_mawqe_almaarid_physical_not_storefront(self) -> None:
@@ -104,16 +102,14 @@ class TestStorefrontLinkIntentReliability:
             LinkIntentType,
             resolve_inbound_link_intent,
         )
-        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY, ACTION_LLM_REPLY
+        from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
         from modules.ai.brain.execution.faq import TOPIC_LOCATION, TOPIC_STORE_INFO
 
         msg = "موقع المعرض"
         assert resolve_inbound_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
         decision = _brain_ctx(msg)
-        assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
-        topic = str(decision.args.get("topic") or "")
-        kind = str(decision.args.get("question_kind") or "")
-        assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
+        assert decision.action == ACTION_FAQ_REPLY
+        assert decision.args.get("topic") == TOPIC_LOCATION
         assert decision.args.get("topic") != TOPIC_STORE_INFO
 
     def test_missing_store_url_honest_not_configured(self) -> None:
@@ -233,10 +229,8 @@ class TestPhysicalLocationOwnershipRegression:
         for msg in physical_cases:
             assert resolve_link_intent(msg) == LinkIntentType.PHYSICAL_LOCATION
             decision = _brain_ctx(msg)
-            assert decision.action in {ACTION_FAQ_REPLY, ACTION_LLM_REPLY}
-            topic = str(decision.args.get("topic") or "")
-            kind = str(decision.args.get("question_kind") or "")
-            assert topic in {TOPIC_LOCATION, "location_delivery"} or kind == "location"
+            assert decision.action == ACTION_FAQ_REPLY
+            assert decision.args.get("topic") == TOPIC_LOCATION
 
         storefront_cases = ("رابط المتجر الإلكتروني", "الموقع الإلكتروني")
         for msg in storefront_cases:

@@ -94,32 +94,6 @@ _SOCIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-
-def _social_key_requested_in_haystack(key: str, haystack: str) -> bool:
-    """True when Pack A2 `_SOCIAL_RE` tokens for a profile key appear.
-
-    Canonical keys are `core.merchant_profile._manual_social`. Token
-    strings are the alternatives already listed in `_SOCIAL_RE` — not a
-    new D3 phrase map and not a new compiled customer-language regex.
-    """
-    key_l = str(key or "").strip().lower()
-    text = str(haystack or "")
-    if not key_l or not text:
-        return False
-    hay_l = text.lower()
-    if key_l in hay_l:
-        return True
-    compact = hay_l.replace(" ", "").replace("\u00a0", "")
-    if key_l == "tiktok":
-        return "تيك توك" in hay_l or "تيكتوك" in compact
-    if key_l == "instagram":
-        return "انستقرام" in hay_l or "إنستغرام" in text
-    if key_l == "twitter":
-        return "تويتر" in hay_l
-    if key_l == "snapchat":
-        return "سناب" in hay_l
-    return False
-
 _CURRENCY_RE = re.compile(
     r"("
     r"عمل(?:ة|تكم|ة\s*المتجر)|"
@@ -232,11 +206,10 @@ def authorized_profile_cta_url(
     """Tenant-authorized CTA destination, never the customer-supplied URL.
 
     store_info → merchant store_url only.
-    owner_contact → matching configured social URL when a social_links key
-    appears in the keyword haystack; otherwise empty (no store-link substitute).
+    owner_contact → empty (no store-link substitute, no social-channel
+    button selection). The model answers from trusted profile facts.
     """
     inbound = _inbound_url_texts(message)
-    haystack = _contact_store_keyword_haystack(message)
     mc = merchant_context if isinstance(merchant_context, dict) else {}
     mp = mc.get("merchant_profile") if isinstance(mc, dict) else None
     mp = mp if isinstance(mp, dict) else {}
@@ -249,28 +222,6 @@ def authorized_profile_cta_url(
             store_url = str(mp.get("domain") or "").strip()
         return _reject_inbound_cta(store_url, inbound)
 
-    if topic != "owner_contact":
-        return ""
-
-    social = {}
-    if facts is not None:
-        raw_social = getattr(facts, "merchant_profile_social_links", None)
-        if isinstance(raw_social, dict):
-            social = raw_social
-    if not social:
-        raw_social = mp.get("social_links")
-        if isinstance(raw_social, dict):
-            social = raw_social
-    haystack_l = haystack.lower()
-    # Canonical keys already exist on merchant_profile. Token groups are
-    # the Pack A2 _SOCIAL_RE alternatives already in this module — not a
-    # new D3 phrase map.
-    for key, val in social.items():
-        key_l = str(key or "").strip().lower()
-        if not key_l:
-            continue
-        if key_l in haystack_l or _social_key_requested_in_haystack(key_l, haystack):
-            return _reject_inbound_cta(str(val or ""), inbound)
     return ""
 
 

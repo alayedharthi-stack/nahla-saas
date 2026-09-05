@@ -178,6 +178,9 @@ class TestFExplicitSocialRequest:
         assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "owner_contact"
         assert decision.args.get("profile_surface") == "merchant_profile"
+        assert not decision.args.get("authorized_cta_url")
+        social = getattr(_facts(), "merchant_profile_social_links", {}) or {}
+        assert social.get("instagram")
         assert "faq_owner_contact" not in str(decision.args)
 
 
@@ -522,27 +525,32 @@ class TestEmptyModelBodyNoDeterministicCtaProse:
 
 
 class TestConfiguredSocialChannel:
-    def test_arabic_tiktok_uses_configured_cta(self) -> None:
+    def test_explicit_tiktok_is_owner_contact_without_channel_cta(self) -> None:
         facts = _facts(social={"tiktok": TIKTOK_CTA, "instagram": INSTAGRAM_CTA})
         decision = _decide("وش حسابكم في تيك توك؟", facts)
         assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "owner_contact"
-        assert decision.args.get("authorized_cta_url") == TIKTOK_CTA
+        assert not decision.args.get("authorized_cta_url")
         assert decision.args.get("authorized_cta_url") != GENERIC_STORE_URL
-        assert TIKTOK_LIVE not in str(decision.args.get("authorized_cta_url") or "")
+        social = getattr(facts, "merchant_profile_social_links", {}) or {}
+        assert social.get("tiktok") == TIKTOK_CTA
+        assert social.get("instagram") == INSTAGRAM_CTA
 
-    def test_configured_instagram_channel(self) -> None:
+    def test_configured_instagram_still_no_deterministic_cta(self) -> None:
         facts = _facts(social={"tiktok": TIKTOK_CTA, "instagram": INSTAGRAM_CTA})
         decision = _decide("وش حسابكم في انستقرام؟", facts)
         assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "owner_contact"
-        assert decision.args.get("authorized_cta_url") == INSTAGRAM_CTA
+        assert not decision.args.get("authorized_cta_url")
+        social = getattr(facts, "merchant_profile_social_links", {}) or {}
+        assert social.get("instagram") == INSTAGRAM_CTA
 
     def test_missing_channel_no_store_substitute(self) -> None:
         facts = _facts(social={"instagram": INSTAGRAM_CTA})
         decision = _decide("وش حسابكم في تيك توك؟", facts)
         assert decision.action == ACTION_LLM_REPLY
         assert not decision.args.get("authorized_cta_url")
+        assert decision.args.get("authorized_cta_url") != GENERIC_STORE_URL
 
     def test_generic_contact_no_automatic_store_or_social_cta(self) -> None:
         facts = _facts(social={"tiktok": TIKTOK_CTA})
@@ -550,16 +558,6 @@ class TestConfiguredSocialChannel:
         assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "owner_contact"
         assert not decision.args.get("authorized_cta_url")
-
-    def test_social_cta_tenant_isolation(self) -> None:
-        facts_a = _facts(social={"tiktok": TIKTOK_CTA})
-        facts_b = _facts(social={"tiktok": "https://social.example/other"})
-        setattr(facts_b, "tenant_id", 2)
-        a = _decide("وش حسابكم في تيك توك؟", facts_a)
-        b = _decide("وش حسابكم في تيك توك؟", facts_b)
-        assert a.args.get("authorized_cta_url") == TIKTOK_CTA
-        assert b.args.get("authorized_cta_url") == "https://social.example/other"
-        assert a.args.get("authorized_cta_url") != b.args.get("authorized_cta_url")
 
 
 class TestResponseGoalProseRemoved:
@@ -704,14 +702,77 @@ def _d3_brain_process_stack(brain: Any, *, message: str, decision: Decision, mod
     stack.enter_context(patch.object(brain._policy_gate, "gate", side_effect=lambda d, _ctx: d))
     stack.enter_context(patch.object(brain._state_store, "load", return_value=state))
     stack.enter_context(patch.object(brain._state_store, "save"))
-    stack.enter_context(patch.object(brain._facts_loader, "load", return_value=_facts()))
+    facts = _facts()
+    merchant_ctx = {
+        "tenant_id": 1,
+        "merchant_profile": {
+            "description": facts.store_description,
+            "domain": facts.store_url,
+            "email": facts.store_contact_email,
+            "phone": facts.store_contact_phone,
+            "social_links": getattr(facts, "merchant_profile_social_links", {}) or {},
+            "currency": "SAR",
+            "status": "active",
+        },
+    }
+    stack.enter_context(patch.object(brain._facts_loader, "load", return_value=facts))
+    stack.enter_context(
+        patch("core.store_knowledge.build_merchant_context", return_value=merchant_ctx)
+    )
     stack.enter_context(patch.object(brain._memory_updater, "update"))
+    captured: dict[str, Any] = {}
+
+    async def _compose(decision: Decision, result: Any, ctx: Any, *args: Any, **kwargs: Any) -> str:
+        rs = getattr(ctx, "reply_state", None)
+        kf = dict(getattr(rs, "known_facts", None) or {})
+        mc = dict(getattr(rs, "merchant_context", None) or getattr(ctx, "merchant_context", None) or {})
+        mp = mc.get("merchant_profile") if isinstance(mc.get("merchant_profile"), dict) else {}
+        proj = kf.get("trusted_context_projection")
+        proj_mp = {}
+        if isinstance(proj, dict):
+            raw_mp = proj.get("merchant_profile")
+            if isinstance(raw_mp, dict):
+                proj_mp = raw_mp
+        social = (
+            proj_mp.get("social_links")
+            or mp.get("social_links")
+            or getattr(getattr(ctx, "facts", None), "merchant_profile_social_links", None)
+            or {}
+        )
+        prompt = ""
+        if rs is not None:
+            try:
+                from modules.ai.brain.compose.prompt_builder import (  # noqa: PLC0415
+                    build_brain_reply_prompt,
+                )
+
+                prompt = build_brain_reply_prompt(rs)
+            except Exception:
+                prompt = ""
+        captured["known_facts"] = kf
+        captured["merchant_profile"] = mp
+        captured["contact_phone"] = kf.get("contact_phone") or getattr(
+            getattr(ctx, "facts", None), "store_contact_phone", ""
+        )
+        captured["contact_email"] = kf.get("contact_email") or getattr(
+            getattr(ctx, "facts", None), "store_contact_email", ""
+        )
+        captured["store_url"] = kf.get("store_url") or getattr(
+            getattr(ctx, "facts", None), "store_url", ""
+        )
+        captured["social_links"] = social
+        captured["prompt"] = prompt
+        captured["decision_cta"] = (getattr(decision, "args", None) or {}).get(
+            "authorized_cta_url"
+        )
+        return model_body
+
     llm_mock = stack.enter_context(
         patch.object(
             brain._composer,
             "compose",
             new_callable=AsyncMock,
-            return_value=model_body,
+            side_effect=_compose,
         )
     )
     faq_contact = stack.enter_context(
@@ -732,7 +793,7 @@ def _d3_brain_process_stack(brain: Any, *, message: str, decision: Decision, mod
             new_callable=AsyncMock,
         )
     )
-    return stack, llm_mock, faq_contact, faq_store, persona, asyncio, MagicMock
+    return stack, llm_mock, faq_contact, faq_store, persona, asyncio, MagicMock, captured
 
 
 def _process_then_wire(brain, *, db, message: str):
@@ -760,6 +821,7 @@ class TestModelOwnershipComposeOnce:
 
         cases = (
             ("كيف أتواصل معكم؟", "owner_contact"),
+            ("وش حسابكم في تيك توك؟", "owner_contact"),
             ("وش رابط المتجر؟", "store_info"),
         )
         for message, topic in cases:
@@ -768,7 +830,7 @@ class TestModelOwnershipComposeOnce:
             assert decision.args.get("topic") == topic
             consume_authorized_cta()
             brain = get_brain()
-            stack, llm_mock, _fc, _fs, _persona, asyncio, MagicMock = _d3_brain_process_stack(
+            stack, llm_mock, _fc, _fs, _persona, asyncio, MagicMock, captured = _d3_brain_process_stack(
                 brain, message=message, decision=decision, model_body=MODEL_BODY
             )
             db = MagicMock()
@@ -790,8 +852,19 @@ class TestModelOwnershipComposeOnce:
             assert result.get("compose_reply_candidate") == MODEL_BODY
             assert GENERIC_STORE_URL not in (result.get("reply") or "")
             assert TIKTOK_LIVE not in (result.get("reply") or "")
+            assert captured.get("contact_phone") == "966500000001"
+            assert captured.get("contact_email") == "hello@demo.example"
+            social = captured.get("social_links") or {}
+            assert social.get("instagram") == "https://instagram.com/demo_store"
+            prompt = str(captured.get("prompt") or "")
+            if prompt:
+                assert "966500000001" in prompt
+                assert "hello@demo.example" in prompt
+                assert "https://instagram.com/demo_store" in prompt
             if topic == "store_info":
                 assert result.get("authorized_cta_url") == GENERIC_STORE_URL
+                assert captured.get("store_url") == GENERIC_STORE_URL
+                assert GENERIC_STORE_URL not in MODEL_BODY
             else:
                 assert not result.get("authorized_cta_url")
             follow = DefaultSuggestionEngine().suggest(
@@ -814,7 +887,7 @@ class TestPipelineToWireCta:
         decision = _decide(message)
         consume_authorized_cta()
         brain = get_brain()
-        stack, llm_mock, _fc, _fs, _persona, asyncio, MagicMock = _d3_brain_process_stack(
+        stack, llm_mock, _fc, _fs, _persona, asyncio, MagicMock, captured = _d3_brain_process_stack(
             brain, message=message, decision=decision, model_body=MODEL_BODY
         )
         db = MagicMock()
@@ -823,8 +896,11 @@ class TestPipelineToWireCta:
         send = _wire_send_kwargs(result.get("reply") or "", msgs)
         assert llm_mock.await_count == 1
         assert result.get("reply") == MODEL_BODY
+        assert result.get("compose_reply_candidate") == MODEL_BODY
         assert GENERIC_STORE_URL not in (result.get("reply") or "")
-        assert result.get("authorized_cta_url") == GENERIC_STORE_URL
+        assert GENERIC_STORE_URL not in MODEL_BODY
+        assert captured.get("store_url") == GENERIC_STORE_URL
+        assert result.get("authorized_cta_url") == captured.get("store_url")
         assert send["btn_url"].rstrip("/") == GENERIC_STORE_URL.rstrip("/")
         assert send["body_text"] == MODEL_BODY
         assert TIKTOK_LIVE not in str(send["btn_url"] or "")
@@ -836,7 +912,7 @@ class TestPipelineToWireCta:
         decision = _decide(message)
         consume_authorized_cta()
         brain = get_brain()
-        stack, _llm, _fc, _fs, _persona, asyncio, MagicMock = _d3_brain_process_stack(
+        stack, _llm, _fc, _fs, _persona, asyncio, MagicMock, _captured = _d3_brain_process_stack(
             brain, message=message, decision=decision, model_body=MODEL_BODY
         )
         db = MagicMock()
@@ -859,7 +935,7 @@ class TestPipelineToWireCta:
             args={"authorized_cta_url": GENERIC_STORE_URL, "topic": "store_info"},
             reason="t",
         )
-        stack, _llm, _fc, _fs, _persona, asyncio, MagicMock = _d3_brain_process_stack(
+        stack, _llm, _fc, _fs, _persona, asyncio, MagicMock, _captured = _d3_brain_process_stack(
             brain, message="وش رابط المتجر؟", decision=decision, model_body=MODEL_BODY
         )
         db = MagicMock()

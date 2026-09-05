@@ -224,7 +224,7 @@ def test_online_store_inquiry_missing_url_safe_fallback(
 
 
 def test_order_from_website_does_not_trigger_checkout_slots() -> None:
-    from modules.ai.brain.decision.actions import ACTION_LLM_REPLY
+    from modules.ai.brain.decision.actions import ACTION_FAQ_REPLY
     from modules.ai.brain.decision.engine import DefaultDecisionEngine
     from modules.ai.brain.execution.faq import TOPIC_STORE_INFO
     from modules.ai.brain.types import (
@@ -245,9 +245,8 @@ def test_order_from_website_does_not_trigger_checkout_slots() -> None:
         history=[],
     )
     decision = DefaultDecisionEngine().decide(ctx)
-    assert decision.action == ACTION_LLM_REPLY
-    topic = str(decision.args.get("topic") or "")
-    assert topic in {TOPIC_STORE_INFO, "storefront_self_checkout"}
+    assert decision.action == ACTION_FAQ_REPLY
+    assert decision.args.get("topic") == TOPIC_STORE_INFO
     assert "customer_first_name" not in str(decision.args)
 
 
