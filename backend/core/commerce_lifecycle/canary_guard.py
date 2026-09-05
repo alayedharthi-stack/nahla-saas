@@ -9,6 +9,7 @@ No customer-facing prose. No model calls.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from dataclasses import dataclass
@@ -42,12 +43,16 @@ REASON_RECIPIENT_UNNORMALIZABLE = "recipient_unnormalizable"
 REASON_LIFECYCLE_OWNS_EVENT = "lifecycle_dispatch_owns_event"
 REASON_LEGACY_NOT_IN_SCOPE = "legacy_not_in_scope"
 
+# Audit is intentionally narrow: only canary-tenant send blocks that
+# involve a recipient or lifecycle-ownership skip. Tenant-not-allowlisted
+# and dispatch-disabled skips are not audited as blocked customer sends.
 _AUDIT_REASONS = frozenset({
     REASON_RECIPIENT_NOT_ALLOWLISTED,
     REASON_RECIPIENT_MISSING,
     REASON_RECIPIENT_UNNORMALIZABLE,
     REASON_LIFECYCLE_OWNS_EVENT,
 })
+_PHONE_FINGERPRINT_PREFIX = "nahla.lifecycle_canary.v1:"
 
 
 @dataclass(frozen=True)
@@ -130,6 +135,18 @@ def commerce_lifecycle_dispatch_recipient_permitted(phone: str) -> bool:
     if not normalized:
         return False
     return normalized in allowlist
+
+
+def _phone_audit_fields(normalized: Optional[str]) -> dict[str, str]:
+    """Correlation fields that must never include the full customer phone."""
+    if not normalized:
+        return {"phone_last4": "", "phone_fingerprint": ""}
+    digits = "".join(ch for ch in str(normalized) if ch.isdigit())
+    last4 = digits[-4:] if digits else ""
+    digest = hashlib.sha256(
+        f"{_PHONE_FINGERPRINT_PREFIX}{normalized}".encode("utf-8")
+    ).hexdigest()
+    return {"phone_last4": last4, "phone_fingerprint": digest}
 
 
 def _normalize_candidate_phone(phone: str) -> tuple[str, Optional[str], Optional[str]]:
@@ -299,7 +316,7 @@ def evaluate_and_audit(
             mode=decision.mode,
             automation_type=decision.automation_type or "",
             reason=decision.reason,
-            phone_normalized=decision.phone_normalized or "",
+            **_phone_audit_fields(decision.phone_normalized),
         )
     except Exception:
         logger.warning(

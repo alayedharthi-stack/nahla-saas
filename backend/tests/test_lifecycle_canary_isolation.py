@@ -17,6 +17,7 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 from core.automation_engine import (  # noqa: E402
     _execute_action,
     _execute_ai_recovery_step,
+    send_lifecycle_whatsapp_session_body,
     send_lifecycle_whatsapp_template,
 )
 from core.commerce_lifecycle.canary_guard import (  # noqa: E402
@@ -311,10 +312,36 @@ class TestLegacySenderPathsCannotBypass:
         assert info["error_code"] == "recipient_not_allowlisted"
         send.assert_not_awaited()
 
+    def test_lifecycle_session_last_mile_blocks_other_recipient(self, monkeypatch):
+        _enable_canary(monkeypatch)
+        send = AsyncMock()
+        monkeypatch.setattr(
+            "services.whatsapp_platform.service.provider_send_message",
+            send,
+        )
+        outcome, info = asyncio.run(
+            send_lifecycle_whatsapp_session_body(
+                MagicMock(),
+                CANARY_TENANT,
+                OTHER_PHONE,
+                SimpleNamespace(name="order_confirmed_generic_ar", components=[]),
+                {},
+            )
+        )
+        assert outcome == "failed"
+        assert info["error_code"] == "recipient_not_allowlisted"
+        send.assert_not_awaited()
+
 
 class TestZeroModelCalls:
     def test_ai_recovery_does_not_call_model_on_canary_tenant(self, monkeypatch):
         _enable_canary(monkeypatch)
+        import types
+
+        model = AsyncMock(return_value="should-not-run")
+        fake_ai_client = types.ModuleType("services.ai_client")
+        fake_ai_client.generate_cart_recovery_text = model
+        monkeypatch.setitem(sys.modules, "services.ai_client", fake_ai_client)
         ok, info = asyncio.run(
             _execute_ai_recovery_step(
                 MagicMock(),
@@ -330,7 +357,8 @@ class TestZeroModelCalls:
         )
         assert ok is False
         assert info.get("error_code") == "lifecycle_canary_zero_ai"
-        assert "generate_cart_recovery_text" not in str(info)
+        model.assert_not_called()
+        model.assert_not_awaited()
 
     def test_canary_guard_source_has_no_model_client(self):
         src = (BACKEND_DIR / "core" / "commerce_lifecycle" / "canary_guard.py").read_text(
@@ -359,4 +387,12 @@ class TestAudit:
         )
         assert seen
         assert seen[0][0] == "lifecycle_canary_blocked"
-        assert seen[0][1]["reason"] == "recipient_not_allowlisted"
+        ctx = seen[0][1]
+        assert ctx["reason"] == "recipient_not_allowlisted"
+        assert "phone_normalized" not in ctx
+        assert OTHER_PHONE not in str(ctx)
+        assert ALLOWED_PHONE not in str(ctx)
+        assert ctx["phone_last4"] == OTHER_PHONE[-4:]
+        assert len(ctx["phone_fingerprint"]) == 64
+        assert OTHER_PHONE not in ctx["phone_fingerprint"]
+        assert ctx["phone_fingerprint"] != OTHER_PHONE
