@@ -1001,6 +1001,25 @@ async def _execute_action(
         }
     to_phone = normalized_phone
 
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        MODE_LEGACY_LIFECYCLE,
+        evaluate_and_audit,
+    )
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=to_phone,
+        sender_path="automation_engine",
+        mode=MODE_LEGACY_LIFECYCLE,
+        automation_type=str(getattr(automation, "automation_type", "") or ""),
+    )
+    if not canary.allowed:
+        return False, {
+            "skipped": True,
+            "skip_reason": canary.reason,
+            "error_code": canary.reason,
+            "canary_blocked": True,
+        }
+
     # ── WhatsApp connection ───────────────────────────────────────────────────
     wa_conn: Optional[Any] = (
         db.query(WhatsAppConnection)
@@ -3128,6 +3147,16 @@ async def _execute_ai_recovery_step(
         operation="execute_ai_recovery_step",
         tenant_id=tenant_id,
     )
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        commerce_lifecycle_dispatch_tenant_permitted,
+    )
+    if commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id)):
+        return False, {
+            "skipped": True,
+            "skip_reason": "lifecycle_canary_zero_ai",
+            "error_code": "lifecycle_canary_zero_ai",
+            "error": "lifecycle_canary_zero_ai",
+        }
     from core.wa_usage import has_open_service_window  # noqa: PLC0415
 
     if not has_open_service_window(db, tenant_id, to_phone):
@@ -3427,6 +3456,23 @@ async def send_lifecycle_whatsapp_session_body(
         operation="lifecycle_session_send",
         tenant_id=tenant_id,
     )
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        MODE_NEW_LIFECYCLE,
+        evaluate_and_audit,
+    )
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=to_phone,
+        sender_path="lifecycle_session_send",
+        mode=MODE_NEW_LIFECYCLE,
+    )
+    if not canary.allowed:
+        return "failed", {
+            "error_code": canary.reason,
+            "template": getattr(template, "name", None),
+            "send_method": "session_message",
+            "canary_blocked": True,
+        }
     from models import WhatsAppConnection  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
     from core.billing import has_billing_access as _has_access  # noqa: PLC0415
@@ -3573,6 +3619,22 @@ async def send_lifecycle_whatsapp_template(
         operation="lifecycle_template_send",
         tenant_id=tenant_id,
     )
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        MODE_NEW_LIFECYCLE,
+        evaluate_and_audit,
+    )
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=to_phone,
+        sender_path="lifecycle_template_send",
+        mode=MODE_NEW_LIFECYCLE,
+    )
+    if not canary.allowed:
+        return "failed", {
+            "error_code": canary.reason,
+            "template": getattr(template, "name", None),
+            "canary_blocked": True,
+        }
     from models import WhatsAppConnection  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 

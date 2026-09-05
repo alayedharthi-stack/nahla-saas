@@ -7,7 +7,6 @@ Platform-wide deterministic order lifecycle WhatsApp template sends gated by
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -15,6 +14,15 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from core.commerce_lifecycle.canary_guard import (
+    MODE_NEW_LIFECYCLE,
+    commerce_lifecycle_dispatch_enabled,
+    commerce_lifecycle_dispatch_recipient_allowlist,
+    commerce_lifecycle_dispatch_recipient_permitted,
+    commerce_lifecycle_dispatch_tenant_allowlist,
+    commerce_lifecycle_dispatch_tenant_permitted,
+    evaluate_and_audit,
+)
 from core.commerce_lifecycle.evidence import (
     OrderLifecycleEvidence,
     validate_capabilities,
@@ -79,81 +87,6 @@ _DISPATCHABLE_INTENTS: frozenset[BusinessIntent] = frozenset({
     BusinessIntent.ORDER_CONFIRMED,
     BusinessIntent.SHIPMENT_AVAILABLE,
 })
-
-
-def commerce_lifecycle_dispatch_enabled() -> bool:
-    val = str(
-        os.environ.get("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "false")
-    ).strip().lower()
-    return val in {"1", "true", "yes", "on"}
-_ENV_DISPATCH_TENANT_ALLOWLIST = "COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST"
-_ENV_DISPATCH_RECIPIENT_ALLOWLIST = "COMMERCE_LIFECYCLE_DISPATCH_RECIPIENT_ALLOWLIST"
-
-
-def _parse_dispatch_tenant_allowlist() -> frozenset[int]:
-    raw = str(os.environ.get(_ENV_DISPATCH_TENANT_ALLOWLIST, "")).strip()
-    if not raw:
-        return frozenset()
-    allowed: set[int] = set()
-    for part in raw.split(","):
-        piece = part.strip()
-        if not piece:
-            continue
-        try:
-            tenant_id = int(piece)
-        except ValueError:
-            continue
-        if tenant_id > 0:
-            allowed.add(tenant_id)
-    return frozenset(allowed)
-
-
-def _parse_dispatch_recipient_allowlist() -> frozenset[str]:
-    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
-    raw = str(os.environ.get(_ENV_DISPATCH_RECIPIENT_ALLOWLIST, "")).strip()
-    if not raw:
-        return frozenset()
-    allowed: set[str] = set()
-    for part in raw.split(","):
-        piece = part.strip()
-        if not piece:
-            continue
-        normalized = normalize_phone(piece) or piece
-        allowed.add(normalized)
-    return frozenset(allowed)
-
-
-def commerce_lifecycle_dispatch_tenant_allowlist() -> frozenset[int]:
-    """Tenant IDs permitted when lifecycle dispatch master flag is on."""
-    return _parse_dispatch_tenant_allowlist()
-
-
-def commerce_lifecycle_dispatch_recipient_allowlist() -> frozenset[str]:
-    """E.164 recipient phones permitted for lifecycle provider sends."""
-    return _parse_dispatch_recipient_allowlist()
-
-
-def commerce_lifecycle_dispatch_tenant_permitted(tenant_id: int) -> bool:
-    if not commerce_lifecycle_dispatch_enabled():
-        return False
-    allowlist = commerce_lifecycle_dispatch_tenant_allowlist()
-    if not allowlist:
-        return False
-    return int(tenant_id) in allowlist
-
-
-def commerce_lifecycle_dispatch_recipient_permitted(phone: str) -> bool:
-    if not commerce_lifecycle_dispatch_enabled():
-        return False
-    allowlist = commerce_lifecycle_dispatch_recipient_allowlist()
-    if not allowlist:
-        return False
-    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
-    normalized = normalize_phone(str(phone or "").strip()) or str(phone or "").strip()
-    if not normalized:
-        return False
-    return normalized in allowlist
-
 
 
 @dataclass(frozen=True)
@@ -255,14 +188,24 @@ async def _execute_reserved_send(
     service_key: str,
 ) -> LifecycleDispatchResult:
     to_phone = str(evidence.customer_phone or "").strip()
-
-    if not commerce_lifecycle_dispatch_recipient_permitted(to_phone):
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=to_phone,
+        sender_path="lifecycle_dispatch_reserved_send",
+        mode=MODE_NEW_LIFECYCLE,
+    )
+    if not canary.allowed:
+        block_code = (
+            "missing_customer_phone"
+            if canary.reason == "recipient_missing"
+            else canary.reason
+        )
         finalize_send_outcome(
             db,
             ledger_id=reserve.ledger_id,
             tenant_id=int(tenant_id),
             outcome=SendLedgerOutcome.SEND_BLOCKED,
-            send_error_code="recipient_not_allowlisted",
+            send_error_code=block_code,
             commit=True,
         )
         return LifecycleDispatchResult(
@@ -271,25 +214,7 @@ async def _execute_reserved_send(
             duplicate=False,
             recovered=reserve.recovered,
             outcome=SendLedgerOutcome.SEND_BLOCKED.value,
-            reason_code="recipient_not_allowlisted",
-        )
-
-    if not to_phone:
-        finalize_send_outcome(
-            db,
-            ledger_id=reserve.ledger_id,
-            tenant_id=int(tenant_id),
-            outcome=SendLedgerOutcome.SEND_BLOCKED,
-            send_error_code="missing_customer_phone",
-            commit=True,
-        )
-        return LifecycleDispatchResult(
-            ledger_id=reserve.ledger_id,
-            dispatched=False,
-            duplicate=False,
-            recovered=reserve.recovered,
-            outcome=SendLedgerOutcome.SEND_BLOCKED.value,
-            reason_code="missing_customer_phone",
+            reason_code=block_code,
         )
 
     from core.service_template_resolver import resolve_template_for_send  # noqa: PLC0415
@@ -585,21 +510,26 @@ async def dispatch_external_lifecycle_notification(
             transition_version=transition_version,
         )
 
-        if not commerce_lifecycle_dispatch_recipient_permitted(
-            str(evidence.customer_phone or "")
-        ):
+        canary = evaluate_and_audit(
+            int(tenant_id),
+            phone=str(evidence.customer_phone or ""),
+            sender_path="lifecycle_dispatch",
+            mode=MODE_NEW_LIFECYCLE,
+        )
+        if not canary.allowed:
             logger.info(
-                "[LifecycleDispatch] recipient_blocked tenant=%s order=%s intent=%s",
+                "[LifecycleDispatch] recipient_blocked tenant=%s order=%s intent=%s reason=%s",
                 tenant_id,
                 order_id,
                 intent.value,
+                canary.reason,
             )
             return LifecycleDispatchResult(
                 ledger_id=None,
                 dispatched=False,
                 duplicate=False,
                 outcome="skipped",
-                reason_code="recipient_not_allowlisted",
+                reason_code=canary.reason,
             )
 
         registry = get_default_registry()
