@@ -159,6 +159,18 @@ async def send_cod_confirmation_template(
         return {"sent": False, "error": "template_not_approved"}
 
     to = normalize_phone(customer_phone) or customer_phone
+    from core.commerce_lifecycle.dispatch import (  # noqa: PLC0415
+        lifecycle_canary_legacy_send_block_reason,
+    )
+    block_reason = lifecycle_canary_legacy_send_block_reason(
+        int(tenant_id), "cod_confirmation", to
+    )
+    if block_reason:
+        logger.info(
+            "[COD] tenant=%s order=%s: canary gate %s",
+            tenant_id, getattr(order, "id", None), block_reason,
+        )
+        return {"sent": False, "error": block_reason}
     body_params = [
         # Use the central fallback (``"عميلنا الغالي"``) so every
         # template / campaign / automation uses the same greeting.

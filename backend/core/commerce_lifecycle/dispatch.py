@@ -155,6 +155,31 @@ def commerce_lifecycle_dispatch_recipient_permitted(phone: str) -> bool:
     return normalized in allowlist
 
 
+_LIFECYCLE_OWNED_AUTOMATION_TYPES = frozenset({"order_notifications"})
+
+
+def lifecycle_canary_legacy_send_block_reason(
+    tenant_id: int,
+    automation_type: str,
+    phone: str,
+) -> Optional[str]:
+    """Skip reason when a legacy automation would violate canary ownership.
+
+    Returns None when the send may proceed. Platform-wide: uses the same
+    tenant/recipient allowlists as lifecycle dispatch. Does not hard-code
+    merchants.
+    """
+    if not commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id)):
+        return None
+    atype = str(automation_type or "").strip()
+    if atype in _LIFECYCLE_OWNED_AUTOMATION_TYPES:
+        return "lifecycle_dispatch_owns_event"
+    if not commerce_lifecycle_dispatch_recipient_permitted(phone):
+        return "recipient_not_allowlisted"
+    return None
+
+
+
 
 @dataclass(frozen=True)
 class LifecycleDispatchResult:
@@ -802,6 +827,7 @@ __all__ = [
     "commerce_lifecycle_dispatch_tenant_permitted",
     "commerce_lifecycle_dispatch_recipient_permitted",
     "commerce_lifecycle_send_audit_schema_ready",
+    "lifecycle_canary_legacy_send_block_reason",
     "dispatch_external_lifecycle_notification",
 ]
 

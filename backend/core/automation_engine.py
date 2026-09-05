@@ -1001,6 +1001,20 @@ async def _execute_action(
         }
     to_phone = normalized_phone
 
+    from core.commerce_lifecycle.dispatch import (  # noqa: PLC0415
+        lifecycle_canary_legacy_send_block_reason,
+    )
+    atype = str(getattr(automation, "automation_type", "") or "")
+    block_reason = lifecycle_canary_legacy_send_block_reason(
+        int(tenant_id), atype, to_phone
+    )
+    if block_reason:
+        return False, {
+            "skipped": True,
+            "skip_reason": block_reason,
+            "error_code": block_reason,
+        }
+
     # ── WhatsApp connection ───────────────────────────────────────────────────
     wa_conn: Optional[Any] = (
         db.query(WhatsAppConnection)
@@ -1133,12 +1147,24 @@ async def _execute_action(
          or config.get("ai_recovery_enabled"))
     )
 
-    # Cart recovery: always use template mode — no interactive/AI.
-    # Templates work regardless of service window state.
-    if is_cart_recovery:
+    _NOTIFICATION_TEMPLATE_ONLY_TYPES = frozenset({
+        "abandoned_cart",
+        "cod_confirmation",
+        "unpaid_order_reminder",
+        "order_notifications",
+    })
+    atype = str(getattr(automation, "automation_type", "") or "")
+
+    # Notification dispatch is template-only — never interactive/AI.
+    if is_cart_recovery or atype in _NOTIFICATION_TEMPLATE_ONLY_TYPES:
         from services.delivery_policy import DeliveryDecision  # noqa: PLC0415
         decision = DeliveryDecision(
-            mode="template", reason="cart_recovery_template_only",
+            mode="template",
+            reason=(
+                "cart_recovery_template_only"
+                if is_cart_recovery
+                else "notification_template_only"
+            ),
             primary="template", fallback="template",
             used_fallback=False, window_open=window_open,
             ai_eligible=False,
@@ -3129,6 +3155,16 @@ async def _execute_ai_recovery_step(
         tenant_id=tenant_id,
     )
     from core.wa_usage import has_open_service_window  # noqa: PLC0415
+    from core.commerce_lifecycle.dispatch import (  # noqa: PLC0415
+        commerce_lifecycle_dispatch_tenant_permitted,
+    )
+    if commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id)):
+        return False, {
+            "skipped": True,
+            "skip_reason": "lifecycle_canary_zero_ai",
+            "error_code": "lifecycle_canary_zero_ai",
+            "error": "lifecycle_canary_zero_ai",
+        }
 
     if not has_open_service_window(db, tenant_id, to_phone):
         return False, {
