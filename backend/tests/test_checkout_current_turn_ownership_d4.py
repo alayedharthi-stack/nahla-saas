@@ -180,6 +180,7 @@ def _snapshot(state: MerchantConversationState) -> dict[str, Any]:
         "payment_method": getattr(prep, "payment_method", None),
         "line_items": copy.deepcopy(items),
         "cart_items": copy.deepcopy(list(state.cart_items or [])),
+        "updated_at": getattr(state, "updated_at", None),
     }
 
 
@@ -230,7 +231,9 @@ class TestCDraftStateUnchanged:
         ctx = _ctx(GENERIC_URL, orderable=True)
         before = _snapshot(ctx.state)
         _decide(ctx)
-        assert _snapshot(ctx.state) == before
+        after = _snapshot(ctx.state)
+        assert after == before
+        assert after["updated_at"] == "2026-09-04T17:47:22+00:00"
 
 
 class TestDEllmReplyAndNoDraftInjection:
@@ -295,10 +298,48 @@ class TestGPendingSlotRepliesContinue:
         decision = _decide(ctx)
         assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
 
+    def test_written_address_reply_continues(self) -> None:
+        message = f"{GENERIC_CITY} حي النخيل شارع التحلية"
+        ctx = _ctx(
+            message,
+            slots={"city": GENERIC_CITY, "address": message},
+            orderable=True,
+        )
+        ctx.state.order_prep.missing_fields = ["city", "delivery_address"]
+        before = _snapshot(ctx.state)
+        decision = _decide(ctx)
+        assert decision.action in {ACTION_PROPOSE_DRAFT_ORDER, "order_context_update"}
+        assert _snapshot(ctx.state)["line_items"] == before["line_items"]
+
+    def test_maps_url_reply_continues(self) -> None:
+        maps = "https://maps.app.goo.gl/abc123"
+        ctx = _ctx(
+            maps,
+            slots={"google_maps_url": maps},
+            orderable=True,
+        )
+        ctx.state.order_prep.missing_fields = ["google_maps_url", "delivery_address"]
+        decision = _decide(ctx)
+        assert decision.action in {ACTION_PROPOSE_DRAFT_ORDER, "order_context_update"}
+        assert decision.action != ACTION_LLM_REPLY or "checkout" in (
+            decision.reason or ""
+        ).lower()
+
+    def test_bank_transfer_payment_answer_continues(self) -> None:
+        ctx = _ctx("تحويل", orderable=True)
+        ctx.state.order_prep.missing_fields = ["payment_method"]
+        decision = _decide(ctx)
+        assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+
 
 class TestHExplicitResumeAndConfirm:
     def test_existing_resume_phrase_continues(self) -> None:
         ctx = _ctx(RESUME_PHRASE, intent_name=INTENT_GENERAL, orderable=True)
+        decision = _decide(ctx)
+        assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
+
+    def test_existing_resume_helper_matches_nekamel_al_talab(self) -> None:
+        ctx = _ctx("نكمل الطلب", intent_name=INTENT_GENERAL, orderable=True)
         decision = _decide(ctx)
         assert decision.action == ACTION_PROPOSE_DRAFT_ORDER
 
