@@ -1,8 +1,8 @@
 """Ephemeral PostgreSQL rehearsal: integration path to 0101 without touching Production.
 
 Proves:
-- Repository heads stay {0092, 0104}; 0092 is not lost and is not selected.
-- 0102 remains a linear step under the application head 0104.
+- Repository heads stay {0092, 0105}; 0092 is not lost and is not selected.
+- 0102 remains a linear step under the application head 0105.
 - Fresh bootstrap 0093 then upgrade 0101 applies 0094..0101 and creates the index.
 - A production-like DB at 0100 then upgrade 0101 applies only 0101.
 - After 0101, upgrade 0092 can still attach as a second alembic_version row.
@@ -56,7 +56,7 @@ _PROD_CURRENT = "0099"
 _PROD_LIKE = "0100"
 _TARGET = "0101"
 _HEAD = "0102"
-_REPO_HEAD = "0104"
+_REPO_HEAD = "0105"
 _VALIDATE_HEAD = "0092"
 _EXPECTED_FROM_BOOTSTRAP = ("0094", "0095", "0096", "0097", "0098", "0099", "0100", "0101")
 _EXPECTED_FROM_PROD = ("0100", "0101")
@@ -411,6 +411,41 @@ def test_0104_unique_index_rejects_second_active_visible_null_step(
             engine, tenant_id=tenant_id, name="lifecycle_step", step_number=1
         )
         assert _whatsapp_template_count(engine) == 4
+    finally:
+        engine.dispose()
+        drop_ephemeral_database(admin_engine, db_name)
+
+
+def test_clean_upgrade_0104_to_0105(admin_engine: Engine) -> None:
+    source = (
+        _DATABASE / "migrations" / "versions" / "0105_last_customer_inbound_at.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision = "0105"' in source
+    assert 'down_revision = "0104"' in source
+    assert "last_customer_inbound_at" in source
+    upgrade_src = source.split("def upgrade", 1)[1]
+    assert "upgrade head" not in upgrade_src
+    assert "DELETE FROM" not in upgrade_src.upper().replace(" ", "")
+
+    db_name, engine = _ephemeral_engine(admin_engine)
+    try:
+        run_alembic(engine, "0104")
+        assert _current_revisions(engine) == {"0104"}
+        run_alembic(engine, "0105")
+        assert _current_revisions(engine) == {"0105"}
+        with engine.connect() as conn:
+            cols = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = 'wa_conversation_windows'
+                        """
+                    )
+                )
+            }
+        assert "last_customer_inbound_at" in cols
     finally:
         engine.dispose()
         drop_ephemeral_database(admin_engine, db_name)

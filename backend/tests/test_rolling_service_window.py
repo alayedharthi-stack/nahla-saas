@@ -26,6 +26,7 @@ from core.commerce_lifecycle.window import (  # noqa: E402
 from core.wa_usage import (  # noqa: E402
     _open_new_window,
     has_open_service_window,
+    record_customer_inbound_window,
 )
 from models import ConversationLog, WaConversationWindow  # noqa: E402
 
@@ -56,192 +57,173 @@ def _make_db():
     return Session()
 
 
-def _seed_service(db, *, tenant_id=TENANT_A, phone=PHONE_A, start=T0):
+def _seed_inbound(db, *, tenant_id=TENANT_A, phone=PHONE_A, inbound_at=T0, window_start=None):
     db.add(
         WaConversationWindow(
             tenant_id=tenant_id,
             customer_phone=phone,
-            window_start=start,
+            window_start=window_start if window_start is not None else inbound_at,
+            last_customer_inbound_at=inbound_at,
             category="service",
         )
     )
     db.commit()
 
 
-def _inbound(db, *, tenant_id=TENANT_A, phone=PHONE_A, inbound_at, now=None):
-    return _open_new_window(
+def _record(db, *, tenant_id=TENANT_A, phone=PHONE_A, inbound_at, now=None):
+    return record_customer_inbound_window(
         db,
         tenant_id,
         phone,
-        "service",
-        "inbound",
-        now or inbound_at,
-        inbound_at=inbound_at,
+        inbound_at,
+        now=now or inbound_at or T0,
+        commit=True,
     )
 
 
 class TestConservativeTwentyFourHourBound:
     def test_inbound_at_t0_is_open(self):
         db = _make_db()
-        _inbound(db, inbound_at=T0)
+        _record(db, inbound_at=T0, now=T0)
         assert has_open_service_window(db, TENANT_A, PHONE_A, now=T0) is True
 
-    def test_23_59_59_inside(self):
+    def test_less_than_24h_open(self):
         db = _make_db()
-        _seed_service(db, start=T0)
+        _seed_inbound(db, inbound_at=T0)
         now = T0 + timedelta(hours=23, minutes=59, seconds=59)
         assert has_open_service_window(db, TENANT_A, PHONE_A, now=now) is True
 
-    def test_exact_24_00_00_outside(self):
+    def test_exact_24h_closed(self):
         db = _make_db()
-        _seed_service(db, start=T0)
+        _seed_inbound(db, inbound_at=T0)
         assert has_open_service_window(
             db, TENANT_A, PHONE_A, now=T0 + timedelta(hours=24)
         ) is False
 
-    def test_greater_than_24h_outside(self):
+    def test_greater_than_24h_closed(self):
         db = _make_db()
-        _seed_service(db, start=T0)
+        _seed_inbound(db, inbound_at=T0)
         assert has_open_service_window(
             db, TENANT_A, PHONE_A, now=T0 + timedelta(hours=24, seconds=1)
         ) is False
 
 
-class TestInboundRefreshesRollingWindow:
-    def test_later_inbound_extends_window_without_new_billable(self):
+class TestOutboundNeverMutatesServiceTruth:
+    def test_no_prior_inbound_api_outbound_stays_closed(self):
         db = _make_db()
-        _seed_service(db, start=T0)
-        t_later = T0 + timedelta(hours=10)
-        billed = _inbound(db, inbound_at=t_later, now=t_later)
-        assert billed is False
+        _open_new_window(db, TENANT_A, PHONE_A, "service", "api", T0)
         row = db.query(WaConversationWindow).one()
-        assert row.window_start == t_later
-        still_open_at = t_later + timedelta(hours=23, minutes=59, seconds=59)
-        assert has_open_service_window(db, TENANT_A, PHONE_A, now=still_open_at) is True
-        closed_at = t_later + timedelta(hours=24)
-        assert has_open_service_window(db, TENANT_A, PHONE_A, now=closed_at) is False
-        assert db.query(ConversationLog).count() == 0
-
-    def test_inbound_after_expiry_opens_new_window(self):
-        db = _make_db()
-        _seed_service(db, start=T0)
-        t_new = T0 + timedelta(hours=25)
-        billed = _inbound(db, inbound_at=t_new, now=t_new)
-        assert billed is True
-        row = db.query(WaConversationWindow).one()
-        assert row.window_start == t_new
-        assert row.category == "service"
-        assert has_open_service_window(db, TENANT_A, PHONE_A, now=t_new) is True
-        assert db.query(ConversationLog).count() == 1
-
-
-class TestOutboundDoesNotRefresh:
-    def test_template_source_does_not_refresh_service_anchor(self):
-        db = _make_db()
-        _seed_service(db, start=T0)
-        billed = _open_new_window(
-            db, TENANT_A, PHONE_A, "marketing", "template", T0 + timedelta(hours=1)
-        )
-        assert billed is False
-        row = db.query(WaConversationWindow).one()
-        assert row.window_start == T0
-        assert row.category == "service"
-
-    def test_campaign_outbound_does_not_refresh(self):
-        db = _make_db()
-        _seed_service(db, start=T0)
-        _open_new_window(
-            db, TENANT_A, PHONE_A, "marketing", "campaign", T0 + timedelta(hours=2)
-        )
-        assert db.query(WaConversationWindow).one().window_start == T0
-
-    def test_api_ai_outbound_does_not_refresh(self):
-        db = _make_db()
-        _seed_service(db, start=T0)
-        _open_new_window(
-            db, TENANT_A, PHONE_A, "service", "api", T0 + timedelta(hours=3)
-        )
-        row = db.query(WaConversationWindow).one()
-        assert row.window_start == T0
-        assert row.category == "service"
-
-
-class TestConversationCreationDoesNotOpenWindow:
-    def test_missing_window_is_closed(self):
-        db = _make_db()
+        assert row.last_customer_inbound_at is None
         assert has_open_service_window(db, TENANT_A, PHONE_A, now=T0) is False
 
-    def test_runtime_window_row_only_written_from_wa_usage(self):
-        src = (BACKEND_DIR / "core" / "wa_usage.py").read_text(encoding="utf-8")
-        runtime_hits = []
-        for rel in (
-            "routers/conversations.py",
-            "core/automation_engine.py",
-            "modules/ai/brain/pipeline.py",
-        ):
-            text = (BACKEND_DIR / rel).read_text(encoding="utf-8")
-            assert "WaConversationWindow(" not in text
-            runtime_hits.append(rel)
-        assert "WaConversationWindow(" in src
-        assert runtime_hits
+    def test_expired_inbound_plus_api_outbound_stays_closed(self):
+        db = _make_db()
+        _seed_inbound(db, inbound_at=T0, window_start=T0)
+        later = T0 + timedelta(hours=25)
+        _open_new_window(db, TENANT_A, PHONE_A, "service", "api", later)
+        row = db.query(WaConversationWindow).one()
+        assert row.last_customer_inbound_at == T0
+        assert has_open_service_window(db, TENANT_A, PHONE_A, now=later) is False
+
+    def test_expired_inbound_plus_template_preserves_inbound_truth(self):
+        db = _make_db()
+        _seed_inbound(db, inbound_at=T0, window_start=T0)
+        later = T0 + timedelta(hours=25)
+        _open_new_window(db, TENANT_A, PHONE_A, "marketing", "template", later)
+        row = db.query(WaConversationWindow).one()
+        assert row.last_customer_inbound_at == T0
+        assert row.window_start == later
+        assert has_open_service_window(db, TENANT_A, PHONE_A, now=later) is False
+
+    def test_expired_inbound_plus_campaign_stays_closed(self):
+        db = _make_db()
+        _seed_inbound(db, inbound_at=T0, window_start=T0)
+        later = T0 + timedelta(hours=25)
+        _open_new_window(db, TENANT_A, PHONE_A, "marketing", "campaign", later)
+        row = db.query(WaConversationWindow).one()
+        assert row.last_customer_inbound_at == T0
+        assert has_open_service_window(db, TENANT_A, PHONE_A, now=later) is False
+
+    def test_active_inbound_plus_outbound_keeps_original_inbound(self):
+        db = _make_db()
+        _seed_inbound(db, inbound_at=T0, window_start=T0)
+        _open_new_window(
+            db, TENANT_A, PHONE_A, "service", "api", T0 + timedelta(hours=1)
+        )
+        row = db.query(WaConversationWindow).one()
+        assert row.last_customer_inbound_at == T0
+        assert has_open_service_window(
+            db, TENANT_A, PHONE_A, now=T0 + timedelta(hours=1)
+        ) is True
 
 
-class TestFailClosed:
-    def test_missing_state_closed(self):
+class TestProviderTimestampContract:
+    def test_valid_timestamp_monotonic_update(self):
+        db = _make_db()
+        assert _record(db, inbound_at=T0, now=T0) is True
+        newer = T0 + timedelta(hours=3)
+        assert _record(db, inbound_at=newer, now=newer) is True
+        assert db.query(WaConversationWindow).one().last_customer_inbound_at == newer
+
+    def test_missing_timestamp_does_not_open(self):
+        db = _make_db()
+        assert _record(db, inbound_at=None, now=T0) is False
+        assert db.query(WaConversationWindow).count() == 0
+        assert has_open_service_window(db, TENANT_A, PHONE_A, now=T0) is False
+
+    def test_malformed_timestamp_does_not_extend(self):
+        db = _make_db()
+        _seed_inbound(db, inbound_at=T0)
+        assert record_customer_inbound_window(
+            db, TENANT_A, PHONE_A, "not-a-timestamp", now=T0 + timedelta(hours=1), commit=True
+        ) is False
+        assert db.query(WaConversationWindow).one().last_customer_inbound_at == T0
+
+    def test_older_delayed_timestamp_does_not_regress(self):
+        db = _make_db()
+        _seed_inbound(db, inbound_at=T0)
+        older = T0 - timedelta(hours=2)
+        _record(db, inbound_at=older, now=T0 + timedelta(minutes=5))
+        assert db.query(WaConversationWindow).one().last_customer_inbound_at == T0
+
+    def test_future_timestamp_capped_at_receipt(self):
+        db = _make_db()
+        future = T0 + timedelta(hours=10)
+        _record(db, inbound_at=future, now=T0)
+        row = db.query(WaConversationWindow).one()
+        assert row.last_customer_inbound_at == T0
+        assert has_open_service_window(
+            db, TENANT_A, PHONE_A, now=T0 + timedelta(hours=23, minutes=59, seconds=59)
+        ) is True
+        assert has_open_service_window(
+            db, TENANT_A, PHONE_A, now=T0 + timedelta(hours=24)
+        ) is False
+
+
+class TestFailClosedProvenance:
+    def test_missing_state_is_normal_closed(self):
         db = _make_db()
         opened, source = lifecycle_service_window_is_open(db, TENANT_A, PHONE_A)
         assert opened is False
         assert source == WINDOW_SOURCE_WA_USAGE
 
-    def test_read_exception_closed(self):
+    def test_injected_db_failure_is_error_source(self):
         db = MagicMock()
         db.query.side_effect = RuntimeError("db down")
-        assert has_open_service_window(db, TENANT_A, PHONE_A, now=T0) is False
-
-    def test_empty_phone_closed(self):
-        db = _make_db()
-        _seed_service(db)
-        assert has_open_service_window(db, TENANT_A, "", now=T0) is False
-
-    def test_lifecycle_wrapper_error_source(self):
-        db = MagicMock()
-        db.query.side_effect = RuntimeError("db down")
-        with patch(
-            "core.wa_usage.has_open_service_window",
-            side_effect=RuntimeError("boom"),
-        ):
-            opened, source = lifecycle_service_window_is_open(db, TENANT_A, PHONE_A)
+        opened, source = lifecycle_service_window_is_open(db, TENANT_A, PHONE_A)
         assert opened is False
         assert source == WINDOW_SOURCE_ERROR_FAIL_CLOSED
 
-
-class TestMonotonicInbound:
-    def test_replay_does_not_regress_timestamp(self):
+    def test_empty_phone_closed(self):
         db = _make_db()
-        _inbound(db, inbound_at=T0, now=T0)
-        billed = _inbound(db, inbound_at=T0, now=T0 + timedelta(hours=2))
-        assert billed is False
-        assert db.query(WaConversationWindow).one().window_start == T0
-
-    def test_older_out_of_order_inbound_does_not_regress(self):
-        db = _make_db()
-        _seed_service(db, start=T0)
-        older = T0 - timedelta(hours=1)
-        _inbound(db, inbound_at=older, now=T0 + timedelta(minutes=5))
-        assert db.query(WaConversationWindow).one().window_start == T0
-
-    def test_newer_inbound_wins(self):
-        db = _make_db()
-        _seed_service(db, start=T0)
-        newer = T0 + timedelta(hours=4)
-        _inbound(db, inbound_at=newer, now=newer)
-        assert db.query(WaConversationWindow).one().window_start == newer
+        _seed_inbound(db)
+        assert has_open_service_window(db, TENANT_A, "", now=T0) is False
 
 
 class TestTenantIsolation:
     def test_tenant_a_inbound_does_not_open_tenant_b(self):
         db = _make_db()
-        _inbound(db, tenant_id=TENANT_A, phone=PHONE_A, inbound_at=T0, now=T0)
+        _record(db, tenant_id=TENANT_A, phone=PHONE_A, inbound_at=T0, now=T0)
         assert has_open_service_window(db, TENANT_A, PHONE_A, now=T0) is True
         assert has_open_service_window(db, TENANT_B, PHONE_A, now=T0) is False
         assert has_open_service_window(db, TENANT_A, PHONE_B, now=T0) is False
@@ -250,55 +232,68 @@ class TestTenantIsolation:
 class TestDualTransportSelection:
     def test_open_window_is_session_path(self):
         db = _make_db()
-        _seed_service(db, start=datetime.utcnow())
+        now = datetime.utcnow()
+        _seed_inbound(db, inbound_at=now, window_start=now)
         opened, source = lifecycle_service_window_is_open(db, TENANT_A, PHONE_A)
         assert opened is True
         assert source == WINDOW_SOURCE_WA_USAGE
-        send_method = "session_message" if opened else "approved_template"
-        assert send_method == "session_message"
+        assert ("session_message" if opened else "approved_template") == "session_message"
 
     def test_closed_window_is_template_path(self):
         db = _make_db()
-        _seed_service(db, start=datetime.utcnow() - timedelta(hours=25))
+        _seed_inbound(
+            db,
+            inbound_at=datetime.utcnow() - timedelta(hours=25),
+        )
         opened, source = lifecycle_service_window_is_open(db, TENANT_A, PHONE_A)
         assert opened is False
         assert source == WINDOW_SOURCE_WA_USAGE
-        send_method = "session_message" if opened else "approved_template"
-        assert send_method == "approved_template"
+        assert ("session_message" if opened else "approved_template") == "approved_template"
 
     def test_error_window_is_fail_closed_template_path(self):
-        with patch(
-            "core.wa_usage.has_open_service_window",
-            side_effect=RuntimeError("query failed"),
-        ):
-            opened, source = lifecycle_service_window_is_open(
-                MagicMock(), TENANT_A, PHONE_A
-            )
+        db = MagicMock()
+        db.query.side_effect = RuntimeError("query failed")
+        opened, source = lifecycle_service_window_is_open(db, TENANT_A, PHONE_A)
         assert opened is False
         assert source == WINDOW_SOURCE_ERROR_FAIL_CLOSED
-        send_method = "session_message" if opened else "approved_template"
-        assert send_method == "approved_template"
+        assert ("session_message" if opened else "approved_template") == "approved_template"
 
 
-class TestCodInboundAndBrainZero:
-    def test_webhook_records_inbound_before_cod_consume(self):
-        src = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(
-            encoding="utf-8"
-        )
-        track_at = src.index("track_conversation(")
-        assert "inbound_at=_wa_msg_ts" in src[track_at : track_at + 400]
-        interactive = src.index("normalized_type == \"interactive\"")
-        assert track_at < interactive
-        consume_at = src.index("consume_owned_cod_button_inbound")
-        assert track_at < consume_at
+class TestWebhookInboundBeforeShortCircuits:
+    def _webhook_src(self) -> str:
+        return (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(encoding="utf-8")
 
-    def test_recognized_cod_button_stays_brain_zero(self):
-        src = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(
-            encoding="utf-8"
-        )
+    def test_record_runs_after_dedup_before_unsubscribe_cod_normalizer_brain(self):
+        src = self._webhook_src()
+        record_at = src.index("record_customer_inbound_window(")
+        assert "inbound_at=_wa_msg_ts" in src[record_at : record_at + 500]
+        assert src.index("normalized_sender = normalize_phone") < record_at
+        assert src.index("IdempotencyGuard.is_duplicate") < record_at
+        assert record_at < src.index("is_unsubscribe_request(")
+        assert record_at < src.index("UNSUB_CONFIRM_BUTTON_ID")
+        assert record_at < src.index("UNSUB_CANCEL_BUTTON_ID")
+        assert record_at < src.index("consume_owned_cod_button_inbound")
+        assert record_at < src.index("normalize_whatsapp_inbound(")
+        assert record_at < src.index("button_reply (generic)")
+        assert record_at < src.index("_handle_merchant_message(")
+
+    def test_unsubscribe_keyword_and_buttons_are_after_record(self):
+        src = self._webhook_src()
+        record_at = src.index("record_customer_inbound_window(")
+        unsub_kw = src.index("is_unsubscribe_request(_inbound_text)")
+        unsub_confirm = src.index("_btn_id == UNSUB_CONFIRM_BUTTON_ID")
+        unsub_cancel = src.index("_btn_id == UNSUB_CANCEL_BUTTON_ID")
+        assert record_at < unsub_kw < src.index("EVENT_UNSUB_SHORT_CIRCUIT")
+        assert record_at < unsub_confirm
+        assert record_at < unsub_cancel
+
+    def test_cod_confirm_cancel_refresh_then_brain_zero(self):
+        src = self._webhook_src()
+        record_at = src.index("record_customer_inbound_window(")
         interactive = src.index("normalized_type == \"interactive\"")
         brain_generic = src.index("button_reply (generic)")
         block = src[interactive:brain_generic]
+        assert record_at < interactive
         assert "is_owned_cod_button_payload(btn_id)" in block
         assert "consume_owned_cod_button_inbound" in block
         owned_at = block.index("if is_owned_cod_button_payload(btn_id)")

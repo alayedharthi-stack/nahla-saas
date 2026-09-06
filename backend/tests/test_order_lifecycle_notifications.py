@@ -36,7 +36,6 @@ from core.commerce_lifecycle.order_updates import (  # noqa: E402
 )
 from core.commerce_lifecycle.window import (  # noqa: E402
     WINDOW_SOURCE_ERROR_FAIL_CLOSED,
-    WINDOW_SOURCE_WA_USAGE,
     lifecycle_service_window_is_open,
 )
 from models import TenantSettings, WhatsAppTemplate  # noqa: E402
@@ -254,10 +253,7 @@ class TestWindowFailClosed:
         db.query.side_effect = RuntimeError("db down")
         opened, source = lifecycle_service_window_is_open(db, 1, "+966500111222")
         assert opened is False
-        assert source in {
-            WINDOW_SOURCE_WA_USAGE,
-            WINDOW_SOURCE_ERROR_FAIL_CLOSED,
-        }
+        assert source == WINDOW_SOURCE_ERROR_FAIL_CLOSED
 
 
 class TestCodButtons:

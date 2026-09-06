@@ -150,9 +150,8 @@ def _pilot_env(monkeypatch):
 class TestHasOpenServiceWindowInboundOnly:
     def test_inbound_service_window_opens_and_outbound_marketing_does_not(self):
         """
-        has_open_service_window depends on WaConversationWindow.category==service
-        (opened by inbound customer messages via track_conversation), not on a
-        prior outbound/marketing window.
+        has_open_service_window depends on last_customer_inbound_at,
+        not on a prior outbound/marketing billing window.
         """
         db, _ = _make_db(WaConversationWindow)
         phone = "+966500111222"
@@ -173,12 +172,12 @@ class TestHasOpenServiceWindowInboundOnly:
         # Simulate inbound customer message opening a service window.
         row = db.query(WaConversationWindow).filter_by(tenant_id=20, customer_phone=phone).one()
         row.category = "service"
-        row.window_start = now
+        row.last_customer_inbound_at = now
         db.commit()
         assert has_open_service_window(db, 20, phone, now=now) is True
 
-        # Expired service window closes free-form path.
-        row.window_start = now - timedelta(hours=25)
+        # Expired last inbound closes free-form path.
+        row.last_customer_inbound_at = now - timedelta(hours=25)
         db.commit()
         assert has_open_service_window(db, 20, phone, now=now) is False
 
@@ -215,6 +214,7 @@ class TestOpenClosedWindowDispatch:
                 tenant_id=20,
                 customer_phone="+966500111222",
                 window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
                 category="service",
             )
         )
@@ -280,6 +280,7 @@ class TestOpenClosedWindowDispatch:
                 tenant_id=20,
                 customer_phone="+966500111222",
                 window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
                 category="service",
             )
         )
@@ -323,6 +324,7 @@ class TestOpenClosedWindowDispatch:
                 tenant_id=20,
                 customer_phone="+966500111222",
                 window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
                 category="service",
             )
         )
@@ -361,6 +363,7 @@ class TestOpenClosedWindowDispatch:
                 tenant_id=20,
                 customer_phone="+966500111222",
                 window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
                 category="service",
             )
         )

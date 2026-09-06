@@ -3,9 +3,11 @@ Lifecycle 24h service-window policy — one deterministic interface.
 
 OPEN iff last customer inbound is strictly less than 24 hours ago.
 Canonical read: ``wa_usage.has_open_service_window``
-(``WaConversationWindow.window_start`` for category=service).
+(``WaConversationWindow.last_customer_inbound_at``).
 
-Unknown / missing / error fails closed to the closed-window (template) path.
+Missing last-inbound is a normal CLOSED result
+(``WINDOW_SOURCE_WA_USAGE``). Query/read exceptions fail closed to the
+template path with ``WINDOW_SOURCE_ERROR_FAIL_CLOSED``.
 Do not add a second window implementation here.
 """
 from __future__ import annotations
