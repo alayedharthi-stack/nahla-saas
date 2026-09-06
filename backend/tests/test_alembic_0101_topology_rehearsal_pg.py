@@ -350,7 +350,9 @@ def test_clean_upgrade_0103_to_0104(admin_engine: Engine) -> None:
     assert 'down_revision = "0103"' in source
     assert "DELETE FROM" not in source.upper().replace(" ", "")
     assert "No rows were deleted" in source
-    assert "alembic upgrade head" not in source
+    upgrade_src = source.split("def upgrade", 1)[1]
+    assert "upgrade head" not in upgrade_src
+    assert "command.upgrade" not in upgrade_src
 
     db_name, engine = _ephemeral_engine(admin_engine)
     try:
