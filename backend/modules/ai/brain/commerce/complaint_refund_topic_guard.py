@@ -207,6 +207,7 @@ def should_block_order_draft_injection(
     decision: Any = None,
     history: Any = None,
     inbound_metadata: Any = None,
+    ctx: Any = None,
 ) -> bool:
     """True when WA draft/order-flow injection must not run."""
     try:
@@ -265,6 +266,27 @@ def should_block_order_draft_injection(
             return True
     except Exception:  # noqa: BLE001  # noqa: silent-ok — order-support draft block is best-effort
         pass
+    # Ownership is Decision/ctx-scoped. compose_wa_order_flow_reply's inner
+    # probe does not pass Decision; it keeps the complaint/post-purchase
+    # contract above so legitimate checkout templates stay available when
+    # an authorized caller invokes the composer.
+    if decision is None and ctx is None:
+        return False
+    try:
+        from modules.ai.brain.decision.checkout_continuation_evidence import (  # noqa: PLC0415
+            has_positive_checkout_ownership,
+        )
+
+        if not has_positive_checkout_ownership(
+            decision=decision,
+            ctx=ctx,
+            message=customer_message or "",
+            state=brain_state,
+            inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
+        ):
+            return True
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must fail closed for inject
+        return True
     return False
 
 

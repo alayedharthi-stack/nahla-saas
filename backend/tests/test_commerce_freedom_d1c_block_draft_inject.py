@@ -23,7 +23,10 @@ from core.wa_draft_confirmation import (  # noqa: E402
 from modules.ai.brain.commerce.complaint_refund_topic_guard import (  # noqa: E402
     should_block_order_draft_injection,
 )
-from modules.ai.brain.decision.actions import ACTION_LLM_REPLY  # noqa: E402
+from modules.ai.brain.decision.actions import (  # noqa: E402
+    ACTION_LLM_REPLY,
+    ACTION_PROPOSE_DRAFT_ORDER,
+)
 from modules.ai.brain.types import Decision  # noqa: E402
 
 # Fixture evidence only — live inbound from T33 conv 26 / message 58191.
@@ -151,7 +154,7 @@ class TestCGenuineUnblockedOrder:
             ],
             "cart_deltas": [{"op": "add"}],
         }
-        decision = Decision(action=ACTION_LLM_REPLY, args={}, reason="order_flow")
+        decision = Decision(action=ACTION_PROPOSE_DRAFT_ORDER, args={}, reason="order_flow")
         assert should_block_order_draft_injection(
             brain_state={"order_prep": prep},
             customer_message="أضف القميص",
@@ -186,7 +189,7 @@ class TestDExistingBlockOrderFlow:
 
 
 class TestEUnrelatedDecisions:
-    def test_unrelated_decision_without_block_signal_does_not_block(self) -> None:
+    def test_unrelated_decision_without_checkout_ownership_blocks(self) -> None:
         decision = Decision(
             action=ACTION_LLM_REPLY,
             args={"topic": "general"},
@@ -197,9 +200,9 @@ class TestEUnrelatedDecisions:
             customer_message="تمام",
             decision=decision,
             history=[],
-        ) is False
+        ) is True
 
-    def test_block_commerce_escalation_false_does_not_block(self) -> None:
+    def test_block_commerce_escalation_false_still_requires_checkout_ownership(self) -> None:
         decision = Decision(
             action=ACTION_LLM_REPLY,
             args={"block_commerce_escalation": False, "topic": "general"},
@@ -210,7 +213,7 @@ class TestEUnrelatedDecisions:
             customer_message="تمام",
             decision=decision,
             history=[],
-        ) is False
+        ) is True
 
 
 class TestFPipelinePreservation:

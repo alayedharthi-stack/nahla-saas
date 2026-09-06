@@ -204,3 +204,194 @@ def has_current_turn_checkout_continuation_evidence(
     if fresh_checkout_slots_from_current_inbound(message, slots):
         return True
     return False
+
+
+# Decision actions that explicitly own checkout continuation. Stale
+# ordering stage / product focus / order_prep are not in this set.
+CHECKOUT_OWNING_ACTIONS = frozenset(
+    {
+        "propose_draft_order",
+        "send_payment_link",
+        "payment_continuation_reply",
+    }
+)
+
+# Suggestion / pending_action values that count as checkout-progress stamps.
+CHECKOUT_PROGRESS_PENDING_ACTIONS = frozenset(
+    {
+        "collect_checkout_details",
+        "complete_checkout",
+        "complete_payment",
+        "confirm_order_details",
+        "collect_missing_detail",
+    }
+)
+
+
+def decision_owns_checkout_continuation(decision: Any = None, *, action: str = "") -> bool:
+    """True when Decision explicitly owns checkout continuation this turn."""
+    args = getattr(decision, "args", None) or {}
+    if args.get("block_order_flow") or args.get("suppress_checkout"):
+        return False
+    act = str(action or getattr(decision, "action", "") or "").strip()
+    return act in CHECKOUT_OWNING_ACTIONS
+
+
+def _ownership_ctx(
+    *,
+    ctx: Any = None,
+    message: str = "",
+    intent_name: str = "",
+    intent_slots: Optional[Mapping[str, Any]] = None,
+    state: Any = None,
+    order_prep: Any = None,
+    customer_phone: str = "",
+    inbound_metadata: Optional[Mapping[str, Any]] = None,
+) -> Any:
+    if ctx is not None and getattr(ctx, "message", None) is not None:
+        return ctx
+    meta = dict(inbound_metadata or {})
+    name = str(
+        intent_name
+        or meta.get("intent_name")
+        or meta.get("intent")
+        or ""
+    )
+    slots = dict(intent_slots or meta.get("intent_slots") or meta.get("slots") or {})
+    prep = order_prep
+    st = state
+    if st is None:
+        if isinstance(meta.get("brain_state"), dict):
+            st = meta.get("brain_state")
+        elif isinstance(state, dict):
+            st = state
+
+    class _Intent:
+        def __init__(self) -> None:
+            self.name = name
+            self.slots = slots
+
+    class _State:
+        def __init__(self) -> None:
+            self.order_prep = prep
+            if isinstance(st, dict):
+                self.order_prep = prep if prep is not None else st.get("order_prep")
+                self.stage = st.get("stage")
+                self.current_product_focus = st.get("current_product_focus")
+            elif st is not None:
+                self.order_prep = prep if prep is not None else getattr(st, "order_prep", None)
+                self.stage = getattr(st, "stage", None)
+                self.current_product_focus = getattr(st, "current_product_focus", None)
+
+    class _Ctx:
+        def __init__(self) -> None:
+            self.message = str(message or "")
+            self.intent = _Intent()
+            self.state = _State()
+            self.customer_phone = str(customer_phone or meta.get("customer_phone") or "")
+            self.history = []
+
+    return _Ctx()
+
+
+def has_positive_checkout_ownership(
+    *,
+    decision: Any = None,
+    decision_action: str = "",
+    decision_args: Optional[Mapping[str, Any]] = None,
+    ctx: Any = None,
+    message: str = "",
+    intent_name: str = "",
+    intent_slots: Optional[Mapping[str, Any]] = None,
+    state: Any = None,
+    order_prep: Any = None,
+    customer_phone: str = "",
+    inbound_metadata: Optional[Mapping[str, Any]] = None,
+    confirm_keyword_matched: bool = False,
+) -> bool:
+    """Authorize checkout customer-text / progress from this turn only.
+
+    A preserved draft, ordering stage, or product focus is not enough.
+    Either Decision owns checkout continuation, or the inbound carries
+    current-turn checkout evidence (resume, confirm, address/maps,
+    payment, quantity/variant, or another accepted slot).
+    """
+    wrapped = decision
+    if wrapped is None and (decision_action or decision_args):
+        class _Dec:
+            def __init__(self) -> None:
+                self.action = str(decision_action or "")
+                self.args = dict(decision_args or {})
+
+        wrapped = _Dec()
+    if decision_owns_checkout_continuation(wrapped, action=decision_action):
+        return True
+    built = _ownership_ctx(
+        ctx=ctx,
+        message=message or str(getattr(ctx, "message", "") or ""),
+        intent_name=intent_name,
+        intent_slots=intent_slots,
+        state=state,
+        order_prep=order_prep,
+        customer_phone=customer_phone,
+        inbound_metadata=inbound_metadata,
+    )
+    return has_current_turn_checkout_continuation_evidence(
+        built,
+        confirm_keyword_matched=confirm_keyword_matched,
+    )
+
+
+def should_stamp_checkout_progress(
+    *,
+    decision: Any = None,
+    ctx: Any = None,
+    **kwargs: Any,
+) -> bool:
+    """True when last_question_asked / checkout pending_action may update."""
+    return has_positive_checkout_ownership(decision=decision, ctx=ctx, **kwargs)
+
+
+def is_checkout_progress_pending_action(value: Any) -> bool:
+    return str(value or "").strip() in CHECKOUT_PROGRESS_PENDING_ACTIONS
+
+
+def select_pending_action(
+    *,
+    previous: str = "",
+    suggested: str = "",
+    decision: Any = None,
+    ctx: Any = None,
+    **kwargs: Any,
+) -> str:
+    """Keep checkout-progress pending_action unless this turn owns checkout."""
+    nxt = str(suggested or "").strip() or str(previous or "").strip()
+    if should_stamp_checkout_progress(decision=decision, ctx=ctx, **kwargs):
+        return nxt
+    if not is_checkout_progress_pending_action(nxt):
+        return nxt
+    return str(previous or "").strip()
+
+
+def select_last_question(
+    *,
+    previous_question: str = "",
+    previous_answered: bool = True,
+    asked_now: str = "",
+    suggested_next_step: str = "",
+    decision: Any = None,
+    ctx: Any = None,
+    **kwargs: Any,
+) -> tuple[str, bool]:
+    """Freeze checkout-progress questions unless this turn owns checkout."""
+    asked = str(asked_now or "").strip()
+    stamp = should_stamp_checkout_progress(decision=decision, ctx=ctx, **kwargs)
+    checkout_q = is_checkout_progress_pending_action(suggested_next_step)
+    if asked and (stamp or not checkout_q):
+        return asked, False
+    if asked:
+        return str(previous_question or ""), bool(previous_answered)
+    prev_q = str(previous_question or "")
+    if prev_q:
+        return prev_q, True
+    return prev_q, bool(previous_answered)
