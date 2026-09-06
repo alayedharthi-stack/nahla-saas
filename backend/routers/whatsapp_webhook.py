@@ -8198,103 +8198,22 @@ async def _handle_merchant_message(
                         logger.warning("[ORDER FLOW] lease reset failed: %s", _lease_exc)
                 # Fall through to Brain pipeline below — DO NOT return.
             else:
-                # Handoff notice cooldown — never re-send the same
-                # acknowledgement within HANDOFF_NOTICE_COOLDOWN_SEC even
-                # if the upstream pause flag was cleared by a different
-                # code path. This is belt-and-suspenders on top of the
-                # ai_pause_guard so a brief race can't replay the line.
-                _HANDOFF_COOLDOWN_SEC = 1800  # 30 min
-                _last_at = None
-                try:
-                    _meta = (convo.extra_metadata or {}) if convo is not None else {}
-                    _raw = _meta.get("last_handoff_notice_at") if isinstance(_meta, dict) else None
-                    if _raw:
-                        from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
-                        _dt_parsed = _dt.fromisoformat(str(_raw))
-                        if _dt_parsed.tzinfo is None:
-                            _dt_parsed = _dt_parsed.replace(tzinfo=_tz.utc)
-                        _last_at = _dt_parsed
-                except Exception:
-                    _last_at = None
-                from datetime import datetime as _dt2, timezone as _tz2  # noqa: PLC0415
-                _now_utc = _dt2.now(_tz2.utc)
-                _within_cooldown = (
-                    _last_at is not None
-                    and (_now_utc - _last_at).total_seconds() < _HANDOFF_COOLDOWN_SEC
-                )
-                if _within_cooldown:
-                    logger.info(
-                        "[HANDOFF_DEDUP] skip handoff notice — within cooldown | "
-                        "tenant=%s to=%s last_at=%s seconds_since=%d",
-                        tenant_id, to, _last_at,
-                        int((_now_utc - _last_at).total_seconds()),
-                    )
-                    # May 2026 #46 — no automatic pause_ai on
-                    # customer-side escalation. The cooldown stamp
-                    # already prevents the canonical handoff line
-                    # from being replayed within 30 minutes; the
-                    # mode resolver no longer routes back into this
-                    # branch on subsequent inbounds unless staff has
-                    # actively taken over (paused_by_human /
-                    # taken_over_at), so the brain handles natural
-                    # follow-up questions ("ايش طرق التوصيل؟")
-                    # without being silenced.
-                    logger.info(
-                        "[OUTBOUND] tenant=%s to=%s source=handoff_dedup trigger=inbound "
-                        "intent=human_handoff handoff_triggered=true dedup_blocked=true reply_len=0",
-                        tenant_id, to,
-                    )
-                    return
-
-                reply = (
-                    "وصلت رسالتك. تم تحويل المحادثة لفريق المتجر، "
-                    "وسيرد عليك أحد الموظفين في أقرب وقت."
-                )
-                _persona_ownership.mark_bypass(
-                    _POReason.WEBHOOK_ESCALATION,
-                    owner="support_escalation",
-                )
-                StateManager.save_message(
-                    db, to, reply, "outbound",
-                    conversation_id=convo.id, tenant_id=tenant_id,
-                    extra_metadata=_persona_ownership.to_metadata(),
-                )
-                _send_ok = await _send_whatsapp_message(
-                    phone_id=phone_id, to=to, text=reply,
-                    _tenant_id=tenant_id, _db=db,
-                )
-                if _send_ok:
-                    logger.info("[TRACE][5/6] HUMAN_HANDOFF_ACK_SENT | tenant=%s to=%s", tenant_id, to)
-                    # Stamp the cooldown marker so duplicate webhook
-                    # deliveries / racing turns don't replay the line.
-                    try:
-                        _new_meta = dict(convo.extra_metadata or {})
-                        _new_meta["last_handoff_notice_at"] = _now_utc.isoformat()
-                        convo.extra_metadata = _new_meta
-                        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-                        flag_modified(convo, "extra_metadata")
-                        db.add(convo)
-                        db.flush()
-                    except Exception as _stamp_exc:  # noqa: BLE001  # noqa: silent-ok — cooldown stamp is best-effort
-                        logger.debug("[handoff] cooldown stamp failed: %s", _stamp_exc)
-                else:
-                    logger.error("[TRACE][5/6] HUMAN_HANDOFF_ACK_SEND_FAILED | tenant=%s to=%s", tenant_id, to)
-                # May 2026 #46 — no automatic pause_ai on
-                # customer-side escalation. The cooldown stamp
-                # prevents replay; subsequent inbounds flow through
-                # the brain (mode resolver only pivots to support
-                # escalation when staff has actually taken over).
+                # MODE_SUPPORT_ESCALATION is current explicit human
+                # ownership only. A genuinely human-owned conversation
+                # must not receive a synthetic AI future-followup
+                # promise. Inbound is already persisted. Existing
+                # AI-disabled / takeover suppression owns silence.
                 logger.info(
-                    "[OUTBOUND] tenant=%s to=%s source=support_escalation trigger=inbound "
-                    "intent=human_handoff handoff_triggered=true dedup_blocked=false "
-                    "reply_len=%d",
-                    tenant_id, to, len(reply),
+                    "[HANDOFF] MODE_SUPPORT_ESCALATION current human ownership "
+                    "— suppress AI outbound | tenant=%s to=%s",
+                    tenant_id, to,
                 )
-                if _send_ok:
-                    _trace.mark_outbound_sent(
-                        source=_TS.SOURCE_SUPPORT_ESCALATION,
-                        length=len(reply or ""),
-                    )
+                logger.info(
+                    "[OUTBOUND] tenant=%s to=%s source=support_escalation "
+                    "trigger=inbound intent=human_handoff "
+                    "handoff_triggered=true ownership_suppress=true reply_len=0",
+                    tenant_id, to,
+                )
                 _sync_persona_observability()
                 return
 

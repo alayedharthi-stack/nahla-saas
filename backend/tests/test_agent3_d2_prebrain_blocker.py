@@ -180,6 +180,7 @@ def _merchant_handler_patch_ctx(
     whatsapp_send_mock=None,
     save_message_side_effect=None,
     mock_generic_vcard: bool = True,
+    use_real_mode: bool = False,
 ):
     state = SimpleNamespace(turn=0, stage="active", order_prep={})
     with ExitStack() as stack:
@@ -217,14 +218,15 @@ def _merchant_handler_patch_ctx(
             return_value=False,
         ))
         mock_brain = stack.enter_context(patch("modules.ai.brain.pipeline.get_brain"))
-        stack.enter_context(patch(
-            "modules.ai.routing.conversation_mode.resolve_conversation_mode",
-        ))
-        stack.enter_context(patch("modules.ai.routing.conversation_mode.save_lease"))
-        stack.enter_context(patch(
-            "core.ownership_state.resolve_ownership_state",
-            return_value=SimpleNamespace(state="ai_active", takeover_class=""),
-        ))
+        if not use_real_mode:
+            stack.enter_context(patch(
+                "modules.ai.routing.conversation_mode.resolve_conversation_mode",
+            ))
+            stack.enter_context(patch("modules.ai.routing.conversation_mode.save_lease"))
+            stack.enter_context(patch(
+                "core.ownership_state.resolve_ownership_state",
+                return_value=SimpleNamespace(state="ai_active", takeover_class=""),
+            ))
         stack.enter_context(patch(
             "core.ownership_state.attempt_implicit_takeover_recovery",
             return_value=SimpleNamespace(released=False, reason=""),
