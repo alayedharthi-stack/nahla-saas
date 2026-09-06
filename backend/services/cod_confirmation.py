@@ -124,6 +124,24 @@ async def send_cod_confirmation_template(
     from models import WhatsAppConnection, WhatsAppTemplate  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
     from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        MODE_LEGACY_LIFECYCLE,
+        evaluate_and_audit,
+    )
+
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=customer_phone,
+        sender_path="cod_confirmation",
+        mode=MODE_LEGACY_LIFECYCLE,
+        automation_type="cod_confirmation",
+    )
+    if not canary.allowed:
+        logger.info(
+            "[COD] tenant=%s order=%s: canary gate %s",
+            tenant_id, getattr(order, "id", None), canary.reason,
+        )
+        return {"sent": False, "error": canary.reason, "canary_blocked": True}
 
     template_name = "cod_order_confirmation_ar"
 
