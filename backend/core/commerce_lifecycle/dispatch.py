@@ -82,10 +82,19 @@ def commerce_lifecycle_send_audit_schema_ready(db: Session) -> bool:
     except Exception:
         return False
 
-# First production slice — confirmation + shipment only.
+# Merchant order-update intents with dedicated Meta/session templates.
 _DISPATCHABLE_INTENTS: frozenset[BusinessIntent] = frozenset({
     BusinessIntent.ORDER_CONFIRMED,
+    BusinessIntent.COD_CONFIRMATION,
+    BusinessIntent.PAYMENT_NEEDED,
+    BusinessIntent.PAYMENT_CONFIRMED,
+    BusinessIntent.ORDER_PREPARING,
+    BusinessIntent.ORDER_PACKED,
     BusinessIntent.SHIPMENT_AVAILABLE,
+    BusinessIntent.OUT_FOR_DELIVERY,
+    BusinessIntent.ORDER_DELIVERED,
+    BusinessIntent.ORDER_CANCELLED,
+    BusinessIntent.ORDER_REFUNDED,
 })
 
 
@@ -217,16 +226,18 @@ async def _execute_reserved_send(
             reason_code=block_code,
         )
 
-    from core.service_template_resolver import resolve_template_for_send  # noqa: PLC0415
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        is_order_update_enabled,
+        resolve_lifecycle_template_for_send,
+    )
 
-    template = resolve_template_for_send(
+    template = resolve_lifecycle_template_for_send(
         db,
         int(tenant_id),
         service_key,
-        step_number=None,
     )
-    # Slice A: approved active template is required even when the service
-    # window is open — session text must never come from a parallel source.
+    # Approved active revision is required even when the service window is
+    # open — session text must never come from a parallel source.
     if template is None:
         finalize_send_outcome(
             db,
@@ -245,7 +256,6 @@ async def _execute_reserved_send(
             reason_code="no_approved_template",
         )
 
-    from core.commerce_lifecycle.order_updates import is_order_update_enabled  # noqa: PLC0415
     if not is_order_update_enabled(db, int(tenant_id), service_key):
         finalize_send_outcome(
             db,
@@ -264,22 +274,15 @@ async def _execute_reserved_send(
             reason_code="order_update_disabled",
         )
 
-    from core.wa_usage import has_open_service_window  # noqa: PLC0415
+    from core.commerce_lifecycle.window import lifecycle_service_window_is_open  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
     from models import CommerceLifecycleNotificationLedger  # noqa: PLC0415
     from core.commerce_lifecycle.ledger import sanitize_dispatch_decision  # noqa: PLC0415
 
     window_phone = normalize_phone(to_phone) or to_phone
-    try:
-        window_open = has_open_service_window(db, int(tenant_id), window_phone)
-    except Exception as exc:  # noqa: BLE001 — fail closed to template path
-        logger.warning(
-            "[LifecycleDispatch] window_check_failed tenant=%s order=%s err=%s",
-            tenant_id,
-            order_id,
-            exc,
-        )
-        window_open = False
+    window_open, window_source = lifecycle_service_window_is_open(
+        db, int(tenant_id), window_phone
+    )
     send_method = "session_message" if window_open else "approved_template"
 
     # Persist path decision on the reserved ledger row before CAS→sending.
@@ -290,6 +293,7 @@ async def _execute_reserved_send(
     )
     decision = dict(row.dispatch_decision_json or {})
     decision["send_method"] = send_method
+    decision["window_source"] = window_source
     row.dispatch_decision_json = sanitize_dispatch_decision(decision)
     row.send_method = send_method
     db.flush()
@@ -478,15 +482,6 @@ async def dispatch_external_lifecycle_notification(
                 duplicate=False,
                 outcome="skipped",
                 reason_code="no_intent",
-            )
-
-        if intent == BusinessIntent.OUT_FOR_DELIVERY:
-            return LifecycleDispatchResult(
-                ledger_id=None,
-                dispatched=False,
-                duplicate=False,
-                outcome="skipped",
-                reason_code="intent_not_dispatchable",
             )
 
         external_order_id = str(

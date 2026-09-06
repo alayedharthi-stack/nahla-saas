@@ -195,7 +195,7 @@ class TestSendMethodNormalize:
 class TestOpenClosedWindowDispatch:
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_open_window_sends_session_body_only(
         self,
@@ -233,7 +233,7 @@ class TestOpenClosedWindowDispatch:
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_closed_window_sends_approved_template_only(
         self,
@@ -260,7 +260,7 @@ class TestOpenClosedWindowDispatch:
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_no_approved_template_blocks_even_when_window_open(
         self,
@@ -297,7 +297,7 @@ class TestOpenClosedWindowDispatch:
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_single_path_idempotency_blocks_second_send(
         self,

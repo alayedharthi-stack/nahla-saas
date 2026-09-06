@@ -22,14 +22,65 @@ _PAYMENT_PENDING_STATUSES = frozenset({
     "awaiting_payment",
     "pending_payment",
 })
+_PAYMENT_CONFIRMED_STATUSES = frozenset({
+    "paid",
+    "payment_completed",
+    "payment_confirmed",
+})
+# Acceptance / merchant confirmed — not preparing. ``processing`` is preparing.
 _CONFIRMATION_STATUSES = frozenset({
     "under_review",
     "pending",
     "in_review",
-    "processing",
     "confirmed",
     "new",
 })
+_PREPARING_STATUSES = frozenset({
+    "in_progress",
+    "processing",
+    "preparing",
+})
+_READY_STATUSES = frozenset({
+    "ready",
+    "ready_for_pickup",
+    "packed",
+})
+_COD_METHODS = frozenset({
+    "cod",
+    "cash_on_delivery",
+    "cod_payment",
+    "cash",
+})
+
+
+def _payment_method(normalized_order: Mapping[str, Any]) -> str:
+    raw = normalized_order.get("payment_method")
+    if isinstance(raw, dict):
+        raw = raw.get("slug") or raw.get("name") or raw.get("code") or ""
+    return str(raw or "").strip().lower()
+
+
+def _is_cod(normalized_order: Mapping[str, Any]) -> bool:
+    return _payment_method(normalized_order) in _COD_METHODS
+
+
+def _first_seen_acceptance_intent(
+    curr: str,
+    normalized_order: Mapping[str, Any],
+) -> Optional[BusinessIntent]:
+    if curr in _CONFIRMATION_STATUSES:
+        if _is_cod(normalized_order):
+            return BusinessIntent.COD_CONFIRMATION
+        return BusinessIntent.ORDER_CONFIRMED
+    if curr in _PAYMENT_PENDING_STATUSES:
+        if _is_cod(normalized_order):
+            return None
+        return BusinessIntent.PAYMENT_NEEDED
+    if curr in _PREPARING_STATUSES:
+        return BusinessIntent.ORDER_PREPARING
+    if curr in _READY_STATUSES:
+        return BusinessIntent.ORDER_PACKED
+    return None
 
 
 def normalize_salla_lifecycle_business_intent(
@@ -45,11 +96,7 @@ def normalize_salla_lifecycle_business_intent(
     has_prior = bool(prev) and prev != "unknown"
 
     if not has_prior:
-        if curr in _CONFIRMATION_STATUSES:
-            return BusinessIntent.ORDER_CONFIRMED
-        if curr in _PAYMENT_PENDING_STATUSES:
-            return BusinessIntent.PAYMENT_NEEDED
-        return None
+        return _first_seen_acceptance_intent(curr, normalized_order)
 
     if curr in _CANCELLED_STATUSES and prev not in _CANCELLED_STATUSES:
         return BusinessIntent.ORDER_CANCELLED
@@ -68,8 +115,35 @@ def normalize_salla_lifecycle_business_intent(
         and prev not in _DELIVERED_STATUSES
     ):
         return BusinessIntent.SHIPMENT_AVAILABLE
+    if curr in _READY_STATUSES and prev not in _READY_STATUSES:
+        return BusinessIntent.ORDER_PACKED
+    if (
+        curr in _PREPARING_STATUSES
+        and prev not in _PREPARING_STATUSES
+        and prev not in _READY_STATUSES
+        and prev not in _SHIPPED_STATUSES
+        and prev not in _OUT_FOR_DELIVERY_STATUSES
+        and prev not in _DELIVERED_STATUSES
+    ):
+        return BusinessIntent.ORDER_PREPARING
+    if (
+        curr in _PAYMENT_CONFIRMED_STATUSES
+        and prev in _PAYMENT_PENDING_STATUSES
+        and not _is_cod(normalized_order)
+    ):
+        return BusinessIntent.PAYMENT_CONFIRMED
     if curr in _PAYMENT_PENDING_STATUSES and prev not in _PAYMENT_PENDING_STATUSES:
+        if _is_cod(normalized_order):
+            return None
         return BusinessIntent.PAYMENT_NEEDED
+    if curr in _CONFIRMATION_STATUSES and prev not in _CONFIRMATION_STATUSES:
+        if prev in _PAYMENT_PENDING_STATUSES:
+            if _is_cod(normalized_order):
+                return BusinessIntent.COD_CONFIRMATION
+            return BusinessIntent.ORDER_CONFIRMED
+        if _is_cod(normalized_order) and prev not in _PREPARING_STATUSES:
+            return BusinessIntent.COD_CONFIRMATION
+        return None
 
     return None
 

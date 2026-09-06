@@ -93,6 +93,12 @@ class TestSallaNormalization:
         intent = normalize_salla_lifecycle_business_intent(
             None, "under_review", {"payment_method": "cod"}
         )
+        assert intent == BusinessIntent.COD_CONFIRMATION
+
+    def test_new_non_cod_confirmed_maps_order_confirmed(self):
+        intent = normalize_salla_lifecycle_business_intent(
+            None, "under_review", {"payment_method": "bank"}
+        )
         assert intent == BusinessIntent.ORDER_CONFIRMED
 
     def test_first_observation_shipped_returns_none(self):
@@ -187,7 +193,7 @@ class TestTransitionIdentity:
         )
         a = build_transition_identity(**kwargs, raw_payload={"updated_at": "2026-07-13T10:00:00Z"})
         b = build_transition_identity(**kwargs, raw_payload={"updated_at": "2026-07-13T11:00:00Z"})
-        assert a[1] != b[1]
+        assert a == b
 
     def test_precision_normalization_is_deterministic(self):
         raw = "2026-07-13T10:00:00.123456Z"
@@ -216,7 +222,7 @@ class TestTransitionIdentity:
         with_naive = build_transition_identity(
             **kwargs, raw_payload={"updated_at": "2026-07-13T10:00:00"}
         )
-        assert with_utc[1] != with_naive[1]
+        assert with_utc == with_naive
 
     def test_different_transition_different_identity(self):
         payload = {"event_id": "evt-1", "updated_at": "2026-07-13T10:00:00Z"}
@@ -255,6 +261,23 @@ class TestTransitionIdentity:
         )
         assert id_a != id_b
 
+    def test_webhook_and_poll_same_semantic_transition_same_identity(self):
+        kwargs = dict(
+            provider="salla",
+            external_order_id="ord-1",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+        )
+        webhook = build_transition_identity(
+            **kwargs,
+            raw_payload={"event_id": "evt-webhook-1", "updated_at": "2026-07-13T10:00:00Z"},
+        )
+        poll = build_transition_identity(
+            **kwargs,
+            raw_payload={"updated_at": "2026-07-13T11:00:00Z"},
+        )
+        assert webhook == poll
+
     def test_missing_provider_event_id_uses_deterministic_fallback(self):
         source_id, _version = build_transition_identity(
             provider="salla",
@@ -263,7 +286,7 @@ class TestTransitionIdentity:
             raw_current_status="shipped",
             raw_payload={"updated_at": "2026-07-13T11:00:00Z"},
         )
-        assert source_id.startswith("ext:")
+        assert source_id.startswith("sem:")
 
     def test_no_random_identity_for_same_factual_event(self):
         kwargs = dict(

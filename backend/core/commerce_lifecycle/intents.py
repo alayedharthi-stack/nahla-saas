@@ -11,6 +11,7 @@ class BusinessIntent(str, Enum):
 
     INCOMPLETE_ORDER = "incomplete_order"
     ORDER_CONFIRMED = "order_confirmed"
+    COD_CONFIRMATION = "cod_confirmation"
     PAYMENT_NEEDED = "payment_needed"
     PAYMENT_SUBMITTED = "payment_submitted"
     PAYMENT_CONFIRMED = "payment_confirmed"

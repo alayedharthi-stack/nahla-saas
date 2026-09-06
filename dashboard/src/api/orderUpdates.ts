@@ -2,11 +2,31 @@ import { apiCall } from './client'
 
 // ── Service keys (lifecycle slice A scope) ───────────────────────────────────
 
-export type OrderUpdateServiceKey = 'order_confirmation' | 'shipping_tracking'
+export type OrderUpdateServiceKey =
+  | 'order_confirmation'
+  | 'cod_confirmation'
+  | 'payment_pending'
+  | 'payment_confirmed'
+  | 'order_preparing'
+  | 'order_ready'
+  | 'shipping_tracking'
+  | 'out_for_delivery'
+  | 'order_delivered'
+  | 'order_cancelled'
+  | 'order_refunded'
 
 export const ORDER_UPDATE_SERVICE_KEYS: readonly OrderUpdateServiceKey[] = [
   'order_confirmation',
+  'cod_confirmation',
+  'payment_pending',
+  'payment_confirmed',
+  'order_preparing',
+  'order_ready',
   'shipping_tracking',
+  'out_for_delivery',
+  'order_delivered',
+  'order_cancelled',
+  'order_refunded',
 ] as const
 
 export function isOrderUpdateServiceKey(key: string): key is OrderUpdateServiceKey {
@@ -42,7 +62,9 @@ export interface OrderUpdateServiceToggle {
 }
 
 export interface OrderUpdatesSettings {
+  enabled?: boolean
   services?: Partial<Record<OrderUpdateServiceKey, OrderUpdateServiceToggle>>
+  flags?: Partial<Record<OrderUpdateServiceKey, boolean>>
   order_confirmation?: OrderUpdateServiceToggle
   shipping_tracking?: OrderUpdateServiceToggle
 }
@@ -110,6 +132,12 @@ export function approvedRevision(detail: OrderUpdateServiceDetail | null | undef
   )
 }
 
+export function isMasterEnabled(settings: OrderUpdatesSettings | null | undefined): boolean {
+  if (!settings) return true
+  if (typeof settings.enabled === 'boolean') return settings.enabled
+  return true
+}
+
 export function isServiceEnabled(
   settings: OrderUpdatesSettings | null | undefined,
   serviceKey: OrderUpdateServiceKey,
@@ -138,6 +166,12 @@ export const orderUpdatesApi = {
   putSettings: (payload: OrderUpdatesSettings) =>
     apiCall<OrderUpdatesSettings>('/order-updates/settings', {
       method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  patchSettings: (payload: OrderUpdatesSettings) =>
+    apiCall<OrderUpdatesSettings>('/order-updates/settings', {
+      method: 'PATCH',
       body: JSON.stringify(payload),
     }),
 

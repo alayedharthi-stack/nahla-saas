@@ -166,7 +166,11 @@ class BusinessIntentDefinition:
 
 
 def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
-    """Conservative PR 2A seed definitions — policy metadata only."""
+    """Canonical merchant order-update intents + retained non-dispatchable policies."""
+    name_number = {
+        "customer_name": "customer_name",
+        "order_number": "order_number",
+    }
     return (
         BusinessIntentDefinition(
             intent=BusinessIntent.ORDER_CONFIRMED,
@@ -175,19 +179,62 @@ def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
             open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
             closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
             service_key="order_confirmation",
-            template_variable_map={
-                "customer_name": "customer_name",
-                "order_number": "order_number",
-            },
+            template_variable_map=name_number,
+            retry_policy=RetryPolicy.ONCE,
+        ),
+        BusinessIntentDefinition(
+            intent=BusinessIntent.COD_CONFIRMATION,
+            required_evidence=("order_number",),
+            optional_evidence=("customer_name", "customer_phone", "payment_method"),
+            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="cod_confirmation",
+            template_variable_map=name_number,
             retry_policy=RetryPolicy.ONCE,
         ),
         BusinessIntentDefinition(
             intent=BusinessIntent.PAYMENT_NEEDED,
-            required_evidence=(),
-            optional_evidence=("payment_url", "payment_method"),
+            required_evidence=("order_number",),
+            optional_evidence=("payment_url", "payment_method", "customer_name"),
             open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
-            closed_window_strategy=ClosedWindowStrategy.BLOCKED,
-            retry_policy=RetryPolicy.NONE,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="payment_pending",
+            template_variable_map={
+                "customer_name": "customer_name",
+                "order_number": "order_number",
+                "payment_url": "payment_url",
+            },
+            retry_policy=RetryPolicy.ONCE,
+        ),
+        BusinessIntentDefinition(
+            intent=BusinessIntent.PAYMENT_CONFIRMED,
+            required_evidence=("order_number",),
+            optional_evidence=("customer_name", "payment_method"),
+            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="payment_confirmed",
+            template_variable_map=name_number,
+            retry_policy=RetryPolicy.ONCE,
+        ),
+        BusinessIntentDefinition(
+            intent=BusinessIntent.ORDER_PREPARING,
+            required_evidence=("order_number",),
+            optional_evidence=("customer_name",),
+            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="order_preparing",
+            template_variable_map=name_number,
+            retry_policy=RetryPolicy.ONCE,
+        ),
+        BusinessIntentDefinition(
+            intent=BusinessIntent.ORDER_PACKED,
+            required_evidence=("order_number",),
+            optional_evidence=("customer_name",),
+            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="order_ready",
+            template_variable_map=name_number,
+            retry_policy=RetryPolicy.ONCE,
         ),
         BusinessIntentDefinition(
             intent=BusinessIntent.SHIPMENT_AVAILABLE,
@@ -216,11 +263,47 @@ def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
             retry_policy=RetryPolicy.ONCE,
         ),
         BusinessIntentDefinition(
-            intent=BusinessIntent.ORDER_DELIVERED,
-            required_evidence=("delivered_at",),
-            optional_evidence=("order_number",),
+            intent=BusinessIntent.OUT_FOR_DELIVERY,
+            required_evidence=("order_number",),
+            optional_evidence=("customer_name", "carrier", "tracking_number", "tracking_url"),
             open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
-            closed_window_strategy=ClosedWindowStrategy.BLOCKED,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="out_for_delivery",
+            template_variable_map={
+                "customer_name": "customer_name",
+                "order_number": "order_number",
+                "carrier": "carrier",
+            },
+            retry_policy=RetryPolicy.ONCE,
+        ),
+        BusinessIntentDefinition(
+            intent=BusinessIntent.ORDER_DELIVERED,
+            required_evidence=("order_number",),
+            optional_evidence=("customer_name", "delivered_at"),
+            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="order_delivered",
+            template_variable_map=name_number,
+            retry_policy=RetryPolicy.ONCE,
+        ),
+        BusinessIntentDefinition(
+            intent=BusinessIntent.ORDER_CANCELLED,
+            required_evidence=("order_number",),
+            optional_evidence=("customer_name",),
+            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="order_cancelled",
+            template_variable_map=name_number,
+            retry_policy=RetryPolicy.ONCE,
+        ),
+        BusinessIntentDefinition(
+            intent=BusinessIntent.ORDER_REFUNDED,
+            required_evidence=("order_number",),
+            optional_evidence=("customer_name",),
+            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
+            service_key="order_refunded",
+            template_variable_map=name_number,
             retry_policy=RetryPolicy.ONCE,
         ),
         BusinessIntentDefinition(
@@ -238,10 +321,7 @@ def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
             open_window_strategy=OpenWindowStrategy.NO_MESSAGE,
             closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
             service_key="post_delivery",
-            template_variable_map={
-                "customer_name": "customer_name",
-                "order_number": "order_number",
-            },
+            template_variable_map=name_number,
             retry_policy=RetryPolicy.ONCE,
         ),
     )

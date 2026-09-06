@@ -47,6 +47,7 @@ _ALLOWED_DISPATCH_DECISION_KEYS: FrozenSet[str] = frozenset({
     "template_evidence_valid",
     "template_missing_evidence",
     "send_method",
+    "window_source",
 })
 
 _ALLOWED_SEND_METHODS: FrozenSet[str] = frozenset({

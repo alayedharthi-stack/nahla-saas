@@ -75,6 +75,8 @@ class TestOrderUpdateFlags:
         assert is_order_update_enabled(db, 1, "shipping_tracking") is True
         flags = get_order_update_flags(db, 1)
         assert flags["order_confirmation"] is False
+        assert flags["order_delivered"] is False
+        assert is_order_update_enabled(db, 1, "order_delivered") is False
 
 
 class TestRevisionChain:

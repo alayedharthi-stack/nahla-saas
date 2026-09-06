@@ -1,11 +1,11 @@
 """
 Order Updates (تحديثات الطلبات) — settings, revisions, Meta promotion.
 
-Platform-wide helpers for the two Slice-B service keys only:
-``order_confirmation`` and ``shipping_tracking``.
-
 Enable flags live in ``TenantSettings.extra_metadata["order_updates"]``.
 Revision chain uses ``WhatsAppTemplate.revision`` + ``supersedes_template_id``.
+
+One canonical active APPROVED revision per service_key is used for BOTH
+open-window session rendering and closed-window Meta template sends.
 """
 from __future__ import annotations
 
@@ -21,14 +21,71 @@ logger = logging.getLogger("nahla.commerce_lifecycle.order_updates")
 
 ORDER_UPDATE_SERVICE_KEYS: Tuple[str, ...] = (
     "order_confirmation",
+    "cod_confirmation",
+    "payment_pending",
+    "payment_confirmed",
+    "order_preparing",
+    "order_ready",
     "shipping_tracking",
+    "out_for_delivery",
+    "order_delivered",
+    "order_cancelled",
+    "order_refunded",
 )
+
+# Existing merchants already had these two ON. New types stay OFF until enabled.
+LEGACY_DEFAULT_ON_KEYS: frozenset[str] = frozenset({
+    "order_confirmation",
+    "shipping_tracking",
+})
+
+MASTER_ENABLED_KEY = "enabled"
+
+# Same customer event, historical library service_key. Never a different event.
+_SERVICE_KEY_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "payment_pending": ("payment_reminder",),
+}
+
+_DISPLAY_NAMES_AR: Dict[str, str] = {
+    "order_confirmation": "تأكيد الطلب",
+    "cod_confirmation": "تأكيد الدفع عند الاستلام",
+    "payment_pending": "بانتظار الدفع",
+    "payment_confirmed": "تم استلام الدفع",
+    "order_preparing": "جاري تجهيز الطلب",
+    "order_ready": "تم تجهيز الطلب",
+    "shipping_tracking": "تم شحن الطلب",
+    "out_for_delivery": "خرج الطلب للتوصيل",
+    "order_delivered": "تم تسليم الطلب",
+    "order_cancelled": "تم إلغاء الطلب",
+    "order_refunded": "تم استرجاع المبلغ",
+}
 
 _DEFAULT_BODIES: Dict[str, str] = {
     "order_confirmation": (
         "تم تأكيد طلبك ✅\n\n"
         "مرحباً {{1}}، تم استلام طلبك رقم #{{2}}.\n\n"
         "سنبدأ تجهيزه وسنرسل لك تحديثات الشحن عند توفرها."
+    ),
+    "cod_confirmation": (
+        "مرحباً {{1}} 👋\n\n"
+        "لديك طلب رقم #{{2}} بنظام الدفع عند الاستلام.\n\n"
+        "هل تريد تأكيد هذا الطلب؟"
+    ),
+    "payment_pending": (
+        "مرحباً {{1}} 💳\n\n"
+        "طلبك رقم #{{2}} لا يزال بانتظار إكمال الدفع."
+    ),
+    "payment_confirmed": (
+        "مرحباً {{1}}\n\n"
+        "تم استلام دفع طلبك رقم #{{2}}."
+    ),
+    "order_preparing": (
+        "مرحباً {{1}}\n\n"
+        "جاري تجهيز طلبك رقم #{{2}}."
+    ),
+    "order_ready": (
+        "مرحباً {{1}}\n\n"
+        "تم تجهيز طلبك رقم #{{2}}."
     ),
     "shipping_tracking": (
         "خبر سار يا {{1}} 🚚\n\n"
@@ -37,16 +94,49 @@ _DEFAULT_BODIES: Dict[str, str] = {
         "رابط التتبع: {{5}}\n\n"
         "يمكنك متابعة شحنتك من الرابط أعلاه."
     ),
+    "out_for_delivery": (
+        "مرحباً {{1}}\n\n"
+        "طلبك رقم #{{2}} خرج للتوصيل."
+    ),
+    "order_delivered": (
+        "مرحباً {{1}}\n\n"
+        "تم تسليم طلبك رقم #{{2}}."
+    ),
+    "order_cancelled": (
+        "مرحباً {{1}}\n\n"
+        "تم إلغاء طلبك رقم #{{2}}."
+    ),
+    "order_refunded": (
+        "مرحباً {{1}}\n\n"
+        "تم استرجاع مبلغ طلبك رقم #{{2}}."
+    ),
 }
 
 _DEFAULT_VARIABLES: Dict[str, List[str]] = {
     "order_confirmation": ["customer_name", "order_number"],
+    "cod_confirmation": ["customer_name", "order_number"],
+    "payment_pending": ["customer_name", "order_number", "payment_url"],
+    "payment_confirmed": ["customer_name", "order_number"],
+    "order_preparing": ["customer_name", "order_number"],
+    "order_ready": ["customer_name", "order_number"],
     "shipping_tracking": [
         "customer_name",
         "order_number",
         "carrier",
         "tracking_number",
         "tracking_url",
+    ],
+    "out_for_delivery": ["customer_name", "order_number", "carrier"],
+    "order_delivered": ["customer_name", "order_number"],
+    "order_cancelled": ["customer_name", "order_number"],
+    "order_refunded": ["customer_name", "order_number"],
+}
+
+_COD_DEFAULT_BUTTONS: Dict[str, Any] = {
+    "type": "BUTTONS",
+    "buttons": [
+        {"type": "QUICK_REPLY", "text": "تأكيد الطلب ✅"},
+        {"type": "QUICK_REPLY", "text": "إلغاء الطلب ❌"},
     ],
 }
 
@@ -55,8 +145,38 @@ def is_order_update_service_key(service_key: Optional[str]) -> bool:
     return str(service_key or "").strip() in ORDER_UPDATE_SERVICE_KEYS
 
 
+def _default_enabled_for(key: str) -> bool:
+    return key in LEGACY_DEFAULT_ON_KEYS
+
+
 def _empty_flags() -> Dict[str, bool]:
-    return {key: True for key in ORDER_UPDATE_SERVICE_KEYS}
+    return {key: _default_enabled_for(key) for key in ORDER_UPDATE_SERVICE_KEYS}
+
+
+def _read_master_enabled(stored: Dict[str, Any]) -> bool:
+    raw = stored.get(MASTER_ENABLED_KEY, True)
+    if isinstance(raw, dict):
+        return bool(raw.get("enabled", True))
+    return bool(raw)
+
+
+def get_order_updates_master_enabled(db: Session, tenant_id: int) -> bool:
+    from models import TenantSettings  # noqa: PLC0415
+
+    try:
+        settings = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.tenant_id == int(tenant_id))
+            .first()
+        )
+    except Exception:  # noqa: BLE001 — tests / partial schemas fail open
+        return True
+    if not settings or not settings.extra_metadata:
+        return True
+    stored = settings.extra_metadata.get("order_updates") or {}
+    if not isinstance(stored, dict):
+        return True
+    return _read_master_enabled(stored)
 
 
 def get_order_update_flags(db: Session, tenant_id: int) -> Dict[str, bool]:
@@ -69,7 +189,7 @@ def get_order_update_flags(db: Session, tenant_id: int) -> Dict[str, bool]:
             .filter(TenantSettings.tenant_id == int(tenant_id))
             .first()
         )
-    except Exception:  # noqa: BLE001 — tests / partial schemas fail open (enabled)
+    except Exception:  # noqa: BLE001 — tests / partial schemas fail open
         return flags
     if not settings or not settings.extra_metadata:
         return flags
@@ -78,7 +198,11 @@ def get_order_update_flags(db: Session, tenant_id: int) -> Dict[str, bool]:
         return flags
     for key in ORDER_UPDATE_SERVICE_KEYS:
         if key in stored:
-            flags[key] = bool(stored.get(key, {}).get("enabled", True))
+            entry = stored.get(key)
+            if isinstance(entry, dict):
+                flags[key] = bool(entry.get("enabled", _default_enabled_for(key)))
+            elif isinstance(entry, bool):
+                flags[key] = entry
     return flags
 
 
@@ -88,6 +212,7 @@ def set_order_update_flags(
     updates: Dict[str, bool],
     *,
     commit: bool = False,
+    master_enabled: Optional[bool] = None,
 ) -> Dict[str, bool]:
     from models import TenantSettings  # noqa: PLC0415
 
@@ -103,10 +228,12 @@ def set_order_update_flags(
 
     extra: Dict[str, Any] = dict(settings.extra_metadata or {})
     bucket: Dict[str, Any] = dict(extra.get("order_updates") or {})
+    if master_enabled is not None:
+        bucket[MASTER_ENABLED_KEY] = bool(master_enabled)
     for key, enabled in updates.items():
         if key not in ORDER_UPDATE_SERVICE_KEYS:
             continue
-        entry = dict(bucket.get(key) or {})
+        entry = dict(bucket.get(key) or {}) if isinstance(bucket.get(key), dict) else {}
         entry["enabled"] = bool(enabled)
         bucket[key] = entry
     extra["order_updates"] = bucket
@@ -121,15 +248,49 @@ def set_order_update_flags(
 def is_order_update_enabled(db: Session, tenant_id: int, service_key: str) -> bool:
     if not is_order_update_service_key(service_key):
         return True
-    return bool(get_order_update_flags(db, tenant_id).get(service_key, True))
+    if not get_order_updates_master_enabled(db, tenant_id):
+        return False
+    return bool(get_order_update_flags(db, tenant_id).get(service_key, _default_enabled_for(service_key)))
+
+
+def resolve_lifecycle_template_for_send(
+    db: Session,
+    tenant_id: int,
+    service_key: str,
+):
+    """
+    Strict same-slot resolver. Never substitutes a different lifecycle event.
+
+    ``payment_pending`` may resolve a historical ``payment_reminder`` binding
+    for the same unpaid-order event only.
+    """
+    from core.service_template_resolver import resolve_active_template  # noqa: PLC0415
+
+    keys = (str(service_key),) + _SERVICE_KEY_ALIASES.get(str(service_key), ())
+    for key in keys:
+        tpl = resolve_active_template(db, int(tenant_id), key, None)
+        if tpl is not None:
+            return tpl
+    return None
 
 
 def default_body_for(service_key: str) -> str:
     return _DEFAULT_BODIES.get(service_key, "")
 
 
+def default_components_for(service_key: str) -> List[Dict[str, Any]]:
+    body = {"type": "BODY", "text": default_body_for(service_key)}
+    if service_key == "cod_confirmation":
+        return [body, dict(_COD_DEFAULT_BUTTONS)]
+    return [body]
+
+
 def variables_for(service_key: str) -> List[str]:
     return list(_DEFAULT_VARIABLES.get(service_key, []))
+
+
+def display_name_ar_for(service_key: str) -> str:
+    return _DISPLAY_NAMES_AR.get(service_key, service_key)
 
 
 def _extract_body_text(components: Any) -> str:
@@ -163,10 +324,27 @@ def _replace_body_text(components: Any, body_text: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _header_contract(components: Any) -> Dict[str, Any]:
+    for comp in components or []:
+        if str((comp or {}).get("type", "")).upper() != "HEADER":
+            continue
+        fmt = str((comp or {}).get("format") or "TEXT").upper()
+        return {
+            "header_type": fmt.lower(),
+            "header_format": fmt,
+            "header_asset_id": (comp or {}).get("example", {}).get("header_handle")
+            if isinstance((comp or {}).get("example"), dict)
+            else None,
+        }
+    return {"header_type": "none", "header_format": None, "header_asset_id": None}
+
+
 def _tpl_public(tpl: Any) -> Optional[Dict[str, Any]]:
     if tpl is None:
         return None
-    body = _extract_body_text(getattr(tpl, "components", None))
+    components = getattr(tpl, "components", None)
+    body = _extract_body_text(components)
+    header = _header_contract(components)
     return {
         "id": int(tpl.id),
         "template_id": int(tpl.id),
@@ -184,6 +362,9 @@ def _tpl_public(tpl: Any) -> Optional[Dict[str, Any]]:
         "meta_template_name": tpl.name,
         "language": tpl.language or "ar",
         "category": tpl.category,
+        "header_type": header["header_type"],
+        "header_format": header["header_format"],
+        "header_asset_id": header["header_asset_id"],
     }
 
 
@@ -231,6 +412,8 @@ def resolve_active_and_pending(
         "approved_revision": active_pub,
         "last_approved_revision": active_pub,
         "pending_revision": pending_pub,
+        "header_type": (active_pub or pending_pub or {}).get("header_type") or "none",
+        "header_asset_id": (active_pub or {}).get("header_asset_id"),
     }
 
 
@@ -267,7 +450,7 @@ def create_revision_from_active(
         category = active.category or "UTILITY"
         source_key = active.nahla_source_key
     else:
-        base_components = [{"type": "BODY", "text": default_body_for(service_key)}]
+        base_components = default_components_for(service_key)
         # Prefer any existing pending draft as base for components.
         existing_pending = (
             db.query(WhatsAppTemplate)
@@ -312,8 +495,7 @@ def create_revision_from_active(
         category=category,
         status="DRAFT",
         components=_replace_body_text(base_components, text),
-        display_name_ar=display_name_ar
-        or ("تأكيد الطلب" if service_key == "order_confirmation" else "تحديث الشحن"),
+        display_name_ar=display_name_ar or display_name_ar_for(service_key),
         service_key=service_key,
         nahla_source_key=source_key or service_key,
         is_active=False,
@@ -378,14 +560,19 @@ def promote_approved_revision(
 
 
 __all__ = [
+    "LEGACY_DEFAULT_ON_KEYS",
+    "MASTER_ENABLED_KEY",
     "ORDER_UPDATE_SERVICE_KEYS",
     "create_revision_from_active",
     "default_body_for",
+    "display_name_ar_for",
     "get_order_update_flags",
+    "get_order_updates_master_enabled",
     "is_order_update_enabled",
     "is_order_update_service_key",
     "promote_approved_revision",
     "resolve_active_and_pending",
+    "resolve_lifecycle_template_for_send",
     "set_order_update_flags",
     "variables_for",
 ]

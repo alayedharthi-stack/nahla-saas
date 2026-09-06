@@ -3392,6 +3392,33 @@ def _lifecycle_body_placeholder_values(
     return body_text, [str(v) if str(v).strip() else " " for v in var_values]
 
 
+def _lifecycle_session_quick_replies(template: Any) -> List[str]:
+    titles: List[str] = []
+    for comp in getattr(template, "components", None) or []:
+        if str((comp or {}).get("type", "")).upper() != "BUTTONS":
+            continue
+        for btn in (comp or {}).get("buttons") or []:
+            if str((btn or {}).get("type", "")).upper() != "QUICK_REPLY":
+                continue
+            title = str((btn or {}).get("text") or "").strip()
+            if title:
+                titles.append(title)
+    return titles[:3]
+
+
+def _lifecycle_quick_reply_id(title: str, idx: int) -> str:
+    try:
+        from services.cod_confirmation import classify_cod_reply  # noqa: PLC0415
+        action = classify_cod_reply(title)
+    except Exception:
+        action = None
+    if action == "confirm":
+        return "nahla_cod_confirm"
+    if action == "cancel":
+        return "nahla_cod_cancel"
+    return f"nahla_lifecycle_qr_{idx}"
+
+
 def render_lifecycle_approved_body(
     db: Session,
     tenant_id: int,
@@ -3527,6 +3554,29 @@ async def send_lifecycle_whatsapp_session_body(
         "type": "text",
         "text": {"preview_url": False, "body": body_text},
     }
+    quick_replies = _lifecycle_session_quick_replies(template)
+    if quick_replies:
+        send_payload = {
+            "messaging_product": "whatsapp",
+            "to": normalized_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body_text},
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": _lifecycle_quick_reply_id(title, idx),
+                                "title": title[:20],
+                            },
+                        }
+                        for idx, title in enumerate(quick_replies[:3])
+                    ]
+                },
+            },
+        }
 
     try:
         from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415

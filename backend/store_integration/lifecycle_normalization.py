@@ -133,41 +133,6 @@ def normalize_external_lifecycle_intent(
     return intent, "adapter_mapped"
 
 
-def _extract_provider_updated_at(raw_payload: Optional[Mapping[str, Any]]) -> Optional[str]:
-    if not raw_payload:
-        return None
-    for key in ("updated_at", "updated_date", "modified_at"):
-        val = raw_payload.get(key)
-        if isinstance(val, dict):
-            val = val.get("date") or val.get("iso") or val.get("formatted")
-        canonical = canonicalize_provider_timestamp(val)
-        if canonical:
-            return canonical
-    return None
-
-
-def _extract_provider_event_id(raw_payload: Optional[Mapping[str, Any]]) -> Optional[str]:
-    if not raw_payload:
-        return None
-    for key in ("event_id", "webhook_event_id", "webhook_id"):
-        val = raw_payload.get(key)
-        text = str(val or "").strip()
-        if text:
-            return text
-    return None
-
-
-def _extract_external_update_version(raw_payload: Optional[Mapping[str, Any]]) -> Optional[str]:
-    if not raw_payload:
-        return None
-    for key in ("version", "update_id", "revision"):
-        val = raw_payload.get(key)
-        text = str(val or "").strip()
-        if text:
-            return text
-    return None
-
-
 def build_transition_identity(
     *,
     provider: str,
@@ -179,73 +144,36 @@ def build_transition_identity(
     """
     Build stable ``(source_event_id, transition_version)`` for ledger idempotency.
 
-    ``source_event_id`` priority:
-      1. provider webhook/event id
-      2. external order update id/version
-      3. deterministic digest from provider + order id + statuses + updated_at
+    Semantic identity (not webhook event-id) so StoreSync + webhook + retries
+    of the same prev→curr transition collapse to one ledger key.
 
-    ``transition_version`` hashes a canonical provider ``updated_at`` (when
-    parseable) plus status transition components; otherwise a deterministic
-    digest (never wall-clock alone).
+    ``source_event_id`` / ``transition_version`` both hash:
+      provider + external_order_id + previous_status + current_status
+
+    Provider ``updated_at`` and webhook ``event_id`` are audit-only — they must
+    not split the same customer-relevant transition into duplicate deliveries.
+    A genuinely new transition is a different prev→curr pair.
     """
     provider_key = str(provider or "").strip().lower()
     ext_id = str(external_order_id or "").strip()
     prev = normalize_status_slug(raw_previous_status) or None
     curr = normalize_status_slug(raw_current_status)
-    updated_at = _extract_provider_updated_at(raw_payload)
 
-    event_id = _extract_provider_event_id(raw_payload)
-    if event_id:
-        source_event_id = event_id
-    else:
-        update_version = _extract_external_update_version(raw_payload)
-        if update_version:
-            source_event_id = f"upd:{update_version}"
-        else:
-            fallback_payload = {
-                "provider": provider_key,
-                "external_order_id": ext_id,
-                "raw_previous_status": prev,
-                "raw_current_status": curr,
-                "provider_updated_at": updated_at,
-            }
-            canonical = json.dumps(
-                fallback_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-            )
-            source_event_id = f"ext:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
-
-    if updated_at:
-        version_payload = {
-            "provider_updated_at": updated_at,
-            "raw_previous_status": prev,
-            "raw_current_status": curr,
-        }
-        canonical = json.dumps(
-            version_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        transition_version = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    else:
-        version_payload = {
-            "provider": provider_key,
-            "external_order_id": ext_id,
-            "raw_previous_status": prev,
-            "raw_current_status": curr,
-            "source_event_id": source_event_id,
-        }
-        canonical = json.dumps(
-            version_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        transition_version = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
+    semantic_payload = {
+        "provider": provider_key,
+        "external_order_id": ext_id,
+        "raw_previous_status": prev,
+        "raw_current_status": curr,
+    }
+    canonical = json.dumps(
+        semantic_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    source_event_id = f"sem:{digest}"
+    transition_version = digest
     return source_event_id, transition_version
 
 

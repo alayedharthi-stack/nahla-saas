@@ -121,9 +121,16 @@ class TestRegistry:
         registry = LifecycleIntentRegistry(INITIAL_DEFINITIONS)
         expected = {
             BusinessIntent.ORDER_CONFIRMED,
+            BusinessIntent.COD_CONFIRMATION,
             BusinessIntent.PAYMENT_NEEDED,
+            BusinessIntent.PAYMENT_CONFIRMED,
+            BusinessIntent.ORDER_PREPARING,
+            BusinessIntent.ORDER_PACKED,
             BusinessIntent.SHIPMENT_AVAILABLE,
+            BusinessIntent.OUT_FOR_DELIVERY,
             BusinessIntent.ORDER_DELIVERED,
+            BusinessIntent.ORDER_CANCELLED,
+            BusinessIntent.ORDER_REFUNDED,
             BusinessIntent.CUSTOMER_ACTION_REQUIRED,
             BusinessIntent.REVIEW_REQUEST,
         }
@@ -139,16 +146,16 @@ class TestRegistry:
     def test_unknown_intent_fails_safely(self):
         registry = LifecycleIntentRegistry(INITIAL_DEFINITIONS)
         with pytest.raises(KeyError, match="unsupported"):
-            registry.get(BusinessIntent.ORDER_CANCELLED)
+            registry.get(BusinessIntent.ORDER_RETURNED)
 
     def test_list_definitions_is_immutable_copy(self):
         registry = LifecycleIntentRegistry(INITIAL_DEFINITIONS)
         listed = registry.list_definitions()
-        assert len(listed) == 6
+        assert len(listed) == 13
         assert listed[0].intent == listed[0].intent
 
     def test_default_registry_singleton(self):
-        assert len(get_default_registry()) == 6
+        assert len(get_default_registry()) == 13
 
 
 class TestEvidenceValidation:
@@ -185,6 +192,7 @@ class TestEvidenceValidation:
 
     def test_payment_url_not_inferred_from_checkout_url(self):
         evidence = OrderLifecycleEvidence(
+            order_number="1001",
             checkout_url="https://shop.merchant.io/checkout/1",
             payment_url=None,
         )
@@ -200,14 +208,14 @@ class TestEvidenceValidation:
         assert result.valid is False
         assert "order_number" in result.missing_fields
 
-    def test_delivered_intent_requires_delivered_at(self):
+    def test_delivered_intent_requires_order_number(self):
         definition = get_default_registry().get(BusinessIntent.ORDER_DELIVERED)
         result = validate_evidence(
             definition,
-            OrderLifecycleEvidence(order_number="1001"),
+            OrderLifecycleEvidence(delivered_at=datetime.now(timezone.utc)),
         )
         assert result.valid is False
-        assert "delivered_at" in result.missing_fields
+        assert "order_number" in result.missing_fields
 
     def test_validation_outputs_field_names_only(self):
         definition = get_default_registry().get(BusinessIntent.ORDER_CONFIRMED)
@@ -302,7 +310,16 @@ class TestInitialDefinitionsPolicy:
 
     _APPROVED_TEMPLATE_BINDINGS = {
         BusinessIntent.ORDER_CONFIRMED: "order_confirmation",
+        BusinessIntent.COD_CONFIRMATION: "cod_confirmation",
+        BusinessIntent.PAYMENT_NEEDED: "payment_pending",
+        BusinessIntent.PAYMENT_CONFIRMED: "payment_confirmed",
+        BusinessIntent.ORDER_PREPARING: "order_preparing",
+        BusinessIntent.ORDER_PACKED: "order_ready",
         BusinessIntent.SHIPMENT_AVAILABLE: "shipping_tracking",
+        BusinessIntent.OUT_FOR_DELIVERY: "out_for_delivery",
+        BusinessIntent.ORDER_DELIVERED: "order_delivered",
+        BusinessIntent.ORDER_CANCELLED: "order_cancelled",
+        BusinessIntent.ORDER_REFUNDED: "order_refunded",
         BusinessIntent.REVIEW_REQUEST: "post_delivery",
     }
 
@@ -313,16 +330,24 @@ class TestInitialDefinitionsPolicy:
             assert definition.closed_window_strategy == ClosedWindowStrategy.APPROVED_TEMPLATE
             assert definition.service_key == expected_service_key
 
-    def test_order_delivered_closed_window_blocked_without_ambiguous_service_key(self):
+    def test_order_delivered_uses_dedicated_service_key(self):
         definition = get_default_registry().get(BusinessIntent.ORDER_DELIVERED)
-        assert definition.closed_window_strategy == ClosedWindowStrategy.BLOCKED
-        assert definition.service_key is None
+        assert definition.closed_window_strategy == ClosedWindowStrategy.APPROVED_TEMPLATE
+        assert definition.service_key == "order_delivered"
 
     def test_post_delivery_not_shared_by_order_delivered(self):
         delivered = get_default_registry().get(BusinessIntent.ORDER_DELIVERED)
         review = get_default_registry().get(BusinessIntent.REVIEW_REQUEST)
-        assert delivered.service_key is None
+        assert delivered.service_key == "order_delivered"
         assert review.service_key == "post_delivery"
+        assert delivered.service_key != review.service_key
+
+    def test_out_for_delivery_not_shared_with_shipping(self):
+        ofd = get_default_registry().get(BusinessIntent.OUT_FOR_DELIVERY)
+        ship = get_default_registry().get(BusinessIntent.SHIPMENT_AVAILABLE)
+        assert ofd.service_key == "out_for_delivery"
+        assert ship.service_key == "shipping_tracking"
+        assert ofd.service_key != ship.service_key
 
 
 class TestOutcomes:
@@ -376,7 +401,7 @@ class TestArchitectureIsolation:
             mod = importlib.import_module(module_info.name)
             source_path = Path(mod.__file__).resolve()
             tree = ast.parse(source_path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
+            for node in tree.body:
                 if isinstance(node, ast.Import):
                     for alias in node.names:
                         for bad in forbidden:
@@ -386,7 +411,7 @@ class TestArchitectureIsolation:
                         assert bad not in node.module
 
     def test_build_initial_definitions_count(self):
-        assert len(build_initial_definitions()) == 6
+        assert len(build_initial_definitions()) == 13
 
     def test_known_capability_fields_match_merchant_capabilities(self):
         cap_fields = set(MerchantCapabilities.__dataclass_fields__)

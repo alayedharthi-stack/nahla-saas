@@ -5,6 +5,7 @@ import {
 import { useLanguage } from '../../i18n/context'
 import {
   approvedRevision,
+  isMasterEnabled,
   isNotFoundError,
   isServiceEnabled,
   orderUpdatesApi,
@@ -35,8 +36,69 @@ const SERVICE_META: Record<OrderUpdateServiceKey, ServiceMeta> = {
     key: 'order_confirmation',
     labelAr: 'تأكيد الطلب',
     labelEn: 'Order confirmation',
-    descAr: 'رسالة تُرسل للعميل عند استلام الطلب وتأكيده.',
-    descEn: 'Message sent when an order is received and confirmed.',
+    descAr: 'رسالة تُرسل للعميل عند قبول المتجر للطلب.',
+    descEn: 'Sent when the store accepts/confirms the order.',
+    icon: '📦',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+    ],
+  },
+  cod_confirmation: {
+    key: 'cod_confirmation',
+    labelAr: 'تأكيد الدفع عند الاستلام',
+    labelEn: 'Cash on delivery confirmation',
+    descAr: 'يطلب من العميل تأكيد أو إلغاء طلب الدفع عند الاستلام.',
+    descEn: 'Asks the customer to confirm or cancel a cash-on-delivery order.',
+    icon: '💵',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+    ],
+  },
+  payment_pending: {
+    key: 'payment_pending',
+    labelAr: 'بانتظار الدفع',
+    labelEn: 'Payment needed',
+    descAr: 'تُرسل فقط عندما يكون الدفع ما زال مطلوباً بثقة.',
+    descEn: 'Sent only when payment is still genuinely required.',
+    icon: '💳',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+      { key: 'payment_url', labelAr: 'رابط الدفع', labelEn: 'Payment URL', sample: 'https://pay.example/12345' },
+    ],
+  },
+  payment_confirmed: {
+    key: 'payment_confirmed',
+    labelAr: 'تم استلام الدفع',
+    labelEn: 'Payment received',
+    descAr: 'بعد ثبوت استلام الدفع من مصدر موثوق.',
+    descEn: 'After trusted payment confirmation.',
+    icon: '✅',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+    ],
+  },
+  order_preparing: {
+    key: 'order_preparing',
+    labelAr: 'جاري تجهيز الطلب',
+    labelEn: 'Order preparing',
+    descAr: 'عند بدء تجهيز الطلب.',
+    descEn: 'When the order starts being prepared.',
+    icon: '🛠️',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+    ],
+  },
+  order_ready: {
+    key: 'order_ready',
+    labelAr: 'تم تجهيز الطلب',
+    labelEn: 'Order ready',
+    descAr: 'عندما يصبح الطلب جاهزاً / معبّأ.',
+    descEn: 'When the order is packed or ready.',
     icon: '📦',
     defaultVariables: [
       { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
@@ -45,15 +107,66 @@ const SERVICE_META: Record<OrderUpdateServiceKey, ServiceMeta> = {
   },
   shipping_tracking: {
     key: 'shipping_tracking',
-    labelAr: 'تحديث الشحن والتتبع',
-    labelEn: 'Shipping & tracking',
-    descAr: 'رسالة تُرسل عند شحن الطلب مع رابط التتبع.',
-    descEn: 'Message sent when the order ships with a tracking link.',
+    labelAr: 'تم شحن الطلب',
+    labelEn: 'Order shipped',
+    descAr: 'عند توفر دليل شحن موثوق مع التتبع إن وُجد.',
+    descEn: 'When trusted shipment evidence is available.',
     icon: '🚚',
     defaultVariables: [
       { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
       { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+      { key: 'carrier', labelAr: 'الناقل', labelEn: 'Carrier', sample: 'سمسا' },
+      { key: 'tracking_number', labelAr: 'رقم التتبع', labelEn: 'Tracking number', sample: 'RRRD1234' },
       { key: 'tracking_url', labelAr: 'رابط التتبع', labelEn: 'Tracking URL', sample: 'https://track.example/12345' },
+    ],
+  },
+  out_for_delivery: {
+    key: 'out_for_delivery',
+    labelAr: 'خرج الطلب للتوصيل',
+    labelEn: 'Out for delivery',
+    descAr: 'عندما يخرج الطلب للتوصيل.',
+    descEn: 'When the order is out for delivery.',
+    icon: '🛵',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+      { key: 'carrier', labelAr: 'الناقل', labelEn: 'Carrier', sample: 'سمسا' },
+    ],
+  },
+  order_delivered: {
+    key: 'order_delivered',
+    labelAr: 'تم تسليم الطلب',
+    labelEn: 'Order delivered',
+    descAr: 'عند تسليم الطلب.',
+    descEn: 'When the order is delivered.',
+    icon: '🏡',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+    ],
+  },
+  order_cancelled: {
+    key: 'order_cancelled',
+    labelAr: 'تم إلغاء الطلب',
+    labelEn: 'Order cancelled',
+    descAr: 'عند إلغاء الطلب.',
+    descEn: 'When the order is cancelled.',
+    icon: '🚫',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+    ],
+  },
+  order_refunded: {
+    key: 'order_refunded',
+    labelAr: 'تم استرجاع المبلغ',
+    labelEn: 'Refund issued',
+    descAr: 'عند رد المبلغ.',
+    descEn: 'When a refund is issued.',
+    icon: '↩️',
+    defaultVariables: [
+      { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
+      { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
     ],
   },
 }
@@ -63,6 +176,9 @@ const PREVIEW_SAMPLES: Record<string, string> = {
   order_number: '12345',
   order_id: '12345',
   tracking_url: 'https://track.example/12345',
+  tracking_number: 'RRRD1234',
+  carrier: 'سمسا',
+  payment_url: 'https://pay.example/12345',
   store_name: 'متجر تجريبي عام',
   order_total: '350',
 }
@@ -424,6 +540,8 @@ export default function OrderUpdatesSettingsTab() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [apiMissing, setApiMissing] = useState(false)
 
+  const [masterSaving, setMasterSaving] = useState(false)
+
   const loadAll = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
@@ -435,10 +553,10 @@ export default function OrderUpdatesSettingsTab() {
       if (isNotFoundError(err)) {
         missing = true
         setSettings({
-          services: {
-            order_confirmation: { enabled: false },
-            shipping_tracking: { enabled: false },
-          },
+          enabled: false,
+          services: Object.fromEntries(
+            ORDER_UPDATE_SERVICE_KEYS.map(key => [key, { enabled: false }]),
+          ) as OrderUpdatesSettings['services'],
         })
       } else {
         setLoadError(err instanceof Error ? err.message : (isAr ? 'تعذّر التحميل' : 'Failed to load'))
@@ -473,6 +591,16 @@ export default function OrderUpdatesSettingsTab() {
   useEffect(() => {
     loadAll()
   }, [loadAll])
+
+  const handleMasterChange = async (enabled: boolean) => {
+    setMasterSaving(true)
+    try {
+      const saved = await orderUpdatesApi.patchSettings({ enabled })
+      setSettings(saved)
+    } finally {
+      setMasterSaving(false)
+    }
+  }
 
   const handleSettingsChange = async (serviceKey: OrderUpdateServiceKey, enabled: boolean) => {
     const next: OrderUpdatesSettings = {
@@ -516,14 +644,32 @@ export default function OrderUpdatesSettingsTab() {
         <div className="w-9 h-9 rounded-xl bg-brand-50 border border-brand-100 flex items-center justify-center shrink-0">
           <Package className="w-4 h-4 text-brand-600" />
         </div>
-        <div>
-          <h2 className="text-sm font-semibold text-slate-900">
-            {isAr ? 'تحديثات الطلبات' : 'Order updates'}
-          </h2>
-          <p className="text-xs text-slate-500 mt-0.5 leading-relaxed max-w-2xl">
-            {isAr
-              ? 'إدارة رسائل تأكيد الطلب وتحديث الشحن — نص موحّد واحد يُستخدم داخل نافذة المحادثة وخارجها عبر قوالب Meta المعتمدة.'
-              : 'Manage order confirmation and shipping update messages — one unified text for in-session and closed-window Meta templates.'}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">
+                {isAr ? 'تحديثات الطلبات' : 'Order updates'}
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5 leading-relaxed max-w-2xl">
+                {isAr
+                  ? 'قالب واحد لكل إشعار — نفس النص والأزرار داخل نافذة المحادثة وخارجها. التعطيل يوقف الإرسال فقط ولا يحذف القوالب.'
+                  : 'One template per notification — the same copy and buttons inside and outside the 24h window. Disabling stops delivery only; templates are kept.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => handleMasterChange(!isMasterEnabled(settings))}
+              disabled={masterSaving || apiMissing}
+              className="shrink-0 disabled:opacity-50"
+              aria-label={isAr ? 'تشغيل الكل' : 'Enable all'}
+            >
+              {isMasterEnabled(settings)
+                ? <ToggleRight className="w-7 h-7 text-brand-500" />
+                : <ToggleLeft className="w-7 h-7 text-slate-300" />}
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-1">
+            {isAr ? 'تشغيل الكل' : 'Master switch'}
           </p>
         </div>
       </div>
