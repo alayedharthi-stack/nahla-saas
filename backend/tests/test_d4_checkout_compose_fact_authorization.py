@@ -20,6 +20,7 @@ import copy
 import json
 import os
 import sys
+from contextlib import ExitStack
 from dataclasses import asdict
 from typing import Any, Optional
 from unittest.mock import patch
@@ -339,7 +340,12 @@ def _assert_no_checkout_execution_facts(reply_state: Any, prompt: str = "") -> N
     }
 
 
-def _run_full_path(message: str, *, state: Optional[MerchantConversationState] = None) -> dict[str, Any]:
+def _run_full_path(
+    message: str,
+    *,
+    state: Optional[MerchantConversationState] = None,
+    patch_phatic: bool = True,
+) -> dict[str, Any]:
     ctx = _ctx(message, state=state or _active_checkout_state())
     before = _snapshot(ctx.state)
     decision = DefaultDecisionEngine().decide(ctx)
@@ -370,16 +376,26 @@ def _run_full_path(message: str, *, state: Optional[MerchantConversationState] =
 
     async def _compose() -> str:
         result = ActionResult(success=True, data={})
-        with patch(
-            "modules.ai.orchestrator.adapter.generate_ai_reply",
-            side_effect=_fake_generate_ai_reply,
-        ), patch(
-            "modules.ai.brain.persona.integration.try_enforce_phatic_llm_persona_compose",
-            return_value=None,
-        ), patch(
-            "urllib.request.urlopen",
-            side_effect=AssertionError("external fetch must not run"),
-        ) as fetch:
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "modules.ai.orchestrator.adapter.generate_ai_reply",
+                    side_effect=_fake_generate_ai_reply,
+                )
+            )
+            if patch_phatic:
+                stack.enter_context(
+                    patch(
+                        "modules.ai.brain.persona.integration.try_enforce_phatic_llm_persona_compose",
+                        return_value=None,
+                    )
+                )
+            fetch = stack.enter_context(
+                patch(
+                    "urllib.request.urlopen",
+                    side_effect=AssertionError("external fetch must not run"),
+                )
+            )
             try:
                 text = await DefaultComposer().compose(decision, result, ctx)
             finally:
@@ -634,6 +650,26 @@ class TestJExplicitOrderSupport:
         assert SYNTH_ADDRESS not in blob
         assert SYNTH_PAYMENT not in blob
 
+    def test_status_query_quarantines_checkout_without_evidence_patch(self) -> None:
+        ctx = _ctx("وين طلبي")
+        decision = DefaultDecisionEngine().decide(ctx)
+        reply_state = _build_reply_state(
+            ctx=ctx,
+            previous_state=ctx.state,
+            current_state=ctx.state,
+            suggestion=SuggestionSnapshot(),
+            decision=decision,
+            db=None,
+        )
+        assert decision.action in {ACTION_TRACK_ORDER, ACTION_LLM_REPLY}
+        assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+        _assert_no_checkout_execution_facts(reply_state)
+        facts = dict(reply_state.known_facts or {})
+        blob = json.dumps(facts, ensure_ascii=False)
+        assert SYNTH_PHONE not in blob
+        assert SYNTH_ADDRESS not in blob
+        assert SYNTH_PAYMENT not in blob
+
 
 class TestKProductQuestionDuringDraft:
     def test_product_question_keeps_catalog_not_checkout_confirm(self) -> None:
@@ -726,6 +762,18 @@ class TestOComposeOnceAndNoFetch:
         assert not args.get("cta_url")
         assert args.get("cta_url") != GENERIC_URL
         assert GENERIC_URL not in (out["final"] or "")
+
+    def test_url_only_full_path_without_phatic_patch(self) -> None:
+        out = _run_full_path(GENERIC_URL, patch_phatic=False)
+        assert out["decision"].action == ACTION_LLM_REPLY
+        assert out["owned"] is False
+        assert out["compose_count"] == 1
+        assert out["final"] == MODEL_CANDIDATE
+        _assert_no_checkout_execution_facts(out["reply_state"], out["prompt"])
+        payload = json.dumps(out["brain_state"] or asdict(out["reply_state"]), ensure_ascii=False)
+        assert SYNTH_PHONE not in payload
+        assert SYNTH_ADDRESS not in payload
+        assert SYNTH_PAYMENT not in payload
 
 
 class TestPNonInterference:
