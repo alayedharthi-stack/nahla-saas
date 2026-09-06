@@ -219,6 +219,35 @@ class TestFailClosedProvenance:
         _seed_inbound(db)
         assert has_open_service_window(db, TENANT_A, "", now=T0) is False
 
+    def test_pre_0105_schema_is_normal_closed_not_error(self):
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "CREATE TABLE wa_conversation_windows ("
+                "id INTEGER PRIMARY KEY,"
+                "tenant_id INTEGER NOT NULL,"
+                "customer_phone VARCHAR NOT NULL,"
+                "window_start DATETIME NOT NULL,"
+                "category VARCHAR NOT NULL,"
+                "created_at DATETIME,"
+                "updated_at DATETIME"
+                ")"
+            )
+            conn.exec_driver_sql(
+                "INSERT INTO wa_conversation_windows "
+                "(tenant_id, customer_phone, window_start, category) "
+                "VALUES (20, '+966500111222', '2026-09-05 12:00:00', 'service')"
+            )
+        db = sessionmaker(bind=engine)()
+        opened, source = lifecycle_service_window_is_open(db, TENANT_A, PHONE_A)
+        assert opened is False
+        assert source == WINDOW_SOURCE_WA_USAGE
+        assert has_open_service_window(db, TENANT_A, PHONE_A, now=T0) is False
+
 
 class TestTenantIsolation:
     def test_tenant_a_inbound_does_not_open_tenant_b(self):

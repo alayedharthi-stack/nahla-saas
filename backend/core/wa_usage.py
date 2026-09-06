@@ -80,6 +80,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional, Tuple
 
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("nahla-backend")
@@ -912,6 +913,75 @@ def _open_new_window(
     return True
 
 
+def _is_missing_last_inbound_column(exc: BaseException) -> bool:
+    """True only for a missing last_customer_inbound_at column, not generic DB errors."""
+    blob = f"{exc} {getattr(exc, 'orig', '')}".lower()
+    if "last_customer_inbound_at" not in blob:
+        return False
+    return any(
+        marker in blob
+        for marker in (
+            "undefinedcolumn",
+            "does not exist",
+            "no such column",
+            "42703",
+        )
+    )
+
+
+def _read_last_customer_inbound_at(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+):
+    """Load last-inbound truth without poisoning the caller transaction.
+
+    Pre-0105 schemas have no dedicated column. That is missing service truth
+    (normal CLOSED), not a window_check_error. Real query failures still raise.
+    """
+    from models import WaConversationWindow  # noqa: PLC0415
+
+    nested = None
+    if isinstance(db, Session):
+        try:
+            nested = db.begin_nested()
+        except Exception as exc:
+            logger.warning("[WaUsage] last_inbound savepoint begin failed err=%s", exc)
+            nested = None
+    try:
+        inbound_at = (
+            db.query(WaConversationWindow.last_customer_inbound_at)
+            .filter(
+                WaConversationWindow.tenant_id == tenant_id,
+                WaConversationWindow.customer_phone == customer_phone,
+            )
+            .scalar()
+        )
+        if nested is not None:
+            nested.commit()
+        return inbound_at
+    except (ProgrammingError, OperationalError) as exc:
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception as rb_exc:
+                logger.warning(
+                    "[WaUsage] last_inbound savepoint rollback failed err=%s", rb_exc
+                )
+        if _is_missing_last_inbound_column(exc):
+            return None
+        raise
+    except Exception:
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception as rb_exc:
+                logger.warning(
+                    "[WaUsage] last_inbound savepoint rollback failed err=%s", rb_exc
+                )
+        raise
+
+
 def has_open_service_window(
     db: Session,
     tenant_id: int,
@@ -923,24 +993,15 @@ def has_open_service_window(
     Return True iff last *customer inbound* is strictly less than 24 hours ago.
 
     Source of truth: ``WaConversationWindow.last_customer_inbound_at``.
-    Missing inbound is a normal CLOSED (False). Query failures propagate so
-    ``lifecycle_service_window_is_open`` can stamp error provenance.
+    Missing inbound or a not-yet-migrated column is a normal CLOSED (False).
+    Other query failures propagate so ``lifecycle_service_window_is_open``
+    can stamp error provenance.
     """
     if not customer_phone:
         return False
 
-    from models import WaConversationWindow  # noqa: PLC0415
-
     now_naive = _naive(now or _utcnow())
-    window = (
-        db.query(WaConversationWindow)
-        .filter(
-            WaConversationWindow.tenant_id == tenant_id,
-            WaConversationWindow.customer_phone == customer_phone,
-        )
-        .first()
-    )
-    inbound_at = getattr(window, "last_customer_inbound_at", None) if window else None
+    inbound_at = _read_last_customer_inbound_at(db, tenant_id, customer_phone)
     if inbound_at is None:
         return False
     return _elapsed_within_conservative_window(inbound_at, now_naive)
