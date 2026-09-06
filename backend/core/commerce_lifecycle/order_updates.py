@@ -260,6 +260,22 @@ def get_order_update_flags(db: Session, tenant_id: int) -> Dict[str, bool]:
     return dict(load_order_update_settings_truth(db, tenant_id).flags)
 
 
+def evaluate_order_update_delivery_from_truth(
+    truth: OrderUpdateSettingsTruth,
+    service_key: str,
+) -> Tuple[bool, Optional[str]]:
+    """Evaluate delivery against an already-loaded settings snapshot. No DB read."""
+    if not is_order_update_service_key(service_key):
+        return True, None
+    if not truth.available:
+        return False, REASON_SETTINGS_UNAVAILABLE
+    if not truth.master_enabled:
+        return False, REASON_ORDER_UPDATE_DISABLED
+    if not bool(truth.flags.get(service_key, _default_enabled_for(service_key))):
+        return False, REASON_ORDER_UPDATE_DISABLED
+    return True, None
+
+
 def evaluate_order_update_delivery(
     db: Session,
     tenant_id: int,
@@ -269,13 +285,7 @@ def evaluate_order_update_delivery(
     if not is_order_update_service_key(service_key):
         return True, None
     truth = load_order_update_settings_truth(db, tenant_id)
-    if not truth.available:
-        return False, REASON_SETTINGS_UNAVAILABLE
-    if not truth.master_enabled:
-        return False, REASON_ORDER_UPDATE_DISABLED
-    if not bool(truth.flags.get(service_key, _default_enabled_for(service_key))):
-        return False, REASON_ORDER_UPDATE_DISABLED
-    return True, None
+    return evaluate_order_update_delivery_from_truth(truth, service_key)
 
 
 def set_order_update_flags(
@@ -637,6 +647,7 @@ __all__ = [
     "default_body_for",
     "display_name_ar_for",
     "evaluate_order_update_delivery",
+    "evaluate_order_update_delivery_from_truth",
     "get_order_update_flags",
     "get_order_updates_master_enabled",
     "is_order_update_enabled",

@@ -169,6 +169,48 @@ async def intercept_cod_button_inbound(
     return COD_INBOUND_CONSUMED, decision, order
 
 
+async def consume_owned_cod_button_inbound(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    text: str,
+    button_payload: Optional[str],
+    followup_send=None,
+) -> str:
+    """
+    Fail-closed owner for recognized COD button payloads.
+
+    Unrecognized payloads return passthrough and do not run the handler.
+    Recognized payloads always return consumed and never raise, including when
+    pending-order lookup, DB work, handle_cod_reply, or follow-up send fails.
+    """
+    if not is_owned_cod_button_payload(button_payload):
+        return COD_INBOUND_PASSTHROUGH
+    try:
+        _disposition, decision, order = await intercept_cod_button_inbound(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            text=text,
+            button_payload=button_payload,
+        )
+        if order is not None and followup_send is not None:
+            try:
+                await followup_send(decision, order)
+            except Exception:
+                logger.exception(
+                    "[COD] owned-button followup failed tenant=%s",
+                    tenant_id,
+                )
+    except Exception:
+        logger.exception(
+            "[COD] owned-button handler failed tenant=%s",
+            tenant_id,
+        )
+    return COD_INBOUND_CONSUMED
+
+
 class CodOrderingDisabled(Exception):
     """Merchant disabled COD as a payment method (not the notification)."""
 
@@ -191,10 +233,10 @@ class CodCheckoutPlan:
 
 
 def plan_cod_checkout(db, tenant_id: int) -> CodCheckoutPlan:
-    """Decide wait-for-button vs immediate store push. Never treats DB failure as disabled."""
+    """Decide wait-for-button vs immediate store push from one settings snapshot."""
     from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
         REASON_SETTINGS_UNAVAILABLE,
-        evaluate_order_update_delivery,
+        evaluate_order_update_delivery_from_truth,
         load_order_update_settings_truth,
     )
 
@@ -207,8 +249,8 @@ def plan_cod_checkout(db, tenant_id: int) -> CodCheckoutPlan:
             push_to_store_now=False,
             send_confirmation=False,
         )
-    allowed, reason = evaluate_order_update_delivery(
-        db, int(tenant_id), CANONICAL_SERVICE_KEY
+    allowed, reason = evaluate_order_update_delivery_from_truth(
+        truth, CANONICAL_SERVICE_KEY
     )
     if allowed:
         return CodCheckoutPlan(

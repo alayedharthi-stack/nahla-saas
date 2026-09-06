@@ -667,16 +667,18 @@ class TestCodBinding:
         )
         interactive = src.index("normalized_type == \"interactive\"")
         brain_generic = src.index("button_reply (generic)")
-        assert src.find("button_payload=btn_id", interactive, brain_generic) > 0
-        consumed_return = src.find("if disposition == COD_INBOUND_CONSUMED", interactive, brain_generic)
-        assert consumed_return > 0
-        assert src.find("return", consumed_return, brain_generic) > 0
-        assert "classify_cod_reply(btn_txt)" not in src[interactive:brain_generic]
+        block = src[interactive:brain_generic]
+        assert "is_owned_cod_button_payload(btn_id)" in block
+        assert "consume_owned_cod_button_inbound" in block
+        owned_at = block.index("if is_owned_cod_button_payload(btn_id)")
+        assert block.find("return", owned_at) > 0
+        assert "classify_cod_reply(btn_txt)" not in block
         button_rescue = src.index("msg_type == \"button\"")
         merchant_rescue = src.index("_handle_merchant_message", button_rescue)
-        assert src.find("intercept_cod_button_inbound", button_rescue, merchant_rescue) > 0
-        assert src.find("if disposition == COD_INBOUND_CONSUMED", button_rescue, merchant_rescue) > 0
-        assert "classify_cod_reply(_wa_text)" not in src[button_rescue:merchant_rescue]
+        rescue = src[button_rescue:merchant_rescue]
+        assert "is_owned_cod_button_payload(_btn_payload)" in rescue
+        assert "consume_owned_cod_button_inbound" in rescue
+        assert "classify_cod_reply(_wa_text)" not in rescue
 
 
 class TestMigration0104:

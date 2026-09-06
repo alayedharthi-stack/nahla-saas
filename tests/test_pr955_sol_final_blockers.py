@@ -24,6 +24,7 @@ for _p in (REPO_ROOT, BACKEND_DIR, REPO_ROOT / "database"):
 
 from core.commerce_lifecycle.order_updates import (  # noqa: E402
     LEGACY_DEFAULT_ON_KEYS,
+    REASON_ORDER_UPDATE_DISABLED,
     REASON_SETTINGS_UNAVAILABLE,
     set_order_update_flags,
 )
@@ -32,12 +33,12 @@ from services.cod_confirmation import (  # noqa: E402
     COD_CHECKOUT_PUSH_IMMEDIATE,
     COD_CHECKOUT_SETTINGS_UNAVAILABLE,
     COD_CHECKOUT_WAIT_FOR_CUSTOMER,
-    COD_INBOUND_CONSUMED,
     COD_INBOUND_PASSTHROUGH,
     STATUS_PENDING_CUSTOMER,
     STATUS_PENDING_MERCHANT,
     CodCheckoutSettingsUnavailable,
     CodOrderingDisabled,
+    consume_owned_cod_button_inbound,
     intercept_cod_button_inbound,
     is_owned_cod_button_payload,
     nahla_owns_cod_customer_confirmation,
@@ -115,19 +116,18 @@ async def _route_inbound(
     brain: AsyncMock,
     followup: AsyncMock,
 ) -> str:
-    disposition, decision, order = await intercept_cod_button_inbound(
+    if not is_owned_cod_button_payload(button_payload):
+        await brain()
+        return "brain"
+    await consume_owned_cod_button_inbound(
         db,
         tenant_id=9,
         customer_phone="+966500111222",
         text=text,
         button_payload=button_payload,
+        followup_send=followup,
     )
-    if disposition == COD_INBOUND_CONSUMED:
-        if order is not None:
-            await followup(decision, order)
-        return "cod"
-    await brain()
-    return "brain"
+    return "cod"
 
 
 class TestRecognizedCodButtonAlwaysConsumed:
@@ -304,6 +304,72 @@ class TestRecognizedCodButtonAlwaysConsumed:
         assert decision is None
         assert order is None
 
+    def test_interactive_handler_exception_brain_zero(self):
+        db = _pending_query([])
+        brain = AsyncMock()
+        followup = AsyncMock()
+        with patch(
+            "services.cod_confirmation.handle_cod_reply",
+            AsyncMock(side_effect=RuntimeError("pending lookup failed")),
+        ):
+            route = _run(
+                _route_inbound(
+                    db,
+                    text="تأكيد الطلب ✅",
+                    button_payload="nahla_cod_confirm:77",
+                    brain=brain,
+                    followup=followup,
+                )
+            )
+        assert route == "cod"
+        followup.assert_not_awaited()
+        brain.assert_not_awaited()
+
+    def test_template_button_handler_exception_brain_zero(self):
+        db = _pending_query([])
+        brain = AsyncMock()
+        followup = AsyncMock()
+        with patch(
+            "services.cod_confirmation.intercept_cod_button_inbound",
+            AsyncMock(side_effect=RuntimeError("db operation failed")),
+        ):
+            route = _run(
+                _route_inbound(
+                    db,
+                    text="تأكيد الطلب ✅",
+                    button_payload="nahla_cod_confirm",
+                    brain=brain,
+                    followup=followup,
+                )
+            )
+        assert route == "cod"
+        followup.assert_not_awaited()
+        brain.assert_not_awaited()
+
+    def test_valid_action_followup_exception_brain_zero(self):
+        order = _pending_order()
+        db = _pending_query([order])
+        brain = AsyncMock()
+        followup = AsyncMock(side_effect=RuntimeError("whatsapp followup failed"))
+        push = AsyncMock(return_value="salla-77")
+        with patch("services.cod_confirmation._push_cod_to_store", push), patch(
+            "observability.event_logger.log_event", lambda *a, **k: None
+        ), patch("services.cod_confirmation.flag_modified", lambda *a, **k: None):
+            route = _run(
+                _route_inbound(
+                    db,
+                    text="تأكيد الطلب ✅",
+                    button_payload="nahla_cod_confirm:77",
+                    brain=brain,
+                    followup=followup,
+                )
+            )
+        assert route == "cod"
+        assert order.status == "under_review"
+        push.assert_awaited_once()
+        followup.assert_awaited_once()
+        brain.assert_not_awaited()
+
     def test_webhook_returns_on_consumed_without_order(self):
         src = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text(
             encoding="utf-8"
@@ -311,17 +377,19 @@ class TestRecognizedCodButtonAlwaysConsumed:
         interactive = src.index('normalized_type == "interactive"')
         generic = src.index("button_reply (generic)")
         block = src[interactive:generic]
-        assert "intercept_cod_button_inbound" in block
-        assert "if disposition == COD_INBOUND_CONSUMED" in block
-        consumed_at = block.index("if disposition == COD_INBOUND_CONSUMED")
-        return_at = block.index("return", consumed_at)
-        order_guard = block.find("if order is not None", consumed_at, return_at)
-        assert order_guard > 0
+        assert "is_owned_cod_button_payload(btn_id)" in block
+        assert "consume_owned_cod_button_inbound" in block
+        owned_at = block.index("if is_owned_cod_button_payload(btn_id)")
+        return_at = block.index("return", owned_at)
+        assert "except" in block[owned_at:return_at]
         assert block[return_at:return_at + 6] == "return"
         rescue = src.index('msg_type == "button"')
         merchant = src.index("_handle_merchant_message", rescue)
         rescue_block = src[rescue:merchant]
-        assert "if disposition == COD_INBOUND_CONSUMED" in rescue_block
+        assert "is_owned_cod_button_payload(_btn_payload)" in rescue_block
+        assert "consume_owned_cod_button_inbound" in rescue_block
+        owned_tpl = rescue_block.index("if is_owned_cod_button_payload(_btn_payload)")
+        assert rescue_block.find("return", owned_tpl) > 0
         assert "classify_cod_reply(_wa_text)" not in rescue_block
 
 
@@ -363,6 +431,49 @@ class TestCodDisabledDoesNotStrand:
         assert plan.local_status is None
         with pytest.raises(CodCheckoutSettingsUnavailable):
             require_cod_checkout_plan(db, 9, ordering_allowed=True)
+
+    def test_single_settings_truth_snapshot_no_second_read(self):
+        db, _ = _make_db(TenantSettings)
+        set_order_update_flags(db, 9, {"cod_confirmation": True}, commit=True)
+        src = inspect.getsource(plan_cod_checkout)
+        assert src.count("load_order_update_settings_truth(") == 1
+        assert "evaluate_order_update_delivery_from_truth" in src
+        assert "evaluate_order_update_delivery(" not in src.replace(
+            "evaluate_order_update_delivery_from_truth", "SNAPSHOT"
+        )
+        loads = []
+        from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+            load_order_update_settings_truth as _real_load,
+        )
+
+        def _count_load(db_arg, tenant_id):
+            loads.append(tenant_id)
+            return _real_load(db_arg, tenant_id)
+
+        with patch(
+            "core.commerce_lifecycle.order_updates.load_order_update_settings_truth",
+            _count_load,
+        ), patch(
+            "core.commerce_lifecycle.order_updates.evaluate_order_update_delivery",
+            side_effect=AssertionError("second settings read is forbidden"),
+        ):
+            plan = plan_cod_checkout(db, 9)
+        assert loads == [9]
+        assert plan.policy == COD_CHECKOUT_WAIT_FOR_CUSTOMER
+        assert plan.send_confirmation is True
+        assert plan.push_to_store_now is False
+
+    def test_master_off_pushes_immediately(self):
+        db, _ = _make_db(TenantSettings)
+        set_order_update_flags(
+            db, 9, {"cod_confirmation": True}, master_enabled=False, commit=True
+        )
+        plan = plan_cod_checkout(db, 9)
+        assert plan.policy == COD_CHECKOUT_PUSH_IMMEDIATE
+        assert plan.reason == REASON_ORDER_UPDATE_DISABLED
+        assert plan.push_to_store_now is True
+        assert plan.send_confirmation is False
+        assert plan.local_status == STATUS_PENDING_MERCHANT
 
     def test_merchant_cod_ordering_disabled_still_rejects(self):
         db, _ = _make_db(TenantSettings)

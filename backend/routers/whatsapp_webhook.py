@@ -4000,26 +4000,31 @@ async def _dispatch_message(
                 # a "تأكيد الطلب" tap on a merchant tenant.
                 try:
                     from services.cod_confirmation import (  # noqa: PLC0415
-                        COD_INBOUND_CONSUMED,
-                        intercept_cod_button_inbound,
+                        consume_owned_cod_button_inbound,
+                        is_owned_cod_button_payload,
                     )
-                    disposition, decision, order = await intercept_cod_button_inbound(
-                        db,
-                        tenant_id=resolved_tenant_id,
-                        customer_phone=sender,
-                        text=btn_txt,
-                        button_payload=btn_id,
-                    )
-                    if disposition == COD_INBOUND_CONSUMED:
-                        if order is not None:
+                except Exception as exc:
+                    logger.error("[Webhook] COD button import failed: %s", exc)
+                else:
+                    if is_owned_cod_button_payload(btn_id):
+                        async def _cod_followup(decision, order):
                             await _send_cod_followup_message(
                                 phone_id=used_pid, to=sender,
                                 decision=decision, order=order,
                                 _tenant_id=resolved_tenant_id, _db=db,
                             )
+                        try:
+                            await consume_owned_cod_button_inbound(
+                                db,
+                                tenant_id=resolved_tenant_id,
+                                customer_phone=sender,
+                                text=btn_txt,
+                                button_payload=btn_id,
+                                followup_send=_cod_followup,
+                            )
+                        except Exception as exc:
+                            logger.error("[Webhook] COD button handler failed: %s", exc)
                         return
-                except Exception as exc:
-                    logger.error("[Webhook] COD button handler failed: %s", exc)
 
                 # Product-pick buttons from merchant brain — route to merchant AI
                 if btn_id.startswith("pick_") and not _is_platform_tenant(db, resolved_tenant_id):
@@ -4285,26 +4290,31 @@ async def _dispatch_message(
                 _btn_payload = str((msg.get("button") or {}).get("payload") or "")
                 try:
                     from services.cod_confirmation import (  # noqa: PLC0415
-                        COD_INBOUND_CONSUMED,
-                        intercept_cod_button_inbound,
+                        consume_owned_cod_button_inbound,
+                        is_owned_cod_button_payload,
                     )
-                    disposition, decision, order = await intercept_cod_button_inbound(
-                        db,
-                        tenant_id=resolved_tenant_id,
-                        customer_phone=sender,
-                        text=_wa_text,
-                        button_payload=_btn_payload,
-                    )
-                    if disposition == COD_INBOUND_CONSUMED:
-                        if order is not None:
+                except Exception as exc:
+                    logger.error("[Webhook] COD template-button import failed: %s", exc)
+                else:
+                    if is_owned_cod_button_payload(_btn_payload):
+                        async def _cod_tpl_followup(decision, order):
                             await _send_cod_followup_message(
                                 phone_id=used_pid, to=sender,
                                 decision=decision, order=order,
                                 _tenant_id=resolved_tenant_id, _db=db,
                             )
+                        try:
+                            await consume_owned_cod_button_inbound(
+                                db,
+                                tenant_id=resolved_tenant_id,
+                                customer_phone=sender,
+                                text=_wa_text,
+                                button_payload=_btn_payload,
+                                followup_send=_cod_tpl_followup,
+                            )
+                        except Exception as exc:
+                            logger.error("[Webhook] COD template-button handler failed: %s", exc)
                         return
-                except Exception as exc:
-                    logger.error("[Webhook] COD template-button handler failed: %s", exc)
                 logger.info(
                     "[WA PARSER] button tap rescued | tenant=%s text=%r source=%s",
                     resolved_tenant_id, _wa_text, _wa_source,
