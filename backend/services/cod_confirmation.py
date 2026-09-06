@@ -9,11 +9,17 @@ WhatsApp webhook:
 
   Step 1 — send_cod_confirmation_template(db, tenant_id, order)
     Triggered by POST /api/v1/ai-sales/create-order when the customer
-    chose `cash_on_delivery`. Sends the APPROVED Meta template
-    `cod_order_confirmation_ar` (named slots: customer_name, product_name,
-    order_amount) with QUICK_REPLY buttons "تأكيد الطلب ✅" / "إلغاء
-    الطلب ❌". The local order is stored in status `pending_confirmation`
+    chose `cash_on_delivery`. The order is stored as `pending_confirmation`
     and is NOT yet pushed to the merchant store.
+
+    Customer-facing send is owned exclusively here. It uses the canonical
+    order-updates `service_key=cod_confirmation` active APPROVED revision:
+      OPEN 24h  → same revision as interactive/session buttons
+      CLOSED 24h → same revision as Meta template
+    Buttons stay deterministic: "تأكيد الطلب ✅" / "إلغاء الطلب ❌".
+
+    StoreSync / Salla first observation of `under_review` MUST NOT send
+    another confirmation request.
 
   Step 2 — handle_cod_reply(db, tenant_id, customer_phone, button_text)
     Triggered by the WhatsApp webhook when the customer taps a button
@@ -59,6 +65,7 @@ logger = logging.getLogger("nahla.cod_confirmation")
 STATUS_PENDING_CUSTOMER  = "pending_confirmation"
 STATUS_PENDING_MERCHANT  = "under_review"
 STATUS_CANCELLED         = "cancelled"
+CANONICAL_SERVICE_KEY    = "cod_confirmation"
 
 # Customer reply matchers. We accept the full button text plus a small
 # whitelist of free-text equivalents Saudi customers commonly type when
@@ -87,6 +94,11 @@ _CANCEL_TEXTS: tuple[str, ...] = (
     "cancel",
 )
 
+_COD_BUTTON_TITLES: tuple[str, str] = (
+    "تأكيد الطلب ✅",
+    "إلغاء الطلب ❌",
+)
+
 
 def classify_cod_reply(text: str) -> Optional[str]:
     """
@@ -105,6 +117,36 @@ def classify_cod_reply(text: str) -> Optional[str]:
     return None
 
 
+def nahla_owns_cod_customer_confirmation(order: Any) -> bool:
+    """True when Nahla checkout already requested or resolved COD confirm."""
+    meta = getattr(order, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(
+        meta.get("nahla_cod_confirmation_sent")
+        or meta.get("cod_confirmed_at")
+        or meta.get("cod_cancelled_at")
+        or meta.get("cod_pushed_external_id")
+    )
+
+
+def _stamp_cod_confirmation_sent(order: Any, *, template: Any, send_method: str) -> None:
+    meta = dict(getattr(order, "extra_metadata", None) or {})
+    meta["nahla_cod_confirmation_sent"] = True
+    meta["nahla_cod_confirmation_sent_at"] = datetime.now(timezone.utc).isoformat()
+    meta["nahla_cod_confirmation_service_key"] = CANONICAL_SERVICE_KEY
+    meta["nahla_cod_confirmation_send_method"] = send_method
+    if template is not None:
+        meta["nahla_cod_confirmation_template_id"] = getattr(template, "id", None)
+        meta["nahla_cod_confirmation_template_name"] = getattr(template, "name", None)
+        meta["nahla_cod_confirmation_revision"] = getattr(template, "revision", None)
+    order.extra_metadata = meta
+    try:
+        flag_modified(order, "extra_metadata")
+    except Exception:
+        pass
+
+
 async def send_cod_confirmation_template(
     db,
     *,
@@ -116,18 +158,28 @@ async def send_cod_confirmation_template(
     total_amount: str,
 ) -> Dict[str, Any]:
     """
-    Send the cod_order_confirmation_ar template. Best-effort: failures
-    log loudly but do not raise — the order itself is already durable.
+    Send the canonical ``cod_confirmation`` lifecycle revision.
+
+    Failures log loudly but do not raise — the order itself is already durable.
     Returns a dict with `sent` (bool), `wa_message_id` (or None), and
     `error` (optional string) for the caller to log alongside the order.
+
+    The hard-named legacy Meta template is no longer a send owner.
     """
-    from models import WhatsAppConnection, WhatsAppTemplate  # noqa: PLC0415
-    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
-    from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
     from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
         MODE_LEGACY_LIFECYCLE,
         evaluate_and_audit,
     )
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        evaluate_order_update_delivery,
+        resolve_lifecycle_template_for_send,
+    )
+    from core.commerce_lifecycle.window import lifecycle_service_window_is_open  # noqa: PLC0415
+    from core.automation_engine import (  # noqa: PLC0415
+        send_lifecycle_whatsapp_session_body,
+        send_lifecycle_whatsapp_template,
+    )
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 
     canary = evaluate_and_audit(
         int(tenant_id),
@@ -143,114 +195,119 @@ async def send_cod_confirmation_template(
         )
         return {"sent": False, "error": canary.reason, "canary_blocked": True}
 
-    template_name = "cod_order_confirmation_ar"
-
-    wa_conn = (
-        db.query(WhatsAppConnection)
-        .filter(
-            WhatsAppConnection.tenant_id == tenant_id,
-            WhatsAppConnection.status    == "connected",
-        )
-        .first()
+    allowed, flag_reason = evaluate_order_update_delivery(
+        db, int(tenant_id), CANONICAL_SERVICE_KEY
     )
-    if not wa_conn:
+    if not allowed:
+        logger.info(
+            "[COD] tenant=%s order=%s: delivery blocked %s",
+            tenant_id, getattr(order, "id", None), flag_reason,
+        )
+        return {"sent": False, "error": flag_reason or "order_update_disabled"}
+
+    template = resolve_lifecycle_template_for_send(
+        db, int(tenant_id), CANONICAL_SERVICE_KEY
+    )
+    if template is None:
         logger.warning(
-            "[COD] tenant=%s order=%s: no connected WhatsApp — skipping template send",
+            "[COD] tenant=%s order=%s: no APPROVED cod_confirmation revision",
             tenant_id, getattr(order, "id", None),
         )
-        return {"sent": False, "error": "no_whatsapp_connection"}
-
-    template = (
-        db.query(WhatsAppTemplate)
-        .filter(
-            WhatsAppTemplate.tenant_id == tenant_id,
-            WhatsAppTemplate.name      == template_name,
-            WhatsAppTemplate.status    == "APPROVED",
-        )
-        .first()
-    )
-    if not template:
-        logger.warning(
-            "[COD] tenant=%s order=%s: template %s not APPROVED — skipping send",
-            tenant_id, getattr(order, "id", None), template_name,
-        )
-        return {"sent": False, "error": "template_not_approved"}
+        return {"sent": False, "error": "no_approved_template"}
 
     to = normalize_phone(customer_phone) or customer_phone
-    body_params = [
-        # Use the central fallback (``"عميلنا الغالي"``) so every
-        # template / campaign / automation uses the same greeting.
-        # See ``core.customer_display.DEFAULT_FALLBACK_NAME``.
-        {
-            "type": "text",
-            "text": _customer_display_passthrough(customer_name),
-        },
-        {"type": "text", "text": str(product_name or "طلبك")},
-        {"type": "text", "text": str(total_amount or "—")},
-    ]
+    window_open, window_source = lifecycle_service_window_is_open(
+        db, int(tenant_id), to
+    )
+    send_method = "session_message" if window_open else "approved_template"
     payload: Dict[str, Any] = {
-        "messaging_product": "whatsapp",
-        "to":                to,
-        "type":              "template",
-        "template": {
-            "name":       template_name,
-            "language":   {"code": template.language or "ar"},
-            "components": [{"type": "body", "parameters": body_params}],
-        },
+        "order_number": str(
+            getattr(order, "external_order_number", None)
+            or getattr(order, "id", "")
+            or ""
+        ),
+        "order_id": str(getattr(order, "id", "") or ""),
+        "product_name": str(product_name or "طلبك"),
+        "total": str(total_amount or ""),
+        "amount": str(total_amount or ""),
+        "payment_method": "cod",
+        "customer_name": _customer_display_passthrough(customer_name),
     }
-
+    last_mile_kwargs = dict(
+        customer_name=_customer_display_passthrough(customer_name),
+        service_key=CANONICAL_SERVICE_KEY,
+        canary_mode=MODE_LEGACY_LIFECYCLE,
+        canary_automation_type="cod_confirmation",
+        canary_sender_path="cod_confirmation",
+    )
     try:
-        response, _ = await provider_send_message(
-            db,
-            wa_conn,
-            tenant_id=tenant_id,
-            operation="send_template",
-            phone_id=wa_conn.phone_number_id,
-            payload=payload,
-        )
-        wa_msg_id = (response or {}).get("messages", [{}])[0].get("id")
-
-        try:
-            from routers.conversations import record_outbound_message  # noqa: PLC0415
-            import re
-            _vals = [customer_name, product_name, total_amount]
-            def _sub(m):
-                i = int(m.group(1)) - 1
-                return str(_vals[i]) if i < len(_vals) else m.group(0)
-            _parts = []
-            for comp in (template.components or []):
-                _ct = (comp.get("type") or "").upper()
-                if _ct == "BODY" and comp.get("text"):
-                    _parts.append(re.sub(r"\{\{(\d+)\}\}", _sub, comp["text"]))
-                elif _ct == "FOOTER" and comp.get("text"):
-                    _parts.append(comp["text"])
-                elif _ct == "BUTTONS":
-                    _bl = []
-                    for _b in (comp.get("buttons") or []):
-                        _bt = (_b.get("type") or "").upper()
-                        _lbl = _b.get("text") or ""
-                        if _bt == "QUICK_REPLY": _bl.append(f"↩️ {_lbl}")
-                        elif _bt == "URL": _bl.append(f"🔗 {_lbl or 'رابط'}")
-                        elif _lbl: _bl.append(f"▪️ {_lbl}")
-                    if _bl:
-                        _parts.append("━━━━━\n" + "\n".join(_bl))
-            _rendered = "\n\n".join(_parts) if _parts else f"[{template_name}]"
-            record_outbound_message(
-                db, tenant_id, to, _rendered,
-                event_type="cod_confirmation",
-                customer_name=customer_name,
-                extra={"template_name": template_name, "order_id": getattr(order, "id", None)},
+        if send_method == "session_message":
+            outcome, info = await send_lifecycle_whatsapp_session_body(
+                db, int(tenant_id), to, template, payload, **last_mile_kwargs
             )
-        except Exception:
-            pass
-
-        return {"sent": True, "wa_message_id": wa_msg_id, "error": None}
+        else:
+            outcome, info = await send_lifecycle_whatsapp_template(
+                db, int(tenant_id), to, template, payload, **last_mile_kwargs
+            )
     except Exception as exc:
         logger.error(
-            "[COD] tenant=%s order=%s template send failed: %s",
+            "[COD] tenant=%s order=%s canonical send failed: %s",
             tenant_id, getattr(order, "id", None), exc,
         )
-        return {"sent": False, "error": str(exc)[:200]}
+        return {
+            "sent": False,
+            "error": str(exc)[:200],
+            "template_name": getattr(template, "name", None),
+            "service_key": CANONICAL_SERVICE_KEY,
+        }
+
+    if outcome != "sent":
+        logger.warning(
+            "[COD] tenant=%s order=%s send outcome=%s error=%s",
+            tenant_id,
+            getattr(order, "id", None),
+            outcome,
+            (info or {}).get("error_code"),
+        )
+        return {
+            "sent": False,
+            "error": str((info or {}).get("error_code") or outcome),
+            "template_name": getattr(template, "name", None),
+            "service_key": CANONICAL_SERVICE_KEY,
+            "send_method": send_method,
+            "window_source": window_source,
+            "canary_blocked": bool((info or {}).get("canary_blocked")),
+        }
+
+    _stamp_cod_confirmation_sent(order, template=template, send_method=send_method)
+    try:
+        from routers.conversations import record_outbound_message  # noqa: PLC0415
+        record_outbound_message(
+            db, tenant_id, to, f"[{getattr(template, 'name', CANONICAL_SERVICE_KEY)}]",
+            event_type="cod_confirmation",
+            customer_name=customer_name,
+            extra={
+                "template_name": getattr(template, "name", None),
+                "service_key": CANONICAL_SERVICE_KEY,
+                "order_id": getattr(order, "id", None),
+                "send_method": send_method,
+            },
+        )
+    except Exception:
+        pass
+
+    return {
+        "sent": True,
+        "wa_message_id": (info or {}).get("wa_message_id"),
+        "error": None,
+        "template_name": getattr(template, "name", None),
+        "template_id": getattr(template, "id", None),
+        "revision": getattr(template, "revision", None),
+        "service_key": CANONICAL_SERVICE_KEY,
+        "send_method": send_method,
+        "window_source": window_source,
+        "buttons": list(_COD_BUTTON_TITLES),
+    }
 
 
 def find_pending_cod_order(

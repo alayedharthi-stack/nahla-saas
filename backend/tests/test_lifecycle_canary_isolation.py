@@ -290,7 +290,7 @@ class TestLegacySenderPathsCannotBypass:
         )
         assert result.get("canary_blocked") is not True
         assert result["sent"] is False
-        assert result["error"] == "no_whatsapp_connection"
+        assert result["error"] == "no_approved_template"
 
     def test_lifecycle_template_last_mile_blocks_other_recipient(self, monkeypatch):
         _enable_canary(monkeypatch)

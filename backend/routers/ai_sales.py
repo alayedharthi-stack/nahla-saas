@@ -988,7 +988,9 @@ async def ai_sales_create_order(
                 "order_id":       order.id,
                 "wa_message_id":  cod_result.get("wa_message_id"),
                 "error":          cod_template_error,
-                "template_name":  "cod_order_confirmation_ar",
+                "template_name":  cod_result.get("template_name"),
+                "service_key":    "cod_confirmation",
+                "send_method":    cod_result.get("send_method"),
             },
             reference_id=str(order.id),
         )

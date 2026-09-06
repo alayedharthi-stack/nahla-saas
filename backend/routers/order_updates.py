@@ -11,10 +11,10 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_user
 from core.commerce_lifecycle.order_updates import (
     ORDER_UPDATE_SERVICE_KEYS,
+    REASON_SETTINGS_UNAVAILABLE,
     create_revision_from_active,
-    get_order_update_flags,
-    get_order_updates_master_enabled,
     is_order_update_service_key,
+    load_order_update_settings_truth,
     promote_approved_revision,
     resolve_active_and_pending,
     set_order_update_flags,
@@ -130,8 +130,11 @@ def get_settings(
     user=Depends(get_current_user),
 ) -> Dict[str, Any]:
     tid = _tenant_id(user)
-    flags = get_order_update_flags(db, tid)
-    master = get_order_updates_master_enabled(db, tid)
+    truth = load_order_update_settings_truth(db, tid)
+    if not truth.available:
+        raise HTTPException(status_code=503, detail=REASON_SETTINGS_UNAVAILABLE)
+    flags = dict(truth.flags)
+    master = bool(truth.master_enabled)
     services = {
         key: resolve_active_and_pending(db, tid, key)
         for key in ORDER_UPDATE_SERVICE_KEYS
@@ -139,13 +142,19 @@ def get_settings(
     payload: Dict[str, Any] = {
         "enabled": master,
         "flags": flags,
+        "effective": {
+            key: bool(master and flags[key])
+            for key in ORDER_UPDATE_SERVICE_KEYS
+        },
         "services": {
-            key: {"enabled": flags[key], **services[key]}
+            key: {
+                **services[key],
+                "enabled": flags[key],
+                "effective_enabled": bool(master and flags[key]),
+            }
             for key in ORDER_UPDATE_SERVICE_KEYS
         },
     }
-    for key in ORDER_UPDATE_SERVICE_KEYS:
-        payload[key] = {"enabled": flags[key]}
     return payload
 
 

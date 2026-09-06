@@ -143,6 +143,18 @@ def _build_dispatch_payload(evidence: OrderLifecycleEvidence) -> Dict[str, str]:
     return payload
 
 
+def _nahla_owns_cod_customer_confirmation(order: Any) -> bool:
+    meta = getattr(order, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(
+        meta.get("nahla_cod_confirmation_sent")
+        or meta.get("cod_confirmed_at")
+        or meta.get("cod_cancelled_at")
+        or meta.get("cod_pushed_external_id")
+    )
+
+
 def _has_tracking_evidence(evidence: OrderLifecycleEvidence) -> bool:
     if str(evidence.tracking_url or "").strip():
         return True
@@ -227,7 +239,7 @@ async def _execute_reserved_send(
         )
 
     from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
-        is_order_update_enabled,
+        evaluate_order_update_delivery,
         resolve_lifecycle_template_for_send,
     )
 
@@ -256,13 +268,17 @@ async def _execute_reserved_send(
             reason_code="no_approved_template",
         )
 
-    if not is_order_update_enabled(db, int(tenant_id), service_key):
+    allowed, flag_reason = evaluate_order_update_delivery(
+        db, int(tenant_id), service_key
+    )
+    if not allowed:
+        block_reason = flag_reason or "order_update_disabled"
         finalize_send_outcome(
             db,
             ledger_id=reserve.ledger_id,
             tenant_id=int(tenant_id),
             outcome=SendLedgerOutcome.SEND_BLOCKED,
-            send_error_code="order_update_disabled",
+            send_error_code=block_reason,
             commit=True,
         )
         return LifecycleDispatchResult(
@@ -271,7 +287,7 @@ async def _execute_reserved_send(
             duplicate=False,
             recovered=reserve.recovered,
             outcome=SendLedgerOutcome.SEND_BLOCKED.value,
-            reason_code="order_update_disabled",
+            reason_code=block_reason,
         )
 
     from core.commerce_lifecycle.window import lifecycle_service_window_is_open  # noqa: PLC0415
@@ -482,6 +498,29 @@ async def dispatch_external_lifecycle_notification(
                 duplicate=False,
                 outcome="skipped",
                 reason_code="no_intent",
+            )
+
+        # COD confirmation requests are owned exclusively by the Nahla
+        # checkout sender (pending_confirmation). StoreSync/Salla must
+        # never send a second confirm/cancel prompt.
+        if intent == BusinessIntent.COD_CONFIRMATION:
+            return LifecycleDispatchResult(
+                ledger_id=None,
+                dispatched=False,
+                duplicate=False,
+                outcome="skipped",
+                reason_code="cod_confirmation_owned_by_checkout",
+            )
+        if (
+            intent == BusinessIntent.ORDER_CONFIRMED
+            and _nahla_owns_cod_customer_confirmation(order)
+        ):
+            return LifecycleDispatchResult(
+                ledger_id=None,
+                dispatched=False,
+                duplicate=False,
+                outcome="skipped",
+                reason_code="nahla_cod_already_confirmed",
             )
 
         external_order_id = str(

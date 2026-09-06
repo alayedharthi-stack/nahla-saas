@@ -42,6 +42,7 @@ from models import (  # noqa: E402
     CommerceLifecycleNotificationLedger,
     Integration,
     Order,
+    TenantSettings,
     WaConversationWindow,
     WebhookEvent,
 )
@@ -54,7 +55,7 @@ def _make_db() -> Tuple[Any, Any]:
         poolclass=StaticPool,
     )
     saved: list = []
-    for model in (CommerceLifecycleNotificationLedger, WaConversationWindow):
+    for model in (CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings):
         table = model.__table__
         for col in table.columns:
             if isinstance(col.type, JSONB):
@@ -618,7 +619,7 @@ class TestLifecycleDispatcher:
         row = db.query(CommerceLifecycleNotificationLedger).one()
         assert row.template_service_key == "shipping_tracking"
 
-    @patch("core.commerce_lifecycle.order_updates.is_order_update_enabled", return_value=True)
+    @patch("core.commerce_lifecycle.order_updates.evaluate_order_update_delivery", return_value=(True, None))
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
@@ -888,7 +889,7 @@ class TestLifecycleDispatcher:
         assert {row.tenant_id for row in rows} == {20, 21}
         assert len({row.idempotency_key for row in rows}) == 2
 
-    @patch("core.commerce_lifecycle.order_updates.is_order_update_enabled", return_value=True)
+    @patch("core.commerce_lifecycle.order_updates.evaluate_order_update_delivery", return_value=(True, None))
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
@@ -927,7 +928,7 @@ class TestLifecycleDispatcher:
         row = db.query(CommerceLifecycleNotificationLedger).one()
         assert row.template_service_key == "payment_pending"
 
-    @patch("core.commerce_lifecycle.order_updates.is_order_update_enabled", return_value=True)
+    @patch("core.commerce_lifecycle.order_updates.evaluate_order_update_delivery", return_value=(True, None))
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")

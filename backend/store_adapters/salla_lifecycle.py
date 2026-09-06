@@ -69,8 +69,9 @@ def _first_seen_acceptance_intent(
     normalized_order: Mapping[str, Any],
 ) -> Optional[BusinessIntent]:
     if curr in _CONFIRMATION_STATUSES:
-        if _is_cod(normalized_order):
-            return BusinessIntent.COD_CONFIRMATION
+        # Salla under_review is merchant acceptance, not a customer
+        # confirm/cancel prompt. Nahla-origin COD confirmation is owned
+        # exclusively by the checkout sender.
         return BusinessIntent.ORDER_CONFIRMED
     if curr in _PAYMENT_PENDING_STATUSES:
         if _is_cod(normalized_order):
@@ -137,12 +138,8 @@ def normalize_salla_lifecycle_business_intent(
             return None
         return BusinessIntent.PAYMENT_NEEDED
     if curr in _CONFIRMATION_STATUSES and prev not in _CONFIRMATION_STATUSES:
-        if prev in _PAYMENT_PENDING_STATUSES:
-            if _is_cod(normalized_order):
-                return BusinessIntent.COD_CONFIRMATION
+        if prev in _PAYMENT_PENDING_STATUSES and not _is_cod(normalized_order):
             return BusinessIntent.ORDER_CONFIRMED
-        if _is_cod(normalized_order) and prev not in _PREPARING_STATUSES:
-            return BusinessIntent.COD_CONFIRMATION
         return None
 
     return None

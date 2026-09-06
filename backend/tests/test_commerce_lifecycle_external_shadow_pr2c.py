@@ -93,7 +93,7 @@ class TestSallaNormalization:
         intent = normalize_salla_lifecycle_business_intent(
             None, "under_review", {"payment_method": "cod"}
         )
-        assert intent == BusinessIntent.COD_CONFIRMATION
+        assert intent == BusinessIntent.ORDER_CONFIRMED
 
     def test_new_non_cod_confirmed_maps_order_confirmed(self):
         intent = normalize_salla_lifecycle_business_intent(

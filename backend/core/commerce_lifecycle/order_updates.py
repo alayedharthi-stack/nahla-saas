@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -33,18 +34,20 @@ ORDER_UPDATE_SERVICE_KEYS: Tuple[str, ...] = (
     "order_refunded",
 )
 
-# Existing merchants already had these two ON. New types stay OFF until enabled.
+# Compatibility defaults when TenantSettings exists but a key is unset.
+# ``cod_confirmation`` was already an active Nahla-origin customer send
+# before order-updates flags existed; leaving it default-OFF would stop
+# that send on missing rows.
 LEGACY_DEFAULT_ON_KEYS: frozenset[str] = frozenset({
     "order_confirmation",
     "shipping_tracking",
+    "cod_confirmation",
 })
 
 MASTER_ENABLED_KEY = "enabled"
 
-# Same customer event, historical library service_key. Never a different event.
-_SERVICE_KEY_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "payment_pending": ("payment_reminder",),
-}
+REASON_SETTINGS_UNAVAILABLE = "order_update_settings_unavailable"
+REASON_ORDER_UPDATE_DISABLED = "order_update_disabled"
 
 _DISPLAY_NAMES_AR: Dict[str, str] = {
     "order_confirmation": "تأكيد الطلب",
@@ -160,7 +163,49 @@ def _read_master_enabled(stored: Dict[str, Any]) -> bool:
     return bool(raw)
 
 
-def get_order_updates_master_enabled(db: Session, tenant_id: int) -> bool:
+def _flags_from_stored(stored: Dict[str, Any]) -> Dict[str, bool]:
+    flags = _empty_flags()
+    for key in ORDER_UPDATE_SERVICE_KEYS:
+        if key not in stored:
+            continue
+        entry = stored.get(key)
+        if isinstance(entry, dict):
+            flags[key] = bool(entry.get("enabled", _default_enabled_for(key)))
+        elif isinstance(entry, bool):
+            flags[key] = entry
+    return flags
+
+
+def _denied_flags() -> Dict[str, bool]:
+    return {key: False for key in ORDER_UPDATE_SERVICE_KEYS}
+
+
+@dataclass(frozen=True)
+class OrderUpdateSettingsTruth:
+    """Persisted merchant preferences vs effective send permission."""
+
+    available: bool
+    reason: Optional[str]
+    master_enabled: bool
+    flags: Dict[str, bool]
+
+    @property
+    def effective(self) -> Dict[str, bool]:
+        if not self.available or not self.master_enabled:
+            return _denied_flags()
+        return dict(self.flags)
+
+
+def load_order_update_settings_truth(
+    db: Session,
+    tenant_id: int,
+) -> OrderUpdateSettingsTruth:
+    """
+    Read order-update settings.
+
+    Missing TenantSettings / unset keys → documented compatibility defaults.
+    Database/query errors → unavailable (fail closed, not merchant consent).
+    """
     from models import TenantSettings  # noqa: PLC0415
 
     try:
@@ -169,41 +214,69 @@ def get_order_updates_master_enabled(db: Session, tenant_id: int) -> bool:
             .filter(TenantSettings.tenant_id == int(tenant_id))
             .first()
         )
-    except Exception:  # noqa: BLE001 — tests / partial schemas fail open
-        return True
+    except Exception:  # noqa: BLE001 — query failure is not consent
+        logger.exception(
+            "[OrderUpdates] settings truth unavailable tenant=%s",
+            tenant_id,
+        )
+        return OrderUpdateSettingsTruth(
+            available=False,
+            reason=REASON_SETTINGS_UNAVAILABLE,
+            master_enabled=False,
+            flags=_denied_flags(),
+        )
+
     if not settings or not settings.extra_metadata:
-        return True
+        return OrderUpdateSettingsTruth(
+            available=True,
+            reason=None,
+            master_enabled=True,
+            flags=_empty_flags(),
+        )
     stored = settings.extra_metadata.get("order_updates") or {}
     if not isinstance(stored, dict):
-        return True
-    return _read_master_enabled(stored)
+        return OrderUpdateSettingsTruth(
+            available=True,
+            reason=None,
+            master_enabled=True,
+            flags=_empty_flags(),
+        )
+    return OrderUpdateSettingsTruth(
+        available=True,
+        reason=None,
+        master_enabled=_read_master_enabled(stored),
+        flags=_flags_from_stored(stored),
+    )
+
+
+def get_order_updates_master_enabled(db: Session, tenant_id: int) -> bool:
+    truth = load_order_update_settings_truth(db, tenant_id)
+    if not truth.available:
+        return False
+    return truth.master_enabled
 
 
 def get_order_update_flags(db: Session, tenant_id: int) -> Dict[str, bool]:
-    from models import TenantSettings  # noqa: PLC0415
+    """Persisted individual flags. Master OFF does not rewrite these."""
+    return dict(load_order_update_settings_truth(db, tenant_id).flags)
 
-    flags = _empty_flags()
-    try:
-        settings = (
-            db.query(TenantSettings)
-            .filter(TenantSettings.tenant_id == int(tenant_id))
-            .first()
-        )
-    except Exception:  # noqa: BLE001 — tests / partial schemas fail open
-        return flags
-    if not settings or not settings.extra_metadata:
-        return flags
-    stored = settings.extra_metadata.get("order_updates") or {}
-    if not isinstance(stored, dict):
-        return flags
-    for key in ORDER_UPDATE_SERVICE_KEYS:
-        if key in stored:
-            entry = stored.get(key)
-            if isinstance(entry, dict):
-                flags[key] = bool(entry.get("enabled", _default_enabled_for(key)))
-            elif isinstance(entry, bool):
-                flags[key] = entry
-    return flags
+
+def evaluate_order_update_delivery(
+    db: Session,
+    tenant_id: int,
+    service_key: str,
+) -> Tuple[bool, Optional[str]]:
+    """Return ``(allowed, reason)``. Query errors fail closed and do not send."""
+    if not is_order_update_service_key(service_key):
+        return True, None
+    truth = load_order_update_settings_truth(db, tenant_id)
+    if not truth.available:
+        return False, REASON_SETTINGS_UNAVAILABLE
+    if not truth.master_enabled:
+        return False, REASON_ORDER_UPDATE_DISABLED
+    if not bool(truth.flags.get(service_key, _default_enabled_for(service_key))):
+        return False, REASON_ORDER_UPDATE_DISABLED
+    return True, None
 
 
 def set_order_update_flags(
@@ -246,11 +319,8 @@ def set_order_update_flags(
 
 
 def is_order_update_enabled(db: Session, tenant_id: int, service_key: str) -> bool:
-    if not is_order_update_service_key(service_key):
-        return True
-    if not get_order_updates_master_enabled(db, tenant_id):
-        return False
-    return bool(get_order_update_flags(db, tenant_id).get(service_key, _default_enabled_for(service_key)))
+    allowed, _reason = evaluate_order_update_delivery(db, tenant_id, service_key)
+    return allowed
 
 
 def resolve_lifecycle_template_for_send(
@@ -261,17 +331,12 @@ def resolve_lifecycle_template_for_send(
     """
     Strict same-slot resolver. Never substitutes a different lifecycle event.
 
-    ``payment_pending`` may resolve a historical ``payment_reminder`` binding
-    for the same unpaid-order event only.
+    ``payment_pending`` resolves only an APPROVED ``payment_pending`` revision.
+    Historical reminder-slot rows are never selected for this event.
     """
     from core.service_template_resolver import resolve_active_template  # noqa: PLC0415
 
-    keys = (str(service_key),) + _SERVICE_KEY_ALIASES.get(str(service_key), ())
-    for key in keys:
-        tpl = resolve_active_template(db, int(tenant_id), key, None)
-        if tpl is not None:
-            return tpl
-    return None
+    return resolve_active_template(db, int(tenant_id), str(service_key), None)
 
 
 def default_body_for(service_key: str) -> str:
@@ -397,9 +462,12 @@ def resolve_active_and_pending(
         body = str(active_pub["body_text"])
     else:
         body = default_body_for(service_key)
+    persisted = get_order_update_flags(db, tenant_id).get(
+        service_key, _default_enabled_for(service_key)
+    )
     return {
         "service_key": service_key,
-        "enabled": is_order_update_enabled(db, tenant_id, service_key),
+        "enabled": bool(persisted),
         "variables": variables_for(service_key),
         "available_variables": variables_for(service_key),
         "default_body": default_body_for(service_key),
@@ -563,13 +631,18 @@ __all__ = [
     "LEGACY_DEFAULT_ON_KEYS",
     "MASTER_ENABLED_KEY",
     "ORDER_UPDATE_SERVICE_KEYS",
+    "REASON_ORDER_UPDATE_DISABLED",
+    "REASON_SETTINGS_UNAVAILABLE",
+    "OrderUpdateSettingsTruth",
     "create_revision_from_active",
     "default_body_for",
     "display_name_ar_for",
+    "evaluate_order_update_delivery",
     "get_order_update_flags",
     "get_order_updates_master_enabled",
     "is_order_update_enabled",
     "is_order_update_service_key",
+    "load_order_update_settings_truth",
     "promote_approved_revision",
     "resolve_active_and_pending",
     "resolve_lifecycle_template_for_send",

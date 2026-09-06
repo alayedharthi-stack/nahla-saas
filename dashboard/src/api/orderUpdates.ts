@@ -65,8 +65,36 @@ export interface OrderUpdatesSettings {
   enabled?: boolean
   services?: Partial<Record<OrderUpdateServiceKey, OrderUpdateServiceToggle>>
   flags?: Partial<Record<OrderUpdateServiceKey, boolean>>
-  order_confirmation?: OrderUpdateServiceToggle
-  shipping_tracking?: OrderUpdateServiceToggle
+  effective?: Partial<Record<OrderUpdateServiceKey, boolean>>
+}
+
+export const LEGACY_DEFAULT_ON_KEYS: readonly OrderUpdateServiceKey[] = [
+  'order_confirmation',
+  'shipping_tracking',
+  'cod_confirmation',
+] as const
+
+export function persistedIndividualEnabled(
+  settings: OrderUpdatesSettings | null | undefined,
+  serviceKey: OrderUpdateServiceKey,
+): boolean {
+  if (!settings) return LEGACY_DEFAULT_ON_KEYS.includes(serviceKey)
+  if (settings.flags && typeof settings.flags[serviceKey] === 'boolean') {
+    return settings.flags[serviceKey] as boolean
+  }
+  const nested = settings.services?.[serviceKey]?.enabled
+  if (typeof nested === 'boolean') return nested
+  return LEGACY_DEFAULT_ON_KEYS.includes(serviceKey)
+}
+
+export function effectiveEnabledAfterMaster(
+  settings: OrderUpdatesSettings | null | undefined,
+  serviceKey: OrderUpdateServiceKey,
+): boolean {
+  if (settings?.effective && typeof settings.effective[serviceKey] === 'boolean') {
+    return settings.effective[serviceKey] as boolean
+  }
+  return isMasterEnabled(settings) && persistedIndividualEnabled(settings, serviceKey)
 }
 
 export interface OrderUpdateServiceDetail {
@@ -142,14 +170,18 @@ export function isServiceEnabled(
   settings: OrderUpdatesSettings | null | undefined,
   serviceKey: OrderUpdateServiceKey,
 ): boolean {
-  if (!settings) return true
-  const nested = settings.services?.[serviceKey]?.enabled
-  if (typeof nested === 'boolean') return nested
-  const flat = settings[serviceKey]?.enabled
-  if (typeof flat === 'boolean') return flat
-  const flags = (settings as { flags?: Partial<Record<OrderUpdateServiceKey, boolean>> }).flags
-  if (flags && typeof flags[serviceKey] === 'boolean') return flags[serviceKey] as boolean
-  return true
+  return persistedIndividualEnabled(settings, serviceKey)
+}
+
+export function patchPayloadForIndividual(
+  serviceKey: OrderUpdateServiceKey,
+  enabled: boolean,
+): OrderUpdatesSettings {
+  return { services: { [serviceKey]: { enabled } } }
+}
+
+export function patchPayloadForMaster(enabled: boolean): OrderUpdatesSettings {
+  return { enabled }
 }
 
 export function isNotFoundError(err: unknown): boolean {

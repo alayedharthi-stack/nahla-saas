@@ -3469,6 +3469,9 @@ async def send_lifecycle_whatsapp_session_body(
     customer_name: Optional[str] = None,
     service_key: Optional[str] = None,
     blocked_path: str = "lifecycle_dispatch",
+    canary_mode: Optional[str] = None,
+    canary_automation_type: Optional[str] = None,
+    canary_sender_path: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Send lifecycle BODY text as a free-form session message.
@@ -3490,8 +3493,9 @@ async def send_lifecycle_whatsapp_session_body(
     canary = evaluate_and_audit(
         int(tenant_id),
         phone=to_phone,
-        sender_path="lifecycle_session_send",
-        mode=MODE_NEW_LIFECYCLE,
+        sender_path=canary_sender_path or "lifecycle_session_send",
+        mode=canary_mode or MODE_NEW_LIFECYCLE,
+        automation_type=canary_automation_type,
     )
     if not canary.allowed:
         return "failed", {
@@ -3655,6 +3659,9 @@ async def send_lifecycle_whatsapp_template(
     customer_name: Optional[str] = None,
     service_key: Optional[str] = None,
     blocked_path: str = "lifecycle_dispatch",
+    canary_mode: Optional[str] = None,
+    canary_automation_type: Optional[str] = None,
+    canary_sender_path: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Send a resolved approved WhatsApp template for lifecycle dispatch.
@@ -3676,8 +3683,9 @@ async def send_lifecycle_whatsapp_template(
     canary = evaluate_and_audit(
         int(tenant_id),
         phone=to_phone,
-        sender_path="lifecycle_template_send",
-        mode=MODE_NEW_LIFECYCLE,
+        sender_path=canary_sender_path or "lifecycle_template_send",
+        mode=canary_mode or MODE_NEW_LIFECYCLE,
+        automation_type=canary_automation_type,
     )
     if not canary.allowed:
         return "failed", {

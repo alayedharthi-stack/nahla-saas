@@ -5,10 +5,12 @@ import {
 import { useLanguage } from '../../i18n/context'
 import {
   approvedRevision,
+  effectiveEnabledAfterMaster,
   isMasterEnabled,
   isNotFoundError,
   isServiceEnabled,
   orderUpdatesApi,
+  patchPayloadForIndividual,
   revisionBodyText,
   serviceBodyText,
   serviceVariables,
@@ -281,6 +283,8 @@ function ServiceCard({
   const isAr = lang === 'ar'
 
   const enabled = isServiceEnabled(settings, meta.key)
+  const effectivelyOn = effectiveEnabledAfterMaster(settings, meta.key)
+  const masterOff = !isMasterEnabled(settings)
   const [bodyText, setBodyText] = useState('')
   const [toggleSaving, setToggleSaving] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
@@ -407,11 +411,22 @@ function ServiceCard({
 
         <Toggle
           label={isAr ? 'تفعيل التحديث' : 'Enable update'}
-          hint={isAr ? 'إرسال هذه الرسالة تلقائياً عند الحدث المناسب' : 'Send automatically on the matching lifecycle event'}
+          hint={
+            masterOff
+              ? (isAr
+                ? 'التفضيل محفوظ، لكن الإرسال متوقف لأن المفتاح الرئيسي مغلق'
+                : 'Preference is saved, but sending is off while the master switch is off')
+              : (isAr ? 'إرسال هذه الرسالة تلقائياً عند الحدث المناسب' : 'Send automatically on the matching lifecycle event')
+          }
           value={enabled}
           onChange={handleToggle}
           disabled={toggleSaving || apiMissing}
         />
+        {!effectivelyOn && enabled && masterOff && (
+          <p className="text-[11px] text-slate-400">
+            {isAr ? 'فعّال بعد إعادة تشغيل المفتاح الرئيسي' : 'Will send again when the master switch is turned on'}
+          </p>
+        )}
         {toggleError && (
           <p className="text-xs text-red-600 flex items-center gap-1">
             <AlertCircle className="w-3.5 h-3.5" /> {toggleError}
@@ -603,15 +618,7 @@ export default function OrderUpdatesSettingsTab() {
   }
 
   const handleSettingsChange = async (serviceKey: OrderUpdateServiceKey, enabled: boolean) => {
-    const next: OrderUpdatesSettings = {
-      ...(settings ?? {}),
-      services: {
-        ...(settings?.services ?? {}),
-        [serviceKey]: { enabled },
-      },
-      [serviceKey]: { enabled },
-    }
-    const saved = await orderUpdatesApi.putSettings(next)
+    const saved = await orderUpdatesApi.patchSettings(patchPayloadForIndividual(serviceKey, enabled))
     setSettings(saved)
   }
 
