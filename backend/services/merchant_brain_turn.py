@@ -177,6 +177,9 @@ def _dedup_operational_substitute(
     inbound_text: str,
     inbound_metadata: dict | None,
     normalized_type: str | None,
+    decision: object | None = None,
+    decision_action: str = "",
+    decision_args: dict | None = None,
 ) -> str:
     try:
         from core.order_flow import context_aware_dedup_fallback
@@ -190,6 +193,9 @@ def _dedup_operational_substitute(
             inbound_text=inbound_text,
             inbound_metadata=inbound_metadata,
             normalized_type=normalized_type,
+            decision=decision,
+            decision_action=decision_action,
+            decision_args=decision_args,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("[CHAT_DEDUP] context-aware fallback failed: %s", exc)
@@ -490,6 +496,9 @@ def _apply_outbound_dedup(
     brain_persona_compose_event: Optional[Dict[str, Any]],
     live_provenance_tracker: Optional[Dict[str, Any]] = None,
     skip_social_identity_dedup: bool = False,
+    decision: Any = None,
+    decision_action: str = "",
+    decision_args: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, str]:
     from modules.ai.brain.persona_ownership import PersonaBypassReason as POReason
 
@@ -592,6 +601,9 @@ def _apply_outbound_dedup(
                 inbound_text=text,
                 inbound_metadata=meta_for_dedup,
                 normalized_type=norm_type,
+                decision=decision,
+                decision_action=decision_action,
+                decision_args=decision_args,
             )
             if not (reply or "").strip():
                 outbound_abort_suppressor = "chat_dedup_hard"
@@ -1192,6 +1204,8 @@ async def evaluate_live_merchant_brain_turn(
             brain_persona_compose_event=parsed["brain_persona_compose_event"],
             live_provenance_tracker=live_provenance_tracker,
             skip_social_identity_dedup=_skip_social_identity_dedup,
+            decision_action=str(parsed.get("br_dec_action") or ""),
+            decision_args=dict(parsed.get("br_dec_args") or {}),
         )
         try:
             if _t_mbg_dedup is not None:

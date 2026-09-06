@@ -283,11 +283,29 @@ export interface Translations {
         noPreview: string
         services: {
           order_confirmation: string
+          cod_confirmation: string
+          payment_pending: string
+          payment_confirmed: string
+          order_preparing: string
+          order_ready: string
           shipping_tracking: string
+          out_for_delivery: string
+          order_delivered: string
+          order_cancelled: string
+          order_refunded: string
         }
         serviceDescriptions: {
           order_confirmation: string
+          cod_confirmation: string
+          payment_pending: string
+          payment_confirmed: string
+          order_preparing: string
+          order_ready: string
           shipping_tracking: string
+          out_for_delivery: string
+          order_delivered: string
+          order_cancelled: string
+          order_refunded: string
         }
       }
     }

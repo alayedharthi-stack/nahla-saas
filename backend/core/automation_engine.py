@@ -1001,6 +1001,66 @@ async def _execute_action(
         }
     to_phone = normalized_phone
 
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        MODE_LEGACY_LIFECYCLE,
+        evaluate_and_audit,
+    )
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=to_phone,
+        sender_path="automation_engine",
+        mode=MODE_LEGACY_LIFECYCLE,
+        automation_type=str(getattr(automation, "automation_type", "") or ""),
+    )
+    if not canary.allowed:
+        return False, {
+            "skipped": True,
+            "skip_reason": canary.reason,
+            "error_code": canary.reason,
+        }
+
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        lifecycle_dispatch_owns_legacy_send,
+        REASON_LIFECYCLE_OWNS_EVENT,
+    )
+    event_type = str(getattr(event, "event_type", "") or "")
+    event_payload = dict(getattr(event, "payload", None) or {})
+    if lifecycle_dispatch_owns_legacy_send(
+        int(tenant_id),
+        automation_type=str(getattr(automation, "automation_type", "") or ""),
+        event_type=event_type,
+        payload=event_payload,
+    ):
+        return False, {
+            "skipped": True,
+            "skip_reason": REASON_LIFECYCLE_OWNS_EVENT,
+            "error_code": REASON_LIFECYCLE_OWNS_EVENT,
+        }
+
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        evaluate_order_update_delivery,
+        is_order_update_service_key,
+    )
+    owned_service_key = _derive_service_key(automation, {})
+    if owned_service_key == "shipping_update":
+        owned_service_key = "shipping_tracking"
+    if event_type == "order_shipped":
+        owned_service_key = "shipping_tracking"
+    if event_type == "order_cod_pending" and event_payload.get("message_type") == "initial_confirmation":
+        owned_service_key = owned_service_key or "cod_confirmation"
+    if owned_service_key == "order_notifications":
+        owned_service_key = "order_confirmation"
+    if owned_service_key and is_order_update_service_key(owned_service_key):
+        allowed, flag_reason = evaluate_order_update_delivery(
+            db, int(tenant_id), owned_service_key
+        )
+        if not allowed:
+            return False, {
+                "skipped": True,
+                "skip_reason": flag_reason or "order_update_disabled",
+                "error_code": flag_reason or "order_update_disabled",
+            }
+
     # ── WhatsApp connection ───────────────────────────────────────────────────
     wa_conn: Optional[Any] = (
         db.query(WhatsAppConnection)
@@ -3128,6 +3188,16 @@ async def _execute_ai_recovery_step(
         operation="execute_ai_recovery_step",
         tenant_id=tenant_id,
     )
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        commerce_lifecycle_dispatch_tenant_permitted,
+    )
+    if commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id)):
+        return False, {
+            "skipped": True,
+            "skip_reason": "lifecycle_canary_zero_ai",
+            "error_code": "lifecycle_canary_zero_ai",
+            "error": "lifecycle_canary_zero_ai",
+        }
     from core.wa_usage import has_open_service_window  # noqa: PLC0415
 
     if not has_open_service_window(db, tenant_id, to_phone):
@@ -3363,6 +3433,39 @@ def _lifecycle_body_placeholder_values(
     return body_text, [str(v) if str(v).strip() else " " for v in var_values]
 
 
+def _lifecycle_session_quick_replies(template: Any) -> List[str]:
+    titles: List[str] = []
+    for comp in getattr(template, "components", None) or []:
+        if str((comp or {}).get("type", "")).upper() != "BUTTONS":
+            continue
+        for btn in (comp or {}).get("buttons") or []:
+            if str((btn or {}).get("type", "")).upper() != "QUICK_REPLY":
+                continue
+            title = str((btn or {}).get("text") or "").strip()
+            if title:
+                titles.append(title)
+    return titles[:3]
+
+
+def _lifecycle_quick_reply_id(
+    title: str,
+    idx: int,
+    *,
+    order_id: Optional[Any] = None,
+) -> str:
+    try:
+        from services.cod_confirmation import classify_cod_reply  # noqa: PLC0415
+        action = classify_cod_reply(title)
+    except Exception:
+        action = None
+    oid = str(order_id or "").strip()
+    if action == "confirm":
+        return f"nahla_cod_confirm:{oid}" if oid else "nahla_cod_confirm"
+    if action == "cancel":
+        return f"nahla_cod_cancel:{oid}" if oid else "nahla_cod_cancel"
+    return f"nahla_lifecycle_qr_{idx}"
+
+
 def render_lifecycle_approved_body(
     db: Session,
     tenant_id: int,
@@ -3413,6 +3516,9 @@ async def send_lifecycle_whatsapp_session_body(
     customer_name: Optional[str] = None,
     service_key: Optional[str] = None,
     blocked_path: str = "lifecycle_dispatch",
+    canary_mode: Optional[str] = None,
+    canary_automation_type: Optional[str] = None,
+    canary_sender_path: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Send lifecycle BODY text as a free-form session message.
@@ -3427,6 +3533,24 @@ async def send_lifecycle_whatsapp_session_body(
         operation="lifecycle_session_send",
         tenant_id=tenant_id,
     )
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        MODE_NEW_LIFECYCLE,
+        evaluate_and_audit,
+    )
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=to_phone,
+        sender_path=canary_sender_path or "lifecycle_session_send",
+        mode=canary_mode or MODE_NEW_LIFECYCLE,
+        automation_type=canary_automation_type,
+    )
+    if not canary.allowed:
+        return "failed", {
+            "error_code": canary.reason,
+            "template": getattr(template, "name", None),
+            "send_method": "session_message",
+            "canary_blocked": True,
+        }
     from models import WhatsAppConnection  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
     from core.billing import has_billing_access as _has_access  # noqa: PLC0415
@@ -3481,6 +3605,32 @@ async def send_lifecycle_whatsapp_session_body(
         "type": "text",
         "text": {"preview_url": False, "body": body_text},
     }
+    quick_replies = _lifecycle_session_quick_replies(template)
+    if quick_replies:
+        order_id = str((payload or {}).get("order_id") or "").strip()
+        send_payload = {
+            "messaging_product": "whatsapp",
+            "to": normalized_phone,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body_text},
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": _lifecycle_quick_reply_id(
+                                    title, idx, order_id=order_id
+                                ),
+                                "title": title[:20],
+                            },
+                        }
+                        for idx, title in enumerate(quick_replies[:3])
+                    ]
+                },
+            },
+        }
 
     try:
         from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
@@ -3559,6 +3709,9 @@ async def send_lifecycle_whatsapp_template(
     customer_name: Optional[str] = None,
     service_key: Optional[str] = None,
     blocked_path: str = "lifecycle_dispatch",
+    canary_mode: Optional[str] = None,
+    canary_automation_type: Optional[str] = None,
+    canary_sender_path: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Send a resolved approved WhatsApp template for lifecycle dispatch.
@@ -3573,6 +3726,23 @@ async def send_lifecycle_whatsapp_template(
         operation="lifecycle_template_send",
         tenant_id=tenant_id,
     )
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        MODE_NEW_LIFECYCLE,
+        evaluate_and_audit,
+    )
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=to_phone,
+        sender_path=canary_sender_path or "lifecycle_template_send",
+        mode=canary_mode or MODE_NEW_LIFECYCLE,
+        automation_type=canary_automation_type,
+    )
+    if not canary.allowed:
+        return "failed", {
+            "error_code": canary.reason,
+            "template": getattr(template, "name", None),
+            "canary_blocked": True,
+        }
     from models import WhatsAppConnection  # noqa: PLC0415
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 
@@ -3739,6 +3909,22 @@ async def send_lifecycle_whatsapp_template(
                     "sub_type": "url",
                     "index": str(btn_idx),
                     "parameters": [{"type": "text", "text": _suffix or " "}],
+                })
+            elif btn_type == "QUICK_REPLY":
+                title = str(btn.get("text") or "").strip()
+                order_id = str(_payload_for_btn.get("order_id") or "").strip()
+                components.append({
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": str(btn_idx),
+                    "parameters": [
+                        {
+                            "type": "payload",
+                            "payload": _lifecycle_quick_reply_id(
+                                title, btn_idx, order_id=order_id
+                            )[:128],
+                        }
+                    ],
                 })
 
     send_payload: Dict[str, Any] = {

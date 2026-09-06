@@ -488,6 +488,18 @@ def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
         cod_methods = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
         is_cod = bool(pm and any(pm == m or m in pm for m in cod_methods))
         if is_cod:
+            from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+                commerce_lifecycle_dispatch_tenant_permitted,
+            )
+            from services.cod_confirmation import (  # noqa: PLC0415
+                nahla_owns_cod_customer_confirmation,
+            )
+            if (
+                commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id))
+                or nahla_owns_cod_customer_confirmation(order)
+            ):
+                is_cod = False
+        if is_cod:
             emit_automation_event(
                 db, tenant_id,
                 AutomationTrigger.ORDER_COD_PENDING.value,

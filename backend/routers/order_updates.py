@@ -11,9 +11,10 @@ from sqlalchemy.orm import Session
 from core.auth import get_current_user
 from core.commerce_lifecycle.order_updates import (
     ORDER_UPDATE_SERVICE_KEYS,
+    REASON_SETTINGS_UNAVAILABLE,
     create_revision_from_active,
-    get_order_update_flags,
     is_order_update_service_key,
+    load_order_update_settings_truth,
     promote_approved_revision,
     resolve_active_and_pending,
     set_order_update_flags,
@@ -26,6 +27,16 @@ router = APIRouter(prefix="/order-updates", tags=["order-updates"])
 class OrderUpdateFlagsPayload(BaseModel):
     order_confirmation: Optional[Any] = None
     shipping_tracking: Optional[Any] = None
+    cod_confirmation: Optional[Any] = None
+    payment_pending: Optional[Any] = None
+    payment_confirmed: Optional[Any] = None
+    order_preparing: Optional[Any] = None
+    order_ready: Optional[Any] = None
+    out_for_delivery: Optional[Any] = None
+    order_delivered: Optional[Any] = None
+    order_cancelled: Optional[Any] = None
+    order_refunded: Optional[Any] = None
+    enabled: Optional[Any] = None
     services: Optional[Dict[str, Any]] = None
     flags: Optional[Dict[str, Any]] = None
 
@@ -37,7 +48,10 @@ class RevisionCreatePayload(BaseModel):
 
 
 def _tenant_id(user: Any) -> int:
-    tid = getattr(user, "tenant_id", None)
+    if isinstance(user, dict):
+        tid = user.get("tenant_id")
+    else:
+        tid = getattr(user, "tenant_id", None)
     if tid is None:
         raise HTTPException(status_code=403, detail="tenant_required")
     return int(tid)
@@ -116,21 +130,32 @@ def get_settings(
     user=Depends(get_current_user),
 ) -> Dict[str, Any]:
     tid = _tenant_id(user)
-    flags = get_order_update_flags(db, tid)
+    truth = load_order_update_settings_truth(db, tid)
+    if not truth.available:
+        raise HTTPException(status_code=503, detail=REASON_SETTINGS_UNAVAILABLE)
+    flags = dict(truth.flags)
+    master = bool(truth.master_enabled)
     services = {
         key: resolve_active_and_pending(db, tid, key)
         for key in ORDER_UPDATE_SERVICE_KEYS
     }
-    # Flat enable toggles for the Settings tab API client.
-    return {
+    payload: Dict[str, Any] = {
+        "enabled": master,
         "flags": flags,
-        "services": {
-            key: {"enabled": flags[key], **services[key]}
+        "effective": {
+            key: bool(master and flags[key])
             for key in ORDER_UPDATE_SERVICE_KEYS
         },
-        "order_confirmation": {"enabled": flags["order_confirmation"]},
-        "shipping_tracking": {"enabled": flags["shipping_tracking"]},
+        "services": {
+            key: {
+                **services[key],
+                "enabled": flags[key],
+                "effective_enabled": bool(master and flags[key]),
+            }
+            for key in ORDER_UPDATE_SERVICE_KEYS
+        },
     }
+    return payload
 
 
 @router.put("/settings")
@@ -142,25 +167,46 @@ def put_settings(
     tid = _tenant_id(user)
     raw = payload.model_dump(exclude_none=True)
     updates: Dict[str, bool] = {}
+    master: Optional[bool] = None
 
     def _consume(key: str, val: Any) -> None:
+        nonlocal master
+        if key == "enabled" and not isinstance(val, dict):
+            master = bool(val)
+            return
         if isinstance(val, bool):
-            updates[key] = val
+            if key == "enabled":
+                master = val
+            else:
+                updates[key] = val
         elif isinstance(val, dict) and "enabled" in val:
             updates[key] = bool(val["enabled"])
 
+    if "enabled" in raw:
+        _consume("enabled", raw["enabled"])
     for key in ORDER_UPDATE_SERVICE_KEYS:
         if key in raw:
             _consume(key, raw[key])
     for bucket_name in ("services", "flags"):
         bucket = raw.get(bucket_name) or {}
         if isinstance(bucket, dict):
+            if "enabled" in bucket and not isinstance(bucket.get("enabled"), dict):
+                master = bool(bucket["enabled"])
             for key in ORDER_UPDATE_SERVICE_KEYS:
                 if key in bucket:
                     _consume(key, bucket[key])
 
-    set_order_update_flags(db, tid, updates, commit=True)
+    set_order_update_flags(db, tid, updates, master_enabled=master, commit=True)
     return get_settings(db=db, user=user)
+
+
+@router.patch("/settings")
+def patch_settings(
+    payload: OrderUpdateFlagsPayload,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    return put_settings(payload, db=db, user=user)
 
 
 @router.get("/{service_key}")

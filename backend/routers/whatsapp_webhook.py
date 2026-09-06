@@ -416,6 +416,9 @@ def _dedup_operational_substitute(
     inbound_text: str,
     inbound_metadata: dict | None,
     normalized_type: str | None,
+    decision: object | None = None,
+    decision_action: str = "",
+    decision_args: dict | None = None,
 ) -> str:
     """Operational dedup fallback only — empty when no state-backed message."""
     try:
@@ -430,6 +433,9 @@ def _dedup_operational_substitute(
             inbound_text=inbound_text,
             inbound_metadata=inbound_metadata,
             normalized_type=normalized_type,
+            decision=decision,
+            decision_action=decision_action,
+            decision_args=decision_args,
         )
     except Exception as _ctx_exc:  # noqa: BLE001
         logger.debug(
@@ -3994,24 +4000,31 @@ async def _dispatch_message(
                 # a "تأكيد الطلب" tap on a merchant tenant.
                 try:
                     from services.cod_confirmation import (  # noqa: PLC0415
-                        classify_cod_reply, handle_cod_reply,
+                        consume_owned_cod_button_inbound,
+                        is_owned_cod_button_payload,
                     )
-                    if classify_cod_reply(btn_txt) is not None:
-                        decision, order = await handle_cod_reply(
-                            db,
-                            tenant_id=resolved_tenant_id,
-                            customer_phone=sender,
-                            text=btn_txt,
-                        )
-                        if order is not None:
+                except Exception as exc:
+                    logger.error("[Webhook] COD button import failed: %s", exc)
+                else:
+                    if is_owned_cod_button_payload(btn_id):
+                        async def _cod_followup(decision, order):
                             await _send_cod_followup_message(
                                 phone_id=used_pid, to=sender,
                                 decision=decision, order=order,
                                 _tenant_id=resolved_tenant_id, _db=db,
                             )
-                            return
-                except Exception as exc:
-                    logger.error("[Webhook] COD button handler failed: %s", exc)
+                        try:
+                            await consume_owned_cod_button_inbound(
+                                db,
+                                tenant_id=resolved_tenant_id,
+                                customer_phone=sender,
+                                text=btn_txt,
+                                button_payload=btn_id,
+                                followup_send=_cod_followup,
+                            )
+                        except Exception as exc:
+                            logger.error("[Webhook] COD button handler failed: %s", exc)
+                        return
 
                 # Product-pick buttons from merchant brain — route to merchant AI
                 if btn_id.startswith("pick_") and not _is_platform_tenant(db, resolved_tenant_id):
@@ -4274,6 +4287,34 @@ async def _dispatch_message(
             # already extracted human-readable text via _extract_wa_message_text.
             # Treat it exactly like a text message so the Brain receives it.
             if _wa_text and msg_type == "button" and not _is_platform_tenant(db, resolved_tenant_id):
+                _btn_payload = str((msg.get("button") or {}).get("payload") or "")
+                try:
+                    from services.cod_confirmation import (  # noqa: PLC0415
+                        consume_owned_cod_button_inbound,
+                        is_owned_cod_button_payload,
+                    )
+                except Exception as exc:
+                    logger.error("[Webhook] COD template-button import failed: %s", exc)
+                else:
+                    if is_owned_cod_button_payload(_btn_payload):
+                        async def _cod_tpl_followup(decision, order):
+                            await _send_cod_followup_message(
+                                phone_id=used_pid, to=sender,
+                                decision=decision, order=order,
+                                _tenant_id=resolved_tenant_id, _db=db,
+                            )
+                        try:
+                            await consume_owned_cod_button_inbound(
+                                db,
+                                tenant_id=resolved_tenant_id,
+                                customer_phone=sender,
+                                text=_wa_text,
+                                button_payload=_btn_payload,
+                                followup_send=_cod_tpl_followup,
+                            )
+                        except Exception as exc:
+                            logger.error("[Webhook] COD template-button handler failed: %s", exc)
+                        return
                 logger.info(
                     "[WA PARSER] button tap rescued | tenant=%s text=%r source=%s",
                     resolved_tenant_id, _wa_text, _wa_source,
@@ -6988,14 +7029,29 @@ async def _handle_merchant_message(
     # unrelated text, so this guard is safe to run on every message.
     try:
         from services.cod_confirmation import (  # noqa: PLC0415
-            classify_cod_reply, handle_cod_reply,
+            classify_cod_reply, handle_cod_reply, is_owned_cod_button_payload,
         )
+        if is_owned_cod_button_payload(text):
+            decision, order = await handle_cod_reply(
+                db,
+                tenant_id=tenant_id,
+                customer_phone=to,
+                text=text,
+                button_payload=text,
+            )
+            if order is not None:
+                await _send_cod_followup_message(
+                    phone_id=phone_id, to=to, decision=decision, order=order,
+                    _tenant_id=tenant_id, _db=db,
+                )
+            return
         if classify_cod_reply(text) is not None:
             decision, order = await handle_cod_reply(
                 db,
                 tenant_id=tenant_id,
                 customer_phone=to,
                 text=text,
+                button_payload=text,
             )
             if order is not None:
                 await _send_cod_followup_message(
@@ -7003,8 +7059,7 @@ async def _handle_merchant_message(
                     _tenant_id=tenant_id, _db=db,
                 )
                 return
-            # No pending COD order → fall through to normal AI reply, but
-            # don't block the rest of the conversation.
+            # Title-only fallback with no pending order continues to AI.
     except Exception as exc:
         logger.error("[Merchant] COD text-reply handler failed: %s", exc)
 
@@ -9994,6 +10049,8 @@ async def _handle_merchant_message(
                             inbound_text=text,
                             inbound_metadata=_meta_for_dedup,
                             normalized_type=_norm_type,
+                            decision_action=str(_br_dec_action or ""),
+                            decision_args=dict(_br_dec_args or {}),
                         )
                         if not (reply or "").strip():
                             logger.info(

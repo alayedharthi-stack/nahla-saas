@@ -138,6 +138,7 @@ class TestDedupOrderStateGate:
                 history=[],
                 default_fallback="fallback",
                 inbound_text="تمام",
+                decision_action="propose_draft_order",
             )
         finally:
             of._load_brain_state = orig_load

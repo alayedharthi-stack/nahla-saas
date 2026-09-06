@@ -7,13 +7,23 @@ The flow has two halves and they live in this module so the contract is
 in one place rather than scattered between routers/ai_sales.py and the
 WhatsApp webhook:
 
-  Step 1 — send_cod_confirmation_template(db, tenant_id, order)
+  Step 1 — checkout policy then optional send_cod_confirmation_template
     Triggered by POST /api/v1/ai-sales/create-order when the customer
-    chose `cash_on_delivery`. Sends the APPROVED Meta template
-    `cod_order_confirmation_ar` (named slots: customer_name, product_name,
-    order_amount) with QUICK_REPLY buttons "تأكيد الطلب ✅" / "إلغاء
-    الطلب ❌". The local order is stored in status `pending_confirmation`
-    and is NOT yet pushed to the merchant store.
+    chose `cash_on_delivery`.
+      • confirmation ENABLED → local `pending_confirmation`, send once,
+        wait for confirm/cancel, then push to the store.
+      • confirmation DISABLED → do not strand pending_confirmation; do
+        not send; push immediately through the normal COD store path.
+      • settings READ failure → fail closed (no send, no silent push).
+
+    Customer-facing send is owned exclusively here. It uses the canonical
+    order-updates `service_key=cod_confirmation` active APPROVED revision:
+      OPEN 24h  → same revision as interactive/session buttons
+      CLOSED 24h → same revision as Meta template
+    Buttons stay deterministic: "تأكيد الطلب ✅" / "إلغاء الطلب ❌".
+
+    StoreSync / Salla first observation of `under_review` MUST NOT send
+    another confirmation request.
 
   Step 2 — handle_cod_reply(db, tenant_id, customer_phone, button_text)
     Triggered by the WhatsApp webhook when the customer taps a button
@@ -26,8 +36,9 @@ WhatsApp webhook:
                    "بإنتظار المراجعة"), and saves the returned external
                    order id.
       • cancel   → sets the local status to `cancelled`.
-    No action taken if the customer has no pending COD order, so a
-    button-text false positive is harmless.
+    Recognized button payloads (`nahla_cod_confirm` / `nahla_cod_cancel`)
+    are always consumed by the webhook even when no pending order exists.
+    Unrecognized buttons fall through to generic merchant routing.
 
 The state names `pending_confirmation` and `under_review` are deliberate
 and match what Salla's Orders API returns for `payment_method=cod` orders
@@ -42,6 +53,7 @@ Every transition is logged through observability.event_logger so the
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -59,6 +71,14 @@ logger = logging.getLogger("nahla.cod_confirmation")
 STATUS_PENDING_CUSTOMER  = "pending_confirmation"
 STATUS_PENDING_MERCHANT  = "under_review"
 STATUS_CANCELLED         = "cancelled"
+CANONICAL_SERVICE_KEY    = "cod_confirmation"
+
+COD_INBOUND_CONSUMED = "consumed"
+COD_INBOUND_PASSTHROUGH = "passthrough"
+
+COD_CHECKOUT_WAIT_FOR_CUSTOMER = "wait_for_customer"
+COD_CHECKOUT_PUSH_IMMEDIATE = "push_immediate"
+COD_CHECKOUT_SETTINGS_UNAVAILABLE = "settings_unavailable"
 
 # Customer reply matchers. We accept the full button text plus a small
 # whitelist of free-text equivalents Saudi customers commonly type when
@@ -87,6 +107,198 @@ _CANCEL_TEXTS: tuple[str, ...] = (
     "cancel",
 )
 
+_COD_BUTTON_TITLES: tuple[str, str] = (
+    "تأكيد الطلب ✅",
+    "إلغاء الطلب ❌",
+)
+
+_COD_CONFIRM_ID = "nahla_cod_confirm"
+_COD_CANCEL_ID = "nahla_cod_cancel"
+
+
+def parse_cod_button_payload(raw: str) -> Tuple[Optional[str], Optional[int]]:
+    """Parse deterministic COD button ids. Never treats an unverified id as truth."""
+    text = str(raw or "").strip()
+    if not text:
+        return None, None
+    lower = text.lower()
+    for action, token in (("confirm", _COD_CONFIRM_ID), ("cancel", _COD_CANCEL_ID)):
+        if lower == token:
+            return action, None
+        prefix = f"{token}:"
+        if lower.startswith(prefix):
+            rest = text[len(prefix):].strip()
+            if rest.isdigit():
+                return action, int(rest)
+            return action, None
+    return None, None
+
+
+def is_owned_cod_button_payload(raw: Optional[str]) -> bool:
+    """True when the WhatsApp button id/payload is a Nahla COD control."""
+    action, _oid = parse_cod_button_payload(raw or "")
+    return action is not None
+
+
+async def intercept_cod_button_inbound(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    text: str,
+    button_payload: Optional[str],
+) -> Tuple[str, Optional[str], Optional[Any]]:
+    """
+    Own interactive / template-button inbound for recognized COD payloads.
+
+    Returns ``(consumed|passthrough, decision, order)``. ``consumed`` means
+    the webhook must return without conversational routing, even when
+    ``order`` is None (duplicate, stale, foreign id, or no pending order).
+
+    A non-empty unrecognized payload is never stolen via visible title.
+    """
+    if not is_owned_cod_button_payload(button_payload):
+        return COD_INBOUND_PASSTHROUGH, None, None
+    decision, order = await handle_cod_reply(
+        db,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        text=text,
+        button_payload=button_payload,
+    )
+    return COD_INBOUND_CONSUMED, decision, order
+
+
+async def consume_owned_cod_button_inbound(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    text: str,
+    button_payload: Optional[str],
+    followup_send=None,
+) -> str:
+    """
+    Fail-closed owner for recognized COD button payloads.
+
+    Unrecognized payloads return passthrough and do not run the handler.
+    Recognized payloads always return consumed and never raise, including when
+    pending-order lookup, DB work, handle_cod_reply, or follow-up send fails.
+    """
+    if not is_owned_cod_button_payload(button_payload):
+        return COD_INBOUND_PASSTHROUGH
+    try:
+        _disposition, decision, order = await intercept_cod_button_inbound(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            text=text,
+            button_payload=button_payload,
+        )
+        if order is not None and followup_send is not None:
+            try:
+                await followup_send(decision, order)
+            except Exception:
+                logger.exception(
+                    "[COD] owned-button followup failed tenant=%s",
+                    tenant_id,
+                )
+    except Exception:
+        logger.exception(
+            "[COD] owned-button handler failed tenant=%s",
+            tenant_id,
+        )
+    return COD_INBOUND_CONSUMED
+
+
+class CodOrderingDisabled(Exception):
+    """Merchant disabled COD as a payment method (not the notification)."""
+
+
+class CodCheckoutSettingsUnavailable(Exception):
+    """Settings read failed; caller must not choose send vs immediate push."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class CodCheckoutPlan:
+    policy: str
+    reason: Optional[str]
+    local_status: Optional[str]
+    push_to_store_now: bool
+    send_confirmation: bool
+
+
+def plan_cod_checkout(db, tenant_id: int) -> CodCheckoutPlan:
+    """Decide wait-for-button vs immediate store push from one settings snapshot."""
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        REASON_SETTINGS_UNAVAILABLE,
+        evaluate_order_update_delivery_from_truth,
+        load_order_update_settings_truth,
+    )
+
+    truth = load_order_update_settings_truth(db, int(tenant_id))
+    if not truth.available:
+        return CodCheckoutPlan(
+            policy=COD_CHECKOUT_SETTINGS_UNAVAILABLE,
+            reason=truth.reason or REASON_SETTINGS_UNAVAILABLE,
+            local_status=None,
+            push_to_store_now=False,
+            send_confirmation=False,
+        )
+    allowed, reason = evaluate_order_update_delivery_from_truth(
+        truth, CANONICAL_SERVICE_KEY
+    )
+    if allowed:
+        return CodCheckoutPlan(
+            policy=COD_CHECKOUT_WAIT_FOR_CUSTOMER,
+            reason=None,
+            local_status=STATUS_PENDING_CUSTOMER,
+            push_to_store_now=False,
+            send_confirmation=True,
+        )
+    return CodCheckoutPlan(
+        policy=COD_CHECKOUT_PUSH_IMMEDIATE,
+        reason=reason,
+        local_status=STATUS_PENDING_MERCHANT,
+        push_to_store_now=True,
+        send_confirmation=False,
+    )
+
+
+def require_cod_checkout_plan(
+    db,
+    tenant_id: int,
+    *,
+    ordering_allowed: bool,
+) -> CodCheckoutPlan:
+    """COD payment-method gate, then confirmation-notification policy."""
+    if not ordering_allowed:
+        raise CodOrderingDisabled()
+    plan = plan_cod_checkout(db, tenant_id)
+    if plan.policy == COD_CHECKOUT_SETTINGS_UNAVAILABLE:
+        raise CodCheckoutSettingsUnavailable(
+            plan.reason or "order_update_settings_unavailable"
+        )
+    return plan
+
+
+def disabled_confirmation_bypass_metadata(
+    reason: Optional[str],
+    *,
+    external_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {
+        "cod_confirmation_bypassed": True,
+        "cod_confirmation_bypass_reason": reason or "order_update_disabled",
+    }
+    if external_id:
+        meta["cod_pushed_external_id"] = str(external_id)
+    return meta
+
 
 def classify_cod_reply(text: str) -> Optional[str]:
     """
@@ -95,6 +307,9 @@ def classify_cod_reply(text: str) -> Optional[str]:
     isn't a COD response — caller should then fall through to the normal
     AI reply path so we don't break unrelated conversations.
     """
+    action, _oid = parse_cod_button_payload(text)
+    if action is not None:
+        return action
     if not text:
         return None
     norm = text.strip().lower()
@@ -103,6 +318,53 @@ def classify_cod_reply(text: str) -> Optional[str]:
     if norm in {t.lower() for t in _CANCEL_TEXTS}:
         return "cancel"
     return None
+
+
+def _order_phone_matches(order: Any, customer_phone: str) -> bool:
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+    normalized = normalize_phone(customer_phone) or customer_phone
+    info = getattr(order, "customer_info", None) or {}
+    if not isinstance(info, dict):
+        return False
+    for k in ("phone", "mobile"):
+        v = info.get(k)
+        if not v:
+            continue
+        if normalize_phone(str(v)) == normalized or str(v) == customer_phone:
+            return True
+    return False
+
+
+def nahla_owns_cod_customer_confirmation(order: Any) -> bool:
+    """True when Nahla checkout already requested or resolved COD confirm."""
+    meta = getattr(order, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return False
+    return bool(
+        meta.get("nahla_cod_confirmation_sent")
+        or meta.get("cod_confirmed_at")
+        or meta.get("cod_cancelled_at")
+        or meta.get("cod_pushed_external_id")
+        or meta.get("cod_confirmation_bypassed")
+    )
+
+
+def _stamp_cod_confirmation_sent(order: Any, *, template: Any, send_method: str) -> None:
+    meta = dict(getattr(order, "extra_metadata", None) or {})
+    meta["nahla_cod_confirmation_sent"] = True
+    meta["nahla_cod_confirmation_sent_at"] = datetime.now(timezone.utc).isoformat()
+    meta["nahla_cod_confirmation_service_key"] = CANONICAL_SERVICE_KEY
+    meta["nahla_cod_confirmation_send_method"] = send_method
+    if template is not None:
+        meta["nahla_cod_confirmation_template_id"] = getattr(template, "id", None)
+        meta["nahla_cod_confirmation_template_name"] = getattr(template, "name", None)
+        meta["nahla_cod_confirmation_revision"] = getattr(template, "revision", None)
+    order.extra_metadata = meta
+    try:
+        flag_modified(order, "extra_metadata")
+    except Exception:  # noqa: silent-ok — SimpleNamespace orders in tests have no SA state
+        pass
 
 
 async def send_cod_confirmation_template(
@@ -116,137 +378,164 @@ async def send_cod_confirmation_template(
     total_amount: str,
 ) -> Dict[str, Any]:
     """
-    Send the cod_order_confirmation_ar template. Best-effort: failures
-    log loudly but do not raise — the order itself is already durable.
+    Send the canonical ``cod_confirmation`` lifecycle revision.
+
+    Failures log loudly but do not raise — the order itself is already durable.
     Returns a dict with `sent` (bool), `wa_message_id` (or None), and
     `error` (optional string) for the caller to log alongside the order.
+
+    The hard-named legacy Meta template is no longer a send owner.
     """
-    from models import WhatsAppConnection, WhatsAppTemplate  # noqa: PLC0415
-    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
-    from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
-
-    template_name = "cod_order_confirmation_ar"
-
-    wa_conn = (
-        db.query(WhatsAppConnection)
-        .filter(
-            WhatsAppConnection.tenant_id == tenant_id,
-            WhatsAppConnection.status    == "connected",
-        )
-        .first()
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        MODE_LEGACY_LIFECYCLE,
+        evaluate_and_audit,
     )
-    if not wa_conn:
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        evaluate_order_update_delivery,
+        resolve_lifecycle_template_for_send,
+    )
+    from core.commerce_lifecycle.window import lifecycle_service_window_is_open  # noqa: PLC0415
+    from core.automation_engine import (  # noqa: PLC0415
+        send_lifecycle_whatsapp_session_body,
+        send_lifecycle_whatsapp_template,
+    )
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+    canary = evaluate_and_audit(
+        int(tenant_id),
+        phone=customer_phone,
+        sender_path="cod_confirmation",
+        mode=MODE_LEGACY_LIFECYCLE,
+        automation_type="cod_confirmation",
+    )
+    if not canary.allowed:
+        logger.info(
+            "[COD] tenant=%s order=%s: canary gate %s",
+            tenant_id, getattr(order, "id", None), canary.reason,
+        )
+        return {"sent": False, "error": canary.reason, "canary_blocked": True}
+
+    allowed, flag_reason = evaluate_order_update_delivery(
+        db, int(tenant_id), CANONICAL_SERVICE_KEY
+    )
+    if not allowed:
+        logger.info(
+            "[COD] tenant=%s order=%s: delivery blocked %s",
+            tenant_id, getattr(order, "id", None), flag_reason,
+        )
+        return {"sent": False, "error": flag_reason or "order_update_disabled"}
+
+    template = resolve_lifecycle_template_for_send(
+        db, int(tenant_id), CANONICAL_SERVICE_KEY
+    )
+    if template is None:
         logger.warning(
-            "[COD] tenant=%s order=%s: no connected WhatsApp — skipping template send",
+            "[COD] tenant=%s order=%s: no APPROVED cod_confirmation revision",
             tenant_id, getattr(order, "id", None),
         )
-        return {"sent": False, "error": "no_whatsapp_connection"}
-
-    template = (
-        db.query(WhatsAppTemplate)
-        .filter(
-            WhatsAppTemplate.tenant_id == tenant_id,
-            WhatsAppTemplate.name      == template_name,
-            WhatsAppTemplate.status    == "APPROVED",
-        )
-        .first()
-    )
-    if not template:
-        logger.warning(
-            "[COD] tenant=%s order=%s: template %s not APPROVED — skipping send",
-            tenant_id, getattr(order, "id", None), template_name,
-        )
-        return {"sent": False, "error": "template_not_approved"}
+        return {"sent": False, "error": "no_approved_template"}
 
     to = normalize_phone(customer_phone) or customer_phone
-    body_params = [
-        # Use the central fallback (``"عميلنا الغالي"``) so every
-        # template / campaign / automation uses the same greeting.
-        # See ``core.customer_display.DEFAULT_FALLBACK_NAME``.
-        {
-            "type": "text",
-            "text": _customer_display_passthrough(customer_name),
-        },
-        {"type": "text", "text": str(product_name or "طلبك")},
-        {"type": "text", "text": str(total_amount or "—")},
-    ]
+    window_open, window_source = lifecycle_service_window_is_open(
+        db, int(tenant_id), to
+    )
+    send_method = "session_message" if window_open else "approved_template"
     payload: Dict[str, Any] = {
-        "messaging_product": "whatsapp",
-        "to":                to,
-        "type":              "template",
-        "template": {
-            "name":       template_name,
-            "language":   {"code": template.language or "ar"},
-            "components": [{"type": "body", "parameters": body_params}],
-        },
+        "order_number": str(
+            getattr(order, "external_order_number", None)
+            or getattr(order, "id", "")
+            or ""
+        ),
+        "order_id": str(getattr(order, "id", "") or ""),
+        "product_name": str(product_name or "طلبك"),
+        "total": str(total_amount or ""),
+        "amount": str(total_amount or ""),
+        "payment_method": "cod",
+        "customer_name": _customer_display_passthrough(customer_name),
     }
-
+    last_mile_kwargs = dict(
+        customer_name=_customer_display_passthrough(customer_name),
+        service_key=CANONICAL_SERVICE_KEY,
+        canary_mode=MODE_LEGACY_LIFECYCLE,
+        canary_automation_type="cod_confirmation",
+        canary_sender_path="cod_confirmation",
+    )
     try:
-        response, _ = await provider_send_message(
-            db,
-            wa_conn,
-            tenant_id=tenant_id,
-            operation="send_template",
-            phone_id=wa_conn.phone_number_id,
-            payload=payload,
-        )
-        wa_msg_id = (response or {}).get("messages", [{}])[0].get("id")
-
-        try:
-            from routers.conversations import record_outbound_message  # noqa: PLC0415
-            import re
-            _vals = [customer_name, product_name, total_amount]
-            def _sub(m):
-                i = int(m.group(1)) - 1
-                return str(_vals[i]) if i < len(_vals) else m.group(0)
-            _parts = []
-            for comp in (template.components or []):
-                _ct = (comp.get("type") or "").upper()
-                if _ct == "BODY" and comp.get("text"):
-                    _parts.append(re.sub(r"\{\{(\d+)\}\}", _sub, comp["text"]))
-                elif _ct == "FOOTER" and comp.get("text"):
-                    _parts.append(comp["text"])
-                elif _ct == "BUTTONS":
-                    _bl = []
-                    for _b in (comp.get("buttons") or []):
-                        _bt = (_b.get("type") or "").upper()
-                        _lbl = _b.get("text") or ""
-                        if _bt == "QUICK_REPLY": _bl.append(f"↩️ {_lbl}")
-                        elif _bt == "URL": _bl.append(f"🔗 {_lbl or 'رابط'}")
-                        elif _lbl: _bl.append(f"▪️ {_lbl}")
-                    if _bl:
-                        _parts.append("━━━━━\n" + "\n".join(_bl))
-            _rendered = "\n\n".join(_parts) if _parts else f"[{template_name}]"
-            record_outbound_message(
-                db, tenant_id, to, _rendered,
-                event_type="cod_confirmation",
-                customer_name=customer_name,
-                extra={"template_name": template_name, "order_id": getattr(order, "id", None)},
+        if send_method == "session_message":
+            outcome, info = await send_lifecycle_whatsapp_session_body(
+                db, int(tenant_id), to, template, payload, **last_mile_kwargs
             )
-        except Exception:
-            pass
-
-        return {"sent": True, "wa_message_id": wa_msg_id, "error": None}
+        else:
+            outcome, info = await send_lifecycle_whatsapp_template(
+                db, int(tenant_id), to, template, payload, **last_mile_kwargs
+            )
     except Exception as exc:
         logger.error(
-            "[COD] tenant=%s order=%s template send failed: %s",
+            "[COD] tenant=%s order=%s canonical send failed: %s",
             tenant_id, getattr(order, "id", None), exc,
         )
-        return {"sent": False, "error": str(exc)[:200]}
+        return {
+            "sent": False,
+            "error": str(exc)[:200],
+            "template_name": getattr(template, "name", None),
+            "service_key": CANONICAL_SERVICE_KEY,
+        }
+
+    if outcome != "sent":
+        logger.warning(
+            "[COD] tenant=%s order=%s send outcome=%s error=%s",
+            tenant_id,
+            getattr(order, "id", None),
+            outcome,
+            (info or {}).get("error_code"),
+        )
+        return {
+            "sent": False,
+            "error": str((info or {}).get("error_code") or outcome),
+            "template_name": getattr(template, "name", None),
+            "service_key": CANONICAL_SERVICE_KEY,
+            "send_method": send_method,
+            "window_source": window_source,
+            "canary_blocked": bool((info or {}).get("canary_blocked")),
+        }
+
+    _stamp_cod_confirmation_sent(order, template=template, send_method=send_method)
+    try:
+        from routers.conversations import record_outbound_message  # noqa: PLC0415
+        record_outbound_message(
+            db, tenant_id, to, f"[{getattr(template, 'name', CANONICAL_SERVICE_KEY)}]",
+            event_type="cod_confirmation",
+            customer_name=customer_name,
+            extra={
+                "template_name": getattr(template, "name", None),
+                "service_key": CANONICAL_SERVICE_KEY,
+                "order_id": getattr(order, "id", None),
+                "send_method": send_method,
+            },
+        )
+    except Exception:  # noqa: silent-ok — conversation log must not fail the COD send
+        pass
+
+    return {
+        "sent": True,
+        "wa_message_id": (info or {}).get("wa_message_id"),
+        "error": None,
+        "template_name": getattr(template, "name", None),
+        "template_id": getattr(template, "id", None),
+        "revision": getattr(template, "revision", None),
+        "service_key": CANONICAL_SERVICE_KEY,
+        "send_method": send_method,
+        "window_source": window_source,
+        "buttons": list(_COD_BUTTON_TITLES),
+    }
 
 
-def find_pending_cod_order(
+def find_pending_cod_orders(
     db, *, tenant_id: int, customer_phone: str
-) -> Optional[Any]:
-    """
-    Return the most-recent Order in status pending_confirmation for this
-    tenant + normalised phone, or None. Used by the webhook to bind a
-    QUICK_REPLY tap to the right order without trusting any client-side id.
-    """
+) -> list:
+    """Return pending_confirmation orders for this tenant + normalised phone."""
     from models import Order  # noqa: PLC0415
-    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 
-    normalized = normalize_phone(customer_phone) or customer_phone
     candidates = (
         db.query(Order)
         .filter(
@@ -257,15 +546,48 @@ def find_pending_cod_order(
         .limit(50)
         .all()
     )
-    for o in candidates:
-        info = o.customer_info or {}
-        for k in ("phone", "mobile"):
-            v = info.get(k)
-            if not v:
-                continue
-            if normalize_phone(str(v)) == normalized or str(v) == customer_phone:
-                return o
+    return [o for o in candidates if _order_phone_matches(o, customer_phone)]
+
+
+def find_pending_cod_order(
+    db, *, tenant_id: int, customer_phone: str
+) -> Optional[Any]:
+    """
+    Bind a reply only when exactly one pending COD order exists for this
+    tenant + phone. Ambiguous multiples must not guess.
+    """
+    matches = find_pending_cod_orders(
+        db, tenant_id=tenant_id, customer_phone=customer_phone
+    )
+    if len(matches) == 1:
+        return matches[0]
     return None
+
+
+def _load_bound_pending_cod_order(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    order_id: int,
+) -> Optional[Any]:
+    """Server-side bind: tenant + pending status + phone must all match."""
+    from models import Order  # noqa: PLC0415
+
+    order = (
+        db.query(Order)
+        .filter(
+            Order.id == int(order_id),
+            Order.tenant_id == int(tenant_id),
+            Order.status == STATUS_PENDING_CUSTOMER,
+        )
+        .first()
+    )
+    if order is None:
+        return None
+    if not _order_phone_matches(order, customer_phone):
+        return None
+    return order
 
 
 async def handle_cod_reply(
@@ -274,28 +596,37 @@ async def handle_cod_reply(
     tenant_id: int,
     customer_phone: str,
     text: str,
+    button_payload: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[Any]]:
     """
     Process a customer's COD reply. Returns (decision, order) where
     decision is 'confirm' | 'cancel' | None and order is the affected
     Order row (or None when there was no pending order to match).
 
-    On 'confirm':
-      • status moves pending_confirmation → under_review
-      • order is pushed to the store adapter (best-effort; failure is
-        logged but the local transition still lands so the merchant can
-        act on it from the dashboard)
-      • external_id is updated when the store returns one
-    On 'cancel':
-      • status moves pending_confirmation → cancelled
+    Button ids ``nahla_cod_confirm`` / ``nahla_cod_cancel`` (optionally
+    ``:order_id``) bind first. A client-supplied order id is never trusted
+    unless the row is still ``pending_confirmation`` for this tenant and
+    phone. Text fallback binds only when exactly one pending COD order
+    exists for that customer.
     """
-    decision = classify_cod_reply(text)
+    payload_action, payload_oid = parse_cod_button_payload(button_payload or "")
+    text_action, text_oid = parse_cod_button_payload(text)
+    decision = payload_action or text_action or classify_cod_reply(text)
     if decision is None:
         return None, None
 
-    order = find_pending_cod_order(
-        db, tenant_id=tenant_id, customer_phone=customer_phone,
-    )
+    bound_oid = payload_oid or text_oid
+    if bound_oid is not None:
+        order = _load_bound_pending_cod_order(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            order_id=bound_oid,
+        )
+    else:
+        order = find_pending_cod_order(
+            db, tenant_id=tenant_id, customer_phone=customer_phone,
+        )
     if order is None:
         return decision, None
 

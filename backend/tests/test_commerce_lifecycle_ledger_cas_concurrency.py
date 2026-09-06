@@ -550,7 +550,7 @@ def _dispatch_kwargs(db, *, tenant_id: int):
 @pytest.mark.skipif(not _PG_FIXTURES_AVAILABLE, reason="postgres fixtures unavailable")
 class TestDispatchProviderCasPostgres:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_concurrent_dispatch_single_provider_call_pg(
         self,
@@ -628,7 +628,7 @@ class TestMigration0094GuardPostgres:
             "core.automation_engine.send_lifecycle_whatsapp_template",
             new_callable=AsyncMock,
         ) as mock_send, patch(
-            "core.service_template_resolver.resolve_template_for_send",
+            "core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send",
             return_value=_approved_template(),
         ), patch(
             "core.merchant_capabilities.resolve_merchant_capabilities",

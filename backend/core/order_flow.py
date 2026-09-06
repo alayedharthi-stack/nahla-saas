@@ -2191,6 +2191,9 @@ def context_aware_dedup_fallback(
     inbound_text: Optional[str] = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
     normalized_type: Optional[str] = None,
+    decision: Any = None,
+    decision_action: str = "",
+    decision_args: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Return a context-relevant fallback when the brain's reply
     tripped the near-duplicate guard. Without this, the merchant
@@ -2215,6 +2218,37 @@ def context_aware_dedup_fallback(
             log_dedup_state_mismatch,
             should_suppress_dedup_order_templates,
         )
+        try:
+            from modules.ai.brain.decision.checkout_continuation_evidence import (  # noqa: PLC0415
+                has_positive_checkout_ownership,
+            )
+
+            _meta = dict(inbound_metadata or {})
+            _action = str(
+                decision_action
+                or getattr(decision, "action", "")
+                or _meta.get("decision_action")
+                or ""
+            )
+            _args = dict(
+                decision_args
+                or getattr(decision, "args", None)
+                or _meta.get("decision_args")
+                or {}
+            )
+            if not has_positive_checkout_ownership(
+                decision=decision,
+                decision_action=_action,
+                decision_args=_args,
+                message=inbound_text or "",
+                state=bs,
+                inbound_metadata=_meta,
+                customer_phone=phone or "",
+                confirm_keyword_matched=bool(_meta.get("confirm_keyword_matched")),
+            ):
+                return default_fallback or ""
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe fail-closed
+            return default_fallback or ""
 
         _suppress, _suppress_reason = should_suppress_dedup_order_templates(
             message=inbound_text or "",
