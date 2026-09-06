@@ -2615,16 +2615,29 @@ class DefaultComposer:
             ).strip()
             if _facts_overlay:
                 prompt = f"{prompt}\n\n{_facts_overlay}"
+            _checkout_owned = False
+            try:
+                from modules.ai.brain.decision.checkout_continuation_evidence import (  # noqa: PLC0415
+                    has_positive_checkout_ownership,
+                )
+
+                _checkout_owned = bool(
+                    has_positive_checkout_ownership(decision=decision, ctx=ctx)
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — ownership probe must not break compose
+                _checkout_owned = False
             try:
                 from modules.ai.brain.commerce.catalog_order_facts import (  # noqa: PLC0415
                     build_catalog_order_compose_facts,
                 )
 
-                _profile = dict(getattr(ctx, "profile", None) or {})
-                _cat_facts = build_catalog_order_compose_facts(
-                    state=getattr(ctx, "state", None),
-                    inbound_metadata=dict(_profile.get("inbound_metadata") or {}),
-                )
+                _cat_facts = None
+                if _checkout_owned:
+                    _profile = dict(getattr(ctx, "profile", None) or {})
+                    _cat_facts = build_catalog_order_compose_facts(
+                        state=getattr(ctx, "state", None),
+                        inbound_metadata=dict(_profile.get("inbound_metadata") or {}),
+                    )
                 if _cat_facts:
                     import json as _json  # noqa: PLC0415
 
@@ -2634,12 +2647,14 @@ class DefaultComposer:
                     )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — catalog facts must not break compose
                 pass
-            _checkout_facts = dict(
-                (getattr(reply_state, "known_facts", None) or {}).get(
-                    "checkout_identity_shipping",
+            _checkout_facts = {}
+            if _checkout_owned:
+                _checkout_facts = dict(
+                    (getattr(reply_state, "known_facts", None) or {}).get(
+                        "checkout_identity_shipping",
+                    )
+                    or {}
                 )
-                or {}
-            )
             if _checkout_facts:
                 import json as _json  # noqa: PLC0415
 
