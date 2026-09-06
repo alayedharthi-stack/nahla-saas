@@ -4002,12 +4002,16 @@ async def _dispatch_message(
                     from services.cod_confirmation import (  # noqa: PLC0415
                         classify_cod_reply, handle_cod_reply,
                     )
-                    if classify_cod_reply(btn_txt) is not None:
+                    if (
+                        classify_cod_reply(btn_txt) is not None
+                        or classify_cod_reply(btn_id) is not None
+                    ):
                         decision, order = await handle_cod_reply(
                             db,
                             tenant_id=resolved_tenant_id,
                             customer_phone=sender,
                             text=btn_txt,
+                            button_payload=btn_id,
                         )
                         if order is not None:
                             await _send_cod_followup_message(
@@ -4280,6 +4284,31 @@ async def _dispatch_message(
             # already extracted human-readable text via _extract_wa_message_text.
             # Treat it exactly like a text message so the Brain receives it.
             if _wa_text and msg_type == "button" and not _is_platform_tenant(db, resolved_tenant_id):
+                _btn_payload = str((msg.get("button") or {}).get("payload") or "")
+                try:
+                    from services.cod_confirmation import (  # noqa: PLC0415
+                        classify_cod_reply, handle_cod_reply,
+                    )
+                    if (
+                        classify_cod_reply(_wa_text) is not None
+                        or classify_cod_reply(_btn_payload) is not None
+                    ):
+                        decision, order = await handle_cod_reply(
+                            db,
+                            tenant_id=resolved_tenant_id,
+                            customer_phone=sender,
+                            text=_wa_text,
+                            button_payload=_btn_payload,
+                        )
+                        if order is not None:
+                            await _send_cod_followup_message(
+                                phone_id=used_pid, to=sender,
+                                decision=decision, order=order,
+                                _tenant_id=resolved_tenant_id, _db=db,
+                            )
+                            return
+                except Exception as exc:
+                    logger.error("[Webhook] COD template-button handler failed: %s", exc)
                 logger.info(
                     "[WA PARSER] button tap rescued | tenant=%s text=%r source=%s",
                     resolved_tenant_id, _wa_text, _wa_source,
@@ -7002,6 +7031,7 @@ async def _handle_merchant_message(
                 tenant_id=tenant_id,
                 customer_phone=to,
                 text=text,
+                button_payload=text,
             )
             if order is not None:
                 await _send_cod_followup_message(

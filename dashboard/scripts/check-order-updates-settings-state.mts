@@ -98,6 +98,7 @@ assert(masterPatch.services === undefined, 'master PATCH must not send individua
 assert(masterPatch.flags === undefined, 'master PATCH must not send flags snapshot')
 
 assert(LEGACY_DEFAULT_ON_KEYS.includes('order_confirmation'), 'legacy confirmation default')
+assert(!LEGACY_DEFAULT_ON_KEYS.includes('cod_confirmation'), 'cod confirmation must default OFF')
 assert(ORDER_UPDATE_SERVICE_KEYS.length === 11, 'all 11 service keys typed')
 
 console.log('check:order-updates-settings OK')

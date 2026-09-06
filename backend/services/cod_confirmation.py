@@ -99,6 +99,27 @@ _COD_BUTTON_TITLES: tuple[str, str] = (
     "إلغاء الطلب ❌",
 )
 
+_COD_CONFIRM_ID = "nahla_cod_confirm"
+_COD_CANCEL_ID = "nahla_cod_cancel"
+
+
+def parse_cod_button_payload(raw: str) -> Tuple[Optional[str], Optional[int]]:
+    """Parse deterministic COD button ids. Never treats an unverified id as truth."""
+    text = str(raw or "").strip()
+    if not text:
+        return None, None
+    lower = text.lower()
+    for action, token in (("confirm", _COD_CONFIRM_ID), ("cancel", _COD_CANCEL_ID)):
+        if lower == token:
+            return action, None
+        prefix = f"{token}:"
+        if lower.startswith(prefix):
+            rest = text[len(prefix):].strip()
+            if rest.isdigit():
+                return action, int(rest)
+            return action, None
+    return None, None
+
 
 def classify_cod_reply(text: str) -> Optional[str]:
     """
@@ -107,6 +128,9 @@ def classify_cod_reply(text: str) -> Optional[str]:
     isn't a COD response — caller should then fall through to the normal
     AI reply path so we don't break unrelated conversations.
     """
+    action, _oid = parse_cod_button_payload(text)
+    if action is not None:
+        return action
     if not text:
         return None
     norm = text.strip().lower()
@@ -115,6 +139,22 @@ def classify_cod_reply(text: str) -> Optional[str]:
     if norm in {t.lower() for t in _CANCEL_TEXTS}:
         return "cancel"
     return None
+
+
+def _order_phone_matches(order: Any, customer_phone: str) -> bool:
+    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+    normalized = normalize_phone(customer_phone) or customer_phone
+    info = getattr(order, "customer_info", None) or {}
+    if not isinstance(info, dict):
+        return False
+    for k in ("phone", "mobile"):
+        v = info.get(k)
+        if not v:
+            continue
+        if normalize_phone(str(v)) == normalized or str(v) == customer_phone:
+            return True
+    return False
 
 
 def nahla_owns_cod_customer_confirmation(order: Any) -> bool:
@@ -310,18 +350,12 @@ async def send_cod_confirmation_template(
     }
 
 
-def find_pending_cod_order(
+def find_pending_cod_orders(
     db, *, tenant_id: int, customer_phone: str
-) -> Optional[Any]:
-    """
-    Return the most-recent Order in status pending_confirmation for this
-    tenant + normalised phone, or None. Used by the webhook to bind a
-    QUICK_REPLY tap to the right order without trusting any client-side id.
-    """
+) -> list:
+    """Return pending_confirmation orders for this tenant + normalised phone."""
     from models import Order  # noqa: PLC0415
-    from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 
-    normalized = normalize_phone(customer_phone) or customer_phone
     candidates = (
         db.query(Order)
         .filter(
@@ -332,15 +366,48 @@ def find_pending_cod_order(
         .limit(50)
         .all()
     )
-    for o in candidates:
-        info = o.customer_info or {}
-        for k in ("phone", "mobile"):
-            v = info.get(k)
-            if not v:
-                continue
-            if normalize_phone(str(v)) == normalized or str(v) == customer_phone:
-                return o
+    return [o for o in candidates if _order_phone_matches(o, customer_phone)]
+
+
+def find_pending_cod_order(
+    db, *, tenant_id: int, customer_phone: str
+) -> Optional[Any]:
+    """
+    Bind a reply only when exactly one pending COD order exists for this
+    tenant + phone. Ambiguous multiples must not guess.
+    """
+    matches = find_pending_cod_orders(
+        db, tenant_id=tenant_id, customer_phone=customer_phone
+    )
+    if len(matches) == 1:
+        return matches[0]
     return None
+
+
+def _load_bound_pending_cod_order(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    order_id: int,
+) -> Optional[Any]:
+    """Server-side bind: tenant + pending status + phone must all match."""
+    from models import Order  # noqa: PLC0415
+
+    order = (
+        db.query(Order)
+        .filter(
+            Order.id == int(order_id),
+            Order.tenant_id == int(tenant_id),
+            Order.status == STATUS_PENDING_CUSTOMER,
+        )
+        .first()
+    )
+    if order is None:
+        return None
+    if not _order_phone_matches(order, customer_phone):
+        return None
+    return order
 
 
 async def handle_cod_reply(
@@ -349,28 +416,37 @@ async def handle_cod_reply(
     tenant_id: int,
     customer_phone: str,
     text: str,
+    button_payload: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[Any]]:
     """
     Process a customer's COD reply. Returns (decision, order) where
     decision is 'confirm' | 'cancel' | None and order is the affected
     Order row (or None when there was no pending order to match).
 
-    On 'confirm':
-      • status moves pending_confirmation → under_review
-      • order is pushed to the store adapter (best-effort; failure is
-        logged but the local transition still lands so the merchant can
-        act on it from the dashboard)
-      • external_id is updated when the store returns one
-    On 'cancel':
-      • status moves pending_confirmation → cancelled
+    Button ids ``nahla_cod_confirm`` / ``nahla_cod_cancel`` (optionally
+    ``:order_id``) bind first. A client-supplied order id is never trusted
+    unless the row is still ``pending_confirmation`` for this tenant and
+    phone. Text fallback binds only when exactly one pending COD order
+    exists for that customer.
     """
-    decision = classify_cod_reply(text)
+    payload_action, payload_oid = parse_cod_button_payload(button_payload or "")
+    text_action, text_oid = parse_cod_button_payload(text)
+    decision = payload_action or text_action or classify_cod_reply(text)
     if decision is None:
         return None, None
 
-    order = find_pending_cod_order(
-        db, tenant_id=tenant_id, customer_phone=customer_phone,
-    )
+    bound_oid = payload_oid or text_oid
+    if bound_oid is not None:
+        order = _load_bound_pending_cod_order(
+            db,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            order_id=bound_oid,
+        )
+    else:
+        order = find_pending_cod_order(
+            db, tenant_id=tenant_id, customer_phone=customer_phone,
+        )
     if order is None:
         return decision, None
 

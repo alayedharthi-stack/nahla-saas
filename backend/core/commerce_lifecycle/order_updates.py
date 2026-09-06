@@ -35,13 +35,12 @@ ORDER_UPDATE_SERVICE_KEYS: Tuple[str, ...] = (
 )
 
 # Compatibility defaults when TenantSettings exists but a key is unset.
-# ``cod_confirmation`` was already an active Nahla-origin customer send
-# before order-updates flags existed; leaving it default-OFF would stop
-# that send on missing rows.
+# Only historically-on merchant notifications stay ON. New lifecycle
+# types, including checkout COD confirmation, default OFF so merge does
+# not suddenly enable nine extra WhatsApp sends.
 LEGACY_DEFAULT_ON_KEYS: frozenset[str] = frozenset({
     "order_confirmation",
     "shipping_tracking",
-    "cod_confirmation",
 })
 
 MASTER_ENABLED_KEY = "enabled"

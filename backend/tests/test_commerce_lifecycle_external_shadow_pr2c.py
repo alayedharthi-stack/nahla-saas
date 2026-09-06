@@ -278,6 +278,78 @@ class TestTransitionIdentity:
         )
         assert webhook == poll
 
+    def test_webhook_poller_previous_status_disagreement_same_identity(self):
+        webhook = build_transition_identity(
+            provider="salla",
+            external_order_id="ord-ship-1",
+            raw_previous_status="under_review",
+            raw_current_status="shipped",
+            raw_payload={"event_id": "evt-wh-ship", "updated_at": "2026-07-13T10:00:00Z"},
+            business_intent="shipment_available",
+        )
+        poller = build_transition_identity(
+            provider="salla",
+            external_order_id="ord-ship-1",
+            raw_previous_status="processing",
+            raw_current_status="shipped",
+            raw_payload={"updated_at": "2026-07-13T11:05:00Z"},
+            business_intent="shipment_available",
+        )
+        assert webhook == poller
+
+    def test_shipped_and_out_for_delivery_never_collapse(self):
+        shipped = build_transition_identity(
+            provider="salla",
+            external_order_id="ord-ship-1",
+            raw_previous_status="in_progress",
+            raw_current_status="shipped",
+            business_intent="shipment_available",
+        )
+        ofd = build_transition_identity(
+            provider="salla",
+            external_order_id="ord-ship-1",
+            raw_previous_status="shipped",
+            raw_current_status="out_for_delivery",
+            business_intent="out_for_delivery",
+        )
+        assert shipped != ofd
+
+    def test_payment_pending_and_confirmed_never_collapse(self):
+        pending = build_transition_identity(
+            provider="salla",
+            external_order_id="ord-pay-1",
+            raw_previous_status="under_review",
+            raw_current_status="payment_pending",
+            business_intent="payment_needed",
+        )
+        confirmed = build_transition_identity(
+            provider="salla",
+            external_order_id="ord-pay-1",
+            raw_previous_status="payment_pending",
+            raw_current_status="paid",
+            business_intent="payment_confirmed",
+        )
+        assert pending != confirmed
+
+    def test_prior_customer_state_preserves_legitimate_recurrence(self):
+        first = build_transition_identity(
+            provider="salla",
+            external_order_id="ord-rec-1",
+            raw_previous_status="cancelled",
+            raw_current_status="shipped",
+            business_intent="shipment_available",
+            prior_customer_state=None,
+        )
+        later = build_transition_identity(
+            provider="salla",
+            external_order_id="ord-rec-1",
+            raw_previous_status="cancelled",
+            raw_current_status="shipped",
+            business_intent="shipment_available",
+            prior_customer_state="cancelled",
+        )
+        assert first != later
+
     def test_missing_provider_event_id_uses_deterministic_fallback(self):
         source_id, _version = build_transition_identity(
             provider="salla",

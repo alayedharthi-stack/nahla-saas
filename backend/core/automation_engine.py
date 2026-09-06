@@ -1017,8 +1017,49 @@ async def _execute_action(
             "skipped": True,
             "skip_reason": canary.reason,
             "error_code": canary.reason,
-            "canary_blocked": True,
         }
+
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        lifecycle_dispatch_owns_legacy_send,
+        REASON_LIFECYCLE_OWNS_EVENT,
+    )
+    event_type = str(getattr(event, "event_type", "") or "")
+    event_payload = dict(getattr(event, "payload", None) or {})
+    if lifecycle_dispatch_owns_legacy_send(
+        int(tenant_id),
+        automation_type=str(getattr(automation, "automation_type", "") or ""),
+        event_type=event_type,
+        payload=event_payload,
+    ):
+        return False, {
+            "skipped": True,
+            "skip_reason": REASON_LIFECYCLE_OWNS_EVENT,
+            "error_code": REASON_LIFECYCLE_OWNS_EVENT,
+        }
+
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        evaluate_order_update_delivery,
+        is_order_update_service_key,
+    )
+    owned_service_key = _derive_service_key(automation, {})
+    if owned_service_key == "shipping_update":
+        owned_service_key = "shipping_tracking"
+    if event_type == "order_shipped":
+        owned_service_key = "shipping_tracking"
+    if event_type == "order_cod_pending" and event_payload.get("message_type") == "initial_confirmation":
+        owned_service_key = owned_service_key or "cod_confirmation"
+    if owned_service_key == "order_notifications":
+        owned_service_key = "order_confirmation"
+    if owned_service_key and is_order_update_service_key(owned_service_key):
+        allowed, flag_reason = evaluate_order_update_delivery(
+            db, int(tenant_id), owned_service_key
+        )
+        if not allowed:
+            return False, {
+                "skipped": True,
+                "skip_reason": flag_reason or "order_update_disabled",
+                "error_code": flag_reason or "order_update_disabled",
+            }
 
     # ── WhatsApp connection ───────────────────────────────────────────────────
     wa_conn: Optional[Any] = (
@@ -3406,16 +3447,22 @@ def _lifecycle_session_quick_replies(template: Any) -> List[str]:
     return titles[:3]
 
 
-def _lifecycle_quick_reply_id(title: str, idx: int) -> str:
+def _lifecycle_quick_reply_id(
+    title: str,
+    idx: int,
+    *,
+    order_id: Optional[Any] = None,
+) -> str:
     try:
         from services.cod_confirmation import classify_cod_reply  # noqa: PLC0415
         action = classify_cod_reply(title)
     except Exception:
         action = None
+    oid = str(order_id or "").strip()
     if action == "confirm":
-        return "nahla_cod_confirm"
+        return f"nahla_cod_confirm:{oid}" if oid else "nahla_cod_confirm"
     if action == "cancel":
-        return "nahla_cod_cancel"
+        return f"nahla_cod_cancel:{oid}" if oid else "nahla_cod_cancel"
     return f"nahla_lifecycle_qr_{idx}"
 
 
@@ -3560,6 +3607,7 @@ async def send_lifecycle_whatsapp_session_body(
     }
     quick_replies = _lifecycle_session_quick_replies(template)
     if quick_replies:
+        order_id = str((payload or {}).get("order_id") or "").strip()
         send_payload = {
             "messaging_product": "whatsapp",
             "to": normalized_phone,
@@ -3572,7 +3620,9 @@ async def send_lifecycle_whatsapp_session_body(
                         {
                             "type": "reply",
                             "reply": {
-                                "id": _lifecycle_quick_reply_id(title, idx),
+                                "id": _lifecycle_quick_reply_id(
+                                    title, idx, order_id=order_id
+                                ),
                                 "title": title[:20],
                             },
                         }
@@ -3859,6 +3909,22 @@ async def send_lifecycle_whatsapp_template(
                     "sub_type": "url",
                     "index": str(btn_idx),
                     "parameters": [{"type": "text", "text": _suffix or " "}],
+                })
+            elif btn_type == "QUICK_REPLY":
+                title = str(btn.get("text") or "").strip()
+                order_id = str(_payload_for_btn.get("order_id") or "").strip()
+                components.append({
+                    "type": "button",
+                    "sub_type": "quick_reply",
+                    "index": str(btn_idx),
+                    "parameters": [
+                        {
+                            "type": "payload",
+                            "payload": _lifecycle_quick_reply_id(
+                                title, btn_idx, order_id=order_id
+                            )[:128],
+                        }
+                    ],
                 })
 
     send_payload: Dict[str, Any] = {

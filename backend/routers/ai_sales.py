@@ -897,6 +897,8 @@ async def ai_sales_create_order(
     )
     db.add(order)
     db.flush()
+    db.commit()
+    db.refresh(order)
 
     # NOTE: An earlier version of this path called
     #   _log_autopilot_event(..., "autopilot_order_update_sent", ...)

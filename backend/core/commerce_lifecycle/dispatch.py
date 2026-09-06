@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -46,6 +47,7 @@ from core.merchant_capabilities import resolve_merchant_capabilities
 from store_integration.lifecycle_normalization import (
     build_transition_identity,
     normalize_external_lifecycle_intent,
+    resolve_customer_relevant_state,
 )
 
 logger = logging.getLogger("nahla.commerce_lifecycle.dispatch")
@@ -143,6 +145,24 @@ def _build_dispatch_payload(evidence: OrderLifecycleEvidence) -> Dict[str, str]:
     return payload
 
 
+def _last_notified_customer_state(order: Any) -> Optional[str]:
+    meta = getattr(order, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return None
+    value = str(meta.get("lifecycle_last_customer_state") or "").strip().lower()
+    return value or None
+
+
+def _stamp_last_notified_customer_state(order: Any, state: str) -> None:
+    meta = dict(getattr(order, "extra_metadata", None) or {})
+    meta["lifecycle_last_customer_state"] = str(state or "").strip().lower()
+    order.extra_metadata = meta
+    try:
+        flag_modified(order, "extra_metadata")
+    except Exception:  # noqa: silent-ok — SimpleNamespace orders in tests have no SA state
+        pass
+
+
 def _nahla_owns_cod_customer_confirmation(order: Any) -> bool:
     meta = getattr(order, "extra_metadata", None) or {}
     if not isinstance(meta, dict):
@@ -207,6 +227,8 @@ async def _execute_reserved_send(
     reserve: Any,
     evidence: OrderLifecycleEvidence,
     service_key: str,
+    order: Any = None,
+    customer_state: Optional[str] = None,
 ) -> LifecycleDispatchResult:
     to_phone = str(evidence.customer_phone or "").strip()
     canary = evaluate_and_audit(
@@ -379,6 +401,16 @@ async def _execute_reserved_send(
             send_method=send_method,
             commit=True,
         )
+        if order is not None and customer_state:
+            _stamp_last_notified_customer_state(order, customer_state)
+            try:
+                db.commit()
+            except Exception:
+                logger.exception(
+                    "[LifecycleDispatch] failed to stamp last customer state tenant=%s order=%s",
+                    tenant_id,
+                    order_id,
+                )
         logger.info(
             "[LifecycleDispatch] sent tenant=%s order=%s intent=%s method=%s wamid=%s",
             tenant_id,
@@ -500,6 +532,20 @@ async def dispatch_external_lifecycle_notification(
                 reason_code="no_intent",
             )
 
+        current_state = resolve_customer_relevant_state(
+            provider=provider,
+            raw_status=raw_current_status,
+        )
+        last_state = _last_notified_customer_state(order)
+        if last_state and current_state and last_state == current_state:
+            return LifecycleDispatchResult(
+                ledger_id=None,
+                dispatched=False,
+                duplicate=True,
+                outcome="skipped",
+                reason_code="already_notified",
+            )
+
         # COD confirmation requests are owned exclusively by the Nahla
         # checkout sender (pending_confirmation). StoreSync/Salla must
         # never send a second confirm/cancel prompt.
@@ -534,6 +580,9 @@ async def dispatch_external_lifecycle_notification(
             raw_previous_status=raw_previous_status,
             raw_current_status=raw_current_status,
             raw_payload=raw_payload,
+            business_intent=intent,
+            prior_customer_state=last_state,
+            normalized_order=normalized_order,
         )
 
         evidence = build_order_lifecycle_evidence(
@@ -618,6 +667,29 @@ async def dispatch_external_lifecycle_notification(
                 duplicate=False,
                 outcome="skipped",
                 reason_code="no_service_key",
+            )
+
+        from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+            REASON_SETTINGS_UNAVAILABLE,
+            evaluate_order_update_delivery,
+        )
+
+        allowed, flag_reason = evaluate_order_update_delivery(
+            db, int(tenant_id), service_key
+        )
+        if not allowed and flag_reason == REASON_SETTINGS_UNAVAILABLE:
+            logger.info(
+                "[LifecycleDispatch] settings_unavailable tenant=%s order=%s intent=%s",
+                tenant_id,
+                order_id,
+                intent.value,
+            )
+            return LifecycleDispatchResult(
+                ledger_id=None,
+                dispatched=False,
+                duplicate=False,
+                outcome="retryable",
+                reason_code=REASON_SETTINGS_UNAVAILABLE,
             )
 
         dispatch_decision = {
@@ -709,6 +781,8 @@ async def dispatch_external_lifecycle_notification(
             reserve=reserve,
             evidence=evidence,
             service_key=service_key,
+            order=order,
+            customer_state=current_state,
         )
     except SQLAlchemyError:
         if ledger_id and reserve is not None and not reserve.duplicate:

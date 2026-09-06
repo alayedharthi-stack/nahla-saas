@@ -278,6 +278,14 @@ def record_external_order_transition_shadow(
             raw_previous_status=raw_previous_status,
             raw_current_status=raw_current_status,
             raw_payload=raw_payload,
+            business_intent=intent,
+            prior_customer_state=str(
+                (getattr(order, "extra_metadata", None) or {}).get(
+                    "lifecycle_last_customer_state"
+                )
+                or ""
+            ) or None,
+            normalized_order=normalized_order,
         )
 
         evidence = build_order_lifecycle_evidence(

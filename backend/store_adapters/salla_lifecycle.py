@@ -64,10 +64,54 @@ def _is_cod(normalized_order: Mapping[str, Any]) -> bool:
     return _payment_method(normalized_order) in _COD_METHODS
 
 
+def customer_relevant_state(raw_status: Any) -> str:
+    """Collapse provider synonyms into one customer-relevant state bucket."""
+    curr = normalize_status_slug(raw_status)
+    if curr in _SHIPPED_STATUSES:
+        return "shipped"
+    if curr in _OUT_FOR_DELIVERY_STATUSES:
+        return "out_for_delivery"
+    if curr in _DELIVERED_STATUSES:
+        return "delivered"
+    if curr in _CANCELLED_STATUSES:
+        return "cancelled"
+    if curr in _REFUNDED_STATUSES:
+        return "refunded"
+    if curr in _RETURNED_STATUSES:
+        return "returned"
+    if curr in _PAYMENT_PENDING_STATUSES:
+        return "payment_pending"
+    if curr in _PAYMENT_CONFIRMED_STATUSES:
+        return "paid"
+    if curr in _CONFIRMATION_STATUSES:
+        return "confirmed"
+    if curr in _PREPARING_STATUSES:
+        return "preparing"
+    if curr in _READY_STATUSES:
+        return "ready"
+    return curr
+
+
+def normalize_salla_lifecycle_customer_state(raw_status: Any) -> str:
+    return customer_relevant_state(raw_status)
+
+
+def _is_poll_first_observation(normalized_order: Mapping[str, Any]) -> bool:
+    observation = str(
+        normalized_order.get("lifecycle_observation") or ""
+    ).strip().lower()
+    return observation in {"poll", "poll_import", "storesync_poll", "historical"}
+
+
 def _first_seen_acceptance_intent(
     curr: str,
     normalized_order: Mapping[str, Any],
 ) -> Optional[BusinessIntent]:
+    # Historical / poller first inserts are snapshots, not transitions.
+    if _is_poll_first_observation(normalized_order):
+        return None
+    if curr in _PREPARING_STATUSES or curr in _READY_STATUSES:
+        return None
     if curr in _CONFIRMATION_STATUSES:
         # Salla under_review is merchant acceptance, not a customer
         # confirm/cancel prompt. Nahla-origin COD confirmation is owned
@@ -77,10 +121,6 @@ def _first_seen_acceptance_intent(
         if _is_cod(normalized_order):
             return None
         return BusinessIntent.PAYMENT_NEEDED
-    if curr in _PREPARING_STATUSES:
-        return BusinessIntent.ORDER_PREPARING
-    if curr in _READY_STATUSES:
-        return BusinessIntent.ORDER_PACKED
     return None
 
 
@@ -145,4 +185,8 @@ def normalize_salla_lifecycle_business_intent(
     return None
 
 
-__all__ = ["normalize_salla_lifecycle_business_intent"]
+__all__ = [
+    "customer_relevant_state",
+    "normalize_salla_lifecycle_business_intent",
+    "normalize_salla_lifecycle_customer_state",
+]

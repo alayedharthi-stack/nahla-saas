@@ -95,6 +95,60 @@ def resolve_lifecycle_intent_normalizer(
     return None
 
 
+def resolve_customer_relevant_state(
+    *,
+    provider: str,
+    raw_status: Any,
+) -> str:
+    """Adapter-owned current-state bucket used in semantic delivery identity."""
+    slug = normalize_status_slug(raw_status)
+    registry = _load_adapter_registry()
+    adapter_cls = registry.get(str(provider or "").strip().lower())
+    if adapter_cls is not None:
+        fn = getattr(adapter_cls, "normalize_lifecycle_customer_state", None)
+        if callable(fn):
+            try:
+                bucket = fn(raw_status)
+            except Exception:
+                logger.exception(
+                    "[LifecycleNorm] customer-state normalizer failed provider=%s",
+                    str(provider or "").strip().lower(),
+                )
+                return slug
+            text = normalize_status_slug(bucket)
+            if text:
+                return text
+    return slug
+
+
+def extract_provider_order_version(
+    *,
+    normalized_order: Optional[Mapping[str, Any]] = None,
+    raw_payload: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Audit-only Salla/order version. Not used as the semantic delivery key
+    because webhook vs poller payloads often carry observation timestamps
+    in ``updated_at`` rather than a shared transition id.
+    """
+    candidates: list[Any] = []
+    order_map = dict(normalized_order or {})
+    payload = dict(raw_payload or {})
+    nested_order = payload.get("order") if isinstance(payload.get("order"), dict) else {}
+    nested_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    for source in (order_map, nested_order, nested_data, payload):
+        if not isinstance(source, dict):
+            continue
+        for key in ("order_updated_at", "salla_updated_at"):
+            if source.get(key):
+                candidates.append(source.get(key))
+    for value in candidates:
+        canonical = canonicalize_provider_timestamp(value)
+        if canonical:
+            return canonical
+    return None
+
+
 def normalize_external_lifecycle_intent(
     *,
     provider: str,
@@ -140,30 +194,47 @@ def build_transition_identity(
     raw_previous_status: Optional[str],
     raw_current_status: str,
     raw_payload: Optional[Mapping[str, Any]] = None,
+    business_intent: Optional[Any] = None,
+    prior_customer_state: Optional[str] = None,
+    normalized_order: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[str, str]:
     """
     Build stable ``(source_event_id, transition_version)`` for ledger idempotency.
 
-    Semantic identity (not webhook event-id) so StoreSync + webhook + retries
-    of the same prev→curr transition collapse to one ledger key.
+    RAW observer identity (previous_status, webhook event_id, observation
+    timestamps) is audit-only. Semantic customer-delivery identity hashes:
 
-    ``source_event_id`` / ``transition_version`` both hash:
-      provider + external_order_id + previous_status + current_status
+      provider + external_order_id + business_intent + customer_state
+      + persisted prior_customer_state
 
-    Provider ``updated_at`` and webhook ``event_id`` are audit-only — they must
-    not split the same customer-relevant transition into duplicate deliveries.
-    A genuinely new transition is a different prev→curr pair.
+    ``raw_previous_status`` must not split webhook vs poller views of the
+    same actual transition. A later legitimate recurrence is a different
+    ``prior_customer_state`` (the last customer-relevant state Nahla already
+    notified), not a different observer previous_status.
+
+    Provider ``updated_at`` / event ids remain audit-only.
     """
     provider_key = str(provider or "").strip().lower()
     ext_id = str(external_order_id or "").strip()
-    prev = normalize_status_slug(raw_previous_status) or None
-    curr = normalize_status_slug(raw_current_status)
+    current_state = resolve_customer_relevant_state(
+        provider=provider_key,
+        raw_status=raw_current_status,
+    )
+    intent_value = None
+    if business_intent is not None:
+        intent_value = getattr(business_intent, "value", None) or str(business_intent)
+        intent_value = str(intent_value).strip() or None
+    prior = normalize_status_slug(prior_customer_state) or None
+    # Observer previous_status is mapping evidence only — never a ledger key.
+    _observer_previous_status = raw_previous_status
+    del _observer_previous_status
 
     semantic_payload = {
         "provider": provider_key,
         "external_order_id": ext_id,
-        "raw_previous_status": prev,
-        "raw_current_status": curr,
+        "business_intent": intent_value,
+        "customer_state": current_state or None,
+        "prior_customer_state": prior,
     }
     canonical = json.dumps(
         semantic_payload,
@@ -182,7 +253,9 @@ __all__ = [
     "LifecycleIntentNormalizer",
     "build_transition_identity",
     "canonicalize_provider_timestamp",
+    "extract_provider_order_version",
     "normalize_external_lifecycle_intent",
     "normalize_status_slug",
+    "resolve_customer_relevant_state",
     "resolve_lifecycle_intent_normalizer",
 ]

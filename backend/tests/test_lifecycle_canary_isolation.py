@@ -5,7 +5,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_DIR = REPO_ROOT / "backend"
@@ -158,8 +158,18 @@ class TestCentralGuardContract:
         assert decision.allowed is False
         assert decision.reason == "lifecycle_dispatch_owns_event"
 
+    def test_shipping_update_owned_by_dispatch(self, monkeypatch):
+        _enable_canary(monkeypatch)
+        decision = _eval(
+            tenant_id=CANARY_TENANT,
+            phone=ALLOWED_PHONE,
+            mode=MODE_LEGACY_LIFECYCLE,
+            sender_path="automation_engine",
+            automation_type="shipping_update",
+        )
+        assert decision.allowed is False
+        assert decision.reason == "lifecycle_dispatch_owns_event"
 
-class TestLegacySenderPathsCannotBypass:
     def test_storesync_has_no_direct_provider_send(self):
         src = (BACKEND_DIR / "services" / "store_sync.py").read_text(encoding="utf-8")
         assert "await provider_send_message" not in src
@@ -277,17 +287,21 @@ class TestLegacySenderPathsCannotBypass:
         _enable_canary(monkeypatch)
         db = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = None
-        result = asyncio.run(
-            send_cod_confirmation_template(
-                db,
-                tenant_id=CANARY_TENANT,
-                order=SimpleNamespace(id=77),
-                customer_phone=ALLOWED_PHONE,
-                customer_name="أحمد سالم",
-                product_name="حذاء رياضي أبيض",
-                total_amount="200",
+        with patch(
+            "core.commerce_lifecycle.order_updates.evaluate_order_update_delivery",
+            return_value=(True, None),
+        ):
+            result = asyncio.run(
+                send_cod_confirmation_template(
+                    db,
+                    tenant_id=CANARY_TENANT,
+                    order=SimpleNamespace(id=77),
+                    customer_phone=ALLOWED_PHONE,
+                    customer_name="أحمد سالم",
+                    product_name="حذاء رياضي أبيض",
+                    total_amount="200",
+                )
             )
-        )
         assert result.get("canary_blocked") is not True
         assert result["sent"] is False
         assert result["error"] == "no_approved_template"

@@ -114,8 +114,9 @@ class TestSettingsFailClosed:
         assert truth.available is True
         assert truth.reason is None
         assert truth.master_enabled is True
-        for key in ("order_confirmation", "shipping_tracking", "cod_confirmation"):
+        for key in ("order_confirmation", "shipping_tracking"):
             assert truth.flags[key] is True, key
+        assert truth.flags["cod_confirmation"] is False
         assert truth.flags["payment_pending"] is False
         assert is_order_update_enabled(db, 9, "order_confirmation") is True
 
@@ -267,7 +268,7 @@ class TestCodSingleOwner:
             WaConversationWindow,
         )
         db.add(_cod_template(tenant_id=9))
-        db.commit()
+        set_order_update_flags(db, 9, {"cod_confirmation": True}, commit=True)
         order = SimpleNamespace(
             id=8801,
             external_id=None,
@@ -388,7 +389,7 @@ class TestCodSingleOwner:
         db, _ = _make_db(WhatsAppTemplate, TenantSettings, WaConversationWindow)
         tpl = _cod_template(tenant_id=4)
         db.add(tpl)
-        db.commit()
+        set_order_update_flags(db, 4, {"cod_confirmation": True}, commit=True)
         resolved = resolve_lifecycle_template_for_send(db, 4, "cod_confirmation")
         assert resolved is not None
         assert int(resolved.id) == int(tpl.id)

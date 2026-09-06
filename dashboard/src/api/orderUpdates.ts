@@ -71,7 +71,6 @@ export interface OrderUpdatesSettings {
 export const LEGACY_DEFAULT_ON_KEYS: readonly OrderUpdateServiceKey[] = [
   'order_confirmation',
   'shipping_tracking',
-  'cod_confirmation',
 ] as const
 
 export function persistedIndividualEnabled(

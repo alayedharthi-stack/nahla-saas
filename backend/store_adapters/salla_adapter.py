@@ -33,7 +33,10 @@ from store_integration.models import (
 )
 from store_integration.registry import register_adapter
 from store_adapters.base_adapter import BaseStoreAdapter
-from store_adapters.salla_lifecycle import normalize_salla_lifecycle_business_intent
+from store_adapters.salla_lifecycle import (
+    normalize_salla_lifecycle_business_intent,
+    normalize_salla_lifecycle_customer_state,
+)
 
 logger = logging.getLogger("nahla.adapter.salla")
 
@@ -454,6 +457,9 @@ class SallaAdapter(BaseStoreAdapter):
     }
     normalize_lifecycle_business_intent = staticmethod(
         normalize_salla_lifecycle_business_intent
+    )
+    normalize_lifecycle_customer_state = staticmethod(
+        normalize_salla_lifecycle_customer_state
     )
 
     def __init__(

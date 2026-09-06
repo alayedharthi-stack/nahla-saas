@@ -133,6 +133,7 @@ _TERMINAL_NO_RESEND_STATES: FrozenSet[str] = frozenset({
 _REEVALUABLE_BLOCK_ERROR_CODES: FrozenSet[str] = frozenset({
     "missing_customer_phone",
     "no_approved_template",
+    "order_update_settings_unavailable",
 })
 
 _MAX_SEND_ATTEMPTS = 2
