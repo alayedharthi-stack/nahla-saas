@@ -1540,7 +1540,7 @@
       "exact_symbol_scope": "3048",
       "expected_change_digest": "0891fcb97e46703fcefa24df89ab729acb8d1c4e9bf1f517c4f9faaee1c70d52",
       "single_use": true,
-      "consumed": false,
+      "consumed": true,
       "created_at": "2026-09-06",
       "expires_at": "2026-09-20",
       "implementation_pr": "958",
