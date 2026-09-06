@@ -6672,6 +6672,166 @@ def _resolve_chosen_path(decision: Decision, result: ActionResult) -> str:
     return "action"
 
 
+# Per-turn compose projection only. Persisted checkout state is unchanged.
+_CHECKOUT_EXECUTION_COMPOSE_KEYS = (
+    "checkout_identity_shipping",
+    "checkout_missing_fields",
+    "next_missing_field",
+    "resume_missing_fields",
+    "resume_next_slot",
+    "resume_next_goal",
+    "next_goal_after_hydration",
+)
+_CHECKOUT_IDENTITY_COMPOSE_KEYS = (
+    "merchant_customer_record",
+    "customer_name_known",
+    "customer_name",
+    "customer_name_source",
+    "customer_id",
+    "personal_familiarity",
+)
+_CHECKOUT_CONTINUATION_COMPOSE_STAGES = frozenset({"ordering", "checkout"})
+_CHECKOUT_NAVIGATOR_CONTINUATION_STAGES = frozenset({"whatsapp_quick_order"})
+_CHECKOUT_NAVIGATOR_CONTINUATION_GOALS = frozenset(
+    {
+        "collect_customer_name_for_whatsapp_order",
+        "collect_customer_name_only",
+        "confirm_customer_name_once",
+        "collect_phone_for_whatsapp_order",
+        "collect_customer_phone",
+        "collect_missing_city",
+        "collect_city_for_whatsapp_order",
+        "collect_city_only",
+        "collect_missing_address",
+        "collect_delivery_address_for_whatsapp_order",
+        "collect_delivery_address_only",
+        "collect_or_confirm_delivery_address",
+        "collect_next_whatsapp_order_field",
+        "collect_payment_method_for_whatsapp_order",
+        "continue_checkout",
+        "continue_checkout_from_catalog_order",
+        "confirm_known_address",
+        "confirm_whatsapp_order_before_payment",
+        "confirm_customer_order_and_shipping_details_once",
+    }
+)
+_CHECKOUT_NAVIGATOR_PII_KEYS = frozenset(
+    {
+        "phone",
+        "known_phone",
+        "customer_phone",
+        "name",
+        "known_name",
+        "customer_name",
+        "city",
+        "known_city",
+        "address",
+        "address_line",
+        "known_address_text",
+        "short_address",
+        "short_address_code",
+        "known_short_address_code",
+        "google_maps_url",
+        "known_google_maps_url",
+        "maps_url",
+        "payment_method",
+        "known_payment_method",
+        "building_number",
+        "additional_number",
+        "street",
+        "district",
+        "postal_code",
+        "national_address",
+        "national_short_address",
+    }
+)
+
+
+def _current_turn_checkout_execution_authorized(
+    *,
+    decision: Decision,
+    ctx: BrainContext,
+    current_state: MerchantConversationState,
+) -> bool:
+    from .decision.checkout_continuation_evidence import (  # noqa: PLC0415
+        has_positive_checkout_ownership,
+    )
+
+    return bool(
+        has_positive_checkout_ownership(
+            decision=decision,
+            ctx=ctx,
+            state=current_state,
+            order_prep=getattr(current_state, "order_prep", None),
+        )
+    )
+
+
+def _quarantine_unauthorized_checkout_compose_facts(
+    known_facts: Dict[str, Any],
+) -> None:
+    known_facts["checkout_preparation"] = {}
+    for key in _CHECKOUT_EXECUTION_COMPOSE_KEYS:
+        known_facts.pop(key, None)
+    for key in _CHECKOUT_IDENTITY_COMPOSE_KEYS:
+        known_facts.pop(key, None)
+
+
+def _strip_checkout_pii_mapping(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    return {
+        key: value
+        for key, value in data.items()
+        if key not in _CHECKOUT_NAVIGATOR_PII_KEYS
+    }
+
+
+def _sanitize_unauthorized_checkout_navigator(navigator: Any) -> Any:
+    if navigator is None:
+        return None
+    nav_dict = (
+        navigator.to_dict()
+        if hasattr(navigator, "to_dict")
+        else (dict(navigator) if isinstance(navigator, dict) else None)
+    )
+    if not isinstance(nav_dict, dict):
+        return navigator
+    stage = str(nav_dict.get("stage") or "")
+    goal = str(nav_dict.get("next_goal") or "")
+    stripped_known = _strip_checkout_pii_mapping(nav_dict.get("known_fields"))
+    continuation = (
+        stage in _CHECKOUT_NAVIGATOR_CONTINUATION_STAGES
+        or goal in _CHECKOUT_NAVIGATOR_CONTINUATION_GOALS
+    )
+    nav_dict["known_fields"] = stripped_known
+    nav_dict["missing_fields"] = []
+    if continuation:
+        nav_dict["stage"] = "browse"
+        nav_dict["next_goal"] = ""
+        nav_dict["reason"] = "checkout_execution_not_authorized_this_turn"
+    try:
+        from .commerce.commerce_navigator import CommerceNavigatorDecision  # noqa: PLC0415
+
+        rebuilt = {
+            "stage": nav_dict.get("stage") or "browse",
+            "confidence": float(nav_dict.get("confidence") or 0),
+            "reason": str(nav_dict.get("reason") or ""),
+            "next_goal": str(nav_dict.get("next_goal") or ""),
+            "known_fields": stripped_known,
+            "missing_fields": [],
+            "forbidden_actions": list(nav_dict.get("forbidden_actions") or []),
+            "customer_intent": str(nav_dict.get("customer_intent") or ""),
+            "style": str(nav_dict.get("style") or "natural_saudi_brief"),
+        }
+        channels = list(nav_dict.get("available_purchase_channels") or [])
+        if channels:
+            rebuilt["available_purchase_channels"] = channels
+        return CommerceNavigatorDecision(**rebuilt)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — dict projection is enough for compose
+        return nav_dict
+
+
 def _build_reply_state(
     *,
     ctx: BrainContext,
@@ -6866,6 +7026,13 @@ def _build_reply_state(
         "contact_email": ctx.facts.store_contact_email,
         "checkout_preparation": current_state.order_prep.to_dict(),
     }
+    _checkout_execution_authorized = _current_turn_checkout_execution_authorized(
+        decision=decision,
+        ctx=ctx,
+        current_state=current_state,
+    )
+    if not _checkout_execution_authorized:
+        known_facts["checkout_preparation"] = {}
     try:
         from modules.ai.brain.commerce.catalog_reasoning_evidence import (  # noqa: PLC0415
             collect_catalog_reasoning_candidates,
@@ -7091,34 +7258,35 @@ def _build_reply_state(
         known_facts.pop("catalog_reasoning_candidates", None)
         known_facts.pop("last_presented_products", None)
         known_facts.pop("last_recommended_products", None)
-    try:
-        from .commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
-            merchant_customer_record_facts,
-            merge_prep_with_customer_identity,
-            resolve_catalog_checkout_customer_identity,
-        )
-
-        _identity = resolve_catalog_checkout_customer_identity(
-            db=db,
-            tenant_id=getattr(ctx, "tenant_id", None),
-            phone=str(getattr(ctx, "customer_phone", "") or ""),
-            order_prep=(
-                {}
-                if _social_identity_defocus
-                else dict(known_facts.get("checkout_preparation") or {})
-            ),
-            profile=ctx.profile if isinstance(getattr(ctx, "profile", None), dict) else {},
-        )
-        _identity_facts = merchant_customer_record_facts(_identity)
-        if _identity_facts:
-            known_facts.update(_identity_facts)
-        if not _social_identity_defocus and _identity.prep_patch:
-            known_facts["checkout_preparation"] = merge_prep_with_customer_identity(
-                dict(known_facts.get("checkout_preparation") or {}),
-                _identity,
+    if _checkout_execution_authorized or _social_identity_defocus:
+        try:
+            from .commerce.catalog_checkout_customer_identity import (  # noqa: PLC0415
+                merchant_customer_record_facts,
+                merge_prep_with_customer_identity,
+                resolve_catalog_checkout_customer_identity,
             )
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — merchant identity facts must not block compose
-        pass
+
+            _identity = resolve_catalog_checkout_customer_identity(
+                db=db,
+                tenant_id=getattr(ctx, "tenant_id", None),
+                phone=str(getattr(ctx, "customer_phone", "") or ""),
+                order_prep=(
+                    {}
+                    if _social_identity_defocus
+                    else dict(known_facts.get("checkout_preparation") or {})
+                ),
+                profile=ctx.profile if isinstance(getattr(ctx, "profile", None), dict) else {},
+            )
+            _identity_facts = merchant_customer_record_facts(_identity)
+            if _identity_facts:
+                known_facts.update(_identity_facts)
+            if not _social_identity_defocus and _identity.prep_patch:
+                known_facts["checkout_preparation"] = merge_prep_with_customer_identity(
+                    dict(known_facts.get("checkout_preparation") or {}),
+                    _identity,
+                )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — merchant identity facts must not block compose
+            pass
     _sr = getattr(ctx, "state_relevance", None)
     if _sr is not None and hasattr(_sr, "to_dict"):
         known_facts["state_relevance_verdict"] = _sr.to_dict()
@@ -7393,16 +7561,18 @@ def _build_reply_state(
             _cn_exc,
         )
 
-    _checkout_order_context = _load_checkout_order_context(
-        db,
-        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
-        customer_id=getattr(ctx, "customer_id", None),
-        conversation_id=getattr(ctx, "conversation_id", None),
-        phone=str(ctx.customer_phone or ""),
-        state=current_state,
-        message=str(ctx.message or ""),
-        inbound_metadata=dict((ctx.profile or {}).get("inbound_metadata") or {}),
-    )
+    _checkout_order_context = None
+    if _checkout_execution_authorized:
+        _checkout_order_context = _load_checkout_order_context(
+            db,
+            tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+            customer_id=getattr(ctx, "customer_id", None),
+            conversation_id=getattr(ctx, "conversation_id", None),
+            phone=str(ctx.customer_phone or ""),
+            state=current_state,
+            message=str(ctx.message or ""),
+            inbound_metadata=dict((ctx.profile or {}).get("inbound_metadata") or {}),
+        )
     if _checkout_order_context is not None:
         try:
             from core.order_context_prefill import build_checkout_compose_facts  # noqa: PLC0415
@@ -7445,39 +7615,50 @@ def _build_reply_state(
                 _cn2_exc,
             )
 
-    try:
-        from .commerce.commerce_turn_contract import canonical_checkout_next_slot  # noqa: PLC0415
+    if _checkout_execution_authorized:
+        try:
+            from .commerce.commerce_turn_contract import canonical_checkout_next_slot  # noqa: PLC0415
 
-        _contract = getattr(ctx, "commerce_turn_contract", None)
-        if _contract is not None:
-            _checkout_facts = dict(known_facts.get("checkout_identity_shipping") or {})
-            _cf = dict(getattr(_contract, "known_facts", None) or {})
-            for _key in (
-                "next_missing_field",
-                "checkout_missing_fields",
-                "saved_address_complete",
-                "saved_address_available",
-                "location_link_persisted",
-                "checkout_location_evidence_known",
-                "saved_location_link",
-            ):
-                if _key in _cf and _cf.get(_key) not in (None, ""):
-                    _checkout_facts[_key] = _cf[_key]
-            _contract_goal = str(getattr(_contract, "next_goal", "") or "").strip()
-            if _contract_goal:
-                _checkout_facts["next_goal"] = _contract_goal
-            _missing, _nxt = canonical_checkout_next_slot(ctx)
-            _checkout_facts["missing_fields"] = list(_missing)
-            _checkout_facts["next_missing_field"] = _nxt
-            known_facts["checkout_identity_shipping"] = _checkout_facts
-            known_facts["next_missing_field"] = _nxt
-            known_facts["checkout_missing_fields"] = list(_missing)
-    except Exception as _ctc_facts_exc:  # noqa: BLE001  # noqa: silent-ok — contract overlay must not block compose
-        logger.debug(
-            "[CHECKOUT_COMPOSE_FACTS] contract overlay skipped tenant=%s err=%s",
-            getattr(ctx, "tenant_id", None),
-            _ctc_facts_exc,
+            _contract = getattr(ctx, "commerce_turn_contract", None)
+            if _contract is not None:
+                _checkout_facts = dict(known_facts.get("checkout_identity_shipping") or {})
+                _cf = dict(getattr(_contract, "known_facts", None) or {})
+                for _key in (
+                    "next_missing_field",
+                    "checkout_missing_fields",
+                    "saved_address_complete",
+                    "saved_address_available",
+                    "location_link_persisted",
+                    "checkout_location_evidence_known",
+                    "saved_location_link",
+                ):
+                    if _key in _cf and _cf.get(_key) not in (None, ""):
+                        _checkout_facts[_key] = _cf[_key]
+                _contract_goal = str(getattr(_contract, "next_goal", "") or "").strip()
+                if _contract_goal:
+                    _checkout_facts["next_goal"] = _contract_goal
+                _missing, _nxt = canonical_checkout_next_slot(ctx)
+                _checkout_facts["missing_fields"] = list(_missing)
+                _checkout_facts["next_missing_field"] = _nxt
+                known_facts["checkout_identity_shipping"] = _checkout_facts
+                known_facts["next_missing_field"] = _nxt
+                known_facts["checkout_missing_fields"] = list(_missing)
+        except Exception as _ctc_facts_exc:  # noqa: BLE001  # noqa: silent-ok — contract overlay must not block compose
+            logger.debug(
+                "[CHECKOUT_COMPOSE_FACTS] contract overlay skipped tenant=%s err=%s",
+                getattr(ctx, "tenant_id", None),
+                _ctc_facts_exc,
+            )
+    else:
+        _quarantine_unauthorized_checkout_compose_facts(known_facts)
+        _commerce_navigator = _sanitize_unauthorized_checkout_navigator(
+            _commerce_navigator
         )
+        if _commerce_navigator is not None:
+            if hasattr(_commerce_navigator, "to_dict"):
+                known_facts["commerce_navigator"] = _commerce_navigator.to_dict()
+            elif isinstance(_commerce_navigator, dict):
+                known_facts["commerce_navigator"] = dict(_commerce_navigator)
 
     effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
 
@@ -7555,11 +7736,29 @@ def _build_reply_state(
         pass
 
     from .commerce.promotion_truth import coupon_policy_for_compose  # noqa: PLC0415
+    from .decision.checkout_continuation_evidence import (  # noqa: PLC0415
+        is_checkout_progress_pending_action,
+    )
+
+    _compose_stage = current_state.stage
+    _pending_for_compose = current_state.pending_action
+    _next_step = suggestion.suggested_next_step or current_state.recommended_next_step
+    _checkout_facts_for_goal = dict(known_facts.get("checkout_identity_shipping") or {})
+    if not _checkout_execution_authorized:
+        if str(_compose_stage or "") in _CHECKOUT_CONTINUATION_COMPOSE_STAGES:
+            _compose_stage = "discovery"
+        if is_checkout_progress_pending_action(_pending_for_compose):
+            _pending_for_compose = ""
+        if is_checkout_progress_pending_action(_next_step):
+            _next_step = ""
+        _last_q_asked = ""
+        _last_q_answered = True
+        _checkout_facts_for_goal = {}
 
     _reply_state = BrainReplyState(
         store_name=ctx.facts.store_name,
         tone=effective_tone,
-        stage=current_state.stage,
+        stage=_compose_stage,
         customer_goal=current_state.customer_goal,
         identity_already_introduced=bool(
             getattr(current_state, "assistant_identity_introduced", False)
@@ -7569,7 +7768,7 @@ def _build_reply_state(
         known_facts=known_facts,
         last_question_asked=_last_q_asked,
         last_question_answered=_last_q_answered,
-        recommended_next_step=suggestion.suggested_next_step or current_state.recommended_next_step,
+        recommended_next_step=_next_step,
         coupon_policy=coupon_policy_for_compose(
             ctx.facts,
             discount_ok_now=suggestion.discount_ok_now,
@@ -7585,7 +7784,7 @@ def _build_reply_state(
         },
         last_recommended_products=list(current_state.last_recommended_products or []),
         tenant_overlay=tenant_overlay,
-        explicit_pending_action=current_state.pending_action,
+        explicit_pending_action=_pending_for_compose,
         intent_name=getattr(ctx.intent, "name", "") or "",
         response_goal=_compose_response_goal(
             decision,
@@ -7593,7 +7792,7 @@ def _build_reply_state(
             stance=_stance_result,
             intent_priority=_intent_priority,
             commerce_navigator=_commerce_navigator,
-            checkout_facts=dict(known_facts.get("checkout_identity_shipping") or {}),
+            checkout_facts=_checkout_facts_for_goal,
         ),
         merchant_context=dict(merchant_context or {}),
         platform_kb_mode=platform_kb_mode,
