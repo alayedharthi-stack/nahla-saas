@@ -1485,6 +1485,51 @@
       "expires_at": "2026-09-19",
       "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 PR946 HEAD=31e8fe247bc17658105fc566253ffe07691da773 EXACT_LINUX_FINDINGS=91 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
       "exact_reason": "D4 adds a current-turn checkout-evidence gate and no customer-language rule. PR #946 HEAD 31e8fe247bc17658105fc566253ffe07691da773 changes checkout-continuation ownership only. It adds no customer-language phrases, phrase maps, customer regexes, model changes, prompt changes, persona changes or fixed replies. The scanner re-reported pre-existing governed literals because engine.py was touched."
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-POST-DECISION-PR953-001",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/commerce/complaint_refund_topic_guard.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "1973f58cb8eaa6c95d9e68b033bc01cba892c9cd12eb7f8c9a7ef76060eddf95",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-06",
+      "expires_at": "2026-09-20",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 POST_DECISION PR953 HEAD=6faf8ea1a626c5417c49cbf73471a39575522c34 EXACT_LINUX_FINDINGS=3 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "positive current-turn checkout ownership gates stale draft-flow injection; Linux finding is file-touch of a pre-existing helper literal, with no new customer-language rule"
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-POST-DECISION-PR953-002",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/pipeline.py"
+      ],
+      "exact_symbol_scope": "in",
+      "expected_change_digest": "2eacce72378b8cf7827e536fdb708d6f4ff7169fe659e4aa62fb0285a8a4fc80",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-06",
+      "expires_at": "2026-09-20",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 POST_DECISION PR953 HEAD=6faf8ea1a626c5417c49cbf73471a39575522c34 EXACT_LINUX_FINDINGS=3 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "post-decision checkout ownership propagation prevents stale order injection; Linux finding is file-touch of a pre-existing in-branch literal, with no new customer-language rule"
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-POST-DECISION-PR953-003",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/pipeline.py"
+      ],
+      "exact_symbol_scope": "in",
+      "expected_change_digest": "575b8f03ec22b653e3e0bd3eff7c5a4cec10e5bafbeb18b3907d70bb70c17426",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-06",
+      "expires_at": "2026-09-20",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 POST_DECISION PR953 HEAD=6faf8ea1a626c5417c49cbf73471a39575522c34 EXACT_LINUX_FINDINGS=3 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
+      "exact_reason": "non-checkout turns freeze checkout-progress stamping after compose; Linux finding is file-touch of a pre-existing in-branch literal, with no new customer-language rule"
     }
   ]
 }
