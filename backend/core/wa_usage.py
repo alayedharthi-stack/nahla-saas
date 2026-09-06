@@ -80,6 +80,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional, Tuple
 
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("nahla-backend")
@@ -135,6 +136,35 @@ def _utcnow() -> datetime:
 def _naive(dt: datetime) -> datetime:
     """Strip timezone info — DB stores naive UTC datetimes."""
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+
+def _elapsed_within_conservative_window(
+    window_start: datetime,
+    now_naive: datetime,
+) -> bool:
+    """True when elapsed time is strictly less than 24 hours.
+
+    Customer-service window bound:
+    23:59:59 inside, exact 24:00:00 outside, 24:00:01 outside.
+    """
+    start_naive = _naive(window_start)
+    return (now_naive - start_naive) < timedelta(hours=WINDOW_HOURS)
+
+
+def _is_customer_inbound(source: ConvSource, category: ConvCategory) -> bool:
+    return source == "inbound" and category == "service"
+
+
+def _later_naive(left: datetime, right: datetime) -> datetime:
+    left_naive = _naive(left)
+    right_naive = _naive(right)
+    return left_naive if left_naive >= right_naive else right_naive
+
+
+# Billing clock placeholder when a row is created only to store last inbound.
+# Must look expired so later billing/outbound can open a billable window
+# without being treated as an existing in-window conversation.
+_BILLING_CLOCK_UNSET = datetime(1970, 1, 1)
 
 
 # Sentinel returned for unlimited plans (Scale). We use a finite integer
@@ -702,6 +732,109 @@ def get_lifetime_conversations(db: Session, tenant_id: int) -> int:
 
 # ── Core: race-safe 24-h window check ────────────────────────────────────────
 
+def _normalize_provider_inbound_at(
+    inbound_at: Optional[datetime],
+    *,
+    now_naive: datetime,
+) -> Optional[datetime]:
+    """Return a persistable provider timestamp, or None to fail closed.
+
+    Missing / non-datetime values are rejected. Future timestamps are
+    capped at receipt time so they cannot extend the window past now+24h.
+    """
+    if inbound_at is None or not isinstance(inbound_at, datetime):
+        return None
+    stored = _naive(inbound_at)
+    if stored > now_naive:
+        stored = now_naive
+    return stored
+
+
+def _lock_conversation_window(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+):
+    from models import WaConversationWindow  # noqa: PLC0415
+
+    return (
+        db.query(WaConversationWindow)
+        .filter(
+            WaConversationWindow.tenant_id == tenant_id,
+            WaConversationWindow.customer_phone == customer_phone,
+        )
+        .with_for_update()
+        .first()
+    )
+
+
+def _persist_last_customer_inbound_locked(
+    db: Session,
+    window,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    stored: datetime,
+    now_naive: datetime,
+):
+    """Write last_customer_inbound_at only. Never mutates billing clocks."""
+    from models import WaConversationWindow  # noqa: PLC0415
+
+    if window is None:
+        window = WaConversationWindow(
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            window_start=_BILLING_CLOCK_UNSET,
+            last_customer_inbound_at=stored,
+            category="service",
+        )
+        db.add(window)
+        return window
+    existing = getattr(window, "last_customer_inbound_at", None)
+    if existing is None:
+        window.last_customer_inbound_at = stored
+    else:
+        window.last_customer_inbound_at = _later_naive(existing, stored)
+    window.updated_at = now_naive
+    return window
+
+
+def record_customer_inbound_window(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+    inbound_at: Optional[datetime],
+    *,
+    now: Optional[datetime] = None,
+    commit: bool = False,
+) -> bool:
+    """Persist last customer inbound monotonically from a provider timestamp.
+
+    Returns True when a valid timestamp was stored. Missing/invalid timestamps
+    do not open or extend the service window.
+    """
+    if not customer_phone:
+        return False
+    now_naive = _naive(now or _utcnow())
+    stored = _normalize_provider_inbound_at(inbound_at, now_naive=now_naive)
+    if stored is None:
+        return False
+    window = _lock_conversation_window(db, tenant_id, customer_phone)
+    _persist_last_customer_inbound_locked(
+        db,
+        window,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        stored=stored,
+        now_naive=now_naive,
+    )
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return True
+
+
 def _open_new_window(
     db: Session,
     tenant_id: int,
@@ -709,58 +842,144 @@ def _open_new_window(
     category: ConvCategory,
     source: ConvSource,
     now_naive: datetime,
+    inbound_at: Optional[datetime] = None,
 ) -> bool:
     """
-    Atomically check and update the conversation window for this customer.
-    Uses SELECT FOR UPDATE to serialise concurrent calls for the same customer.
+    Atomically check and update the *billing* conversation window.
+
+    Customer-service truth (``last_customer_inbound_at``) is updated only for
+    inbound+service with a valid provider timestamp. Outbound / template /
+    campaign / api never create, refresh, overwrite, or convert that field.
 
     Returns True  → a NEW billable window was opened (counter must be incremented)
     Returns False → still inside an existing window (no charge)
     """
     from models import WaConversationWindow, ConversationLog  # noqa: PLC0415
 
-    cutoff = now_naive - timedelta(hours=WINDOW_HOURS)
-
-    # Lock the row for this tenant+customer — prevents race conditions
-    window = (
-        db.query(WaConversationWindow)
-        .filter(
-            WaConversationWindow.tenant_id      == tenant_id,
-            WaConversationWindow.customer_phone == customer_phone,
-        )
-        .with_for_update()
-        .first()
-    )
-
-    if window is not None and window.window_start >= cutoff:
-        # Still inside the 24-h window — no new conversation
+    if not customer_phone:
         return False
 
-    # ── New window starts now ────────────────────────────────────────────────
+    customer_inbound = _is_customer_inbound(source, category)
+    stored_inbound = (
+        _normalize_provider_inbound_at(inbound_at, now_naive=now_naive)
+        if customer_inbound
+        else None
+    )
+
+    window = _lock_conversation_window(db, tenant_id, customer_phone)
+
+    if customer_inbound and stored_inbound is not None:
+        window = _persist_last_customer_inbound_locked(
+            db,
+            window,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            stored=stored_inbound,
+            now_naive=now_naive,
+        )
+
+    still_inside = (
+        window is not None
+        and window.window_start is not None
+        and _elapsed_within_conservative_window(window.window_start, now_naive)
+    )
+    if still_inside:
+        return False
+
     if window is None:
         window = WaConversationWindow(
-            tenant_id      = tenant_id,
-            customer_phone = customer_phone,
-            window_start   = now_naive,
-            category       = category,
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            window_start=now_naive,
+            category=category,
         )
+        if customer_inbound and stored_inbound is not None:
+            window.last_customer_inbound_at = stored_inbound
         db.add(window)
     else:
         window.window_start = now_naive
-        window.category     = category
-        window.updated_at   = now_naive
+        window.category = category
+        window.updated_at = now_naive
 
-    # Write audit log
-    log = ConversationLog(
-        tenant_id               = tenant_id,
-        customer_phone          = customer_phone,
-        conversation_started_at = now_naive,
-        source                  = source,
-        category                = category,
+    db.add(
+        ConversationLog(
+            tenant_id=tenant_id,
+            customer_phone=customer_phone,
+            conversation_started_at=now_naive,
+            source=source,
+            category=category,
+        )
     )
-    db.add(log)
-
     return True
+
+
+def _is_missing_last_inbound_column(exc: BaseException) -> bool:
+    """True only for a missing last_customer_inbound_at column, not generic DB errors."""
+    blob = f"{exc} {getattr(exc, 'orig', '')}".lower()
+    if "last_customer_inbound_at" not in blob:
+        return False
+    return any(
+        marker in blob
+        for marker in (
+            "undefinedcolumn",
+            "does not exist",
+            "no such column",
+            "42703",
+        )
+    )
+
+
+def _read_last_customer_inbound_at(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+):
+    """Load last-inbound truth without poisoning the caller transaction.
+
+    Pre-0105 schemas have no dedicated column. That is missing service truth
+    (normal CLOSED), not a window_check_error. Real query failures still raise.
+    """
+    from models import WaConversationWindow  # noqa: PLC0415
+
+    nested = None
+    if isinstance(db, Session):
+        try:
+            nested = db.begin_nested()
+        except Exception as exc:
+            logger.warning("[WaUsage] last_inbound savepoint begin failed err=%s", exc)
+            nested = None
+    try:
+        inbound_at = (
+            db.query(WaConversationWindow.last_customer_inbound_at)
+            .filter(
+                WaConversationWindow.tenant_id == tenant_id,
+                WaConversationWindow.customer_phone == customer_phone,
+            )
+            .scalar()
+        )
+        if nested is not None:
+            nested.commit()
+        return inbound_at
+    except (ProgrammingError, OperationalError) as exc:
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception as rb_exc:
+                logger.warning(
+                    "[WaUsage] last_inbound savepoint rollback failed err=%s", rb_exc
+                )
+        if _is_missing_last_inbound_column(exc):
+            return None
+        raise
+    except Exception:
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception as rb_exc:
+                logger.warning(
+                    "[WaUsage] last_inbound savepoint rollback failed err=%s", rb_exc
+                )
+        raise
 
 
 def has_open_service_window(
@@ -771,32 +990,21 @@ def has_open_service_window(
     now: Optional[datetime] = None,
 ) -> bool:
     """
-    Return True when the customer currently has an open *service* window.
+    Return True iff last *customer inbound* is strictly less than 24 hours ago.
 
-    Free-form text replies are only allowed after a customer-initiated message.
-    A marketing conversation opened by a template must not be treated as a
-    customer-service window for manual text replies.
+    Source of truth: ``WaConversationWindow.last_customer_inbound_at``.
+    Missing inbound or a not-yet-migrated column is a normal CLOSED (False).
+    Other query failures propagate so ``lifecycle_service_window_is_open``
+    can stamp error provenance.
     """
     if not customer_phone:
         return False
 
-    from models import WaConversationWindow  # noqa: PLC0415
-
     now_naive = _naive(now or _utcnow())
-    cutoff = now_naive - timedelta(hours=WINDOW_HOURS)
-    window = (
-        db.query(WaConversationWindow)
-        .filter(
-            WaConversationWindow.tenant_id == tenant_id,
-            WaConversationWindow.customer_phone == customer_phone,
-        )
-        .first()
-    )
-    return bool(
-        window is not None
-        and window.category == "service"
-        and window.window_start >= cutoff
-    )
+    inbound_at = _read_last_customer_inbound_at(db, tenant_id, customer_phone)
+    if inbound_at is None:
+        return False
+    return _elapsed_within_conservative_window(inbound_at, now_naive)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -807,6 +1015,7 @@ def track_conversation(
     customer_phone: str,
     source: ConvSource = "inbound",
     category: ConvCategory = "service",
+    inbound_at: Optional[datetime] = None,
 ) -> TrackResult:
     """
     Check whether this message opens a new Meta conversation window.
@@ -822,6 +1031,10 @@ def track_conversation(
     source   : "inbound" for customer messages, "campaign"/"template" for
                merchant-initiated bulk or one-off messages
     category : "service" (customer-initiated) | "marketing" (merchant-initiated)
+    inbound_at : WhatsApp customer-message timestamp. Used only for inbound
+                 service-window writes. Missing/invalid timestamps do not
+                 open or extend last_customer_inbound_at (no server-now
+                 substitute). Wall clock is used only for the billing clock.
     """
     now        = _utcnow()
     now_naive  = _naive(now)
@@ -829,9 +1042,19 @@ def track_conversation(
 
     usage = _get_or_create_usage(db, tenant_id, ctx)
 
-    is_new = _open_new_window(db, tenant_id, customer_phone, category, source, now_naive)
+    is_new = _open_new_window(
+        db,
+        tenant_id,
+        customer_phone,
+        category,
+        source,
+        now_naive,
+        inbound_at=inbound_at,
+    )
 
     if not is_new:
+        # Persist rolling-window refresh from a later inbound.
+        db.commit()
         total = usage.service_conversations_used + usage.marketing_conversations_used
         return TrackResult(
             counted=False,

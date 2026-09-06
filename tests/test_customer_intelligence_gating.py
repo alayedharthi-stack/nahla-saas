@@ -485,16 +485,16 @@ def test_has_open_service_window_requires_service_category():
         db.add(WaConversationWindow(tenant_id=tenant.id, customer_phone=phone, window_start=recent, category="marketing"))
         db.commit()
 
-        # marketing window → NOT a service window
+        # marketing / billing clock alone is NOT a customer-service window
         assert has_open_service_window(db, tenant.id, phone) is False
 
         db.query(WaConversationWindow).filter(
             WaConversationWindow.tenant_id == tenant.id,
             WaConversationWindow.customer_phone == phone,
-        ).update({"category": "service"})
+        ).update({"category": "service", "last_customer_inbound_at": recent})
         db.commit()
 
-        # service window within 24h → allowed
+        # last customer inbound within 24h → allowed
         assert has_open_service_window(db, tenant.id, phone) is True
     finally:
         db.close()
@@ -550,6 +550,7 @@ def test_reply_allows_freeform_inside_service_window():
             tenant_id=tenant.id,
             customer_phone="+966555000003",
             window_start=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1),
+            last_customer_inbound_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1),
             category="service",
         ))
         db.commit()

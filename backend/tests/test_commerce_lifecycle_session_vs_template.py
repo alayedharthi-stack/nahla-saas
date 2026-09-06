@@ -150,9 +150,8 @@ def _pilot_env(monkeypatch):
 class TestHasOpenServiceWindowInboundOnly:
     def test_inbound_service_window_opens_and_outbound_marketing_does_not(self):
         """
-        has_open_service_window depends on WaConversationWindow.category==service
-        (opened by inbound customer messages via track_conversation), not on a
-        prior outbound/marketing window.
+        has_open_service_window depends on last_customer_inbound_at,
+        not on a prior outbound/marketing billing window.
         """
         db, _ = _make_db(WaConversationWindow)
         phone = "+966500111222"
@@ -173,12 +172,12 @@ class TestHasOpenServiceWindowInboundOnly:
         # Simulate inbound customer message opening a service window.
         row = db.query(WaConversationWindow).filter_by(tenant_id=20, customer_phone=phone).one()
         row.category = "service"
-        row.window_start = now
+        row.last_customer_inbound_at = now
         db.commit()
         assert has_open_service_window(db, 20, phone, now=now) is True
 
-        # Expired service window closes free-form path.
-        row.window_start = now - timedelta(hours=25)
+        # Expired last inbound closes free-form path.
+        row.last_customer_inbound_at = now - timedelta(hours=25)
         db.commit()
         assert has_open_service_window(db, 20, phone, now=now) is False
 
@@ -215,6 +214,7 @@ class TestOpenClosedWindowDispatch:
                 tenant_id=20,
                 customer_phone="+966500111222",
                 window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
                 category="service",
             )
         )
@@ -263,6 +263,51 @@ class TestOpenClosedWindowDispatch:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    def test_window_read_error_sends_approved_template_only(
+        self,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_template_send,
+        mock_session_send,
+    ):
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+        mock_template_send.return_value = ("sent", {"wa_message_id": "wamid.tpl.err"})
+
+        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings)
+        db.add(
+            WaConversationWindow(
+                tenant_id=20,
+                customer_phone="+966500111222",
+                window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
+                category="service",
+            )
+        )
+        db.commit()
+
+        with patch(
+            "core.wa_usage.has_open_service_window",
+            side_effect=RuntimeError("window query failed"),
+        ):
+            result = _run_async(
+                dispatch_external_lifecycle_notification(
+                    **_dispatch_kwargs(db, _generic_order())
+                )
+            )
+        assert result.dispatched is True
+        mock_template_send.assert_awaited_once()
+        mock_session_send.assert_not_awaited()
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        assert row.send_method == "approved_template"
+        assert (row.dispatch_decision_json or {}).get("window_source") == (
+            "window_check_error_fail_closed"
+        )
+
+    @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_no_approved_template_blocks_even_when_window_open(
         self,
         mock_caps,
@@ -279,6 +324,7 @@ class TestOpenClosedWindowDispatch:
                 tenant_id=20,
                 customer_phone="+966500111222",
                 window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
                 category="service",
             )
         )
@@ -317,6 +363,7 @@ class TestOpenClosedWindowDispatch:
                 tenant_id=20,
                 customer_phone="+966500111222",
                 window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
                 category="service",
             )
         )
