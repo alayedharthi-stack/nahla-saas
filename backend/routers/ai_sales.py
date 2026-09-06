@@ -766,10 +766,32 @@ async def ai_sales_create_order(
 
     rate_limit(f"order:{tenant_id}:{body.customer_phone}", max_count=5, window_seconds=3600)
 
+    from services.cod_confirmation import (  # noqa: PLC0415
+        CodCheckoutSettingsUnavailable,
+        CodOrderingDisabled,
+        disabled_confirmation_bypass_metadata,
+        require_cod_checkout_plan,
+    )
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        REASON_SETTINGS_UNAVAILABLE,
+    )
+
+    cod_plan = None
     if body.payment_method in ("cash_on_delivery", "cod"):
-        if not settings.get("allow_cod_confirmation_flow", True):
+        try:
+            cod_plan = require_cod_checkout_plan(
+                db,
+                tenant_id,
+                ordering_allowed=bool(settings.get("allow_cod_confirmation_flow", True)),
+            )
+        except CodOrderingDisabled:
             raise HTTPException(status_code=403, detail="COD orders are disabled for this tenant")
-        order_status = "pending_confirmation"
+        except CodCheckoutSettingsUnavailable:
+            raise HTTPException(
+                status_code=503,
+                detail=REASON_SETTINGS_UNAVAILABLE,
+            )
+        order_status = cod_plan.local_status
         payment_link = None
     else:
         if not settings.get("allow_payment_link_sending", True):
@@ -783,7 +805,14 @@ async def ai_sales_create_order(
     from store_integration.payment_service import generate_payment_link as store_payment_link  # noqa: PLC0415
 
     store_order = None
-    if body.payment_method in ("pay_now",):
+    if body.payment_method in ("pay_now",) or (
+        body.payment_method in ("cash_on_delivery", "cod")
+        and cod_plan is not None
+        and cod_plan.push_to_store_now
+    ):
+        store_payment_method = (
+            "cod" if body.payment_method in ("cash_on_delivery", "cod") else body.payment_method
+        )
         store_order_input = StoreOrderInput(
             customer_name=body.customer_name,
             customer_phone=body.customer_phone,
@@ -793,7 +822,7 @@ async def ai_sales_create_order(
             postal_code=body.postal_code or "",
             city=body.city or "",
             address=body.address or "",
-            payment_method=body.payment_method,
+            payment_method=store_payment_method,
             items=[StoreOrderItem(
                 product_id=str(body.product_id) if body.product_id else "0",
                 variant_id=str(body.variant_id) if body.variant_id else None,
@@ -874,6 +903,18 @@ async def ai_sales_create_order(
     if not order_reference_number:
         order_reference_number = external_order_id
 
+    order_extra: Dict[str, Any] = {
+        "source": "ai_sales_agent", "payment_method": body.payment_method,
+        "notes": body.notes, "created_via": "whatsapp_conversation",
+    }
+    if cod_plan is not None and cod_plan.push_to_store_now:
+        order_extra.update(
+            disabled_confirmation_bypass_metadata(
+                cod_plan.reason,
+                external_id=external_order_id,
+            )
+        )
+
     order = Order(
         tenant_id=tenant_id,
         status=order_status,
@@ -890,13 +931,12 @@ async def ai_sales_create_order(
         line_items=line_items,
         checkout_url=payment_link,
         source="whatsapp",
-        extra_metadata={
-            "source": "ai_sales_agent", "payment_method": body.payment_method,
-            "notes": body.notes, "created_via": "whatsapp_conversation",
-        },
+        extra_metadata=order_extra,
     )
     db.add(order)
     db.flush()
+    db.commit()
+    db.refresh(order)
 
     # NOTE: An earlier version of this path called
     #   _log_autopilot_event(..., "autopilot_order_update_sent", ...)
@@ -956,15 +996,17 @@ async def ai_sales_create_order(
         reference_id=str(order.id),
     )
 
-    # ── COD: send the customer the confirmation template ─────────────────────
-    # The order is in `pending_confirmation` locally and has NOT been pushed
-    # to the merchant's store yet. The customer must tap "تأكيد الطلب ✅" on
-    # the template; the WhatsApp webhook then routes the reply through
-    # services.cod_confirmation.handle_cod_reply, which transitions the
-    # order to `under_review` and pushes it to the store.
+    # ── COD: confirm-first send, or immediate store path when confirmation is OFF
+    # Confirmation ON: local pending_confirmation, send once, wait for button.
+    # Confirmation OFF: already pushed above; do not send and do not wait.
+    # Settings unavailable never reaches here (HTTP 503 before Order()).
     cod_template_sent = False
     cod_template_error: Optional[str] = None
-    if body.payment_method in ("cash_on_delivery", "cod"):
+    if (
+        body.payment_method in ("cash_on_delivery", "cod")
+        and cod_plan is not None
+        and cod_plan.send_confirmation
+    ):
         from services.cod_confirmation import send_cod_confirmation_template  # noqa: PLC0415
         cod_result = await send_cod_confirmation_template(
             db,
@@ -988,7 +1030,9 @@ async def ai_sales_create_order(
                 "order_id":       order.id,
                 "wa_message_id":  cod_result.get("wa_message_id"),
                 "error":          cod_template_error,
-                "template_name":  "cod_order_confirmation_ar",
+                "template_name":  cod_result.get("template_name"),
+                "service_key":    "cod_confirmation",
+                "send_method":    cod_result.get("send_method"),
             },
             reference_id=str(order.id),
         )
@@ -1028,8 +1072,12 @@ async def ai_sales_create_order(
             f"تم إنشاء الطلب #{order.id} بنجاح ✅ "
             + (
                 "أرسلنا لك رسالة لتأكيد الطلب على واتساب."
-                if is_cod
-                else ("رابط الدفع أُرسل إليك." if payment_link else "سيتواصل معك فريقنا لتأكيد الطلب.")
+                if cod_template_sent
+                else (
+                    "رابط الدفع أُرسل إليك."
+                    if payment_link
+                    else ("" if is_cod else "سيتواصل معك فريقنا لتأكيد الطلب.")
+                )
             )
         ),
     }

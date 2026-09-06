@@ -1009,6 +1009,29 @@ def _record_external_lifecycle_shadow_best_effort(
         )
 
 
+def _lifecycle_dispatch_owns_tenant(tenant_id: int) -> bool:
+    try:
+        from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+            commerce_lifecycle_dispatch_tenant_permitted,
+        )
+        return commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id))
+    except Exception:
+        logger.exception(
+            "[StoreSync] lifecycle ownership check failed tenant=%s",
+            tenant_id,
+        )
+        return False
+
+
+def _attach_lifecycle_observation(
+    normalized_order: Dict[str, Any],
+    observation: str,
+) -> Dict[str, Any]:
+    attached = dict(normalized_order or {})
+    attached["lifecycle_observation"] = observation
+    return attached
+
+
 async def _handle_external_lifecycle_transition_best_effort(
     sync: "StoreSyncService",
     *,
@@ -2231,7 +2254,9 @@ class StoreSyncService:
                     provider=adapter_source,
                     raw_previous_status=prev_status,
                     raw_current_status=normalised_status,
-                    normalized_order=normalised,
+                    normalized_order=_attach_lifecycle_observation(
+                        normalised, "poll_import"
+                    ),
                     raw_payload=raw if isinstance(raw, dict) else None,
                 )
                 if self._integration_connection_id is not None:
@@ -2308,6 +2333,15 @@ class StoreSyncService:
                             _pm and any(_pm == m or m in _pm for m in _COD_METHODS)
                         )
                         if _is_cod:
+                            from services.cod_confirmation import (  # noqa: PLC0415
+                                nahla_owns_cod_customer_confirmation,
+                            )
+                            if (
+                                _lifecycle_dispatch_owns_tenant(self.tenant_id)
+                                or nahla_owns_cod_customer_confirmation(new_row)
+                            ):
+                                _is_cod = False
+                        if _is_cod:
                             emit_automation_event(
                                 self.db,
                                 self.tenant_id,
@@ -2355,7 +2389,9 @@ class StoreSyncService:
                     provider=adapter_source,
                     raw_previous_status=None,
                     raw_current_status=normalised_status,
-                    normalized_order=normalised,
+                    normalized_order=_attach_lifecycle_observation(
+                        normalised, "poll_import"
+                    ),
                     raw_payload=raw if isinstance(raw, dict) else None,
                 )
                 if self._integration_connection_id is not None:
@@ -4264,6 +4300,14 @@ class StoreSyncService:
                     "pending", "new",
                 }
                 meta = dict(order_row.extra_metadata or {})
+                from services.cod_confirmation import (  # noqa: PLC0415
+                    nahla_owns_cod_customer_confirmation,
+                )
+                if (
+                    _lifecycle_dispatch_owns_tenant(self.tenant_id)
+                    or nahla_owns_cod_customer_confirmation(order_row)
+                ):
+                    _is_cod = False
                 if _is_cod and not meta.get("cod_webhook_triggered"):
                     emit_automation_event(
                         self.db,
@@ -4386,6 +4430,7 @@ class StoreSyncService:
             normalised.get("status") in _SHIPPED_STATUSES
             and prev_status not in _SHIPPED_STATUSES
             and customer
+            and not _lifecycle_dispatch_owns_tenant(self.tenant_id)
         ):
             try:
                 from core.automation_engine import emit_automation_event  # noqa: PLC0415
@@ -4442,7 +4487,9 @@ class StoreSyncService:
                 provider=webhook_source,
                 raw_previous_status=lifecycle_prev_status,
                 raw_current_status=normalised["status"],
-                normalized_order=normalised,
+                normalized_order=_attach_lifecycle_observation(
+                    normalised, "live_webhook"
+                ),
                 raw_payload=payload if isinstance(payload, dict) else None,
             )
 

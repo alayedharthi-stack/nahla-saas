@@ -1530,6 +1530,23 @@
       "expires_at": "2026-09-20",
       "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=GRANTED LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 POST_DECISION PR953 HEAD=6faf8ea1a626c5417c49cbf73471a39575522c34 EXACT_LINUX_FINDINGS=3 SINGLE_USE=true NO_NEW_CUSTOMER_LANGUAGE_RULES=true",
       "exact_reason": "non-checkout turns freeze checkout-progress stamping after compose; Linux finding is file-touch of a pre-existing in-branch literal, with no new customer-language rule"
+    },
+    {
+      "exception_id": "EX-LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4-COMPOSE-PR958-001",
+      "change_class": "CANNED_REPLY_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/compose/responder.py"
+      ],
+      "exact_symbol_scope": "3048",
+      "expected_change_digest": "0891fcb97e46703fcefa24df89ab729acb8d1c4e9bf1f517c4f9faaee1c70d52",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-06",
+      "expires_at": "2026-09-20",
+      "implementation_pr": "958",
+      "implementation_head": "e4a78bd98185145a897f9ba63f193c50d2b7d57f",
+      "owner_approval_ref": "OWNER_GOV002_APPROVAL=GRANTED DEFECT=LIVE-BARE-EXTERNAL-URL-STOLEN-BY-CHECKOUT-CONTINUATION-D4 SCOPE=PR958_EXACT_LINUX_FINDING_ONLY IMPLEMENTATION_PR=958 IMPLEMENTATION_HEAD=e4a78bd98185145a897f9ba63f193c50d2b7d57f SINGLE_USE=true PREEXISTING_CANNED_REPLY_UNCHANGED=true",
+      "exact_reason": "new fixed customer-facing return in compose/persona surface"
     }
   ]
 }

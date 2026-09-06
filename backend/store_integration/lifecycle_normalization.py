@@ -95,6 +95,60 @@ def resolve_lifecycle_intent_normalizer(
     return None
 
 
+def resolve_customer_relevant_state(
+    *,
+    provider: str,
+    raw_status: Any,
+) -> str:
+    """Adapter-owned current-state bucket used in semantic delivery identity."""
+    slug = normalize_status_slug(raw_status)
+    registry = _load_adapter_registry()
+    adapter_cls = registry.get(str(provider or "").strip().lower())
+    if adapter_cls is not None:
+        fn = getattr(adapter_cls, "normalize_lifecycle_customer_state", None)
+        if callable(fn):
+            try:
+                bucket = fn(raw_status)
+            except Exception:
+                logger.exception(
+                    "[LifecycleNorm] customer-state normalizer failed provider=%s",
+                    str(provider or "").strip().lower(),
+                )
+                return slug
+            text = normalize_status_slug(bucket)
+            if text:
+                return text
+    return slug
+
+
+def extract_provider_order_version(
+    *,
+    normalized_order: Optional[Mapping[str, Any]] = None,
+    raw_payload: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Audit-only Salla/order version. Not used as the semantic delivery key
+    because webhook vs poller payloads often carry observation timestamps
+    in ``updated_at`` rather than a shared transition id.
+    """
+    candidates: list[Any] = []
+    order_map = dict(normalized_order or {})
+    payload = dict(raw_payload or {})
+    nested_order = payload.get("order") if isinstance(payload.get("order"), dict) else {}
+    nested_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    for source in (order_map, nested_order, nested_data, payload):
+        if not isinstance(source, dict):
+            continue
+        for key in ("order_updated_at", "salla_updated_at"):
+            if source.get(key):
+                candidates.append(source.get(key))
+    for value in candidates:
+        canonical = canonicalize_provider_timestamp(value)
+        if canonical:
+            return canonical
+    return None
+
+
 def normalize_external_lifecycle_intent(
     *,
     provider: str,
@@ -133,41 +187,6 @@ def normalize_external_lifecycle_intent(
     return intent, "adapter_mapped"
 
 
-def _extract_provider_updated_at(raw_payload: Optional[Mapping[str, Any]]) -> Optional[str]:
-    if not raw_payload:
-        return None
-    for key in ("updated_at", "updated_date", "modified_at"):
-        val = raw_payload.get(key)
-        if isinstance(val, dict):
-            val = val.get("date") or val.get("iso") or val.get("formatted")
-        canonical = canonicalize_provider_timestamp(val)
-        if canonical:
-            return canonical
-    return None
-
-
-def _extract_provider_event_id(raw_payload: Optional[Mapping[str, Any]]) -> Optional[str]:
-    if not raw_payload:
-        return None
-    for key in ("event_id", "webhook_event_id", "webhook_id"):
-        val = raw_payload.get(key)
-        text = str(val or "").strip()
-        if text:
-            return text
-    return None
-
-
-def _extract_external_update_version(raw_payload: Optional[Mapping[str, Any]]) -> Optional[str]:
-    if not raw_payload:
-        return None
-    for key in ("version", "update_id", "revision"):
-        val = raw_payload.get(key)
-        text = str(val or "").strip()
-        if text:
-            return text
-    return None
-
-
 def build_transition_identity(
     *,
     provider: str,
@@ -175,77 +194,57 @@ def build_transition_identity(
     raw_previous_status: Optional[str],
     raw_current_status: str,
     raw_payload: Optional[Mapping[str, Any]] = None,
+    business_intent: Optional[Any] = None,
+    prior_customer_state: Optional[str] = None,
+    normalized_order: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[str, str]:
     """
     Build stable ``(source_event_id, transition_version)`` for ledger idempotency.
 
-    ``source_event_id`` priority:
-      1. provider webhook/event id
-      2. external order update id/version
-      3. deterministic digest from provider + order id + statuses + updated_at
+    RAW observer identity (previous_status, webhook event_id, observation
+    timestamps) is audit-only. Semantic customer-delivery identity hashes:
 
-    ``transition_version`` hashes a canonical provider ``updated_at`` (when
-    parseable) plus status transition components; otherwise a deterministic
-    digest (never wall-clock alone).
+      provider + external_order_id + business_intent + customer_state
+      + persisted prior_customer_state
+
+    ``raw_previous_status`` must not split webhook vs poller views of the
+    same actual transition. A later legitimate recurrence is a different
+    ``prior_customer_state`` (the last customer-relevant state Nahla already
+    notified), not a different observer previous_status.
+
+    Provider ``updated_at`` / event ids remain audit-only.
     """
     provider_key = str(provider or "").strip().lower()
     ext_id = str(external_order_id or "").strip()
-    prev = normalize_status_slug(raw_previous_status) or None
-    curr = normalize_status_slug(raw_current_status)
-    updated_at = _extract_provider_updated_at(raw_payload)
+    current_state = resolve_customer_relevant_state(
+        provider=provider_key,
+        raw_status=raw_current_status,
+    )
+    intent_value = None
+    if business_intent is not None:
+        intent_value = getattr(business_intent, "value", None) or str(business_intent)
+        intent_value = str(intent_value).strip() or None
+    prior = normalize_status_slug(prior_customer_state) or None
+    # Observer previous_status is mapping evidence only — never a ledger key.
+    _observer_previous_status = raw_previous_status
+    del _observer_previous_status
 
-    event_id = _extract_provider_event_id(raw_payload)
-    if event_id:
-        source_event_id = event_id
-    else:
-        update_version = _extract_external_update_version(raw_payload)
-        if update_version:
-            source_event_id = f"upd:{update_version}"
-        else:
-            fallback_payload = {
-                "provider": provider_key,
-                "external_order_id": ext_id,
-                "raw_previous_status": prev,
-                "raw_current_status": curr,
-                "provider_updated_at": updated_at,
-            }
-            canonical = json.dumps(
-                fallback_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-            )
-            source_event_id = f"ext:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
-
-    if updated_at:
-        version_payload = {
-            "provider_updated_at": updated_at,
-            "raw_previous_status": prev,
-            "raw_current_status": curr,
-        }
-        canonical = json.dumps(
-            version_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        transition_version = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    else:
-        version_payload = {
-            "provider": provider_key,
-            "external_order_id": ext_id,
-            "raw_previous_status": prev,
-            "raw_current_status": curr,
-            "source_event_id": source_event_id,
-        }
-        canonical = json.dumps(
-            version_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        transition_version = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
+    semantic_payload = {
+        "provider": provider_key,
+        "external_order_id": ext_id,
+        "business_intent": intent_value,
+        "customer_state": current_state or None,
+        "prior_customer_state": prior,
+    }
+    canonical = json.dumps(
+        semantic_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    source_event_id = f"sem:{digest}"
+    transition_version = digest
     return source_event_id, transition_version
 
 
@@ -254,7 +253,9 @@ __all__ = [
     "LifecycleIntentNormalizer",
     "build_transition_identity",
     "canonicalize_provider_timestamp",
+    "extract_provider_order_version",
     "normalize_external_lifecycle_intent",
     "normalize_status_slug",
+    "resolve_customer_relevant_state",
     "resolve_lifecycle_intent_normalizer",
 ]

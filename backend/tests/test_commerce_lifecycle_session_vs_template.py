@@ -37,6 +37,7 @@ from core.commerce_lifecycle.ledger import (  # noqa: E402
 from core.wa_usage import has_open_service_window  # noqa: E402
 from models import (  # noqa: E402
     CommerceLifecycleNotificationLedger,
+    TenantSettings,
     WaConversationWindow,
 )
 
@@ -195,7 +196,7 @@ class TestSendMethodNormalize:
 class TestOpenClosedWindowDispatch:
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_open_window_sends_session_body_only(
         self,
@@ -208,7 +209,7 @@ class TestOpenClosedWindowDispatch:
         mock_resolve_tpl.return_value = _approved_template()
         mock_session_send.return_value = ("sent", {"wa_message_id": "wamid.session.1"})
 
-        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow)
+        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings)
         db.add(
             WaConversationWindow(
                 tenant_id=20,
@@ -233,7 +234,7 @@ class TestOpenClosedWindowDispatch:
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_closed_window_sends_approved_template_only(
         self,
@@ -246,7 +247,7 @@ class TestOpenClosedWindowDispatch:
         mock_resolve_tpl.return_value = _approved_template()
         mock_template_send.return_value = ("sent", {"wa_message_id": "wamid.tpl.1"})
 
-        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow)
+        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings)
         result = _run_async(
             dispatch_external_lifecycle_notification(**_dispatch_kwargs(db, _generic_order()))
         )
@@ -260,7 +261,7 @@ class TestOpenClosedWindowDispatch:
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_no_approved_template_blocks_even_when_window_open(
         self,
@@ -272,7 +273,7 @@ class TestOpenClosedWindowDispatch:
         mock_caps.return_value = _merchant_caps()
         mock_resolve_tpl.return_value = None
 
-        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow)
+        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings)
         db.add(
             WaConversationWindow(
                 tenant_id=20,
@@ -297,7 +298,7 @@ class TestOpenClosedWindowDispatch:
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
-    @patch("core.service_template_resolver.resolve_template_for_send")
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_single_path_idempotency_blocks_second_send(
         self,
@@ -310,7 +311,7 @@ class TestOpenClosedWindowDispatch:
         mock_resolve_tpl.return_value = _approved_template()
         mock_session_send.return_value = ("sent", {"wa_message_id": "wamid.session.once"})
 
-        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow)
+        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings)
         db.add(
             WaConversationWindow(
                 tenant_id=20,
@@ -343,7 +344,7 @@ class TestOpenClosedWindowDispatch:
 class TestConditionalReclaimWithSendMethod:
     def test_conditional_reclaim_preserves_single_path(self, monkeypatch):
         monkeypatch.setenv("COMMERCE_LIFECYCLE_SEND_STALE_SECONDS", "1")
-        db, _ = _make_db(CommerceLifecycleNotificationLedger)
+        db, _ = _make_db(CommerceLifecycleNotificationLedger, TenantSettings)
         reserved = reserve_send_decision(
             db,
             tenant_id=20,
