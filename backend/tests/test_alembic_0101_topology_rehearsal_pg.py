@@ -24,6 +24,7 @@ import pytest
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -268,6 +269,146 @@ def test_0101_then_0102_fail_closed_uniqueness(admin_engine: Engine) -> None:
         assert UQ_MEMBERSHIP_META_ITEM in names
         run_alembic(engine, _VALIDATE_HEAD)
         assert _current_revisions(engine) == {_VALIDATE_HEAD, _HEAD}
+    finally:
+        engine.dispose()
+        drop_ephemeral_database(admin_engine, db_name)
+
+
+_LIFECYCLE_TEMPLATE_INDEX = "uq_active_lifecycle_template_null_step"
+_ERROR_0104_DUPLICATES = "0104 refused: duplicate active lifecycle templates"
+
+
+def _lifecycle_template_index_exists(engine: Engine) -> bool:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT 1
+                FROM pg_indexes
+                WHERE tablename = 'whatsapp_templates'
+                  AND indexname = :name
+                """
+            ),
+            {"name": _LIFECYCLE_TEMPLATE_INDEX},
+        ).first()
+    return row is not None
+
+
+def _whatsapp_template_count(engine: Engine) -> int:
+    with engine.connect() as conn:
+        return int(conn.execute(text("SELECT COUNT(*) FROM whatsapp_templates")).scalar_one())
+
+
+def _insert_tenant(engine: Engine, name: str) -> int:
+    with engine.begin() as conn:
+        return int(
+            conn.execute(
+                text("INSERT INTO tenants (name) VALUES (:name) RETURNING id"),
+                {"name": name},
+            ).scalar_one()
+        )
+
+
+def _insert_lifecycle_template(
+    engine: Engine,
+    *,
+    tenant_id: int,
+    name: str,
+    service_key: str = "cod_confirmation",
+    is_active: bool = True,
+    is_hidden: bool = False,
+    step_number=None,
+) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO whatsapp_templates (
+                    tenant_id, name, language, category, status,
+                    service_key, is_active, is_hidden, step_number, revision
+                ) VALUES (
+                    :tenant_id, :name, 'ar', 'UTILITY', 'APPROVED',
+                    :service_key, :is_active, :is_hidden, :step_number, 1
+                )
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "name": name,
+                "service_key": service_key,
+                "is_active": is_active,
+                "is_hidden": is_hidden,
+                "step_number": step_number,
+            },
+        )
+
+
+def test_clean_upgrade_0103_to_0104(admin_engine: Engine) -> None:
+    source = (
+        _DATABASE / "migrations" / "versions" / "0104_active_lifecycle_template_null_step.py"
+    ).read_text(encoding="utf-8")
+    assert 'down_revision = "0103"' in source
+    assert "DELETE FROM" not in source.upper().replace(" ", "")
+    assert "No rows were deleted" in source
+    assert "alembic upgrade head" not in source
+
+    db_name, engine = _ephemeral_engine(admin_engine)
+    try:
+        run_alembic(engine, "0103")
+        assert _current_revisions(engine) == {"0103"}
+        assert _lifecycle_template_index_exists(engine) is False
+        run_alembic(engine, "0104")
+        assert _current_revisions(engine) == {"0104"}
+        assert _lifecycle_template_index_exists(engine) is True
+        assert _whatsapp_template_count(engine) == 0
+    finally:
+        engine.dispose()
+        drop_ephemeral_database(admin_engine, db_name)
+
+
+def test_0104_duplicate_precheck_refuses_and_keeps_rows(admin_engine: Engine) -> None:
+    db_name, engine = _ephemeral_engine(admin_engine)
+    try:
+        run_alembic(engine, "0103")
+        tenant_id = _insert_tenant(engine, "t-0104-dup-precheck")
+        _insert_lifecycle_template(engine, tenant_id=tenant_id, name="lifecycle_a")
+        _insert_lifecycle_template(engine, tenant_id=tenant_id, name="lifecycle_b")
+        before = _whatsapp_template_count(engine)
+        assert before == 2
+        with pytest.raises(Exception) as raised:  # noqa: BLE001 — Alembic wraps RuntimeError
+            run_alembic(engine, "0104")
+        text_exc = str(raised.value)
+        assert _ERROR_0104_DUPLICATES in text_exc or "duplicate active lifecycle" in text_exc
+        assert _current_revisions(engine) == {"0103"}
+        assert _lifecycle_template_index_exists(engine) is False
+        assert _whatsapp_template_count(engine) == before
+    finally:
+        engine.dispose()
+        drop_ephemeral_database(admin_engine, db_name)
+
+
+def test_0104_unique_index_rejects_second_active_visible_null_step(
+    admin_engine: Engine,
+) -> None:
+    db_name, engine = _ephemeral_engine(admin_engine)
+    try:
+        run_alembic(engine, "0104")
+        tenant_id = _insert_tenant(engine, "t-0104-unique")
+        _insert_lifecycle_template(engine, tenant_id=tenant_id, name="lifecycle_one")
+        assert _whatsapp_template_count(engine) == 1
+        with pytest.raises(IntegrityError):
+            _insert_lifecycle_template(engine, tenant_id=tenant_id, name="lifecycle_two")
+        assert _whatsapp_template_count(engine) == 1
+        _insert_lifecycle_template(
+            engine, tenant_id=tenant_id, name="lifecycle_hidden", is_hidden=True
+        )
+        _insert_lifecycle_template(
+            engine, tenant_id=tenant_id, name="lifecycle_inactive", is_active=False
+        )
+        _insert_lifecycle_template(
+            engine, tenant_id=tenant_id, name="lifecycle_step", step_number=1
+        )
+        assert _whatsapp_template_count(engine) == 4
     finally:
         engine.dispose()
         drop_ephemeral_database(admin_engine, db_name)

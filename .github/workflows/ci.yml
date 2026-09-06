@@ -45,14 +45,6 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
-      - name: Order lifecycle PR955 blocker tests
-        run: |
-          python -m pytest \
-            backend/tests/test_pr955_blocker_remediation.py \
-            backend/tests/test_pr955_sol_final_blockers.py \
-            backend/tests/test_order_updates_owner_review.py \
-            -q --tb=short --maxfail=1
-
       - name: WhatsApp OAuth callback auth boundary
         run: |
           set -euo pipefail
@@ -444,7 +436,6 @@ jobs:
             backend/tests/test_staging_migration_0032_to_0083_operator.py \
             backend/tests/test_legacy_migration_drift_0030_0087_pg.py \
             backend/tests/test_alembic_0101_topology_rehearsal_pg.py \
-            backend/tests/test_alembic_0104_pg.py \
             backend/tests/test_staging_dr_canonical_parity_pg.py \
             backend/tests/test_order_customer_identity_capability_gate.py \
             backend/tests/test_order_customer_identity_reconciliation_report.py \
