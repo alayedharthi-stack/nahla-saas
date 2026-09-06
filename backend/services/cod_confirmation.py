@@ -143,7 +143,7 @@ def _stamp_cod_confirmation_sent(order: Any, *, template: Any, send_method: str)
     order.extra_metadata = meta
     try:
         flag_modified(order, "extra_metadata")
-    except Exception:
+    except Exception:  # noqa: silent-ok — SimpleNamespace orders in tests have no SA state
         pass
 
 
@@ -293,7 +293,7 @@ async def send_cod_confirmation_template(
                 "send_method": send_method,
             },
         )
-    except Exception:
+    except Exception:  # noqa: silent-ok — conversation log must not fail the COD send
         pass
 
     return {
