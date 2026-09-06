@@ -2618,13 +2618,13 @@ class WhatsAppUsage(Base):
 class WaConversationWindow(Base):
     """
     One row per (tenant_id, customer_phone).
-    Tracks the start timestamp of the CURRENT open Meta conversation window
-    for each customer. Used to determine whether a new inbound/outbound message
-    opens a NEW billable window (>24 h since last window_start) or falls
-    inside an already-counted one.
 
-    SELECT FOR UPDATE on this row serialises concurrent webhook calls for the
-    same customer, eliminating race conditions.
+    For category=service, ``window_start`` is last *customer inbound*
+    (WhatsApp message timestamp). The customer-service window is OPEN iff
+    now - window_start < 24h. Outbound / template / campaign must not move
+    this timestamp forward.
+
+    The same row still serialises billable-window opens via SELECT FOR UPDATE.
     """
     __tablename__ = 'wa_conversation_windows'
 

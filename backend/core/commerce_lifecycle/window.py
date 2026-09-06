@@ -1,13 +1,12 @@
 """
 Lifecycle 24h service-window policy — one deterministic interface.
 
-OPEN iff the current WaConversationWindow implementation reports an open
-service window. Unknown/error fails closed to the closed-window path.
+OPEN iff last customer inbound is strictly less than 24 hours ago.
+Canonical read: ``wa_usage.has_open_service_window``
+(``WaConversationWindow.window_start`` for category=service).
 
-BLOCKED BY ROLLING-24H DEFECT:
-``has_open_service_window`` is not last-customer-inbound truth. It uses the
-billable window row (category sticky, window_start clock). Do not pretend
-that is Meta's 24h customer-service window. Fix that in a dedicated PR.
+Unknown / missing / error fails closed to the closed-window (template) path.
+Do not add a second window implementation here.
 """
 from __future__ import annotations
 

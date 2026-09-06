@@ -263,6 +263,50 @@ class TestOpenClosedWindowDispatch:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    def test_window_read_error_sends_approved_template_only(
+        self,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_template_send,
+        mock_session_send,
+    ):
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+        mock_template_send.return_value = ("sent", {"wa_message_id": "wamid.tpl.err"})
+
+        db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings)
+        db.add(
+            WaConversationWindow(
+                tenant_id=20,
+                customer_phone="+966500111222",
+                window_start=datetime.utcnow(),
+                category="service",
+            )
+        )
+        db.commit()
+
+        with patch(
+            "core.wa_usage.has_open_service_window",
+            side_effect=RuntimeError("window query failed"),
+        ):
+            result = _run_async(
+                dispatch_external_lifecycle_notification(
+                    **_dispatch_kwargs(db, _generic_order())
+                )
+            )
+        assert result.dispatched is True
+        mock_template_send.assert_awaited_once()
+        mock_session_send.assert_not_awaited()
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        assert row.send_method == "approved_template"
+        assert (row.dispatch_decision_json or {}).get("window_source") == (
+            "window_check_error_fail_closed"
+        )
+
+    @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_no_approved_template_blocks_even_when_window_open(
         self,
         mock_caps,

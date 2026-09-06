@@ -143,11 +143,21 @@ def _elapsed_within_conservative_window(
 ) -> bool:
     """True when elapsed time is strictly less than 24 hours.
 
-    Conservative Meta-safe bound for session sends:
+    Customer-service window bound:
     23:59:59 inside, exact 24:00:00 outside, 24:00:01 outside.
     """
     start_naive = _naive(window_start)
     return (now_naive - start_naive) < timedelta(hours=WINDOW_HOURS)
+
+
+def _is_customer_inbound(source: ConvSource, category: ConvCategory) -> bool:
+    return source == "inbound" and category == "service"
+
+
+def _later_naive(left: datetime, right: datetime) -> datetime:
+    left_naive = _naive(left)
+    right_naive = _naive(right)
+    return left_naive if left_naive >= right_naive else right_naive
 
 
 # Sentinel returned for unlimited plans (Scale). We use a finite integer
@@ -722,15 +732,26 @@ def _open_new_window(
     category: ConvCategory,
     source: ConvSource,
     now_naive: datetime,
+    inbound_at: Optional[datetime] = None,
 ) -> bool:
     """
     Atomically check and update the conversation window for this customer.
     Uses SELECT FOR UPDATE to serialise concurrent calls for the same customer.
 
+    For customer inbound, ``window_start`` is last-customer-inbound truth and
+    only moves forward (monotonic max). Outbound / template / campaign / api
+    never refresh that timestamp.
+
     Returns True  → a NEW billable window was opened (counter must be incremented)
     Returns False → still inside an existing window (no charge)
     """
     from models import WaConversationWindow, ConversationLog  # noqa: PLC0415
+
+    if not customer_phone:
+        return False
+
+    inbound_naive = _naive(inbound_at) if inbound_at is not None else now_naive
+    customer_inbound = _is_customer_inbound(source, category)
 
     # Lock the row for this tenant+customer — prevents race conditions
     window = (
@@ -743,19 +764,48 @@ def _open_new_window(
         .first()
     )
 
+    if customer_inbound:
+        billing_at = inbound_naive
+        still_inside = (
+            window is not None
+            and window.window_start is not None
+            and _elapsed_within_conservative_window(window.window_start, billing_at)
+        )
+        if window is None:
+            window = WaConversationWindow(
+                tenant_id      = tenant_id,
+                customer_phone = customer_phone,
+                window_start   = inbound_naive,
+                category       = "service",
+            )
+            db.add(window)
+        else:
+            if window.category == "service" and window.window_start is not None:
+                window.window_start = _later_naive(window.window_start, inbound_naive)
+            else:
+                # Marketing/template clocks are not last-customer-inbound.
+                window.window_start = inbound_naive
+            window.category = "service"
+            window.updated_at = now_naive
+        if still_inside:
+            return False
+        db.add(
+            ConversationLog(
+                tenant_id               = tenant_id,
+                customer_phone          = customer_phone,
+                conversation_started_at = now_naive,
+                source                  = source,
+                category                = "service",
+            )
+        )
+        return True
+
+    # Outbound / template / campaign / api — billing only, never last-inbound.
     if window is not None and _elapsed_within_conservative_window(
         window.window_start, now_naive
     ):
-        # Still inside the conservative 24-h window — no new billable conversation.
-        # A later customer inbound refreshes the rolling session/billing anchor
-        # without opening a second Meta conversation.
-        if source == "inbound" and category == "service":
-            window.window_start = now_naive
-            window.category = "service"
-            window.updated_at = now_naive
         return False
 
-    # ── New window starts now ────────────────────────────────────────────────
     if window is None:
         window = WaConversationWindow(
             tenant_id      = tenant_id,
@@ -769,16 +819,15 @@ def _open_new_window(
         window.category     = category
         window.updated_at   = now_naive
 
-    # Write audit log
-    log = ConversationLog(
-        tenant_id               = tenant_id,
-        customer_phone          = customer_phone,
-        conversation_started_at = now_naive,
-        source                  = source,
-        category                = category,
+    db.add(
+        ConversationLog(
+            tenant_id               = tenant_id,
+            customer_phone          = customer_phone,
+            conversation_started_at = now_naive,
+            source                  = source,
+            category                = category,
+        )
     )
-    db.add(log)
-
     return True
 
 
@@ -790,31 +839,39 @@ def has_open_service_window(
     now: Optional[datetime] = None,
 ) -> bool:
     """
-    Return True when the customer currently has an open *service* window.
+    Return True iff last *customer inbound* is strictly less than 24 hours ago.
 
-    Free-form text replies are only allowed after a customer-initiated message.
-    A marketing conversation opened by a template must not be treated as a
-    customer-service window for manual text replies.
+    Source of truth: ``WaConversationWindow.window_start`` for category=service.
+    Conversation existence, outbound, templates, and marketing rows do not
+    open this window. Missing data and query errors fail closed (False).
     """
-    if not customer_phone:
-        return False
+    try:
+        if not customer_phone:
+            return False
 
-    from models import WaConversationWindow  # noqa: PLC0415
+        from models import WaConversationWindow  # noqa: PLC0415
 
-    now_naive = _naive(now or _utcnow())
-    window = (
-        db.query(WaConversationWindow)
-        .filter(
-            WaConversationWindow.tenant_id == tenant_id,
-            WaConversationWindow.customer_phone == customer_phone,
+        now_naive = _naive(now or _utcnow())
+        window = (
+            db.query(WaConversationWindow)
+            .filter(
+                WaConversationWindow.tenant_id == tenant_id,
+                WaConversationWindow.customer_phone == customer_phone,
+            )
+            .first()
         )
-        .first()
-    )
-    return bool(
-        window is not None
-        and window.category == "service"
-        and _elapsed_within_conservative_window(window.window_start, now_naive)
-    )
+        if window is None or window.window_start is None:
+            return False
+        if window.category != "service":
+            return False
+        return _elapsed_within_conservative_window(window.window_start, now_naive)
+    except Exception as exc:
+        logger.warning(
+            "[WaUsage] has_open_service_window fail-closed tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+        return False
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -825,6 +882,7 @@ def track_conversation(
     customer_phone: str,
     source: ConvSource = "inbound",
     category: ConvCategory = "service",
+    inbound_at: Optional[datetime] = None,
 ) -> TrackResult:
     """
     Check whether this message opens a new Meta conversation window.
@@ -840,6 +898,9 @@ def track_conversation(
     source   : "inbound" for customer messages, "campaign"/"template" for
                merchant-initiated bulk or one-off messages
     category : "service" (customer-initiated) | "marketing" (merchant-initiated)
+    inbound_at : WhatsApp customer-message timestamp. Used only for inbound
+                 service writes so replay / out-of-order cannot move the
+                 last-inbound clock backwards. Wall clock is used when omitted.
     """
     now        = _utcnow()
     now_naive  = _naive(now)
@@ -847,7 +908,15 @@ def track_conversation(
 
     usage = _get_or_create_usage(db, tenant_id, ctx)
 
-    is_new = _open_new_window(db, tenant_id, customer_phone, category, source, now_naive)
+    is_new = _open_new_window(
+        db,
+        tenant_id,
+        customer_phone,
+        category,
+        source,
+        now_naive,
+        inbound_at=inbound_at,
+    )
 
     if not is_new:
         # Persist rolling-window refresh from a later inbound.

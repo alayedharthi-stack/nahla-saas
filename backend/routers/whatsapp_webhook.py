@@ -3811,6 +3811,7 @@ async def _dispatch_message(
                     normalized_sender,
                     source="inbound",
                     category="service",
+                    inbound_at=_wa_msg_ts,
                 )
         except Exception as exc:
             logger.warning(
