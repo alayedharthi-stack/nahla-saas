@@ -7,10 +7,14 @@ The flow has two halves and they live in this module so the contract is
 in one place rather than scattered between routers/ai_sales.py and the
 WhatsApp webhook:
 
-  Step 1 — send_cod_confirmation_template(db, tenant_id, order)
+  Step 1 — checkout policy then optional send_cod_confirmation_template
     Triggered by POST /api/v1/ai-sales/create-order when the customer
-    chose `cash_on_delivery`. The order is stored as `pending_confirmation`
-    and is NOT yet pushed to the merchant store.
+    chose `cash_on_delivery`.
+      • confirmation ENABLED → local `pending_confirmation`, send once,
+        wait for confirm/cancel, then push to the store.
+      • confirmation DISABLED → do not strand pending_confirmation; do
+        not send; push immediately through the normal COD store path.
+      • settings READ failure → fail closed (no send, no silent push).
 
     Customer-facing send is owned exclusively here. It uses the canonical
     order-updates `service_key=cod_confirmation` active APPROVED revision:
@@ -32,8 +36,9 @@ WhatsApp webhook:
                    "بإنتظار المراجعة"), and saves the returned external
                    order id.
       • cancel   → sets the local status to `cancelled`.
-    No action taken if the customer has no pending COD order, so a
-    button-text false positive is harmless.
+    Recognized button payloads (`nahla_cod_confirm` / `nahla_cod_cancel`)
+    are always consumed by the webhook even when no pending order exists.
+    Unrecognized buttons fall through to generic merchant routing.
 
 The state names `pending_confirmation` and `under_review` are deliberate
 and match what Salla's Orders API returns for `payment_method=cod` orders
@@ -48,6 +53,7 @@ Every transition is logged through observability.event_logger so the
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -66,6 +72,13 @@ STATUS_PENDING_CUSTOMER  = "pending_confirmation"
 STATUS_PENDING_MERCHANT  = "under_review"
 STATUS_CANCELLED         = "cancelled"
 CANONICAL_SERVICE_KEY    = "cod_confirmation"
+
+COD_INBOUND_CONSUMED = "consumed"
+COD_INBOUND_PASSTHROUGH = "passthrough"
+
+COD_CHECKOUT_WAIT_FOR_CUSTOMER = "wait_for_customer"
+COD_CHECKOUT_PUSH_IMMEDIATE = "push_immediate"
+COD_CHECKOUT_SETTINGS_UNAVAILABLE = "settings_unavailable"
 
 # Customer reply matchers. We accept the full button text plus a small
 # whitelist of free-text equivalents Saudi customers commonly type when
@@ -121,6 +134,130 @@ def parse_cod_button_payload(raw: str) -> Tuple[Optional[str], Optional[int]]:
     return None, None
 
 
+def is_owned_cod_button_payload(raw: Optional[str]) -> bool:
+    """True when the WhatsApp button id/payload is a Nahla COD control."""
+    action, _oid = parse_cod_button_payload(raw or "")
+    return action is not None
+
+
+async def intercept_cod_button_inbound(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    text: str,
+    button_payload: Optional[str],
+) -> Tuple[str, Optional[str], Optional[Any]]:
+    """
+    Own interactive / template-button inbound for recognized COD payloads.
+
+    Returns ``(consumed|passthrough, decision, order)``. ``consumed`` means
+    the webhook must return without conversational routing, even when
+    ``order`` is None (duplicate, stale, foreign id, or no pending order).
+
+    A non-empty unrecognized payload is never stolen via visible title.
+    """
+    if not is_owned_cod_button_payload(button_payload):
+        return COD_INBOUND_PASSTHROUGH, None, None
+    decision, order = await handle_cod_reply(
+        db,
+        tenant_id=tenant_id,
+        customer_phone=customer_phone,
+        text=text,
+        button_payload=button_payload,
+    )
+    return COD_INBOUND_CONSUMED, decision, order
+
+
+class CodOrderingDisabled(Exception):
+    """Merchant disabled COD as a payment method (not the notification)."""
+
+
+class CodCheckoutSettingsUnavailable(Exception):
+    """Settings read failed; caller must not choose send vs immediate push."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class CodCheckoutPlan:
+    policy: str
+    reason: Optional[str]
+    local_status: Optional[str]
+    push_to_store_now: bool
+    send_confirmation: bool
+
+
+def plan_cod_checkout(db, tenant_id: int) -> CodCheckoutPlan:
+    """Decide wait-for-button vs immediate store push. Never treats DB failure as disabled."""
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        REASON_SETTINGS_UNAVAILABLE,
+        evaluate_order_update_delivery,
+        load_order_update_settings_truth,
+    )
+
+    truth = load_order_update_settings_truth(db, int(tenant_id))
+    if not truth.available:
+        return CodCheckoutPlan(
+            policy=COD_CHECKOUT_SETTINGS_UNAVAILABLE,
+            reason=truth.reason or REASON_SETTINGS_UNAVAILABLE,
+            local_status=None,
+            push_to_store_now=False,
+            send_confirmation=False,
+        )
+    allowed, reason = evaluate_order_update_delivery(
+        db, int(tenant_id), CANONICAL_SERVICE_KEY
+    )
+    if allowed:
+        return CodCheckoutPlan(
+            policy=COD_CHECKOUT_WAIT_FOR_CUSTOMER,
+            reason=None,
+            local_status=STATUS_PENDING_CUSTOMER,
+            push_to_store_now=False,
+            send_confirmation=True,
+        )
+    return CodCheckoutPlan(
+        policy=COD_CHECKOUT_PUSH_IMMEDIATE,
+        reason=reason,
+        local_status=STATUS_PENDING_MERCHANT,
+        push_to_store_now=True,
+        send_confirmation=False,
+    )
+
+
+def require_cod_checkout_plan(
+    db,
+    tenant_id: int,
+    *,
+    ordering_allowed: bool,
+) -> CodCheckoutPlan:
+    """COD payment-method gate, then confirmation-notification policy."""
+    if not ordering_allowed:
+        raise CodOrderingDisabled()
+    plan = plan_cod_checkout(db, tenant_id)
+    if plan.policy == COD_CHECKOUT_SETTINGS_UNAVAILABLE:
+        raise CodCheckoutSettingsUnavailable(
+            plan.reason or "order_update_settings_unavailable"
+        )
+    return plan
+
+
+def disabled_confirmation_bypass_metadata(
+    reason: Optional[str],
+    *,
+    external_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {
+        "cod_confirmation_bypassed": True,
+        "cod_confirmation_bypass_reason": reason or "order_update_disabled",
+    }
+    if external_id:
+        meta["cod_pushed_external_id"] = str(external_id)
+    return meta
+
+
 def classify_cod_reply(text: str) -> Optional[str]:
     """
     Map a customer reply to one of: 'confirm' | 'cancel' | None.
@@ -167,6 +304,7 @@ def nahla_owns_cod_customer_confirmation(order: Any) -> bool:
         or meta.get("cod_confirmed_at")
         or meta.get("cod_cancelled_at")
         or meta.get("cod_pushed_external_id")
+        or meta.get("cod_confirmation_bypassed")
     )
 
 
