@@ -16,7 +16,7 @@ validated-staging state ``{0088, 0093}``; it must not select ``0092``.
 """
 from __future__ import annotations
 
-APPLICATION_ALEMBIC_HEAD = "0103"
+APPLICATION_ALEMBIC_HEAD = "0104"
 REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD})
 INTEGRATION_BOOTSTRAP_TARGET = "0093"
 NORMAL_BOOTSTRAP_REVISIONS = frozenset({"0093"})

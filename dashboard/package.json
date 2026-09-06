@@ -20,6 +20,7 @@
     "check:route-hierarchy": "npx --yes tsx@4 scripts/check-route-hierarchy.mts",
     "check:product-identity": "npx --yes tsx@4 scripts/check-product-identity.mts",
     "check:ai-toggle-projection": "npx --yes tsx@4 scripts/check-ai-toggle-projection.mts",
+    "check:order-updates-settings": "npx --yes tsx@4 scripts/check-order-updates-settings-state.mts",
     "check:platform-policy": "npm run check:navigation-policy && npm run check:nav-simplified-p31 && npm run check:nav-marketing-p32 && npm run check:page-metadata && npm run check:route-hierarchy && npm run check:product-identity && npm run check:platform-telemetry && npm run check:platform-feature-flags && npm run check:ai-toggle-projection",
     "check:plan-features": "npx --yes tsx@4 scripts/check-plan-features.mts",
     "check:no-native-dialogs": "npx --yes tsx@4 scripts/check-no-native-dialogs.mts",

@@ -30,9 +30,18 @@ LIFECYCLE_CANARY_AUTOMATION_TYPES = frozenset({
     "unpaid_order_reminder",
     "abandoned_cart",
     "abandoned_order_draft",
+    "shipping_update",
 })
 
-LIFECYCLE_OWNED_AUTOMATION_TYPES = frozenset({"order_notifications"})
+LIFECYCLE_OWNED_AUTOMATION_TYPES = frozenset({
+    "order_notifications",
+    "shipping_update",
+})
+
+LIFECYCLE_OWNED_EVENT_TYPES = frozenset({
+    "order_notifications",
+    "order_shipped",
+})
 
 REASON_PERMITTED = "permitted"
 REASON_DISPATCH_DISABLED = "dispatch_disabled"
@@ -135,6 +144,26 @@ def commerce_lifecycle_dispatch_recipient_permitted(phone: str) -> bool:
     if not normalized:
         return False
     return normalized in allowlist
+
+
+def lifecycle_dispatch_owns_legacy_send(
+    tenant_id: int,
+    *,
+    automation_type: Optional[str] = None,
+    event_type: Optional[str] = None,
+    payload: Optional[dict] = None,
+) -> bool:
+    """True when the new lifecycle dispatcher is the customer-facing owner."""
+    if not commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id)):
+        return False
+    atype = str(automation_type or "").strip()
+    etype = str(event_type or "").strip()
+    if atype in LIFECYCLE_OWNED_AUTOMATION_TYPES or etype in LIFECYCLE_OWNED_EVENT_TYPES:
+        return True
+    message_type = str((payload or {}).get("message_type") or "").strip()
+    if etype == "order_cod_pending" and message_type == "initial_confirmation":
+        return True
+    return False
 
 
 def _phone_audit_fields(normalized: Optional[str]) -> dict[str, str]:
@@ -339,6 +368,7 @@ __all__ = [
     "CanaryDecision",
     "LIFECYCLE_CANARY_AUTOMATION_TYPES",
     "LIFECYCLE_OWNED_AUTOMATION_TYPES",
+    "LIFECYCLE_OWNED_EVENT_TYPES",
     "MODE_LEGACY_LIFECYCLE",
     "MODE_NEW_LIFECYCLE",
     "commerce_lifecycle_dispatch_enabled",
@@ -348,4 +378,6 @@ __all__ = [
     "commerce_lifecycle_dispatch_tenant_permitted",
     "evaluate_and_audit",
     "evaluate_lifecycle_canary_send",
+    "lifecycle_dispatch_owns_legacy_send",
+    "REASON_LIFECYCLE_OWNS_EVENT",
 ]
