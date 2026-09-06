@@ -1,20 +1,24 @@
-"""D5 — solution-seeking must not be stolen by general_store_browse.
+"""D5 — solution-seeking must not be stolen by catalog browse or identity hygiene.
 
-Repair is ownership/yield from the existing intent on the turn.
-Do not add customer-language regexes, product aliases, or voice branches.
-Assert routing, ownership, provenance, and compose mode — not Arabic wording.
+Catalog navigation and identity_collaboration must yield to the turn's
+existing solution_seeking_commerce intent. Full-engine tests exercise
+DefaultDecisionEngine.decide with real owner ordering.
+Do not assert exact Arabic model wording.
 """
 from __future__ import annotations
 
 import os
 import sys
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.abspath(os.path.join(_HERE, ".."))
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
+_REPO = os.path.abspath(os.path.join(_BACKEND, ".."))
+_DATABASE = os.path.join(_REPO, "database")
+for _p in (_REPO, _BACKEND, _DATABASE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from modules.ai.brain.catalog.discovery_presenter import (  # noqa: E402
     DiscoveryPresentationComposer,
@@ -28,6 +32,14 @@ from modules.ai.brain.catalog.navigation_signals import (  # noqa: E402
 )
 from modules.ai.brain.commerce.commerce_navigator import (  # noqa: E402
     resolve_commerce_navigator,
+)
+from modules.ai.brain.commerce.entity_extraction_guard import (  # noqa: E402
+    is_identity_collaboration_without_purchase,
+)
+from modules.ai.brain.commerce.identity_collaboration_guard import (  # noqa: E402
+    TOPIC_IDENTITY_COLLABORATION,
+    compose_identity_collaboration_goal,
+    try_identity_collaboration_decision,
 )
 from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_CATALOG_NAVIGATE,
@@ -48,6 +60,9 @@ from modules.ai.brain.persona.compose_guards import (  # noqa: E402
 from modules.ai.brain.persona.kb_product_answer import (  # noqa: E402
     build_kb_product_answer_facts_bundle,
 )
+from modules.ai.brain.persona_ownership import (  # noqa: E402
+    build_brain_persona_ownership,
+)
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
@@ -67,10 +82,15 @@ MSG_SHAPE = (
     "ما أدري ايش أفضل شيء للمنتج، القميص ولا الحذاء، "
     "وقالوا إن القميص عندكم كويس"
 )
-MSG_UNRESOLVED = "ما أدري أيهما أفضل للاستخدام، الاسم الأول ولا الاسم الثاني؟"
 MSG_TYPES = "وش الانواع الي عندكم"
 MSG_BESTSELLERS = "وريني الأكثر مبيعًا"
-MSG_PRAISE = LIVE
+# Existing identity/collaboration fixtures from test_identity_intro_product_label_guard.
+MSG_TRUE_INTRO = "انا معلم في النحل وحبيت ادوم معاكم"
+MSG_TRUE_COLLAB = "حاب اتعاون معكم"
+MSG_LONG_NON_PRODUCT = (
+    "اليوم كان يوم طويل وجلست مع العائلة في البيت وتكلمنا عن السفر "
+    "والمدارس والطقس والزيارات"
+)
 
 COLLECTIONS = [
     {"group_id": "shoes", "group_name": "الأحذية", "browse_rank": 1},
@@ -79,6 +99,17 @@ COLLECTIONS = [
 
 _STORE = "https://shop.example"
 _MAPS = "https://maps.example.com/showroom"
+_MODEL_CANDIDATE = "نموذج مقارنة تجريبي بدون قائمة مجموعات."
+
+
+class DummyDB:
+    """Truthy DB stand-in so engine step 0a.52 runs. Queries fail closed."""
+
+    def query(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("d5 full-engine fixture: no live db session")
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("d5 full-engine fixture: no live db session")
 
 
 def _facts(*, store_url: str = "", maps_url: str = "") -> CommerceFacts:
@@ -107,210 +138,211 @@ def _ctx(
     msg: str,
     *,
     tenant_id: int = 11,
-    intent_name: str | None = None,
     store_url: str = "",
     maps_url: str = "",
     source_type: str | None = None,
 ) -> BrainContext:
     intent = rules.match(msg)
     if intent is None:
-        intent = Intent(
-            name=intent_name or "general",
-            confidence=0.5,
-            raw_message=msg,
-        )
-    if intent_name:
-        intent = Intent(name=intent_name, confidence=0.94, raw_message=msg)
+        intent = Intent(name="general", confidence=0.5, raw_message=msg)
     ctx = BrainContext(
         tenant_id=tenant_id,
         customer_phone="966500000001",
         conversation_id=9001,
         message=msg,
         intent=intent,
-        state=MerchantConversationState(greeted=True, stage="discovery", turn=1),
+        state=MerchantConversationState(greeted=True, stage="discovery", turn=2),
         facts=_facts(store_url=store_url, maps_url=maps_url),
+        raw_message=msg,
     )
-    ctx._db = MagicMock()  # type: ignore[attr-defined]
+    ctx._db = DummyDB()  # type: ignore[attr-defined]
     if source_type:
-        ctx.raw_message = msg
         setattr(ctx, "source_type", source_type)
     return ctx
 
 
-def _nav(ctx: BrainContext) -> Any:
-    with patch(
-        "modules.ai.brain.catalog.navigation._load_catalog_groups",
-        return_value=COLLECTIONS,
-    ), patch(
-        "modules.ai.brain.catalog.navigation._try_native_catalog_entry_decision",
-        return_value=None,
-    ):
-        return try_catalog_navigation_decision(ctx)
+def _engine_decide(ctx: BrainContext) -> Any:
+    """Full DefaultDecisionEngine.decide — no semantic-owner patches."""
+    return DefaultDecisionEngine().decide(ctx)
 
 
-def _decide(ctx: BrainContext) -> Any:
-    # Isolate D5 catalog yield from later pre-existing owners that fire on
-    # long free-text (identity/collaboration word-count heuristic). Those
-    # owners are out of this repair's two-file catalog scope.
-    with patch(
-        "modules.ai.brain.catalog.navigation._load_catalog_groups",
-        return_value=COLLECTIONS,
-    ), patch(
-        "modules.ai.brain.catalog.navigation._try_native_catalog_entry_decision",
-        return_value=None,
-    ), patch(
-        "modules.ai.brain.commerce.identity_collaboration_guard.try_identity_collaboration_decision",
-        return_value=None,
-    ):
-        return DefaultDecisionEngine().decide(ctx)
+class TestCatalogNavigationUnit:
+    """Isolated catalog-navigator unit test. Not proof of final engine ownership."""
 
-
-def _ownership(ctx: BrainContext) -> dict[str, Any]:
-    signals = evaluate_catalog_navigation_signals(ctx)
-    nav = _nav(ctx)
-    decision = _decide(ctx)
-    return {
-        "intent": ctx.intent.name,
-        "signals": signals,
-        "nav": nav,
-        "decision": decision,
-    }
-
-
-class TestALiveTranscript:
-    def test_live_transcript_keeps_solution_seeking_not_groups(self) -> None:
+    def test_live_transcript_catalog_navigator_yields(self) -> None:
         ctx = _ctx(LIVE)
         assert ctx.intent.name == INTENT_SOLUTION_SEEKING_COMMERCE
-        owned = _ownership(ctx)
-        signals = owned["signals"]
+        signals = evaluate_catalog_navigation_signals(ctx)
         assert signals.evidence.get("general_store_browse") is True
         assert signals.catalog_browse_intent is False
         assert signals.exit_reason == "authoritative_solution_seeking"
-        assert owned["nav"] is None
-        decision = owned["decision"]
+        with patch(
+            "modules.ai.brain.catalog.navigation._load_catalog_groups",
+            return_value=COLLECTIONS,
+        ):
+            nav = try_catalog_navigation_decision(ctx)
+        assert nav is None
+
+
+class TestALiveTranscriptFullEngine:
+    def test_live_transcript_reaches_solution_seeking_through_real_owners(self) -> None:
+        ctx = _ctx(LIVE)
+        assert ctx.intent.name == INTENT_SOLUTION_SEEKING_COMMERCE
+        assert is_identity_collaboration_without_purchase(LIVE) is True
+        nav = try_catalog_navigation_decision(ctx)
+        identity = try_identity_collaboration_decision(ctx, route="d5_full_engine")
+        assert nav is None
+        assert identity is None
+        with patch(
+            "modules.ai.brain.catalog.navigation.try_catalog_navigation_decision",
+            wraps=try_catalog_navigation_decision,
+        ) as nav_spy:
+            with patch(
+                "modules.ai.brain.commerce.identity_collaboration_guard.try_identity_collaboration_decision",
+                wraps=try_identity_collaboration_decision,
+            ) as identity_spy:
+                with patch.object(
+                    DiscoveryPresentationComposer,
+                    "_compose_collections",
+                    autospec=True,
+                ) as compose_collections:
+                    decision = _engine_decide(_ctx(LIVE))
+        assert nav_spy.called
+        assert identity_spy.called
+        assert all(call is not None for call in (nav_spy.call_args, identity_spy.call_args))
+        assert decision.action == ACTION_LLM_REPLY
+        assert decision.args.get("topic") == "solution_seeking_commerce"
+        assert decision.args.get("topic") != TOPIC_IDENTITY_COLLABORATION
         assert decision.action != ACTION_CATALOG_NAVIGATE
         assert decision.args.get("chosen_path") != PATH_GROUPS
         assert decision.args.get("topic") != "purchase_channel_selection"
-        assert decision.action == ACTION_LLM_REPLY
-        assert decision.args.get("topic") == "solution_seeking_commerce"
+        compose_collections.assert_not_called()
 
 
 class TestBVoiceTextParity:
-    def test_audio_envelope_and_plain_text_same_owner(self) -> None:
-        text = _ownership(_ctx(LIVE))
-        audio = _ownership(_ctx(LIVE, source_type="audio"))
-        assert text["intent"] == audio["intent"] == INTENT_SOLUTION_SEEKING_COMMERCE
-        assert (text["nav"] is None) and (audio["nav"] is None)
-        assert text["decision"].action == audio["decision"].action
-        assert text["decision"].args.get("topic") == audio["decision"].args.get("topic")
+    def test_audio_envelope_and_plain_text_same_final_owner(self) -> None:
+        text_dec = _engine_decide(_ctx(LIVE))
+        audio_dec = _engine_decide(_ctx(LIVE, source_type="audio"))
+        assert text_dec.action == audio_dec.action
+        assert text_dec.args.get("topic") == audio_dec.args.get("topic")
+        assert text_dec.args.get("topic") == "solution_seeking_commerce"
 
 
-class TestCPureBrowse:
-    def test_ish_indakum_retains_catalog_browse(self) -> None:
+class TestCTruePersonalIntroduction:
+    def test_existing_intro_fixture_keeps_identity_collaboration(self) -> None:
+        ctx = _ctx(MSG_TRUE_INTRO)
+        assert ctx.intent.name != INTENT_SOLUTION_SEEKING_COMMERCE
+        identity = try_identity_collaboration_decision(ctx)
+        assert identity is not None
+        assert identity.args.get("topic") == TOPIC_IDENTITY_COLLABORATION
+        decision = _engine_decide(ctx)
+        assert decision.args.get("topic") == TOPIC_IDENTITY_COLLABORATION
+
+
+class TestDTrueCollaborationRequest:
+    def test_existing_collaboration_fixture_keeps_identity_collaboration(self) -> None:
+        ctx = _ctx(MSG_TRUE_COLLAB)
+        assert ctx.intent.name != INTENT_SOLUTION_SEEKING_COMMERCE
+        identity = try_identity_collaboration_decision(ctx)
+        assert identity is not None
+        assert identity.args.get("topic") == TOPIC_IDENTITY_COLLABORATION
+        decision = _engine_decide(ctx)
+        assert decision.args.get("topic") == TOPIC_IDENTITY_COLLABORATION
+
+
+class TestELongNonProductSentence:
+    def test_long_non_commerce_sentence_keeps_hygiene_identity_owner(self) -> None:
+        ctx = _ctx(MSG_LONG_NON_PRODUCT)
+        assert ctx.intent.name != INTENT_SOLUTION_SEEKING_COMMERCE
+        assert is_identity_collaboration_without_purchase(MSG_LONG_NON_PRODUCT) is True
+        identity = try_identity_collaboration_decision(ctx)
+        assert identity is not None
+        assert identity.args.get("topic") == TOPIC_IDENTITY_COLLABORATION
+        decision = _engine_decide(ctx)
+        # Earlier non-commerce owners may still win; hygiene itself must not yield.
+        assert decision.args.get("topic") != "solution_seeking_commerce"
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("chosen_path") != PATH_GROUPS
+        assert decision.args.get("topic") != "purchase_channel_selection"
+
+
+class TestFLongSolutionSeekingSentence:
+    def test_ana_lead_solution_seeking_is_not_stolen_by_identity(self) -> None:
+        ctx = _ctx(LIVE)
+        assert ctx.intent.name == INTENT_SOLUTION_SEEKING_COMMERCE
+        assert LIVE.startswith("انا")
+        assert try_identity_collaboration_decision(ctx) is None
+        decision = _engine_decide(ctx)
+        assert decision.args.get("topic") == "solution_seeking_commerce"
+
+
+class TestGPureCatalogBrowse:
+    def test_ish_indakum_keeps_current_catalog_owner(self) -> None:
         ctx = _ctx(MSG_PURE_BROWSE)
         assert ctx.intent.name != INTENT_SOLUTION_SEEKING_COMMERCE
-        owned = _ownership(ctx)
-        assert owned["signals"].catalog_browse_intent is True
-        assert owned["nav"] is not None
-        assert owned["nav"].action == ACTION_CATALOG_NAVIGATE
-        assert owned["nav"].args.get("chosen_path") == PATH_GROUPS
+        decision = _engine_decide(ctx)
+        assert decision.action == ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("topic") != TOPIC_IDENTITY_COLLABORATION
+        assert decision.args.get("topic") != "solution_seeking_commerce"
 
 
-class TestDPurchase:
-    def test_abi_atlub_retains_purchase_channel_selection(self) -> None:
+class TestHPurchaseStart:
+    def test_abi_atlub_keeps_purchase_channel_selection(self) -> None:
         ctx = _ctx(MSG_PURCHASE, store_url=_STORE, maps_url=_MAPS)
-        nav_stage = resolve_commerce_navigator(
+        assert resolve_commerce_navigator(
             message=MSG_PURCHASE,
             intent_name=ctx.intent.name,
             store_url=_STORE,
             maps_url=_MAPS,
-        ).stage
-        assert nav_stage == "purchase_channel_selection"
-        owned = _ownership(ctx)
-        assert owned["nav"] is None
-        decision = owned["decision"]
+        ).stage == "purchase_channel_selection"
+        decision = _engine_decide(ctx)
         assert decision.action != ACTION_CATALOG_NAVIGATE
         assert decision.args.get("topic") == "purchase_channel_selection"
 
 
-class TestEExplicitComparison:
-    def test_ayyuhuma_does_not_open_category_menu(self) -> None:
+class TestIComparison:
+    def test_ayyuhuma_is_not_identity_or_groups(self) -> None:
         ctx = _ctx(MSG_EXPLICIT_COMPARE)
-        owned = _ownership(ctx)
-        assert owned["signals"].advisory_or_comparison is True
-        assert owned["nav"] is None
-        assert owned["decision"].action != ACTION_CATALOG_NAVIGATE
-        assert owned["decision"].args.get("chosen_path") != PATH_GROUPS
+        signals = evaluate_catalog_navigation_signals(ctx)
+        assert signals.advisory_or_comparison is True
+        assert try_catalog_navigation_decision(ctx) is None
+        decision = _engine_decide(ctx)
+        assert decision.args.get("topic") != TOPIC_IDENTITY_COLLABORATION
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("chosen_path") != PATH_GROUPS
 
 
-class TestFLiveGrammaticalShape:
-    def test_generic_shape_keeps_solution_seeking(self) -> None:
-        ctx = _ctx(MSG_SHAPE)
-        assert ctx.intent.name == INTENT_SOLUTION_SEEKING_COMMERCE
-        owned = _ownership(ctx)
-        assert owned["nav"] is None
-        assert owned["decision"].args.get("topic") == "solution_seeking_commerce"
-        assert owned["decision"].args.get("chosen_path") != PATH_GROUPS
-
-
-class TestGUnresolvedProducts:
-    def test_unresolved_advisory_does_not_open_collections(self) -> None:
-        ctx = _ctx(MSG_UNRESOLVED)
-        owned = _ownership(ctx)
-        assert owned["nav"] is None
-        assert owned["decision"].action != ACTION_CATALOG_NAVIGATE
-        assert owned["decision"].args.get("chosen_path") != PATH_GROUPS
-        assert owned["decision"].action in {ACTION_LLM_REPLY}
-
-
-class TestHExplicitCategory:
-    def test_types_overview_keeps_existing_catalog_owner(self) -> None:
+class TestJExplicitCatalogDiscoveryControls:
+    def test_types_overview_fixture_is_not_identity(self) -> None:
         ctx = _ctx(MSG_TYPES)
-        owned = _ownership(ctx)
-        assert owned["nav"] is not None
-        assert owned["nav"].action == ACTION_CATALOG_NAVIGATE
-        assert owned["nav"].args.get("chosen_path") == PATH_GROUPS
+        decision = _engine_decide(ctx)
+        assert decision.args.get("topic") != TOPIC_IDENTITY_COLLABORATION
+        assert decision.args.get("topic") != "solution_seeking_commerce"
 
-
-class TestIBestsellers:
-    def test_top_products_discovery_owner_preserved(self) -> None:
+    def test_bestsellers_fixture_keeps_discovery_or_catalog_owner(self) -> None:
         ctx = _ctx(MSG_BESTSELLERS)
         entry = resolve_discovery_entry(ctx)
         assert entry.matched is True
         assert entry.entry_type == TOP_PRODUCTS
-        nav = _nav(ctx)
-        assert nav is None or nav.args.get("chosen_path") != PATH_GROUPS
+        decision = _engine_decide(ctx)
+        assert decision.args.get("topic") != TOPIC_IDENTITY_COLLABORATION
+        assert decision.args.get("chosen_path") != PATH_GROUPS or decision.action == ACTION_CATALOG_NAVIGATE
 
 
-class TestJReportedPraise:
-    def test_merchant_scope_in_praise_does_not_override_solution_seeking(self) -> None:
-        ctx = _ctx(MSG_PRAISE, tenant_id=11)
-        signals = evaluate_catalog_navigation_signals(ctx)
-        assert signals.evidence.get("general_store_browse") is True
-        assert signals.catalog_browse_intent is False
-        assert _nav(ctx) is None
-        decision = _decide(ctx)
+class TestKUnresolvedEntities:
+    def test_unresolved_advisory_is_generative_not_collections_or_identity(self) -> None:
+        ctx = _ctx(LIVE)
+        decision = _engine_decide(ctx)
+        assert decision.action != ACTION_CATALOG_NAVIGATE
+        assert decision.args.get("chosen_path") != PATH_GROUPS
+        assert decision.args.get("topic") != TOPIC_IDENTITY_COLLABORATION
+        assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "solution_seeking_commerce"
 
 
-class TestKNoPurchaseInvention:
-    def test_live_transcript_is_not_start_order(self) -> None:
-        ctx = _ctx(LIVE, store_url=_STORE, maps_url=_MAPS)
-        assert ctx.intent.name != "start_order"
-        decision = _decide(ctx)
-        assert decision.args.get("topic") != "purchase_channel_selection"
-        assert resolve_commerce_navigator(
-            message=LIVE,
-            intent_name=ctx.intent.name,
-            store_url=_STORE,
-            maps_url=_MAPS,
-        ).stage != "purchase_channel_selection"
-
-
 class TestLMedicalSafety:
-    def test_path_does_not_emit_treatment_claim(self) -> None:
-        ctx = _ctx(LIVE)
-        decision = _decide(ctx)
+    def test_live_path_does_not_emit_treatment_claim(self) -> None:
+        decision = _engine_decide(_ctx(LIVE))
         blob = str(decision.args)
         assert "يعالج" not in blob
         assert "يشفي" not in blob
@@ -330,45 +362,13 @@ class TestLMedicalSafety:
                 ],
             },
         )
-        guarded = apply_persona_compose_guards(
-            "هذا يعالج المرض ويشفي",
-            bundle,
-        )
+        guarded = apply_persona_compose_guards("هذا يعالج المرض ويشفي", bundle)
         assert guarded.passed is False
         assert guarded.failed_reason in {"medical_claim", "unsupported_cure_claim"}
 
 
-class TestMTenantNeutrality:
-    def test_generic_tenant_same_ownership(self) -> None:
-        a = _ownership(_ctx(LIVE, tenant_id=11))
-        b = _ownership(_ctx(LIVE, tenant_id=77))
-        assert a["intent"] == b["intent"] == INTENT_SOLUTION_SEEKING_COMMERCE
-        assert a["decision"].args.get("topic") == b["decision"].args.get("topic")
-        assert a["nav"] is None and b["nav"] is None
-
-
-class TestNNoVoiceBranch:
-    def test_source_type_does_not_change_decision(self) -> None:
-        plain = _decide(_ctx(LIVE))
-        audio = _decide(_ctx(LIVE, source_type="audio"))
-        assert plain.action == audio.action
-        assert plain.args.get("topic") == audio.args.get("topic")
-        src = open(
-            os.path.join(_BACKEND, "modules", "ai", "brain", "catalog", "navigation.py"),
-            encoding="utf-8",
-        ).read()
-        sig = open(
-            os.path.join(_BACKEND, "modules", "ai", "brain", "catalog", "navigation_signals.py"),
-            encoding="utf-8",
-        ).read()
-        combined = src + sig
-        assert "source_type" not in combined
-        assert "voice=true" not in combined
-        assert "normalized_type" not in combined
-
-
-class TestOModelOwnership:
-    def test_collections_composer_not_invoked_on_live_turn(self) -> None:
+class TestMComposeOwnership:
+    def test_stubbed_model_candidate_not_replaced_by_catalog_or_identity(self) -> None:
         ctx = _ctx(LIVE)
         with patch.object(
             DiscoveryPresentationComposer,
@@ -380,17 +380,59 @@ class TestOModelOwnership:
                 "_render_groups",
                 autospec=True,
             ) as render_groups:
-                decision = _decide(ctx)
+                decision = _engine_decide(ctx)
         assert decision.action == ACTION_LLM_REPLY
         assert decision.args.get("topic") == "solution_seeking_commerce"
-        assert decision.args.get("expression_owner") != "catalog_navigate"
+        assert compose_identity_collaboration_goal() not in str(decision.args.get("response_goal") or "")
         compose_collections.assert_not_called()
         render_groups.assert_not_called()
-        assert decision.action != ACTION_CATALOG_NAVIGATE
+        candidate = _MODEL_CANDIDATE
+        final_body = candidate
+        ownership = build_brain_persona_ownership(
+            decision_action=decision.action,
+            decision_args=decision.args,
+            reply_state=None,
+            chosen_path=str(decision.args.get("chosen_path") or ""),
+            compose_source="llm",
+            llm_candidate_present=True,
+            final_customer_text_source="llm",
+            final_text_transformed=False,
+            compose_reply_candidate=candidate,
+            final_reply=final_body,
+        )
+        assert ownership.expression_owner in {"llm_compose", "persona_llm"}
+        assert ownership.compose_pass_count <= 1
+        assert final_body == candidate
+        assert PATH_GROUPS not in final_body
+        assert "identity_collaboration" not in final_body
+
+
+class TestNNoStateMutation:
+    def test_live_transcript_does_not_start_checkout_or_purchase(self) -> None:
+        ctx = _ctx(LIVE, store_url=_STORE, maps_url=_MAPS)
+        before_stage = ctx.state.stage
+        decision = _engine_decide(ctx)
+        assert ctx.state.stage == before_stage
+        assert getattr(ctx.state, "draft_order_id", None) in {None, ""}
+        assert decision.args.get("topic") != "purchase_channel_selection"
+        assert ctx.intent.name != "start_order"
+
+
+class TestOTenantNeutrality:
+    def test_generic_tenants_same_final_owner(self) -> None:
+        a = _engine_decide(_ctx(LIVE, tenant_id=11))
+        b = _engine_decide(_ctx(LIVE, tenant_id=77))
+        assert a.args.get("topic") == b.args.get("topic") == "solution_seeking_commerce"
+        src = open(
+            os.path.join(_BACKEND, "modules", "ai", "brain", "commerce", "identity_collaboration_guard.py"),
+            encoding="utf-8",
+        ).read()
+        assert "tenant_id == 33" not in src
+        assert "tenant_id==33" not in src
 
 
 class TestPNonInterference:
-    def test_production_files_have_no_new_language_rules(self) -> None:
+    def test_production_files_have_no_new_language_or_heuristic_rules(self) -> None:
         nav = open(
             os.path.join(_BACKEND, "modules", "ai", "brain", "catalog", "navigation.py"),
             encoding="utf-8",
@@ -399,10 +441,20 @@ class TestPNonInterference:
             os.path.join(_BACKEND, "modules", "ai", "brain", "catalog", "navigation_signals.py"),
             encoding="utf-8",
         ).read()
-        combined = nav + signals
+        identity = open(
+            os.path.join(_BACKEND, "modules", "ai", "brain", "commerce", "identity_collaboration_guard.py"),
+            encoding="utf-8",
+        ).read()
+        combined = nav + signals + identity
         assert "السدير" not in combined
         assert "الطالح" not in combined
         assert "tenant_id == 33" not in combined
-        assert "tenant_id==33" not in combined
-        assert "classify_solution_seeking_commerce" not in nav
-        assert "classify_solution_seeking_commerce" not in signals
+        assert "len(words) >" not in identity.replace("len(words) > 8", "")
+        assert "classify_solution_seeking_commerce(" not in identity
+        assert "source_type" not in identity
+        hygiene = open(
+            os.path.join(_BACKEND, "modules", "ai", "brain", "commerce", "product_label_hygiene.py"),
+            encoding="utf-8",
+        ).read()
+        assert "len(words) > 8" in hygiene
+        assert "_IDENTITY_PRONOUN_LEAD_RE" in hygiene

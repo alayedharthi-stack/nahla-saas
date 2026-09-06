@@ -98,6 +98,38 @@ def try_identity_collaboration_decision(ctx: Any, *, route: str = "") -> Optiona
     except Exception:  # noqa: BLE001  # noqa: silent-ok
         pass
 
+    # Reuse the turn's existing intent only. Do not reclassify the inbound
+    # text. Long-sentence hygiene may still match; solution-seeking already
+    # owns those turns.
+    intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "").strip()
+    try:
+        from modules.ai.brain.catalog.navigation_signals import (  # noqa: PLC0415
+            is_authoritative_solution_seeking_intent,
+        )
+
+        _ss_owned = is_authoritative_solution_seeking_intent(intent_name)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — local name check if catalog helper unavailable
+        from modules.ai.brain.types import (  # noqa: PLC0415
+            INTENT_NEED_BASED_PRODUCT_ADVICE,
+            INTENT_SOLUTION_SEEKING_COMMERCE,
+        )
+
+        _ss_owned = intent_name in {
+            INTENT_SOLUTION_SEEKING_COMMERCE,
+            INTENT_NEED_BASED_PRODUCT_ADVICE,
+            "need_based_product_advice",
+        }
+    if _ss_owned:
+        logger.info(
+            "[IDENTITY_COLLABORATION_GUARD] yield=authoritative_solution_seeking "
+            "tenant=%s route=%s intent=%s preview=%r",
+            getattr(ctx, "tenant_id", None),
+            route or "-",
+            intent_name or "-",
+            msg[:80],
+        )
+        return None
+
     logger.info(
         "[IDENTITY_COLLABORATION_GUARD] tenant=%s route=%s preview=%r",
         getattr(ctx, "tenant_id", None),
