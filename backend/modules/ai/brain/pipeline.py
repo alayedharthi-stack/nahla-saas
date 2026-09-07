@@ -4005,7 +4005,7 @@ class MerchantBrain:
                 )
 
         try:
-            _attach_current_turn_url_context(
+            await _attach_current_turn_url_context(
                 ctx,
                 db=db,
                 message=message or "",
@@ -6845,7 +6845,7 @@ def _sanitize_unauthorized_checkout_navigator(navigator: Any) -> Any:
         return nav_dict
 
 
-def _attach_current_turn_url_context(ctx: BrainContext, *, db: Any, message: str) -> None:
+async def _attach_current_turn_url_context(ctx: BrainContext, *, db: Any, message: str) -> None:
     """Enrich current-turn URLs once. Failure never suppresses the reply."""
     from services.url_context import (  # noqa: PLC0415
         begin_url_context_turn,
@@ -6858,10 +6858,14 @@ def _attach_current_turn_url_context(ctx: BrainContext, *, db: Any, message: str
     setattr(ctx, "url_context_fetch_count", 0)
     if not current_turn_has_url(message or ""):
         return
-    results = enrich_current_turn_urls(
+    fetch = getattr(ctx, "url_context_fetch", None)
+    catalog_lookup = getattr(ctx, "url_context_catalog_lookup", None)
+    results = await enrich_current_turn_urls(
         message=message or "",
         tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
         db=db,
+        fetch=fetch,
+        catalog_lookup=catalog_lookup,
     )
     setattr(ctx, "url_context_results", results)
     try:

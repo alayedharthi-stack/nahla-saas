@@ -44,6 +44,7 @@ def project_url_context_facts(results: Optional[List[UrlContext]]) -> Dict[str, 
         if isinstance(catalog, dict):
             catalog.pop(key, None)
     payload["content_trust"] = "untrusted_web_metadata"
+    payload["content_channel"] = "untrusted_web_metadata"
     payload["watched_or_transcribed"] = False
     payload["not_instructions"] = True
     return payload

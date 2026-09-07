@@ -6,26 +6,25 @@ TikTok/oEmbed HTML is parsed by the same generic metadata extractor.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote, urlparse
 
 from core.inbound_url_spans import (
     extract_inbound_url_spans,
-    is_url_only_inbound,
-    semantic_text_excluding_url_spans,
 )
 from observability.rate_limiter import check_rate_limit
 from services.safe_http_fetch import (
     SafeHttpResult,
-    fetch_url,
+    fetch_url_async,
     redact_url_for_log,
 )
 
@@ -40,18 +39,8 @@ CACHE_TTL_S = 600.0
 CACHE_MAX_ENTRIES = 256
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW_S = 60
-INJECTION_MARKERS = (
-    "system:",
-    "assistant:",
-    "user:",
-    "[system]",
-    "[assistant]",
-    "[user]",
-    "<|",
-    "```system",
-)
 
-FetchFn = Callable[[str], SafeHttpResult]
+FetchFn = Callable[[str], Union[SafeHttpResult, Awaitable[SafeHttpResult]]]
 CatalogLookup = Callable[[int, str], Optional[Dict[str, Any]]]
 
 
@@ -88,6 +77,7 @@ class UrlContext:
             "source": self.source,
             "error_class": self.error_class,
             "content_trust": "untrusted_web_metadata",
+            "content_channel": "untrusted_web_metadata",
             "watched_or_transcribed": False,
         }
         if self.catalog_product:
@@ -143,9 +133,27 @@ def reset_url_context_cache() -> None:
     with _cache_lock:
         _cache.clear()
     begin_url_context_turn()
+    try:
+        from observability import rate_limiter as rl  # noqa: PLC0415
+
+        with rl._store_lock:
+            stale = [
+                key
+                for key in list(rl._store)
+                if str(key).startswith("url_context:")
+            ]
+            for key in stale:
+                rl._store.pop(key, None)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — test reset must not fail enrichment
+        pass
 
 
 def _normalize_url_for_compare(url: str) -> str:
+    """Cache/catalog compare key only.
+
+    Inbound detection stays in ``core.inbound_url_spans``. This helper
+    must not grow into a second parser or fetch path.
+    """
     raw = str(url or "").strip()
     if not raw:
         return ""
@@ -165,15 +173,14 @@ def _normalize_url_for_compare(url: str) -> str:
 
 
 def _sanitize_text(value: Any, limit: int) -> str:
+    """Length-limit and strip markup/control chars. Not a jailbreak detector.
+
+    Natural-language page text remains quoted untrusted data. Do not add
+    customer-language phrase lists here.
+    """
     text = str(value or "")
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    lowered = text.lower()
-    for marker in INJECTION_MARKERS:
-        if marker in lowered:
-            text = text.replace(marker, " ").replace(marker.upper(), " ").replace(marker.title(), " ")
-            lowered = text.lower()
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
         text = text[:limit].rstrip()
@@ -441,7 +448,7 @@ def select_current_turn_urls(message: str) -> List[str]:
     return out
 
 
-def enrich_current_turn_urls(
+async def enrich_current_turn_urls(
     *,
     message: str,
     tenant_id: int = 0,
@@ -479,8 +486,11 @@ def enrich_current_turn_urls(
         if fetch_marker in fetches:
             return [_unavailable(original, "duplicate_turn_fetch", source="cache")]
         fetches.add(fetch_marker)
-        fetch_fn = fetch or (lambda url: fetch_url(url))
-        fetched = fetch_fn(original)
+        if fetch is None:
+            fetched = await fetch_url_async(original)
+        else:
+            got = fetch(original)
+            fetched = await got if asyncio.iscoroutine(got) else got
         result = _from_fetch(original, fetched)
         if result.extraction_status == "ok":
             _cache_put(int(tenant_id or 0), original, result)
@@ -507,19 +517,9 @@ def current_turn_has_url(message: str) -> bool:
     return bool(extract_inbound_url_spans(message or ""))
 
 
-def current_turn_semantic_text(message: str) -> str:
-    return semantic_text_excluding_url_spans(message or "")
-
-
-def current_turn_is_url_only(message: str) -> bool:
-    return is_url_only_inbound(message or "")
-
-
 __all__ = [
     "UrlContext",
     "current_turn_has_url",
-    "current_turn_is_url_only",
-    "current_turn_semantic_text",
     "enrich_current_turn_urls",
     "lookup_catalog_product_by_url",
     "parse_html_metadata",
