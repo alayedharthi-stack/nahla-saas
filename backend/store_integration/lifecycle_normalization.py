@@ -166,11 +166,15 @@ def normalize_external_lifecycle_intent(
     curr = normalize_status_slug(raw_current_status)
     if not curr:
         return None, "missing_current_status"
-    if prev and prev == curr:
-        return None, "same_status_no_transition"
 
+    # Same-status is usually a no-op snapshot, but source/event provenance
+    # can make it meaningful (e.g. Salla order.created after a poller insert).
+    # Adapters own that decision. Core must not globally convert snapshots
+    # into transitions, and must not skip the adapter before it can evaluate.
     normalizer = resolve_lifecycle_intent_normalizer(provider)
     if normalizer is None:
+        if prev and prev == curr:
+            return None, "same_status_no_transition"
         return None, "adapter_normalizer_unavailable"
 
     try:
@@ -183,6 +187,8 @@ def normalize_external_lifecycle_intent(
         return None, "adapter_normalizer_error"
 
     if intent is None:
+        if prev and prev == curr:
+            return None, "same_status_no_transition"
         return None, "unmapped_transition"
     return intent, "adapter_mapped"
 
