@@ -237,7 +237,7 @@ def parse_html_metadata(html: str, *, base_url: str) -> Dict[str, str]:
         parser.feed(html)
         parser.close()
     except Exception:
-        pass
+        logger.exception("[url_context] html metadata parse failed")
     title = "".join(parser.title_parts)
     og_title = parser.metas.get("og:title") or parser.metas.get("twitter:title") or ""
     og_desc = (
@@ -315,6 +315,7 @@ def lookup_catalog_product_by_url(db: Any, tenant_id: int, url: str) -> Optional
     try:
         from models import Product  # noqa: PLC0415
     except Exception:
+        logger.exception("[url_context] Product model unavailable for catalog URL match")
         return None
     try:
         rows = (
@@ -323,8 +324,8 @@ def lookup_catalog_product_by_url(db: Any, tenant_id: int, url: str) -> Optional
             .limit(400)
             .all()
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[url_context] catalog lookup failed tenant=%s err=%s", tenant_id, exc)
+    except Exception:
+        logger.exception("[url_context] catalog lookup failed tenant=%s", tenant_id)
         return None
     for row in rows or []:
         meta = getattr(row, "extra_metadata", None) or {}

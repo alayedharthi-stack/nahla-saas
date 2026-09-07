@@ -135,7 +135,7 @@ def canonicalize_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddr
         try:
             if ip.teredo is not None:
                 return ipaddress.ip_address(ip.teredo[1])
-        except Exception:
+        except Exception:  # noqa: silent-ok — optional Teredo unwrap; original IP is still blocked below
             pass
     return ip
 
@@ -323,7 +323,7 @@ def default_transport(request: SafeFetchRequest) -> SafeFetchResponse:
         if sock is not None:
             try:
                 sock.close()
-            except Exception:
+            except Exception:  # noqa: silent-ok — socket close is best-effort cleanup
                 pass
 
 
