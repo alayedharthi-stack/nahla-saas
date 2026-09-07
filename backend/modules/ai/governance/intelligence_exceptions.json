@@ -1557,7 +1557,7 @@
       "exact_symbol_scope": "3067",
       "expected_change_digest": "a92bcd6cd37d634ac776b8a6a16ab7011a6530da925952097465a8065ee3545a",
       "single_use": true,
-      "consumed": false,
+      "consumed": true,
       "created_at": "2026-09-07",
       "expires_at": "2026-09-21",
       "implementation_pr": "961",
