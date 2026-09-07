@@ -3495,6 +3495,21 @@ async def _dispatch_message(
                 )
 
         normalized_sender = normalize_phone(sender) or sender
+        try:
+            from core.wa_usage import record_customer_inbound_window  # noqa: PLC0415
+            record_customer_inbound_window(
+                db,
+                resolved_tenant_id,
+                normalized_sender,
+                inbound_at=_wa_msg_ts,
+                commit=True,
+            )
+        except Exception as _win_exc:
+            logger.warning(
+                "[Webhook] record_customer_inbound_window failed tenant=%s err=%s",
+                resolved_tenant_id,
+                _win_exc,
+            )
         contact_name = _extract_contact_name(value, sender)
         _inbound_customer_id: int | None = None
         try:
@@ -3811,6 +3826,7 @@ async def _dispatch_message(
                     normalized_sender,
                     source="inbound",
                     category="service",
+                    inbound_at=_wa_msg_ts,
                 )
         except Exception as exc:
             logger.warning(

@@ -2618,20 +2618,21 @@ class WhatsAppUsage(Base):
 class WaConversationWindow(Base):
     """
     One row per (tenant_id, customer_phone).
-    Tracks the start timestamp of the CURRENT open Meta conversation window
-    for each customer. Used to determine whether a new inbound/outbound message
-    opens a NEW billable window (>24 h since last window_start) or falls
-    inside an already-counted one.
 
-    SELECT FOR UPDATE on this row serialises concurrent webhook calls for the
-    same customer, eliminating race conditions.
+    ``last_customer_inbound_at`` is the customer-service window truth:
+    OPEN iff now - last_customer_inbound_at < 24h. Outbound / template /
+    campaign / api must never write this field.
+
+    ``window_start`` + ``category`` remain the Meta *billing* clock and may
+    be mutated by outbound. They must not be read as the service window.
     """
     __tablename__ = 'wa_conversation_windows'
 
     id             = Column(Integer, primary_key=True)
     tenant_id      = Column(Integer, ForeignKey('tenants.id'), nullable=False)
     customer_phone = Column(String, nullable=False)
-    window_start   = Column(DateTime, nullable=False)   # UTC, naive
+    window_start   = Column(DateTime, nullable=False)   # UTC, naive — billing clock
+    last_customer_inbound_at = Column(DateTime, nullable=True)  # UTC, naive — service window
     category       = Column(String, default='service', nullable=False)  # service | marketing
     created_at     = Column(DateTime, default=datetime.utcnow)
     updated_at     = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

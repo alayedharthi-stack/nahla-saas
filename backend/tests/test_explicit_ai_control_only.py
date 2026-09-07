@@ -227,6 +227,7 @@ def _seed_whatsapp_and_window(db, tenant_id: int, phone: str, *, pid: str):
         tenant_id=tenant_id,
         customer_phone=phone,
         window_start=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1),
+        last_customer_inbound_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1),
         category="service",
     ))
     db.commit()

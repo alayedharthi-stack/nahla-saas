@@ -47,6 +47,7 @@ from core.database import get_db
 from core.obs import EVENTS, log_event
 from core.webhook_audit import record_result as _record_signature_audit
 from core.webhook_enforcement import resolve_enforce
+from core.salla_webhook_identity import build_salla_webhook_external_event_id
 from core.webhook_events import (
     STATUS_FAILED,
     STATUS_RECEIVED,
@@ -383,12 +384,13 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         store_id = str(parsed_payload.get("merchant") or parsed_payload.get("store_id") or "") or None
         data = parsed_payload.get("data") or {}
         if isinstance(data, dict):
-            # Salla uses `id` inside `data` for orders/products/customers.
-            # Combine with event_type to form a synthetic external_event_id
-            # that's deterministic for this event so retries idempotent.
-            entity_id = data.get("id")
-            if entity_id is not None and event_type:
-                external_event_id = f"salla:{event_type}:{entity_id}"
+            # Identity includes status/payment/updated_at (or provider event id)
+            # so exact retries stay one row while later distinct transitions persist.
+            external_event_id = build_salla_webhook_external_event_id(
+                event_type=event_type,
+                parsed_payload=parsed_payload,
+                provider_prefix="salla",
+            )
 
     audit("salla_webhook", salla_event=event_type or "unknown", store_id=store_id or "unknown", ip=client_ip)
 
@@ -574,11 +576,13 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
         store_id = str(parsed_payload.get("merchant") or parsed_payload.get("store_id") or "") or None
         data = parsed_payload.get("data") or {}
         if isinstance(data, dict):
-            entity_id = data.get("id")
-            if entity_id is not None and event_type:
-                # Namespace under salla_oauth so it cannot collide with an
-                # event from the Communication App carrying the same id.
-                external_event_id = f"salla_oauth:{event_type}:{entity_id}"
+            # Namespace under salla_oauth so it cannot collide with an
+            # event from the Communication App carrying the same id.
+            external_event_id = build_salla_webhook_external_event_id(
+                event_type=event_type,
+                parsed_payload=parsed_payload,
+                provider_prefix="salla_oauth",
+            )
 
     audit(
         "salla_oauth_webhook",
