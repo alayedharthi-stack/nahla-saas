@@ -274,8 +274,9 @@ def test_default_transport_max_bytes_plus_one_closes() -> None:
     server = _LocalHttpServer(handler)
     try:
         resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
-        assert resp.error_class == "oversized"
-        assert resp.body == b""
+        assert resp.error_class == ""
+        assert len(resp.body) == MAX_RESPONSE_BYTES
+        assert resp.body_truncated is True
     finally:
         server.close()
 
@@ -592,5 +593,217 @@ def test_async_default_transport_slow_body_deadline() -> None:
         elapsed = time.monotonic() - started
         assert resp.error_class == "timeout"
         assert elapsed < 2.5
+    finally:
+        server.close()
+
+
+def _local_transport(server_port: int):
+    def _transport(request: SafeFetchRequest) -> SafeFetchResponse:
+        local_req = SafeFetchRequest(
+            url=request.url,
+            hostname=request.hostname,
+            ip="127.0.0.1",
+            port=server_port,
+            scheme="http",
+            path=request.path or "/",
+            timeout_connect=request.timeout_connect,
+            timeout_read=request.timeout_read,
+            deadline=request.deadline,
+        )
+        return default_transport(local_req, deadline=request.deadline or time.monotonic() + 8.0)
+
+    return _transport
+
+
+def _html_with_og(
+    *,
+    title: str = "OG Title",
+    description: str = "OG Description",
+    site_name: str = "Example",
+    tail: bytes = b"",
+) -> bytes:
+    head = (
+        "<!doctype html><html><head>"
+        f'<meta property="og:title" content="{title}">'
+        f'<meta property="og:description" content="{description}">'
+        f'<meta property="og:site_name" content="{site_name}">'
+        "</head><body>"
+    ).encode("utf-8")
+    return head + tail
+
+
+def test_a_large_html_og_metadata_prefix_enrichment_via_fetch() -> None:
+    html = _html_with_og(tail=b"z" * (MAX_RESPONSE_BYTES + 50_000))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        try:
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + html
+            )
+        except OSError:
+            pass
+
+    server = _LocalHttpServer(handler)
+    try:
+        result = fetch_url(
+            "http://example.test/",
+            resolver=_resolver("8.8.8.8"),
+            transport=_local_transport(server.port),
+        )
+        assert result.ok is True
+        assert result.body_truncated is True
+        assert len(result.body) <= MAX_RESPONSE_BYTES
+        assert b"og:title" in result.body
+        assert len(result.body) < len(html)
+    finally:
+        server.close()
+
+
+def test_b_metadata_split_across_chunks() -> None:
+    part1 = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+        b"<!doctype html><html><head><meta property=\"og:title\" content=\"Chunk"
+    )
+    part2 = b"ed Title\"></head><body>" + (b"x" * 120_000)
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(part1)
+        time.sleep(0.05)
+        conn.sendall(part2)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == ""
+        assert b"Chunked Title" in resp.body
+        assert resp.body_truncated is True
+    finally:
+        server.close()
+
+
+def test_c_early_head_close_stops_before_huge_body() -> None:
+    huge_tail = b"y" * 400_000
+    html = _html_with_og(tail=huge_tail)
+    received_after_head = {"count": 0}
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        head_only = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+            + html[: html.find(b"</head>") + len(b"</head>")]
+        )
+        conn.sendall(head_only)
+        try:
+            while conn.recv(8192):
+                received_after_head["count"] += 1
+        except OSError:
+            pass
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == ""
+        assert b"og:title" in resp.body
+        assert len(resp.body) < len(html)
+        assert received_after_head["count"] == 0
+    finally:
+        server.close()
+
+
+def test_d_large_html_without_metadata_stays_unavailable() -> None:
+    from services.url_context import enrich_current_turn_urls, reset_url_context_cache  # noqa: PLC0415
+
+    junk = b"<html><head></head><body>" + (b"j" * (MAX_RESPONSE_BYTES + 10_000)) + b"</body></html>"
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + junk
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        url = "http://example.test/"
+        result = fetch_url(
+            url,
+            resolver=_resolver("8.8.8.8"),
+            transport=_local_transport(server.port),
+        )
+        assert result.ok is True
+        assert result.body_truncated is True
+        reset_url_context_cache()
+
+        async def _go():
+            rows = await enrich_current_turn_urls(
+                message=url,
+                tenant_id=33,
+                fetch=lambda _u: result,
+            )
+            return rows[0]
+
+        ctx = asyncio.run(_go())
+        assert ctx.extraction_status == "unavailable"
+        assert ctx.error_class == "oversized"
+    finally:
+        server.close()
+
+
+def test_g_oversized_json_still_fails_closed() -> None:
+    body = b"{" + (b'"x":' + b'"' + b"a" * MAX_RESPONSE_BYTES + b'"') + b"}"
+    result = fetch_url(
+        "https://example.test/big.json",
+        resolver=_resolver("8.8.8.8"),
+        transport=lambda request: SafeFetchResponse(
+            status=200,
+            headers={"content-type": "application/json"},
+            body=body,
+        ),
+    )
+    assert result.ok is False
+    assert result.error_class == "oversized"
+
+
+def test_l_stored_body_never_exceeds_max_via_transport() -> None:
+    html = _html_with_og(tail=b"z" * (MAX_RESPONSE_BYTES + 80_000))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + html
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == ""
+        assert len(resp.body) <= MAX_RESPONSE_BYTES
+    finally:
+        server.close()
+
+
+def test_n_content_length_larger_than_max_with_early_metadata_succeeds() -> None:
+    html = _html_with_og(tail=b"q" * 500_000)
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/html\r\n"
+            b"Content-Length: 9999999\r\n"
+            b"Connection: close\r\n\r\n" + html
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        result = fetch_url(
+            "http://example.test/",
+            resolver=_resolver("8.8.8.8"),
+            transport=_local_transport(server.port),
+        )
+        assert result.ok is True
+        assert b"og:title" in result.body
+        assert len(result.body) < len(html)
     finally:
         server.close()

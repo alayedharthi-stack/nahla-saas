@@ -48,6 +48,13 @@ ALLOWED_CONTENT_TYPES: FrozenSet[str] = frozenset(
         "application/json",
     }
 )
+HTML_CONTENT_TYPES: FrozenSet[str] = frozenset(
+    {
+        "text/html",
+        "application/xhtml+xml",
+    }
+)
+_HEAD_CLOSE_RE = re.compile(rb"</head\s*>", re.IGNORECASE)
 CLOUD_METADATA_HOSTS: FrozenSet[str] = frozenset(
     {
         "metadata.google.internal",
@@ -95,6 +102,7 @@ class SafeFetchResponse:
     headers: Dict[str, str] = field(default_factory=dict)
     body: bytes = b""
     error_class: str = ""
+    body_truncated: bool = False
 
 
 @dataclass
@@ -107,6 +115,7 @@ class SafeHttpResult:
     body: bytes = b""
     error_class: str = ""
     hops: int = 0
+    body_truncated: bool = False
 
 
 def redact_url_for_log(url: str) -> str:
@@ -364,9 +373,16 @@ def _split_http_message(raw: bytes) -> Tuple[Dict[str, str], int, bytes, str]:
     header_blob, sep, body = raw.partition(b"\r\n\r\n")
     if not sep:
         return {}, 0, b"", "invalid_response"
+    headers, status, err = _parse_status_headers(header_blob)
+    if err:
+        return {}, 0, b"", err
+    return headers, status, body, ""
+
+
+def _parse_status_headers(header_blob: bytes) -> Tuple[Dict[str, str], int, str]:
     lines = header_blob.split(b"\r\n")
     if not lines:
-        return {}, 0, b"", "invalid_response"
+        return {}, 0, "invalid_response"
     status_line = lines[0].decode("latin-1", "replace")
     parts = status_line.split(" ", 2)
     status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
@@ -378,7 +394,211 @@ def _split_http_message(raw: bytes) -> Tuple[Dict[str, str], int, bytes, str]:
         headers[name.decode("latin-1", "replace").strip().lower()] = (
             value.decode("latin-1", "replace").strip()
         )
-    return headers, status, body, ""
+    return headers, status, ""
+
+
+def _is_html_content_type(content_type: str) -> bool:
+    return _normalize_content_type(content_type) in HTML_CONTENT_TYPES
+
+
+def _html_head_complete(body: bytes) -> bool:
+    return _HEAD_CLOSE_RE.search(body) is not None
+
+
+def _append_bounded(body: bytes, piece: bytes, limit: int) -> Tuple[bytes, bool]:
+    if not piece:
+        return body, False
+    room = limit - len(body)
+    if room <= 0:
+        return body[:limit], True
+    if len(piece) <= room:
+        return body + piece, False
+    return body + piece[:room], True
+
+
+def _read_bounded_body_sync(
+    sock: socket.socket,
+    hard_deadline: float,
+    content_type: str,
+    initial_body: bytes,
+    *,
+    stop_after_headers: bool = False,
+) -> Tuple[bytes, bool, str]:
+    """Read response body after headers. Never stores more than MAX_RESPONSE_BYTES."""
+    if stop_after_headers:
+        return initial_body, False, ""
+    is_html = _is_html_content_type(content_type)
+    body = initial_body
+    truncated = False
+    if is_html:
+        while True:
+            if _html_head_complete(body):
+                truncated = True
+                break
+            if len(body) >= MAX_RESPONSE_BYTES:
+                body = body[:MAX_RESPONSE_BYTES]
+                truncated = True
+                break
+            sock.settimeout(_require_remaining(hard_deadline))
+            try:
+                piece = sock.recv(8192)
+            except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
+                return body, truncated, "timeout"
+            except OSError:
+                return body, truncated, "network_error"
+            if not piece:
+                break
+            body, hit_limit = _append_bounded(body, piece, MAX_RESPONSE_BYTES)
+            if hit_limit:
+                truncated = True
+                break
+        return body, truncated, ""
+    while True:
+        if len(body) > MAX_RESPONSE_BYTES:
+            return b"", False, "oversized"
+        sock.settimeout(_require_remaining(hard_deadline))
+        try:
+            piece = sock.recv(8192)
+        except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
+            return body, False, "timeout"
+        except OSError:
+            return body, False, "network_error"
+        if not piece:
+            break
+        body += piece
+    if len(body) > MAX_RESPONSE_BYTES:
+        return b"", False, "oversized"
+    return body, False, ""
+
+
+async def _read_bounded_body_async(
+    reader: Any,
+    hard_deadline: float,
+    content_type: str,
+    initial_body: bytes,
+    *,
+    stop_after_headers: bool = False,
+) -> Tuple[bytes, bool, str]:
+    if stop_after_headers:
+        return initial_body, False, ""
+    is_html = _is_html_content_type(content_type)
+    body = initial_body
+    truncated = False
+    if is_html:
+        while True:
+            if _html_head_complete(body):
+                truncated = True
+                break
+            if len(body) >= MAX_RESPONSE_BYTES:
+                body = body[:MAX_RESPONSE_BYTES]
+                truncated = True
+                break
+            left = _require_remaining(hard_deadline)
+            try:
+                piece = await asyncio.wait_for(reader.read(8192), timeout=left)
+            except (asyncio.TimeoutError, TimeoutError):
+                return body, truncated, "timeout"
+            if not piece:
+                break
+            body, hit_limit = _append_bounded(body, piece, MAX_RESPONSE_BYTES)
+            if hit_limit:
+                truncated = True
+                break
+        return body, truncated, ""
+    while True:
+        if len(body) > MAX_RESPONSE_BYTES:
+            return b"", False, "oversized"
+        left = _require_remaining(hard_deadline)
+        try:
+            piece = await asyncio.wait_for(reader.read(8192), timeout=left)
+        except (asyncio.TimeoutError, TimeoutError):
+            return body, False, "timeout"
+        if not piece:
+            break
+        body += piece
+    if len(body) > MAX_RESPONSE_BYTES:
+        return b"", False, "oversized"
+    return body, False, ""
+
+
+def _read_http_response_sync(
+    sock: socket.socket,
+    hard_deadline: float,
+) -> SafeFetchResponse:
+    header_buf = b""
+    while b"\r\n\r\n" not in header_buf:
+        sock.settimeout(_require_remaining(hard_deadline))
+        try:
+            piece = sock.recv(8192)
+        except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
+            return SafeFetchResponse(status=0, error_class="timeout")
+        except OSError:
+            return SafeFetchResponse(status=0, error_class="network_error")
+        if not piece:
+            return SafeFetchResponse(status=0, error_class="invalid_response")
+        header_buf += piece
+        if len(header_buf) > MAX_HEADER_BYTES:
+            return SafeFetchResponse(status=0, error_class="oversized")
+    header_blob, _sep, initial_body = header_buf.partition(b"\r\n\r\n")
+    headers, status, err = _parse_status_headers(header_blob)
+    if err:
+        return SafeFetchResponse(status=0, error_class=err)
+    content_type = headers.get("content-type") or ""
+    redirect = status in {301, 302, 303, 307, 308}
+    body, truncated, body_err = _read_bounded_body_sync(
+        sock,
+        hard_deadline,
+        content_type,
+        initial_body,
+        stop_after_headers=redirect,
+    )
+    if body_err:
+        return SafeFetchResponse(status=status, headers=headers, error_class=body_err)
+    return SafeFetchResponse(
+        status=status,
+        headers=headers,
+        body=body,
+        body_truncated=truncated,
+    )
+
+
+async def _read_http_response_async(
+    reader: Any,
+    hard_deadline: float,
+) -> SafeFetchResponse:
+    header_buf = b""
+    while b"\r\n\r\n" not in header_buf:
+        left = _require_remaining(hard_deadline)
+        try:
+            piece = await asyncio.wait_for(reader.read(8192), timeout=left)
+        except (asyncio.TimeoutError, TimeoutError):
+            return SafeFetchResponse(status=0, error_class="timeout")
+        if not piece:
+            return SafeFetchResponse(status=0, error_class="invalid_response")
+        header_buf += piece
+        if len(header_buf) > MAX_HEADER_BYTES:
+            return SafeFetchResponse(status=0, error_class="oversized")
+    header_blob, _sep, initial_body = header_buf.partition(b"\r\n\r\n")
+    headers, status, err = _parse_status_headers(header_blob)
+    if err:
+        return SafeFetchResponse(status=0, error_class=err)
+    content_type = headers.get("content-type") or ""
+    redirect = status in {301, 302, 303, 307, 308}
+    body, truncated, body_err = await _read_bounded_body_async(
+        reader,
+        hard_deadline,
+        content_type,
+        initial_body,
+        stop_after_headers=redirect,
+    )
+    if body_err:
+        return SafeFetchResponse(status=status, headers=headers, error_class=body_err)
+    return SafeFetchResponse(
+        status=status,
+        headers=headers,
+        body=body,
+        body_truncated=truncated,
+    )
 
 
 def default_transport(
@@ -411,42 +631,7 @@ def default_transport(
             f"\r\n"
         ).encode("ascii")
         sock.sendall(payload)
-        chunks: List[bytes] = []
-        total = 0
-        headers_done = False
-        header_len = 0
-        while True:
-            sock.settimeout(_require_remaining(hard_deadline))
-            piece = sock.recv(8192)
-            if not piece:
-                break
-            if not headers_done:
-                chunks.append(piece)
-                raw = b"".join(chunks)
-                if b"\r\n\r\n" in raw:
-                    header_blob, _sep, body = raw.partition(b"\r\n\r\n")
-                    header_len = len(header_blob) + 4
-                    if header_len > MAX_HEADER_BYTES:
-                        return SafeFetchResponse(status=0, error_class="oversized")
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        return SafeFetchResponse(status=0, error_class="oversized")
-                    headers_done = True
-                    chunks = [header_blob + b"\r\n\r\n", body]
-                    total = len(body)
-                elif len(raw) > MAX_HEADER_BYTES:
-                    return SafeFetchResponse(status=0, error_class="oversized")
-                continue
-            if total + len(piece) > MAX_RESPONSE_BYTES:
-                return SafeFetchResponse(status=0, error_class="oversized")
-            chunks.append(piece)
-            total += len(piece)
-        raw = b"".join(chunks)
-        headers, status, body, err = _split_http_message(raw)
-        if err:
-            return SafeFetchResponse(status=0, error_class=err)
-        if len(body) > MAX_RESPONSE_BYTES:
-            return SafeFetchResponse(status=status, headers=headers, error_class="oversized")
-        return SafeFetchResponse(status=status, headers=headers, body=body)
+        return _read_http_response_sync(sock, hard_deadline)
     except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
         return SafeFetchResponse(status=0, error_class="timeout")
     except ssl.SSLError:
@@ -524,40 +709,7 @@ async def async_default_transport(
         ).encode("ascii")
         writer.write(payload)
         await asyncio.wait_for(writer.drain(), timeout=_require_remaining(hard_deadline))
-        chunks: List[bytes] = []
-        total_body = 0
-        headers_done = False
-        while True:
-            left = _require_remaining(hard_deadline)
-            piece = await asyncio.wait_for(reader.read(8192), timeout=left)
-            if not piece:
-                break
-            if not headers_done:
-                chunks.append(piece)
-                raw = b"".join(chunks)
-                if b"\r\n\r\n" in raw:
-                    header_blob, _sep, body = raw.partition(b"\r\n\r\n")
-                    if len(header_blob) + 4 > MAX_HEADER_BYTES:
-                        return SafeFetchResponse(status=0, error_class="oversized")
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        return SafeFetchResponse(status=0, error_class="oversized")
-                    headers_done = True
-                    chunks = [header_blob + b"\r\n\r\n", body]
-                    total_body = len(body)
-                elif len(raw) > MAX_HEADER_BYTES:
-                    return SafeFetchResponse(status=0, error_class="oversized")
-                continue
-            if total_body + len(piece) > MAX_RESPONSE_BYTES:
-                return SafeFetchResponse(status=0, error_class="oversized")
-            chunks.append(piece)
-            total_body += len(piece)
-        raw = b"".join(chunks)
-        headers, status, body, err = _split_http_message(raw)
-        if err:
-            return SafeFetchResponse(status=0, error_class=err)
-        if len(body) > MAX_RESPONSE_BYTES:
-            return SafeFetchResponse(status=status, headers=headers, error_class="oversized")
-        return SafeFetchResponse(status=status, headers=headers, body=body)
+        return await _read_http_response_async(reader, hard_deadline)
     except asyncio.CancelledError:
         raise
     except (asyncio.TimeoutError, TimeoutError):
@@ -883,6 +1035,7 @@ async def fetch_url_async(
                 content_type=content_type,
                 body=body,
                 hops=hops,
+                body_truncated=bool(resp.body_truncated),
             )
     return SafeHttpResult(
         ok=False, url=url, error_class=last_error or "too_many_redirects", hops=hops
