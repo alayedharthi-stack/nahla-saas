@@ -811,6 +811,48 @@ class TestIsolation:
         assert intent == BusinessIntent.SHIPMENT_AVAILABLE
         assert reason == "adapter_mapped"
 
+    def test_authoritative_order_created_in_progress_reaches_adapter(self):
+        created = {
+            "lifecycle_observation": "live_webhook",
+            "lifecycle_source_event": "order.created",
+        }
+        first, first_reason = normalize_external_lifecycle_intent(
+            provider="salla",
+            raw_previous_status=None,
+            raw_current_status="in_progress",
+            normalized_order=created,
+        )
+        same_status, same_reason = normalize_external_lifecycle_intent(
+            provider="salla",
+            raw_previous_status="in_progress",
+            raw_current_status="in_progress",
+            normalized_order=created,
+        )
+        assert first == BusinessIntent.ORDER_CONFIRMED
+        assert first_reason == "adapter_mapped"
+        assert same_status == BusinessIntent.ORDER_CONFIRMED
+        assert same_reason == "adapter_mapped"
+
+    def test_poll_same_status_in_progress_is_not_a_transition(self):
+        intent, reason = normalize_external_lifecycle_intent(
+            provider="salla",
+            raw_previous_status="in_progress",
+            raw_current_status="in_progress",
+            normalized_order={"lifecycle_observation": "poll_import"},
+        )
+        assert intent is None
+        assert reason == "same_status_no_transition"
+
+    def test_storesync_first_seen_in_progress_does_not_confirm(self):
+        intent, reason = normalize_external_lifecycle_intent(
+            provider="salla",
+            raw_previous_status=None,
+            raw_current_status="in_progress",
+            normalized_order={"lifecycle_observation": "storesync_poll"},
+        )
+        assert intent is None
+        assert reason == "unmapped_transition"
+
 
 class TestStoreSyncHook:
     @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "false"}, clear=False)

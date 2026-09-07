@@ -44,6 +44,7 @@ from store_adapters.salla_lifecycle import (  # noqa: E402
 )
 from store_integration.lifecycle_normalization import (  # noqa: E402
     build_transition_identity,
+    normalize_external_lifecycle_intent,
 )
 
 
@@ -194,12 +195,48 @@ class TestSallaMapping:
             "lifecycle_observation": "live_webhook",
             "lifecycle_source_event": "order.created",
         }
+        first, first_reason = normalize_external_lifecycle_intent(
+            provider="salla",
+            raw_previous_status=None,
+            raw_current_status="in_progress",
+            normalized_order=created,
+        )
+        same_status, same_reason = normalize_external_lifecycle_intent(
+            provider="salla",
+            raw_previous_status="in_progress",
+            raw_current_status="in_progress",
+            normalized_order=created,
+        )
+        assert first == BusinessIntent.ORDER_CONFIRMED
+        assert first_reason == "adapter_mapped"
+        assert same_status == BusinessIntent.ORDER_CONFIRMED
+        assert same_reason == "adapter_mapped"
         assert normalize_salla_lifecycle_business_intent(
             None, "in_progress", created
         ) == BusinessIntent.ORDER_CONFIRMED
         assert normalize_salla_lifecycle_business_intent(
             "in_progress", "in_progress", created
         ) == BusinessIntent.ORDER_CONFIRMED
+
+    def test_poll_same_status_in_progress_has_no_shared_path_intent(self):
+        intent, reason = normalize_external_lifecycle_intent(
+            provider="salla",
+            raw_previous_status="in_progress",
+            raw_current_status="in_progress",
+            normalized_order={"lifecycle_observation": "poll_import"},
+        )
+        assert intent is None
+        assert reason == "same_status_no_transition"
+
+    def test_storesync_first_seen_in_progress_has_no_shared_path_intent(self):
+        intent, reason = normalize_external_lifecycle_intent(
+            provider="salla",
+            raw_previous_status=None,
+            raw_current_status="in_progress",
+            normalized_order={"lifecycle_observation": "storesync_poll"},
+        )
+        assert intent is None
+        assert reason == "unmapped_transition"
 
     def test_poller_and_storesync_first_seen_in_progress_are_not_confirmed(self):
         for observation in ("poll", "poll_import", "storesync_poll", "historical"):

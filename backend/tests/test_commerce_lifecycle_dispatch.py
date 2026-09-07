@@ -1003,6 +1003,85 @@ class TestLifecycleDispatcher:
         assert row.send_state == "ambiguous"
 
 
+class TestPollerThenAuthoritativeCreatedDispatch:
+    """Poller snapshot first, then live order.created, must confirm once."""
+
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    def test_poller_snapshot_then_authoritative_created_sends_once(
+        self,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_send,
+    ):
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+        mock_send.return_value = ("sent", {"wa_message_id": "wamid.poller-created"})
+
+        db, _ = _make_db()
+        order = _generic_order(
+            id=8802,
+            external_id="salla-ord-8802",
+            external_order_number="ORD-8802",
+            status="in_progress",
+        )
+        poller_kwargs = dict(
+            db=db,
+            tenant_id=20,
+            order=order,
+            provider="salla",
+            raw_previous_status=None,
+            raw_current_status="in_progress",
+            normalized_order={
+                "lifecycle_observation": "poll_import",
+                "external_id": "salla-ord-8802",
+                "status": "in_progress",
+                "external_order_number": "ORD-8802",
+            },
+            raw_payload={"event_id": "evt-poll-8802", "updated_at": "2026-07-30T09:50:00Z"},
+        )
+        created_kwargs = dict(
+            db=db,
+            tenant_id=20,
+            order=order,
+            provider="salla",
+            raw_previous_status="in_progress",
+            raw_current_status="in_progress",
+            normalized_order={
+                "lifecycle_observation": "live_webhook",
+                "lifecycle_source_event": "order.created",
+                "external_id": "salla-ord-8802",
+                "status": "in_progress",
+                "external_order_number": "ORD-8802",
+            },
+            raw_payload={
+                "event_id": "evt-order-created-8802",
+                "updated_at": "2026-07-30T10:00:00Z",
+            },
+        )
+
+        poller = _run_async(dispatch_external_lifecycle_notification(**poller_kwargs))
+        created = _run_async(dispatch_external_lifecycle_notification(**created_kwargs))
+        replay = _run_async(dispatch_external_lifecycle_notification(**created_kwargs))
+
+        assert poller.dispatched is False
+        assert poller.ledger_id is None
+        assert poller.reason_code == "no_intent"
+        assert created.dispatched is True
+        assert created.duplicate is False
+        assert created.reason_code is None
+        assert replay.dispatched is False
+        assert replay.duplicate is True
+        assert replay.reason_code in {"duplicate", "already_notified"}
+        assert mock_send.await_count == 1
+        rows = db.query(CommerceLifecycleNotificationLedger).all()
+        assert len(rows) == 1
+        assert rows[0].business_intent == BusinessIntent.ORDER_CONFIRMED.value
+        assert rows[0].send_state == "sent"
+        assert rows[0].template_service_key == "order_confirmation"
+
+
 class TestMoyasarReplay:
     def _run_moyasar(self, *, order_status: str, ps_status: str):
         from routers.webhooks import moyasar_webhook  # noqa: PLC0415
