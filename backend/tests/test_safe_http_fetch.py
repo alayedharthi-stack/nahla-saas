@@ -1225,3 +1225,211 @@ def test_chunked_enrich_current_turn_urls_real_transport() -> None:
         assert ctx.fetch_body_truncated is True
     finally:
         server.close()
+
+
+def _framing_response_sync_async(
+    header_lines: list[bytes],
+    *,
+    body: bytes = b"",
+    deadline: float | None = None,
+) -> tuple[SafeFetchResponse, SafeFetchResponse]:
+    payload = (
+        b"HTTP/1.1 200 OK\r\n"
+        + b"\r\n".join(header_lines)
+        + b"\r\n\r\n"
+        + body
+    )
+    dl = deadline or (time.monotonic() + 5)
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(4096)
+        conn.sendall(payload)
+
+    sync_server = _LocalHttpServer(handler)
+    try:
+        sync_resp = default_transport(_request(sync_server.port, deadline=dl))
+    finally:
+        sync_server.close()
+
+    async_server = _LocalHttpServer(handler)
+    try:
+
+        async def _go() -> SafeFetchResponse:
+            return await async_default_transport(_request(async_server.port, deadline=dl))
+
+        async_resp = asyncio.run(_go())
+    finally:
+        async_server.close()
+    return sync_resp, async_resp
+
+
+def _assert_framing_fail(header_lines: list[bytes], expected: str, *, body: bytes = b"") -> None:
+    sync_resp, async_resp = _framing_response_sync_async(header_lines, body=body)
+    assert sync_resp.error_class == expected, sync_resp.error_class
+    assert async_resp.error_class == expected, async_resp.error_class
+
+
+def _assert_framing_ok(header_lines: list[bytes], *, body: bytes = b"") -> None:
+    sync_resp, async_resp = _framing_response_sync_async(header_lines, body=body)
+    assert sync_resp.error_class == "", sync_resp.error_class
+    assert async_resp.error_class == "", async_resp.error_class
+
+
+def test_framing_duplicate_content_length_different_values_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10", b"Content-Length: 11", b"Content-Type: text/html"],
+        "framing_ambiguous",
+    )
+
+
+def test_framing_duplicate_content_length_same_value_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10", b"Content-Length: 10", b"Content-Type: text/html"],
+        "framing_ambiguous",
+    )
+
+
+def test_framing_comma_content_length_single_header_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10, 10", b"Content-Type: text/html"],
+        "invalid_content_length",
+    )
+
+
+def test_framing_comma_content_length_conflicting_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10, 11", b"Content-Type: text/html"],
+        "invalid_content_length",
+    )
+
+
+def test_framing_invalid_content_length_values_fail_closed() -> None:
+    for line in (
+        b"Content-Length:",
+        b"Content-Length: -1",
+        b"Content-Length: +10",
+        b"Content-Length: 10a",
+        b"Content-Length: 1 0",
+    ):
+        _assert_framing_fail([line, b"Content-Type: text/html"], "invalid_content_length")
+
+
+def test_framing_mixed_case_duplicate_content_length_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10", b"content-length: 10", b"Content-Type: text/html"],
+        "framing_ambiguous",
+    )
+
+
+def test_framing_duplicate_transfer_encoding_fail_closed() -> None:
+    _assert_framing_fail(
+        [
+            b"Transfer-Encoding: chunked",
+            b"Transfer-Encoding: chunked",
+            b"Content-Type: text/html",
+        ],
+        "framing_unsupported",
+    )
+
+
+def test_framing_stacked_transfer_encoding_variants_fail_closed() -> None:
+    for line in (
+        b"Transfer-Encoding: gzip, chunked",
+        b"Transfer-Encoding: chunked, gzip",
+        b"Transfer-Encoding: identity, chunked",
+    ):
+        _assert_framing_fail([line, b"Content-Type: text/html"], "framing_unsupported")
+
+
+def test_framing_cl_then_te_and_te_then_cl_fail_closed() -> None:
+    _assert_framing_fail(
+        [
+            b"Content-Length: 10",
+            b"Transfer-Encoding: chunked",
+            b"Content-Type: text/html",
+        ],
+        "framing_ambiguous",
+    )
+    _assert_framing_fail(
+        [
+            b"Transfer-Encoding: chunked",
+            b"Content-Length: 10",
+            b"Content-Type: text/html",
+        ],
+        "framing_ambiguous",
+    )
+
+
+def test_framing_valid_single_content_length_preserved() -> None:
+    body = b"<html><head></head><body>ok</body></html>"
+    _assert_framing_ok(
+        [b"Content-Length: " + str(len(body)).encode("ascii"), b"Content-Type: text/html"],
+        body=body,
+    )
+
+
+def test_framing_valid_single_chunked_preserved() -> None:
+    wire = _encode_chunked([_html_with_og()])
+    _assert_framing_ok(
+        [b"Transfer-Encoding: chunked", b"Content-Type: text/html"],
+        body=wire,
+    )
+
+
+def test_framing_large_cl_html_early_og_bounded_prefix_preserved() -> None:
+    html = _html_with_og(tail=b"z" * (MAX_RESPONSE_BYTES + 50_000))
+    sync_resp, async_resp = _framing_response_sync_async(
+        [
+            b"Content-Length: 9999999",
+            b"Content-Type: text/html",
+            b"Connection: close",
+        ],
+        body=html,
+    )
+    for resp in (sync_resp, async_resp):
+        assert resp.error_class == ""
+        assert b"og:title" in resp.body
+        assert len(resp.body) <= MAX_RESPONSE_BYTES
+
+
+def test_framing_malformed_closes_socket_without_background_read() -> None:
+    received = {"count": 0}
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(4096)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Length: 10\r\n"
+            b"Content-Length: 11\r\n"
+            b"Content-Type: text/html\r\n\r\n"
+            b"0123456789extra"
+        )
+        try:
+            while conn.recv(8192):
+                received["count"] += 1
+        except OSError:
+            pass
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == "framing_ambiguous"
+        assert received["count"] == 0
+    finally:
+        server.close()
+
+
+def test_framing_oversized_json_body_stays_within_hard_cap() -> None:
+    big = b"x" * (MAX_RESPONSE_BYTES + 4096)
+    result = fetch_url(
+        "http://example.test/big.json",
+        resolver=_resolver("8.8.8.8"),
+        transport=lambda request: SafeFetchResponse(
+            status=200,
+            headers={"content-type": "application/json", "content-length": str(len(big))},
+            body=big,
+        ),
+    )
+    assert result.ok is False
+    assert result.error_class == "oversized"
+    assert len(result.body) <= MAX_RESPONSE_BYTES

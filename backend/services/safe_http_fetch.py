@@ -381,6 +381,37 @@ def _split_http_message(raw: bytes) -> Tuple[Dict[str, str], int, bytes, str]:
     return headers, status, body, ""
 
 
+def _validate_content_length_value(value: str) -> Tuple[Optional[int], str]:
+    """Parse a single Content-Length field-value. Fail closed on ambiguity."""
+    trimmed = str(value or "").strip()
+    if not trimmed:
+        return None, "invalid_content_length"
+    if "," in trimmed or "+" in trimmed or "-" in trimmed:
+        return None, "invalid_content_length"
+    if any(ch.isspace() for ch in trimmed):
+        return None, "invalid_content_length"
+    if not trimmed.isdigit():
+        return None, "invalid_content_length"
+    try:
+        parsed = int(trimmed, 10)
+    except ValueError:
+        return None, "invalid_content_length"
+    if parsed < 0:
+        return None, "invalid_content_length"
+    return parsed, ""
+
+
+def _validate_transfer_encoding_value(value: str) -> str:
+    """Only a single chunked coding is allowed; no stacked encodings."""
+    trimmed = str(value or "").strip()
+    if not trimmed:
+        return "framing_unsupported"
+    parts = [part.strip().lower() for part in trimmed.split(",") if part.strip()]
+    if len(parts) != 1 or parts[0] != "chunked":
+        return "framing_unsupported"
+    return ""
+
+
 def _parse_status_headers(header_blob: bytes) -> Tuple[Dict[str, str], int, str]:
     lines = header_blob.split(b"\r\n")
     if not lines:
@@ -389,13 +420,41 @@ def _parse_status_headers(header_blob: bytes) -> Tuple[Dict[str, str], int, str]
     parts = status_line.split(" ", 2)
     status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
     headers: Dict[str, str] = {}
+    content_length: Optional[int] = None
+    content_length_count = 0
+    transfer_encoding_count = 0
     for line in lines[1:]:
-        if b":" not in line:
+        if not line:
             continue
+        if line[:1] in (b" ", b"\t"):
+            return {}, status, "invalid_response"
+        if b":" not in line:
+            return {}, status, "invalid_response"
         name, value = line.split(b":", 1)
-        headers[name.decode("latin-1", "replace").strip().lower()] = (
-            value.decode("latin-1", "replace").strip()
-        )
+        name_lower = name.decode("latin-1", "replace").strip().lower()
+        value_str = value.decode("latin-1", "replace")
+        if name_lower == "content-length":
+            content_length_count += 1
+            if content_length_count > 1:
+                return {}, status, "framing_ambiguous"
+            parsed, err = _validate_content_length_value(value_str)
+            if err:
+                return {}, status, err
+            content_length = parsed
+            headers[name_lower] = str(parsed)
+            continue
+        if name_lower == "transfer-encoding":
+            transfer_encoding_count += 1
+            if transfer_encoding_count > 1:
+                return {}, status, "framing_unsupported"
+            err = _validate_transfer_encoding_value(value_str)
+            if err:
+                return {}, status, err
+            headers[name_lower] = "chunked"
+            continue
+        headers[name_lower] = value_str.strip()
+    if content_length_count > 0 and transfer_encoding_count > 0:
+        return {}, status, "framing_ambiguous"
     return headers, status, ""
 
 
@@ -776,7 +835,7 @@ def _read_http_response_sync(
     header_blob, _sep, initial_body = header_buf.partition(b"\r\n\r\n")
     headers, status, err = _parse_status_headers(header_blob)
     if err:
-        return SafeFetchResponse(status=0, error_class=err)
+        return SafeFetchResponse(status=status, error_class=err)
     content_type = headers.get("content-type") or ""
     redirect = status in {301, 302, 303, 307, 308}
     if redirect:
@@ -821,7 +880,7 @@ async def _read_http_response_async(
     header_blob, _sep, initial_body = header_buf.partition(b"\r\n\r\n")
     headers, status, err = _parse_status_headers(header_blob)
     if err:
-        return SafeFetchResponse(status=0, error_class=err)
+        return SafeFetchResponse(status=status, error_class=err)
     content_type = headers.get("content-type") or ""
     redirect = status in {301, 302, 303, 307, 308}
     if redirect:
