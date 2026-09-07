@@ -12,11 +12,13 @@ Usage:
 from __future__ import annotations
 
 import time
+import threading
 from collections import defaultdict
 from typing import Dict, List
 
 # Sliding window event timestamps per key
 _store: Dict[str, List[float]] = defaultdict(list)
+_store_lock = threading.Lock()
 
 # Controls periodic cleanup to prevent unbounded memory growth
 _last_cleanup: float = 0.0
@@ -27,29 +29,31 @@ def check_rate_limit(key: str, max_count: int, window_seconds: int) -> bool:
     """
     Returns True if within the rate limit (request allowed).
     Returns False if the limit is exceeded (request should be rejected).
+
+    Process-local only. Concurrent-safe within one process via a lock.
+    Multi-worker deployments need a shared store (e.g. Redis).
     """
     global _last_cleanup
     now = time.monotonic()
     cutoff = now - window_seconds
 
-    # Prune expired entries for this key
-    _store[key] = [t for t in _store[key] if t > cutoff]
+    with _store_lock:
+        _store[key] = [t for t in _store[key] if t > cutoff]
 
-    if len(_store[key]) >= max_count:
-        return False
+        if len(_store[key]) >= max_count:
+            return False
 
-    _store[key].append(now)
+        _store[key].append(now)
 
-    # Periodic full cleanup of stale keys
-    if now - _last_cleanup > _CLEANUP_INTERVAL:
-        _cleanup()
-        _last_cleanup = now
+        if now - _last_cleanup > _CLEANUP_INTERVAL:
+            _cleanup()
+            _last_cleanup = now
 
     return True
 
 
 def _cleanup() -> None:
-    """Remove keys with no recent events."""
+    """Remove keys with no recent events. Caller holds ``_store_lock``."""
     now = time.monotonic()
     stale = [k for k, v in _store.items() if not v or now - max(v) > 3600]
     for k in stale:

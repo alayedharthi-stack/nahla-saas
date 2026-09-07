@@ -2662,12 +2662,31 @@ class DefaultComposer:
                     f"{prompt}\n\n[CHECKOUT_IDENTITY_SHIPPING_FACTS — operational only]\n"
                     f"{_json.dumps(_checkout_facts, ensure_ascii=False)}"
                 )
+            _url_facts = {}
+            try:
+                _url_facts = dict(
+                    (getattr(reply_state, "known_facts", None) or {}).get("url_context")
+                    or {}
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — URL facts must not break compose
+                _url_facts = {}
             locale = str(ctx.profile.get("preferred_language") or "ar")
             history_messages = _as_ai_history(
                 ctx.history,
                 ctx.message,
                 fresh_social_context=bool(getattr(ctx, "fresh_social_context", False)),
             )
+            user_turn_message = ctx.message
+            if _url_facts:
+                from modules.ai.brain.facts.url_context_facts import (  # noqa: PLC0415
+                    bind_url_context_to_user_turn,
+                )
+
+                user_turn_message, history_messages = bind_url_context_to_user_turn(
+                    customer_message=ctx.message,
+                    history_messages=history_messages,
+                    url_facts=_url_facts,
+                )
 
             try:
                 from modules.ai.brain.observability.memory_selection_evidence import (  # noqa: PLC0415
@@ -2904,7 +2923,7 @@ class DefaultComposer:
                     generate_ai_reply,
                     tenant_id=ctx.tenant_id,
                     customer_phone=ctx.customer_phone,
-                    message=ctx.message,
+                    message=user_turn_message,
                     store_name=ctx.facts.store_name,
                     channel="whatsapp",
                     locale=locale,
@@ -3084,6 +3103,22 @@ class DefaultComposer:
         prompt = build_brain_reply_prompt(rs)
         locale = str(ctx.profile.get("preferred_language") or "ar")
         history_messages = _as_ai_history(ctx.history, ctx.message)
+        user_turn_message = ctx.message
+        _retry_url_facts = {}
+        try:
+            _retry_url_facts = dict((getattr(rs, "known_facts", None) or {}).get("url_context") or {})
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — URL facts must not break retry compose
+            _retry_url_facts = {}
+        if _retry_url_facts:
+            from modules.ai.brain.facts.url_context_facts import (  # noqa: PLC0415
+                bind_url_context_to_user_turn,
+            )
+
+            user_turn_message, history_messages = bind_url_context_to_user_turn(
+                customer_message=ctx.message,
+                history_messages=history_messages,
+                url_facts=_retry_url_facts,
+            )
         intent_name = str(
             getattr(ctx.intent, "name", "") or getattr(rs, "intent_name", "") or ""
         )
@@ -3129,7 +3164,7 @@ class DefaultComposer:
                 generate_ai_reply,
                 tenant_id=ctx.tenant_id,
                 customer_phone=ctx.customer_phone,
-                message=ctx.message,
+                message=user_turn_message,
                 store_name=ctx.facts.store_name,
                 channel="whatsapp",
                 locale=locale,

@@ -300,6 +300,12 @@ def strip_state_dict_for_prompt(
                 if k in memory
             }
 
+    facts = out.get("known_facts")
+    if isinstance(facts, dict) and "url_context" in facts:
+        facts = dict(facts)
+        facts.pop("url_context", None)
+        out["known_facts"] = facts
+
     mc = out.get("merchant_context")
     if isinstance(mc, dict):
         out["merchant_context"] = _slim_merchant_context_for_json(
