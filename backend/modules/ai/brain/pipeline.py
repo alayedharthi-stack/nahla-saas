@@ -4004,6 +4004,19 @@ class MerchantBrain:
                     _tc_refresh_exc,
                 )
 
+        try:
+            _attach_current_turn_url_context(
+                ctx,
+                db=db,
+                message=message or "",
+            )
+        except Exception as _url_ctx_exc:  # noqa: BLE001  # noqa: silent-ok — URL context must not block compose
+            logger.debug(
+                "[URL_CONTEXT] attach skipped tenant=%s err=%s",
+                tenant_id,
+                _url_ctx_exc,
+            )
+
         ctx.reply_state = _build_reply_state(
             ctx=ctx,
             previous_state=state,
@@ -6832,6 +6845,34 @@ def _sanitize_unauthorized_checkout_navigator(navigator: Any) -> Any:
         return nav_dict
 
 
+def _attach_current_turn_url_context(ctx: BrainContext, *, db: Any, message: str) -> None:
+    """Enrich current-turn URLs once. Failure never suppresses the reply."""
+    from services.url_context import (  # noqa: PLC0415
+        begin_url_context_turn,
+        current_turn_has_url,
+        enrich_current_turn_urls,
+    )
+
+    begin_url_context_turn()
+    setattr(ctx, "url_context_results", [])
+    setattr(ctx, "url_context_fetch_count", 0)
+    if not current_turn_has_url(message or ""):
+        return
+    results = enrich_current_turn_urls(
+        message=message or "",
+        tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
+        db=db,
+    )
+    setattr(ctx, "url_context_results", results)
+    try:
+        from services import url_context as _url_ctx_mod  # noqa: PLC0415
+
+        markers = getattr(_url_ctx_mod._turn_fetches, "urls", None) or set()
+        setattr(ctx, "url_context_fetch_count", len(markers))
+    except Exception:
+        setattr(ctx, "url_context_fetch_count", 0)
+
+
 def _build_reply_state(
     *,
     ctx: BrainContext,
@@ -7659,6 +7700,22 @@ def _build_reply_state(
                 known_facts["commerce_navigator"] = _commerce_navigator.to_dict()
             elif isinstance(_commerce_navigator, dict):
                 known_facts["commerce_navigator"] = dict(_commerce_navigator)
+
+    try:
+        from modules.ai.brain.facts.url_context_facts import (  # noqa: PLC0415
+            project_url_context_facts,
+        )
+
+        _url_ctx_results = getattr(ctx, "url_context_results", None)
+        _url_facts = project_url_context_facts(_url_ctx_results)
+        if _url_facts:
+            known_facts["url_context"] = _url_facts
+    except Exception as _url_facts_exc:  # noqa: BLE001  # noqa: silent-ok — URL facts must not block compose
+        logger.debug(
+            "[URL_CONTEXT] facts projection skipped tenant=%s err=%s",
+            getattr(ctx, "tenant_id", None),
+            _url_facts_exc,
+        )
 
     effective_tone = tenant_tone or str(ctx.profile.get("communication_style") or "neutral")
 

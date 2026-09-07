@@ -261,20 +261,28 @@ class DefaultIntentClassifier:
         # URL-only inbounds: do not let Layer 1 or Layer 2 rebuild
         # ask_owner_contact / ask_store_info from a token inside a URL.
         # Raw message stays on Intent.raw_message for model context/storage.
+        # Skip the LLM slot extractor when the URL carries no checkout slots,
+        # including stale ordering state (D17). Maps/address URL-only still
+        # keeps heuristic slots so genuine checkout ownership is intact.
+        _url_only_heuristic_slots: Dict[str, Any] = {}
+        _skip_url_only_llm_slots = False
         try:
             from core.inbound_url_spans import is_url_only_inbound  # noqa: PLC0415
 
-            if not in_order_flow and is_url_only_inbound(message):
-                logger.info(
-                    "[Classifier] url-only inbound → general (skip layer2) | preview=%r",
-                    (message or "")[:60],
-                )
-                return Intent(
-                    name=INTENT_GENERAL,
-                    confidence=0.50,
-                    raw_message=message,
-                    extraction_method="rules",
-                )
+            if is_url_only_inbound(message):
+                _url_only_heuristic_slots = extract_ordering_slots(message) or {}
+                if not _url_only_heuristic_slots:
+                    logger.info(
+                        "[Classifier] url-only inbound → general (skip layer2) | preview=%r",
+                        (message or "")[:60],
+                    )
+                    return Intent(
+                        name=INTENT_GENERAL,
+                        confidence=0.50,
+                        raw_message=message,
+                        extraction_method="rules",
+                    )
+                _skip_url_only_llm_slots = True
         except Exception:  # noqa: BLE001  # noqa: silent-ok — projection must not block classify
             pass
 
@@ -291,12 +299,19 @@ class DefaultIntentClassifier:
             return rule_intent
 
         # ── Layer 2: LLM slot extraction ───────────────────────────────────
-        logger.info(
-            "[Classifier] calling LLM slot extractor | in_order_flow=%s rule=%s",
-            in_order_flow,
-            rule_intent.name if rule_intent else None,
-        )
-        slots = await _slot_mod.extract_slots(message, history)
+        if _skip_url_only_llm_slots:
+            slots = dict(_url_only_heuristic_slots)
+            logger.info(
+                "[Classifier] url-only with checkout slots → skip llm extractor | keys=%s",
+                sorted(slots.keys()),
+            )
+        else:
+            logger.info(
+                "[Classifier] calling LLM slot extractor | in_order_flow=%s rule=%s",
+                in_order_flow,
+                rule_intent.name if rule_intent else None,
+            )
+            slots = await _slot_mod.extract_slots(message, history)
 
         # Layer 2b: deterministic Arabic ordering-slot extractor. Runs
         # ALWAYS during the order flow, and as a defensive fallback

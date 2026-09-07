@@ -522,6 +522,7 @@ def _slim_known_facts(raw: Any) -> Dict[str, Any]:
         "store_name",
         "support_hours",
         "maps_url",
+        "url_context",
     ):
         if key in raw and raw[key] not in (None, "", [], {}):
             out[key] = raw[key]
