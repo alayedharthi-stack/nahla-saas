@@ -61,6 +61,7 @@ class UrlContext:
     content_trust: str = "untrusted_web_metadata"
     watched_or_transcribed: bool = False
     catalog_product: Dict[str, Any] = field(default_factory=dict)
+    fetch_body_truncated: bool = False
 
     def to_public_dict(self) -> Dict[str, Any]:
         payload = {
@@ -79,6 +80,7 @@ class UrlContext:
             "content_trust": "untrusted_web_metadata",
             "content_channel": "untrusted_web_metadata",
             "watched_or_transcribed": False,
+            "fetch_body_truncated": bool(self.fetch_body_truncated),
         }
         if self.catalog_product:
             payload["catalog_product"] = dict(self.catalog_product)
@@ -392,6 +394,7 @@ def _from_fetch(original: str, fetched: SafeHttpResult) -> UrlContext:
     meta: Dict[str, str] = {}
     source = "html_metadata"
     body = fetched.body or b""
+    truncated = bool(getattr(fetched, "body_truncated", False))
     ctype = (fetched.content_type or "").lower()
     if "json" in ctype:
         meta = parse_json_metadata(body)
@@ -408,6 +411,8 @@ def _from_fetch(original: str, fetched: SafeHttpResult) -> UrlContext:
     image = _sanitize_text(meta.get("image"), IMAGE_URL_MAX)
     canonical = _sanitize_text(meta.get("canonical") or fetched.final_url or original, 500)
     if not title and not description and not author:
+        if truncated:
+            return _unavailable(original, "oversized", source=source)
         return _unavailable(original, "metadata_missing", source=source)
     confidence = 0.8 if title else 0.55
     image_meta: Dict[str, Any] = {}
@@ -425,6 +430,7 @@ def _from_fetch(original: str, fetched: SafeHttpResult) -> UrlContext:
         extraction_status="ok",
         confidence=confidence,
         source=source,
+        fetch_body_truncated=truncated,
     )
 
 

@@ -274,8 +274,9 @@ def test_default_transport_max_bytes_plus_one_closes() -> None:
     server = _LocalHttpServer(handler)
     try:
         resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
-        assert resp.error_class == "oversized"
-        assert resp.body == b""
+        assert resp.error_class == ""
+        assert len(resp.body) == MAX_RESPONSE_BYTES
+        assert resp.body_truncated is True
     finally:
         server.close()
 
@@ -594,3 +595,841 @@ def test_async_default_transport_slow_body_deadline() -> None:
         assert elapsed < 2.5
     finally:
         server.close()
+
+
+def _local_transport(server_port: int):
+    def _transport(request: SafeFetchRequest) -> SafeFetchResponse:
+        local_req = SafeFetchRequest(
+            url=request.url,
+            hostname=request.hostname,
+            ip="127.0.0.1",
+            port=server_port,
+            scheme="http",
+            path=request.path or "/",
+            timeout_connect=request.timeout_connect,
+            timeout_read=request.timeout_read,
+            deadline=request.deadline,
+        )
+        return default_transport(local_req, deadline=request.deadline or time.monotonic() + 8.0)
+
+    return _transport
+
+
+def _html_with_og(
+    *,
+    title: str = "OG Title",
+    description: str = "OG Description",
+    site_name: str = "Example",
+    tail: bytes = b"",
+) -> bytes:
+    head = (
+        "<!doctype html><html><head>"
+        f'<meta property="og:title" content="{title}">'
+        f'<meta property="og:description" content="{description}">'
+        f'<meta property="og:site_name" content="{site_name}">'
+        "</head><body>"
+    ).encode("utf-8")
+    return head + tail
+
+
+def test_a_large_html_og_metadata_prefix_enrichment_via_fetch() -> None:
+    html = _html_with_og(tail=b"z" * (MAX_RESPONSE_BYTES + 50_000))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        try:
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + html
+            )
+        except OSError:
+            pass
+
+    server = _LocalHttpServer(handler)
+    try:
+        result = fetch_url(
+            "http://example.test/",
+            resolver=_resolver("8.8.8.8"),
+            transport=_local_transport(server.port),
+        )
+        assert result.ok is True
+        assert result.body_truncated is True
+        assert len(result.body) <= MAX_RESPONSE_BYTES
+        assert b"og:title" in result.body
+        assert len(result.body) < len(html)
+    finally:
+        server.close()
+
+
+def test_b_metadata_split_across_chunks() -> None:
+    part1 = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+        b"<!doctype html><html><head><meta property=\"og:title\" content=\"Chunk"
+    )
+    part2 = b"ed Title\"></head><body>" + (b"x" * 120_000)
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(part1)
+        time.sleep(0.05)
+        conn.sendall(part2)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == ""
+        assert b"Chunked Title" in resp.body
+        assert resp.body_truncated is True
+    finally:
+        server.close()
+
+
+def test_c_early_head_close_stops_before_huge_body() -> None:
+    huge_tail = b"y" * 400_000
+    html = _html_with_og(tail=huge_tail)
+    received_after_head = {"count": 0}
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        head_only = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+            + html[: html.find(b"</head>") + len(b"</head>")]
+        )
+        conn.sendall(head_only)
+        try:
+            while conn.recv(8192):
+                received_after_head["count"] += 1
+        except OSError:
+            pass
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == ""
+        assert b"og:title" in resp.body
+        assert len(resp.body) < len(html)
+        assert received_after_head["count"] == 0
+    finally:
+        server.close()
+
+
+def test_d_large_html_without_metadata_stays_unavailable() -> None:
+    from services.url_context import enrich_current_turn_urls, reset_url_context_cache  # noqa: PLC0415
+
+    junk = b"<html><head></head><body>" + (b"j" * (MAX_RESPONSE_BYTES + 10_000)) + b"</body></html>"
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + junk
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        url = "http://example.test/"
+        result = fetch_url(
+            url,
+            resolver=_resolver("8.8.8.8"),
+            transport=_local_transport(server.port),
+        )
+        assert result.ok is True
+        assert result.body_truncated is True
+        reset_url_context_cache()
+
+        async def _go():
+            rows = await enrich_current_turn_urls(
+                message=url,
+                tenant_id=33,
+                fetch=lambda _u: result,
+            )
+            return rows[0]
+
+        ctx = asyncio.run(_go())
+        assert ctx.extraction_status == "unavailable"
+        assert ctx.error_class == "oversized"
+    finally:
+        server.close()
+
+
+def test_g_oversized_json_still_fails_closed() -> None:
+    body = b"{" + (b'"x":' + b'"' + b"a" * MAX_RESPONSE_BYTES + b'"') + b"}"
+    result = fetch_url(
+        "https://example.test/big.json",
+        resolver=_resolver("8.8.8.8"),
+        transport=lambda request: SafeFetchResponse(
+            status=200,
+            headers={"content-type": "application/json"},
+            body=body,
+        ),
+    )
+    assert result.ok is False
+    assert result.error_class == "oversized"
+
+
+def test_l_stored_body_never_exceeds_max_via_transport() -> None:
+    html = _html_with_og(tail=b"z" * (MAX_RESPONSE_BYTES + 80_000))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + html
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == ""
+        assert len(resp.body) <= MAX_RESPONSE_BYTES
+    finally:
+        server.close()
+
+
+def test_n_content_length_larger_than_max_with_early_metadata_succeeds() -> None:
+    html = _html_with_og(tail=b"q" * 500_000)
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/html\r\n"
+            b"Content-Length: 9999999\r\n"
+            b"Connection: close\r\n\r\n" + html
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        result = fetch_url(
+            "http://example.test/",
+            resolver=_resolver("8.8.8.8"),
+            transport=_local_transport(server.port),
+        )
+        assert result.ok is True
+        assert b"og:title" in result.body
+        assert len(result.body) < len(html)
+    finally:
+        server.close()
+
+
+def _encode_chunked(chunks: list[bytes], trailers: bytes = b"") -> bytes:
+    out = bytearray()
+    for chunk in chunks:
+        out.extend(f"{len(chunk):x}\r\n".encode("ascii"))
+        out.extend(chunk)
+        out.extend(b"\r\n")
+    out.extend(b"0\r\n")
+    if trailers:
+        out.extend(trailers)
+        if not trailers.endswith(b"\r\n"):
+            out.extend(b"\r\n")
+    out.extend(b"\r\n")
+    return bytes(out)
+
+
+def _split_chunks(data: bytes, piece: int = 65_536) -> list[bytes]:
+    if not data:
+        return []
+    return [data[i : i + piece] for i in range(0, len(data), piece)]
+
+
+def _chunked_response_headers(
+    content_type: str = "text/html",
+    *,
+    extra: bytes = b"",
+) -> bytes:
+    return (
+        b"HTTP/1.1 200 OK\r\n"
+        + f"Content-Type: {content_type}\r\n".encode("ascii")
+        + b"Transfer-Encoding: chunked\r\n"
+        + extra
+        + b"\r\n"
+    )
+
+
+def test_chunked_decoder_single_large_chunk_wire() -> None:
+    from services.safe_http_fetch import _BodyAccumulator, _ChunkedDecoder  # noqa: PLC0415
+
+    chunk = b"a" * 65_536
+    wire = _encode_chunked([chunk])
+    dec = _ChunkedDecoder()
+    out1, err1 = dec.feed(wire)
+    assert err1 == ""
+    assert len(out1) == 65_536
+
+    head = _html_with_og(tail=b"")
+    tail = b"z" * (MAX_RESPONSE_BYTES + 80_000)
+    acc = _BodyAccumulator(content_type="text/html", framing="chunked", content_length=0)
+    err = acc.feed_wire(_encode_chunked([head] + _split_chunks(tail)))
+    assert err == ""
+    assert acc.stop_early is True
+    assert b"og:title" in acc.body
+
+
+def test_chunked_html_large_early_og_real_transport() -> None:
+    head = _html_with_og(tail=b"")
+    tail = b"z" * (MAX_RESPONSE_BYTES + 80_000)
+    body = _encode_chunked([head] + _split_chunks(tail))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + body)
+
+    server = _LocalHttpServer(handler)
+    try:
+
+        async def _go() -> SafeFetchResponse:
+            return await async_default_transport(
+                _request(server.port, deadline=time.monotonic() + 5)
+            )
+
+        resp = asyncio.run(_go())
+        assert resp.error_class == ""
+        assert b"og:title" in resp.body
+        assert b"0\r\n" not in resp.body
+        assert len(resp.body) <= MAX_RESPONSE_BYTES
+        assert resp.body_truncated is True
+    finally:
+        server.close()
+
+
+def test_chunked_og_split_across_reads_and_chunk_boundaries() -> None:
+    part_a = b'<!doctype html><html><head><meta property="og:title" content="Split'
+    part_b = b' Across Chunks">'
+    part_c = b"</head><body>" + (b"x" * 120_000)
+    wire = _encode_chunked([part_a, part_b, part_c])
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers())
+        cursor = 0
+        while cursor < len(wire):
+            end = min(len(wire), cursor + 17)
+            conn.sendall(wire[cursor:end])
+            cursor = end
+            time.sleep(0.01)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 5))
+        assert resp.error_class == ""
+        assert b"Split Across Chunks" in resp.body
+        assert resp.body_truncated is True
+    finally:
+        server.close()
+
+
+def test_chunked_terminal_zero_chunk_with_trailers() -> None:
+    html = _html_with_og()
+    wire = _encode_chunked([html], trailers=b"X-Test: ok\r\n")
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + wire)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == ""
+        assert b"OG Title" in resp.body
+        assert b"X-Test" not in resp.body
+    finally:
+        server.close()
+
+
+def test_chunked_malformed_chunk_size_fail_closed() -> None:
+    wire = b"ZZ\r\npayload\r\n0\r\n\r\n"
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + wire)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == "invalid_chunk_framing"
+    finally:
+        server.close()
+
+
+def test_chunked_missing_chunk_crlf_fail_closed() -> None:
+    wire = b"5\r\nhello0\r\n\r\n"
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + wire)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == "invalid_chunk_framing"
+    finally:
+        server.close()
+
+
+def test_chunked_premature_eof_inside_chunk_fail_closed() -> None:
+    wire = b"a\r\n"
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + wire)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == "invalid_chunk_framing"
+    finally:
+        server.close()
+
+
+def test_chunked_extension_ignored_and_invalid_extension_size_rejected() -> None:
+    ok_wire = _encode_chunked([b"<html><head></head><body>ok</body></html>"])
+    bad_wire = b"g\r\nxxxxx\r\n0\r\n\r\n"
+
+    def ok_handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers(content_type="text/html") + ok_wire)
+
+    def bad_handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers(content_type="text/html") + bad_wire)
+
+    ok_server = _LocalHttpServer(ok_handler)
+    bad_server = _LocalHttpServer(bad_handler)
+    try:
+        ok_resp = default_transport(_request(ok_server.port, deadline=time.monotonic() + 3))
+        bad_resp = default_transport(_request(bad_server.port, deadline=time.monotonic() + 3))
+        assert ok_resp.error_class == ""
+        assert bad_resp.error_class == "invalid_chunk_framing"
+    finally:
+        ok_server.close()
+        bad_server.close()
+
+
+def test_chunked_oversized_json_fail_closed_without_max_plus_one() -> None:
+    big = b"x" * (MAX_RESPONSE_BYTES + 4096)
+    wire = _encode_chunked([big[:120_000], big[120_000:240_000], big[240_000:]])
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers(content_type="application/json") + wire)
+
+    server = _LocalHttpServer(handler)
+    try:
+        result = fetch_url(
+            "http://example.test/big.json",
+            resolver=_resolver("8.8.8.8"),
+            transport=_local_transport(server.port),
+        )
+        assert result.ok is False
+        assert result.error_class == "oversized"
+        assert len(result.body) <= MAX_RESPONSE_BYTES
+    finally:
+        server.close()
+
+
+def test_framing_ambiguous_content_length_and_chunked_fail_closed() -> None:
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/html\r\n"
+            b"Content-Length: 10\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            b"0\r\n\r\n"
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == "framing_ambiguous"
+    finally:
+        server.close()
+
+
+def test_unsupported_transfer_encoding_fail_closed() -> None:
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/html\r\n"
+            b"Transfer-Encoding: gzip\r\n\r\n"
+            b"payload"
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == "framing_unsupported"
+    finally:
+        server.close()
+
+
+def test_chunked_early_head_stops_before_huge_tail_and_closes_socket() -> None:
+    head = _html_with_og(tail=b"")
+    tail = b"t" * 400_000
+    received_after_head = {"count": 0}
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + _encode_chunked([head]))
+        try:
+            conn.sendall(_encode_chunked([tail]))
+            while conn.recv(8192):
+                received_after_head["count"] += 1
+        except OSError:
+            pass
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 5))
+        assert resp.error_class == ""
+        assert b"og:title" in resp.body
+        assert len(resp.body) < len(head + tail)
+        assert received_after_head["count"] == 0
+    finally:
+        server.close()
+
+
+def test_fake_head_in_comment_and_script_does_not_short_circuit() -> None:
+    html = (
+        b"<!doctype html><html><head><!-- </head> -->"
+        b"<script>var x='</head>';</script>"
+        b'<meta property="og:title" content="Real OG">'
+        b"</head><body>" + (b"u" * 120_000) + b"</body></html>"
+    )
+    wire = _encode_chunked([html[:200], html[200:400], html[400:]])
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + wire)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 5))
+        assert resp.error_class == ""
+        assert b"Real OG" in resp.body
+    finally:
+        server.close()
+
+
+def test_exact_memory_cap_content_length_html() -> None:
+    html = _html_with_og(tail=b"m" * (MAX_RESPONSE_BYTES + 50_000))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+            b"Content-Length: 999999\r\n\r\n" + html
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 5))
+        assert resp.error_class == ""
+        assert len(resp.body) <= MAX_RESPONSE_BYTES
+    finally:
+        server.close()
+
+
+def test_exact_memory_cap_chunked_html() -> None:
+    html = _html_with_og(tail=b"n" * (MAX_RESPONSE_BYTES + 50_000))
+    wire = _encode_chunked(_split_chunks(html, 90_000))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + wire)
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 5))
+        assert resp.error_class == ""
+        assert len(resp.body) <= MAX_RESPONSE_BYTES
+    finally:
+        server.close()
+
+
+def test_exact_memory_cap_connection_close_html() -> None:
+    html = _html_with_og(tail=b"o" * (MAX_RESPONSE_BYTES + 50_000))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + html
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 5))
+        assert resp.error_class == ""
+        assert len(resp.body) <= MAX_RESPONSE_BYTES
+    finally:
+        server.close()
+
+
+def test_exact_memory_cap_json_non_html() -> None:
+    payload = b"{" + b'"k":"' + (b"j" * (MAX_RESPONSE_BYTES + 2048)) + b'"}'
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+            + payload
+        )
+
+    server = _LocalHttpServer(handler)
+    try:
+        result = fetch_url(
+            "http://example.test/big.json",
+            resolver=_resolver("8.8.8.8"),
+            transport=_local_transport(server.port),
+        )
+        assert result.ok is False
+        assert result.error_class == "oversized"
+        assert len(result.body) <= MAX_RESPONSE_BYTES
+    finally:
+        server.close()
+
+
+def test_chunked_enrich_current_turn_urls_real_transport() -> None:
+    from services.url_context import enrich_current_turn_urls, reset_url_context_cache  # noqa: PLC0415
+    from services.safe_http_fetch import fetch_url_async  # noqa: PLC0415
+
+    head = _html_with_og(title="Chunked OG", tail=b"")
+    wire = _encode_chunked([head] + _split_chunks(b"q" * (MAX_RESPONSE_BYTES + 40_000)))
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(1024)
+        conn.sendall(_chunked_response_headers() + wire)
+
+    server = _LocalHttpServer(handler)
+    try:
+        reset_url_context_cache()
+        url = "http://example.test/chunked"
+
+        async def _fetch(u: str):
+            return await fetch_url_async(
+                u,
+                resolver=_resolver("8.8.8.8"),
+                transport=_local_transport(server.port),
+            )
+
+        async def _go():
+            rows = await enrich_current_turn_urls(
+                message=url,
+                tenant_id=33,
+                fetch=_fetch,
+            )
+            return rows[0]
+
+        ctx = asyncio.run(_go())
+        assert ctx.extraction_status == "ok"
+        assert ctx.page_title == "Chunked OG"
+        assert ctx.fetch_body_truncated is True
+    finally:
+        server.close()
+
+
+def _framing_response_sync_async(
+    header_lines: list[bytes],
+    *,
+    body: bytes = b"",
+    deadline: float | None = None,
+) -> tuple[SafeFetchResponse, SafeFetchResponse]:
+    payload = (
+        b"HTTP/1.1 200 OK\r\n"
+        + b"\r\n".join(header_lines)
+        + b"\r\n\r\n"
+        + body
+    )
+    dl = deadline or (time.monotonic() + 5)
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(4096)
+        conn.sendall(payload)
+
+    sync_server = _LocalHttpServer(handler)
+    try:
+        sync_resp = default_transport(_request(sync_server.port, deadline=dl))
+    finally:
+        sync_server.close()
+
+    async_server = _LocalHttpServer(handler)
+    try:
+
+        async def _go() -> SafeFetchResponse:
+            return await async_default_transport(_request(async_server.port, deadline=dl))
+
+        async_resp = asyncio.run(_go())
+    finally:
+        async_server.close()
+    return sync_resp, async_resp
+
+
+def _assert_framing_fail(header_lines: list[bytes], expected: str, *, body: bytes = b"") -> None:
+    sync_resp, async_resp = _framing_response_sync_async(header_lines, body=body)
+    assert sync_resp.error_class == expected, sync_resp.error_class
+    assert async_resp.error_class == expected, async_resp.error_class
+
+
+def _assert_framing_ok(header_lines: list[bytes], *, body: bytes = b"") -> None:
+    sync_resp, async_resp = _framing_response_sync_async(header_lines, body=body)
+    assert sync_resp.error_class == "", sync_resp.error_class
+    assert async_resp.error_class == "", async_resp.error_class
+
+
+def test_framing_duplicate_content_length_different_values_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10", b"Content-Length: 11", b"Content-Type: text/html"],
+        "framing_ambiguous",
+    )
+
+
+def test_framing_duplicate_content_length_same_value_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10", b"Content-Length: 10", b"Content-Type: text/html"],
+        "framing_ambiguous",
+    )
+
+
+def test_framing_comma_content_length_single_header_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10, 10", b"Content-Type: text/html"],
+        "invalid_content_length",
+    )
+
+
+def test_framing_comma_content_length_conflicting_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10, 11", b"Content-Type: text/html"],
+        "invalid_content_length",
+    )
+
+
+def test_framing_invalid_content_length_values_fail_closed() -> None:
+    for line in (
+        b"Content-Length:",
+        b"Content-Length: -1",
+        b"Content-Length: +10",
+        b"Content-Length: 10a",
+        b"Content-Length: 1 0",
+    ):
+        _assert_framing_fail([line, b"Content-Type: text/html"], "invalid_content_length")
+
+
+def test_framing_mixed_case_duplicate_content_length_fail_closed() -> None:
+    _assert_framing_fail(
+        [b"Content-Length: 10", b"content-length: 10", b"Content-Type: text/html"],
+        "framing_ambiguous",
+    )
+
+
+def test_framing_duplicate_transfer_encoding_fail_closed() -> None:
+    _assert_framing_fail(
+        [
+            b"Transfer-Encoding: chunked",
+            b"Transfer-Encoding: chunked",
+            b"Content-Type: text/html",
+        ],
+        "framing_unsupported",
+    )
+
+
+def test_framing_stacked_transfer_encoding_variants_fail_closed() -> None:
+    for line in (
+        b"Transfer-Encoding: gzip, chunked",
+        b"Transfer-Encoding: chunked, gzip",
+        b"Transfer-Encoding: identity, chunked",
+    ):
+        _assert_framing_fail([line, b"Content-Type: text/html"], "framing_unsupported")
+
+
+def test_framing_cl_then_te_and_te_then_cl_fail_closed() -> None:
+    _assert_framing_fail(
+        [
+            b"Content-Length: 10",
+            b"Transfer-Encoding: chunked",
+            b"Content-Type: text/html",
+        ],
+        "framing_ambiguous",
+    )
+    _assert_framing_fail(
+        [
+            b"Transfer-Encoding: chunked",
+            b"Content-Length: 10",
+            b"Content-Type: text/html",
+        ],
+        "framing_ambiguous",
+    )
+
+
+def test_framing_valid_single_content_length_preserved() -> None:
+    body = b"<html><head></head><body>ok</body></html>"
+    _assert_framing_ok(
+        [b"Content-Length: " + str(len(body)).encode("ascii"), b"Content-Type: text/html"],
+        body=body,
+    )
+
+
+def test_framing_valid_single_chunked_preserved() -> None:
+    wire = _encode_chunked([_html_with_og()])
+    _assert_framing_ok(
+        [b"Transfer-Encoding: chunked", b"Content-Type: text/html"],
+        body=wire,
+    )
+
+
+def test_framing_large_cl_html_early_og_bounded_prefix_preserved() -> None:
+    html = _html_with_og(tail=b"z" * (MAX_RESPONSE_BYTES + 50_000))
+    sync_resp, async_resp = _framing_response_sync_async(
+        [
+            b"Content-Length: 9999999",
+            b"Content-Type: text/html",
+            b"Connection: close",
+        ],
+        body=html,
+    )
+    for resp in (sync_resp, async_resp):
+        assert resp.error_class == ""
+        assert b"og:title" in resp.body
+        assert len(resp.body) <= MAX_RESPONSE_BYTES
+
+
+def test_framing_malformed_closes_socket_without_background_read() -> None:
+    received = {"count": 0}
+
+    def handler(conn: socket.socket) -> None:
+        conn.recv(4096)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Length: 10\r\n"
+            b"Content-Length: 11\r\n"
+            b"Content-Type: text/html\r\n\r\n"
+            b"0123456789extra"
+        )
+        try:
+            while conn.recv(8192):
+                received["count"] += 1
+        except OSError:
+            pass
+
+    server = _LocalHttpServer(handler)
+    try:
+        resp = default_transport(_request(server.port, deadline=time.monotonic() + 3))
+        assert resp.error_class == "framing_ambiguous"
+        assert received["count"] == 0
+    finally:
+        server.close()
+
+
+def test_framing_oversized_json_body_stays_within_hard_cap() -> None:
+    big = b"x" * (MAX_RESPONSE_BYTES + 4096)
+    result = fetch_url(
+        "http://example.test/big.json",
+        resolver=_resolver("8.8.8.8"),
+        transport=lambda request: SafeFetchResponse(
+            status=200,
+            headers={"content-type": "application/json", "content-length": str(len(big))},
+            body=big,
+        ),
+    )
+    assert result.ok is False
+    assert result.error_class == "oversized"
+    assert len(result.body) <= MAX_RESPONSE_BYTES
