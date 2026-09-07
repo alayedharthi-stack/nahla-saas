@@ -54,7 +54,9 @@ HTML_CONTENT_TYPES: FrozenSet[str] = frozenset(
         "application/xhtml+xml",
     }
 )
-_HEAD_CLOSE_RE = re.compile(rb"</head\s*>", re.IGNORECASE)
+_WIRE_RECV_BYTES = 8192
+MAX_CHUNK_SIZE_LINE_BYTES = 4096
+MAX_TRAILER_BYTES = 8192
 CLOUD_METADATA_HOSTS: FrozenSet[str] = frozenset(
     {
         "metadata.google.internal",
@@ -402,7 +404,52 @@ def _is_html_content_type(content_type: str) -> bool:
 
 
 def _html_head_complete(body: bytes) -> bool:
-    return _HEAD_CLOSE_RE.search(body) is not None
+    """True when </head> closes the head outside comments and script/style blocks."""
+    i = 0
+    n = len(body)
+    state = "normal"
+    while i < n:
+        if state == "normal":
+            if i + 4 <= n and body[i : i + 4] == b"<!--":
+                state = "comment"
+                i += 4
+                continue
+            if i + 7 <= n and body[i : i + 7].lower() == b"<script":
+                state = "script"
+                i += 7
+                continue
+            if i + 6 <= n and body[i : i + 6].lower() == b"<style":
+                state = "style"
+                i += 6
+                continue
+            if i + 6 <= n and body[i : i + 6].lower() == b"</head":
+                j = i + 6
+                while j < n and body[j : j + 1] in (b" ", b"\t", b"\n", b"\r"):
+                    j += 1
+                if j < n and body[j : j + 1] == b">":
+                    return True
+            i += 1
+            continue
+        if state == "comment":
+            end = body.find(b"-->", i)
+            if end < 0:
+                return False
+            i = end + 3
+            state = "normal"
+            continue
+        if state == "script":
+            end = body.lower().find(b"</script>", i)
+            if end < 0:
+                return False
+            i = end + len(b"</script>")
+            state = "normal"
+            continue
+        end = body.lower().find(b"</style>", i)
+        if end < 0:
+            return False
+        i = end + len(b"</style>")
+        state = "normal"
+    return False
 
 
 def _append_bounded(body: bytes, piece: bytes, limit: int) -> Tuple[bytes, bool]:
@@ -416,109 +463,296 @@ def _append_bounded(body: bytes, piece: bytes, limit: int) -> Tuple[bytes, bool]
     return body + piece[:room], True
 
 
-def _read_bounded_body_sync(
+def _resolve_body_framing(headers: Dict[str, str]) -> Tuple[str, int, str]:
+    """Return (mode, content_length, error_class)."""
+    cl_raw = str(headers.get("content-length") or "").strip()
+    te_raw = str(headers.get("transfer-encoding") or "").strip()
+    has_cl = bool(cl_raw)
+    has_te = bool(te_raw)
+    if has_cl and has_te:
+        return "", 0, "framing_ambiguous"
+    if has_te:
+        parts = [part.strip().lower() for part in te_raw.split(",") if part.strip()]
+        if not parts:
+            return "", 0, "framing_unsupported"
+        if len(parts) == 1 and parts[0] == "identity":
+            has_te = False
+        elif len(parts) == 1 and parts[0] == "chunked":
+            return "chunked", 0, ""
+        else:
+            return "", 0, "framing_unsupported"
+    if has_cl:
+        try:
+            content_length = int(cl_raw, 10)
+        except ValueError:
+            return "", 0, "invalid_response"
+        if content_length < 0:
+            return "", 0, "invalid_response"
+        return "content_length", content_length, ""
+    return "connection_close", 0, ""
+
+
+class _ChunkedDecoder:
+    """RFC 7230 chunked decoder. Semicolon chunk extensions are ignored."""
+
+    def __init__(self) -> None:
+        self._pending = b""
+        self._phase = "size"
+        self._chunk_left = 0
+        self._trailers = b""
+        self.complete = False
+        self.error = ""
+
+    def _fail(self, err: str) -> str:
+        self.error = err
+        self.complete = True
+        return err
+
+    def feed(self, wire: bytes) -> Tuple[bytes, str]:
+        if self.complete:
+            return b"", self.error
+        if wire:
+            self._pending += wire
+        out = bytearray()
+        while not self.complete and not self.error:
+            if self._phase == "size":
+                idx = self._pending.find(b"\r\n")
+                if idx < 0:
+                    if len(self._pending) > MAX_CHUNK_SIZE_LINE_BYTES:
+                        return bytes(out), self._fail("invalid_chunk_framing")
+                    break
+                if idx > MAX_CHUNK_SIZE_LINE_BYTES:
+                    return bytes(out), self._fail("invalid_chunk_framing")
+                line = self._pending[:idx]
+                self._pending = self._pending[idx + 2 :]
+                semi = line.find(b";")
+                size_part = (line[:semi] if semi >= 0 else line).strip()
+                if not size_part:
+                    return bytes(out), self._fail("invalid_chunk_framing")
+                try:
+                    chunk_size = int(size_part.decode("ascii"), 16)
+                except (ValueError, UnicodeDecodeError):
+                    return bytes(out), self._fail("invalid_chunk_framing")
+                if chunk_size < 0 or chunk_size > (MAX_RESPONSE_BYTES * 4):
+                    return bytes(out), self._fail("invalid_chunk_framing")
+                if chunk_size == 0:
+                    self._phase = "trailers"
+                    continue
+                self._chunk_left = chunk_size
+                self._phase = "data"
+                continue
+            if self._phase == "data":
+                if not self._pending:
+                    break
+                take = min(self._chunk_left, len(self._pending))
+                out.extend(self._pending[:take])
+                self._pending = self._pending[take:]
+                self._chunk_left -= take
+                if self._chunk_left:
+                    break
+                self._phase = "crlf"
+                continue
+            if self._phase == "crlf":
+                if len(self._pending) < 2:
+                    break
+                if self._pending[:2] != b"\r\n":
+                    return bytes(out), self._fail("invalid_chunk_framing")
+                self._pending = self._pending[2:]
+                self._phase = "size"
+                if out:
+                    return bytes(out), self.error
+                continue
+            if len(self._trailers) + len(self._pending) > MAX_TRAILER_BYTES:
+                return bytes(out), self._fail("invalid_chunk_framing")
+            self._trailers += self._pending
+            self._pending = b""
+            if b"\r\n\r\n" in self._trailers:
+                self.complete = True
+            break
+        return bytes(out), self.error
+
+    def eof(self) -> str:
+        if self.complete:
+            return ""
+        return self._fail("invalid_chunk_framing")
+
+
+class _BodyAccumulator:
+    def __init__(self, *, content_type: str, framing: str, content_length: int) -> None:
+        self.is_html = _is_html_content_type(content_type)
+        self.framing = framing
+        self.cl_remaining = content_length
+        self.body = b""
+        self.truncated = False
+        self.oversized = False
+        self.done = False
+        self.stop_early = False
+        self.chunked = _ChunkedDecoder() if framing == "chunked" else None
+
+    def _mark_html_stop(self) -> None:
+        self.truncated = True
+        self.stop_early = True
+
+    def add_decoded(self, piece: bytes) -> str:
+        if not piece or self.done or self.stop_early:
+            return ""
+        self.body, hit_limit = _append_bounded(self.body, piece, MAX_RESPONSE_BYTES)
+        if self.is_html:
+            if len(self.body) >= MAX_RESPONSE_BYTES:
+                self._mark_html_stop()
+            elif b"<" in piece or b"<" in self.body:
+                if _html_head_complete(self.body):
+                    self._mark_html_stop()
+            return ""
+        if hit_limit:
+            self.oversized = True
+            self.done = True
+            return "oversized"
+        return ""
+
+    def feed_wire(self, wire: bytes) -> str:
+        if self.done or self.stop_early or not wire:
+            return ""
+        if self.framing == "chunked":
+            assert self.chunked is not None
+            pending = wire
+            while pending or self.chunked._pending:
+                if self.stop_early or self.oversized:
+                    return ""
+                decoded, err = self.chunked.feed(pending)
+                pending = b""
+                if err:
+                    self.done = True
+                    return err
+                if decoded:
+                    err = self.add_decoded(decoded)
+                    if err:
+                        return err
+                    if self.stop_early or self.oversized:
+                        return ""
+                if self.chunked.complete:
+                    self.done = True
+                    return ""
+                if not decoded:
+                    break
+            return ""
+        if self.framing == "content_length":
+            if self.cl_remaining <= 0:
+                self.done = True
+                return ""
+            take = min(len(wire), self.cl_remaining)
+            err = self.add_decoded(wire[:take])
+            self.cl_remaining -= take
+            if self.cl_remaining <= 0:
+                self.done = True
+            return err
+        return self.add_decoded(wire)
+
+    def eof(self) -> str:
+        if self.framing == "chunked":
+            assert self.chunked is not None
+            if self.stop_early:
+                return ""
+            return self.chunked.eof()
+        if self.framing == "content_length":
+            if self.cl_remaining > 0 and not self.stop_early:
+                return "invalid_response"
+            self.done = True
+            return ""
+        self.done = True
+        return ""
+
+
+def _recv_sync(sock: socket.socket, hard_deadline: float) -> Tuple[bytes, str]:
+    try:
+        sock.settimeout(_require_remaining(hard_deadline))
+        piece = sock.recv(_WIRE_RECV_BYTES)
+    except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
+        return b"", "timeout"
+    except OSError:
+        return b"", "network_error"
+    return piece, ""
+
+
+async def _recv_async(reader: Any, hard_deadline: float) -> Tuple[bytes, str]:
+    left = _require_remaining(hard_deadline)
+    try:
+        piece = await asyncio.wait_for(reader.read(_WIRE_RECV_BYTES), timeout=left)
+    except (asyncio.TimeoutError, TimeoutError):
+        return b"", "timeout"
+    return piece, ""
+
+
+def _read_response_body_sync(
     sock: socket.socket,
     hard_deadline: float,
     content_type: str,
-    initial_body: bytes,
-    *,
-    stop_after_headers: bool = False,
+    framing: str,
+    content_length: int,
+    initial_wire: bytes,
 ) -> Tuple[bytes, bool, str]:
-    """Read response body after headers. Never stores more than MAX_RESPONSE_BYTES."""
-    if stop_after_headers:
-        return initial_body, False, ""
-    is_html = _is_html_content_type(content_type)
-    body = initial_body
-    truncated = False
-    if is_html:
-        while True:
-            if _html_head_complete(body):
-                truncated = True
-                break
-            if len(body) >= MAX_RESPONSE_BYTES:
-                body = body[:MAX_RESPONSE_BYTES]
-                truncated = True
-                break
-            sock.settimeout(_require_remaining(hard_deadline))
-            try:
-                piece = sock.recv(8192)
-            except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
-                return body, truncated, "timeout"
-            except OSError:
-                return body, truncated, "network_error"
-            if not piece:
-                break
-            body, hit_limit = _append_bounded(body, piece, MAX_RESPONSE_BYTES)
-            if hit_limit:
-                truncated = True
-                break
-        return body, truncated, ""
+    acc = _BodyAccumulator(
+        content_type=content_type,
+        framing=framing,
+        content_length=content_length,
+    )
+    wire_buf = initial_wire
     while True:
-        if len(body) > MAX_RESPONSE_BYTES:
-            return b"", False, "oversized"
-        sock.settimeout(_require_remaining(hard_deadline))
-        try:
-            piece = sock.recv(8192)
-        except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
-            return body, False, "timeout"
-        except OSError:
-            return body, False, "network_error"
-        if not piece:
+        if wire_buf:
+            err = acc.feed_wire(wire_buf)
+            wire_buf = b""
+            if err:
+                return b"", False, err
+        if acc.stop_early or acc.done or acc.oversized:
             break
-        body += piece
-    if len(body) > MAX_RESPONSE_BYTES:
+        piece, recv_err = _recv_sync(sock, hard_deadline)
+        if recv_err:
+            return acc.body, acc.truncated, recv_err
+        if not piece:
+            eof_err = acc.eof()
+            if eof_err:
+                return b"", False, eof_err
+            break
+        wire_buf = piece
+    if acc.oversized:
         return b"", False, "oversized"
-    return body, False, ""
+    return acc.body, acc.truncated, ""
 
 
-async def _read_bounded_body_async(
+async def _read_response_body_async(
     reader: Any,
     hard_deadline: float,
     content_type: str,
-    initial_body: bytes,
-    *,
-    stop_after_headers: bool = False,
+    framing: str,
+    content_length: int,
+    initial_wire: bytes,
 ) -> Tuple[bytes, bool, str]:
-    if stop_after_headers:
-        return initial_body, False, ""
-    is_html = _is_html_content_type(content_type)
-    body = initial_body
-    truncated = False
-    if is_html:
-        while True:
-            if _html_head_complete(body):
-                truncated = True
-                break
-            if len(body) >= MAX_RESPONSE_BYTES:
-                body = body[:MAX_RESPONSE_BYTES]
-                truncated = True
-                break
-            left = _require_remaining(hard_deadline)
-            try:
-                piece = await asyncio.wait_for(reader.read(8192), timeout=left)
-            except (asyncio.TimeoutError, TimeoutError):
-                return body, truncated, "timeout"
-            if not piece:
-                break
-            body, hit_limit = _append_bounded(body, piece, MAX_RESPONSE_BYTES)
-            if hit_limit:
-                truncated = True
-                break
-        return body, truncated, ""
+    acc = _BodyAccumulator(
+        content_type=content_type,
+        framing=framing,
+        content_length=content_length,
+    )
+    wire_buf = initial_wire
     while True:
-        if len(body) > MAX_RESPONSE_BYTES:
-            return b"", False, "oversized"
-        left = _require_remaining(hard_deadline)
-        try:
-            piece = await asyncio.wait_for(reader.read(8192), timeout=left)
-        except (asyncio.TimeoutError, TimeoutError):
-            return body, False, "timeout"
-        if not piece:
+        if wire_buf:
+            err = acc.feed_wire(wire_buf)
+            wire_buf = b""
+            if err:
+                return b"", False, err
+        if acc.stop_early or acc.done or acc.oversized:
             break
-        body += piece
-    if len(body) > MAX_RESPONSE_BYTES:
+        piece, recv_err = await _recv_async(reader, hard_deadline)
+        if recv_err:
+            return acc.body, acc.truncated, recv_err
+        if not piece:
+            eof_err = acc.eof()
+            if eof_err:
+                return b"", False, eof_err
+            break
+        wire_buf = piece
+    if acc.oversized:
         return b"", False, "oversized"
-    return body, False, ""
+    return acc.body, acc.truncated, ""
 
 
 def _read_http_response_sync(
@@ -545,12 +779,18 @@ def _read_http_response_sync(
         return SafeFetchResponse(status=0, error_class=err)
     content_type = headers.get("content-type") or ""
     redirect = status in {301, 302, 303, 307, 308}
-    body, truncated, body_err = _read_bounded_body_sync(
+    if redirect:
+        return SafeFetchResponse(status=status, headers=headers)
+    framing, content_length, framing_err = _resolve_body_framing(headers)
+    if framing_err:
+        return SafeFetchResponse(status=status, headers=headers, error_class=framing_err)
+    body, truncated, body_err = _read_response_body_sync(
         sock,
         hard_deadline,
         content_type,
+        framing,
+        content_length,
         initial_body,
-        stop_after_headers=redirect,
     )
     if body_err:
         return SafeFetchResponse(status=status, headers=headers, error_class=body_err)
@@ -584,12 +824,18 @@ async def _read_http_response_async(
         return SafeFetchResponse(status=0, error_class=err)
     content_type = headers.get("content-type") or ""
     redirect = status in {301, 302, 303, 307, 308}
-    body, truncated, body_err = await _read_bounded_body_async(
+    if redirect:
+        return SafeFetchResponse(status=status, headers=headers)
+    framing, content_length, framing_err = _resolve_body_framing(headers)
+    if framing_err:
+        return SafeFetchResponse(status=status, headers=headers, error_class=framing_err)
+    body, truncated, body_err = await _read_response_body_async(
         reader,
         hard_deadline,
         content_type,
+        framing,
+        content_length,
         initial_body,
-        stop_after_headers=redirect,
     )
     if body_err:
         return SafeFetchResponse(status=status, headers=headers, error_class=body_err)
