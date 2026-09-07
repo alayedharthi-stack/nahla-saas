@@ -189,6 +189,72 @@ class TestSallaMapping:
             "in_progress", "ready", {}
         ) == BusinessIntent.ORDER_PACKED
 
+    def test_authoritative_order_created_in_progress_is_confirmed_once(self):
+        created = {
+            "lifecycle_observation": "live_webhook",
+            "lifecycle_source_event": "order.created",
+        }
+        assert normalize_salla_lifecycle_business_intent(
+            None, "in_progress", created
+        ) == BusinessIntent.ORDER_CONFIRMED
+        assert normalize_salla_lifecycle_business_intent(
+            "in_progress", "in_progress", created
+        ) == BusinessIntent.ORDER_CONFIRMED
+
+    def test_poller_and_storesync_first_seen_in_progress_are_not_confirmed(self):
+        for observation in ("poll", "poll_import", "storesync_poll", "historical"):
+            assert normalize_salla_lifecycle_business_intent(
+                None,
+                "in_progress",
+                {"lifecycle_observation": observation},
+            ) is None
+            assert normalize_salla_lifecycle_business_intent(
+                None,
+                "in_progress",
+                {
+                    "lifecycle_observation": observation,
+                    "lifecycle_source_event": "order.created",
+                },
+            ) is None
+
+    def test_live_webhook_without_order_created_event_does_not_confirm(self):
+        assert normalize_salla_lifecycle_business_intent(
+            None,
+            "in_progress",
+            {"lifecycle_observation": "live_webhook"},
+        ) is None
+        assert normalize_salla_lifecycle_business_intent(
+            None,
+            "in_progress",
+            {
+                "lifecycle_observation": "live_webhook",
+                "lifecycle_source_event": "order.updated",
+            },
+        ) is None
+
+    def test_authoritative_created_does_not_override_real_preparing_transition(self):
+        assert normalize_salla_lifecycle_business_intent(
+            "under_review",
+            "in_progress",
+            {
+                "lifecycle_observation": "live_webhook",
+                "lifecycle_source_event": "order.created",
+            },
+        ) == BusinessIntent.ORDER_PREPARING
+
+    def test_cod_order_created_in_progress_is_order_confirmed_not_cod_prompt(self):
+        created = {
+            "lifecycle_observation": "live_webhook",
+            "lifecycle_source_event": "order.created",
+            "payment_method": "cod",
+        }
+        assert normalize_salla_lifecycle_business_intent(
+            None, "in_progress", created
+        ) == BusinessIntent.ORDER_CONFIRMED
+        assert normalize_salla_lifecycle_business_intent(
+            None, "in_progress", created
+        ) != BusinessIntent.COD_CONFIRMATION
+
     def test_out_for_delivery_and_delivered_and_cancelled_refunded(self):
         assert normalize_salla_lifecycle_business_intent(
             "shipped", "out_for_delivery", {}
@@ -246,6 +312,58 @@ class TestIdempotency:
         )
         assert a != b
 
+    def test_order_created_in_progress_replay_same_semantic_key(self):
+        created = {
+            "lifecycle_observation": "live_webhook",
+            "lifecycle_source_event": "order.created",
+        }
+        intent = normalize_salla_lifecycle_business_intent(
+            None, "in_progress", created
+        )
+        replay_intent = normalize_salla_lifecycle_business_intent(
+            "in_progress", "in_progress", created
+        )
+        assert intent == replay_intent == BusinessIntent.ORDER_CONFIRMED
+        first = build_transition_identity(
+            provider="salla",
+            external_order_id="ext-shoe-1",
+            raw_previous_status=None,
+            raw_current_status="in_progress",
+            business_intent=intent,
+        )
+        replay = build_transition_identity(
+            provider="salla",
+            external_order_id="ext-shoe-1",
+            raw_previous_status="in_progress",
+            raw_current_status="in_progress",
+            business_intent=replay_intent,
+        )
+        poller_then_webhook = build_transition_identity(
+            provider="salla",
+            external_order_id="ext-shoe-1",
+            raw_previous_status="processing",
+            raw_current_status="in_progress",
+            business_intent=BusinessIntent.ORDER_CONFIRMED,
+        )
+        assert first == replay == poller_then_webhook
+
+    def test_webhook_confirm_and_poller_snapshot_do_not_both_map(self):
+        created = {
+            "lifecycle_observation": "live_webhook",
+            "lifecycle_source_event": "order.created",
+        }
+        poll = {"lifecycle_observation": "poll_import"}
+        storesync = {"lifecycle_observation": "storesync_poll"}
+        assert normalize_salla_lifecycle_business_intent(
+            None, "in_progress", created
+        ) == BusinessIntent.ORDER_CONFIRMED
+        assert normalize_salla_lifecycle_business_intent(
+            None, "in_progress", poll
+        ) is None
+        assert normalize_salla_lifecycle_business_intent(
+            None, "in_progress", storesync
+        ) is None
+
 
 class TestWindowFailClosed:
     def test_error_fails_closed_to_closed_window(self):
@@ -300,6 +418,37 @@ class TestZeroAi:
         assert "generate_cart_recovery_text" not in src
         assert "MerchantBrain" not in src
         model.assert_not_called()
+
+    def test_salla_lifecycle_adapter_has_no_model_imports(self):
+        path = Path(__file__).resolve().parents[1] / "store_adapters" / "salla_lifecycle.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        forbidden = ("modules.ai", "openai", "anthropic", "MerchantBrain")
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    for bad in forbidden:
+                        assert bad not in alias.name
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for bad in forbidden:
+                    assert bad not in node.module
+
+
+def test_storesync_webhook_stamps_authoritative_order_created_event():
+    from services.store_sync import _attach_lifecycle_observation  # noqa: PLC0415
+
+    webhook = _attach_lifecycle_observation(
+        {"status": "in_progress", "external_id": "1564320491"},
+        "live_webhook",
+        source_event="order.created",
+    )
+    assert webhook["lifecycle_observation"] == "live_webhook"
+    assert webhook["lifecycle_source_event"] == "order.created"
+    poll = _attach_lifecycle_observation(
+        {"status": "in_progress", "external_id": "1564320491"},
+        "poll_import",
+    )
+    assert poll["lifecycle_observation"] == "poll_import"
+    assert "lifecycle_source_event" not in poll
 
 
 def test_session_interactive_payload_uses_canonical_buttons():
