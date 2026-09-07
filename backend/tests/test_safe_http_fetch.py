@@ -380,6 +380,12 @@ def test_default_transport_tls_hostname_mismatch() -> None:
             tls.close()
         except Exception:  # noqa: silent-ok — local TLS fixture teardown
             pass
+        finally:
+            raw_sock.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    client_ctx = ssl.create_default_context()
+    client_ctx.check_hostname = True
     client_ctx.verify_mode = ssl.CERT_REQUIRED
     client_ctx.load_verify_locations(cadata=cert_pem.decode("ascii"))
     req = SafeFetchRequest(
@@ -537,6 +543,12 @@ def test_tls_handshake_timeout_closes_socket() -> None:
             conn.close()
         except Exception:  # noqa: silent-ok — local TLS fixture teardown
             pass
+        finally:
+            raw_sock.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    client_ctx = ssl.create_default_context()
+    client_ctx.check_hostname = False
     client_ctx.verify_mode = ssl.CERT_NONE
     started = time.monotonic()
     req = SafeFetchRequest(
