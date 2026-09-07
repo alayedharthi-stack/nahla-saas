@@ -1026,9 +1026,14 @@ def _lifecycle_dispatch_owns_tenant(tenant_id: int) -> bool:
 def _attach_lifecycle_observation(
     normalized_order: Dict[str, Any],
     observation: str,
+    *,
+    source_event: Optional[str] = None,
 ) -> Dict[str, Any]:
     attached = dict(normalized_order or {})
     attached["lifecycle_observation"] = observation
+    event = str(source_event or "").strip().lower()
+    if event:
+        attached["lifecycle_source_event"] = event
     return attached
 
 
@@ -4488,7 +4493,9 @@ class StoreSyncService:
                 raw_previous_status=lifecycle_prev_status,
                 raw_current_status=normalised["status"],
                 normalized_order=_attach_lifecycle_observation(
-                    normalised, "live_webhook"
+                    normalised,
+                    "live_webhook",
+                    source_event=webhook_event_type,
                 ),
                 raw_payload=payload if isinstance(payload, dict) else None,
             )

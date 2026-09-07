@@ -51,6 +51,16 @@ _COD_METHODS = frozenset({
     "cod_payment",
     "cash",
 })
+_POLL_OBSERVATIONS = frozenset({
+    "poll",
+    "poll_import",
+    "storesync_poll",
+    "historical",
+})
+_ORDER_CREATED_EVENTS = frozenset({
+    "order.created",
+    "order_created",
+})
 
 
 def _payment_method(normalized_order: Mapping[str, Any]) -> str:
@@ -100,7 +110,26 @@ def _is_poll_first_observation(normalized_order: Mapping[str, Any]) -> bool:
     observation = str(
         normalized_order.get("lifecycle_observation") or ""
     ).strip().lower()
-    return observation in {"poll", "poll_import", "storesync_poll", "historical"}
+    return observation in _POLL_OBSERVATIONS
+
+
+def _lifecycle_source_event(normalized_order: Mapping[str, Any]) -> str:
+    return str(
+        normalized_order.get("lifecycle_source_event")
+        or normalized_order.get("lifecycle_event_type")
+        or normalized_order.get("webhook_event_type")
+        or ""
+    ).strip().lower()
+
+
+def _is_authoritative_order_created(normalized_order: Mapping[str, Any]) -> bool:
+    """True only for a live Salla order.created webhook, never poller snapshots."""
+    observation = str(
+        normalized_order.get("lifecycle_observation") or ""
+    ).strip().lower()
+    if observation != "live_webhook":
+        return False
+    return _lifecycle_source_event(normalized_order) in _ORDER_CREATED_EVENTS
 
 
 def _first_seen_acceptance_intent(
@@ -110,7 +139,13 @@ def _first_seen_acceptance_intent(
     # Historical / poller first inserts are snapshots, not transitions.
     if _is_poll_first_observation(normalized_order):
         return None
-    if curr in _PREPARING_STATUSES or curr in _READY_STATUSES:
+    if curr in _PREPARING_STATUSES:
+        # Salla often creates already-accepted orders as in_progress.
+        # Only the authoritative order.created webhook may confirm that once.
+        if _is_authoritative_order_created(normalized_order):
+            return BusinessIntent.ORDER_CONFIRMED
+        return None
+    if curr in _READY_STATUSES:
         return None
     if curr in _CONFIRMATION_STATUSES:
         # Salla under_review is merchant acceptance, not a customer
@@ -131,13 +166,32 @@ def normalize_salla_lifecycle_business_intent(
 ) -> Optional[BusinessIntent]:
     prev = normalize_status_slug(raw_previous_status)
     curr = normalize_status_slug(raw_current_status)
-    if not curr or (prev and prev == curr):
+    if not curr:
+        return None
+    if (
+        prev
+        and prev == curr
+        and not (
+            _is_authoritative_order_created(normalized_order)
+            and curr in _PREPARING_STATUSES
+        )
+    ):
         return None
 
     has_prior = bool(prev) and prev != "unknown"
 
     if not has_prior:
         return _first_seen_acceptance_intent(curr, normalized_order)
+
+    if (
+        _is_authoritative_order_created(normalized_order)
+        and curr in _PREPARING_STATUSES
+        and prev in _PREPARING_STATUSES
+    ):
+        # Poller/StoreSync may have inserted the row first with the same
+        # preparing status. The later order.created webhook is still the
+        # one confirmation, and ledger identity remains semantic.
+        return BusinessIntent.ORDER_CONFIRMED
 
     if curr in _CANCELLED_STATUSES and prev not in _CANCELLED_STATUSES:
         return BusinessIntent.ORDER_CANCELLED
