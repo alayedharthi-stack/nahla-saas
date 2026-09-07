@@ -853,6 +853,20 @@ class TestIsolation:
         assert intent is None
         assert reason == "unmapped_transition"
 
+    def test_order_created_without_live_webhook_does_not_confirm(self):
+        for observation in (None, "", "manual", "unknown", "replay"):
+            normalized = {"lifecycle_source_event": "order.created"}
+            if observation is not None:
+                normalized["lifecycle_observation"] = observation
+            intent, reason = normalize_external_lifecycle_intent(
+                provider="salla",
+                raw_previous_status=None,
+                raw_current_status="in_progress",
+                normalized_order=normalized,
+            )
+            assert intent is None
+            assert reason == "unmapped_transition"
+
 
 class TestStoreSyncHook:
     @patch.dict(os.environ, {"COMMERCE_LIFECYCLE_EXTERNAL_SHADOW_ENABLED": "false"}, clear=False)

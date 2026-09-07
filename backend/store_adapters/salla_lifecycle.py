@@ -124,7 +124,10 @@ def _lifecycle_source_event(normalized_order: Mapping[str, Any]) -> str:
 
 def _is_authoritative_order_created(normalized_order: Mapping[str, Any]) -> bool:
     """True only for a live Salla order.created webhook, never poller snapshots."""
-    if _is_poll_first_observation(normalized_order):
+    observation = str(
+        normalized_order.get("lifecycle_observation") or ""
+    ).strip().lower()
+    if observation != "live_webhook":
         return False
     return _lifecycle_source_event(normalized_order) in _ORDER_CREATED_EVENTS
 

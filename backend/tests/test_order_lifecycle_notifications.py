@@ -269,6 +269,31 @@ class TestSallaMapping:
             },
         ) is None
 
+    def test_order_created_without_live_webhook_observation_does_not_confirm(self):
+        order_created = {"lifecycle_source_event": "order.created"}
+        for observation in (None, "", "manual", "unknown", "replay", "backfill"):
+            normalized = dict(order_created)
+            if observation is not None:
+                normalized["lifecycle_observation"] = observation
+            assert normalize_salla_lifecycle_business_intent(
+                None,
+                "in_progress",
+                normalized,
+            ) is None
+            assert normalize_salla_lifecycle_business_intent(
+                "in_progress",
+                "in_progress",
+                normalized,
+            ) is None
+            intent, reason = normalize_external_lifecycle_intent(
+                provider="salla",
+                raw_previous_status="in_progress",
+                raw_current_status="in_progress",
+                normalized_order=normalized,
+            )
+            assert intent is None
+            assert reason in {"same_status_no_transition", "unmapped_transition"}
+
     def test_authoritative_created_does_not_override_real_preparing_transition(self):
         assert normalize_salla_lifecycle_business_intent(
             "under_review",
