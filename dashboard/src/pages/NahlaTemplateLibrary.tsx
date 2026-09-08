@@ -107,6 +107,25 @@ export default function NahlaTemplateLibrary() {
     }
   }, [hash])
 
+  const officialOrderCards = useMemo(
+    () =>
+      orderCards.filter(card => {
+        const activeStatus = (card.detail?.active?.status ?? '').toUpperCase()
+        return activeStatus === 'APPROVED'
+      }),
+    [orderCards],
+  )
+
+  const pendingOrderCards = useMemo(
+    () =>
+      orderCards.filter(card => {
+        const activeStatus = (card.detail?.active?.status ?? '').toUpperCase()
+        const pendingStatus = (card.detail?.pending?.status ?? '').toUpperCase()
+        return activeStatus !== 'APPROVED' && pendingStatus === 'PENDING'
+      }),
+    [orderCards],
+  )
+
   const showOrderUpdates =
     filter === 'all' || filter === 'order_updates'
   const showMarketingEmpty = filter === 'marketing'
@@ -159,9 +178,13 @@ export default function NahlaTemplateLibrary() {
             <div className="flex items-center justify-center py-12">
               <RefreshCw className="w-6 h-6 text-amber-500 animate-spin" />
             </div>
+          ) : officialOrderCards.length === 0 ? (
+            <p className="text-sm text-slate-500 py-6 text-center">
+              {page.orderUpdates.noOfficialTemplates}
+            </p>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {orderCards.map(card => (
+              {officialOrderCards.map(card => (
                 <div
                   key={card.serviceKey}
                   className="border border-slate-200 rounded-xl p-4 bg-white"
@@ -194,6 +217,15 @@ export default function NahlaTemplateLibrary() {
                 </div>
               ))}
             </div>
+          )}
+
+          {pendingOrderCards.length > 0 && (
+            <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mt-4 leading-relaxed">
+              {page.orderUpdates.pendingApprovalNote.replace(
+                '{count}',
+                String(pendingOrderCards.length),
+              )}
+            </p>
           )}
         </section>
       )}

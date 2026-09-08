@@ -124,6 +124,31 @@ async def _submit_draft_to_meta(db: Session, tenant_id: int, tpl: Any) -> Dict[s
     return {"submitted": True, "template": _tpl_to_dict(tpl)}
 
 
+@router.get("/template-inventory")
+def get_template_inventory(
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Read-only inventory of lifecycle order-update templates for merchant audit."""
+    from core.commerce_lifecycle.order_update_template_hygiene import (  # noqa: PLC0415
+        build_order_update_inventory,
+        choose_official_template_ids,
+        cluster_inventory,
+    )
+
+    tid = _tenant_id(user)
+    inventory = build_order_update_inventory(db, tid)
+    official = choose_official_template_ids(inventory)
+    return {
+        "inventory": inventory,
+        "clusters": cluster_inventory(inventory),
+        "official_by_slot": {
+            f"{service_key}:{language}": template_id
+            for (service_key, language), template_id in official.items()
+        },
+    }
+
+
 @router.get("/settings")
 def get_settings(
     db: Session = Depends(get_db),

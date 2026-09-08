@@ -428,7 +428,18 @@ def _tpl_public(tpl: Any) -> Optional[Dict[str, Any]]:
         "revision": int(getattr(tpl, "revision", 1) or 1),
         "label": f"r{int(getattr(tpl, 'revision', 1) or 1)}",
         "supersedes_template_id": getattr(tpl, "supersedes_template_id", None),
+        "archive_state": (
+            (getattr(tpl, "ai_generation_metadata", None) or {}).get("archive_state")
+            if isinstance(getattr(tpl, "ai_generation_metadata", None), dict)
+            else None
+        ),
+        "superseded_by_template_id": (
+            (getattr(tpl, "ai_generation_metadata", None) or {}).get("superseded_by_template_id")
+            if isinstance(getattr(tpl, "ai_generation_metadata", None), dict)
+            else None
+        ),
         "is_active": bool(tpl.is_active),
+        "is_hidden": bool(getattr(tpl, "is_hidden", False)),
         "body_text": body,
         "text": body,
         "rejection_reason": tpl.rejection_reason,

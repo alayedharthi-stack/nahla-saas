@@ -362,6 +362,10 @@ const ar: Translations = {
         opsLink:      'إدارة تشغيل تحديثات الطلبات',
         opsLinkShort: 'إعدادات التشغيل',
         noPreview:    'لا يوجد نص محفوظ بعد — اضبطه من إعدادات التشغيل.',
+        noOfficialTemplates:
+          'لا توجد قوالب رسمية معتمدة نشطة لعرضها هنا. القوالب قيد المراجعة أو المؤرشفة تبقى مخفية عن التاجر.',
+        pendingApprovalNote:
+          'يوجد {count} قالبًا قيد مراجعة Meta — لن يظهر للتاجر حتى يصبح معتمدًا.',
         services: {
           order_confirmation: 'تأكيد الطلب',
           cod_confirmation: 'تأكيد الدفع عند الاستلام',

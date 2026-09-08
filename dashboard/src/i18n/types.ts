@@ -281,6 +281,8 @@ export interface Translations {
         opsLink: string
         opsLinkShort: string
         noPreview: string
+        noOfficialTemplates: string
+        pendingApprovalNote: string
         services: {
           order_confirmation: string
           cod_confirmation: string
