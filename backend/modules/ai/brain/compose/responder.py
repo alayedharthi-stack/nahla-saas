@@ -2687,6 +2687,12 @@ class DefaultComposer:
                     history_messages=history_messages,
                     url_facts=_url_facts,
                 )
+                _uct = getattr(ctx, "url_context_trace", None)
+                if _uct is not None:
+                    try:
+                        _uct.mark_model_context_bound(True)
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block compose
+                        pass
 
             try:
                 from modules.ai.brain.observability.memory_selection_evidence import (  # noqa: PLC0415

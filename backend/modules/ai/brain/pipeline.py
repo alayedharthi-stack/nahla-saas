@@ -4005,16 +4005,37 @@ class MerchantBrain:
                 )
 
         try:
+            from .observability.url_context_trace import (  # noqa: PLC0415
+                UrlContextTraceRecorder,
+                log_url_context_attach_failure,
+            )
+
+            ctx.url_context_trace = UrlContextTraceRecorder()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — trace init must not block compose
+            ctx.url_context_trace = None
+
+        try:
             await _attach_current_turn_url_context(
                 ctx,
                 db=db,
                 message=message or "",
             )
         except Exception as _url_ctx_exc:  # noqa: BLE001  # noqa: silent-ok — URL context must not block compose
-            logger.debug(
-                "[URL_CONTEXT] attach skipped tenant=%s err=%s",
+            _uct = getattr(ctx, "url_context_trace", None)
+            if _uct is not None:
+                try:
+                    _uct.record_failure(stage="attach", exception=_url_ctx_exc)
+                    _uct.finalize(completed=False)
+                    log_url_context_attach_failure(
+                        tenant_id=tenant_id,
+                        trace=_uct,
+                    )
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block compose
+                    pass
+            logger.warning(
+                "[URL_CONTEXT] attach skipped tenant=%s exception_class=%s",
                 tenant_id,
-                _url_ctx_exc,
+                _url_ctx_exc.__class__.__name__,
             )
 
         ctx.reply_state = _build_reply_state(
@@ -6572,6 +6593,15 @@ class MerchantBrain:
                 )
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
+        try:
+            from .observability.url_context_trace import persist_url_context_trace  # noqa: PLC0415
+
+            persist_url_context_trace(
+                target=_out,
+                trace=getattr(ctx, "url_context_trace", None),
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — url context trace must not block reply
+            pass
         return _out
 
 
@@ -6847,34 +6877,69 @@ def _sanitize_unauthorized_checkout_navigator(navigator: Any) -> Any:
 
 async def _attach_current_turn_url_context(ctx: BrainContext, *, db: Any, message: str) -> None:
     """Enrich current-turn URLs once. Failure never suppresses the reply."""
+    from core.inbound_url_spans import extract_inbound_url_spans  # noqa: PLC0415
     from services.url_context import (  # noqa: PLC0415
         begin_url_context_turn,
         current_turn_has_url,
         enrich_current_turn_urls,
+        select_current_turn_urls,
     )
+
+    _trace = getattr(ctx, "url_context_trace", None)
+    if _trace is not None:
+        try:
+            _trace.mark_attach_entered()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block attach
+            pass
 
     begin_url_context_turn()
     setattr(ctx, "url_context_results", [])
     setattr(ctx, "url_context_fetch_count", 0)
-    if not current_turn_has_url(message or ""):
+    _msg = message or ""
+    _spans = extract_inbound_url_spans(_msg)
+    _candidates = select_current_turn_urls(_msg)
+    if _trace is not None:
+        try:
+            _trace.mark_detector(url_count=len(_spans), candidate_count=len(_candidates))
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block attach
+            pass
+    if not current_turn_has_url(_msg):
+        if _trace is not None:
+            try:
+                _trace.mark_no_url()
+                _trace.finalize(completed=True)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block attach
+                pass
         return
     fetch = getattr(ctx, "url_context_fetch", None)
     catalog_lookup = getattr(ctx, "url_context_catalog_lookup", None)
     results = await enrich_current_turn_urls(
-        message=message or "",
+        message=_msg,
         tenant_id=int(getattr(ctx, "tenant_id", 0) or 0),
         db=db,
         fetch=fetch,
         catalog_lookup=catalog_lookup,
+        trace=_trace,
     )
     setattr(ctx, "url_context_results", results)
     try:
         from services import url_context as _url_ctx_mod  # noqa: PLC0415
 
         markers = getattr(_url_ctx_mod._turn_fetches, "urls", None) or set()
-        setattr(ctx, "url_context_fetch_count", len(markers))
+        _fetch_count = len(markers)
+        setattr(ctx, "url_context_fetch_count", _fetch_count)
+        if _trace is not None:
+            try:
+                _trace.mark_external_fetch_count(_fetch_count)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block attach
+                pass
     except Exception:
         setattr(ctx, "url_context_fetch_count", 0)
+    if _trace is not None:
+        try:
+            _trace.finalize(completed=True)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block attach
+            pass
 
 
 def _build_reply_state(
@@ -7714,7 +7779,19 @@ def _build_reply_state(
         _url_facts = project_url_context_facts(_url_ctx_results)
         if _url_facts:
             known_facts["url_context"] = _url_facts
+        _uct = getattr(ctx, "url_context_trace", None)
+        if _uct is not None:
+            try:
+                _uct.mark_facts_projected(bool(_url_facts))
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block compose
+                pass
     except Exception as _url_facts_exc:  # noqa: BLE001  # noqa: silent-ok — URL facts must not block compose
+        _uct = getattr(ctx, "url_context_trace", None)
+        if _uct is not None:
+            try:
+                _uct.record_failure(stage="fact_projection", exception=_url_facts_exc)
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block compose
+                pass
         logger.debug(
             "[URL_CONTEXT] facts projection skipped tenant=%s err=%s",
             getattr(ctx, "tenant_id", None),
