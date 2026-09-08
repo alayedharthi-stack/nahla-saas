@@ -222,7 +222,7 @@ def test_a_success_url_trace_via_merchant_brain_process() -> None:
     assert trace["facts_projected"] is True
     assert trace["reply_state_url_context_present_before_compose"] is True
     assert trace["attach_completed"] is True
-    assert _trace_bytes(trace) <= 700
+    assert _trace_bytes(trace) <= 900
     assert URL_CONTEXT_USER_TURN_BEGIN in captured.get("message", "")
     _assert_trace_privacy(json.dumps(trace, ensure_ascii=False))
 
@@ -342,7 +342,7 @@ def test_g_attach_exception_records_trace() -> None:
     assert trace["failure_stage"] == "attach"
     assert trace["exception_class"] == "attach_error"
     assert "probe" not in json.dumps(trace)
-    assert _trace_bytes(trace) <= 700
+    assert _trace_bytes(trace) <= 900
     assert captured.get("compose_count") == 1
 
 

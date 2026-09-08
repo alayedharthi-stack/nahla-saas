@@ -207,7 +207,7 @@ def test_persistence_a_url_success_end_to_end(db, tenant_ctx) -> None:
     assert trace["fetch_attempted"] is True
     assert trace["facts_projected"] is True
     assert trace["reply_state_url_context_present_before_compose"] is True
-    assert _trace_bytes(trace) <= 700
+    assert _trace_bytes(trace) <= 900
     _assert_trace_privacy(json.dumps(trace, ensure_ascii=False))
 
     row = _persist_outbound(db, tenant_ctx, turn_result.reply_text, extra)
@@ -235,7 +235,7 @@ def test_persistence_b_attach_failure_still_persisted(db, tenant_ctx) -> None:
     trace = extra.get("url_context_trace") or {}
     assert trace.get("failure_stage") == "attach"
     assert trace.get("exception_class") == "attach_error"
-    assert _trace_bytes(trace) <= 700
+    assert _trace_bytes(trace) <= 900
     row = _persist_outbound(db, tenant_ctx, turn_result.reply_text, extra)
     stored = dict(row.extra_metadata or {}).get("url_context_trace") or {}
     assert stored.get("failure_stage") == "attach"

@@ -6924,7 +6924,14 @@ async def _attach_current_turn_url_context(ctx: BrainContext, *, db: Any, messag
         from services import url_context as _url_ctx_mod  # noqa: PLC0415
 
         markers = getattr(_url_ctx_mod._turn_fetches, "urls", None) or set()
-        _fetch_count = len(markers)
+        _marker_count = len(markers)
+        _trace_count = 0
+        if _trace is not None:
+            try:
+                _trace_count = int(getattr(_trace, "_fields", {}).get("external_fetch_count") or 0)
+            except Exception:  # noqa: BLE001
+                _trace_count = 0
+        _fetch_count = max(_marker_count, _trace_count)
         setattr(ctx, "url_context_fetch_count", _fetch_count)
         if _trace is not None:
             try:
