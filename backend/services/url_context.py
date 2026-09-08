@@ -454,6 +454,17 @@ def select_current_turn_urls(message: str) -> List[str]:
     return out
 
 
+def _trace_call(trace: Any, method: str, **kwargs: Any) -> None:
+    if trace is None:
+        return
+    try:
+        fn = getattr(trace, method, None)
+        if callable(fn):
+            fn(**kwargs)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not affect enrichment
+        pass
+
+
 async def enrich_current_turn_urls(
     *,
     message: str,
@@ -461,28 +472,54 @@ async def enrich_current_turn_urls(
     db: Any = None,
     fetch: Optional[FetchFn] = None,
     catalog_lookup: Optional[CatalogLookup] = None,
+    trace: Any = None,
 ) -> List[UrlContext]:
     """Enrich at most one distinct current-turn URL. Never raises."""
+    spans = extract_inbound_url_spans(message or "")
     urls = select_current_turn_urls(message)
+    _trace_call(
+        trace,
+        "mark_detector",
+        url_count=len(spans),
+        candidate_count=len(urls),
+    )
     if not urls:
+        _trace_call(trace, "mark_no_url")
         return []
     original = urls[0]
     try:
         cached = _cache_get(int(tenant_id or 0), original)
         if cached is not None:
+            _trace_call(trace, "mark_cache_status", status="hit")
+            _trace_call(trace, "mark_enrichment_result", result=cached)
             return [cached]
+        _trace_call(trace, "mark_cache_status", status="miss")
         lookup = catalog_lookup
         if lookup is None and db is not None:
             lookup = lambda tid, url: lookup_catalog_product_by_url(db, tid, url)  # noqa: E731
         if lookup is not None:
             product = lookup(int(tenant_id or 0), original)
+            _trace_call(
+                trace,
+                "mark_catalog_lookup",
+                ran=True,
+                matched=bool(product),
+            )
             if product:
                 result = _from_catalog(original, product)
                 _cache_put(int(tenant_id or 0), original, result)
+                _trace_call(trace, "mark_enrichment_result", result=result)
                 return [result]
         rate_key = f"url_context:{int(tenant_id or 0)}"
-        if not check_rate_limit(rate_key, max_count=RATE_LIMIT_MAX, window_seconds=RATE_LIMIT_WINDOW_S):
+        allowed = check_rate_limit(
+            rate_key,
+            max_count=RATE_LIMIT_MAX,
+            window_seconds=RATE_LIMIT_WINDOW_S,
+        )
+        _trace_call(trace, "mark_rate_limit", checked=True, allowed=allowed)
+        if not allowed:
             result = _unavailable(original, "rate_limited", source="rate_limit")
+            _trace_call(trace, "mark_enrichment_result", result=result)
             return [result]
         fetches = getattr(_turn_fetches, "urls", None)
         if fetches is None:
@@ -490,16 +527,22 @@ async def enrich_current_turn_urls(
             _turn_fetches.urls = fetches
         fetch_marker = f"{int(tenant_id or 0)}|{_normalize_url_for_compare(original)}"
         if fetch_marker in fetches:
-            return [_unavailable(original, "duplicate_turn_fetch", source="cache")]
+            _trace_call(trace, "mark_cache_status", status="duplicate_turn")
+            result = _unavailable(original, "duplicate_turn_fetch", source="cache")
+            _trace_call(trace, "mark_enrichment_result", result=result)
+            return [result]
         fetches.add(fetch_marker)
+        _trace_call(trace, "mark_fetch_attempted")
         if fetch is None:
             fetched = await fetch_url_async(original)
         else:
             got = fetch(original)
             fetched = await got if asyncio.iscoroutine(got) else got
+        _trace_call(trace, "mark_fetch_transport", fetched=fetched)
         result = _from_fetch(original, fetched)
         if result.extraction_status == "ok":
             _cache_put(int(tenant_id or 0), original, result)
+        _trace_call(trace, "mark_enrichment_result", result=result)
         logger.info(
             "[url_context] tenant=%s status=%s source=%s err=%s url=%s",
             tenant_id,
@@ -510,13 +553,16 @@ async def enrich_current_turn_urls(
         )
         return [result]
     except Exception as exc:  # noqa: BLE001
+        _trace_call(trace, "record_failure", stage="enrichment", exception=exc)
         logger.warning(
             "[url_context] enrich failed tenant=%s url=%s err=%s",
             tenant_id,
             redact_url_for_log(original),
             type(exc).__name__,
         )
-        return [_unavailable(original, "enrich_exception")]
+        result = _unavailable(original, "enrich_exception")
+        _trace_call(trace, "mark_enrichment_result", result=result)
+        return [result]
 
 
 def current_turn_has_url(message: str) -> bool:
