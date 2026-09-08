@@ -33,10 +33,15 @@ from modules.ai.brain.observability.url_context_trace import (  # noqa: E402
     sanitize_url_context_trace,
 )
 from services.safe_http_fetch import SafeHttpResult, TOTAL_TIMEOUT_S  # noqa: E402
-from services.url_context import enrich_current_turn_urls, reset_url_context_cache  # noqa: E402
+from services.url_context import UrlContext, enrich_current_turn_urls, reset_url_context_cache  # noqa: E402
 from services.url_enrichment.oembed import parse_oembed_payload  # noqa: E402
 from services.url_enrichment.pipeline import MAX_EXTERNAL_FETCHES, run_enrichment_pipeline  # noqa: E402
-from services.url_enrichment.url_safety import resolve_http_url, sanitize_oembed_target_url  # noqa: E402
+from services.url_enrichment.url_safety import (  # noqa: E402
+    build_oembed_request_url,
+    resolve_http_url,
+    sanitize_oembed_target_url,
+    sanitize_public_metadata_url,
+)
 
 from test_d17_url_context_enrichment import (  # noqa: E402
     HTML_FIXTURE,
@@ -598,3 +603,92 @@ def test_trace_fields_sanitized_without_raw_content() -> None:
     assert sanitized.get("external_fetch_count") == 2
     assert "raw_html" not in sanitized
     assert "secret" not in json.dumps(sanitized)
+
+
+def test_public_url_safety_fail_closed() -> None:
+    credential_url = "https://user:pass@example.com/path?jwt=secret&X-Amz-Credential=secret#fragment"
+    public = sanitize_public_metadata_url(credential_url)
+    assert public == "https://example.com/path"
+    assert "?" not in public
+    assert "#" not in public
+    assert "@" not in public
+    assert "jwt" not in public
+
+    amz_url = "https://shop.example.test/item?X-Amz-Signature=abc&Expires=9&Policy=p"
+    assert sanitize_public_metadata_url(amz_url) == "https://shop.example.test/item"
+    assert sanitize_oembed_target_url(final_url=amz_url) == "https://shop.example.test/item"
+
+    email_query_url = "https://shop.example.test/cart?customer_email=user@example.com"
+    assert "customer_email" not in sanitize_public_metadata_url(email_query_url)
+    assert "?" not in sanitize_public_metadata_url(email_query_url)
+
+    invalid_port = "https://example.test:999999/path"
+    assert resolve_http_url("https://example.test/", invalid_port) == ""
+    assert sanitize_public_metadata_url(invalid_port) == ""
+
+
+def test_raw_url_fallback_impossible_in_provider_payload() -> None:
+    raw = "https://user:pass@example.com/path?api_key=secret#frag"
+    ctx = UrlContext(
+        original_url=raw,
+        canonical_url=raw,
+        provider_domain="example.com",
+        page_title="title",
+        extraction_status="ok",
+        metadata_quality="thin",
+    )
+    public = ctx.to_public_dict()
+    facts = project_url_context_facts([ctx])
+    blob = json.dumps({"facts": facts, "public": public}, ensure_ascii=False)
+    assert "user:pass" not in blob
+    assert "api_key" not in blob
+    assert "#frag" not in blob
+    assert "?" not in public["original_url"]
+    assert "?" not in public["canonical_url"]
+    assert public["original_url"] != raw
+
+
+def test_oembed_endpoint_replaces_existing_url_param() -> None:
+    page = "https://www.tiktok.com/@creator/video/9001?token=secret&utm_source=x#fragment"
+    endpoint = "https://www.tiktok.com/oembed?format=json&url=https://evil.test/x&url=evil2"
+    built = build_oembed_request_url(page, endpoint)
+    assert built.count("url=") == 1
+    assert "evil.test" not in built
+    assert "token=secret" not in built
+    assert "format=json" in built
+    assert "www.tiktok.com%2F%40creator%2Fvideo%2F9001" in built or (
+        "www.tiktok.com/@creator/video/9001" in built
+    )
+
+
+def test_credential_url_not_in_provider_payload_end_to_end() -> None:
+    sensitive = (
+        "https://www.tiktok.com/@creator/video/9001"
+        "?jwt=secret&X-Amz-Credential=abc&customer_email=user@example.com#fragment"
+    )
+    fetch = RoutingFetch(
+        {
+            sensitive: TIKTOK_THIN_HTML,
+            "https://www.tiktok.com/oembed*": lambda url: SafeHttpResult(
+                ok=True,
+                url=url,
+                final_url=url,
+                status=200,
+                content_type="application/json",
+                body=_oembed_json(
+                    title="فيديو TikTok آمن",
+                    author_name="creator",
+                ).encode("utf-8"),
+            ),
+        }
+    )
+    out = _run_path(sensitive, fetch=fetch)
+    facts_blob = json.dumps(out["user_turn_facts"], ensure_ascii=False)
+    providers_blob = json.dumps(out["providers"], ensure_ascii=False)
+    assert "jwt=secret" not in facts_blob
+    assert "X-Amz-Credential" not in facts_blob
+    assert "customer_email" not in facts_blob
+    assert "user:pass" not in facts_blob
+    assert "?" not in facts_blob
+    assert "فيديو TikTok" in providers_blob
+    assert len(fetch.calls) == 2

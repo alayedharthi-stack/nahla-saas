@@ -29,7 +29,7 @@ from services.safe_http_fetch import (
 )
 from services.url_enrichment import run_enrichment_pipeline
 from services.url_enrichment.types import EnrichmentDraft, PipelineTraceState
-from services.url_enrichment.url_safety import sanitize_oembed_target_url
+from services.url_enrichment.url_safety import sanitize_public_metadata_url
 
 logger = logging.getLogger("nahla.url_context")
 
@@ -72,17 +72,11 @@ class UrlContext:
     useful_metadata_present: bool = False
 
     def to_public_dict(self) -> Dict[str, Any]:
-        safe_original = sanitize_oembed_target_url(
-            final_url=self.original_url,
-            canonical_url=self.canonical_url or self.original_url,
-        ) or self.original_url
-        safe_canonical = sanitize_oembed_target_url(
-            final_url=self.canonical_url or self.original_url,
-            canonical_url=self.canonical_url or self.original_url,
-        ) or safe_original
+        safe_original = sanitize_public_metadata_url(self.original_url)
+        safe_canonical = sanitize_public_metadata_url(self.canonical_url or self.original_url)
         payload = {
             "original_url": safe_original,
-            "canonical_url": safe_canonical,
+            "canonical_url": safe_canonical or safe_original,
             "provider_domain": self.provider_domain,
             "content_type": self.content_type,
             "page_title": self.page_title,
