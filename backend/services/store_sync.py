@@ -4172,7 +4172,7 @@ class StoreSyncService:
         webhook_source = (
             normalised.get("source")
             or getattr(adapter, "platform", None)
-            or "unknown"
+            or "salla"
         )
 
         if order_row is not None:

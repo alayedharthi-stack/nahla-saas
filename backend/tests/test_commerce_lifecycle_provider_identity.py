@@ -7,10 +7,9 @@ lifecycle adapter provider passed to normalize_external_lifecycle_intent.
 from __future__ import annotations
 
 import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -274,6 +273,45 @@ class TestStoreSyncDispatcherProviderIdentity:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    @patch("services.store_sync.StoreSyncService._get_adapter")
+    def test_missing_source_and_platform_fallback_order_source_salla(
+        self,
+        mock_get_adapter,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_send,
+        _mock_attr,
+        _mock_outcome,
+    ):
+        db, _engine = make_scenario_db()
+        _ensure_webhook_dedupe_index(db)
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        store_id = "STORE-FALLBACK-8810"
+        _seed_salla_integration(db, tenant.id, store_id)
+        mock_get_adapter.return_value = SimpleNamespace(platform=None)
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+        mock_send.return_value = ("sent", {"wa_message_id": "wamid.fallback"})
+
+        _dispatch_order_created(
+            db,
+            tenant_id=tenant.id,
+            store_id=store_id,
+            source=None,
+            status_slug="in_progress",
+            external_event_id="salla-wh-evt-fallback",
+            external_id=8801010,
+        )
+
+        order = db.query(Order).filter_by(tenant_id=tenant.id).one()
+        assert order.source == "salla"
+        assert "order_channel_source" not in (order.extra_metadata or {})
+
+    @patch("services.outcome_tracker.record_order_outcome")
+    @patch("services.offer_attribution_service.attribute_order_to_decision")
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_bank_payment_pending_yields_payment_needed(
         self,
         mock_caps,
@@ -445,23 +483,23 @@ class TestStoreSyncDispatcherProviderIdentity:
 
     @patch("services.outcome_tracker.record_order_outcome")
     @patch("services.offer_attribution_service.attribute_order_to_decision")
+    @patch("modules.ai.orchestrator.adapter.generate_orchestrate_response", new_callable=AsyncMock)
+    @patch("modules.ai.orchestrator.adapter.generate_ai_reply")
+    @patch("modules.ai.brain.pipeline.MerchantBrain.process", new_callable=AsyncMock)
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
-    def test_model_gateway_spies_not_called_on_dispatch_path(
+    def test_model_gateways_not_called_on_lifecycle_dispatch_path(
         self,
         mock_caps,
         mock_resolve_tpl,
         mock_send,
+        mock_brain_process,
+        mock_generate_ai_reply,
+        mock_generate_orchestrate,
         _mock_attr,
         _mock_outcome,
-        monkeypatch,
     ):
-        model = MagicMock()
-        fake_ai_client = types.ModuleType("services.ai_client")
-        fake_ai_client.generate_cart_recovery_text = model
-        monkeypatch.setitem(sys.modules, "services.ai_client", fake_ai_client)
-
         db, _engine = make_scenario_db()
         _ensure_webhook_dedupe_index(db)
         tenant = seed_tenant(db, name="متجر تجريبي عام")
@@ -482,7 +520,9 @@ class TestStoreSyncDispatcherProviderIdentity:
         )
         assert mock_send.await_count == 1
         assert db.query(CommerceLifecycleNotificationLedger).count() == 1
-        model.assert_not_called()
+        mock_brain_process.assert_not_awaited()
+        mock_generate_ai_reply.assert_not_called()
+        mock_generate_orchestrate.assert_not_awaited()
 
     @patch("services.outcome_tracker.record_order_outcome")
     @patch("services.offer_attribution_service.attribute_order_to_decision")
