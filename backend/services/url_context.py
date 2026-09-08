@@ -1,8 +1,8 @@
 """Current-turn URL enrichment for MerchantBrain.
 
 Produces provenance-labelled URL_CONTEXT facts. Does not infer purchase
-or checkout intent from URL presence. No domain special-case in routing.
-TikTok/oEmbed HTML is parsed by the same generic metadata extractor.
+or checkout intent from URL presence. Enrichment uses the universal
+``url_enrichment`` pipeline (HTML metadata, JSON-LD, oEmbed, readable text).
 """
 from __future__ import annotations
 
@@ -14,8 +14,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from html.parser import HTMLParser
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 from urllib.parse import unquote, urlparse
 
 from core.inbound_url_spans import (
@@ -27,6 +26,8 @@ from services.safe_http_fetch import (
     fetch_url_async,
     redact_url_for_log,
 )
+from services.url_enrichment import run_enrichment_pipeline
+from services.url_enrichment.types import EnrichmentDraft, PipelineTraceState
 
 logger = logging.getLogger("nahla.url_context")
 
@@ -62,6 +63,11 @@ class UrlContext:
     watched_or_transcribed: bool = False
     catalog_product: Dict[str, Any] = field(default_factory=dict)
     fetch_body_truncated: bool = False
+    content_kind: str = ""
+    published_at: str = ""
+    readable_excerpt: str = ""
+    metadata_quality: str = "empty"
+    useful_metadata_present: bool = False
 
     def to_public_dict(self) -> Dict[str, Any]:
         payload = {
@@ -80,7 +86,13 @@ class UrlContext:
             "content_trust": "untrusted_web_metadata",
             "content_channel": "untrusted_web_metadata",
             "watched_or_transcribed": False,
+            "not_instructions": True,
             "fetch_body_truncated": bool(self.fetch_body_truncated),
+            "content_kind": self.content_kind,
+            "published_at": self.published_at,
+            "readable_excerpt": self.readable_excerpt,
+            "metadata_quality": self.metadata_quality,
+            "useful_metadata_present": bool(self.useful_metadata_present),
         }
         if self.catalog_product:
             payload["catalog_product"] = dict(self.catalog_product)
@@ -206,70 +218,22 @@ def _absolute_url(base: str, maybe_relative: str) -> str:
     return ""
 
 
-class _MetaHTMLParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._in_title = False
-        self.title_parts: List[str] = []
-        self.metas: Dict[str, str] = {}
-        self.canonical = ""
-
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        ad = {str(k or "").lower(): str(v or "") for k, v in attrs}
-        low = tag.lower()
-        if low == "title":
-            self._in_title = True
-            return
-        if low == "meta":
-            key = (ad.get("property") or ad.get("name") or ad.get("itemprop") or "").lower()
-            content = ad.get("content") or ""
-            if key and content and key not in self.metas:
-                self.metas[key] = content
-            return
-        if low == "link" and "canonical" in (ad.get("rel") or "").lower():
-            href = ad.get("href") or ""
-            if href and not self.canonical:
-                self.canonical = href
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "title":
-            self._in_title = False
-
-    def handle_data(self, data: str) -> None:
-        if self._in_title:
-            self.title_parts.append(data)
-
-
 def parse_html_metadata(html: str, *, base_url: str) -> Dict[str, str]:
-    parser = _MetaHTMLParser()
-    try:
-        parser.feed(html)
-        parser.close()
-    except Exception:
-        logger.exception("[url_context] html metadata parse failed")
-    title = "".join(parser.title_parts)
-    og_title = parser.metas.get("og:title") or parser.metas.get("twitter:title") or ""
-    og_desc = (
-        parser.metas.get("og:description")
-        or parser.metas.get("twitter:description")
-        or parser.metas.get("description")
-        or ""
-    )
-    og_image = parser.metas.get("og:image") or parser.metas.get("twitter:image") or ""
-    og_url = parser.metas.get("og:url") or parser.canonical or ""
-    author = (
-        parser.metas.get("og:site_name")
-        or parser.metas.get("author")
-        or parser.metas.get("article:author")
-        or ""
-    )
+    from services.url_enrichment.standard_metadata import parse_html_metadata as _parse  # noqa: PLC0415
+
+    draft, _ = _parse(html, base_url)
     return {
-        "title": og_title or title,
-        "description": og_desc,
-        "image": _absolute_url(base_url, og_image)[:IMAGE_URL_MAX],
-        "canonical": _absolute_url(base_url, og_url) or og_url,
-        "author": author,
-        "html_title": title,
+        "title": draft.page_title,
+        "description": draft.safe_description,
+        "image": draft.preview_image,
+        "canonical": draft.canonical_url,
+        "author": draft.author_or_channel,
+        "html_title": _sanitize_text(
+            re.search(r"<title[^>]*>(.*?)</title>", html or "", flags=re.I | re.S).group(1)
+            if re.search(r"<title[^>]*>(.*?)</title>", html or "", flags=re.I | re.S)
+            else "",
+            TITLE_MAX,
+        ),
     }
 
 
@@ -282,7 +246,7 @@ def parse_json_metadata(body: bytes) -> Dict[str, str]:
         return {}
     return {
         "title": str(data.get("title") or ""),
-        "description": str(data.get("html") or data.get("description") or "")[:DESCRIPTION_MAX],
+        "description": str(data.get("description") or "")[:DESCRIPTION_MAX],
         "image": str(data.get("thumbnail_url") or data.get("url") or "")[:IMAGE_URL_MAX],
         "canonical": str(data.get("url") or ""),
         "author": str(data.get("author_name") or data.get("provider_name") or ""),
@@ -380,7 +344,119 @@ def _from_catalog(original: str, product: Dict[str, Any]) -> UrlContext:
     )
 
 
+def _primary_source_label(draft: EnrichmentDraft) -> str:
+    sources = list(draft.sources_used or [])
+    if "oembed" in sources:
+        return "oembed"
+    if "json_ld" in sources:
+        return "json_ld"
+    if "readable_text" in sources and not draft.safe_description and not draft.author_or_channel:
+        return "readable_text"
+    if "html_metadata" in sources:
+        return "html_metadata"
+    return draft.enrichment_source or "html_metadata"
+
+
+def _context_from_metadata_dict(
+    original: str,
+    fetched: SafeHttpResult,
+    meta: Dict[str, str],
+    *,
+    source: str,
+    draft: Optional[EnrichmentDraft] = None,
+) -> UrlContext:
+    title = _sanitize_text(meta.get("title") or meta.get("html_title"), TITLE_MAX)
+    description = _sanitize_text(meta.get("description"), DESCRIPTION_MAX)
+    author = _sanitize_text(meta.get("author"), AUTHOR_MAX)
+    image = _sanitize_text(meta.get("image"), IMAGE_URL_MAX)
+    canonical = _sanitize_text(meta.get("canonical") or fetched.final_url or original, 500)
+    excerpt = _sanitize_text(getattr(draft, "readable_excerpt", "") if draft else "", DESCRIPTION_MAX)
+    metadata_quality = str(getattr(draft, "metadata_quality", "") or "empty")
+    useful = bool(getattr(draft, "useful_metadata_present", False))
+    if not title and not description and not author and not excerpt:
+        truncated = bool(getattr(fetched, "body_truncated", False))
+        if truncated:
+            return _unavailable(original, "oversized", source=source)
+        return _unavailable(original, "metadata_missing", source=source)
+    confidence = 0.85 if useful else (0.8 if title else 0.55)
+    image_meta: Dict[str, Any] = {}
+    if image.startswith("http"):
+        image_meta = {"url_present": True, "url_host": _provider_domain(image)}
+    return UrlContext(
+        original_url=original,
+        canonical_url=canonical or fetched.final_url or original,
+        provider_domain=_provider_domain(canonical or fetched.final_url or original),
+        content_type=fetched.content_type or "text/html",
+        page_title=title,
+        safe_description=description,
+        author_or_channel=author,
+        preview_image_metadata=image_meta,
+        extraction_status="ok",
+        confidence=confidence,
+        source=source,
+        fetch_body_truncated=bool(getattr(fetched, "body_truncated", False)),
+        content_kind=_sanitize_text(getattr(draft, "content_kind", "") if draft else "", 80),
+        published_at=_sanitize_text(getattr(draft, "published_at", "") if draft else "", 80),
+        readable_excerpt=excerpt,
+        metadata_quality=metadata_quality,
+        useful_metadata_present=useful,
+    )
+
+
+async def _from_fetch_async(
+    original: str,
+    fetched: SafeHttpResult,
+    *,
+    fetch: FetchFn,
+    trace: Any = None,
+) -> UrlContext:
+    if not fetched.ok:
+        err = fetched.error_class or "unavailable"
+        if err in {
+            "ip_blocked",
+            "host_blocked",
+            "scheme_blocked",
+            "credentials_blocked",
+        }:
+            return _blocked(original, err)
+        return _unavailable(original, err, source="safe_http")
+
+    body = fetched.body or b""
+    truncated = bool(getattr(fetched, "body_truncated", False))
+    ctype = (fetched.content_type or "").lower()
+    if "json" in ctype:
+        meta = parse_json_metadata(body)
+        return _context_from_metadata_dict(original, fetched, meta, source="json_metadata")
+
+    async def _secondary_fetch(url: str) -> SafeHttpResult:
+        got = fetch(url)
+        return await got if asyncio.iscoroutine(got) else got
+
+    draft, pipeline_trace = await run_enrichment_pipeline(
+        original,
+        fetched,
+        fetch=_secondary_fetch,
+    )
+    _trace_call(trace, "mark_pipeline_state", state=pipeline_trace)
+    meta = {
+        "title": draft.page_title,
+        "description": draft.safe_description,
+        "image": draft.preview_image,
+        "canonical": draft.canonical_url or fetched.final_url or original,
+        "author": draft.author_or_channel,
+        "html_title": draft.page_title,
+    }
+    return _context_from_metadata_dict(
+        original,
+        fetched,
+        meta,
+        source=_primary_source_label(draft),
+        draft=draft,
+    )
+
+
 def _from_fetch(original: str, fetched: SafeHttpResult) -> UrlContext:
+    """Sync compatibility shim for callers that do not run the async pipeline."""
     if not fetched.ok:
         err = fetched.error_class or "unavailable"
         if err in {
@@ -405,33 +481,7 @@ def _from_fetch(original: str, fetched: SafeHttpResult) -> UrlContext:
         except Exception:
             html = ""
         meta = parse_html_metadata(html, base_url=fetched.final_url or original)
-    title = _sanitize_text(meta.get("title") or meta.get("html_title"), TITLE_MAX)
-    description = _sanitize_text(meta.get("description"), DESCRIPTION_MAX)
-    author = _sanitize_text(meta.get("author"), AUTHOR_MAX)
-    image = _sanitize_text(meta.get("image"), IMAGE_URL_MAX)
-    canonical = _sanitize_text(meta.get("canonical") or fetched.final_url or original, 500)
-    if not title and not description and not author:
-        if truncated:
-            return _unavailable(original, "oversized", source=source)
-        return _unavailable(original, "metadata_missing", source=source)
-    confidence = 0.8 if title else 0.55
-    image_meta: Dict[str, Any] = {}
-    if image.startswith("http"):
-        image_meta = {"url_present": True, "url_host": _provider_domain(image)}
-    return UrlContext(
-        original_url=original,
-        canonical_url=canonical or fetched.final_url or original,
-        provider_domain=_provider_domain(canonical or fetched.final_url or original),
-        content_type=fetched.content_type or "text/html",
-        page_title=title,
-        safe_description=description,
-        author_or_channel=author,
-        preview_image_metadata=image_meta,
-        extraction_status="ok",
-        confidence=confidence,
-        source=source,
-        fetch_body_truncated=truncated,
-    )
+    return _context_from_metadata_dict(original, fetched, meta, source=source)
 
 
 def select_current_turn_urls(message: str) -> List[str]:
@@ -539,7 +589,13 @@ async def enrich_current_turn_urls(
             got = fetch(original)
             fetched = await got if asyncio.iscoroutine(got) else got
         _trace_call(trace, "mark_fetch_transport", fetched=fetched)
-        result = _from_fetch(original, fetched)
+        fetch_fn = fetch or fetch_url_async
+        result = await _from_fetch_async(
+            original,
+            fetched,
+            fetch=fetch_fn,
+            trace=trace,
+        )
         if result.extraction_status == "ok":
             _cache_put(int(tenant_id or 0), original, result)
         _trace_call(trace, "mark_enrichment_result", result=result)

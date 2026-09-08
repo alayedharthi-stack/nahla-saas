@@ -203,7 +203,7 @@ def test_security_f_valid_recorder_trace_sparse() -> None:
     out, _ = asyncio.run(_run_brain_process(message=PUBLIC_PAGE_URL))
     trace = out["url_context_trace"]
     assert sanitize_url_context_trace(trace) == trace
-    assert _trace_bytes(trace) <= 700
+    assert _trace_bytes(trace) <= 900
 
 
 def test_security_g_key_collision_policy() -> None:

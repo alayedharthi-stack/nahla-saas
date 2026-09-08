@@ -95,8 +95,37 @@ _ENRICHMENT_SOURCES = frozenset(
         "cache",
         "html_metadata",
         "json_metadata",
+        "json_ld",
+        "oembed",
+        "readable_text",
     }
 )
+_METADATA_SOURCES = frozenset(
+    {
+        "html_metadata",
+        "json_ld",
+        "oembed",
+        "readable_text",
+    }
+)
+_METADATA_QUALITY = frozenset({"useful", "thin", "empty"})
+_STANDARD_METADATA_STATUS = frozenset({"ok", "thin", "empty", "not_run"})
+_STRUCTURED_DATA_STATUS = frozenset({"ok", "empty", "not_run"})
+_OEMBED_DISCOVERY_STATUS = frozenset({"declared", "adapter", "none", "not_run"})
+_PROVIDER_ENRICHMENT_STATUS = frozenset(
+    {
+        "ok",
+        "failed",
+        "blocked",
+        "invalid_json",
+        "empty",
+        "skipped",
+        "not_needed",
+        "not_run",
+    }
+)
+_READABLE_TEXT_STATUS = frozenset({"ok", "empty", "not_run"})
+_PROVIDER_ADAPTERS = frozenset({"tiktok"})
 _FETCH_ERROR_CLASSES = frozenset(
     {
         "rate_limited",
@@ -149,6 +178,16 @@ _KNOWN_TRACE_KEYS = frozenset(
         "facts_projected",
         "reply_state_url_context_present_before_compose",
         "enrichment_source",
+        "metadata_sources_attempted",
+        "metadata_source_selected",
+        "standard_metadata_status",
+        "structured_data_status",
+        "oembed_discovery_status",
+        "provider_adapter",
+        "provider_enrichment_status",
+        "readable_text_status",
+        "metadata_quality",
+        "useful_metadata_present",
         "duration_ms",
     }
 )
@@ -308,6 +347,51 @@ def sanitize_url_context_trace(value: object) -> Dict[str, JsonPrimitive] | None
     if enrichment_source in _ENRICHMENT_SOURCES:
         typed["enrichment_source"] = enrichment_source
 
+    metadata_sources_attempted = str(value.get("metadata_sources_attempted") or "").strip().lower()
+    if metadata_sources_attempted:
+        parts = [part for part in metadata_sources_attempted.split(",") if part in _METADATA_SOURCES]
+        if parts:
+            typed["metadata_sources_attempted"] = ",".join(parts)
+
+    metadata_source_selected = str(value.get("metadata_source_selected") or "").strip().lower()
+    if metadata_source_selected in _METADATA_SOURCES:
+        typed["metadata_source_selected"] = metadata_source_selected
+
+    standard_metadata_status = str(value.get("standard_metadata_status") or "").strip().lower()
+    if standard_metadata_status in _STANDARD_METADATA_STATUS and standard_metadata_status != "not_run":
+        typed["standard_metadata_status"] = standard_metadata_status
+
+    structured_data_status = str(value.get("structured_data_status") or "").strip().lower()
+    if structured_data_status in _STRUCTURED_DATA_STATUS and structured_data_status != "not_run":
+        typed["structured_data_status"] = structured_data_status
+
+    oembed_discovery_status = str(value.get("oembed_discovery_status") or "").strip().lower()
+    if oembed_discovery_status in _OEMBED_DISCOVERY_STATUS and oembed_discovery_status != "not_run":
+        typed["oembed_discovery_status"] = oembed_discovery_status
+
+    provider_adapter = str(value.get("provider_adapter") or "").strip().lower()
+    if provider_adapter in _PROVIDER_ADAPTERS:
+        typed["provider_adapter"] = provider_adapter
+
+    provider_enrichment_status = str(value.get("provider_enrichment_status") or "").strip().lower()
+    if (
+        provider_enrichment_status in _PROVIDER_ENRICHMENT_STATUS
+        and provider_enrichment_status != "not_run"
+    ):
+        typed["provider_enrichment_status"] = provider_enrichment_status
+
+    readable_text_status = str(value.get("readable_text_status") or "").strip().lower()
+    if readable_text_status in _READABLE_TEXT_STATUS and readable_text_status != "not_run":
+        typed["readable_text_status"] = readable_text_status
+
+    metadata_quality = str(value.get("metadata_quality") or "").strip().lower()
+    if metadata_quality in _METADATA_QUALITY:
+        typed["metadata_quality"] = metadata_quality
+
+    useful_metadata_present = _is_bool(value.get("useful_metadata_present"))
+    if useful_metadata_present is not None:
+        typed["useful_metadata_present"] = useful_metadata_present
+
     duration_ms = _is_nonneg_int(value.get("duration_ms"), maximum=_MAX_DURATION_MS)
     if duration_ms is not None and duration_ms > 0:
         typed["duration_ms"] = duration_ms
@@ -357,6 +441,16 @@ class UrlContextTraceRecorder:
             "exception_class": "",
             "duration_ms": 0,
             "enrichment_source": "",
+            "metadata_sources_attempted": "",
+            "metadata_source_selected": "",
+            "standard_metadata_status": "not_run",
+            "structured_data_status": "not_run",
+            "oembed_discovery_status": "not_run",
+            "provider_adapter": "",
+            "provider_enrichment_status": "not_run",
+            "readable_text_status": "not_run",
+            "metadata_quality": "empty",
+            "useful_metadata_present": False,
         }
 
     def mark_attach_entered(self) -> None:
@@ -431,6 +525,12 @@ class UrlContextTraceRecorder:
         source = str(getattr(result, "source", "") or "").strip().lower()
         if source:
             self._fields["enrichment_source"] = source
+        metadata_quality = str(getattr(result, "metadata_quality", "") or "").strip().lower()
+        if metadata_quality in _METADATA_QUALITY:
+            self._fields["metadata_quality"] = metadata_quality
+        useful = getattr(result, "useful_metadata_present", None)
+        if isinstance(useful, bool):
+            self._fields["useful_metadata_present"] = useful
         err = _allowlisted_error_class(getattr(result, "error_class", ""))
         if err:
             self._fields["fetch_error_class"] = err
@@ -457,6 +557,20 @@ class UrlContextTraceRecorder:
 
     def mark_external_fetch_count(self, count: int) -> None:
         self._fields["external_fetch_count"] = max(0, int(count or 0))
+
+    def mark_pipeline_state(self, *, state: Any) -> None:
+        fields = {}
+        try:
+            fields = state.to_trace_fields() if hasattr(state, "to_trace_fields") else {}
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block enrichment
+            fields = {}
+        for key, value in dict(fields or {}).items():
+            if value in (None, ""):
+                continue
+            self._fields[key] = value
+        fetch_count = int(fields.get("external_fetch_count") or self._fields.get("external_fetch_count") or 0)
+        if fetch_count > 0:
+            self._fields["external_fetch_count"] = fetch_count
 
     def record_failure(self, *, stage: str, exception: Optional[BaseException] = None) -> None:
         stage_name = str(stage or "").strip().lower()
@@ -550,6 +664,25 @@ class UrlContextTraceRecorder:
         source = str(raw.get("enrichment_source") or "").strip()
         if source:
             out["enrichment_source"] = source
+
+        for key in (
+            "metadata_sources_attempted",
+            "metadata_source_selected",
+            "standard_metadata_status",
+            "structured_data_status",
+            "oembed_discovery_status",
+            "provider_adapter",
+            "provider_enrichment_status",
+            "readable_text_status",
+            "metadata_quality",
+        ):
+            value = str(raw.get(key) or "").strip()
+            if value and value != "not_run":
+                out[key] = value
+
+        useful = raw.get("useful_metadata_present")
+        if isinstance(useful, bool):
+            out["useful_metadata_present"] = useful
 
         duration = int(raw.get("duration_ms") or 0)
         if duration > 0:
