@@ -120,7 +120,11 @@ def _resolve_service_key(
     return None
 
 
-def _build_dispatch_payload(evidence: OrderLifecycleEvidence) -> Dict[str, str]:
+def _build_dispatch_payload(
+    evidence: OrderLifecycleEvidence,
+    *,
+    order: Any = None,
+) -> Dict[str, str]:
     payload: Dict[str, str] = {}
     for field_name in (
         "order_number",
@@ -142,6 +146,9 @@ def _build_dispatch_payload(evidence: OrderLifecycleEvidence) -> Dict[str, str]:
         payload[field_name] = str(value)
     if evidence.order_number:
         payload.setdefault("external_order_number", evidence.order_number)
+    order_total = getattr(order, "total", None) if order is not None else None
+    if order_total is not None and str(order_total).strip():
+        payload["total"] = str(order_total)
     return payload
 
 
@@ -364,7 +371,7 @@ async def _execute_reserved_send(
             reason_code="duplicate",
         )
 
-    payload = _build_dispatch_payload(evidence)
+    payload = _build_dispatch_payload(evidence, order=order)
     if send_method == "session_message":
         from core.automation_engine import send_lifecycle_whatsapp_session_body  # noqa: PLC0415
 

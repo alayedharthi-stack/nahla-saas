@@ -92,6 +92,31 @@ def _extract_payment_url(
     return _non_empty(normalized_order.get("payment_url"))
 
 
+def _extract_checkout_url(
+    order: Any,
+    raw_payload: Optional[Mapping[str, Any]],
+    normalized_order: Mapping[str, Any],
+) -> Optional[str]:
+    """Resolve a customer checkout/details URL from persisted provider facts."""
+    direct = _non_empty(getattr(order, "checkout_url", None)) or _non_empty(
+        normalized_order.get("checkout_url")
+    )
+    if direct:
+        return direct
+    if not raw_payload:
+        return None
+    direct = _non_empty(raw_payload.get("checkout_url"))
+    if direct:
+        return direct
+    payment_actions = raw_payload.get("payment_actions")
+    if not isinstance(payment_actions, Mapping):
+        return None
+    remaining_action = payment_actions.get("remaining_action")
+    if not isinstance(remaining_action, Mapping):
+        return None
+    return _non_empty(remaining_action.get("checkout_url"))
+
+
 def build_order_lifecycle_evidence(
     *,
     order: Any,
@@ -103,8 +128,10 @@ def build_order_lifecycle_evidence(
     meta = dict(getattr(order, "extra_metadata", None) or {})
     customer_info = dict(getattr(order, "customer_info", None) or {})
 
-    checkout_url = _non_empty(getattr(order, "checkout_url", None)) or _non_empty(
-        normalized_order.get("checkout_url")
+    checkout_url = _extract_checkout_url(
+        order,
+        raw_payload,
+        normalized_order,
     )
     payment_url = _extract_payment_url(raw_payload, normalized_order)
     tracking_url = _extract_tracking_url(raw_payload, normalized_order)
