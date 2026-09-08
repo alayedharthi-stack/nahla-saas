@@ -8,6 +8,7 @@ from typing import Optional, Protocol
 @dataclass(frozen=True)
 class ProviderAdapterRequest:
     final_url: str
+    canonical_url: str
     canonical_domain: str
     page_title: str
     safe_description: str

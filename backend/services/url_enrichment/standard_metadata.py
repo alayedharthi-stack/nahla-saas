@@ -116,11 +116,7 @@ def parse_html_metadata(html: str, base_url: str) -> tuple[EnrichmentDraft, Opti
 
 
 def has_useful_standard_metadata(draft: EnrichmentDraft) -> bool:
-    return bool(
-        sanitize_text(draft.safe_description, 40)
-        or sanitize_text(draft.author_or_channel, 20)
-        or (
-            sanitize_text(draft.page_title, 40)
-            and not re.match(r"^(tiktok|youtube|facebook|instagram|twitter|x)\b", draft.page_title, re.I)
-        )
-    )
+    from .quality import assess_draft_quality
+
+    quality, useful = assess_draft_quality(draft)
+    return useful and quality == "useful"

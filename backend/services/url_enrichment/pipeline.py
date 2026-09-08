@@ -14,9 +14,26 @@ from .standard_metadata import has_useful_standard_metadata, parse_html_metadata
 from .structured_data import extract_json_ld_metadata
 from .text import provider_domain
 from .types import EnrichmentDraft, PipelineTraceState
+from .url_safety import same_origin, sanitize_oembed_target_url
 
-FetchFn = Callable[[str], Awaitable[SafeHttpResult]]
+FetchFn = Callable[..., Awaitable[SafeHttpResult]]
 MAX_EXTERNAL_FETCHES = 2
+
+
+def _adapter_request(
+    *,
+    final_url: str,
+    draft: EnrichmentDraft,
+) -> ProviderAdapterRequest:
+    return ProviderAdapterRequest(
+        final_url=final_url,
+        canonical_url=draft.canonical_url or final_url,
+        canonical_domain=draft.canonical_domain,
+        page_title=draft.page_title,
+        safe_description=draft.safe_description,
+        author_or_channel=draft.author_or_channel,
+        metadata_quality=draft.metadata_quality,
+    )
 
 
 async def run_enrichment_pipeline(
@@ -24,6 +41,7 @@ async def run_enrichment_pipeline(
     fetched: SafeHttpResult,
     *,
     fetch: FetchFn,
+    deadline: Optional[float] = None,
 ) -> Tuple[EnrichmentDraft, PipelineTraceState]:
     trace = PipelineTraceState(external_fetch_count=1)
     draft = EnrichmentDraft()
@@ -76,43 +94,36 @@ async def run_enrichment_pipeline(
     draft.useful_metadata_present = useful
 
     # 3) oEmbed discovery or provider adapter (single extra fetch max)
-    oembed_endpoint: Optional[str] = declared_oembed
-    trace.oembed_discovery_status = "declared" if declared_oembed else "none"
+    oembed_endpoint: Optional[str] = None
+    trace.oembed_discovery_status = "none"
+    if declared_oembed:
+        if same_origin(declared_oembed, final_url) or same_origin(declared_oembed, draft.canonical_url):
+            oembed_endpoint = declared_oembed
+            trace.oembed_discovery_status = "declared"
+        else:
+            trace.oembed_discovery_status = "cross_origin_blocked"
 
     if not useful and trace.external_fetch_count < MAX_EXTERNAL_FETCHES:
         adapter = None
         if not oembed_endpoint:
-            adapter = resolve_provider_adapter(
-                ProviderAdapterRequest(
-                    final_url=final_url,
-                    canonical_domain=draft.canonical_domain,
-                    page_title=draft.page_title,
-                    safe_description=draft.safe_description,
-                    author_or_channel=draft.author_or_channel,
-                    metadata_quality=draft.metadata_quality,
-                )
-            )
+            adapter = resolve_provider_adapter(_adapter_request(final_url=final_url, draft=draft))
             if adapter:
                 trace.provider_adapter = adapter.name
-                oembed_endpoint = adapter.oembed_endpoint(
-                    ProviderAdapterRequest(
-                        final_url=final_url,
-                        canonical_domain=draft.canonical_domain,
-                        page_title=draft.page_title,
-                        safe_description=draft.safe_description,
-                        author_or_channel=draft.author_or_channel,
-                        metadata_quality=draft.metadata_quality,
-                    )
-                )
+                oembed_endpoint = adapter.oembed_endpoint(_adapter_request(final_url=final_url, draft=draft))
                 trace.oembed_discovery_status = "adapter"
 
         if oembed_endpoint:
             trace.record_attempt("oembed")
             trace.external_fetch_count += 1
+            safe_target = sanitize_oembed_target_url(
+                final_url=final_url,
+                canonical_url=draft.canonical_url or final_url,
+            )
             oembed_draft, oembed_status = await fetch_oembed(
-                page_url=final_url,
+                page_url=safe_target or final_url,
                 endpoint=oembed_endpoint,
                 fetch=fetch,
+                deadline=deadline,
             )
             trace.provider_enrichment_status = oembed_status
             if oembed_status == "ok":

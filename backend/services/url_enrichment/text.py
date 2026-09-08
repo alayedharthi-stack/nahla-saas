@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
+
+from .url_safety import resolve_http_url
 
 TITLE_MAX = 180
 DESCRIPTION_MAX = 400
@@ -24,26 +26,15 @@ def sanitize_text(value: Any, limit: int) -> str:
 
 def provider_domain(url: str) -> str:
     try:
+        from urllib.parse import urlparse
+
         return (urlparse(url).hostname or "").lower()
     except Exception:
         return ""
 
 
 def absolute_url(base: str, maybe_relative: str) -> str:
-    raw = str(maybe_relative or "").strip()
-    if not raw:
-        return ""
-    if raw.startswith(("http://", "https://")):
-        return raw
-    try:
-        parsed = urlparse(base)
-        if raw.startswith("//"):
-            return f"{parsed.scheme}:{raw}"
-        if raw.startswith("/"):
-            return f"{parsed.scheme}://{parsed.netloc}{raw}"
-    except Exception:
-        return ""
-    return ""
+    return resolve_http_url(base, maybe_relative)
 
 
 def normalize_compare_url(url: str) -> str:
@@ -54,6 +45,8 @@ def normalize_compare_url(url: str) -> str:
     if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", candidate):
         candidate = "https://" + candidate
     try:
+        from urllib.parse import urlparse
+
         parsed = urlparse(candidate)
     except Exception:
         return raw.lower().rstrip("/")

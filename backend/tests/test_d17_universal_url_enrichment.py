@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from typing import Any, Optional
 from unittest.mock import patch
 
@@ -23,40 +24,40 @@ for _p in (_REPO, _BACKEND, os.path.join(_REPO, "database")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from modules.ai.brain.compose.prompt_builder import build_brain_reply_prompt  # noqa: E402
 from modules.ai.brain.facts.url_context_facts import (  # noqa: E402
     URL_CONTEXT_USER_TURN_BEGIN,
-    bind_url_context_to_user_turn,
     project_url_context_facts,
 )
 from modules.ai.brain.observability.url_context_trace import (  # noqa: E402
     UrlContextTraceRecorder,
     sanitize_url_context_trace,
 )
-from modules.ai.brain.types import BrainContext, CommerceFacts, MerchantConversationState  # noqa: E402
-from services.safe_http_fetch import SafeHttpResult  # noqa: E402
+from services.safe_http_fetch import SafeHttpResult, TOTAL_TIMEOUT_S  # noqa: E402
 from services.url_context import enrich_current_turn_urls, reset_url_context_cache  # noqa: E402
 from services.url_enrichment.oembed import parse_oembed_payload  # noqa: E402
-from services.url_enrichment.pipeline import MAX_EXTERNAL_FETCHES  # noqa: E402
+from services.url_enrichment.pipeline import MAX_EXTERNAL_FETCHES, run_enrichment_pipeline  # noqa: E402
+from services.url_enrichment.url_safety import resolve_http_url, sanitize_oembed_target_url  # noqa: E402
 
 from test_d17_url_context_enrichment import (  # noqa: E402
     HTML_FIXTURE,
     PUBLIC_PAGE_URL,
-    _provider_payloads,
     _run_path,
-    _user_turn_json,
 )
 
 ARTICLE_URL = "https://news.example.test/article/cotton-shirt"
 JSONLD_URL = "https://blog.example.test/post/jsonld-only"
 OEMBED_PAGE_URL = "https://video.example.test/watch/clip"
 TIKTOK_URL = "https://www.tiktok.com/@creator/video/9001"
+TIKTOK_SENSITIVE_URL = (
+    "https://www.tiktok.com/@creator/video/9001?token=secret&utm_source=x#fragment"
+)
 PRODUCT_URL = "https://shop.example.test/p/sneaker"
 PLAIN_HTML_URL = "https://plain.example.test/about"
 EMPTY_JS_URL = "https://spa.example.test/empty"
 INTERNAL_OEMBED_URL = "https://media.example.test/embed-me"
 BLOCKED_REDIRECT_URL = "https://blocked.example.test/redirect"
 TIMEOUT_URL = "https://slow.example.test/page"
+RELATIVE_BASE_URL = "https://cdn.example.test/content/page/"
 
 ARTICLE_HTML = HTML_FIXTURE
 JSONLD_ONLY_HTML = """<!doctype html><html><head>
@@ -72,11 +73,15 @@ JSONLD_ONLY_HTML = """<!doctype html><html><head>
 </head><body></body></html>"""
 OEMBED_DECLARE_HTML = """<!doctype html><html><head>
 <link rel="alternate" type="application/json+oembed"
- href="https://oembed.example.test/embed?format=json" />
+ href="/oembed.json" />
 </head><body><p>ignored</p></body></html>"""
 TIKTOK_THIN_HTML = """<!doctype html><html><head>
 <title>TikTok - Make Your Day</title>
 </head><body><div id="app"></div></body></html>"""
+TIKTOK_PLATFORM_ONLY_HTML = """<!doctype html><html><head>
+<title>TikTok - Make Your Day</title>
+<meta property="og:site_name" content="TikTok">
+</head><body></body></html>"""
 PRODUCT_HTML = """<!doctype html><html><head>
 <meta property="og:type" content="product">
 <meta property="og:title" content="حذاء رياضي أبيض">
@@ -90,42 +95,22 @@ PLAIN_HTML = """<!doctype html><html><head><title>Home</title></head><body>
 </body></html>"""
 EMPTY_JS_HTML = """<!doctype html><html><head></head>
 <body><div id="root"></div><script>window.boot()</script></body></html>"""
-
-
-@pytest.fixture(autouse=True)
-def _stub_safe_oembed_destination(monkeypatch: pytest.MonkeyPatch) -> None:
-    from urllib.parse import urlparse
-
-    from backend.services.safe_http_fetch import SafeFetchRequest, validate_destination as real_validate
-
-    def _validate(url: str, **kwargs: Any) -> tuple[Any, str]:
-        if "127.0.0.1" in url or "localhost" in url:
-            return real_validate(url, **kwargs)
-        parsed = urlparse(url)
-        host = parsed.hostname or "example.test"
-        port = parsed.port or (443 if (parsed.scheme or "https") == "https" else 80)
-        req = SafeFetchRequest(
-            url=url,
-            hostname=host,
-            ip="93.184.216.34",
-            port=port,
-            scheme=parsed.scheme or "https",
-            path=parsed.path or "/",
-            timeout_connect=1.0,
-            timeout_read=1.0,
-        )
-        return req, ""
-
-    monkeypatch.setattr("services.url_enrichment.oembed.validate_destination", _validate)
+RELATIVE_METADATA_HTML = """<!doctype html><html><head>
+<link rel="canonical" href="../article/view">
+<link rel="alternate" type="application/json+oembed" href="oembed.json">
+<meta property="og:image" content="../images/thumb.jpg">
+</head><body></body></html>"""
 
 
 class RoutingFetch:
     def __init__(self, routes: dict[str, Any]) -> None:
         self.routes = routes
         self.calls: list[str] = []
+        self.deadlines: list[Optional[float]] = []
 
-    def __call__(self, url: str) -> SafeHttpResult:
+    def __call__(self, url: str, deadline: Optional[float] = None) -> SafeHttpResult:
         self.calls.append(url)
+        self.deadlines.append(deadline)
         if url in self.routes:
             handler = self.routes[url]
         else:
@@ -154,6 +139,17 @@ class RoutingFetch:
 
 def _oembed_json(**fields: Any) -> str:
     return json.dumps(fields, ensure_ascii=False)
+
+
+def _ok_page(url: str, html: str) -> SafeHttpResult:
+    return SafeHttpResult(
+        ok=True,
+        url=url,
+        final_url=url,
+        status=200,
+        content_type="text/html",
+        body=html.encode("utf-8"),
+    )
 
 
 def _enrich(message: str, fetch: Any, *, trace: Optional[UrlContextTraceRecorder] = None) -> tuple[Any, UrlContextTraceRecorder]:
@@ -193,12 +189,11 @@ def test_02_json_ld_only_page() -> None:
     assert trace._fields.get("metadata_source_selected") == "json_ld"
 
 
-def test_03_declared_oembed_endpoint() -> None:
-    oembed_url = "https://oembed.example.test/embed?format=json"
+def test_03_declared_same_origin_oembed_endpoint() -> None:
     fetch = RoutingFetch(
         {
             OEMBED_PAGE_URL: OEMBED_DECLARE_HTML,
-            "https://oembed.example.test/embed*": lambda _url: SafeHttpResult(
+            "https://video.example.test/oembed.json*": lambda _url: SafeHttpResult(
                 ok=True,
                 url=_url,
                 final_url=_url,
@@ -223,7 +218,6 @@ def test_03_declared_oembed_endpoint() -> None:
 
 
 def test_04_tiktok_thin_html_then_oembed() -> None:
-    oembed_endpoint = f"https://www.tiktok.com/oembed?url={TIKTOK_URL}"
     fetch = RoutingFetch(
         {
             TIKTOK_URL: TIKTOK_THIN_HTML,
@@ -292,15 +286,26 @@ def test_08_oembed_html_field_ignored() -> None:
     assert "<iframe" not in json.dumps(parsed).lower()
 
 
-def test_09_internal_oembed_endpoint_blocked() -> None:
-    internal = "http://127.0.0.1/oembed"
-    html = f"""<html><head>
-<link rel="alternate" type="application/json+oembed" href="{internal}" />
+def test_09_same_origin_oembed_blocked_by_safe_fetch() -> None:
+    html = """<html><head>
+<link rel="alternate" type="application/json+oembed" href="https://media.example.test/oembed.json" />
+<title>Home</title>
 </head></html>"""
-    fetch = RoutingFetch({INTERNAL_OEMBED_URL: html})
+    fetch = RoutingFetch(
+        {
+            INTERNAL_OEMBED_URL: html,
+            "https://media.example.test/oembed.json*": SafeHttpResult(
+                ok=False,
+                url="https://media.example.test/oembed.json",
+                final_url="https://media.example.test/oembed.json",
+                error_class="ip_blocked",
+            ),
+        }
+    )
     result, trace = _enrich(INTERNAL_OEMBED_URL, fetch)
-    assert len(fetch.calls) == 1
+    assert len(fetch.calls) == 2
     assert trace._fields.get("provider_enrichment_status") == "blocked"
+    assert result.useful_metadata_present is False
 
 
 def test_10_redirect_to_blocked_domain() -> None:
@@ -319,16 +324,15 @@ def test_10_redirect_to_blocked_domain() -> None:
     assert result.error_class == "ip_blocked"
 
 
-def test_11_timeout_or_invalid_json_best_effort() -> None:
-    oembed_url = "https://oembed.example.test/bad"
-    html = f"""<html><head>
-<link rel="alternate" type="application/json+oembed" href="{oembed_url}" />
+def test_11_invalid_json_same_origin_best_effort() -> None:
+    html = """<html><head>
+<link rel="alternate" type="application/json+oembed" href="/bad.json" />
 <title>Home</title>
 </head></html>"""
     fetch = RoutingFetch(
         {
             TIMEOUT_URL: html,
-            "https://oembed.example.test/bad*": "not-json",
+            "https://slow.example.test/bad.json*": "not-json",
         }
     )
     result, trace = _enrich(TIMEOUT_URL, fetch)
@@ -363,16 +367,14 @@ def test_14_existing_good_html_path_unchanged() -> None:
 
 
 def test_15_max_two_external_fetches_per_url() -> None:
-    oembed_url = "https://oembed.example.test/embed"
-    html = f"""<html><head>
-<link rel="alternate" type="application/json+oembed" href="{oembed_url}" />
+    html = """<html><head>
+<link rel="alternate" type="application/json+oembed" href="/embed" />
 <title>TikTok - Make Your Day</title>
 </head></html>"""
     fetch = RoutingFetch(
         {
             TIKTOK_URL: html,
-            "https://oembed.example.test/embed*": _oembed_json(title="ignored thin", author_name=""),
-            f"https://www.tiktok.com/oembed?url={TIKTOK_URL}": _oembed_json(
+            "https://www.tiktok.com/oembed*": _oembed_json(
                 title="فيديو TikTok",
                 author_name="creator",
             ),
@@ -381,6 +383,168 @@ def test_15_max_two_external_fetches_per_url() -> None:
     _result, trace = _enrich(TIKTOK_URL, fetch)
     assert len(fetch.calls) <= MAX_EXTERNAL_FETCHES
     assert int(trace._fields.get("external_fetch_count") or 0) <= MAX_EXTERNAL_FETCHES
+
+
+def test_platform_name_only_stays_thin_until_adapter() -> None:
+    fetch = RoutingFetch(
+        {
+            TIKTOK_URL: TIKTOK_PLATFORM_ONLY_HTML,
+            "https://www.tiktok.com/oembed*": _oembed_json(
+                title="فيديو عن عطر ورد",
+                author_name="creator",
+            ),
+        }
+    )
+    result, trace = _enrich(TIKTOK_URL, fetch)
+    assert trace._fields.get("standard_metadata_status") == "thin"
+    assert result.metadata_quality == "useful"
+    assert result.useful_metadata_present is True
+    assert trace._fields.get("provider_adapter") == "tiktok"
+
+
+def test_sensitive_query_and_fragment_not_forwarded_to_oembed() -> None:
+    fetch = RoutingFetch(
+        {
+            TIKTOK_SENSITIVE_URL: TIKTOK_THIN_HTML,
+            "https://www.tiktok.com/oembed*": lambda url: SafeHttpResult(
+                ok=True,
+                url=url,
+                final_url=url,
+                status=200,
+                content_type="application/json",
+                body=_oembed_json(title="فيديو منقح", author_name="creator").encode("utf-8"),
+            ),
+        }
+    )
+    result, trace = _enrich(TIKTOK_SENSITIVE_URL, fetch)
+    assert len(fetch.calls) == 2
+    oembed_call = fetch.calls[1]
+    assert "token=secret" not in oembed_call
+    assert "utm_source" not in oembed_call
+    assert "#fragment" not in oembed_call
+    blob = json.dumps(
+        {
+            "trace": trace.to_sparse_public_dict(),
+            "facts": project_url_context_facts([result]),
+        },
+        ensure_ascii=False,
+    )
+    assert "token=secret" not in blob
+    assert "utm_source=x" not in blob
+    assert result.metadata_quality == "useful"
+
+
+def test_cross_origin_declared_oembed_is_not_fetched() -> None:
+    html = """<html><head>
+<link rel="alternate" type="application/json+oembed" href="https://evil.example.test/oembed" />
+<title>Home</title>
+</head></html>"""
+    fetch = RoutingFetch(
+        {
+            OEMBED_PAGE_URL: html,
+            "https://evil.example.test/oembed*": _oembed_json(title="should-not-run", author_name="x"),
+        }
+    )
+    _result, trace = _enrich(OEMBED_PAGE_URL, fetch)
+    assert len(fetch.calls) == 1
+    assert trace._fields.get("oembed_discovery_status") == "cross_origin_blocked"
+
+
+def test_relative_url_resolution_for_metadata_and_oembed() -> None:
+    fetch = RoutingFetch(
+        {
+            RELATIVE_BASE_URL: RELATIVE_METADATA_HTML,
+            "https://cdn.example.test/content/page/oembed.json*": _oembed_json(
+                title="مقال نسبي",
+                author_name="كاتب",
+            ),
+        }
+    )
+    result, trace = _enrich(RELATIVE_BASE_URL, fetch)
+    assert result.canonical_url.endswith("/content/article/view")
+    assert resolve_http_url(RELATIVE_BASE_URL, "../images/thumb.jpg") == (
+        "https://cdn.example.test/content/images/thumb.jpg"
+    )
+    assert trace._fields.get("provider_enrichment_status") == "ok"
+    assert result.page_title == "مقال نسبي"
+
+
+def test_relative_url_resolution_rejects_credentials_and_non_http() -> None:
+    assert resolve_http_url("https://cdn.example.test/a/", "javascript:alert(1)") == ""
+    assert resolve_http_url("https://cdn.example.test/a/", "data:text/plain,hi") == ""
+    assert resolve_http_url("https://cdn.example.test/a/", "//evil.test/x") == "https://evil.test/x"
+    assert resolve_http_url("https://user:pass@cdn.example.test/a/", "../x") == ""
+
+
+def test_shared_enrichment_deadline_not_doubled() -> None:
+    shared_deadline = 12345.678
+
+    async def _fetch(url: str, deadline: Optional[float] = None) -> SafeHttpResult:
+        recorded.append((url, deadline))
+        return SafeHttpResult(
+            ok=True,
+            url=url,
+            final_url=url,
+            status=200,
+            content_type="application/json",
+            body=_oembed_json(title="فيديو TikTok", author_name="creator").encode("utf-8"),
+        )
+
+    recorded: list[tuple[str, Optional[float]]] = []
+
+    async def _go() -> None:
+        await run_enrichment_pipeline(
+            TIKTOK_URL,
+            _ok_page(TIKTOK_URL, TIKTOK_THIN_HTML),
+            fetch=_fetch,
+            deadline=shared_deadline,
+        )
+
+    asyncio.run(_go())
+    assert len(recorded) == 1
+    assert recorded[0][1] == shared_deadline
+    assert shared_deadline < time.monotonic() + (TOTAL_TIMEOUT_S * 2)
+
+
+def test_enrich_turn_passes_single_deadline_to_both_fetches() -> None:
+    fetch = RoutingFetch(
+        {
+            TIKTOK_URL: TIKTOK_THIN_HTML,
+            "https://www.tiktok.com/oembed*": _oembed_json(title="فيديو", author_name="creator"),
+        }
+    )
+    _result, _trace = _enrich(TIKTOK_URL, fetch)
+    assert len(fetch.deadlines) == 2
+    assert fetch.deadlines[0] is not None
+    assert fetch.deadlines[1] == fetch.deadlines[0]
+
+
+def test_tiktok_oembed_reaches_user_role_provider_payload() -> None:
+    fetch = RoutingFetch(
+        {
+            TIKTOK_URL: TIKTOK_THIN_HTML,
+            "https://www.tiktok.com/oembed*": _oembed_json(
+                title="فيديو TikTok عن حذاء رياضي",
+                author_name="creator",
+                html="<iframe></iframe>",
+            ),
+        }
+    )
+    out = _run_path(TIKTOK_URL, fetch=fetch)
+    parsed = dict(out["user_turn_facts"] or {})
+    providers_blob = json.dumps(out["providers"], ensure_ascii=False)
+    system_blob = str(out["prompt"] or "")
+
+    assert parsed.get("metadata_quality") == "useful"
+    assert parsed.get("watched_or_transcribed") is False
+    assert "فيديو TikTok" in providers_blob
+    assert "creator" in providers_blob
+    assert "فيديو TikTok" not in system_blob
+    assert "<iframe" not in providers_blob
+    assert "<html" not in providers_blob.lower()
+    assert URL_CONTEXT_USER_TURN_BEGIN in str(out["provider_message"] or "")
+    assert len(fetch.calls) == 2
+    assert getattr(out["ctx"], "url_context_fetch_count", 0) <= MAX_EXTERNAL_FETCHES
 
 
 def test_trace_fields_sanitized_without_raw_content() -> None:

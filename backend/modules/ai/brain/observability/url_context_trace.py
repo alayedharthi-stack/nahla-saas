@@ -111,7 +111,7 @@ _METADATA_SOURCES = frozenset(
 _METADATA_QUALITY = frozenset({"useful", "thin", "empty"})
 _STANDARD_METADATA_STATUS = frozenset({"ok", "thin", "empty", "not_run"})
 _STRUCTURED_DATA_STATUS = frozenset({"ok", "empty", "not_run"})
-_OEMBED_DISCOVERY_STATUS = frozenset({"declared", "adapter", "none", "not_run"})
+_OEMBED_DISCOVERY_STATUS = frozenset({"declared", "adapter", "none", "cross_origin_blocked", "not_run"})
 _PROVIDER_ENRICHMENT_STATUS = frozenset(
     {
         "ok",

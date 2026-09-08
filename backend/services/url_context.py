@@ -23,11 +23,13 @@ from core.inbound_url_spans import (
 from observability.rate_limiter import check_rate_limit
 from services.safe_http_fetch import (
     SafeHttpResult,
+    TOTAL_TIMEOUT_S,
     fetch_url_async,
     redact_url_for_log,
 )
 from services.url_enrichment import run_enrichment_pipeline
 from services.url_enrichment.types import EnrichmentDraft, PipelineTraceState
+from services.url_enrichment.url_safety import sanitize_oembed_target_url
 
 logger = logging.getLogger("nahla.url_context")
 
@@ -70,9 +72,17 @@ class UrlContext:
     useful_metadata_present: bool = False
 
     def to_public_dict(self) -> Dict[str, Any]:
+        safe_original = sanitize_oembed_target_url(
+            final_url=self.original_url,
+            canonical_url=self.canonical_url or self.original_url,
+        ) or self.original_url
+        safe_canonical = sanitize_oembed_target_url(
+            final_url=self.canonical_url or self.original_url,
+            canonical_url=self.canonical_url or self.original_url,
+        ) or safe_original
         payload = {
-            "original_url": self.original_url,
-            "canonical_url": self.canonical_url or self.original_url,
+            "original_url": safe_original,
+            "canonical_url": safe_canonical,
             "provider_domain": self.provider_domain,
             "content_type": self.content_type,
             "page_title": self.page_title,
@@ -403,12 +413,26 @@ def _context_from_metadata_dict(
     )
 
 
+async def _bounded_fetch(
+    url: str,
+    *,
+    fetch: FetchFn,
+    deadline: float,
+) -> SafeHttpResult:
+    try:
+        got = fetch(url, deadline=deadline)
+    except TypeError:
+        got = fetch(url)
+    return await got if asyncio.iscoroutine(got) else got
+
+
 async def _from_fetch_async(
     original: str,
     fetched: SafeHttpResult,
     *,
     fetch: FetchFn,
     trace: Any = None,
+    deadline: Optional[float] = None,
 ) -> UrlContext:
     if not fetched.ok:
         err = fetched.error_class or "unavailable"
@@ -428,14 +452,17 @@ async def _from_fetch_async(
         meta = parse_json_metadata(body)
         return _context_from_metadata_dict(original, fetched, meta, source="json_metadata")
 
-    async def _secondary_fetch(url: str) -> SafeHttpResult:
-        got = fetch(url)
-        return await got if asyncio.iscoroutine(got) else got
+    async def _secondary_fetch(url: str, **kwargs: Any) -> SafeHttpResult:
+        dl = float(kwargs.get("deadline") or deadline or 0.0)
+        if dl > 0:
+            return await _bounded_fetch(url, fetch=fetch, deadline=dl)
+        return await _bounded_fetch(url, fetch=fetch, deadline=time.monotonic() + TOTAL_TIMEOUT_S)
 
     draft, pipeline_trace = await run_enrichment_pipeline(
         original,
         fetched,
         fetch=_secondary_fetch,
+        deadline=deadline,
     )
     _trace_call(trace, "mark_pipeline_state", state=pipeline_trace)
     meta = {
@@ -583,18 +610,20 @@ async def enrich_current_turn_urls(
             return [result]
         fetches.add(fetch_marker)
         _trace_call(trace, "mark_fetch_attempted")
+        enrichment_deadline = time.monotonic() + TOTAL_TIMEOUT_S
         if fetch is None:
-            fetched = await fetch_url_async(original)
+            fetched = await fetch_url_async(original, deadline=enrichment_deadline)
+            fetch_fn: FetchFn = fetch_url_async
         else:
-            got = fetch(original)
-            fetched = await got if asyncio.iscoroutine(got) else got
+            fetched = await _bounded_fetch(original, fetch=fetch, deadline=enrichment_deadline)
+            fetch_fn = fetch
         _trace_call(trace, "mark_fetch_transport", fetched=fetched)
-        fetch_fn = fetch or fetch_url_async
         result = await _from_fetch_async(
             original,
             fetched,
             fetch=fetch_fn,
             trace=trace,
+            deadline=enrichment_deadline,
         )
         if result.extraction_status == "ok":
             _cache_put(int(tenant_id or 0), original, result)

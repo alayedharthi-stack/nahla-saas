@@ -3,25 +3,24 @@ from __future__ import annotations
 
 import json
 from typing import Any, Awaitable, Callable, Dict, Optional
-from urllib.parse import quote
 
-from backend.services.safe_http_fetch import SafeHttpResult, validate_destination
+from backend.services.safe_http_fetch import SafeHttpResult
 
 from .quality import merge_preferring_richer
 from .text import AUTHOR_MAX, DESCRIPTION_MAX, IMAGE_URL_MAX, TITLE_MAX, sanitize_text
 from .types import EnrichmentDraft
+from .url_safety import build_oembed_request_url
 
-FetchFn = Callable[[str], Awaitable[SafeHttpResult]]
+FetchFn = Callable[..., Awaitable[SafeHttpResult]]
 
-
-def build_oembed_url(page_url: str, endpoint: str) -> str:
-    endpoint = str(endpoint or "").strip()
-    if "{url}" in endpoint:
-        return endpoint.replace("{url}", quote(page_url, safe=""))
-    if "url=" in endpoint:
-        return endpoint
-    joiner = "&" if "?" in endpoint else "?"
-    return f"{endpoint}{joiner}url={quote(page_url, safe='')}"
+_BLOCKED_FETCH_ERRORS = frozenset(
+    {
+        "ip_blocked",
+        "host_blocked",
+        "scheme_blocked",
+        "credentials_blocked",
+    }
+)
 
 
 def parse_oembed_payload(payload: Dict[str, Any]) -> Dict[str, str]:
@@ -40,22 +39,36 @@ def parse_oembed_payload(payload: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def map_fetch_error_to_oembed_status(error_class: str) -> str:
+    if str(error_class or "").strip().lower() in _BLOCKED_FETCH_ERRORS:
+        return "blocked"
+    return "failed"
+
+
 async def fetch_oembed(
     *,
     page_url: str,
     endpoint: str,
     fetch: FetchFn,
+    deadline: Optional[float] = None,
 ) -> tuple[EnrichmentDraft, str]:
-    """Fetch and parse oEmbed JSON. Returns draft and status."""
+    """Fetch and parse oEmbed JSON via the safe fetch path only."""
     draft = EnrichmentDraft()
-    oembed_url = build_oembed_url(page_url, endpoint)
-    validated, err = validate_destination(oembed_url)
-    if validated is None:
-        status = "blocked" if err in {"ip_blocked", "host_blocked"} else "failed"
-        return draft, status
-    result = await fetch(oembed_url)
-    if not result.ok or not result.body:
+    oembed_url = build_oembed_request_url(page_url, endpoint)
+    if not oembed_url:
         return draft, "failed"
+
+    if deadline is not None:
+        try:
+            got = fetch(oembed_url, deadline=deadline)
+        except TypeError:
+            got = fetch(oembed_url)
+    else:
+        got = fetch(oembed_url)
+    result = await got if hasattr(got, "__await__") else got
+
+    if not result.ok or not result.body:
+        return draft, map_fetch_error_to_oembed_status(getattr(result, "error_class", ""))
 
     try:
         payload = json.loads(result.body.decode("utf-8", errors="ignore"))
@@ -65,7 +78,6 @@ async def fetch_oembed(
     if not isinstance(payload, dict):
         return draft, "invalid_json"
 
-    # Explicitly ignore html field even if present.
     extracted = parse_oembed_payload(payload)
     merge_preferring_richer(
         draft,

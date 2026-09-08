@@ -5,6 +5,7 @@ import re
 from typing import Optional
 from urllib.parse import quote, urlparse
 
+from ..url_safety import sanitize_oembed_target_url
 from .base import ProviderAdapterRequest
 
 _TIKTOK_HOSTS = {"tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"}
@@ -26,7 +27,13 @@ class TikTokProviderAdapter:
     def oembed_endpoint(self, request: ProviderAdapterRequest) -> Optional[str]:
         if not self.matches(request):
             return None
-        return f"https://www.tiktok.com/oembed?url={quote(request.final_url, safe='')}"
+        safe_url = sanitize_oembed_target_url(
+            final_url=request.final_url,
+            canonical_url=request.canonical_url,
+        )
+        if not safe_url:
+            return None
+        return f"https://www.tiktok.com/oembed?url={quote(safe_url, safe='')}"
 
     @staticmethod
     def _is_video_url(url: str) -> bool:

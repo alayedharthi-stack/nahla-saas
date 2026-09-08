@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 from .text import provider_domain, sanitize_text
 from .types import EnrichmentDraft
@@ -20,6 +19,14 @@ _THIN_TITLE_PATTERNS = (
     re.compile(r"^about$", re.I),
     re.compile(r"^app$", re.I),
 )
+_PLATFORM_AUTHOR_PATTERNS = (
+    re.compile(r"^tiktok$", re.I),
+    re.compile(r"^youtube$", re.I),
+    re.compile(r"^facebook$", re.I),
+    re.compile(r"^instagram$", re.I),
+    re.compile(r"^twitter$", re.I),
+    re.compile(r"^x$", re.I),
+)
 
 
 def _is_thin_title(title: str) -> bool:
@@ -27,6 +34,21 @@ def _is_thin_title(title: str) -> bool:
     if not cleaned:
         return True
     return any(pattern.fullmatch(cleaned) for pattern in _THIN_TITLE_PATTERNS)
+
+
+def _is_platform_only_author(author: str, canonical_domain: str) -> bool:
+    cleaned = sanitize_text(author, 120).strip()
+    if not cleaned:
+        return True
+    if any(pattern.fullmatch(cleaned) for pattern in _PLATFORM_AUTHOR_PATTERNS):
+        return True
+    domain = (canonical_domain or "").lower().strip()
+    if domain and cleaned.lower() == domain:
+        return True
+    root = domain[4:] if domain.startswith("www.") else domain
+    if root and cleaned.lower() == root.split(".")[0]:
+        return True
+    return False
 
 
 def assess_draft_quality(draft: EnrichmentDraft) -> tuple[str, bool]:
@@ -41,16 +63,13 @@ def assess_draft_quality(draft: EnrichmentDraft) -> tuple[str, bool]:
 
     title_is_thin = _is_thin_title(title)
     domain_only = bool(title) and title.lower() == (draft.canonical_domain or "").lower()
+    has_real_title = bool(title) and not title_is_thin and not domain_only
+    has_substance = bool(body_text)
 
-    if body_text or author:
-        if title_is_thin or domain_only or not title:
-            return "useful", True
+    if has_substance or has_real_title:
         return "useful", True
 
-    if title and not title_is_thin and not domain_only:
-        return "useful", True
-
-    if title:
+    if title or author:
         return "thin", False
 
     return "empty", False
