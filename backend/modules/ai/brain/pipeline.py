@@ -4008,6 +4008,7 @@ class MerchantBrain:
             from .observability.url_context_trace import (  # noqa: PLC0415
                 UrlContextTraceRecorder,
                 log_url_context_attach_failure,
+                log_url_context_attach_skipped,
             )
 
             ctx.url_context_trace = UrlContextTraceRecorder()
@@ -4032,11 +4033,8 @@ class MerchantBrain:
                     )
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block compose
                     pass
-            logger.warning(
-                "[URL_CONTEXT] attach skipped tenant=%s exception_class=%s",
-                tenant_id,
-                _url_ctx_exc.__class__.__name__,
-            )
+            else:
+                log_url_context_attach_skipped(tenant_id=tenant_id)
 
         ctx.reply_state = _build_reply_state(
             ctx=ctx,

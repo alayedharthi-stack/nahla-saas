@@ -4,14 +4,23 @@ Observation-only: records stage progression without URLs, HTML, or customer text
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from collections.abc import Mapping
+from typing import Any, Dict, Optional, Union
 
 logger = logging.getLogger("nahla.url_context_trace")
 
 SCHEMA_VERSION = "2"
+
+JsonPrimitive = Union[str, int, bool]
+
+_MAX_URL_COUNT = 32
+_MAX_CANDIDATE_COUNT = 32
+_MAX_FETCH_COUNT = 32
+_MAX_HTTP_STATUS = 599
+_MAX_RECEIVED_BYTES = 50_000_000
+_MAX_DURATION_MS = 600_000
 
 _FAILURE_STAGES = frozenset(
     {
@@ -25,6 +34,7 @@ _FAILURE_STAGES = frozenset(
         "extraction",
         "fact_projection",
         "trace_persist",
+        "trace_merge",
     }
 )
 
@@ -54,6 +64,7 @@ _STAGE_TO_EXCEPTION_CLASS = {
     "extraction": "extraction_error",
     "fact_projection": "projection_error",
     "trace_persist": "trace_merge_error",
+    "trace_merge": "trace_merge_error",
 }
 
 _CACHE_STATUSES = frozenset({"miss", "hit", "duplicate_turn", "not_checked"})
@@ -75,24 +86,19 @@ _EXTRACTION_STATUSES = frozenset(
         "not_run",
     }
 )
-
-
-def _content_type_class(content_type: str) -> str:
-    low = str(content_type or "").lower()
-    if "json" in low:
-        return "json"
-    if "html" in low or "xml" in low:
-        return "html"
-    if not low:
-        return "unknown"
-    return "other"
-
-
-def _allowlisted_error_class(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return ""
-    allowed = {
+_CONTENT_TYPE_CLASSES = frozenset({"json", "html", "other"})
+_ENRICHMENT_SOURCES = frozenset(
+    {
+        "safe_http",
+        "tenant_catalog",
+        "rate_limit",
+        "cache",
+        "html_metadata",
+        "json_metadata",
+    }
+)
+_FETCH_ERROR_CLASSES = frozenset(
+    {
         "rate_limited",
         "duplicate_turn_fetch",
         "enrich_exception",
@@ -110,13 +116,203 @@ def _allowlisted_error_class(value: Any) -> str:
         "non_http_scheme",
         "http_error",
         "empty_body",
+        "other",
     }
-    return raw if raw in allowed else "other"
+)
+
+_KNOWN_TRACE_KEYS = frozenset(
+    {
+        "schema_version",
+        "attach_entered",
+        "detector_ran",
+        "url_count",
+        "attach_completed",
+        "failure_stage",
+        "exception_class",
+        "candidate_count",
+        "catalog_lookup_ran",
+        "catalog_match",
+        "rate_limit_checked",
+        "rate_limit_allowed",
+        "cache_status",
+        "fetch_attempted",
+        "external_fetch_count",
+        "fetch_completed",
+        "fetch_result",
+        "fetch_error_class",
+        "http_status",
+        "content_type_class",
+        "received_bytes",
+        "body_truncated",
+        "extraction_ran",
+        "extraction_status",
+        "facts_projected",
+        "reply_state_url_context_present_before_compose",
+        "enrichment_source",
+        "duration_ms",
+    }
+)
+
+
+def _content_type_class(content_type: str) -> str:
+    low = str(content_type or "").lower()
+    if "json" in low:
+        return "json"
+    if "html" in low or "xml" in low:
+        return "html"
+    if not low:
+        return "unknown"
+    return "other"
+
+
+def _allowlisted_error_class(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    return raw if raw in _FETCH_ERROR_CLASSES else "other"
 
 
 def _closed_exception_class(stage: str) -> str:
     stage_name = str(stage or "").strip().lower()
     return _STAGE_TO_EXCEPTION_CLASS.get(stage_name, "unknown_error")
+
+
+def _is_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _is_nonneg_int(value: Any, *, maximum: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if 0 <= value <= maximum:
+        return value
+    return None
+
+
+
+def _safe_trace_merge_rejected() -> Dict[str, JsonPrimitive]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "attach_entered": False,
+        "detector_ran": False,
+        "url_count": 0,
+        "attach_completed": False,
+        "failure_stage": "trace_merge",
+        "exception_class": "trace_merge_error",
+    }
+
+
+def sanitize_url_context_trace(value: object) -> Dict[str, JsonPrimitive] | None:
+    """Single owner for public sparse url_context_trace schema (v2)."""
+    if not isinstance(value, Mapping):
+        return None
+
+    version = value.get("schema_version")
+    if version != SCHEMA_VERSION and str(version) != SCHEMA_VERSION:
+        return None
+
+    attach_entered = _is_bool(value.get("attach_entered"))
+    detector_ran = _is_bool(value.get("detector_ran"))
+    url_count = _is_nonneg_int(value.get("url_count"), maximum=_MAX_URL_COUNT)
+    attach_completed = _is_bool(value.get("attach_completed"))
+    if attach_entered is None or detector_ran is None or url_count is None or attach_completed is None:
+        return None
+
+    typed: Dict[str, JsonPrimitive] = {
+        "schema_version": SCHEMA_VERSION,
+        "attach_entered": attach_entered,
+        "detector_ran": detector_ran,
+        "url_count": url_count,
+        "attach_completed": attach_completed,
+    }
+
+    failure_stage = str(value.get("failure_stage") or "").strip().lower()
+    if failure_stage in _FAILURE_STAGES:
+        typed["failure_stage"] = failure_stage
+        exception_class = str(value.get("exception_class") or "").strip()
+        if exception_class in _EXCEPTION_CLASSES:
+            typed["exception_class"] = exception_class
+        else:
+            typed["exception_class"] = _closed_exception_class(failure_stage)
+
+    if url_count == 0 and not typed.get("failure_stage"):
+        return dict(typed)
+
+    candidate_count = _is_nonneg_int(value.get("candidate_count"), maximum=_MAX_CANDIDATE_COUNT)
+    if candidate_count is not None and candidate_count > 0 and candidate_count != url_count:
+        typed["candidate_count"] = candidate_count
+
+    catalog_lookup_ran = _is_bool(value.get("catalog_lookup_ran"))
+    if catalog_lookup_ran is True:
+        typed["catalog_lookup_ran"] = True
+        catalog_match = _is_bool(value.get("catalog_match"))
+        if catalog_match is True:
+            typed["catalog_match"] = True
+
+    rate_limit_checked = _is_bool(value.get("rate_limit_checked"))
+    rate_limit_allowed = _is_bool(value.get("rate_limit_allowed"))
+    if rate_limit_checked is True and rate_limit_allowed is False:
+        typed["rate_limit_checked"] = True
+        typed["rate_limit_allowed"] = False
+
+    cache_status = str(value.get("cache_status") or "").strip().lower()
+    if cache_status in _CACHE_STATUSES and cache_status != "not_checked":
+        typed["cache_status"] = cache_status
+
+    fetch_attempted = _is_bool(value.get("fetch_attempted"))
+    if fetch_attempted is True:
+        typed["fetch_attempted"] = True
+        fetch_count = _is_nonneg_int(value.get("external_fetch_count"), maximum=_MAX_FETCH_COUNT)
+        if fetch_count is not None and fetch_count > 0:
+            typed["external_fetch_count"] = fetch_count
+        fetch_completed = _is_bool(value.get("fetch_completed"))
+        if fetch_completed is True:
+            typed["fetch_completed"] = True
+        fetch_result = str(value.get("fetch_result") or "").strip()
+        if fetch_result in _FETCH_RESULTS and fetch_result != "not_applicable":
+            typed["fetch_result"] = fetch_result
+        fetch_error_class = str(value.get("fetch_error_class") or "").strip().lower()
+        if fetch_error_class in _FETCH_ERROR_CLASSES:
+            typed["fetch_error_class"] = fetch_error_class
+        http_status = _is_nonneg_int(value.get("http_status"), maximum=_MAX_HTTP_STATUS)
+        if http_status is not None and http_status > 0:
+            typed["http_status"] = http_status
+        content_type_class = str(value.get("content_type_class") or "").strip().lower()
+        if content_type_class in _CONTENT_TYPE_CLASSES:
+            typed["content_type_class"] = content_type_class
+        received_bytes = _is_nonneg_int(value.get("received_bytes"), maximum=_MAX_RECEIVED_BYTES)
+        if received_bytes is not None and received_bytes > 0:
+            typed["received_bytes"] = received_bytes
+        body_truncated = _is_bool(value.get("body_truncated"))
+        if body_truncated is True:
+            typed["body_truncated"] = True
+
+    extraction_ran = _is_bool(value.get("extraction_ran"))
+    if extraction_ran is True:
+        typed["extraction_ran"] = True
+        extraction_status = str(value.get("extraction_status") or "").strip().lower()
+        if extraction_status in _EXTRACTION_STATUSES and extraction_status != "not_run":
+            typed["extraction_status"] = extraction_status
+
+    facts_projected = _is_bool(value.get("facts_projected"))
+    if facts_projected is True:
+        typed["facts_projected"] = True
+
+    reply_state_present = _is_bool(value.get("reply_state_url_context_present_before_compose"))
+    if reply_state_present is True:
+        typed["reply_state_url_context_present_before_compose"] = True
+
+    enrichment_source = str(value.get("enrichment_source") or "").strip().lower()
+    if enrichment_source in _ENRICHMENT_SOURCES:
+        typed["enrichment_source"] = enrichment_source
+
+    duration_ms = _is_nonneg_int(value.get("duration_ms"), maximum=_MAX_DURATION_MS)
+    if duration_ms is not None and duration_ms > 0:
+        typed["duration_ms"] = duration_ms
+
+    return dict(typed)
 
 
 class UrlContextTraceRecorder:
@@ -277,7 +473,7 @@ class UrlContextTraceRecorder:
             int((time.monotonic() - self._started) * 1000.0),
         )
 
-    def to_sparse_public_dict(self) -> Dict[str, Any]:
+    def _build_sparse_candidate(self) -> Dict[str, Any]:
         raw = self._fields
         out: Dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
@@ -361,7 +557,19 @@ class UrlContextTraceRecorder:
 
         return out
 
-    def to_public_dict(self) -> Dict[str, Any]:
+    def to_sparse_public_dict(self) -> Dict[str, JsonPrimitive]:
+        sanitized = sanitize_url_context_trace(self._build_sparse_candidate())
+        if sanitized is not None:
+            return sanitized
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "attach_entered": False,
+            "detector_ran": False,
+            "url_count": 0,
+            "attach_completed": False,
+        }
+
+    def to_public_dict(self) -> Dict[str, JsonPrimitive]:
         return self.to_sparse_public_dict()
 
 
@@ -377,7 +585,7 @@ def log_url_context_attach_failure(
     if not payload.get("failure_stage") and not payload.get("exception_class"):
         return
     logger.warning(
-        "[URL_CONTEXT] attach_failure tenant=%s stage=%s exception_class=%s "
+        "[URL_CONTEXT] event=url_context_attach_failure tenant=%s failure_stage=%s error_class=%s "
         "url_count=%s fetch_attempted=%s fetch_result=%s",
         tenant_id,
         payload.get("failure_stage") or "-",
@@ -385,6 +593,14 @@ def log_url_context_attach_failure(
         payload.get("url_count"),
         payload.get("fetch_attempted"),
         payload.get("fetch_result"),
+    )
+
+
+def log_url_context_attach_skipped(*, tenant_id: int) -> None:
+    """Safe attach-skip log when trace recorder is unavailable."""
+    logger.warning(
+        "[URL_CONTEXT] event=url_context_attach_failure tenant=%s failure_stage=attach error_class=attach_error",
+        tenant_id,
     )
 
 
@@ -397,31 +613,46 @@ def persist_url_context_trace(
     if trace is None:
         return
     try:
-        target["url_context_trace"] = trace.to_sparse_public_dict()
+        sanitized = sanitize_url_context_trace(trace.to_sparse_public_dict())
+        if sanitized is not None:
+            target["url_context_trace"] = sanitized
     except Exception:  # noqa: BLE001  # noqa: silent-ok — observability must not block reply
-        logger.warning("[URL_CONTEXT_TRACE] persist_failed")
+        logger.warning(
+            "[URL_CONTEXT_TRACE] event=url_context_trace_persist_failed failure_stage=trace_persist error_class=trace_merge_error"
+        )
 
 
 def merge_url_context_trace_into_extra_metadata(
     target: Dict[str, Any],
     brain_result: Optional[Dict[str, Any]],
 ) -> None:
-    """Copy sparse url_context_trace from brain_result into outbound extra_metadata."""
+    """Copy sanitized url_context_trace from brain_result into outbound extra_metadata."""
     if not isinstance(target, dict) or not isinstance(brain_result, dict):
         return
     trace = brain_result.get("url_context_trace")
-    if not isinstance(trace, dict) or not trace:
+    if not isinstance(trace, Mapping) or not trace:
         return
     try:
-        target["url_context_trace"] = json.loads(json.dumps(trace))
+        sanitized = sanitize_url_context_trace(trace)
+        if sanitized is None:
+            logger.warning(
+                "[URL_CONTEXT_TRACE] event=url_context_trace_merge_rejected failure_stage=trace_merge error_class=trace_merge_error"
+            )
+            sanitized = _safe_trace_merge_rejected()
+        target["url_context_trace"] = dict(sanitized)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — observability must not block reply
-        logger.warning("[URL_CONTEXT_TRACE] merge_failed")
+        logger.warning(
+            "[URL_CONTEXT_TRACE] event=url_context_trace_merge_failed failure_stage=trace_merge error_class=trace_merge_error"
+        )
 
 
 __all__ = [
     "SCHEMA_VERSION",
+    "JsonPrimitive",
     "UrlContextTraceRecorder",
     "log_url_context_attach_failure",
+    "log_url_context_attach_skipped",
     "merge_url_context_trace_into_extra_metadata",
     "persist_url_context_trace",
+    "sanitize_url_context_trace",
 ]

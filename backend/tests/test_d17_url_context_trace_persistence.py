@@ -273,19 +273,29 @@ def test_persistence_d_merge_failure_non_blocking(db, tenant_ctx) -> None:
             _run_live_turn(db=db, tenant_ctx=tenant_ctx, message=PUBLIC_PAGE_URL)
         )
         brain_result = dict(turn_result.brain_result or {})
-        trace = dict(brain_result.get("url_context_trace") or {})
-        trace["__non_serializable__"] = {1}
-        brain_result["url_context_trace"] = trace
-        extra = _otp_merge_save_metadata(None, {}, brain_result=brain_result)
+        brain_result["url_context_trace"] = {
+            "schema_version": "99",
+            "attach_entered": True,
+            "detector_ran": True,
+            "url_count": 1,
+            "attach_completed": True,
+            "raw_url": "https://evil.test/SECRET",
+        }
+        extra = _otp_merge_save_metadata(None, {"quality_observability": {"ok": True}}, brain_result=brain_result)
     finally:
         root.removeHandler(handler)
 
     assert turn_result.reply_text
-    assert "url_context_trace" not in extra
+    assert extra.get("quality_observability") == {"ok": True}
+    trace = extra.get("url_context_trace") or {}
+    assert trace.get("failure_stage") == "trace_merge"
+    assert trace.get("exception_class") == "trace_merge_error"
+    assert "raw_url" not in trace
     assert captured.get("compose_count") == 1
-    assert any("merge_failed" in line for line in records)
+    assert any("merge_rejected" in line for line in records)
     row = _persist_outbound(db, tenant_ctx, turn_result.reply_text, extra)
-    assert "url_context_trace" not in dict(row.extra_metadata or {})
+    stored = dict(row.extra_metadata or {}).get("url_context_trace") or {}
+    assert stored.get("failure_stage") == "trace_merge"
 
 
 _SENSITIVE_TRACE_PATTERNS = (

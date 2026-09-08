@@ -430,7 +430,7 @@ def test_k_observability_writer_failure_non_blocking() -> None:
 
     assert out.get("reply")
     assert captured.get("compose_count") == 1
-    assert any("persist_failed" in line for line in records)
+    assert any("persist_failed" in line or "trace_persist" in line for line in records)
 
 
 def test_l_behavior_regression_unchanged_with_trace() -> None:
