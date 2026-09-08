@@ -7,9 +7,10 @@ lifecycle adapter provider passed to normalize_external_lifecycle_intent.
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -143,6 +144,16 @@ class TestProviderIdentityHelpers:
         adapter = SimpleNamespace(platform="unknown_platform_xyz")
         assert _resolve_canonical_lifecycle_provider(adapter) is None
 
+    def test_order_channel_source_strips_control_chars_and_bounds_length(self):
+        dirty = "merchant-dashboard\x00\r\n\t" + ("x" * 200)
+        normalised = {"source": dirty}
+        bounded = _extract_order_channel_source(normalised)
+        assert bounded is not None
+        assert "\x00" not in bounded
+        assert "\r" not in bounded
+        assert "\n" not in bounded
+        assert len(bounded) <= 128
+
 
 class TestStoreSyncDispatcherProviderIdentity:
     @patch("services.outcome_tracker.record_order_outcome")
@@ -176,7 +187,7 @@ class TestStoreSyncDispatcherProviderIdentity:
         )
 
         order = db.query(Order).filter_by(tenant_id=tenant.id).one()
-        assert order.source == "salla"
+        assert order.source == "merchant-dashboard"
         assert (order.extra_metadata or {}).get("order_channel_source") == "merchant-dashboard"
         ledger = db.query(CommerceLifecycleNotificationLedger).filter_by(
             tenant_id=tenant.id, order_id=order.id
@@ -217,7 +228,7 @@ class TestStoreSyncDispatcherProviderIdentity:
         )
 
         order = db.query(Order).filter_by(tenant_id=tenant.id).one()
-        assert order.source == "salla"
+        assert order.source == "api-app-12345"
         assert (order.extra_metadata or {}).get("order_channel_source") == "api-app-12345"
         assert db.query(CommerceLifecycleNotificationLedger).count() == 1
 
@@ -380,7 +391,7 @@ class TestStoreSyncDispatcherProviderIdentity:
             _handle_external_lifecycle_transition_best_effort(
                 svc,
                 order=order,
-                lifecycle_provider="salla",
+                adapter=SimpleNamespace(platform="salla"),
                 order_channel_source="merchant-dashboard",
                 raw_previous_status="in_progress",
                 raw_current_status="in_progress",
@@ -422,7 +433,7 @@ class TestStoreSyncDispatcherProviderIdentity:
             _handle_external_lifecycle_transition_best_effort(
                 svc,
                 order=order,
-                lifecycle_provider=None,
+                adapter=SimpleNamespace(platform="unknown_platform_xyz"),
                 order_channel_source="merchant-dashboard",
                 raw_previous_status=None,
                 raw_current_status="in_progress",
@@ -437,14 +448,20 @@ class TestStoreSyncDispatcherProviderIdentity:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
-    def test_model_call_count_zero_on_dispatch_path(
+    def test_model_gateway_spies_not_called_on_dispatch_path(
         self,
         mock_caps,
         mock_resolve_tpl,
         mock_send,
         _mock_attr,
         _mock_outcome,
+        monkeypatch,
     ):
+        model = MagicMock()
+        fake_ai_client = types.ModuleType("services.ai_client")
+        fake_ai_client.generate_cart_recovery_text = model
+        monkeypatch.setitem(sys.modules, "services.ai_client", fake_ai_client)
+
         db, _engine = make_scenario_db()
         _ensure_webhook_dedupe_index(db)
         tenant = seed_tenant(db, name="متجر تجريبي عام")
@@ -465,3 +482,47 @@ class TestStoreSyncDispatcherProviderIdentity:
         )
         assert mock_send.await_count == 1
         assert db.query(CommerceLifecycleNotificationLedger).count() == 1
+        model.assert_not_called()
+
+    @patch("services.outcome_tracker.record_order_outcome")
+    @patch("services.offer_attribution_service.attribute_order_to_decision")
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    @patch(
+        "core.commerce_lifecycle.dispatch.normalize_external_lifecycle_intent",
+        side_effect=RuntimeError("normalizer exploded"),
+    )
+    def test_normalizer_exception_does_not_break_webhook_upsert(
+        self,
+        _mock_normalize,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_send,
+        _mock_attr,
+        _mock_outcome,
+    ):
+        db, _engine = make_scenario_db()
+        _ensure_webhook_dedupe_index(db)
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        store_id = "STORE-NORM-EX-8809"
+        _seed_salla_integration(db, tenant.id, store_id)
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+        mock_send.return_value = ("sent", {"wa_message_id": "wamid.norm.ex"})
+
+        _dispatch_order_created(
+            db,
+            tenant_id=tenant.id,
+            store_id=store_id,
+            source="merchant-dashboard",
+            status_slug="in_progress",
+            external_event_id="salla-wh-evt-norm-ex",
+            external_id=8801009,
+        )
+
+        order = db.query(Order).filter_by(tenant_id=tenant.id).one()
+        assert order.external_id == "8801009"
+        assert order.source == "merchant-dashboard"
+        assert db.query(CommerceLifecycleNotificationLedger).count() == 0
+        mock_send.assert_not_awaited()

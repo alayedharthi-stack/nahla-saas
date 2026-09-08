@@ -1023,10 +1023,20 @@ def _lifecycle_dispatch_owns_tenant(tenant_id: int) -> bool:
         return False
 
 
+_ORDER_CHANNEL_SOURCE_MAX_LEN = 128
+
+
 def _extract_order_channel_source(normalised: Mapping[str, Any]) -> Optional[str]:
     """Merchant order-creation channel (dashboard, API app, etc.) — not lifecycle provider."""
     raw = str(normalised.get("source") or "").strip()
-    return raw or None
+    if not raw:
+        return None
+    cleaned = "".join(
+        ch for ch in raw if ch.isprintable() and ch not in "\r\n\t\x00"
+    ).strip()
+    if not cleaned:
+        return None
+    return cleaned[:_ORDER_CHANNEL_SOURCE_MAX_LEN]
 
 
 def _resolve_canonical_lifecycle_provider(adapter: Any) -> Optional[str]:
@@ -1048,11 +1058,6 @@ def _resolve_canonical_lifecycle_provider(adapter: Any) -> Optional[str]:
     return platform
 
 
-def _resolve_platform_order_source(adapter: Any) -> Optional[str]:
-    """Platform slug for ``Order.source`` — adapter-owned, never order channel."""
-    return str(getattr(adapter, "platform", None) or "").strip().lower() or None
-
-
 def _attach_lifecycle_observation(
     normalized_order: Dict[str, Any],
     observation: str,
@@ -1071,7 +1076,7 @@ async def _handle_external_lifecycle_transition_best_effort(
     sync: "StoreSyncService",
     *,
     order: Any,
-    lifecycle_provider: Optional[str],
+    adapter: Any,
     order_channel_source: Optional[str] = None,
     raw_previous_status: Optional[str],
     raw_current_status: str,
@@ -1079,56 +1084,24 @@ async def _handle_external_lifecycle_transition_best_effort(
     raw_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Dispatch lifecycle templates when enabled; otherwise shadow-only audit."""
-    from store_integration.lifecycle_normalization import (  # noqa: PLC0415
-        normalize_external_lifecycle_intent,
-        resolve_lifecycle_intent_normalizer,
-    )
-
     order_id = getattr(order, "id", None)
     channel = order_channel_source or _extract_order_channel_source(normalized_order)
-    provider = str(lifecycle_provider or "").strip().lower() or None
-
-    if not provider or resolve_lifecycle_intent_normalizer(provider) is None:
-        logger.warning(
-            "[StoreSync/lifecycle] provider_unresolved tenant=%s order=%s "
-            "lifecycle_provider=%s order_channel_source=%s reason=adapter_normalizer_unavailable",
-            sync.tenant_id,
-            order_id,
-            lifecycle_provider,
-            channel,
-        )
-        return
-
-    intent, norm_reason = normalize_external_lifecycle_intent(
-        provider=provider,
-        raw_previous_status=raw_previous_status,
-        raw_current_status=raw_current_status,
-        normalized_order=normalized_order,
-    )
-    intent_value = getattr(intent, "value", None) if intent is not None else None
-    logger.info(
-        "[StoreSync/lifecycle] intent_resolved tenant=%s order=%s "
-        "lifecycle_provider=%s order_channel_source=%s intent=%s normalization_reason=%s",
-        sync.tenant_id,
-        order_id,
-        provider,
-        channel,
-        intent_value,
-        norm_reason,
-    )
-
-    if intent is None:
-        logger.info(
-            "[StoreSync/lifecycle] dispatch_skipped tenant=%s order=%s "
-            "lifecycle_provider=%s order_channel_source=%s reason=%s",
-            sync.tenant_id,
-            order_id,
-            provider,
-            channel,
-            norm_reason,
-        )
+    provider: Optional[str] = None
 
     try:
+        provider = _resolve_canonical_lifecycle_provider(adapter)
+        if not provider:
+            logger.warning(
+                "[StoreSync/lifecycle] provider_unresolved tenant=%s order=%s "
+                "lifecycle_provider=%s order_channel_source=%s "
+                "reason=adapter_normalizer_unavailable",
+                sync.tenant_id,
+                order_id,
+                None,
+                channel,
+            )
+            return
+
         from core.commerce_lifecycle.dispatch import (  # noqa: PLC0415
             commerce_lifecycle_dispatch_enabled,
             dispatch_external_lifecycle_notification,
@@ -1160,20 +1133,24 @@ async def _handle_external_lifecycle_transition_best_effort(
             return
     except Exception:
         logger.exception(
-            "[StoreSync] external lifecycle dispatch failed tenant=%s order=%s",
+            "[StoreSync] external lifecycle dispatch failed tenant=%s order=%s "
+            "lifecycle_provider=%s order_channel_source=%s",
             sync.tenant_id,
             order_id,
+            provider,
+            channel,
         )
 
-    _record_external_lifecycle_shadow_best_effort(
-        sync,
-        order=order,
-        provider=provider,
-        raw_previous_status=raw_previous_status,
-        raw_current_status=raw_current_status,
-        normalized_order=normalized_order,
-        raw_payload=raw_payload,
-    )
+    if provider:
+        _record_external_lifecycle_shadow_best_effort(
+            sync,
+            order=order,
+            provider=provider,
+            raw_previous_status=raw_previous_status,
+            raw_current_status=raw_current_status,
+            normalized_order=normalized_order,
+            raw_payload=raw_payload,
+        )
 
 
 def _merge_order_extra_metadata(
@@ -2317,11 +2294,12 @@ class StoreSyncService:
             if _amount == 0.0:
                 zero_total_count += 1
 
-            # Platform slug for Order.source — never the merchant channel
-            # (dashboard/API) carried in normalised.source.
-            lifecycle_provider = _resolve_canonical_lifecycle_provider(adapter)
+            adapter_source = (
+                normalised.get("source")
+                or getattr(adapter, "platform", None)
+                or "salla"
+            )
             order_channel_source = _extract_order_channel_source(normalised)
-            adapter_source = _resolve_platform_order_source(adapter) or "unknown"
 
             existing = (
                 self.db.query(Order)
@@ -2347,7 +2325,7 @@ class StoreSyncService:
                 await _handle_external_lifecycle_transition_best_effort(
                     self,
                     order=existing,
-                    lifecycle_provider=lifecycle_provider,
+                    adapter=adapter,
                     order_channel_source=order_channel_source,
                     raw_previous_status=prev_status,
                     raw_current_status=normalised_status,
@@ -2483,7 +2461,7 @@ class StoreSyncService:
                 await _handle_external_lifecycle_transition_best_effort(
                     self,
                     order=new_row,
-                    lifecycle_provider=lifecycle_provider,
+                    adapter=adapter,
                     order_channel_source=order_channel_source,
                     raw_previous_status=None,
                     raw_current_status=normalised_status,
@@ -4190,10 +4168,12 @@ class StoreSyncService:
             .first()
         )
         adapter = self._get_adapter()
-        lifecycle_provider = _resolve_canonical_lifecycle_provider(adapter)
         order_channel_source = _extract_order_channel_source(normalised)
-        # Order.source is the adapter platform — never merchant-dashboard/API channel.
-        webhook_source = _resolve_platform_order_source(adapter) or "unknown"
+        webhook_source = (
+            normalised.get("source")
+            or getattr(adapter, "platform", None)
+            or "unknown"
+        )
 
         if order_row is not None:
             lifecycle_prev_status = order_row.status
@@ -4579,7 +4559,7 @@ class StoreSyncService:
             await _handle_external_lifecycle_transition_best_effort(
                 self,
                 order=order_row,
-                lifecycle_provider=lifecycle_provider,
+                adapter=adapter,
                 order_channel_source=order_channel_source,
                 raw_previous_status=lifecycle_prev_status,
                 raw_current_status=normalised["status"],
