@@ -4120,13 +4120,6 @@ class MerchantBrain:
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
         reply: str = await self._composer.compose(decision, result, ctx)
-        _uct = getattr(ctx, "url_context_trace", None)
-        if _uct is not None:
-            try:
-                if bool(_uct.to_public_dict().get("facts_projected")):
-                    _uct.mark_model_context_bound(True)
-            except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block compose
-                pass
         result.data["compose_reply_candidate"] = str(reply or "").strip()
         # persona_compose span is recorded inside FactBoundPersonaComposer.
         # post_compose starts after compose returns (provenance / audits).
@@ -7790,6 +7783,7 @@ def _build_reply_state(
         if _uct is not None:
             try:
                 _uct.mark_facts_projected(bool(_url_facts))
+                _uct.mark_reply_state_url_context_present_before_compose(bool(_url_facts))
             except Exception:  # noqa: BLE001  # noqa: silent-ok — trace must not block compose
                 pass
     except Exception as _url_facts_exc:  # noqa: BLE001  # noqa: silent-ok — URL facts must not block compose

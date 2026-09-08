@@ -303,6 +303,7 @@ def _otp_merge_save_metadata(
     persona_meta: Optional[Dict[str, Any]] = None,
     *,
     persona_compose_event: Optional[Dict[str, Any]] = None,
+    brain_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from core.outbound_text_policy import merge_policy_into_extra_metadata  # noqa: PLC0415
     from modules.ai.brain.persona.integration import (  # noqa: PLC0415
@@ -313,6 +314,14 @@ def _otp_merge_save_metadata(
         dict(persona_meta or {}),
         persona_compose_event,
     )
+    try:
+        from modules.ai.brain.observability.url_context_trace import (  # noqa: PLC0415
+            merge_url_context_trace_into_extra_metadata,
+        )
+
+        merge_url_context_trace_into_extra_metadata(base, brain_result)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — url context trace must not block reply
+        pass
     # Measurement-only: attach turn_timing snapshot (never the live object).
     try:
         from core.turn_latency import (  # noqa: PLC0415
@@ -10754,6 +10763,7 @@ async def _handle_merchant_message(
                     persona_compose_event=(
                         _payment_persona_compose_event or _brain_persona_compose_event
                     ),
+                    brain_result=brain_result if isinstance(brain_result, dict) else None,
                 ),
             )
             try:

@@ -4,13 +4,14 @@ Observation-only: records stage progression without URLs, HTML, or customer text
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nahla.url_context_trace")
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 _FAILURE_STAGES = frozenset(
     {
@@ -26,6 +27,34 @@ _FAILURE_STAGES = frozenset(
         "trace_persist",
     }
 )
+
+_EXCEPTION_CLASSES = frozenset(
+    {
+        "detector_error",
+        "catalog_lookup_error",
+        "rate_limit_error",
+        "cache_error",
+        "fetch_error",
+        "extraction_error",
+        "projection_error",
+        "attach_error",
+        "trace_merge_error",
+        "unknown_error",
+    }
+)
+
+_STAGE_TO_EXCEPTION_CLASS = {
+    "attach": "attach_error",
+    "detector": "detector_error",
+    "enrichment": "fetch_error",
+    "catalog_lookup": "catalog_lookup_error",
+    "rate_limit": "rate_limit_error",
+    "cache": "cache_error",
+    "fetch": "fetch_error",
+    "extraction": "extraction_error",
+    "fact_projection": "projection_error",
+    "trace_persist": "trace_merge_error",
+}
 
 _CACHE_STATUSES = frozenset({"miss", "hit", "duplicate_turn", "not_checked"})
 _FETCH_RESULTS = frozenset(
@@ -85,6 +114,11 @@ def _allowlisted_error_class(value: Any) -> str:
     return raw if raw in allowed else "other"
 
 
+def _closed_exception_class(stage: str) -> str:
+    stage_name = str(stage or "").strip().lower()
+    return _STAGE_TO_EXCEPTION_CLASS.get(stage_name, "unknown_error")
+
+
 class UrlContextTraceRecorder:
     """Turn-local D17 attach trace. One instance per BrainContext."""
 
@@ -121,12 +155,11 @@ class UrlContextTraceRecorder:
             "author_present": False,
             "preview_image_present": False,
             "facts_projected": False,
-            "model_context_bound": False,
+            "reply_state_url_context_present_before_compose": False,
             "attach_completed": False,
             "failure_stage": "",
             "exception_class": "",
             "duration_ms": 0,
-            "provider_domain": "",
             "enrichment_source": "",
         }
 
@@ -199,9 +232,6 @@ class UrlContextTraceRecorder:
         )
         preview = dict(getattr(result, "preview_image_metadata", None) or {})
         self._fields["preview_image_present"] = bool(preview.get("url_present"))
-        domain = str(getattr(result, "provider_domain", "") or "").strip().lower()
-        if domain and "." in domain and "://" not in domain:
-            self._fields["provider_domain"] = domain
         source = str(getattr(result, "source", "") or "").strip().lower()
         if source:
             self._fields["enrichment_source"] = source
@@ -226,8 +256,8 @@ class UrlContextTraceRecorder:
     def mark_facts_projected(self, projected: bool) -> None:
         self._fields["facts_projected"] = bool(projected)
 
-    def mark_model_context_bound(self, bound: bool) -> None:
-        self._fields["model_context_bound"] = bool(bound)
+    def mark_reply_state_url_context_present_before_compose(self, present: bool) -> None:
+        self._fields["reply_state_url_context_present_before_compose"] = bool(present)
 
     def mark_external_fetch_count(self, count: int) -> None:
         self._fields["external_fetch_count"] = max(0, int(count or 0))
@@ -238,8 +268,7 @@ class UrlContextTraceRecorder:
             self._fields["failure_stage"] = stage_name
         else:
             self._fields["failure_stage"] = "attach"
-        if exception is not None:
-            self._fields["exception_class"] = type(exception).__name__
+        self._fields["exception_class"] = _closed_exception_class(stage_name)
 
     def finalize(self, *, completed: bool = True) -> None:
         self._fields["attach_completed"] = bool(completed)
@@ -248,8 +277,92 @@ class UrlContextTraceRecorder:
             int((time.monotonic() - self._started) * 1000.0),
         )
 
+    def to_sparse_public_dict(self) -> Dict[str, Any]:
+        raw = self._fields
+        out: Dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "attach_entered": bool(raw.get("attach_entered")),
+            "detector_ran": bool(raw.get("detector_ran")),
+            "url_count": max(0, int(raw.get("url_count") or 0)),
+            "attach_completed": bool(raw.get("attach_completed")),
+        }
+        failure = str(raw.get("failure_stage") or "").strip()
+        if failure:
+            out["failure_stage"] = failure
+        exc = str(raw.get("exception_class") or "").strip()
+        if exc in _EXCEPTION_CLASSES:
+            out["exception_class"] = exc
+
+        if out["url_count"] == 0 and not failure:
+            return out
+
+        candidate_count = int(raw.get("candidate_count") or 0)
+        if candidate_count > 0 and candidate_count != out["url_count"]:
+            out["candidate_count"] = candidate_count
+
+        if raw.get("catalog_lookup_ran"):
+            out["catalog_lookup_ran"] = True
+            if raw.get("catalog_match"):
+                out["catalog_match"] = True
+
+        if raw.get("rate_limit_checked"):
+            allowed = raw.get("rate_limit_allowed")
+            if allowed is False:
+                out["rate_limit_checked"] = True
+                out["rate_limit_allowed"] = False
+
+        cache = str(raw.get("cache_status") or "").strip()
+        if cache and cache != "not_checked":
+            out["cache_status"] = cache
+
+        if raw.get("fetch_attempted"):
+            out["fetch_attempted"] = True
+            fetch_count = int(raw.get("external_fetch_count") or 0)
+            if fetch_count > 0:
+                out["external_fetch_count"] = fetch_count
+            if raw.get("fetch_completed"):
+                out["fetch_completed"] = True
+            fetch_result = str(raw.get("fetch_result") or "").strip()
+            if fetch_result in _FETCH_RESULTS and fetch_result != "not_applicable":
+                out["fetch_result"] = fetch_result
+            err = str(raw.get("fetch_error_class") or "").strip()
+            if err:
+                out["fetch_error_class"] = err
+            status = int(raw.get("http_status") or 0)
+            if status > 0:
+                out["http_status"] = status
+            ctype = str(raw.get("content_type_class") or "").strip()
+            if ctype and ctype != "unknown":
+                out["content_type_class"] = ctype
+            received = int(raw.get("received_bytes") or 0)
+            if received > 0:
+                out["received_bytes"] = received
+            if raw.get("body_truncated"):
+                out["body_truncated"] = True
+
+        if raw.get("extraction_ran"):
+            out["extraction_ran"] = True
+            est = str(raw.get("extraction_status") or "").strip()
+            if est and est not in {"not_run"}:
+                out["extraction_status"] = est
+
+        if raw.get("facts_projected"):
+            out["facts_projected"] = True
+        if raw.get("reply_state_url_context_present_before_compose"):
+            out["reply_state_url_context_present_before_compose"] = True
+
+        source = str(raw.get("enrichment_source") or "").strip()
+        if source:
+            out["enrichment_source"] = source
+
+        duration = int(raw.get("duration_ms") or 0)
+        if duration > 0:
+            out["duration_ms"] = duration
+
+        return out
+
     def to_public_dict(self) -> Dict[str, Any]:
-        return dict(self._fields)
+        return self.to_sparse_public_dict()
 
 
 def log_url_context_attach_failure(
@@ -260,7 +373,7 @@ def log_url_context_attach_failure(
     """Production-visible failure log without raw URLs or exception messages."""
     if trace is None:
         return
-    payload = trace.to_public_dict()
+    payload = trace.to_sparse_public_dict()
     if not payload.get("failure_stage") and not payload.get("exception_class"):
         return
     logger.warning(
@@ -280,18 +393,35 @@ def persist_url_context_trace(
     target: Dict[str, Any],
     trace: Optional[UrlContextTraceRecorder],
 ) -> None:
-    """Attach trace to outbound operational metadata. Fail-open."""
+    """Attach sparse trace to brain outbound dict. Fail-open."""
     if trace is None:
         return
     try:
-        target["url_context_trace"] = trace.to_public_dict()
+        target["url_context_trace"] = trace.to_sparse_public_dict()
     except Exception:  # noqa: BLE001  # noqa: silent-ok — observability must not block reply
-        logger.debug("[URL_CONTEXT_TRACE] persist skipped", exc_info=True)
+        logger.warning("[URL_CONTEXT_TRACE] persist_failed")
+
+
+def merge_url_context_trace_into_extra_metadata(
+    target: Dict[str, Any],
+    brain_result: Optional[Dict[str, Any]],
+) -> None:
+    """Copy sparse url_context_trace from brain_result into outbound extra_metadata."""
+    if not isinstance(target, dict) or not isinstance(brain_result, dict):
+        return
+    trace = brain_result.get("url_context_trace")
+    if not isinstance(trace, dict) or not trace:
+        return
+    try:
+        target["url_context_trace"] = json.loads(json.dumps(trace))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — observability must not block reply
+        logger.warning("[URL_CONTEXT_TRACE] merge_failed")
 
 
 __all__ = [
     "SCHEMA_VERSION",
     "UrlContextTraceRecorder",
     "log_url_context_attach_failure",
+    "merge_url_context_trace_into_extra_metadata",
     "persist_url_context_trace",
 ]

@@ -25,6 +25,7 @@ for _p in (_REPO, _BACKEND, os.path.join(_REPO, "database")):
         sys.path.insert(0, _p)
 
 from modules.ai.brain.facts.url_context_facts import URL_CONTEXT_USER_TURN_BEGIN  # noqa: E402
+from modules.ai.brain.observability.url_context_trace import UrlContextTraceRecorder  # noqa: E402
 from modules.ai.brain.pipeline import get_brain  # noqa: E402
 from modules.ai.brain.types import (  # noqa: E402
     ActionResult,
@@ -64,7 +65,13 @@ FORBIDDEN_TRACE_PATTERNS = (
     r"https://shop\.example\.test/p/shirt",
     r"<html",
     r"og:title",
+    r"provider_domain",
+    r"RuntimeError",
 )
+
+
+def _trace_bytes(trace: dict[str, Any]) -> int:
+    return len(json.dumps(trace, ensure_ascii=False).encode("utf-8"))
 
 
 def _trace(out: dict[str, Any]) -> dict[str, Any]:
@@ -209,12 +216,13 @@ def test_a_success_url_trace_via_merchant_brain_process() -> None:
     assert trace["attach_entered"] is True
     assert trace["detector_ran"] is True
     assert trace["url_count"] >= 1
-    assert trace["candidate_count"] >= 1
+    assert trace.get("candidate_count", trace["url_count"]) >= 1
     assert trace["fetch_attempted"] is True
     assert trace["external_fetch_count"] == 1
     assert trace["facts_projected"] is True
-    assert trace["model_context_bound"] is True
+    assert trace["reply_state_url_context_present_before_compose"] is True
     assert trace["attach_completed"] is True
+    assert _trace_bytes(trace) <= 700
     assert URL_CONTEXT_USER_TURN_BEGIN in captured.get("message", "")
     _assert_trace_privacy(json.dumps(trace, ensure_ascii=False))
 
@@ -225,9 +233,9 @@ def test_b_no_url_trace() -> None:
     assert trace["attach_entered"] is True
     assert trace["detector_ran"] is True
     assert trace["url_count"] == 0
-    assert trace["fetch_attempted"] is False
-    assert trace["external_fetch_count"] == 0
-    assert trace["fetch_result"] in {"not_applicable", "not_attempted"}
+    assert "fetch_attempted" not in trace
+    assert "external_fetch_count" not in trace
+    assert _trace_bytes(trace) <= 160
 
 
 def test_c_catalog_precedence_trace() -> None:
@@ -255,8 +263,8 @@ def test_c_catalog_precedence_trace() -> None:
     trace = _trace(out)
     assert trace["catalog_lookup_ran"] is True
     assert trace["catalog_match"] is True
-    assert trace["external_fetch_count"] == 0
-    assert trace["fetch_attempted"] is False
+    assert "external_fetch_count" not in trace
+    assert "fetch_attempted" not in trace
     assert trace["facts_projected"] is True
     assert trace.get("enrichment_source") == "tenant_catalog"
 
@@ -271,8 +279,8 @@ def test_d_rate_limited_trace() -> None:
     trace = _trace(out)
     assert trace["rate_limit_checked"] is True
     assert trace["rate_limit_allowed"] is False
-    assert trace["fetch_attempted"] is False
-    assert trace["external_fetch_count"] == 0
+    assert "fetch_attempted" not in trace
+    assert "external_fetch_count" not in trace
     assert captured.get("compose_count") == 1
 
 
@@ -288,8 +296,8 @@ def test_e_cache_hit_trace() -> None:
     )
     trace = _trace(out)
     assert trace["cache_status"] == "hit"
-    assert trace["fetch_attempted"] is False
-    assert trace["external_fetch_count"] == 0
+    assert "fetch_attempted" not in trace
+    assert "external_fetch_count" not in trace
 
 
 def test_f_fetch_unavailable_trace() -> None:
@@ -332,8 +340,9 @@ def test_g_attach_exception_records_trace() -> None:
     trace = _trace(out)
     assert trace["attach_entered"] is True
     assert trace["failure_stage"] == "attach"
-    assert trace["exception_class"] == "RuntimeError"
+    assert trace["exception_class"] == "attach_error"
     assert "probe" not in json.dumps(trace)
+    assert _trace_bytes(trace) <= 700
     assert captured.get("compose_count") == 1
 
 
@@ -386,28 +395,42 @@ def test_j_concurrent_traces_do_not_mix() -> None:
         assert a["url_count"] >= 1
         assert b["url_count"] == 0
         assert a["fetch_attempted"] is True
-        assert b["fetch_attempted"] is False
+        assert "fetch_attempted" not in b
 
     asyncio.run(_main())
 
 
 def test_k_observability_writer_failure_non_blocking() -> None:
-    def _boom(*_a: Any, **_k: Any) -> None:
-        raise RuntimeError("trace writer failed")
+    records: list[str] = []
 
-    out, captured = asyncio.run(
-        _run_brain_process(
-            message=PUBLIC_PAGE_URL,
-            extra_patches=[
-                patch(
-                    "modules.ai.brain.observability.url_context_trace.persist_url_context_trace",
-                    side_effect=_boom,
-                )
-            ],
+    class _Cap(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(self.format(record))
+
+    root = logging.getLogger("nahla.url_context_trace")
+    handler = _Cap()
+    root.addHandler(handler)
+    root.setLevel(logging.WARNING)
+
+    try:
+        out, captured = asyncio.run(
+            _run_brain_process(
+                message=PUBLIC_PAGE_URL,
+                extra_patches=[
+                    patch.object(
+                        UrlContextTraceRecorder,
+                        "to_sparse_public_dict",
+                        side_effect=RuntimeError("trace writer failed"),
+                    )
+                ],
+            )
         )
-    )
+    finally:
+        root.removeHandler(handler)
+
     assert out.get("reply")
     assert captured.get("compose_count") == 1
+    assert any("persist_failed" in line for line in records)
 
 
 def test_l_behavior_regression_unchanged_with_trace() -> None:
