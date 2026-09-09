@@ -2473,6 +2473,16 @@ def _looks_like_store_link_request(
     msg = _normalise_for_match(customer_msg)
     if not msg:
         return False
+    try:
+        from modules.ai.brain.commerce.link_intent import (  # noqa: PLC0415
+            LinkIntentType,
+            resolve_inbound_link_intent,
+        )
+
+        if resolve_inbound_link_intent(customer_msg or "") == LinkIntentType.PRODUCT_URL:
+            return False
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — canonical link probe is best-effort
+        pass
     # Drop punctuation that fragments the phrase match.
     msg_compact = re.sub(r"[؟?,،.!:;\-\u060c]+", " ", msg)
     msg_compact = re.sub(r"\s+", " ", msg_compact).strip()

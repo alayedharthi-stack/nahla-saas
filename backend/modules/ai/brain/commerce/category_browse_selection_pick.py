@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 
+from core.native_product_public_url import is_valid_https_product_url
+
 from ..decision.actions import ACTION_SEARCH_PRODUCTS
 from ..types import BrainContext, Decision
 from .link_intent import (
@@ -16,6 +18,7 @@ from .commerce_focus_owner import (
     has_structured_catalog_identity,
 )
 from .selection_context import (
+    SELECTION_CONTEXT_TTL_TURNS,
     _extract_name_pick,
     _normalize_ar,
     _presentation_identity_patch_from_product,
@@ -24,6 +27,7 @@ from .selection_context import (
     _presented_identity_key,
     _resolve_unique_presented_identity,
     get_presented_products,
+    has_active_selection_context,
     normalize_presented_product,
 )
 
@@ -89,6 +93,10 @@ def _prior_inbound_focus_identity_match(
     effective focus is from a prior inbound even when ``product_focus_turn``
     equals ``state.turn``.
     """
+    turn = int(getattr(state, "turn", 0) or 0)
+    focus_turn = int(getattr(state, "product_focus_turn", 0) or 0)
+    if focus_turn > 0 and (turn - focus_turn) > SELECTION_CONTEXT_TTL_TURNS:
+        return None
     focus = get_effective_product_focus(state)
     if not isinstance(focus, dict) or not has_structured_catalog_identity(focus):
         return None
@@ -105,11 +113,19 @@ def try_named_product_link_decision(ctx: BrainContext) -> Optional[Decision]:
         )
         if not subject:
             return None
-        presented = get_presented_products(ctx.state)
+        presented = (
+            get_presented_products(ctx.state)
+            if has_active_selection_context(ctx.state)
+            else []
+        )
         identity_product = _resolve_unique_presented_identity(subject, presented)
         if identity_product is None:
             identity_product = _prior_inbound_focus_identity_match(subject, ctx.state)
         if identity_product is None:
+            return None
+        if not is_valid_https_product_url(
+            str(identity_product.get("product_url") or "").strip()
+        ):
             return None
         product_title = str(
             identity_product.get("title")
@@ -163,21 +179,26 @@ def try_category_browse_pick_decision(ctx: BrainContext) -> Optional[Decision]:
         len(products),
         (ctx.message or "")[:60],
     )
+    decision_args = {
+        "query": name_pick,
+        "source": "selection_context_category_browse_pick",
+        "products": list(products),
+        "presentation_identity_grounded": True,
+        "selection_context_patch": {
+            "last_presented_products": [
+                normalize_presented_product(product, list_index=i)
+                for i, product in enumerate(products, start=1)
+            ],
+            "selection_context_turn": int(getattr(ctx.state, "turn", 0) or 0),
+        },
+    }
+    if len(products) == 1:
+        # A single checkout-eligible category result is positive availability
+        # evidence, so the existing fact-bound fallback cannot deny the card.
+        decision_args["question_kind"] = "availability"
     return Decision(
         action=ACTION_SEARCH_PRODUCTS,
-        args={
-            "query": name_pick,
-            "source": "selection_context_category_browse_pick",
-            "products": list(products),
-            "presentation_identity_grounded": True,
-            "selection_context_patch": {
-                "last_presented_products": [
-                    normalize_presented_product(product, list_index=i)
-                    for i, product in enumerate(products, start=1)
-                ],
-                "selection_context_turn": int(getattr(ctx.state, "turn", 0) or 0),
-            },
-        },
+        args=decision_args,
         reason="selection_context_category_browse_pick",
         confidence=0.9,
     )
