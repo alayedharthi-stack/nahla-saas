@@ -20,6 +20,7 @@ from core.commerce_lifecycle.order_confirmation_header_image_fetch import (
     HeaderImageFetchError,
     fetch_header_image_bytes_secure,
 )
+from services.safe_http_fetch import redact_url_for_log
 from core.config import META_APP_ID, META_GRAPH_API_VERSION
 
 logger = logging.getLogger("nahla.commerce_lifecycle.order_confirmation_meta_header")
@@ -223,7 +224,7 @@ async def ensure_order_confirmation_image_header_for_meta(
         logger.warning(
             "[order_confirmation_meta_header] secure fetch blocked code=%s url=%s",
             exc.error_code,
-            source_url[:120],
+            redact_url_for_log(source_url),
         )
         raise ValueError("header_image_fetch_blocked") from exc
 
