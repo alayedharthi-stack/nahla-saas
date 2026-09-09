@@ -621,6 +621,21 @@ def structured_product_from_turn(decision: Any = None, result: Any = None) -> Op
         rec = _identity_row(container, "recommended_product")
         if rec is not None:
             return rec
+    try:
+        from modules.ai.brain.commerce.product_presentation_selection import (  # noqa: PLC0415
+            PRESENTATION_SINGLE_RICH,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — rich-card identity probe is optional
+        return None
+    if str(data.get("product_presentation_kind") or "").strip() != PRESENTATION_SINGLE_RICH:
+        return None
+    for key in ("pending_candidates", "pending_product_cards"):
+        items = list(data.get(key) or [])
+        if not items or not isinstance(items[0], dict):
+            continue
+        found = _identity_row({"product": items[0]}, "product")
+        if found is not None:
+            return found
     return None
 
 
