@@ -124,6 +124,15 @@ def _stamp_row(
     ).strip()
     if image_url:
         item["image_url"] = image_url
+    product_url = str(
+        row.get("product_url")
+        or row.get("url")
+        or (row.get("extra_metadata") or {}).get("product_url")
+        or (row.get("extra_metadata") or {}).get("url")
+        or ""
+    ).strip()
+    if product_url:
+        item["product_url"] = product_url
     price = row.get("price") if row.get("price") not in (None, "") else row.get("sale_price")
     if price not in (None, ""):
         item["price"] = price
@@ -233,6 +242,41 @@ def stamp_assistant_named_catalog_from_reply(
         candidates,
         prefer_rows=existing_presented,
     )
+    try:
+        from modules.ai.brain.commerce.commerce_browse_category_guard import (  # noqa: PLC0415
+            extract_browse_category_scopes,
+            filter_products_for_browse_turn,
+        )
+
+        scopes = [
+            scope
+            for scope in extract_browse_category_scopes(reply, "")
+            if str(scope or "").strip()
+        ]
+        if len(scopes) >= 2 or (not mapped and scopes):
+            scope_hits: List[Dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for scope in scopes:
+                for row in filter_products_for_browse_turn(
+                    message=scope,
+                    query=scope,
+                    products=candidates,
+                ):
+                    if not isinstance(row, dict):
+                        continue
+                    ident = product_focus_identity(row)
+                    if ident and ident in seen_ids:
+                        continue
+                    if ident:
+                        seen_ids.add(ident)
+                    scope_hits.append(row)
+            if scope_hits:
+                mapped = scope_hits
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — category scope stamp is best-effort
+        logger.debug(
+            "[PRESENTED_PROVENANCE] category_scope_stamp_failed",
+            exc_info=True,
+        )
     if not mapped:
         return []
 

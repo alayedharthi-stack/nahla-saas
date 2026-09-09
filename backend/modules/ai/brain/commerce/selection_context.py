@@ -742,6 +742,117 @@ def _resolve_unique_presented_fragment(
     return hits[0]
 
 
+_CATEGORY_PLURAL_SUFFIX_RE = re.compile(r"(?:ات|ان|ين)$", re.UNICODE)
+
+
+def _is_category_presentation_pick(name_pick: str) -> bool:
+    """True when the customer names a browse category, not a singular checkout pick."""
+    token = _presented_identity_key(name_pick)
+    if not token:
+        return False
+    return bool(_CATEGORY_PLURAL_SUFFIX_RE.search(token))
+
+
+def _match_presented_products_for_category_pick(
+    name_pick: str,
+    products: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not name_pick or not products:
+        return []
+    try:
+        from .commerce_browse_category_guard import filter_products_for_browse_turn  # noqa: PLC0415
+
+        scoped = filter_products_for_browse_turn(
+            message=name_pick,
+            query=name_pick,
+            products=list(products),
+        )
+        if scoped:
+            return [
+                product
+                for product in scoped
+                if isinstance(product, dict) and _product_is_checkout_eligible(product)
+            ]
+    except Exception:  # noqa: BLE001
+        logger.debug("[SELECTION_CONTEXT] category_pick_filter_failed", exc_info=True)
+    return _match_product_by_name(name_pick, products)
+
+
+def _extract_named_product_link_subject(message: str) -> str:
+    norm = _normalize_ar(message or "")
+    if not norm:
+        return ""
+    match = re.search(
+        r"(?:رابط|لينك|link)\s+(?P<name>.+?)\s*$",
+        norm,
+        flags=re.UNICODE | re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return _presented_identity_key(str(match.group("name") or ""))
+
+
+def _catalog_candidates_for_category_pick(ctx: BrainContext) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    facts = getattr(ctx, "facts", None)
+    for source in (
+        list(getattr(facts, "discovery_products", None) or []),
+        list(getattr(facts, "top_products", None) or []),
+        list(getattr(ctx.state, "last_search_candidates", None) or []),
+        list(getattr(ctx.state, "last_presented_products", None) or []),
+    ):
+        for row in source:
+            if isinstance(row, dict):
+                rows.append(row)
+    deduped: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        key = _product_key(row)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def try_category_browse_pick_decision(ctx: BrainContext) -> Optional[Decision]:
+    """Present scoped catalog products for ``ابي {category}`` without checkout binding."""
+    norm = _normalize_ar(ctx.message or "")
+    name_pick = _extract_name_pick(norm)
+    if not name_pick or not _is_category_presentation_pick(name_pick):
+        return None
+    products = _match_presented_products_for_category_pick(
+        name_pick,
+        _catalog_candidates_for_category_pick(ctx),
+    )
+    if not products:
+        return None
+    logger.info(
+        "[SELECTION_CONTEXT] tenant=%s kind=category_browse_pick count=%d preview=%r",
+        getattr(ctx, "tenant_id", None),
+        len(products),
+        (ctx.message or "")[:60],
+    )
+    return Decision(
+        action=ACTION_SEARCH_PRODUCTS,
+        args={
+            "query": name_pick,
+            "source": "selection_context_category_browse_pick",
+            "products": list(products),
+            "presentation_identity_grounded": True,
+            "selection_context_patch": {
+                "last_presented_products": [
+                    normalize_presented_product(p, list_index=i)
+                    for i, p in enumerate(products, start=1)
+                ],
+                "selection_context_turn": int(getattr(ctx.state, "turn", 0) or 0),
+            },
+        },
+        reason="selection context category browse pick",
+        confidence=0.9,
+    )
+
+
 def _match_product_by_name(name: str, products: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     norm = _normalize_ar(name)
     if not norm:
@@ -983,6 +1094,14 @@ def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution
 
     name_pick = _extract_name_pick(norm)
     if name_pick:
+        if _is_category_presentation_pick(name_pick):
+            hits = _match_presented_products_for_category_pick(name_pick, presented)
+            if hits:
+                return SelectionResolution(
+                    kind="category_present",
+                    products=hits,
+                    presentation_text="",
+                )
         hits = _match_product_by_name(name_pick, presented)
         if len(hits) == 1:
             return SelectionResolution(
@@ -1028,6 +1147,37 @@ def _presentation_identity_patch_from_product(product: Dict[str, Any]) -> Dict[s
 
 def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
     """Resolve follow-up turns against last presented discovery products."""
+    try:
+        from .link_intent import LinkIntentType, resolve_inbound_link_intent  # noqa: PLC0415
+
+        if resolve_inbound_link_intent(ctx.message or "") == LinkIntentType.PRODUCT_URL:
+            subject = _extract_named_product_link_subject(ctx.message or "")
+            if subject:
+                presented = get_presented_products(ctx.state)
+                identity_product = _resolve_unique_presented_identity(subject, presented)
+                if identity_product is not None:
+                    product_title = str(
+                        identity_product.get("title")
+                        or identity_product.get("display_label")
+                        or ""
+                    ).strip()
+                    return Decision(
+                        action=ACTION_SEARCH_PRODUCTS,
+                        args={
+                            "query": product_title or subject,
+                            "source": "selection_context_named_product_link",
+                            "products": [identity_product],
+                            "presentation_identity_grounded": True,
+                            "selection_context_patch": _presentation_identity_patch_from_product(
+                                identity_product
+                            ),
+                        },
+                        reason="selection context named product link",
+                        confidence=0.91,
+                    )
+    except Exception:  # noqa: BLE001
+        logger.debug("[SELECTION_CONTEXT] named_product_link skipped", exc_info=True)
+
     if not has_active_selection_context(ctx.state):
         return None
 
@@ -1224,13 +1374,19 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
         "want_larger",
         "name_ambiguous",
         "family_sizes",
+        "category_present",
     }:
         return Decision(
             action=ACTION_SEARCH_PRODUCTS,
             args={
-                "query": str(getattr(ctx.state, "last_browse_query", "") or ""),
+                "query": str(
+                    getattr(ctx.state, "last_browse_query", "")
+                    or _extract_name_pick(_normalize_ar(ctx.message or ""))
+                    or ""
+                ),
                 "source": f"selection_context_{resolution.kind}",
                 "products": list(resolution.products),
+                "presentation_identity_grounded": resolution.kind == "category_present",
                 "selection_presentation_text": resolution.presentation_text,
                 "selection_context_patch": {
                     "last_presented_products": [
@@ -1280,5 +1436,6 @@ __all__ = [
     "resolve_selection_context",
     "selection_product_pool",
     "stamp_selection_context_from_products",
+    "try_category_browse_pick_decision",
     "try_selection_context_decision",
 ]
