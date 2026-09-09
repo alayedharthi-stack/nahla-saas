@@ -829,6 +829,17 @@ def filter_products_for_browse_turn(
         return base
 
 
+def is_plural_category_scope_token(token: str) -> bool:
+    """True when the customer named an explicit plural category browse scope."""
+    base = _canonical_scope_token(token)
+    if not base:
+        return False
+    variants = _scope_variants(base)
+    if not variants:
+        return False
+    return len(base) > min(len(variant) for variant in variants)
+
+
 __all__ = [
     "BROWSE_SCOPE_MODE_CATEGORY",
     "BROWSE_SCOPE_MODE_GLOBAL",
@@ -839,6 +850,7 @@ __all__ = [
     "filter_products_to_browse_category",
     "is_category_price_or_availability_message",
     "is_category_scoped_browse",
+    "is_plural_category_scope_token",
     "is_generic_category_browse",
     "resolve_browse_category_scope",
     "resolve_browse_category_scopes",

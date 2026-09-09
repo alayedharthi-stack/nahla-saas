@@ -1499,11 +1499,6 @@ class DefaultDecisionEngine:
             _selection_dec = try_selection_context_decision(ctx)
             if _selection_dec is not None:
                 return _selection_dec
-            from ..commerce.selection_context import try_category_browse_pick_decision  # noqa: PLC0415
-
-            _category_pick_dec = try_category_browse_pick_decision(ctx)
-            if _category_pick_dec is not None:
-                return _category_pick_dec
         except Exception as _sel_exc:  # noqa: BLE001  # noqa: silent-ok — selection context hook must not block decide
             logger.debug(
                 "[SELECTION_CONTEXT] skipped tenant=%s err=%s",
