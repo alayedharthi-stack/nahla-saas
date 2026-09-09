@@ -337,6 +337,8 @@ class DraftOrderHandler:
 
         # ── From here on, the product is confirmed to exist on Salla. ─────
 
+        _name_answer_expected = _expects_checkout_name_answer(prep)
+        _name_before_message_merge = _checkout_name_from_prep(prep)
         _seed_checkout_state(prep, ctx)
         _sync_single_product_line_item(prep, product_info, ctx)
 
@@ -399,6 +401,12 @@ class DraftOrderHandler:
                     bool(prep.short_address_code),
                     prep.city,
                 )
+        _persist_expected_checkout_name_answer(
+            ctx,
+            prep,
+            expected=_name_answer_expected,
+            previous_name=_name_before_message_merge,
+        )
         await _resolve_checkout_address(prep)
 
         if _had_prep_before:
@@ -1868,6 +1876,166 @@ def _looks_like_phone_name(text: str) -> bool:
         return False
     digits = text.lstrip("+").replace(" ", "").replace("-", "")
     return digits.isdigit() and len(digits) >= 7
+
+
+_CHECKOUT_NAME_SLOTS = frozenset({
+    "name",
+    "full_name",
+    "customer_name",
+    "customer_first_name",
+    "customer_last_name",
+})
+
+
+def _expects_checkout_name_answer(prep: OrderPreparationState) -> bool:
+    missing = list(getattr(prep, "missing_fields", None) or [])
+    if not missing:
+        return False
+    return str(missing[0] or "").strip().lower() in _CHECKOUT_NAME_SLOTS
+
+
+def _checkout_name_from_prep(prep: OrderPreparationState) -> str:
+    return " ".join(
+        part
+        for part in (
+            str(getattr(prep, "customer_first_name", "") or "").strip(),
+            str(getattr(prep, "customer_last_name", "") or "").strip(),
+        )
+        if part
+    ).strip()
+
+
+def _current_turn_name_slot(ctx: BrainContext) -> str:
+    slots = dict(getattr(getattr(ctx, "intent", None), "slots", None) or {})
+    full = str(
+        slots.get("customer_name")
+        or slots.get("full_name")
+        or slots.get("name")
+        or "",
+    ).strip()
+    if full:
+        return full
+    return " ".join(
+        part
+        for part in (
+            str(slots.get("customer_first_name") or "").strip(),
+            str(slots.get("customer_last_name") or "").strip(),
+        )
+        if part
+    ).strip()
+
+
+def _letter_tokens(value: str) -> List[str]:
+    tokens: List[str] = []
+    for raw in str(value or "").casefold().split():
+        token = "".join(char for char in raw if char.isalpha())
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _name_is_grounded_in_message(name: str, message: str) -> bool:
+    candidate = _letter_tokens(name)
+    inbound = _letter_tokens(message)
+    if not candidate or len(candidate) > len(inbound):
+        return False
+    width = len(candidate)
+    return any(
+        inbound[index:index + width] == candidate
+        for index in range(len(inbound) - width + 1)
+    )
+
+
+def _persist_expected_checkout_name_answer(
+    ctx: BrainContext,
+    prep: OrderPreparationState,
+    *,
+    expected: bool,
+    previous_name: str,
+) -> bool:
+    """Persist a grounded name transition after checkout slot consumption."""
+    if not expected:
+        return False
+    slot_candidate = _current_turn_name_slot(ctx)
+    prep_candidate = _checkout_name_from_prep(prep)
+    previous_tokens = _letter_tokens(previous_name)
+    slot_tokens = _letter_tokens(slot_candidate)
+    prep_tokens = _letter_tokens(prep_candidate)
+    is_name_completion = bool(
+        previous_tokens
+        and slot_tokens
+        and len(prep_tokens) > len(previous_tokens)
+        and prep_tokens[:len(previous_tokens)] == previous_tokens
+        and prep_tokens[-len(slot_tokens):] == slot_tokens
+    )
+    candidate = prep_candidate if is_name_completion else (slot_candidate or prep_candidate)
+    if not candidate or _letter_tokens(candidate) == previous_tokens:
+        return False
+    raw_message = str(getattr(ctx, "raw_message", "") or ctx.message or "")
+    grounded_candidate = slot_candidate if is_name_completion else candidate
+    if not _name_is_grounded_in_message(grounded_candidate, raw_message):
+        return False
+
+    from core.customer_identity_resolver import (  # noqa: PLC0415
+        is_official_name_status,
+        read_customer_identity,
+    )
+    from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
+    from services.customer_intelligence import CustomerIntelligenceService  # noqa: PLC0415
+
+    validation = validate_customer_name(candidate)
+    if not validation.valid:
+        return False
+    db = getattr(ctx, "_db", None)
+    tenant_id = int(getattr(ctx, "tenant_id", 0) or 0)
+    phone = str(getattr(ctx, "customer_phone", "") or "").strip()
+    if db is None or tenant_id <= 0 or not phone:
+        return False
+
+    try:
+        service = CustomerIntelligenceService(db, tenant_id)
+        existing = service.find_customer_by_phone(phone)
+        if existing is not None:
+            snapshot = read_customer_identity(existing)
+            if (
+                _letter_tokens(snapshot.customer_name)
+                == _letter_tokens(validation.cleaned)
+                and is_official_name_status(snapshot.customer_name_status)
+            ):
+                return False
+
+        saved = service.upsert_customer_identity(
+            phone=phone,
+            name=validation.cleaned,
+            source="ai_detected_name",
+            message_context={
+                "raw_message": raw_message,
+                "explicit_name_correction": is_name_completion,
+            },
+        )
+        if saved is None:
+            return False
+        snapshot = read_customer_identity(saved)
+        applied = (
+            _letter_tokens(snapshot.customer_name)
+            == _letter_tokens(validation.cleaned)
+            and is_official_name_status(snapshot.customer_name_status)
+        )
+        if applied:
+            logger.info(
+                "[ORDER_NAME_PERSISTED] tenant=%s customer_id=%s "
+                "source=expected_checkout_slot",
+                tenant_id,
+                getattr(saved, "id", None),
+            )
+        return applied
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[ORDER_NAME_PERSIST_FAILED] tenant=%s error=%s",
+            tenant_id,
+            type(exc).__name__,
+        )
+        return False
 
 
 def _prep_has_real_name(prep: OrderPreparationState) -> bool:
