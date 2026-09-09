@@ -13,7 +13,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import inspect as sa_inspect, text
+from sqlalchemy import func, inspect as sa_inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -48,6 +48,13 @@ MSG_ACTIVE_EXISTS_DRAFT = (
 MSG_EXISTING_DRAFT = (
     "توجد مسودة جاهزة لملخص الطلب (r3). يمكنك تخصيصها الآن."
 )
+MSG_EXISTING_PENDING = (
+    "القالب قيد المراجعة من Meta ولا يمكن تخصيصه حالياً."
+)
+MSG_EXISTING_REJECTED = (
+    "القالب مرفوض من Meta. راجع سبب الرفض ثم أعد الإرسال بعد التعديل."
+)
+MSG_LANGUAGE_AR_ONLY = "قالب ملخص الطلب متاح باللغة العربية فقط."
 MSG_GENERIC_SAVE_FAILED = "فشل حفظ القالب. يرجى المحاولة مرة أخرى أو التواصل مع الدعم."
 
 _PENDING_STATUSES = ("DRAFT", "PENDING", "REJECTED")
@@ -115,7 +122,7 @@ def inspect_whatsapp_template_schema(db: Session) -> Dict[str, Any]:
     alembic_rev: Optional[str] = None
     if inspector.has_table("alembic_version"):
         try:
-            row = bind.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).fetchone()
+            row = db.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).first()
             if row:
                 alembic_rev = str(row[0])
         except Exception:  # noqa: silent-ok — schema probe is best-effort; columns still reported
@@ -253,18 +260,51 @@ def _import_lock(db: Session, tenant_id: int) -> DedicatedAdvisoryLock:
     )
 
 
-def _outcome_from_existing(existing: Any, *, tenant_id: int) -> Dict[str, Any]:
+def _next_order_confirmation_revision(db: Session, tenant_id: int) -> int:
+    from models import WhatsAppTemplate  # noqa: PLC0415
+
+    max_rev = (
+        db.query(func.max(WhatsAppTemplate.revision))
+        .filter(
+            WhatsAppTemplate.tenant_id == int(tenant_id),
+            WhatsAppTemplate.service_key == SERVICE_KEY,
+        )
+        .scalar()
+    )
+    return int(max_rev or 0) + 1
+
+
+def _message_for_existing_status(status: str) -> str:
+    normalized = str(status or "").upper()
+    if normalized == "PENDING":
+        return MSG_EXISTING_PENDING
+    if normalized == "REJECTED":
+        return MSG_EXISTING_REJECTED
+    return MSG_EXISTING_DRAFT
+
+
+def _outcome_from_existing(
+    existing: Any,
+    *,
+    tenant_id: int,
+    db: Session,
+) -> Dict[str, Any]:
+    status = str(getattr(existing, "status", "") or "DRAFT").upper()
+    active_slot = _find_active_lifecycle_slot_template(db, tenant_id)
     logger.info(
-        "[NahlaImport:OC] Reusing existing r3 draft id=%s tenant=%s",
+        "[NahlaImport:OC] Reusing existing r3 template id=%s tenant=%s status=%s",
         existing.id,
         tenant_id,
+        status,
     )
     return {
         "template": existing,
-        "message": MSG_EXISTING_DRAFT,
+        "message": _message_for_existing_status(status),
         "reused_existing_draft": True,
         "created": False,
-        "active_template_preserved": True,
+        "active_template_preserved": active_slot is not None,
+        "template_status": status,
+        "customizable": status == "DRAFT",
     }
 
 
@@ -282,6 +322,8 @@ def build_merchant_import_api_payload(
         "reused_existing_draft": bool(outcome.get("reused_existing_draft")),
         "created": bool(outcome.get("created")),
         "active_template_preserved": bool(outcome.get("active_template_preserved")),
+        "template_status": outcome.get("template_status"),
+        "customizable": bool(outcome.get("customizable", False)),
         "store_url_injected": False,
     }
 
@@ -323,17 +365,22 @@ def _import_order_summary_locked(
 ) -> Dict[str, Any]:
     from models import WhatsAppTemplate  # noqa: PLC0415
 
+    lang = str(language or "ar").strip().lower()
+    if lang != "ar":
+        raise NahlaLibraryImportError(
+            MSG_LANGUAGE_AR_ONLY,
+            error_code="nahla_import_language_unsupported",
+        )
+
     schema_probe = _log_schema_probe(db, tenant_id)
     existing = find_existing_order_confirmation_library_draft(db, tenant_id)
     if existing is not None:
-        return _outcome_from_existing(existing, tenant_id=tenant_id)
+        return _outcome_from_existing(existing, tenant_id=tenant_id, db=db)
 
     components = order_summary_r3_components()
     active_slot = _find_active_lifecycle_slot_template(db, tenant_id)
     supersedes_id: Optional[int] = int(active_slot.id) if active_slot is not None else None
-    next_revision = 1
-    if active_slot is not None and schema_probe.get("revision_column"):
-        next_revision = int(getattr(active_slot, "revision", 1) or 1) + 1
+    next_revision = _next_order_confirmation_revision(db, tenant_id)
 
     suffix = secrets.token_hex(3)
     if custom_name:
@@ -408,7 +455,7 @@ def _import_order_summary_locked(
             )
             reused = find_existing_order_confirmation_library_draft(db, tenant_id)
             if reused is not None:
-                return _outcome_from_existing(reused, tenant_id=tenant_id)
+                return _outcome_from_existing(reused, tenant_id=tenant_id, db=db)
             raise NahlaLibraryImportError(MSG_ACTIVE_EXISTS_DRAFT, error_code=error_code) from exc
         logger.error(
             "[%s] integrity failure tenant=%s library=%s",
@@ -440,7 +487,7 @@ def _import_order_summary_locked(
         )
         reused = find_existing_order_confirmation_library_draft(db, tenant_id)
         if reused is not None:
-            return _outcome_from_existing(reused, tenant_id=tenant_id)
+            return _outcome_from_existing(reused, tenant_id=tenant_id, db=db)
         raise NahlaLibraryImportError(MSG_GENERIC_SAVE_FAILED, error_code="nahla_import_commit")
     except Exception:
         db.rollback()
@@ -469,6 +516,8 @@ def _import_order_summary_locked(
         "reused_existing_draft": False,
         "created": True,
         "active_template_preserved": active_slot is not None,
+        "template_status": "DRAFT",
+        "customizable": True,
     }
 
 

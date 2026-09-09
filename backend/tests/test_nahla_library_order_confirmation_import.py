@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pytest
-from sqlalchemy import JSON, create_engine
+from sqlalchemy import JSON, create_engine, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -21,6 +21,8 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  # noqa: E402
     MSG_ACTIVE_EXISTS_DRAFT,
     MSG_EXISTING_DRAFT,
+    MSG_EXISTING_PENDING,
+    MSG_LANGUAGE_AR_ONLY,
     NahlaLibraryImportError,
     build_merchant_import_api_payload,
     find_existing_order_confirmation_library_draft,
@@ -28,6 +30,10 @@ from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  #
     inspect_whatsapp_template_schema,
     is_order_confirmation_r3_contract,
     order_summary_r3_components,
+)
+from core.commerce_lifecycle.order_confirmation_assets import (  # noqa: E402
+    ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL,
+    order_confirmation_header_public_url,
 )
 from models import WhatsAppTemplate  # noqa: E402
 from services.whatsapp_templates.nahla_templates import get_template_by_key  # noqa: E402
@@ -123,6 +129,9 @@ class TestOrderSummaryLibraryDefinition:
         assert tpl_def.get("revision_contract") == "r3"
         assert is_order_confirmation_r3_contract(tpl_def["components"])
         assert "example.com" not in str(tpl_def["components"])
+        header_url = tpl_def["components"][0]["example"]["header_url"]
+        assert header_url == ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL
+        assert "app.nahlah.ai" not in header_url
 
     def test_other_lifecycle_library_cards_remain_untouched(self):
         shipping = get_template_by_key("shipping_update")
@@ -329,9 +338,96 @@ class TestOrderConfirmationLibraryImport:
         finally:
             verify.close()
 
-    def test_schema_probe_helper_still_available_for_ops(self):
-        db, _ = _make_db(WhatsAppTemplate)
+    def test_schema_probe_reads_alembic_version_via_same_session(self):
+        db, engine = _make_db(WhatsAppTemplate)
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR PRIMARY KEY)"))
+            conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0096')"))
         probe = inspect_whatsapp_template_schema(db)
-        assert probe["table_exists"] is True
-        assert probe["revision_column"] is True
-        assert probe["supersedes_template_id_column"] is True
+        assert probe["alembic_version"] == "0096"
+
+    def test_revision_max_plus_one_for_templates_198_and_432(self):
+        db, _ = _make_db(WhatsAppTemplate)
+        live = WhatsAppTemplate(
+            id=198,
+            tenant_id=1,
+            name="nahla_order_summary_8d9f",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=[{"type": "BODY", "text": "قديم"}],
+            service_key="order_confirmation",
+            is_active=True,
+            is_hidden=False,
+            step_number=None,
+            revision=1,
+        )
+        pending = WhatsAppTemplate(
+            id=432,
+            tenant_id=1,
+            name="nahla_order_confirmation_r2",
+            language="ar",
+            category="UTILITY",
+            status="PENDING",
+            components=[{"type": "BODY", "text": "قديم r2"}],
+            service_key="order_confirmation",
+            is_active=False,
+            is_hidden=False,
+            step_number=None,
+            revision=2,
+        )
+        db.add_all([live, pending])
+        db.commit()
+        outcome = import_order_summary_from_library(db, 1, get_template_by_key("order_summary"))
+        assert outcome["created"] is True
+        assert int(outcome["template"].revision) == 3
+
+    def test_reused_draft_without_active_reports_preserved_false(self):
+        db, _ = _make_db(WhatsAppTemplate)
+        tpl_def = get_template_by_key("order_summary")
+        first = import_order_summary_from_library(db, 1, tpl_def)
+        second = import_order_summary_from_library(db, 1, tpl_def)
+        assert second["reused_existing_draft"] is True
+        assert second["active_template_preserved"] is False
+        assert second["customizable"] is True
+        assert second["template_status"] == "DRAFT"
+        assert int(second["template"].id) == int(first["template"].id)
+
+    def test_reused_pending_is_not_customizable(self):
+        db, _ = _make_db(WhatsAppTemplate)
+        pending = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_summary_pending",
+            language="ar",
+            category="UTILITY",
+            status="PENDING",
+            components=order_summary_r3_components(),
+            service_key="order_confirmation",
+            nahla_source_key="order_summary",
+            is_active=False,
+            is_hidden=False,
+        )
+        db.add(pending)
+        db.commit()
+        outcome = import_order_summary_from_library(db, 1, get_template_by_key("order_summary"))
+        assert outcome["reused_existing_draft"] is True
+        assert outcome["template_status"] == "PENDING"
+        assert outcome["customizable"] is False
+        assert outcome["message"] == MSG_EXISTING_PENDING
+
+    def test_rejects_non_ar_language(self):
+        db, _ = _make_db(WhatsAppTemplate)
+        with pytest.raises(NahlaLibraryImportError) as exc:
+            import_order_summary_from_library(
+                db,
+                1,
+                get_template_by_key("order_summary"),
+                language="en",
+            )
+        assert exc.value.message == MSG_LANGUAGE_AR_ONLY
+
+    def test_default_header_url_not_dashboard_spa(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("NAHLA_ORDER_CONFIRMATION_HEADER_URL", raising=False)
+        url = order_confirmation_header_public_url()
+        assert "app.nahlah.ai" not in url
+        assert url.startswith("https://pub-")

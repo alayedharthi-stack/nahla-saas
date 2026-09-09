@@ -1148,6 +1148,8 @@ async def _submit_template_to_meta(
     language: str,
     category: str,
     components: List[Dict[str, Any]],
+    service_key: Optional[str] = None,
+    template_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Submit a new template using the active WhatsApp provider.
     Raises ValueError with the actual Meta error message on failure.
@@ -1201,6 +1203,30 @@ async def _submit_template_to_meta(
                         raw_text, cleaned_text,
                     )
                 btn["text"] = cleaned_text
+
+    if str(service_key or "").strip() == "order_confirmation":
+        from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+            ensure_order_confirmation_image_header_for_meta,
+        )
+
+        try:
+            components = await ensure_order_confirmation_image_header_for_meta(
+                db,
+                conn,
+                tenant_id=int(tenant_id),
+                components=components,
+                metadata=template_metadata or {},
+            )
+        except Exception as exc:
+            logger.error(
+                "[template/submit] order_confirmation header upload failed tenant=%s name=%s",
+                tenant_id,
+                name,
+                exc_info=True,
+            )
+            raise ValueError(
+                "تعذّر تجهيز صورة رأس قالب تأكيد الطلب لـ Meta. حاول مرة أخرى لاحقاً."
+            ) from exc
 
     # Ensure all components have the Meta-required `example` fields before
     # submitting. This prevents code-100 "missing example" rejections for
@@ -2300,6 +2326,8 @@ async def submit_template_to_meta(template_id: int, request: Request, db: Sessio
             language=tpl.language,
             category=tpl.category,
             components=tpl.components or [],
+            service_key=getattr(tpl, "service_key", None),
+            template_metadata=dict(getattr(tpl, "ai_generation_metadata", None) or {}),
         )
     except ValueError as exc:
         logger.warning("[template/submit] meta_validation tenant=%s: %s", tenant_id, exc)
