@@ -3336,6 +3336,28 @@ async def import_nahla_template(
             detail=f"القالب '{body.template_key}' غير موجود في مكتبة نحلة",
         )
 
+    if body.template_key == "order_summary":
+        from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  # noqa: PLC0415
+            NahlaLibraryImportError,
+            build_merchant_import_api_payload,
+            import_order_summary_from_library,
+        )
+
+        try:
+            outcome = import_order_summary_from_library(
+                db,
+                tenant_id,
+                tpl_def,
+                language=body.language,
+                custom_name=body.custom_name,
+            )
+        except NahlaLibraryImportError as exc:
+            raise HTTPException(status_code=409, detail=exc.message)
+        return build_merchant_import_api_payload(
+            outcome,
+            template_to_dict=_tpl_to_dict,
+        )
+
     # ── اكتشاف رابط المتجر الحقيقي للتاجر ──────────────────────────
     # نأخذه من TenantSettings.store.store_url أو Integration.config
     from models import Integration  # noqa: PLC0415
@@ -3442,15 +3464,31 @@ async def import_nahla_template(
         db.flush()
     except Exception as exc:
         db.rollback()
-        logger.error("[NahlaImport] flush failed: tenant=%s key=%s err=%s", tenant_id, body.template_key, exc)
-        raise HTTPException(status_code=409, detail=f"فشل حفظ القالب: {exc}")
+        logger.error(
+            "[NahlaImport] flush failed: tenant=%s key=%s",
+            tenant_id,
+            body.template_key,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="فشل حفظ القالب. يرجى المحاولة مرة أخرى أو التواصل مع الدعم.",
+        )
 
     try:
         db.commit()
     except Exception as exc:
         db.rollback()
-        logger.error("[NahlaImport] commit failed: tenant=%s key=%s err=%s", tenant_id, body.template_key, exc)
-        raise HTTPException(status_code=409, detail=f"فشل حفظ القالب: {exc}")
+        logger.error(
+            "[NahlaImport] commit failed: tenant=%s key=%s",
+            tenant_id,
+            body.template_key,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="فشل حفظ القالب. يرجى المحاولة مرة أخرى أو التواصل مع الدعم.",
+        )
 
     db.refresh(new_tpl)
 
