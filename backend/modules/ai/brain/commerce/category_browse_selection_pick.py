@@ -11,6 +11,10 @@ from .link_intent import (
     extract_named_product_link_subject,
     resolve_inbound_link_intent,
 )
+from .commerce_focus_owner import (
+    get_effective_product_focus,
+    has_structured_catalog_identity,
+)
 from .selection_context import (
     _extract_name_pick,
     _normalize_ar,
@@ -75,6 +79,22 @@ def _match_presented_products_for_category_pick(
     return []
 
 
+def _prior_inbound_focus_identity_match(
+    subject: str,
+    state: Any,
+) -> Optional[Dict[str, Any]]:
+    """Resolve named link against prior-turn focus when presented rows miss it.
+
+    At ``decide()`` time the current inbound has not executed yet, so any
+    effective focus is from a prior inbound even when ``product_focus_turn``
+    equals ``state.turn``.
+    """
+    focus = get_effective_product_focus(state)
+    if not isinstance(focus, dict) or not has_structured_catalog_identity(focus):
+        return None
+    return _resolve_unique_presented_identity(subject, [focus])
+
+
 def try_named_product_link_decision(ctx: BrainContext) -> Optional[Decision]:
     """Ground named product link asks on last presented catalog identity."""
     try:
@@ -87,6 +107,8 @@ def try_named_product_link_decision(ctx: BrainContext) -> Optional[Decision]:
             return None
         presented = get_presented_products(ctx.state)
         identity_product = _resolve_unique_presented_identity(subject, presented)
+        if identity_product is None:
+            identity_product = _prior_inbound_focus_identity_match(subject, ctx.state)
         if identity_product is None:
             return None
         product_title = str(

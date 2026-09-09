@@ -13,8 +13,11 @@ if _BACKEND not in sys.path:
 os.environ.setdefault("NAHLA_TEST_NO_DB", "1")
 
 from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: E402
+    apply_turn_catalog_referent_binding,
     stamp_assistant_named_catalog_from_reply,
+    structured_product_from_turn,
 )
+from modules.ai.brain.commerce.commerce_focus_owner import set_product_focus  # noqa: E402
 from modules.ai.brain.commerce.commerce_objective import (  # noqa: E402
     COMMERCE_OBJECTIVE_DISCOVERY,
 )
@@ -22,6 +25,9 @@ from modules.ai.brain.commerce.product_presentation_selection import (  # noqa: 
     PRESENTATION_SINGLE_RICH,
     apply_search_product_presentation,
     presentation_context_from_brain,
+)
+from modules.ai.brain.commerce.category_browse_selection_pick import (  # noqa: E402
+    try_named_product_link_decision,
 )
 from modules.ai.brain.commerce.selection_context import (  # noqa: E402
     stamp_selection_context_from_products,
@@ -275,6 +281,79 @@ class TestSallaCategoryPickPresentation:
         card = (result_3.data.get("pending_product_cards") or [None])[0]
         assert card["product_url"] == JACKET_PRODUCT_URL
         assert presentation_3.kind == PRESENTATION_SINGLE_RICH
+
+    def test_named_product_link_falls_back_to_prior_inbound_focus(self) -> None:
+        """Live gap: rich card focus without jacket in last_presented_products."""
+        state = MerchantConversationState(
+            greeted=True,
+            stage="exploring",
+            turn=2,
+            commerce_objective=COMMERCE_OBJECTIVE_DISCOVERY,
+            last_presented_products=[DRESS_22, DRESS_23],
+        )
+        set_product_focus(
+            state,
+            dict(JACKET_28),
+            reason="executor_product_search_products",
+            turn=2,
+        )
+        decision = try_named_product_link_decision(_ctx("ابي رابط الجاكيت", state=state))
+        assert decision is not None
+        assert decision.args.get("source") == "selection_context_named_product_link"
+        assert decision.args.get("presentation_identity_grounded") is True
+        product = (decision.args.get("products") or [None])[0]
+        assert product is not None
+        assert product.get("product_url") == JACKET_PRODUCT_URL
+
+    def test_live_replay_pdp_persists_from_rich_card_to_named_link(self) -> None:
+        """Replay tenant-1 live sequence without manual jacket stamp shortcuts."""
+        state = MerchantConversationState(
+            greeted=True,
+            stage="exploring",
+            turn=1,
+            commerce_objective=COMMERCE_OBJECTIVE_DISCOVERY,
+        )
+        stamp_selection_context_from_products(
+            state,
+            products=[DRESS_22, DRESS_23],
+        )
+
+        state.turn = 2
+        _, decision_2, result_2, presentation_2 = _presentation_flow(
+            "ابي الجاكيتات",
+            state=state,
+            products=PRESENTED_LIVE,
+        )
+        assert presentation_2.kind == PRESENTATION_SINGLE_RICH
+        structured = structured_product_from_turn(decision_2, result_2)
+        assert structured is not None
+        assert int(structured.get("id") or 0) == 28
+        apply_turn_catalog_referent_binding(
+            state=state,
+            reply="",
+            structured_product=structured,
+            turn=2,
+        )
+        jacket_presented = any(
+            int(row.get("id") or 0) == 28
+            for row in (state.last_presented_products or [])
+            if isinstance(row, dict)
+        )
+        assert jacket_presented
+        assert state.current_product_focus.get("product_url") == JACKET_PRODUCT_URL
+
+        state.turn = 2
+        _, decision_3, result_3, presentation_3 = _presentation_flow(
+            "ابي رابط الجاكيت",
+            state=state,
+            products=PRESENTED_LIVE,
+        )
+        assert decision_3.args.get("source") == "selection_context_named_product_link"
+        assert presentation_3.kind == PRESENTATION_SINGLE_RICH
+        card = (result_3.data.get("pending_product_cards") or [None])[0]
+        assert card is not None
+        assert card["product_url"] == JACKET_PRODUCT_URL
+        assert card["file_url"] == JACKET_IMAGE_URL
 
     def test_generic_merchant_category_pick_without_prior_stamp(self) -> None:
         ctx = _ctx(
