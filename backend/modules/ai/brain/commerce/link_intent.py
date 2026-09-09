@@ -315,6 +315,24 @@ def resolve_link_intent(message: str) -> LinkIntentType:
     return LinkIntentType.UNKNOWN_LINK
 
 
+def extract_named_product_link_subject(message: str) -> str:
+    """Extract trailing product identity from a named product link ask."""
+    from .link_intent_media_source_guard import link_intent_message  # noqa: PLC0415
+
+    norm = _normalise(link_intent_message(message or ""))
+    if not norm or not _looks_like_product_url_request(norm):
+        return ""
+    if not _SEND_NAMED_PRODUCT_LINK_RE.search(norm):
+        return ""
+    tokens = norm.split()
+    for idx, token in enumerate(tokens):
+        if token in _WEBSITE_CONTEXT_MARKERS and token not in _WEBSITE_TOKEN_MARKERS:
+            tail = " ".join(tokens[idx + 1 :]).strip()
+            if tail:
+                return tail
+    return ""
+
+
 def compose_website_url_reply(store_url: str) -> str:
     """Operational store-link reply — URL when configured, honest none otherwise."""
     url = str(store_url or "").strip()
@@ -328,6 +346,7 @@ def compose_website_url_reply(store_url: str) -> str:
 __all__ = [
     "LinkIntentType",
     "compose_website_url_reply",
+    "extract_named_product_link_subject",
     "is_explicit_direct_location_request",
     "resolve_inbound_link_intent",
     "resolve_link_intent",

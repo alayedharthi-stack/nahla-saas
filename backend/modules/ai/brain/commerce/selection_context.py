@@ -1026,7 +1026,7 @@ def _presentation_identity_patch_from_product(product: Dict[str, Any]) -> Dict[s
     }
 
 
-def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
+def _try_selection_context_decision_base(ctx: BrainContext) -> Optional[Decision]:
     """Resolve follow-up turns against last presented discovery products."""
     if not has_active_selection_context(ctx.state):
         return None
@@ -1259,6 +1259,12 @@ def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
     return None
 
 
+def try_selection_context_decision(ctx: BrainContext) -> Optional[Decision]:
+    from .category_browse_selection_pick import drive_selection_context_decision  # noqa: PLC0415
+
+    return drive_selection_context_decision(ctx, _try_selection_context_decision_base)
+
+
 __all__ = [
     "CANDIDATE_SOURCE_LAST_SEARCH",
     "NAME_PRICE_CANDIDATE_MATCH",
@@ -1280,5 +1286,14 @@ __all__ = [
     "resolve_selection_context",
     "selection_product_pool",
     "stamp_selection_context_from_products",
+    "try_category_browse_pick_decision",
     "try_selection_context_decision",
 ]
+
+
+def __getattr__(name: str):
+    if name == "try_category_browse_pick_decision":
+        from .category_browse_selection_pick import try_category_browse_pick_decision  # noqa: PLC0415
+
+        return try_category_browse_pick_decision
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
