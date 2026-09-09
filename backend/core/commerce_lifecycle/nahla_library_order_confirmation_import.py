@@ -118,8 +118,8 @@ def inspect_whatsapp_template_schema(db: Session) -> Dict[str, Any]:
             row = bind.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).fetchone()
             if row:
                 alembic_rev = str(row[0])
-        except Exception:
-            logger.debug("alembic_version probe failed", exc_info=True)
+        except Exception:  # noqa: silent-ok — schema probe is best-effort; columns still reported
+            logger.exception("[NahlaImport:OC:schema_probe] alembic_version read failed")
     return {
         "table_exists": True,
         "revision_column": "revision" in col_names,
