@@ -358,6 +358,10 @@ const en: Translations = {
         opsLink:      'Manage order-update operations',
         opsLinkShort: 'Operations settings',
         noPreview:    'No saved message body yet — configure in operations settings.',
+        noOfficialTemplates:
+          'No active approved official templates to show here. Pending or archived templates stay hidden from merchants.',
+        pendingApprovalNote:
+          '{count} template(s) are pending Meta review — they will not appear to merchants until approved.',
         services: {
           order_confirmation: 'Order confirmation',
           cod_confirmation: 'Cash on delivery confirmation',
