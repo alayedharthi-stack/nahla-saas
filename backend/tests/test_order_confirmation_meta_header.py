@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -22,6 +23,7 @@ from core.commerce_lifecycle.order_confirmation_assets import (  # noqa: E402
 from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: E402
     ensure_order_confirmation_image_header_for_meta,
     prepare_order_confirmation_meta_submit_components,
+    resolve_header_image_source_url,
 )
 
 
@@ -48,6 +50,17 @@ class TestOrderConfirmationMetaSubmitPayload:
         assert header["example"]["header_handle"] == [handle]
         assert "header_url" not in header["example"]
 
+    def test_component_header_url_wins_over_metadata_r2(self):
+        merchant = "https://cdn.merchant.example/custom-header.png"
+        components = order_summary_r3_components()
+        components[0]["example"]["header_url"] = merchant
+        metadata = {"header_image_url": ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL}
+        assert resolve_header_image_source_url(components, metadata) == merchant
+
+    def test_r2_default_when_no_component_or_merchant_metadata(self):
+        components = order_summary_r3_components()
+        assert resolve_header_image_source_url(components, {}) == ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL
+
     def test_ensure_uploads_and_strips_header_url(self, monkeypatch: pytest.MonkeyPatch):
         class _FakeUploader:
             async def upload_template_header(self, *, access_token, image_bytes, mime_type):
@@ -62,7 +75,7 @@ class TestOrderConfirmationMetaSubmitPayload:
         async def _fake_token(*_a, **_k):
             return _FakeCtx()
 
-        async def _fake_fetch(url: str, *, timeout: float = 30.0):
+        async def _fake_fetch(url: str, **kwargs):
             assert url
             return b"jpeg-bytes", "image/jpeg"
 
@@ -71,13 +84,13 @@ class TestOrderConfirmationMetaSubmitPayload:
             _fake_token,
         )
         monkeypatch.setattr(
-            "core.commerce_lifecycle.order_confirmation_meta_header.fetch_header_image_bytes",
+            "core.commerce_lifecycle.order_confirmation_meta_header.fetch_header_image_bytes_secure",
             _fake_fetch,
         )
 
         prepared = asyncio.run(
             ensure_order_confirmation_image_header_for_meta(
-                db=None,
+                db=MagicMock(),
                 conn=object(),
                 tenant_id=1,
                 components=order_summary_r3_components(),
@@ -87,3 +100,31 @@ class TestOrderConfirmationMetaSubmitPayload:
         )
         assert prepared[0]["example"]["header_handle"] == ["4::uploaded_handle"]
         assert "header_url" not in prepared[0]["example"]
+
+    def test_submit_hook_skipped_for_non_order_confirmation_service_key(self):
+        from routers.templates import _submit_template_to_meta  # noqa: PLC0415
+
+        with patch(
+            "core.commerce_lifecycle.order_confirmation_meta_header.ensure_order_confirmation_image_header_for_meta",
+            new_callable=AsyncMock,
+        ) as ensure_mock:
+            with patch(
+                "routers.templates.provider_submit_template",
+                new_callable=AsyncMock,
+                return_value=({"id": "meta-1"}, MagicMock()),
+            ):
+                with patch("routers.templates._ensure_meta_examples", side_effect=lambda c: c):
+                    asyncio.run(
+                        _submit_template_to_meta(
+                            db=MagicMock(),
+                            conn=MagicMock(),
+                            tenant_id=1,
+                            waba_id="waba",
+                            name="nahla_shipping",
+                            language="ar",
+                            category="UTILITY",
+                            components=[{"type": "BODY", "text": "hi"}],
+                            service_key="shipping_tracking",
+                        )
+                    )
+        ensure_mock.assert_not_called()

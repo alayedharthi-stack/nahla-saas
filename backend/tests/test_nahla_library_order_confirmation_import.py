@@ -393,6 +393,27 @@ class TestOrderConfirmationLibraryImport:
         assert second["template_status"] == "DRAFT"
         assert int(second["template"].id) == int(first["template"].id)
 
+    def test_reused_rejected_is_customizable(self):
+        db, _ = _make_db(WhatsAppTemplate)
+        rejected = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_summary_rejected",
+            language="ar",
+            category="UTILITY",
+            status="REJECTED",
+            components=order_summary_r3_components(),
+            service_key="order_confirmation",
+            nahla_source_key="order_summary",
+            is_active=False,
+            is_hidden=False,
+        )
+        db.add(rejected)
+        db.commit()
+        outcome = import_order_summary_from_library(db, 1, get_template_by_key("order_summary"))
+        assert outcome["reused_existing_draft"] is True
+        assert outcome["template_status"] == "REJECTED"
+        assert outcome["customizable"] is True
+
     def test_reused_pending_is_not_customizable(self):
         db, _ = _make_db(WhatsAppTemplate)
         pending = WhatsAppTemplate(
@@ -425,6 +446,23 @@ class TestOrderConfirmationLibraryImport:
                 language="en",
             )
         assert exc.value.message == MSG_LANGUAGE_AR_ONLY
+
+    def test_normalizes_language_to_ar_on_create(self):
+        db, _ = _make_db(WhatsAppTemplate)
+        outcome = import_order_summary_from_library(
+            db,
+            1,
+            get_template_by_key("order_summary"),
+            language=" AR ",
+        )
+        assert outcome["template"].language == "ar"
+
+    def test_import_metadata_does_not_stamp_r2_url(self):
+        db, _ = _make_db(WhatsAppTemplate)
+        outcome = import_order_summary_from_library(db, 1, get_template_by_key("order_summary"))
+        meta = outcome["template"].ai_generation_metadata or {}
+        assert "header_image_url" not in meta
+        assert meta.get("header_image_asset_key")
 
     def test_default_header_url_not_dashboard_spa(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("NAHLA_ORDER_CONFIRMATION_HEADER_URL", raising=False)

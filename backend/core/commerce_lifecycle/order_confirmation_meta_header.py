@@ -16,6 +16,10 @@ from core.commerce_lifecycle.order_confirmation_assets import (
     ORDER_CONFIRMATION_HEADER_ASSET_KEY,
     order_confirmation_header_public_url,
 )
+from core.commerce_lifecycle.order_confirmation_header_image_fetch import (
+    HeaderImageFetchError,
+    fetch_header_image_bytes_secure,
+)
 from core.config import META_APP_ID, META_GRAPH_API_VERSION
 
 logger = logging.getLogger("nahla.commerce_lifecycle.order_confirmation_meta_header")
@@ -46,17 +50,30 @@ def _image_header_component(components: Any) -> Optional[Dict[str, Any]]:
 def resolve_header_image_source_url(
     components: Any,
     metadata: Optional[Dict[str, Any]] = None,
+    *,
+    tenant_runtime_url: Optional[str] = None,
 ) -> str:
-    meta = dict(metadata or {})
-    from_meta = str(meta.get("header_image_url") or "").strip()
-    if from_meta:
-        return from_meta
+    """
+    Single source of truth for order_confirmation header image URL.
+
+    Precedence: tenant runtime override → HEADER component URL → explicit
+    ``merchant_header_image_url`` metadata → platform R2 default.
+    """
+    if tenant_runtime_url:
+        return str(tenant_runtime_url).strip()
+
     header = _image_header_component(components)
     if header:
         example = dict(header.get("example") or {})
-        from_comp = str(example.get("header_url") or "").strip()
-        if from_comp:
-            return from_comp
+        from_component = str(example.get("header_url") or "").strip()
+        if from_component:
+            return from_component
+
+    meta = dict(metadata or {})
+    explicit = str(meta.get("merchant_header_image_url") or "").strip()
+    if explicit:
+        return explicit
+
     return order_confirmation_header_public_url()
 
 
@@ -81,14 +98,33 @@ def prepare_order_confirmation_meta_submit_components(
     return out
 
 
-async def fetch_header_image_bytes(url: str, *, timeout: float = 30.0) -> tuple[bytes, str]:
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        mime = str(resp.headers.get("content-type") or "image/jpeg").split(";")[0].strip()
-        if not mime.startswith("image/"):
-            raise ValueError("header_image_not_image")
-        return resp.content, mime
+def _tenant_runtime_header_image_url(db: Any, tenant_id: int) -> Optional[str]:
+    """Read merchant runtime header override from TenantSettings (order_confirmation)."""
+    try:
+        from models import TenantSettings  # noqa: PLC0415
+
+        settings = (
+            db.query(TenantSettings)
+            .filter(TenantSettings.tenant_id == int(tenant_id))
+            .first()
+        )
+        if settings is None:
+            return None
+        extra = getattr(settings, "extra_metadata", None)
+        if not isinstance(extra, dict):
+            return None
+        bucket = dict(extra.get("order_updates") or {})
+        slot = bucket.get("order_confirmation")
+        if not isinstance(slot, dict):
+            return None
+        runtime = slot.get("runtime")
+        if not isinstance(runtime, dict):
+            return None
+        raw = str(runtime.get("header_image_url") or "").strip()
+        return raw or None
+    except Exception:  # noqa: silent-ok — runtime override is optional
+        logger.exception("[order_confirmation_meta_header] tenant runtime header lookup failed")
+        return None
 
 
 class MetaResumableHeaderUploader:
@@ -175,8 +211,22 @@ async def ensure_order_confirmation_image_header_for_meta(
     if not access_token:
         raise ValueError("missing_access_token")
 
-    source_url = resolve_header_image_source_url(components, meta)
-    image_bytes, mime_type = await fetch_header_image_bytes(source_url)
+    tenant_runtime = _tenant_runtime_header_image_url(db, int(tenant_id))
+    source_url = resolve_header_image_source_url(
+        components,
+        meta,
+        tenant_runtime_url=tenant_runtime,
+    )
+    try:
+        image_bytes, mime_type = await fetch_header_image_bytes_secure(source_url)
+    except HeaderImageFetchError as exc:
+        logger.warning(
+            "[order_confirmation_meta_header] secure fetch blocked code=%s url=%s",
+            exc.error_code,
+            source_url[:120],
+        )
+        raise ValueError("header_image_fetch_blocked") from exc
+
     upload = uploader or MetaResumableHeaderUploader()
     handle = await upload.upload_template_header(
         access_token=access_token,
@@ -197,7 +247,6 @@ async def ensure_order_confirmation_image_header_for_meta(
 __all__ = [
     "MetaResumableHeaderUploader",
     "ensure_order_confirmation_image_header_for_meta",
-    "fetch_header_image_bytes",
     "prepare_order_confirmation_meta_submit_components",
     "resolve_header_image_source_url",
 ]

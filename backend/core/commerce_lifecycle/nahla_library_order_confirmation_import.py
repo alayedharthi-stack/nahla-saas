@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 
 from core.commerce_lifecycle.order_confirmation_assets import (
     ORDER_CONFIRMATION_HEADER_ASSET_KEY,
-    order_confirmation_header_public_url,
     order_confirmation_image_header_component,
 )
 from core.pg_advisory_lock import DedicatedAdvisoryLock
@@ -304,7 +303,7 @@ def _outcome_from_existing(
         "created": False,
         "active_template_preserved": active_slot is not None,
         "template_status": status,
-        "customizable": status == "DRAFT",
+        "customizable": status in ("DRAFT", "REJECTED"),
     }
 
 
@@ -371,6 +370,7 @@ def _import_order_summary_locked(
             MSG_LANGUAGE_AR_ONLY,
             error_code="nahla_import_language_unsupported",
         )
+    language = "ar"
 
     schema_probe = _log_schema_probe(db, tenant_id)
     existing = find_existing_order_confirmation_library_draft(db, tenant_id)
@@ -400,7 +400,6 @@ def _import_order_summary_locked(
 
     header_meta: Dict[str, Any] = {
         "revision_label": "r3",
-        "header_image_url": order_confirmation_header_public_url(),
         "header_image_asset_key": ORDER_CONFIRMATION_HEADER_ASSET_KEY,
     }
     if supersedes_id is not None and not schema_probe.get("supersedes_template_id_column"):
