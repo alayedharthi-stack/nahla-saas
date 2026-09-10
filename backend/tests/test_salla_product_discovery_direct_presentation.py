@@ -431,14 +431,14 @@ class TestSallaCategoryPickPresentation:
             reason="invented_offer",
         )
         assert fallback_facts["question_kind"] == "browse"
-        assert "لا توجد منتجات" not in fallback_2.text
         guarded_2, passed_2, _ = _guard_catalog_browse_fallback(
             text=fallback_2.text,
             products=list(result_2.data.get("pending_candidates") or []),
             pending_product_card_count=len(cards_2),
         )
-        assert guarded_2.replaced is False
-        assert guarded_2.action == "allowed_structured_catalog_browse"
+        assert guarded_2.replaced is True
+        assert guarded_2.action == "rewrite_false_negative"
+        assert "متوفر" not in guarded_2.reply
         assert passed_2.action == "allowed_structured_catalog_browse"
         assert passed_2.replaced is False
 
@@ -591,7 +591,6 @@ class TestSallaCategoryPickPresentation:
         assert event["eligible_product_count"] == 1
         assert event["question_kind"] == "browse"
         assert event["catalog_product_ids"] == [GENERIC_SHOE["id"]]
-        assert "لا توجد منتجات" not in text
         guarded, passed, availability_context = _guard_catalog_browse_fallback(
             text=text,
             products=[dict(GENERIC_SHOE)],
@@ -601,9 +600,10 @@ class TestSallaCategoryPickPresentation:
         assert presentation_facts["eligible_product_count"] == 1
         assert presentation_facts["has_eligible_products"] is True
         assert presentation_facts["pending_product_card_count"] == 1
-        assert guarded.replaced is False
-        assert guarded.action == "allowed_structured_catalog_browse"
-        assert guarded.reply == text
+        assert guarded.replaced is True
+        assert guarded.action == "rewrite_false_negative"
+        assert guarded.reply != text
+        assert "متوفر" not in guarded.reply
         assert passed.action == "allowed_structured_catalog_browse"
         assert passed.replaced is False
 
@@ -624,7 +624,6 @@ class TestSallaCategoryPickPresentation:
 
         assert bundle.verified_facts["question_kind"] == "browse"
         assert bundle.verified_facts["eligible_product_count"] == 2
-        assert "لا توجد منتجات" not in fallback.text
         guarded, passed, availability_context = _guard_catalog_browse_fallback(
             text=fallback.text,
             products=products,
@@ -634,9 +633,10 @@ class TestSallaCategoryPickPresentation:
         assert presentation_facts["eligible_product_count"] == 2
         assert presentation_facts["has_eligible_products"] is True
         assert presentation_facts["pending_product_card_count"] == 0
-        assert guarded.replaced is False
-        assert guarded.action == "allowed_structured_catalog_browse"
-        assert guarded.reply == fallback.text
+        assert guarded.replaced is True
+        assert guarded.action == "rewrite_false_negative"
+        assert guarded.reply != fallback.text
+        assert "متوفر" not in guarded.reply
         assert passed.action == "allowed_structured_catalog_browse"
         assert passed.replaced is False
 
