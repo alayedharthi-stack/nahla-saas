@@ -229,6 +229,8 @@ def _guard_catalog_browse_fallback(
     products: List[Dict[str, Any]],
     pending_product_card_count: int,
 ):
+    prev_mode = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+    os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
     result_data = {
         "question_kind": "browse",
         "compose_source": "fallback_deterministic",
@@ -260,6 +262,10 @@ def _guard_catalog_browse_fallback(
         question_kind="browse",
         surface="catalog_product_answer",
     )
+    if prev_mode is None:
+        os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+    else:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = prev_mode
     return guarded, passed, availability_context
 
 

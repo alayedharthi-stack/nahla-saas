@@ -703,6 +703,9 @@ def apply_product_availability_truth_guard(
             )
         )
 
+    if mode == "off":
+        return ProductAvailabilityTruthGuardResult(reply=original, action="disabled")
+
     browse_facts = _eligible_catalog_browse_fallback_facts(
         availability_context,
         question_kind=question_kind,
@@ -747,9 +750,6 @@ def apply_product_availability_truth_guard(
                 availability_claim_blocked=True,
                 would_rewrite=True,
             )
-
-    if mode == "off":
-        return ProductAvailabilityTruthGuardResult(reply=original, action="disabled")
 
     topic = str(decision_topic or "").strip()
     if topic in {

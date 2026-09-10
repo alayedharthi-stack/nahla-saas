@@ -577,3 +577,217 @@ class TestVariantPricingPathAllow:
         )
         assert result.replaced is False
         assert result.reply == self._VARIANT_PRICE_REPLY
+
+
+_BROWSE_CONTRADICTORY_FALLBACK_AR = (
+    "لا توجد منتجات قابلة للبيع مؤكدة في الكتالوج حالياً."
+)
+
+_GENERIC_BROWSE_PRODUCT = {
+    "id": 501,
+    "title": "حذاء رياضي أبيض",
+    "price": 249,
+    "in_stock": True,
+    "can_checkout": True,
+    "orderable": True,
+}
+
+
+def _browse_fallback_availability_context(products: list[dict]) -> dict:
+    from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
+        build_availability_context,
+    )
+
+    return build_availability_context(
+        None,
+        1,
+        result_data={
+            "question_kind": "browse",
+            "compose_source": "fallback_deterministic",
+            "fallback_action_type": "catalog_product_answer",
+            "eligible_product_count": len(products),
+            "catalog_search_query": "",
+            "search_result_count": len(products),
+            "pending_product_card_count": len(products),
+            "pending_candidates": list(products),
+        },
+    )
+
+
+class TestBrowseCatalogFallbackGuardModes:
+    def setup_method(self) -> None:
+        self._prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+
+    def teardown_method(self) -> None:
+        if self._prev is None:
+            os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+        else:
+            os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = self._prev
+
+    def test_off_mode_leaves_contradictory_browse_fallback_unchanged(self) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "off"
+        contradictory = _BROWSE_CONTRADICTORY_FALLBACK_AR
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=contradictory,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.action == "disabled"
+        assert result.replaced is False
+        assert result.reply == contradictory
+
+    def test_shadow_mode_detects_without_rewriting_browse_fallback(self) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "shadow"
+        contradictory = _BROWSE_CONTRADICTORY_FALLBACK_AR
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=contradictory,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.replaced is False
+        assert result.reply == contradictory
+        assert result.action == "rewrite_false_negative"
+        assert result.shadow_mode is True
+        assert result.would_rewrite is True
+        assert result.availability_claim_blocked is True
+
+    def test_enforce_mode_rewrites_contradictory_browse_fallback(self) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        contradictory = _BROWSE_CONTRADICTORY_FALLBACK_AR
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=contradictory,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.replaced is True
+        assert result.reply != contradictory
+        assert result.action == "rewrite_false_negative"
+        passed = apply_product_availability_truth_guard(
+            reply=result.reply,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert passed.action == "allowed_structured_catalog_browse"
+        assert passed.replaced is False
+
+
+_BROWSE_CONTRADICTORY_FALLBACK_AR = (
+    "لا توجد منتجات قابلة للبيع مؤكدة في الكتالوج حالياً."
+)
+
+_GENERIC_BROWSE_PRODUCT = {
+    "id": 501,
+    "title": "حذاء رياضي أبيض",
+    "price": 249,
+    "in_stock": True,
+    "can_checkout": True,
+    "orderable": True,
+}
+
+
+def _browse_fallback_availability_context(products: list[dict]) -> dict:
+    from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: PLC0415
+        build_availability_context,
+    )
+
+    return build_availability_context(
+        None,
+        1,
+        result_data={
+            "question_kind": "browse",
+            "compose_source": "fallback_deterministic",
+            "fallback_action_type": "catalog_product_answer",
+            "eligible_product_count": len(products),
+            "catalog_search_query": "",
+            "search_result_count": len(products),
+            "pending_product_card_count": len(products),
+            "pending_candidates": list(products),
+        },
+    )
+
+
+class TestBrowseCatalogFallbackGuardModes:
+    def setup_method(self) -> None:
+        self._prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
+
+    def teardown_method(self) -> None:
+        if self._prev is None:
+            os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
+        else:
+            os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = self._prev
+
+    def test_off_mode_leaves_contradictory_browse_fallback_unchanged(self) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "off"
+        contradictory = _BROWSE_CONTRADICTORY_FALLBACK_AR
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=contradictory,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.action == "disabled"
+        assert result.replaced is False
+        assert result.reply == contradictory
+
+    def test_shadow_mode_detects_without_rewriting_browse_fallback(self) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "shadow"
+        contradictory = _BROWSE_CONTRADICTORY_FALLBACK_AR
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=contradictory,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.replaced is False
+        assert result.reply == contradictory
+        assert result.action == "rewrite_false_negative"
+        assert result.shadow_mode is True
+        assert result.would_rewrite is True
+        assert result.availability_claim_blocked is True
+
+    def test_enforce_mode_rewrites_contradictory_browse_fallback(self) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        contradictory = _BROWSE_CONTRADICTORY_FALLBACK_AR
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=contradictory,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.replaced is True
+        assert result.reply != contradictory
+        assert result.action == "rewrite_false_negative"
+        passed = apply_product_availability_truth_guard(
+            reply=result.reply,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert passed.action == "allowed_structured_catalog_browse"
+        assert passed.replaced is False
