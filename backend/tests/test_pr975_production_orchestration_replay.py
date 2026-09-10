@@ -17,6 +17,7 @@ for _path in (_REPO, _REPO / "backend", _REPO / "database"):
         sys.path.insert(0, str(_path))
 
 import models as _models  # noqa: E402
+from core.inbound_dedup import reset_cache  # noqa: E402
 from models import Integration, Product  # noqa: E402
 from modules.ai.brain.persona.fact_bound_composer import (  # noqa: E402
     FactBoundPersonaComposer,
@@ -38,11 +39,13 @@ from services.merchant_brain_turn import (  # noqa: E402
 )
 from tests.commerce_scenario_fixtures import (  # noqa: E402
     DEFAULT_PHONE_E164,
+    ScenarioWorld,
     make_scenario_db,
     seed_conversation,
     seed_customer,
     seed_tenant,
 )
+from tests.salla_acceptance.layer2_harness import Layer2BrainRunner  # noqa: E402
 
 JACKET_IMAGE_URL = "https://cdn.example/catalog/jacket.jpg"
 JACKET_PRODUCT_URL = "https://shop.example/products/jacket"
@@ -424,4 +427,245 @@ def test_real_orchestration_three_turn_replay_reaches_whatsapp_wire(
             )
             assert interactive["header"]["image"]["link"] == JACKET_IMAGE_URL
     finally:
+        db.close()
+
+
+def test_layer2_webhook_three_turn_replay_reaches_provider_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the actual merchant webhook, state store, and outbound dispatcher."""
+    from modules.ai.brain.pipeline import get_brain  # noqa: PLC0415
+
+    monkeypatch.delenv("NAHLA_TEST_NO_DB", raising=False)
+    monkeypatch.setenv("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", "enforce")
+    monkeypatch.setenv("ORDER_FLOW_V2_ENABLED", "false")
+    monkeypatch.setenv("ORDER_FLOW_V2_SHADOW_ENABLED", "true")
+    reset_cache()
+
+    db, _engine = make_scenario_db()
+    tenant = seed_tenant(db, name="متجر تجريبي عام")
+    customer = seed_customer(
+        db,
+        tenant.id,
+        phone=DEFAULT_PHONE_E164,
+        name="نورة عبدالله",
+    )
+    convo = seed_conversation(
+        db,
+        tenant.id,
+        customer_id=customer.id,
+        status="active",
+    )
+    _seed_catalog(db, tenant.id)
+    world = ScenarioWorld(
+        db=db,
+        tenant=tenant,
+        customer=customer,
+        conversation=convo,
+        phone=DEFAULT_PHONE_E164.lstrip("+"),
+        phone_e164=DEFAULT_PHONE_E164,
+    )
+    runner = Layer2BrainRunner(world, phone_id="PH_PR975_LAYER2")
+    brain = get_brain()
+    messages = (
+        "وش منتجاتكم؟",
+        "ابي الجاكيتات",
+        "ابي رابط الجاكيت",
+    )
+    store_link_results: list[tuple[str, object]] = []
+
+    async def compose(
+        _composer: FactBoundPersonaComposer,
+        bundle,
+    ) -> PersonaComposeResult:
+        if bundle.inbound_text == messages[1]:
+            return PersonaComposeResult(
+                text="",
+                source="fallback_deterministic",
+                surface=bundle.surface,
+                facts_hash="layer2",
+                guard_passed=False,
+                guard_failed_reason="invented_offer",
+                fallback_reason="invented_offer",
+                language=bundle.language,
+                dialect=bundle.dialect,
+            )
+        text = (
+            "عندنا فستان كاجوال وفستان سهرة وجاكيت."
+            if bundle.inbound_text == messages[0]
+            else "هذا رابط جاكيت."
+        )
+        return PersonaComposeResult(
+            text=text,
+            source="persona_llm",
+            surface=bundle.surface,
+            facts_hash="layer2",
+            guard_passed=True,
+            language=bundle.language,
+            dialect=bundle.dialect,
+        )
+
+    def capture_store_link(*args, **kwargs):
+        result = apply_store_link_safety_net(*args, **kwargs)
+        store_link_results.append((str(kwargs.get("customer_msg") or ""), result))
+        return result
+
+    try:
+        stack = ExitStack()
+        stack.enter_context(
+            patch(
+                "core.store_knowledge.build_merchant_context",
+                return_value={},
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                brain._facts_loader,
+                "load",
+                side_effect=lambda *_args, **_kwargs: _commerce_facts(
+                    _catalog_rows()
+                ),
+            )
+        )
+        stack.enter_context(
+            patch.object(FactBoundPersonaComposer, "compose", new=compose)
+        )
+        stack.enter_context(
+            patch(
+                "modules.ai.orchestrator.adapter.generate_ai_reply",
+                return_value=AIReplyPayload(
+                    reply_text="استعرض المنتجات المتاحة.",
+                    provider_used="test",
+                ),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "modules.ai.postprocess.safety_nets.apply_store_link_safety_net",
+                new=capture_store_link,
+            )
+        )
+
+        turns = []
+        brain_results: list[dict] = []
+        state_snapshots: list[dict] = []
+        wire_by_turn: list[list] = []
+        with stack:
+            for index, message in enumerate(messages, start=1):
+                outbound_before = len(runner.fake_sender.sent)
+                turn = runner.run_turn(
+                    message,
+                    label=f"pr975-layer2-turn-{index}",
+                    provider_msg_id=f"wamid.pr975.layer2.{index}",
+                )
+                turns.append(turn)
+                brain_results.append(dict(runner._last_brain_result))
+                state_snapshots.append(
+                    brain._state_store.load(
+                        db,
+                        tenant.id,
+                        world.phone,
+                    ).to_dict()
+                )
+                wire_by_turn.append(
+                    list(runner.fake_sender.sent[outbound_before:])
+                )
+
+        assert all(turn.brain_called for turn in turns), [
+            turn.to_dict() for turn in turns
+        ]
+        assert not runner.errors, runner.errors
+        assert [int(state.get("turn") or 0) for state in state_snapshots] == [
+            1,
+            2,
+            3,
+        ]
+        assert [
+            int((state.get("current_product_focus") or {}).get("id") or 0)
+            for state in state_snapshots[1:]
+        ] == [28, 28]
+
+        data_2 = brain_results[1]
+        assert data_2["question_kind"] == "browse"
+        assert int(data_2["eligible_product_count"]) > 0
+        assert data_2["availability_claim_blocked"] is True
+        assert "product_availability_truth_guard" in data_2[
+            "final_transform_reasons"
+        ]
+        assert "product_availability_truth_guard" in data_2[
+            "quality_observability"
+        ]["guards_triggered"]
+        cards_2 = data_2.get("product_cards") or []
+        assert len(cards_2) == 1
+        assert int(cards_2[0].get("id") or 0) == 28
+        assert cards_2[0].get("file_url") == JACKET_IMAGE_URL
+        assert cards_2[0].get("product_url") == JACKET_PRODUCT_URL
+
+        final_context = build_availability_context(
+            db,
+            tenant.id,
+            result_data={
+                **data_2,
+                "pending_candidates": list(
+                    data_2["decision_args"].get("products") or []
+                ),
+                "pending_product_card_count": len(cards_2),
+            },
+        )
+        final_guard_pass = apply_product_availability_truth_guard(
+            reply=turns[1].outbound_reply,
+            availability_context=final_context,
+            inbound_text=messages[1],
+            chosen_path=str(data_2.get("chosen_path") or ""),
+            question_kind=str(data_2.get("question_kind") or ""),
+            surface=str((data_2.get("persona_compose") or {}).get("surface") or ""),
+        )
+        assert final_guard_pass.action == "allowed_structured_catalog_browse"
+        assert final_guard_pass.replaced is False
+        assert final_guard_pass.reply == turns[1].outbound_reply
+
+        data_3 = brain_results[2]
+        assert (
+            data_3["decision_args"]["source"]
+            == "selection_context_named_product_link"
+        )
+        assert data_3["decision_args"]["presentation_identity_grounded"] is True
+        cards_3 = data_3.get("product_cards") or []
+        assert len(cards_3) == 1
+        assert int(cards_3[0].get("id") or 0) == 28
+        assert cards_3[0].get("product_url") == JACKET_PRODUCT_URL
+        assert cards_3[0].get("product_url") != STOREFRONT_URL
+
+        turn_3_store_link = [
+            result
+            for message, result in store_link_results
+            if message == messages[2]
+        ]
+        assert len(turn_3_store_link) == 1
+        assert turn_3_store_link[0].fired is False
+        assert turn_3_store_link[0].rewrote_reply is False
+
+        for records in wire_by_turn[1:]:
+            cta_payloads = [
+                record.payload
+                for record in records
+                if (record.payload.get("interactive") or {}).get("type")
+                == "cta_url"
+            ]
+            assert len(cta_payloads) == 1, [record.payload for record in records]
+            interactive = cta_payloads[0]["interactive"]
+            assert (
+                interactive["action"]["parameters"]["url"]
+                == JACKET_PRODUCT_URL
+            )
+            assert interactive["header"]["image"]["link"] == JACKET_IMAGE_URL
+        assert all(
+            record.path
+            in {"provider_post_with_context", "provider_send_message"}
+            for records in wire_by_turn[1:]
+            for record in records
+        )
+        assert runner.fake_sender.real_send_attempted is True
+    finally:
+        reset_cache()
         db.close()
