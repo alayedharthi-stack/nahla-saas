@@ -284,6 +284,50 @@ class TestNavigationPersonaRouteProvenance:
 
         asyncio.run(_run())
 
+    def test_navigation_timeout_retries_model_owned_prose_once(self) -> None:
+        async def _run() -> None:
+            timed_out = PersonaComposeResult(
+                text="",
+                source="fallback_deterministic",
+                surface="catalog_product_answer",
+                facts_hash="abc",
+                guard_passed=False,
+                fallback_reason="timeout",
+            )
+            model_reply = PersonaComposeResult(
+                text="عندنا خيارات متنوعة من الأحذية والملابس.",
+                source="persona_llm",
+                surface="catalog_product_answer",
+                facts_hash="def",
+                guard_passed=True,
+            )
+            first_event = {"compose_source": "fallback_deterministic"}
+            second_event = {"compose_source": "persona_llm"}
+            compose = AsyncMock(
+                side_effect=[
+                    ("existing emergency", timed_out, first_event),
+                    (model_reply.text, model_reply, second_event),
+                ]
+            )
+
+            from services.catalog_navigation_compose_retry import (
+                _retry_catalog_navigation_timeout_once,
+            )
+
+            text, result, event = await _retry_catalog_navigation_timeout_once(
+                compose,
+                {"tenant_id": 77},
+            )
+
+            assert compose.await_count == 2
+            assert text == model_reply.text
+            assert result.source == "persona_llm"
+            assert event["compose_source"] == "persona_llm"
+            assert event["compose_retry_count"] == 1
+            assert event["first_compose_failure"] == "timeout"
+
+        asyncio.run(_run())
+
     def test_navigation_no_route_fallback_stays_null(self) -> None:
         text, result, event = build_catalog_navigation_emergency_outcome(
             tenant_id=77,
