@@ -1564,6 +1564,1808 @@
       "implementation_head": "5ac624e28b3c617a3b6a050b7e75bbc029dab439",
       "owner_approval_ref": "OWNER_GOV002_APPROVAL=GRANTED DEFECT=EXTERNAL-URL-NOT-ENRICHED-FOR-AI-D17 SCOPE=PR961_EXACT_LINUX_FINDING_ONLY IMPLEMENTATION_PR=961 IMPLEMENTATION_HEAD=5ac624e28b3c617a3b6a050b7e75bbc029dab439 EXACT_FINDINGS=1 SINGLE_USE=true PREEXISTING_CANNED_REPLY_UNCHANGED=true",
       "exact_reason": "new fixed customer-facing return in compose/persona surface"
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-001",
+      "change_class": "CANNED_REPLY_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/compose/responder.py"
+      ],
+      "exact_symbol_scope": "3074",
+      "expected_change_digest": "1a38ca83fa2fa93e3b8a92a701475d2cbdd6005cf8944356c82ff677f45a4a43",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: new fixed customer-facing return in compose/persona surface."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-002",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "",
+      "expected_change_digest": "050a6682fe1afc41b98ba34dca78ec1c3ca045bcb3eea327fe7743dc13358c65",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: modified semantic regex in semantic ownership surface."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-003",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "7df72e8a7b102c2e8580b863b67a3f1e74b63be37449df1c4c008efbbb4acd03",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: customer-language re_search in semantic ownership surface."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-004",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "e6f488362f658afd7f6c05dea966e279c3b92c89801bf83681f6c474216fc072",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: customer-language re_search in semantic ownership surface."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-005",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "117e968102bb39e3e3149ed9c0bbe84eee9781dd94a8134e1d2687a72875f156",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: customer-language re_search in semantic ownership surface."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-006",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "b81a577916f761a57e7fc02ddfbf2e1f9a0dfd0dbdb351c29a921cccd408fdcb",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: customer-language re_search in semantic ownership surface."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-007",
+      "change_class": "CUSTOMER_REGEX_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "re_search",
+      "expected_change_digest": "25b73ac55fceab59fc4207b1c1e1187dc40c892b106beb0914cb7560b80496cd",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: customer-language re_search in semantic ownership surface."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-008",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e7037971cacb754c27411f32246a0bfb2f9d6306332ebfe8b8d80f4230a72136",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-009",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e64e79f07f277cf51f03443b8a14a5ea215b84453a7e04e96eaa720306efd494",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-010",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "20805317924d62e91230e18b050b5c85148bb07ae6f1f72ac68e5b78c1430b82",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-011",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "d929755ad4249c6c28fdbb209cc8c68ffeeaa1acf2a1a445f38e3d3a5d57b069",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-012",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "0778b2fca3bcb7cd9b752dc29e522cc219b74e9f8b6527f5e1dce5c5c551e23c",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-013",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "c4dd8c7e699c79dfa8cc48a98f1754915654dec8259a64e4d82572e70668fa07",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-014",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "bf0412130645ce9b0148d7675589bcc0d52dada626426869aca59c1217984f60",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-015",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e088b365ac7591ab79b55caabc985e59f7f033d3d517f0ac7d447674807139eb",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-016",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "6104bdfd4f86a796c3cca2a340a24bceec9899ba81041c81babef0fa17015c46",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-017",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e8cfae7f410c78ead8f75c29d135a70f3322ce6c7a6e8255b320ed83193ef433",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-018",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "8e6bb38a2000f24638b12a4c22eda1af7915e14e65ce33a8b64179b2af2ea9b7",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-019",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "a11fea7622147564431b174542705c670c1911c2874b1527c8d875c338f96597",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-020",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "3e2a95bde9b6b9c2cfde11e38738b0bf452b2fd1be56114f4e4f48f7b408ff65",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-021",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "7b79fc088ae5238cdfc78858c5c00f4884ad7b9c9ad65555bec0ce5d1e8d3d53",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-022",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "f36dc45627e2fdfc8893abbe8c4fddb2d36ae9a035ae9a9d29c40dfeca520703",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-023",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "f6b81c73a52e8b90157bec76c326908a5898f088888953d6385455b2642097c7",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-024",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "50031b8ad9d06e4d5251ecd40784bc3b8fdb86e011c5c195d0a98566e18bda4b",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-025",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "c774487640a3a513bfc306a5f2eb2b04b1ee46e93b75ca99a8259abf0a2ecea7",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-026",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "05032192e0686db60708d2600b7a94bccde9530f890e218a9ede1bc0c25c735f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-027",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b203f695c77e37151293f34a113c0a26fc44b63be6cbb117e801db24a3e3e100",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-028",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "1535f05c4e88bb95753f8ac0b2a2fc0b2ff0de8e79a1dd6fbdd88f5c2a1887fb",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-029",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "5caa15305f3ded5d3fc622195b802670659b7774cab760d336fd239801328df2",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-030",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "fc4ca9978c152cfe8ddc5ca27684d979426c3949b04efecc1a17c039e3e69acb",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-031",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "62e1c50ce1cda8f14b11e59b52ff912cd06a8782215ae36183da4ec07ca7e6d7",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-032",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "8946442ee815203516faac35218bd0885df1305b7b20fd2d5df3271d435129be",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-033",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "89fbd37fae5926345aaaa8f97c1227c00523da5f3ee522a75e97c866300f6f15",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-034",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "d7a6d39737f9b4ea6aac63c19f4ec69fab8831b1e461adc7529b10893a2e90da",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-035",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "a132d6afeb49053d0a793fd819d0687593620388b86b71569f99098c10f02ebe",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-036",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "7a688f02e2f871192f9b78eb1c15e04119cee011bcd2a266780a14000fa52c6a",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-037",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "373e136cb10d6c8febf515df9a599a207a7f1cf1eac8dc23a4b94aaafb24c954",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-038",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b6a1c3f3ada89bc2ab5a0fd5ed9c87dab068304fbb8fc2eddfff0a110664447a",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-039",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "62eb70878f7ff87352eedac565d297f1375325d3c0bc5d273a5068ecec79c243",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-040",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "9006463033042a266126bdf9838a50e7b839b737180f81d26a989a61fb2a0d4d",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-041",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "389689b77a7573d7003abe35b810b9735624bda20a5ca9ac2ebc712c530e5b14",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-042",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "d6d8b2989464f25e3c85f03138d1f020ed3e4ad4498ea1a22ed61723853e5853",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-043",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "6bb7c35b23a93f83855d920188e8877a2f3ca24e1c7c72b46c1f49f0bd0dd045",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-044",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e266b9ef762d568a8e1072395b7cb3f62d8a0b42d31db5a2021deebc322386b5",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-045",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "9d3cb7181593568a19a6409d3013dd652b7629ef901dd9d90441455f76b77f3f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-046",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "4a4ed60a279ce22e6e135ce8644ee4ca420c0d11859253b5ac534f0b6d7a669e",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-047",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "bda61d6825cbad1fd7d39f781445571d41f229607fc3409e5ece936584902a20",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-048",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "daf6426263c38eaca2ace5f4408dc4e6f2b4d3da0699668da36c1b6fe3dcf81f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-049",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "0489561a07098c2cf779b836bdc348eab986e74bbfda7dfc9a32f38a6047d1cb",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-050",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "137a9e552a8d18237a215badddbfc03829ebd95dc6291bd88ac0ae48262399e6",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-051",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "9b0e70da3e63511c8abe0e03023fe7570b6787b175ae5d9cdad0c23fb34a89e7",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-052",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e74f6a6917a01641b49b00ccbb36646b19b16c14643b89ab21c10105caee1cd4",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-053",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "edf141c3bedb08e117f188f3cf9e91637393c2415da91e615f5d9ae72b9ee8a1",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-054",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "2502cfed7bfb5c9fdcf7745f209f5517e820991c37842db5006462b259652931",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-055",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "187c9d89f7231e8386b66681a8d3c9895a0a9f9a877d837a68e0ddf7c533f4c6",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-056",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "8cfc3dbdfb584687fd23c1fe6ed40f3ac3edeba7c0cdbf26c972d3062772a3ec",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-057",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "128033c6ba2dc93edacce4eef2c32ee447e2d4c9dc5c0f8cfcf673fdf1854549",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-058",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "c0713f564d69e495258edf52af310e90a43a4b65439a3c9440bfdb05996176f5",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-059",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b13890f34c3708c2ef2bfb901b6fa6de0ed8a488bfa1c63ee7c735e06db6fe37",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-060",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "3146766f5851c7d4d25f7bef340d4545f97c483eae65480532b5cef4d0c87de1",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-061",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "6380e0a7a46843a7244353dc6e3bc09e8842aaf69341e1263090d932be862f28",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-062",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "ab4c450816bc7ee0f509d54c54910819cd681a6afe1ecff4b875520fc23c73e1",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-063",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "00c2137d9f980ca8fd636a2d2e5d1de1c6d823a28aa4a72096d035e3a6589a59",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-064",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "0b8ca1cd8a16bc9ed3f7a4c87e5cd74ca42bf98627134b5df1da6f55840a406e",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-065",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "c50c05532cdeb1da5d19c22c71597787785290df98b4efe4098f40266e7c2101",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-066",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "42980eddf96f66773d0c37effb8cba5a434b2ca82fb2181cda695b7e4d6eecac",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-067",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "c84e2bdd03fe355757133bb807e64738ab92e2596d5970eb47ee194af20b07e9",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-068",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "75e2f808ddee6780306a21ea5c5bbe7cbfa4b9b22782e504f8fbf23d87589e6e",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-069",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "1d6fcb79a70cb51962185cd63fc4358dc238b3891549099a68b2b4c3d0ed8dfd",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-070",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "708969e5702247ee4ca1827ff26bc620686f1f573e07ec8ebe59bbb7886f372f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-071",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "0189726a266ff388dbab75462843ef2087b89a8fe5495bb7acc3b8ea32410e45",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-072",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "a360c82056088d0e2f080cde236c0fb8e60ec02c7055cdd114414fec7b71fdf4",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-073",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "a564b575b6f6b6d510bc0c8fdee988575e282eed363449d8984a25edc8397f33",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-074",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "9f62b667d66195085639e6ea71da2703e3d03c2e91d2d3c5a46d004e8ed1bea8",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-075",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "ce102933ba03f293dbb3ff7434337345f873c4a3d3833815f52ddef4f0d94b70",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-076",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "a3c43ae5e6db7efc495368601cd4bb392ec3fcebf56f4b6f92672b7a6494e290",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-077",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "6fea991c539dd22ff1e52754424f3b984825437077172f037aea80ceb546fa36",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-078",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "cf33de1b832c30bb23634bc330f3fdb168a28779a29e4874e5b7ac3dec4a670d",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-079",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "168ef840f8af9db4222842c2c9763ac3a45663238ee8119f5e69bdc402407f42",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-080",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "522720b55a88d9c090fa68a4e1f3342f4d2bde823c800e21e47af1c669538934",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-081",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "06431e5ac2ccedf24d5bac5512165ba2782af2bd158b543cbaf3bc86e97e9ee8",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-082",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e055f91ce9a45ddc6306759106afbc15eb54f7b95eb8ada76a14e45387b33a5f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-083",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "cab0c5c754b1aa634936b91079d52f331d559438622b1a9b552e9a5e48190bba",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-084",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "139936194992b3dc166ff71fb10bd572a2639bc30181cfae309d9ced33242404",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-085",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "baa9e8e0ef0477557917f2eded75cec5507c7d3568814b1e427293fe9f7b8124",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-086",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "dea53cfbf0b2469dcfe3137ebd7d569e42d1ee1f03110a4438c2c807bd93c2b0",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-087",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "e924cf56cea6f5bed24622c09b18bd064ebc273593bf59bdde6bbcc4838de1fb",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-088",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "d91673751c34c7807ee7c0dcb268b56e05808dd85c68ceabb9e35ff7bfbd7a7f",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-089",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "99e95005227a9de06c7327b48699859a99eb9b6f66cde0b0c4a8e7201e252aed",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-090",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "2baa45ff379552f180022a1209e9401790a0c4625c884ce33293f80bb6742fc4",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-091",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "82046a4d86a21de885cb8584d1c74f71bf0cfb73ff7cf69d9bd3c4aa35477ddd",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-092",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "3bb142cc25d8b846f94089bf6a9bbeedd93228d75bd3aab7401c1187a3998e72",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-093",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "15f1527d8eb9523e9af6c528b34da7b13f6a0a710b7d5e6b6572306b2af1b6cc",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-094",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "f9390c9aac5db331d23999b259f8f716861624ea9efb78e4c0695164ed4d0539",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-095",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "7ea14f4bbda98b83bc5982210acfa43c1d8aeb0bacfd83e9fc609b22436ca4e7",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-096",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "740b060f80669f29312128ac30f5e1b134fcc68a1b0fd122b3d9b57bca1314f8",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-097",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "59d6392afa1aa03bcc0ceab38279c1db7c1094f8cfe6673653d9e399b63460a3",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-098",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "69d04d6d48938faa252831a040c5ec4d36000995040b4aed4f8a9301afe21c84",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-099",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "f46c4b8b75f2957a4d1aca19447fbf94fa3c3de2ac50be67781de45990035c02",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-100",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "df1b080f5b74d9761f2832a6cb0b4631d9fa1a3cbf5a1e8d8c6a216ce05c8056",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-101",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "82e6867176ec679316ef8d0d792659477c7f57e15660c36f7d0f9dc8bc31ece7",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-102",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "b6354a6ab5b6d0c1843601db787861260d32070e6c619e0358a67de4ec6fd020",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-103",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/decision/engine.py"
+      ],
+      "exact_symbol_scope": "helper",
+      "expected_change_digest": "2b75e253e6f7649581140f465b982cdaa8a59b1ae30eb8ed88f18455c9539802",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: helper call wrapping a customer-language literal in an ownership branch."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-104",
+      "change_class": "PERSONA_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/persona/catalog_product_answer.py"
+      ],
+      "exact_symbol_scope": "",
+      "expected_change_digest": "8d1462a47d6519b467fd53e37750f94d2a8a5666626a4e704ad50cc6774c71b1",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest for PR #980 model-owned catalog understanding and grounded correction. The model owns semantic interpretation and wording; code validates tenant-scoped catalog facts and delivery. Scanner reason: persona runtime behavior surface changed."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-105",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/pipeline.py"
+      ],
+      "exact_symbol_scope": "in",
+      "expected_change_digest": "ebe4ac174ee67b5b678d919961d73a30b131d753626ce50e11af9c54b8734efb",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: customer-language in branch in semantic ownership surface."
+    },
+    {
+      "exception_id": "EX-AI-PRODUCT-UNDERSTANDING-PR980-106",
+      "change_class": "KEYWORD_ROUTER_CHANGE",
+      "exact_file_scope": [
+        "backend/modules/ai/brain/pipeline.py"
+      ],
+      "exact_symbol_scope": "in",
+      "expected_change_digest": "8ee903974c158684b9329ef766683cd6f73b4938b230fa3110b775451fe339e3",
+      "single_use": true,
+      "consumed": false,
+      "created_at": "2026-09-10",
+      "expires_at": "2026-09-24",
+      "implementation_pr": "980",
+      "implementation_head": "1f902eecffb209a0174ba6ac8ac3c05d449d415d",
+      "owner_approval_ref": "OWNER_GOV002_BATCH_APPROVAL=REQUIRED_ON_AUTHORIZATION_PR IMPLEMENTATION_PR=980 IMPLEMENTATION_HEAD=1f902eecffb209a0174ba6ac8ac3c05d449d415d EXACT_TRUSTED_BASE_FINDINGS=106 SINGLE_USE=true MODEL_OWNS_CATALOG_SEMANTICS=true NO_FIXED_CUSTOMER_PHRASES_ADDED=true",
+      "exact_reason": "Authorize only this exact trusted-BASE digest reported after the integration file changed for PR #980. The implementation adds model-owned catalog intent/claim decisions and structured fact validation; it adds no customer-facing phrase, customer, or customer-language regex rule. Scanner reason: customer-language in branch in semantic ownership surface."
     }
   ]
 }
