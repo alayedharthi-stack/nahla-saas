@@ -16,6 +16,12 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  # noqa: E402
+    order_summary_r3_components,
+)
+from core.commerce_lifecycle.order_confirmation_assets import (  # noqa: E402
+    ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL,
+)
 from core.commerce_lifecycle.order_updates import (  # noqa: E402
     create_revision_from_active,
     get_order_update_flags,
@@ -120,3 +126,168 @@ class TestRevisionChain:
         assert active.is_active is False
         snap = resolve_active_and_pending(db, 1, "order_confirmation")
         assert snap["active"]["id"] == draft.id
+
+
+_PENDING_IMAGE_BODY = (
+    "مسودة IMAGE {{1}} 📦\n\nمن {{4}}\nرقم الطلب: #{{2}}\nالمبلغ: {{3}} ريال"
+)
+_ACTIVE_TEXT_BODY = "نسخة نشطة نصية {{1}} رقم {{2}}"
+_PENDING_TEXT_BODY = "مسودة نصية {{1}} رقم {{2}}"
+
+
+def _pending_image_components(body_text: str = _PENDING_IMAGE_BODY):
+    comps = order_summary_r3_components()
+    body = dict(comps[1])
+    body["text"] = body_text
+    return [comps[0], body, comps[2]]
+
+
+class TestOrderConfirmationPreviewSource:
+    def test_preview_follows_pending_image_over_active_text(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        active = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_confirmation_text_active",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=[{"type": "BODY", "text": _ACTIVE_TEXT_BODY}],
+            service_key="order_confirmation",
+            is_active=True,
+            is_hidden=False,
+            revision=1,
+        )
+        pending = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_confirmation_image_draft",
+            language="ar",
+            category="UTILITY",
+            status="DRAFT",
+            components=_pending_image_components(),
+            service_key="order_confirmation",
+            is_active=False,
+            is_hidden=False,
+            revision=2,
+            supersedes_template_id=None,
+        )
+        db.add_all([active, pending])
+        db.commit()
+
+        snap = resolve_active_and_pending(db, 1, "order_confirmation")
+        assert "مسودة IMAGE" in snap["body_text"]
+        assert snap["header_type"] == "image"
+        assert snap["preview_header_image_url"] == ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL
+        assert snap.get("preview_footer") is None
+        assert snap["active"]["header_type"] == "none"
+        assert snap["pending"]["header_type"] == "image"
+        assert _ACTIVE_TEXT_BODY.split("{{")[0] in snap["active"]["body_text"]
+
+    def test_preview_follows_pending_text_over_active_image(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        active = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_confirmation_image_active",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=order_summary_r3_components(),
+            service_key="order_confirmation",
+            is_active=True,
+            is_hidden=False,
+            revision=3,
+        )
+        pending = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_confirmation_text_draft",
+            language="ar",
+            category="UTILITY",
+            status="DRAFT",
+            components=[{"type": "BODY", "text": _PENDING_TEXT_BODY}],
+            service_key="order_confirmation",
+            is_active=False,
+            is_hidden=False,
+            revision=4,
+        )
+        db.add_all([active, pending])
+        db.commit()
+
+        snap = resolve_active_and_pending(db, 1, "order_confirmation")
+        assert "مسودة نصية" in snap["body_text"]
+        assert snap["header_type"] == "none"
+        assert snap.get("preview_header_image_url") is None
+        assert snap.get("preview_footer") is None
+        assert snap["active"]["header_type"] == "image"
+        assert snap["pending"]["header_type"] == "none"
+
+
+class TestOrderConfirmationPreviewHeader:
+    def test_order_confirmation_r3_image_includes_preview_header_url(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        tpl = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_confirmation_r3",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=order_summary_r3_components(),
+            service_key="order_confirmation",
+            is_active=True,
+            is_hidden=False,
+            revision=3,
+        )
+        db.add(tpl)
+        db.commit()
+        snap = resolve_active_and_pending(db, 1, "order_confirmation")
+        assert snap["header_type"] == "image"
+        assert snap["preview_header_image_url"] == ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL
+        assert snap.get("preview_footer") is None
+
+    def test_text_only_order_confirmation_has_no_preview_header(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        tpl = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_confirmation_text",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=[{"type": "BODY", "text": "تم استلام طلبك يا {{1}} رقم {{2}}"}],
+            service_key="order_confirmation",
+            is_active=True,
+            is_hidden=False,
+            revision=1,
+        )
+        db.add(tpl)
+        db.commit()
+        snap = resolve_active_and_pending(db, 1, "order_confirmation")
+        assert snap["header_type"] == "none"
+        assert snap.get("preview_header_image_url") is None
+        assert snap.get("preview_footer") is None
+
+    def test_other_services_do_not_expose_preview_header_url(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        _seed_approved(db, service_key="shipping_tracking")
+        snap = resolve_active_and_pending(db, 1, "shipping_tracking")
+        assert snap.get("preview_header_image_url") is None
+        assert snap.get("preview_footer") is None
+
+    def test_preview_footer_extracted_from_selected_revision(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        tpl = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_shipping_with_footer",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=[
+                {"type": "BODY", "text": "تتبع {{1}}"},
+                {"type": "FOOTER", "text": "متجر تجريبي عام"},
+            ],
+            service_key="shipping_tracking",
+            is_active=True,
+            is_hidden=False,
+            revision=1,
+        )
+        db.add(tpl)
+        db.commit()
+        snap = resolve_active_and_pending(db, 1, "shipping_tracking")
+        assert snap.get("preview_footer") == "متجر تجريبي عام"

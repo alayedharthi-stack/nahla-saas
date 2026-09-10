@@ -54,6 +54,9 @@ MSG_EXISTING_REJECTED = (
     "القالب مرفوض من Meta. راجع سبب الرفض ثم أعد الإرسال بعد التعديل."
 )
 MSG_LANGUAGE_AR_ONLY = "قالب ملخص الطلب متاح باللغة العربية فقط."
+MSG_STORE_INTEGRATION_REQUIRED = (
+    "يتطلب استيراد ملخص الطلب ربط متجر إلكتروني نشط. فعّل تكامل المتجر أولاً."
+)
 MSG_GENERIC_SAVE_FAILED = "فشل حفظ القالب. يرجى المحاولة مرة أخرى أو التواصل مع الدعم."
 
 _PENDING_STATUSES = ("DRAFT", "PENDING", "REJECTED")
@@ -354,6 +357,17 @@ def import_order_summary_from_library(
         lock.release()
 
 
+def _require_store_integration_for_import(db: Session, tenant_id: int) -> None:
+    from core.merchant_capabilities import resolve_merchant_capabilities  # noqa: PLC0415
+
+    caps = resolve_merchant_capabilities(db, int(tenant_id))
+    if not caps.supports_external_checkout:
+        raise NahlaLibraryImportError(
+            MSG_STORE_INTEGRATION_REQUIRED,
+            error_code="nahla_import_store_integration_required",
+        )
+
+
 def _import_order_summary_locked(
     db: Session,
     tenant_id: int,
@@ -376,6 +390,8 @@ def _import_order_summary_locked(
     existing = find_existing_order_confirmation_library_draft(db, tenant_id)
     if existing is not None:
         return _outcome_from_existing(existing, tenant_id=tenant_id, db=db)
+
+    _require_store_integration_for_import(db, tenant_id)
 
     components = order_summary_r3_components()
     active_slot = _find_active_lifecycle_slot_template(db, tenant_id)

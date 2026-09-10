@@ -48,6 +48,20 @@ def _image_header_component(components: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def resolve_order_confirmation_preview_header_url(
+    db: Any,
+    tenant_id: int,
+    components: Any,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Merchant-facing preview URL for order_confirmation IMAGE header only."""
+    return resolve_header_image_source_url(
+        components,
+        metadata,
+        tenant_runtime_url=_tenant_runtime_header_image_url(db, int(tenant_id)),
+    )
+
+
 def resolve_header_image_source_url(
     components: Any,
     metadata: Optional[Dict[str, Any]] = None,
@@ -250,4 +264,5 @@ __all__ = [
     "ensure_order_confirmation_image_header_for_meta",
     "prepare_order_confirmation_meta_submit_components",
     "resolve_header_image_source_url",
+    "resolve_order_confirmation_preview_header_url",
 ]
