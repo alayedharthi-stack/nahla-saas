@@ -98,13 +98,23 @@ function isDefaultTemplate(name: string, page: TemplatesPageExtraLabels) {
 // ── WhatsApp bubble preview ───────────────────────────────────────────────────
 
 function WaPreview({
-  header, body, footer, buttons,
-}: { header: string; body: string; footer: string; buttons: TemplateButton[] }) {
+  header, headerImageUrl, body, footer, buttons,
+}: { header: string; headerImageUrl?: string | null; body: string; footer: string; buttons: TemplateButton[] }) {
   const { tStatic, dir } = useLanguage()
   const mgmt = tStatic(tr => tr.templatesMgmt)
   return (
     <div className="bg-[#e5ddd5] rounded-xl p-4 flex items-end min-h-28" dir={dir}>
       <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs w-full p-3 space-y-1" dir="rtl">
+        {headerImageUrl && (
+          <img
+            src={headerImageUrl}
+            alt=""
+            className="w-full h-auto rounded-lg mb-1"
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            data-testid="template-order-summary-header"
+          />
+        )}
         {header && <p className="font-semibold text-slate-900 text-xs border-b border-slate-100 pb-1">{header}</p>}
         {body && (
           <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">{body}</p>
@@ -131,6 +141,13 @@ function WaPreview({
       </div>
     </div>
   )
+}
+
+function getOrderSummaryHeaderImageUrl(tpl: WhatsAppTemplateRecord): string | null {
+  if (tpl.service_key !== 'order_confirmation') return null
+  const header = tpl.components.find(component => component.type === 'HEADER')
+  if (header?.format !== 'IMAGE') return null
+  return header.example?.header_url?.trim() || null
 }
 
 // ── Template row ──────────────────────────────────────────────────────────────
@@ -445,6 +462,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
   const varKeys = extractVars(bodyRaw)
   const footer  = getFooter(tpl)
   const buttons = getButtons(tpl)
+  const headerImageUrl = getOrderSummaryHeaderImageUrl(tpl)
   const isDefault = isDefaultTemplate(tpl.name, page)
   const defaultMeta = isDefault ? page.defaultTemplates[tpl.name] : null
 
@@ -740,6 +758,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
 
           <WaPreview
             header={renderBody(getHeader(tpl), vars)}
+            headerImageUrl={headerImageUrl}
             body={renderBody(bodyRaw, vars)}
             footer={footer}
             buttons={buttons}
