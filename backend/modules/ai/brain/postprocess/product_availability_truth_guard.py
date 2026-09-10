@@ -510,6 +510,66 @@ def _would_rewrite(action: str, mode: str) -> bool:
     return False
 
 
+def _eligible_catalog_browse_fallback_facts(
+    availability_context: Optional[Dict[str, Any]],
+    *,
+    question_kind: str,
+) -> Optional[Dict[str, Any]]:
+    facts = dict(
+        (availability_context or {}).get("catalog_presentation_facts") or {}
+    )
+    if str(question_kind or facts.get("question_kind") or "").strip() != "browse":
+        return None
+    if str(facts.get("compose_source") or "").strip() != "fallback_deterministic":
+        return None
+    if str(facts.get("fallback_action_type") or "").strip() != "catalog_product_answer":
+        return None
+    if int(facts.get("eligible_product_count") or 0) <= 0:
+        return None
+    if not bool(facts.get("has_eligible_products")):
+        return None
+    if not bool(facts.get("pending_product_card_count_present")):
+        return None
+    if not list(facts.get("catalog_products") or []):
+        return None
+    if not list(facts.get("eligible_catalog_products") or []):
+        return None
+    return facts
+
+
+def _compose_positive_catalog_browse_fallback(
+    facts: Dict[str, Any],
+    *,
+    inbound_text: str,
+) -> str:
+    from modules.ai.brain.persona.catalog_product_answer import (  # noqa: PLC0415
+        build_catalog_product_answer_facts_bundle,
+        catalog_product_answer_deterministic_fallback,
+    )
+
+    products = [
+        dict(row)
+        for row in (facts.get("eligible_catalog_products") or [])
+        if isinstance(row, dict)
+    ]
+    bundle = build_catalog_product_answer_facts_bundle(
+        inbound_text=inbound_text,
+        products=products,
+        catalog_search_query=str(facts.get("catalog_search_query") or ""),
+        search_result_count=int(
+            facts.get("search_result_count")
+            or facts.get("eligible_product_count")
+            or len(products)
+        ),
+        question_kind="availability",
+        display_count=max(
+            int(facts.get("pending_product_card_count") or 0),
+            len(products),
+        ),
+    )
+    return catalog_product_answer_deterministic_fallback(bundle).strip()
+
+
 @dataclass(frozen=True)
 class ProductAvailabilityTruthGuardResult:
     reply: str
@@ -520,6 +580,26 @@ class ProductAvailabilityTruthGuardResult:
     availability_claim_blocked: bool = False
     shadow_mode: bool = False
     would_rewrite: bool = False
+
+
+def stamp_product_availability_guard_transform(
+    result_data: Dict[str, Any],
+    guard_result: ProductAvailabilityTruthGuardResult,
+    guard_replaced: Optional[Dict[str, bool]] = None,
+) -> None:
+    if not guard_result.replaced:
+        return
+    result_data["final_text_transformed"] = True
+    reasons = [
+        str(reason)
+        for reason in (result_data.get("final_transform_reasons") or [])
+        if str(reason or "").strip()
+    ]
+    if "product_availability_truth_guard" not in reasons:
+        reasons.append("product_availability_truth_guard")
+    result_data["final_transform_reasons"] = reasons
+    if guard_replaced is not None:
+        guard_replaced["product_availability_truth_guard"] = True
 
 
 def log_product_availability_truth_guard(
@@ -622,6 +702,51 @@ def apply_product_availability_truth_guard(
                 turn_token=turn_token,
             )
         )
+
+    browse_facts = _eligible_catalog_browse_fallback_facts(
+        availability_context,
+        question_kind=question_kind,
+    )
+    if browse_facts is not None:
+        positive_fallback = _compose_positive_catalog_browse_fallback(
+            browse_facts,
+            inbound_text=inbound_text,
+        )
+        if positive_fallback:
+            if (
+                _norm(original) == _norm(positive_fallback)
+                or reply_availability_polarity(original) == "positive"
+            ):
+                return ProductAvailabilityTruthGuardResult(
+                    reply=original,
+                    action="allowed_structured_catalog_browse",
+                    reason="structured_catalog_browse_positive_facts",
+                )
+            if mode == "shadow":
+                _emit_shadow(
+                    evidence_state=EVIDENCE_RESOLVED_AVAILABLE,
+                    conflict_type="-",
+                    guard_action="rewrite_false_negative",
+                    would_rewrite=True,
+                    reason="structured_catalog_browse_positive_facts",
+                    customer_text_changed=False,
+                )
+                return ProductAvailabilityTruthGuardResult(
+                    reply=original,
+                    action="rewrite_false_negative",
+                    reason="structured_catalog_browse_positive_facts",
+                    availability_claim_blocked=True,
+                    shadow_mode=True,
+                    would_rewrite=True,
+                )
+            return ProductAvailabilityTruthGuardResult(
+                reply=positive_fallback,
+                action="rewrite_false_negative",
+                replaced=True,
+                reason="structured_catalog_browse_positive_facts",
+                availability_claim_blocked=True,
+                would_rewrite=True,
+            )
 
     if mode == "off":
         return ProductAvailabilityTruthGuardResult(reply=original, action="disabled")

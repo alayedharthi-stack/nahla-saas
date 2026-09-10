@@ -47,6 +47,12 @@ from modules.ai.brain.persona.catalog_product_answer import (  # noqa: E402
 )
 from modules.ai.brain.persona.fact_bound_composer import FactBoundPersonaComposer  # noqa: E402
 from modules.ai.brain.persona.facts_bundle import PersonaComposeResult  # noqa: E402
+from modules.ai.brain.postprocess.availability_context_builder import (  # noqa: E402
+    build_availability_context,
+)
+from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: E402
+    apply_product_availability_truth_guard,
+)
 from modules.ai.brain.types import (  # noqa: E402
     BrainContext,
     CommerceFacts,
@@ -217,6 +223,46 @@ def _presentation_flow(message: str, *, state=None, products=None):
     return ctx, decision, result, presentation
 
 
+def _guard_catalog_browse_fallback(
+    *,
+    text: str,
+    products: List[Dict[str, Any]],
+    pending_product_card_count: int,
+):
+    result_data = {
+        "question_kind": "browse",
+        "compose_source": "fallback_deterministic",
+        "fallback_action_type": "catalog_product_answer",
+        "eligible_product_count": len(products),
+        "catalog_search_query": "",
+        "search_result_count": len(products),
+        "pending_product_card_count": pending_product_card_count,
+        "pending_candidates": list(products),
+    }
+    availability_context = build_availability_context(
+        None,
+        1,
+        result_data=result_data,
+    )
+    guarded = apply_product_availability_truth_guard(
+        reply=text,
+        availability_context=availability_context,
+        inbound_text="وش المنتجات المتوفرة؟",
+        chosen_path="fact_bound_persona_compose",
+        question_kind="browse",
+        surface="catalog_product_answer",
+    )
+    passed = apply_product_availability_truth_guard(
+        reply=guarded.reply,
+        availability_context=availability_context,
+        inbound_text="وش المنتجات المتوفرة؟",
+        chosen_path="fact_bound_persona_compose",
+        question_kind="browse",
+        surface="catalog_product_answer",
+    )
+    return guarded, passed, availability_context
+
+
 class TestSallaCategoryPickPresentation:
     def test_browse_reply_stamps_category_scoped_products(self) -> None:
         state = MerchantConversationState(turn=1)
@@ -358,7 +404,7 @@ class TestSallaCategoryPickPresentation:
         assert len(cards_2) == 1
         assert int(cards_2[0].get("id") or 0) == 28
         assert cards_2[0].get("file_url") == JACKET_IMAGE_URL
-        assert decision_2.args.get("question_kind") == "availability"
+        assert decision_2.args.get("question_kind") is None
 
         fallback_bundle = build_catalog_product_answer_facts_bundle(
             inbound_text=live_messages[1],
@@ -378,7 +424,16 @@ class TestSallaCategoryPickPresentation:
             fallback_bundle,
             reason="invented_offer",
         )
-        assert JACKET_28["title"] in fallback_2.text
+        assert fallback_facts["question_kind"] == "browse"
+        guarded_2, passed_2, _ = _guard_catalog_browse_fallback(
+            text=fallback_2.text,
+            products=list(result_2.data.get("pending_candidates") or []),
+            pending_product_card_count=len(cards_2),
+        )
+        assert guarded_2.replaced is True
+        assert guarded_2.action == "rewrite_false_negative"
+        assert passed_2.action == "allowed_structured_catalog_browse"
+        assert passed_2.replaced is False
 
         structured = structured_product_from_turn(decision_2, result_2)
         assert structured is not None
@@ -492,7 +547,7 @@ class TestSallaCategoryPickPresentation:
             _ctx("ابي رابط حذاء رياضي أبيض", state=no_url, products=[without_pdp])
         ) is None
 
-    def test_invented_offer_rejection_uses_positive_catalog_facts(
+    def test_browse_one_eligible_cannot_negate_after_invented_offer(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -519,17 +574,62 @@ class TestSallaCategoryPickPresentation:
                 inbound_text="ابي الأحذية",
                 products=[dict(GENERIC_SHOE)],
                 catalog_search_query="حذاء رياضي أبيض",
-                question_kind="availability",
+                question_kind="browse",
                 display_count=1,
             )
         )
 
-        assert GENERIC_SHOE["title"] in text
         assert result.source == "fallback_deterministic"
         assert result.fallback_reason == "invented_offer"
         assert event["eligible_product_count"] == 1
-        assert event["question_kind"] == "availability"
+        assert event["question_kind"] == "browse"
         assert event["catalog_product_ids"] == [GENERIC_SHOE["id"]]
+        guarded, passed, availability_context = _guard_catalog_browse_fallback(
+            text=text,
+            products=[dict(GENERIC_SHOE)],
+            pending_product_card_count=1,
+        )
+        presentation_facts = availability_context["catalog_presentation_facts"]
+        assert presentation_facts["eligible_product_count"] == 1
+        assert presentation_facts["has_eligible_products"] is True
+        assert presentation_facts["pending_product_card_count"] == 1
+        assert guarded.replaced is True
+        assert guarded.action == "rewrite_false_negative"
+        assert guarded.reply != text
+        assert passed.action == "allowed_structured_catalog_browse"
+        assert passed.replaced is False
+
+    def test_browse_multiple_eligible_cannot_negate(self) -> None:
+        products = [dict(GENERIC_SHOE), dict(JACKET_28)]
+        bundle = build_catalog_product_answer_facts_bundle(
+            inbound_text="وش المنتجات المتوفرة؟",
+            tenant_id=2,
+            customer_phone="966500000002",
+            products=products,
+            question_kind="browse",
+            display_count=2,
+        )
+        fallback = _catalog_product_answer_emergency_fallback(
+            bundle,
+            reason="invented_offer",
+        )
+
+        assert bundle.verified_facts["question_kind"] == "browse"
+        assert bundle.verified_facts["eligible_product_count"] == 2
+        guarded, passed, availability_context = _guard_catalog_browse_fallback(
+            text=fallback.text,
+            products=products,
+            pending_product_card_count=0,
+        )
+        presentation_facts = availability_context["catalog_presentation_facts"]
+        assert presentation_facts["eligible_product_count"] == 2
+        assert presentation_facts["has_eligible_products"] is True
+        assert presentation_facts["pending_product_card_count"] == 0
+        assert guarded.replaced is True
+        assert guarded.action == "rewrite_false_negative"
+        assert guarded.reply != fallback.text
+        assert passed.action == "allowed_structured_catalog_browse"
+        assert passed.replaced is False
 
     def test_generic_merchant_category_pick_without_prior_stamp(self) -> None:
         ctx = _ctx(

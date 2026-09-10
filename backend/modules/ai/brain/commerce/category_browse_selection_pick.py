@@ -192,10 +192,6 @@ def try_category_browse_pick_decision(ctx: BrainContext) -> Optional[Decision]:
             "selection_context_turn": int(getattr(ctx.state, "turn", 0) or 0),
         },
     }
-    if len(products) == 1:
-        # A single checkout-eligible category result is positive availability
-        # evidence, so the existing fact-bound fallback cannot deny the card.
-        decision_args["question_kind"] = "availability"
     return Decision(
         action=ACTION_SEARCH_PRODUCTS,
         args=decision_args,

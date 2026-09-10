@@ -5249,7 +5249,7 @@ class MerchantBrain:
         try:
             from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
                 apply_product_availability_truth_guard,
-                product_availability_guard_mode,
+                product_availability_guard_mode, stamp_product_availability_guard_transform,
             )
             if product_availability_guard_mode() != "off":
                 from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
@@ -5282,7 +5282,7 @@ class MerchantBrain:
                         db,
                         tenant_id,
                         focus_product=getattr(new_state, "current_product_focus", None),
-                        recommended_product_ids=_pavg_rec_ids,
+                        recommended_product_ids=_pavg_rec_ids, result_data=result.data,
                     )
                     _pavg_pc = dict(result.data.get("persona_compose") or {})
                     _pavg = apply_product_availability_truth_guard(
@@ -5302,7 +5302,7 @@ class MerchantBrain:
                     )
                     if _pavg.replaced:
                         reply = _pavg.reply
-                        _guard_replaced["product_availability_truth_guard"] = True
+                        stamp_product_availability_guard_transform(result.data, _pavg, _guard_replaced)
                     if _pavg.availability_claim_blocked:
                         result.data["availability_claim_blocked"] = True
                         if _pavg.reason:
