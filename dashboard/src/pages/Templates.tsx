@@ -1721,7 +1721,7 @@ function NahlaLibraryModal({ onClose, onImported }: {
               {/* WhatsApp bubble */}
               <div className="bg-[#e5ddd5] rounded-xl p-3 mb-4">
                 <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm p-3 space-y-2" dir="rtl">
-                  {preview.service_key === 'order_confirmation'
+                  {preview.key === 'order_summary'
                     && preview.header_type === 'image'
                     && preview.preview_header_image_url && (
                       <img

@@ -211,6 +211,16 @@ assert(
     && whatsappTemplatesSource.includes('filterWhatsAppLibraryTemplates')
     && !whatsappTemplatesSource.includes("'order_updates',"),
 )
+const libraryFilterSource = source('../src/pages/templates/orderUpdatesLibraryFilter.ts')
+assert(
+  'library filter keeps external-store order_summary templates',
+  libraryFilterSource.includes("group.channel === 'whatsapp'")
+    && libraryFilterSource.includes('order_summary uses order_confirmation internally'),
+)
+assert(
+  'library preview image is scoped to order_summary',
+  whatsappTemplatesSource.includes("preview.key === 'order_summary'"),
+)
 assert(
   'Settings tab follows order_updates deep-link changes',
   source('../src/pages/Settings.tsx').includes('Keep the rendered tab aligned with deep links')
