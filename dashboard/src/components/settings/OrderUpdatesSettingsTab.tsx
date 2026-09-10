@@ -44,6 +44,8 @@ const SERVICE_META: Record<OrderUpdateServiceKey, ServiceMeta> = {
     defaultVariables: [
       { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
       { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+      { key: 'order_total', labelAr: 'المبلغ الإجمالي', labelEn: 'Order total', sample: '350' },
+      { key: 'store_name', labelAr: 'اسم المتجر', labelEn: 'Store name', sample: 'متجر تجريبي عام' },
     ],
   },
   cod_confirmation: {
@@ -248,17 +250,35 @@ function Toggle({
   )
 }
 
-function WaBubblePreview({ body, footer }: { body: string; footer?: string }) {
+function WaBubblePreview({
+  body,
+  footer,
+  headerImageUrl,
+}: {
+  body: string
+  footer?: string
+  headerImageUrl?: string | null
+}) {
   return (
     <div className="bg-[#e5ddd5] rounded-xl p-4 flex items-end min-h-28" dir="rtl">
-      <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs w-full p-3 space-y-1">
-        {body ? (
-          <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">{body}</p>
-        ) : (
-          <p className="text-slate-400 text-xs italic">—</p>
-        )}
-        {footer && <p className="text-[10px] text-slate-400 mt-1">{footer}</p>}
-        <p className="text-[10px] text-slate-300 text-end">✓✓</p>
+      <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs w-full overflow-hidden">
+        {headerImageUrl ? (
+          <img
+            src={headerImageUrl}
+            alt=""
+            className="w-full h-32 object-cover border-b border-slate-100"
+            loading="lazy"
+          />
+        ) : null}
+        <div className="p-3 space-y-1">
+          {body ? (
+            <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">{body}</p>
+          ) : (
+            <p className="text-slate-400 text-xs italic">—</p>
+          )}
+          {footer && <p className="text-[10px] text-slate-400 mt-1">{footer}</p>}
+          <p className="text-[10px] text-slate-300 text-end">✓✓</p>
+        </div>
       </div>
     </div>
   )
@@ -328,6 +348,8 @@ function ServiceCard({
   const pending = detail?.pending_revision ?? null
   const previewBody = buildPreview(bodyText, variableKeys)
   const previewFooter = detail?.preview_footer ?? (isAr ? 'نحلة — مساعد متجرك' : 'Nahla — your store assistant')
+  const previewHeaderImageUrl =
+    meta.key === 'order_confirmation' ? (detail?.preview_header_image_url ?? null) : null
 
   const handleToggle = async (next: boolean) => {
     setToggleSaving(true)
@@ -473,7 +495,11 @@ function ServiceCard({
           <p className="text-xs font-semibold text-slate-600 mb-2">
             {isAr ? 'معاينة' : 'Preview'}
           </p>
-          <WaBubblePreview body={previewBody} footer={previewFooter} />
+          <WaBubblePreview
+            body={previewBody}
+            footer={previewFooter}
+            headerImageUrl={previewHeaderImageUrl}
+          />
         </div>
 
         {approvedLabel && (

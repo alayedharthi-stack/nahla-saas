@@ -139,8 +139,9 @@ _TEMPLATE_OVERRIDES: Dict[str, TemplateFilterMeta] = {
     ),
     "order_summary": TemplateFilterMeta(
         intent="order_confirmed",
-        order_channel="any",
-        required_buttons=("tracking_url",),
+        order_channel="external_store",
+        required_capabilities=("supports_external_checkout",),
+        required_buttons=("order_tracking_url",),
     ),
     "order_confirmed": TemplateFilterMeta(
         intent="order_confirmed",
@@ -190,7 +191,8 @@ _TEMPLATE_OVERRIDES: Dict[str, TemplateFilterMeta] = {
     ),
     "meta_review_order_confirmation": TemplateFilterMeta(
         intent="order_confirmed",
-        order_channel="any",
+        order_channel="external_store",
+        required_capabilities=("supports_external_checkout",),
     ),
     "meta_review_delivery_update": TemplateFilterMeta(
         intent="order_shipped",

@@ -144,6 +144,24 @@ class TestFilterAndGroup:
         flat_keys = [t["key"] for t in result["templates"]]
         assert len(flat_keys) == len(set(flat_keys))
 
+    def test_order_summary_only_in_external_store_group(self):
+        tpl = get_template_by_key("order_summary")
+        assert tpl is not None
+        meta = resolve_template_filter_meta(tpl)
+        assert meta.order_channel == "external_store"
+        assert "supports_external_checkout" in meta.required_capabilities
+
+        result = filter_and_group_library_templates(get_all_templates(), HYBRID)
+        by_channel = {g["channel"]: {t["key"] for t in g["templates"]} for g in result["groups"]}
+        assert "order_summary" in by_channel.get("external_store", set())
+        assert "order_summary" not in by_channel.get("whatsapp", set())
+
+    def test_order_summary_hidden_without_store_integration(self):
+        caps = _caps(supports_whatsapp_orders=True, supports_nahla_orders=True)
+        result = filter_and_group_library_templates(get_all_templates(), caps)
+        keys = {t["key"] for t in result["templates"]}
+        assert "order_summary" not in keys
+
     def test_default_order_channel_whatsapp_sorts_groups(self):
         result = filter_and_group_library_templates(
             get_all_templates(),

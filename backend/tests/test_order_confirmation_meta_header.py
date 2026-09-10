@@ -24,6 +24,7 @@ from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: E4
     ensure_order_confirmation_image_header_for_meta,
     prepare_order_confirmation_meta_submit_components,
     resolve_header_image_source_url,
+    resolve_order_confirmation_preview_header_url,
 )
 
 
@@ -60,6 +61,18 @@ class TestOrderConfirmationMetaSubmitPayload:
     def test_r2_default_when_no_component_or_merchant_metadata(self):
         components = order_summary_r3_components()
         assert resolve_header_image_source_url(components, {}) == ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL
+
+    def test_preview_helper_uses_component_header_url(self):
+        merchant = "https://cdn.merchant.example/preview-header.jpg"
+        components = order_summary_r3_components()
+        components[0]["example"]["header_url"] = merchant
+        url = resolve_order_confirmation_preview_header_url(
+            MagicMock(),
+            1,
+            components,
+            {},
+        )
+        assert url == merchant
 
     def test_ensure_uploads_and_strips_header_url(self, monkeypatch: pytest.MonkeyPatch):
         class _FakeUploader:

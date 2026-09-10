@@ -16,6 +16,12 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  # noqa: E402
+    order_summary_r3_components,
+)
+from core.commerce_lifecycle.order_confirmation_assets import (  # noqa: E402
+    ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL,
+)
 from core.commerce_lifecycle.order_updates import (  # noqa: E402
     create_revision_from_active,
     get_order_update_flags,
@@ -120,3 +126,30 @@ class TestRevisionChain:
         assert active.is_active is False
         snap = resolve_active_and_pending(db, 1, "order_confirmation")
         assert snap["active"]["id"] == draft.id
+
+
+class TestOrderConfirmationPreviewHeader:
+    def test_order_confirmation_includes_preview_header_url(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        tpl = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_confirmation_r3",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=order_summary_r3_components(),
+            service_key="order_confirmation",
+            is_active=True,
+            is_hidden=False,
+            revision=3,
+        )
+        db.add(tpl)
+        db.commit()
+        snap = resolve_active_and_pending(db, 1, "order_confirmation")
+        assert snap["preview_header_image_url"] == ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL
+
+    def test_other_services_do_not_expose_preview_header_url(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        _seed_approved(db, service_key="shipping_tracking")
+        snap = resolve_active_and_pending(db, 1, "shipping_tracking")
+        assert snap.get("preview_header_image_url") is None

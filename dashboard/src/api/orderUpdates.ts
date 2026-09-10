@@ -110,6 +110,7 @@ export interface OrderUpdateServiceDetail {
   last_approved_revision?: OrderUpdateRevision | null
   preview_body?: string | null
   preview_footer?: string | null
+  preview_header_image_url?: string | null
 }
 
 export interface CreateOrderUpdateRevisionPayload {

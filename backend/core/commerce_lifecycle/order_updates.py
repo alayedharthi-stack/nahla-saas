@@ -115,7 +115,12 @@ _DEFAULT_BODIES: Dict[str, str] = {
 }
 
 _DEFAULT_VARIABLES: Dict[str, List[str]] = {
-    "order_confirmation": ["customer_name", "order_number"],
+    "order_confirmation": [
+        "customer_name",
+        "order_number",
+        "order_total",
+        "store_name",
+    ],
     "cod_confirmation": ["customer_name", "order_number"],
     "payment_pending": ["customer_name", "order_number", "payment_url"],
     "payment_confirmed": ["customer_name", "order_number"],
@@ -474,6 +479,22 @@ def resolve_active_and_pending(
     persisted = get_order_update_flags(db, tenant_id).get(
         service_key, _default_enabled_for(service_key)
     )
+    preview_tpl = pending or active
+    preview_components = getattr(preview_tpl, "components", None) if preview_tpl else None
+    preview_metadata = getattr(preview_tpl, "ai_generation_metadata", None) if preview_tpl else None
+    preview_header_image_url: Optional[str] = None
+    if service_key == "order_confirmation":
+        from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+            resolve_order_confirmation_preview_header_url,
+        )
+
+        preview_header_image_url = resolve_order_confirmation_preview_header_url(
+            db,
+            int(tenant_id),
+            preview_components,
+            preview_metadata if isinstance(preview_metadata, dict) else None,
+        )
+
     return {
         "service_key": service_key,
         "enabled": bool(persisted),
@@ -491,6 +512,7 @@ def resolve_active_and_pending(
         "pending_revision": pending_pub,
         "header_type": (active_pub or pending_pub or {}).get("header_type") or "none",
         "header_asset_id": (active_pub or {}).get("header_asset_id"),
+        "preview_header_image_url": preview_header_image_url,
     }
 
 
