@@ -219,6 +219,8 @@ export interface Translations {
     templatesHub: {
       title: string
       subtitle: string
+      library: { title: string; description: string }
+      sections: { title: string; description: string }
       cards: {
         whatsappTemplates:   { title: string; description: string }
         ecommerceTemplates:  { title: string; description: string }

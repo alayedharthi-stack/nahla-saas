@@ -234,14 +234,22 @@ const en: Translations = {
     templatesHub: {
       title:    'Templates',
       subtitle: 'WhatsApp templates and store templates',
+      library: {
+        title: 'Shared template library',
+        description: 'Browse Nahla templates for e-commerce and WhatsApp in one place, then manage them in the appropriate section.',
+      },
+      sections: {
+        title: 'Template sections',
+        description: 'Choose the template area that matches the merchant setup.',
+      },
       cards: {
         whatsappTemplates: {
           title:       'WhatsApp templates',
-          description: 'Nahla library, your templates, and Meta approval statuses',
+          description: 'For merchants without an online store and without dynamic links.',
         },
         ecommerceTemplates: {
           title:       'E-commerce store templates',
-          description: 'Marketing, order updates, and store experience templates',
+          description: 'For merchants with an online store and dynamic links, including order-update settings.',
         },
       },
     },
