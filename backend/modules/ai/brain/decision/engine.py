@@ -1434,6 +1434,12 @@ class DefaultDecisionEngine:
             )
 
         # ── 0a.51 Commerce entry catalog delivery (CE2) ───────────────────
+        from ..commerce.catalog_request_interpreter import catalog_request_decision  # noqa: PLC0415
+
+        _semantic_catalog = catalog_request_decision(ctx)
+        if _semantic_catalog is not None:
+            return _semantic_catalog
+
         try:
             from ..commerce.commerce_entry_catalog_delivery import (  # noqa: PLC0415
                 try_commerce_entry_catalog_decision,

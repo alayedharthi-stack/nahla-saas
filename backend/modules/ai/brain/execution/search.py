@@ -86,7 +86,7 @@ class ProductSearchHandler:
                         "candidate_source": decision.args.get("candidate_source"),
                     },
                 )
-        if source.startswith("selection_context") and decision.args.get("products"):
+        if (source.startswith("selection_context") or source == "catalog_semantic_request") and decision.args.get("products"):
             products = list(decision.args.get("products") or [])
             presentation = str(decision.args.get("selection_presentation_text") or "").strip()
             query = str(decision.args.get("query") or "")
@@ -116,6 +116,9 @@ class ProductSearchHandler:
                 payload["product"] = selected_product
             if decision.args.get("presentation_identity_grounded"):
                 payload["presentation_identity_grounded"] = True
+            if source == "catalog_semantic_request":
+                payload["catalog_capability"] = decision.args.get("catalog_capability")
+                payload["catalog_request_status"] = decision.args.get("catalog_request_status")
             return ActionResult(success=True, data=payload)
 
         from ..commerce.product_breadth_policy import (  # noqa: PLC0415

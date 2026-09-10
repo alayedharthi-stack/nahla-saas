@@ -178,18 +178,27 @@ def _availability_context(products: List[Dict[str, Any]]) -> dict:
     )
 
 
-def _guard(reply: str, products: List[Dict[str, Any]], *, allow_recompose: bool = True):
+def _guard(reply: str, products: List[Dict[str, Any]], *, allow_recompose: bool = True,
+           fixture_claims=None):
     prev = os.environ.get("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE")
     os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+    import json
+    from modules.ai.brain.postprocess.catalog_semantic_claims import parse_claims
+
+    context = _availability_context(products)
+    semantics = None if fixture_claims is None else parse_claims(json.dumps({
+        "complete": True, "confidence": 1, "claims": fixture_claims,
+    }), reply, context["catalog_presentation_facts"])
     try:
         return apply_product_availability_truth_guard(
             reply=reply,
-            availability_context=_availability_context(products),
+            availability_context=context,
             inbound_text="وش المنتجات المتوفرة؟",
             chosen_path="fact_bound_persona_compose",
             question_kind="browse",
             surface="catalog_product_answer",
             allow_recompose=allow_recompose,
+            semantic_claims=semantics,
         )
     finally:
         if prev is None:
@@ -256,26 +265,36 @@ class TestCatalogToolContract:
 
 class TestGuardClaimBinding:
     def test_conversational_photo_line_is_kept(self) -> None:
-        first = _guard("متوفر حذاء رياضي أبيض تقدر تشوف صورته.", [SHOE])
+        first = _guard("متوفر حذاء رياضي أبيض تقدر تشوف صورته.", [SHOE], fixture_claims=[{
+            "scope": "product", "product_id": SHOE["id"], "attribute": "available",
+            "value": True, "quote": "متوفر حذاء رياضي أبيض",
+        }])
         assert first.replaced is False
+        assert first.requires_grounded_recompose is False
         assert first.reply.endswith("صورته.")
 
     def test_false_negative_with_alasf_is_caught(self) -> None:
-        first = _guard("حذاء رياضي أبيض غير متوفر للأسف.", [SHOE])
+        fixture = [{"scope": "product", "product_id": SHOE["id"], "attribute": "available",
+                    "value": False, "quote": "حذاء رياضي أبيض غير متوفر"}]
+        first = _guard("حذاء رياضي أبيض غير متوفر للأسف.", [SHOE], fixture_claims=fixture)
         assert first.requires_grounded_recompose is True
+        assert first.reason == "browse_false_negative_vs_eligible_products"
         blocked = _guard(
             first.reply,
             [SHOE],
             allow_recompose=False,
+            fixture_claims=fixture,
         )
         assert blocked.replaced is True
         assert blocked.reply == ""
 
     def test_price_is_not_moved_onto_another_product(self) -> None:
         mixed = "متوفر حذاء رياضي أبيض وعطر ورد سعره 250 ريال."
-        first = _guard(mixed, [SHOE, SHIRT])
+        fixture = [{"scope": "product", "product_id": None, "attribute": "price",
+                    "value": "250", "quote": "عطر ورد سعره 250 ريال"}]
+        first = _guard(mixed, [SHOE, SHIRT], fixture_claims=fixture)
         assert first.requires_grounded_recompose is True
-        blocked = _guard(mixed, [SHOE, SHIRT], allow_recompose=False)
+        blocked = _guard(mixed, [SHOE, SHIRT], allow_recompose=False, fixture_claims=fixture)
         assert blocked.reply == ""
         assert blocked.reply != "متوفر حذاء رياضي أبيض سعره 250 ريال."
 

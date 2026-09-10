@@ -156,6 +156,18 @@ def _seed_catalog(db, tenant_id: int) -> None:
     db.commit()
 
 
+def _final_fixture_claims(reply, context):
+    # This replay mocks composition with a neutral catalog overview. Supply its
+    # structured interpretation explicitly; do not call the live verifier here.
+    import json
+    from modules.ai.brain.postprocess.catalog_semantic_claims import parse_claims
+
+    return parse_claims(json.dumps({"complete": True, "confidence": 1, "claims": [{
+        "scope": "catalog", "product_id": None, "attribute": "exists",
+        "value": True, "quote": reply,
+    }]}), reply, context["catalog_presentation_facts"])
+
+
 def test_real_orchestration_three_turn_replay_reaches_whatsapp_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -370,6 +382,7 @@ def test_real_orchestration_three_turn_replay_reaches_whatsapp_wire(
         )
         final_guard_pass = apply_product_availability_truth_guard(
             reply=turn_2.reply_text,
+            semantic_claims=_final_fixture_claims(turn_2.reply_text, final_availability_context),
             availability_context=final_availability_context,
             inbound_text=messages[1],
             chosen_path=str(data_2.get("chosen_path") or ""),
@@ -616,6 +629,7 @@ def test_layer2_webhook_three_turn_replay_reaches_provider_boundary(
         )
         final_guard_pass = apply_product_availability_truth_guard(
             reply=turns[1].outbound_reply,
+            semantic_claims=_final_fixture_claims(turns[1].outbound_reply, final_context),
             availability_context=final_context,
             inbound_text=messages[1],
             chosen_path=str(data_2.get("chosen_path") or ""),

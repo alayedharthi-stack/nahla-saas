@@ -1133,6 +1133,8 @@ class BrainContext:
     # Populated in ``Pipeline.process`` when a short/ambiguous turn is
     # repaired using conversation anchors. Guards still enforce execution.
     semantic_interpretation: Optional[Any] = None
+    # Read-only catalog intent selected by the model, validated against facts.
+    catalog_request: Optional[Any] = None
     raw_message: str = ""
     # State relevance verdict — blocks stale workflow resurrection.
     state_relevance: Optional[Any] = None

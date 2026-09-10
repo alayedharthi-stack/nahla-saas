@@ -246,6 +246,15 @@ def _guard_catalog_browse_fallback(
         1,
         result_data=result_data,
     )
+    # The fixture is the known false catalog-denial fallback. Claim extraction
+    # is an explicit model-boundary fixture, not a language-understanding test.
+    import json
+    from modules.ai.brain.postprocess.catalog_semantic_claims import parse_claims
+
+    semantics = parse_claims(json.dumps({"complete": True, "confidence": 1, "claims": [{
+        "scope": "catalog", "product_id": None, "attribute": "exists", "value": False,
+        "quote": text,
+    }]}), text, availability_context["catalog_presentation_facts"])
     guarded = apply_product_availability_truth_guard(
         reply=text,
         availability_context=availability_context,
@@ -254,6 +263,7 @@ def _guard_catalog_browse_fallback(
         question_kind="browse",
         surface="catalog_product_answer",
         allow_recompose=True,
+        semantic_claims=semantics,
     )
     second_reply = guarded.reply
     if guarded.requires_grounded_recompose:
@@ -266,6 +276,7 @@ def _guard_catalog_browse_fallback(
         question_kind="browse",
         surface="catalog_product_answer",
         allow_recompose=False,
+        semantic_claims=semantics,
     )
     if prev_mode is None:
         os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
