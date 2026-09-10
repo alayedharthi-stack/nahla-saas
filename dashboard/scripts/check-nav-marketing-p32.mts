@@ -222,6 +222,12 @@ assert(
   whatsappTemplatesSource.includes("preview.key === 'order_summary'"),
 )
 assert(
+  'saved order_summary preview renders its IMAGE header',
+  whatsappTemplatesSource.includes('getOrderSummaryHeaderImageUrl')
+    && whatsappTemplatesSource.includes('headerImageUrl={headerImageUrl}')
+    && whatsappTemplatesSource.includes('data-testid="template-order-summary-header"'),
+)
+assert(
   'Settings tab follows order_updates deep-link changes',
   source('../src/pages/Settings.tsx').includes('Keep the rendered tab aligned with deep links')
     && source('../src/pages/Settings.tsx').includes('setActiveTab(nextTab)'),
