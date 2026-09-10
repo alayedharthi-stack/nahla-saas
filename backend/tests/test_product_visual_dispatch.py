@@ -33,6 +33,9 @@ from modules.observability.visual_enforcement import (  # noqa: E402
     pick_best_candidate_title,
 )
 from services.final_dispatch_guard import (  # noqa: E402
+    has_fail_closed_product_suppression,
+    is_structured_catalog_miss,
+    record_fail_closed_product_suppression,
     should_allow_product_attachment_dispatch,
     validate_product_attachment_for_send,
 )
@@ -239,6 +242,64 @@ def test_stale_candidate_suppressed_at_send_boundary():
         dispatch_allowed=d.allow,
     )
     assert ok is False
+
+
+def test_rejected_unrelated_card_cannot_be_revived_by_visual_rescue():
+    """The exact wire-boundary rejection must survive later CTA recovery."""
+    attachment = {
+        "kind": "product_card",
+        "id": 23,
+        "title": "فستان",
+        "product_url": "https://shop.example/products/dress",
+    }
+    audit: dict = {}
+
+    ok, reason = validate_product_attachment_for_send(
+        inbound_message="هل يوجد حذاء رياضي؟",
+        attachment=attachment,
+        brain_state={"current_product_focus": None},
+        intent_name="ask_product",
+        brain_action="search_products",
+        dispatch_allowed=True,
+    )
+    assert ok is False
+
+    record_fail_closed_product_suppression(
+        attachment=attachment,
+        delivery_audit=audit,
+        reason=reason,
+    )
+    assert attachment["fail_closed_visual_suppressed"] is True
+    assert attachment["fail_closed_visual_suppression_reason"] == reason
+    assert has_fail_closed_product_suppression(audit) is True
+
+    rescue_urls = [
+        row.get("product_url")
+        for row in [attachment]
+        if not row.get("fail_closed_visual_suppressed")
+    ]
+    assert rescue_urls == []
+
+
+def test_structured_catalog_miss_blocks_visual_recovery_without_reading_prose():
+    brain_result = {
+        "decision_action": "search_products",
+        "chosen_path": "catalog_miss_resolved_subject",
+        "product_cards": [],
+        "catalog_product_ids": [],
+        "reply": "arbitrary model-owned wording",
+    }
+    assert is_structured_catalog_miss(brain_result) is True
+
+
+def test_grounded_product_card_is_never_classified_as_catalog_miss():
+    brain_result = {
+        "decision_action": "search_products",
+        "chosen_path": "fact_bound_persona_compose",
+        "product_cards": [{"id": 28, "title": "جاكيت"}],
+        "catalog_product_ids": [28],
+    }
+    assert is_structured_catalog_miss(brain_result) is False
 
 
 def test_named_talh_visual_request_intent():
