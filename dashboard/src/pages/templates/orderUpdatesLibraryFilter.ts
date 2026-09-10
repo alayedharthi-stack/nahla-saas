@@ -43,7 +43,13 @@ export function filterWhatsAppLibraryGroups(
   return groups
     .map(group => ({
       ...group,
-      templates: filterWhatsAppLibraryTemplates(group.templates ?? []),
+      // The endpoint returns both channel groups. Store templates must stay
+      // visible there even when their lifecycle service key is shared with an
+      // order-update row (order_summary uses order_confirmation internally).
+      templates:
+        group.channel === 'whatsapp'
+          ? filterWhatsAppLibraryTemplates(group.templates ?? [])
+          : (group.templates ?? []),
     }))
     .filter(group => (group.templates?.length ?? 0) > 0)
 }
