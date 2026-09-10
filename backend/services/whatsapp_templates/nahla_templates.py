@@ -1366,7 +1366,7 @@ def template_preview(tpl: Dict[str, Any]) -> Dict[str, Any]:
     )
     service_key = tpl.get("service_key", "")
     service = SERVICE_CATALOG.get(service_key, {})
-    return {
+    preview = {
         "key":          tpl["key"],
         "name_ar":      tpl["name_ar"],
         "description_ar": tpl.get("description_ar", ""),
@@ -1388,3 +1388,19 @@ def template_preview(tpl: Dict[str, Any]) -> Dict[str, Any]:
         "has_coupon":             tpl.get("has_coupon", False),
         "trigger_delay_hours":    tpl.get("trigger_delay_hours"),
     }
+    # Library cards have their own preview contract; do not drop the IMAGE
+    # component when projecting the order-confirmation definition into it.
+    # Other services retain their existing preview until separately designed.
+    if service_key == "order_confirmation" and any(
+        c.get("type") == "HEADER" and c.get("format") == "IMAGE"
+        for c in tpl["components"]
+    ):
+        from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+            resolve_header_image_source_url,
+        )
+
+        preview["header_type"] = "image"
+        preview["preview_header_image_url"] = resolve_header_image_source_url(
+            tpl["components"],
+        )
+    return preview

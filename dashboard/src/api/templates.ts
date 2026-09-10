@@ -316,6 +316,8 @@ export interface NahlaLibraryTemplate {
   smart_label:   string | null
   preview_body:  string
   preview_footer: string
+  header_type?: 'image' | 'none' | null
+  preview_header_image_url?: string | null
   buttons:       TemplateButton[]
   slot_count:    number
   slots:         string[]

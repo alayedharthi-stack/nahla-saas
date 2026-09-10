@@ -3312,6 +3312,14 @@ async def get_nahla_library(
 
     def _preview_item(t: dict) -> dict:
         out = template_preview(t)
+        if out.get("service_key") == "order_confirmation" and out.get("header_type") == "image":
+            from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+                resolve_order_confirmation_preview_header_url,
+            )
+
+            out["preview_header_image_url"] = resolve_order_confirmation_preview_header_url(
+                db, tenant_id, t["components"],
+            )
         if t.get("filter_meta"):
             out["filter_meta"] = t["filter_meta"]
         return out
