@@ -102,7 +102,9 @@ assert(
 )
 assert(
   'simplified tree exposes expected route count after daily-use correction',
-  simplifiedPaths.size >= 32 && simplifiedPaths.size <= 36,
+  // The templates IA intentionally removes order-update settings from the
+  // general Settings tree; the resulting deduplicated route set is 31.
+  simplifiedPaths.size >= 31 && simplifiedPaths.size <= 36,
   `got ${simplifiedPaths.size}`,
 )
 
@@ -256,6 +258,3 @@ assert(
 if (failed > 0) {
   console.error(`\n${failed} marketing nav P3.2 check(s) failed`)
   process.exit(1)
-}
-
-console.log('\nAll marketing nav P3.2 checks passed.')
