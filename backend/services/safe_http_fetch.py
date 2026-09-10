@@ -36,6 +36,8 @@ logger = logging.getLogger("nahla.url_context.safe_http")
 ALLOWED_SCHEMES: FrozenSet[str] = frozenset({"http", "https"})
 MAX_REDIRECTS = 3
 MAX_RESPONSE_BYTES = 262_144  # 256 KiB; body never exceeds this by one byte
+MAX_HEADER_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MiB for template header images
+IMAGE_FETCH_TIMEOUT_S = 30.0
 MAX_HEADER_BYTES = 32_768
 CONNECT_TIMEOUT_S = 3.0
 TOTAL_TIMEOUT_S = 8.0
@@ -554,7 +556,8 @@ def _resolve_body_framing(headers: Dict[str, str]) -> Tuple[str, int, str]:
 class _ChunkedDecoder:
     """RFC 7230 chunked decoder. Semicolon chunk extensions are ignored."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_body_bytes: int = MAX_RESPONSE_BYTES) -> None:
+        self._max_body_bytes = max_body_bytes
         self._pending = b""
         self._phase = "size"
         self._chunk_left = 0
@@ -592,7 +595,7 @@ class _ChunkedDecoder:
                     chunk_size = int(size_part.decode("ascii"), 16)
                 except (ValueError, UnicodeDecodeError):
                     return bytes(out), self._fail("invalid_chunk_framing")
-                if chunk_size < 0 or chunk_size > (MAX_RESPONSE_BYTES * 4):
+                if chunk_size < 0 or chunk_size > (self._max_body_bytes * 4):
                     return bytes(out), self._fail("invalid_chunk_framing")
                 if chunk_size == 0:
                     self._phase = "trailers"
@@ -637,7 +640,15 @@ class _ChunkedDecoder:
 
 
 class _BodyAccumulator:
-    def __init__(self, *, content_type: str, framing: str, content_length: int) -> None:
+    def __init__(
+        self,
+        *,
+        content_type: str,
+        framing: str,
+        content_length: int,
+        max_body_bytes: int = MAX_RESPONSE_BYTES,
+    ) -> None:
+        self.max_body_bytes = max_body_bytes
         self.is_html = _is_html_content_type(content_type)
         self.framing = framing
         self.cl_remaining = content_length
@@ -646,7 +657,9 @@ class _BodyAccumulator:
         self.oversized = False
         self.done = False
         self.stop_early = False
-        self.chunked = _ChunkedDecoder() if framing == "chunked" else None
+        self.chunked = (
+            _ChunkedDecoder(max_body_bytes=max_body_bytes) if framing == "chunked" else None
+        )
 
     def _mark_html_stop(self) -> None:
         self.truncated = True
@@ -655,9 +668,9 @@ class _BodyAccumulator:
     def add_decoded(self, piece: bytes) -> str:
         if not piece or self.done or self.stop_early:
             return ""
-        self.body, hit_limit = _append_bounded(self.body, piece, MAX_RESPONSE_BYTES)
+        self.body, hit_limit = _append_bounded(self.body, piece, self.max_body_bytes)
         if self.is_html:
-            if len(self.body) >= MAX_RESPONSE_BYTES:
+            if len(self.body) >= self.max_body_bytes:
                 self._mark_html_stop()
             elif b"<" in piece or b"<" in self.body:
                 if _html_head_complete(self.body):
@@ -749,11 +762,14 @@ def _read_response_body_sync(
     framing: str,
     content_length: int,
     initial_wire: bytes,
+    *,
+    max_body_bytes: int = MAX_RESPONSE_BYTES,
 ) -> Tuple[bytes, bool, str]:
     acc = _BodyAccumulator(
         content_type=content_type,
         framing=framing,
         content_length=content_length,
+        max_body_bytes=max_body_bytes,
     )
     wire_buf = initial_wire
     while True:
@@ -785,11 +801,14 @@ async def _read_response_body_async(
     framing: str,
     content_length: int,
     initial_wire: bytes,
+    *,
+    max_body_bytes: int = MAX_RESPONSE_BYTES,
 ) -> Tuple[bytes, bool, str]:
     acc = _BodyAccumulator(
         content_type=content_type,
         framing=framing,
         content_length=content_length,
+        max_body_bytes=max_body_bytes,
     )
     wire_buf = initial_wire
     while True:
@@ -817,6 +836,9 @@ async def _read_response_body_async(
 def _read_http_response_sync(
     sock: socket.socket,
     hard_deadline: float,
+    *,
+    max_body_bytes: int = MAX_RESPONSE_BYTES,
+    reject_content_length_over_limit: bool = False,
 ) -> SafeFetchResponse:
     header_buf = b""
     while b"\r\n\r\n" not in header_buf:
@@ -843,6 +865,12 @@ def _read_http_response_sync(
     framing, content_length, framing_err = _resolve_body_framing(headers)
     if framing_err:
         return SafeFetchResponse(status=status, headers=headers, error_class=framing_err)
+    if (
+        reject_content_length_over_limit
+        and framing == "content_length"
+        and content_length > max_body_bytes
+    ):
+        return SafeFetchResponse(status=status, headers=headers, error_class="oversized")
     body, truncated, body_err = _read_response_body_sync(
         sock,
         hard_deadline,
@@ -850,6 +878,7 @@ def _read_http_response_sync(
         framing,
         content_length,
         initial_body,
+        max_body_bytes=max_body_bytes,
     )
     if body_err:
         return SafeFetchResponse(status=status, headers=headers, error_class=body_err)
@@ -864,6 +893,9 @@ def _read_http_response_sync(
 async def _read_http_response_async(
     reader: Any,
     hard_deadline: float,
+    *,
+    max_body_bytes: int = MAX_RESPONSE_BYTES,
+    reject_content_length_over_limit: bool = False,
 ) -> SafeFetchResponse:
     header_buf = b""
     while b"\r\n\r\n" not in header_buf:
@@ -888,6 +920,12 @@ async def _read_http_response_async(
     framing, content_length, framing_err = _resolve_body_framing(headers)
     if framing_err:
         return SafeFetchResponse(status=status, headers=headers, error_class=framing_err)
+    if (
+        reject_content_length_over_limit
+        and framing == "content_length"
+        and content_length > max_body_bytes
+    ):
+        return SafeFetchResponse(status=status, headers=headers, error_class="oversized")
     body, truncated, body_err = await _read_response_body_async(
         reader,
         hard_deadline,
@@ -895,6 +933,7 @@ async def _read_http_response_async(
         framing,
         content_length,
         initial_body,
+        max_body_bytes=max_body_bytes,
     )
     if body_err:
         return SafeFetchResponse(status=status, headers=headers, error_class=body_err)
@@ -911,6 +950,8 @@ def default_transport(
     *,
     deadline: Optional[float] = None,
     ssl_context: Optional[ssl.SSLContext] = None,
+    max_body_bytes: int = MAX_RESPONSE_BYTES,
+    reject_content_length_over_limit: bool = False,
 ) -> SafeFetchResponse:
     """Connect to the pinned IP with TLS SNI for the original hostname.
 
@@ -936,7 +977,12 @@ def default_transport(
             f"\r\n"
         ).encode("ascii")
         sock.sendall(payload)
-        return _read_http_response_sync(sock, hard_deadline)
+        return _read_http_response_sync(
+            sock,
+            hard_deadline,
+            max_body_bytes=max_body_bytes,
+            reject_content_length_over_limit=reject_content_length_over_limit,
+        )
     except (socket.timeout, TimeoutError, ssl.SSLWantReadError):
         return SafeFetchResponse(status=0, error_class="timeout")
     except ssl.SSLError:
@@ -969,6 +1015,8 @@ async def async_default_transport(
     *,
     deadline: Optional[float] = None,
     ssl_context: Optional[ssl.SSLContext] = None,
+    max_body_bytes: int = MAX_RESPONSE_BYTES,
+    reject_content_length_over_limit: bool = False,
 ) -> SafeFetchResponse:
     """Async pinned-IP GET. Cancellation/timeout closes the writer."""
     hard_deadline = deadline or request.deadline or (time.monotonic() + TOTAL_TIMEOUT_S)
@@ -1014,7 +1062,12 @@ async def async_default_transport(
         ).encode("ascii")
         writer.write(payload)
         await asyncio.wait_for(writer.drain(), timeout=_require_remaining(hard_deadline))
-        return await _read_http_response_async(reader, hard_deadline)
+        return await _read_http_response_async(
+            reader,
+            hard_deadline,
+            max_body_bytes=max_body_bytes,
+            reject_content_length_over_limit=reject_content_length_over_limit,
+        )
     except asyncio.CancelledError:
         raise
     except (asyncio.TimeoutError, TimeoutError):
@@ -1206,9 +1259,16 @@ async def _call_transport(
     request: SafeFetchRequest,
     *,
     deadline: float,
+    max_body_bytes: int = MAX_RESPONSE_BYTES,
+    reject_content_length_over_limit: bool = False,
 ) -> SafeFetchResponse:
     if transport is None or transport is default_transport:
-        return await async_default_transport(request, deadline=deadline)
+        return await async_default_transport(
+            request,
+            deadline=deadline,
+            max_body_bytes=max_body_bytes,
+            reject_content_length_over_limit=reject_content_length_over_limit,
+        )
     result = transport(request)
     if asyncio.iscoroutine(result):
         return await asyncio.wait_for(result, timeout=_require_remaining(deadline))
@@ -1345,6 +1405,235 @@ async def fetch_url_async(
     return SafeHttpResult(
         ok=False, url=url, error_class=last_error or "too_many_redirects", hops=hops
     )
+
+
+IMAGE_ALLOWED_CONTENT_TYPES: FrozenSet[str] = frozenset({"image/jpeg", "image/png"})
+
+
+def _https_only_url(url: str) -> Tuple[Optional[str], str]:
+    parsed, err = _parse_and_validate_url(url)
+    if parsed is None:
+        return None, err
+    if str(parsed.scheme or "").lower() != "https":
+        return None, "scheme_blocked"
+    return str(url or "").strip(), ""
+
+
+async def fetch_https_image_bytes_async(
+    url: str,
+    *,
+    resolver: Optional[Resolver] = None,
+    transport: Any = None,
+    max_redirects: int = MAX_REDIRECTS,
+    max_bytes: int = MAX_HEADER_IMAGE_BYTES,
+    deadline: Optional[float] = None,
+    host_blocker: Optional[Callable[[str], bool]] = None,
+) -> SafeHttpResult:
+    """Pinned-IP HTTPS image fetch with streaming size cap and redirect revalidation."""
+    started = time.monotonic()
+    if deadline is None:
+        deadline = started + IMAGE_FETCH_TIMEOUT_S
+    current, scheme_err = _https_only_url(url)
+    if current is None:
+        return SafeHttpResult(ok=False, url=url, error_class=scheme_err)
+    seen: List[str] = []
+    hops = 0
+    last_error = "unknown"
+    sem = _fetch_semaphore()
+    async with sem:
+        while hops <= max_redirects:
+            try:
+                _require_remaining(deadline)
+            except TimeoutError:
+                return SafeHttpResult(ok=False, url=url, error_class="timeout", hops=hops)
+            parsed, parse_err = _parse_and_validate_url(current)
+            if parsed is None:
+                return SafeHttpResult(
+                    ok=False, url=url, final_url=current, error_class=parse_err, hops=hops
+                )
+            host = _idna_hostname(parsed.hostname or "")
+            if host_blocker is not None and host_blocker(host):
+                logger.info(
+                    "[safe_http.image_fetch] blocked url=%s class=host_blocked",
+                    redact_url_for_log(current),
+                )
+                return SafeHttpResult(
+                    ok=False, url=url, final_url=current, error_class="host_blocked", hops=hops
+                )
+            req, err = await _validate_async(
+                current, resolver=resolver, deadline=deadline
+            )
+            if req is None:
+                logger.info(
+                    "[safe_http.image_fetch] blocked url=%s class=%s",
+                    redact_url_for_log(current),
+                    err,
+                )
+                return SafeHttpResult(
+                    ok=False, url=url, final_url=current, error_class=err, hops=hops
+                )
+            marker = f"{req.scheme}://{req.hostname}{req.path}"
+            if marker in seen:
+                return SafeHttpResult(
+                    ok=False, url=url, final_url=current, error_class="redirect_loop", hops=hops
+                )
+            seen.append(marker)
+            try:
+                resp = await _call_transport(
+                    transport,
+                    req,
+                    deadline=deadline,
+                    max_body_bytes=max_bytes,
+                    reject_content_length_over_limit=True,
+                )
+            except TimeoutError:
+                return SafeHttpResult(
+                    ok=False, url=url, final_url=current, error_class="timeout", hops=hops
+                )
+            except Exception:
+                return SafeHttpResult(
+                    ok=False, url=url, final_url=current, error_class="transport_error", hops=hops
+                )
+            if resp.error_class:
+                return SafeHttpResult(
+                    ok=False,
+                    url=url,
+                    final_url=current,
+                    status=resp.status,
+                    error_class=resp.error_class,
+                    hops=hops,
+                )
+            if resp.status in {301, 302, 303, 307, 308}:
+                location = (resp.headers or {}).get("location") or ""
+                if not location.strip():
+                    return SafeHttpResult(
+                        ok=False,
+                        url=url,
+                        final_url=current,
+                        status=resp.status,
+                        error_class="redirect_missing",
+                        hops=hops,
+                    )
+                nxt = urljoin(current, location.strip())
+                nxt_parsed, nxt_err = _parse_and_validate_url(nxt)
+                if nxt_parsed is None:
+                    return SafeHttpResult(
+                        ok=False, url=url, final_url=nxt, error_class=nxt_err, hops=hops
+                    )
+                if str(nxt_parsed.scheme or "").lower() != "https":
+                    return SafeHttpResult(
+                        ok=False, url=url, final_url=nxt, error_class="scheme_blocked", hops=hops
+                    )
+                hops += 1
+                if hops > max_redirects:
+                    return SafeHttpResult(
+                        ok=False,
+                        url=url,
+                        final_url=current,
+                        error_class="too_many_redirects",
+                        hops=hops,
+                    )
+                current = nxt
+                last_error = "redirect"
+                continue
+            if resp.status < 200 or resp.status >= 300:
+                return SafeHttpResult(
+                    ok=False,
+                    url=url,
+                    final_url=current,
+                    status=resp.status,
+                    error_class="http_error",
+                    hops=hops,
+                )
+            content_type = _normalize_content_type(
+                (resp.headers or {}).get("content-type") or ""
+            )
+            if not content_type:
+                return SafeHttpResult(
+                    ok=False,
+                    url=url,
+                    final_url=current,
+                    status=resp.status,
+                    error_class="missing_content_type",
+                    hops=hops,
+                )
+            if content_type in {"text/html", "application/xhtml+xml"}:
+                return SafeHttpResult(
+                    ok=False,
+                    url=url,
+                    final_url=current,
+                    status=resp.status,
+                    content_type=content_type,
+                    error_class="html_response_blocked",
+                    hops=hops,
+                )
+            if content_type not in IMAGE_ALLOWED_CONTENT_TYPES:
+                return SafeHttpResult(
+                    ok=False,
+                    url=url,
+                    final_url=current,
+                    status=resp.status,
+                    content_type=content_type,
+                    error_class="content_type_blocked",
+                    hops=hops,
+                )
+            body = resp.body or b""
+            if len(body) > max_bytes:
+                return SafeHttpResult(
+                    ok=False,
+                    url=url,
+                    final_url=current,
+                    status=resp.status,
+                    content_type=content_type,
+                    error_class="oversized",
+                    hops=hops,
+                )
+            logger.info(
+                "[safe_http.image_fetch] ok url=%s bytes=%d mime=%s",
+                redact_url_for_log(current),
+                len(body),
+                content_type,
+            )
+            return SafeHttpResult(
+                ok=True,
+                url=url,
+                final_url=current,
+                status=resp.status,
+                content_type=content_type,
+                body=body,
+                hops=hops,
+            )
+    return SafeHttpResult(
+        ok=False, url=url, error_class=last_error or "too_many_redirects", hops=hops
+    )
+
+
+def fetch_https_image_bytes(
+    url: str,
+    *,
+    resolver: Optional[Resolver] = None,
+    transport: Any = None,
+    max_redirects: int = MAX_REDIRECTS,
+    max_bytes: int = MAX_HEADER_IMAGE_BYTES,
+    deadline: Optional[float] = None,
+    host_blocker: Optional[Callable[[str], bool]] = None,
+) -> SafeHttpResult:
+    """Sync wrapper for image fetch outside a running event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            fetch_https_image_bytes_async(
+                url,
+                resolver=resolver,
+                transport=transport,
+                max_redirects=max_redirects,
+                max_bytes=max_bytes,
+                deadline=deadline,
+                host_blocker=host_blocker,
+            )
+        )
+    raise RuntimeError("fetch_https_image_bytes_async required inside a running event loop")
 
 
 def fetch_url(
