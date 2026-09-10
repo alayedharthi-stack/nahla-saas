@@ -20,6 +20,11 @@ import {
   type OrderUpdatesSettings,
   ORDER_UPDATE_SERVICE_KEYS,
 } from '../../api/orderUpdates'
+import {
+  buildOrderUpdatePreviewBody,
+  resolvePreviewFooter,
+  resolvePreviewHeaderImageUrl,
+} from './orderUpdatesPreview'
 
 // ── Static service metadata (UI only) ─────────────────────────────────────────
 
@@ -204,16 +209,6 @@ function metaStatusClasses(status: MetaRevisionStatus | null | undefined): strin
   return 'bg-slate-50 text-slate-600 border-slate-200'
 }
 
-function buildPreview(text: string, variableKeys: string[]): string {
-  let out = text
-  variableKeys.forEach((key, idx) => {
-    const sample = PREVIEW_SAMPLES[key] ?? `[${key}]`
-    out = out.split(`{{${key}}}`).join(sample)
-    out = out.split(`{{${idx + 1}}}`).join(sample)
-  })
-  return out
-}
-
 function revisionId(rev: { id?: string | number | null; template_id?: string | number | null } | null | undefined) {
   if (!rev) return null
   return rev.template_id ?? rev.id ?? null
@@ -346,10 +341,9 @@ function ServiceCard({
 
   const approved = approvedRevision(detail)
   const pending = detail?.pending_revision ?? null
-  const previewBody = buildPreview(bodyText, variableKeys)
-  const previewFooter = detail?.preview_footer ?? (isAr ? 'نحلة — مساعد متجرك' : 'Nahla — your store assistant')
-  const previewHeaderImageUrl =
-    meta.key === 'order_confirmation' ? (detail?.preview_header_image_url ?? null) : null
+  const previewBody = buildOrderUpdatePreviewBody(bodyText, variableKeys, PREVIEW_SAMPLES)
+  const previewFooter = resolvePreviewFooter(meta.key, detail, isAr)
+  const previewHeaderImageUrl = resolvePreviewHeaderImageUrl(meta.key, detail)
 
   const handleToggle = async (next: boolean) => {
     setToggleSaving(true)

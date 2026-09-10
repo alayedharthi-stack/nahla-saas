@@ -482,20 +482,24 @@ def resolve_active_and_pending(
     preview_tpl = pending or active
     preview_components = getattr(preview_tpl, "components", None) if preview_tpl else None
     preview_metadata = getattr(preview_tpl, "ai_generation_metadata", None) if preview_tpl else None
+    header_type = (active_pub or pending_pub or {}).get("header_type") or "none"
     preview_header_image_url: Optional[str] = None
+    preview_footer: Optional[str] = None
     if service_key == "order_confirmation":
-        from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
-            resolve_order_confirmation_preview_header_url,
-        )
+        preview_footer = None
+        if str(header_type).lower() == "image":
+            from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+                resolve_order_confirmation_preview_header_url,
+            )
 
-        preview_header_image_url = resolve_order_confirmation_preview_header_url(
-            db,
-            int(tenant_id),
-            preview_components,
-            preview_metadata if isinstance(preview_metadata, dict) else None,
-        )
+            preview_header_image_url = resolve_order_confirmation_preview_header_url(
+                db,
+                int(tenant_id),
+                preview_components,
+                preview_metadata if isinstance(preview_metadata, dict) else None,
+            )
 
-    return {
+    payload: Dict[str, Any] = {
         "service_key": service_key,
         "enabled": bool(persisted),
         "variables": variables_for(service_key),
@@ -510,10 +514,13 @@ def resolve_active_and_pending(
         "approved_revision": active_pub,
         "last_approved_revision": active_pub,
         "pending_revision": pending_pub,
-        "header_type": (active_pub or pending_pub or {}).get("header_type") or "none",
+        "header_type": header_type,
         "header_asset_id": (active_pub or {}).get("header_asset_id"),
         "preview_header_image_url": preview_header_image_url,
     }
+    if service_key == "order_confirmation":
+        payload["preview_footer"] = preview_footer
+    return payload
 
 
 def create_revision_from_active(

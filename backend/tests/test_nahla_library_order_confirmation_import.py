@@ -23,6 +23,7 @@ from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  #
     MSG_EXISTING_DRAFT,
     MSG_EXISTING_PENDING,
     MSG_LANGUAGE_AR_ONLY,
+    MSG_STORE_INTEGRATION_REQUIRED,
     NahlaLibraryImportError,
     build_merchant_import_api_payload,
     find_existing_order_confirmation_library_draft,
@@ -35,8 +36,37 @@ from core.commerce_lifecycle.order_confirmation_assets import (  # noqa: E402
     ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL,
     order_confirmation_header_public_url,
 )
+from core.merchant_capabilities import MerchantCapabilities  # noqa: E402
 from models import WhatsAppTemplate  # noqa: E402
 from services.whatsapp_templates.nahla_templates import get_template_by_key  # noqa: E402
+
+_STORE_INTEGRATION_CAPS = MerchantCapabilities(
+    has_external_store=True,
+    supports_external_checkout=True,
+    supports_external_coupons=True,
+    supports_whatsapp_orders=False,
+    supports_nahla_orders=False,
+    supports_bank_transfer=False,
+    supports_cod=True,
+    has_whatsapp_catalog=False,
+    has_external_tracking=True,
+    has_nahla_tracking=False,
+    has_payment_link=True,
+)
+
+_WHATSAPP_ONLY_CAPS = MerchantCapabilities(
+    has_external_store=False,
+    supports_external_checkout=False,
+    supports_external_coupons=False,
+    supports_whatsapp_orders=True,
+    supports_nahla_orders=True,
+    supports_bank_transfer=True,
+    supports_cod=True,
+    has_whatsapp_catalog=False,
+    has_external_tracking=False,
+    has_nahla_tracking=True,
+    has_payment_link=False,
+)
 
 _MERCHANT_RESPONSE_FORBIDDEN = (
     "uq_active_lifecycle_template_null_step",
@@ -120,6 +150,14 @@ def _assert_merchant_safe_payload(payload: Dict[str, Any]) -> None:
     serialized = json.dumps(payload, ensure_ascii=False).lower()
     for token in _MERCHANT_RESPONSE_FORBIDDEN:
         assert token.lower() not in serialized
+
+
+@pytest.fixture(autouse=True)
+def _enable_store_integration_for_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "core.merchant_capabilities.resolve_merchant_capabilities",
+        lambda db, tenant_id: _STORE_INTEGRATION_CAPS,
+    )
 
 
 class TestOrderSummaryLibraryDefinition:
@@ -446,6 +484,29 @@ class TestOrderConfirmationLibraryImport:
                 language="en",
             )
         assert exc.value.message == MSG_LANGUAGE_AR_ONLY
+
+    def test_rejects_new_import_without_store_integration(self, monkeypatch: pytest.MonkeyPatch):
+        db, _ = _make_db(WhatsAppTemplate)
+        monkeypatch.setattr(
+            "core.merchant_capabilities.resolve_merchant_capabilities",
+            lambda db, tenant_id: _WHATSAPP_ONLY_CAPS,
+        )
+        with pytest.raises(NahlaLibraryImportError) as exc:
+            import_order_summary_from_library(db, 1, get_template_by_key("order_summary"))
+        assert exc.value.message == MSG_STORE_INTEGRATION_REQUIRED
+        assert exc.value.error_code == "nahla_import_store_integration_required"
+        assert db.query(WhatsAppTemplate).count() == 0
+
+    def test_reuses_existing_draft_without_store_integration(self, monkeypatch: pytest.MonkeyPatch):
+        db, _ = _make_db(WhatsAppTemplate)
+        first = import_order_summary_from_library(db, 1, get_template_by_key("order_summary"))
+        monkeypatch.setattr(
+            "core.merchant_capabilities.resolve_merchant_capabilities",
+            lambda db, tenant_id: _WHATSAPP_ONLY_CAPS,
+        )
+        second = import_order_summary_from_library(db, 1, get_template_by_key("order_summary"))
+        assert second["reused_existing_draft"] is True
+        assert int(second["template"].id) == int(first["template"].id)
 
     def test_normalizes_language_to_ar_on_create(self):
         db, _ = _make_db(WhatsAppTemplate)

@@ -129,7 +129,7 @@ class TestRevisionChain:
 
 
 class TestOrderConfirmationPreviewHeader:
-    def test_order_confirmation_includes_preview_header_url(self):
+    def test_order_confirmation_r3_image_includes_preview_header_url(self):
         db, _ = _make_db(WhatsAppTemplate, TenantSettings)
         tpl = WhatsAppTemplate(
             tenant_id=1,
@@ -146,10 +146,34 @@ class TestOrderConfirmationPreviewHeader:
         db.add(tpl)
         db.commit()
         snap = resolve_active_and_pending(db, 1, "order_confirmation")
+        assert snap["header_type"] == "image"
         assert snap["preview_header_image_url"] == ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL
+        assert snap.get("preview_footer") is None
+
+    def test_text_only_order_confirmation_has_no_preview_header(self):
+        db, _ = _make_db(WhatsAppTemplate, TenantSettings)
+        tpl = WhatsAppTemplate(
+            tenant_id=1,
+            name="nahla_order_confirmation_text",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=[{"type": "BODY", "text": "تم استلام طلبك يا {{1}} رقم {{2}}"}],
+            service_key="order_confirmation",
+            is_active=True,
+            is_hidden=False,
+            revision=1,
+        )
+        db.add(tpl)
+        db.commit()
+        snap = resolve_active_and_pending(db, 1, "order_confirmation")
+        assert snap["header_type"] == "none"
+        assert snap.get("preview_header_image_url") is None
+        assert snap.get("preview_footer") is None
 
     def test_other_services_do_not_expose_preview_header_url(self):
         db, _ = _make_db(WhatsAppTemplate, TenantSettings)
         _seed_approved(db, service_key="shipping_tracking")
         snap = resolve_active_and_pending(db, 1, "shipping_tracking")
         assert snap.get("preview_header_image_url") is None
+        assert "preview_footer" not in snap
