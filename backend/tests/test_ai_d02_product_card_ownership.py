@@ -434,6 +434,30 @@ class TestGroundedAvailableKeepsCard:
             clear_incompatible_product_cards(data, reason="availability_truth_unresolved")
         assert data.get("pending_product_cards")
 
+    def test_browse_blocked_empty_text_keeps_proven_cards(self) -> None:
+        data: dict[str, Any] = {
+            "pending_product_cards": [
+                {
+                    "kind": "product_card",
+                    "id": 501,
+                    "file_url": "https://cdn.example/shoe.jpg",
+                    "product_url": "https://shop.example/products/shoe",
+                }
+            ],
+        }
+        result = ProductAvailabilityTruthGuardResult(
+            reply="",
+            action="rewrite_conflict",
+            replaced=True,
+            reason="browse_positive_ungrounded_in_eligible_products",
+            availability_claim_blocked=True,
+        )
+        if should_clear_cards_for_availability_guard(result):
+            clear_incompatible_product_cards(data, reason="availability_truth_unresolved")
+        cards = data.get("pending_product_cards") or []
+        assert len(cards) == 1
+        assert int(cards[0]["id"]) == 501
+
 
 class TestGenericCommerce:
     def test_shoes_and_perfume_ungrounded(self) -> None:

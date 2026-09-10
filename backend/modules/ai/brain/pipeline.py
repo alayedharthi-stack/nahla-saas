@@ -5249,7 +5249,7 @@ class MerchantBrain:
         try:
             from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
                 apply_product_availability_truth_guard,
-                product_availability_guard_mode,
+                product_availability_guard_mode, stamp_product_availability_guard_transform,
             )
             if product_availability_guard_mode() != "off":
                 from modules.ai.brain.commerce.merchant_capability_faq import (  # noqa: PLC0415
@@ -5282,7 +5282,7 @@ class MerchantBrain:
                         db,
                         tenant_id,
                         focus_product=getattr(new_state, "current_product_focus", None),
-                        recommended_product_ids=_pavg_rec_ids,
+                        recommended_product_ids=_pavg_rec_ids, result_data=result.data,
                     )
                     _pavg_pc = dict(result.data.get("persona_compose") or {})
                     _pavg = apply_product_availability_truth_guard(
@@ -5300,13 +5300,83 @@ class MerchantBrain:
                         invocation_site="pipeline",
                         turn_token=str(getattr(new_state, "turn", None) or ""),
                     )
-                    if _pavg.replaced:
-                        reply = _pavg.reply
-                        _guard_replaced["product_availability_truth_guard"] = True
                     if _pavg.availability_claim_blocked:
                         result.data["availability_claim_blocked"] = True
                         if _pavg.reason:
                             result.data["availability_guard_reason"] = _pavg.reason
+                    if _pavg.requires_grounded_recompose:
+                        from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
+                            _browse_correction_facts,
+                            _eligible_catalog_browse_fallback_facts,
+                        )
+                        from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
+                            invoke_authorized_product_claim_recompose,
+                        )
+
+                        _browse_facts = _eligible_catalog_browse_fallback_facts(
+                            _availability_ctx,
+                            question_kind=str(result.data.get("question_kind") or ""),
+                        )
+                        if _browse_facts is not None:
+                            _correction = _browse_correction_facts(
+                                _browse_facts,
+                                _pavg.reason,
+                            )
+                            result.data["availability_guard_correction"] = _correction
+                            if isinstance(getattr(decision, "args", None), dict):
+                                decision.args["availability_guard_correction"] = _correction
+                        _pavg_recomposed, _pavg_compose_failed, _pavg_recompose_calls = (
+                            await invoke_authorized_product_claim_recompose(
+                                self._composer,
+                                decision,
+                                result,
+                                ctx,
+                            )
+                        )
+                        result.data["availability_guard_recompose_requested"] = True
+                        result.data["availability_guard_recompose_performed"] = True
+                        result.data["availability_guard_recompose_count"] = int(
+                            _pavg_recompose_calls
+                        )
+                        result.data["product_claim_recompose_performed"] = True
+                        _pavg_second = apply_product_availability_truth_guard(
+                            reply=_pavg_recomposed or "",
+                            availability_context=_availability_ctx,
+                            inbound_text=message or "",
+                            chosen_path=_chosen_path,
+                            decision_topic=str((decision.args or {}).get("topic") or ""),
+                            tenant_id=tenant_id,
+                            conversation_id=conversation_id,
+                            question_kind=str(result.data.get("question_kind") or ""),
+                            catalog_product_ids=list(result.data.get("catalog_product_ids") or []),
+                            checkout_pressure_allowed=result.data.get("checkout_pressure_allowed"),
+                            surface=str(_pavg_pc.get("surface") or ""),
+                            invocation_site="pipeline_browse_recompose",
+                            turn_token=str(getattr(new_state, "turn", None) or ""),
+                            allow_recompose=False,
+                        )
+                        if _pavg_second.replaced:
+                            reply = _pavg_second.reply
+                            stamp_product_availability_guard_transform(
+                                result.data, _pavg_second, _guard_replaced,
+                            )
+                        elif (_pavg_recomposed or "").strip() and not _pavg_compose_failed:
+                            reply = _pavg_recomposed
+                        else:
+                            reply = ""
+                            stamp_product_availability_guard_transform(
+                                result.data, _pavg_second, _guard_replaced,
+                            )
+                        if _pavg_second.availability_claim_blocked:
+                            result.data["availability_claim_blocked"] = True
+                            if _pavg_second.reason:
+                                result.data["availability_guard_reason"] = (
+                                    _pavg_second.reason
+                                )
+                        _pavg = _pavg_second
+                    elif _pavg.replaced:
+                        reply = _pavg.reply
+                        stamp_product_availability_guard_transform(result.data, _pavg, _guard_replaced)
                     from modules.ai.brain.commerce.product_presentation_selection import (  # noqa: PLC0415
                         clear_incompatible_product_cards,
                         should_clear_cards_for_availability_guard,

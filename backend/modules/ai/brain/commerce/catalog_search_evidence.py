@@ -326,7 +326,7 @@ def has_catalog_search_evidence(
 
     if args.get("rejected_product") or args.get("selected_product"):
         return True
-    if args.get("alternatives"):
+    if args.get("alternatives") or (args.get("presentation_identity_grounded") is True and args.get("products")):
         return True
 
     source = str(args.get("source") or "").strip().lower()
