@@ -199,8 +199,22 @@ assert(
   !templateLibrarySource.includes('ORDER_UPDATE_TEMPLATE_KEYS'),
 )
 assert(
-  'Store templates page links ops to settings order_updates',
-  templateLibrarySource.includes('/settings?tab=order_updates'),
+  'Store templates page keeps order-update settings inline',
+  templateLibrarySource.includes('OrderUpdatesSettingsTab')
+    && templateLibrarySource.includes('id="order-update-settings"')
+    && !templateLibrarySource.includes('/settings?tab=order_updates'),
+)
+const whatsappTemplatesSource = source('../src/pages/Templates.tsx')
+assert(
+  'WhatsApp templates page excludes order-update service rows',
+  whatsappTemplatesSource.includes('isOrderUpdateServiceKey')
+    && whatsappTemplatesSource.includes('filterWhatsAppLibraryTemplates')
+    && !whatsappTemplatesSource.includes("'order_updates',"),
+)
+assert(
+  'Settings tab follows order_updates deep-link changes',
+  source('../src/pages/Settings.tsx').includes('Keep the rendered tab aligned with deep links')
+    && source('../src/pages/Settings.tsx').includes('setActiveTab(nextTab)'),
 )
 assert(
   'Store templates page documents Meta open-window scope comment',

@@ -333,7 +333,7 @@ const en: Translations = {
     },
     ecommerceTemplates: {
       title:    'E-commerce store templates',
-      subtitle: 'Store-scoped template organization — order updates today; other store families when a real store library exists',
+      subtitle: 'Store templates and order-update settings in one page',
       filters: {
         all:          'All',
         marketing:    'Marketing',
@@ -344,7 +344,7 @@ const en: Translations = {
         marketing:    'No store marketing template library is available yet. WhatsApp marketing message templates stay under WhatsApp templates.',
         orderUpdates: 'No order-update services are available',
         unsupportedStoreLibrary:
-          'There is no separate store-page template library yet. Only order-update services below are backed by real store order-update data. WhatsApp message templates (including Meta MARKETING) remain under WhatsApp templates.',
+          'WhatsApp message templates, including Meta MARKETING templates, remain under WhatsApp templates. This page contains store templates and store-order settings only.',
         orderUpdatesOnlyHint:
           'Only order-update services with a trusted service_key contract are listed above.',
       },
@@ -354,10 +354,10 @@ const en: Translations = {
       orderUpdates: {
         title:        'Order update templates',
         description:  'Copy and preview for the order-update services that exist today. Classification uses ORDER_UPDATE_SERVICE_KEYS only.',
-        scopeNote:    'Enablement, timing, channel, and send conditions stay in order-update settings.',
-        opsLink:      'Manage order-update operations',
-        opsLinkShort: 'Operations settings',
-        noPreview:    'No saved message body yet — configure in operations settings.',
+        scopeNote:    'Enablement, message text, preview, and Meta submissions are managed here inside store templates.',
+        opsLink:      'Order-update settings',
+        opsLinkShort: 'Order-update settings',
+        noPreview:    'No saved message body yet.',
         services: {
           order_confirmation: 'Order confirmation',
           cod_confirmation: 'Cash on delivery confirmation',

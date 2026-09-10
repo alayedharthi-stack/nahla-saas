@@ -1589,6 +1589,15 @@ export default function Settings() {
   const _defaultTab: TabId = (_tabParam && TAB_IDS.includes(_tabParam as TabId)) ? _tabParam : 'team'
   const [activeTab, setActiveTab] = useState<TabId>(_defaultTab)
 
+  // Keep the rendered tab aligned with deep links when navigation changes the
+  // query string while this route remains mounted.
+  useEffect(() => {
+    const nextTab: TabId = (_tabParam && TAB_IDS.includes(_tabParam as TabId))
+      ? _tabParam
+      : 'team'
+    setActiveTab(nextTab)
+  }, [_tabParam])
+
   const [settings, setSettings] = useState<AllSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
