@@ -26,9 +26,12 @@ import {
 import { useDashboardPoll } from '../lib/dashboardPolling'
 import {
   ORDER_UPDATES_LIBRARY_TAG,
+  filterWhatsAppLibraryGroups,
+  filterWhatsAppLibraryTemplates,
   filterOrderUpdatesLibraryGroups,
   filterOrderUpdatesLibraryTemplates,
 } from './templates/orderUpdatesLibraryFilter'
+import { isOrderUpdateServiceKey } from '../api/orderUpdates'
 
 // ── Service catalog (mirrors backend SERVICE_CATALOG) ─────────────────────────
 
@@ -1397,7 +1400,7 @@ const BUTTON_TYPE_ICON: Record<string, string> = {
   PHONE_NUMBER:'📞',
 }
 
-const LIBRARY_TAG_KEYS = ['all', 'order_updates', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
+const LIBRARY_TAG_KEYS = ['all', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
 
 function NahlaLibraryModal({ onClose, onImported }: {
   onClose: () => void
@@ -1439,8 +1442,10 @@ function NahlaLibraryModal({ onClose, onImported }: {
     try {
       const apiTag = tag !== 'all' && tag !== ORDER_UPDATES_LIBRARY_TAG ? tag : undefined
       const res = await templatesApi.nahlaLibrary({ tag: apiTag, search: q || undefined })
-      let groups = res.groups?.filter(g => (g.templates?.length ?? 0) > 0) ?? []
-      let flatTemplates = res.templates ?? []
+      let groups = filterWhatsAppLibraryGroups(
+        res.groups?.filter(g => (g.templates?.length ?? 0) > 0) ?? [],
+      )
+      let flatTemplates = filterWhatsAppLibraryTemplates(res.templates ?? [])
       if (tag === ORDER_UPDATES_LIBRARY_TAG) {
         groups = filterOrderUpdatesLibraryGroups(groups)
         flatTemplates = filterOrderUpdatesLibraryTemplates(flatTemplates)
@@ -2012,7 +2017,9 @@ export default function Templates() {
   const loadTemplates = useCallback(() => {
     setLoading(true)
     templatesApi.list()
-      .then(r => setTemplates(r.templates))
+      .then(r => setTemplates(
+        r.templates.filter(template => !isOrderUpdateServiceKey(template.service_key ?? '')),
+      ))
       .catch(() => setTemplates([]))
       .finally(() => setLoading(false))
   }, [])
