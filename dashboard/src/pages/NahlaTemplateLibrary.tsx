@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useLocation } from 'react-router-dom'
-import { ExternalLink, Package, RefreshCw, Store } from 'lucide-react'
+import { useLocation } from 'react-router-dom'
+import { Package, RefreshCw, Store } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
+import OrderUpdatesSettingsTab from '../components/settings/OrderUpdatesSettingsTab'
 import {
   ORDER_UPDATE_SERVICE_KEYS,
   orderUpdatesApi,
@@ -28,7 +29,8 @@ type OrderUpdateCard = {
  *   store-template API today — show an explicit empty state, never nahlaLibrary
  *   WhatsApp MARKETING rows re-labeled as store templates.
  *
- * Ops (enablement, timing, channel) remain at /settings?tab=order_updates.
+ * Order-update enablement, message text, revisions, and preview are rendered
+ * inline on this page so merchants do not leave the store-template context.
  *
  * Open-window / Meta / Lifecycle send orchestration are out of scope here.
  */
@@ -55,13 +57,11 @@ export default function NahlaTemplateLibrary() {
   )
 
   const serviceLabel = (key: OrderUpdateServiceKey): string => {
-    if (key === 'order_confirmation') return page.orderUpdates.services.order_confirmation
-    return page.orderUpdates.services.shipping_tracking
+    return page.orderUpdates.services[key]
   }
 
   const serviceDescription = (key: OrderUpdateServiceKey): string => {
-    if (key === 'order_confirmation') return page.orderUpdates.serviceDescriptions.order_confirmation
-    return page.orderUpdates.serviceDescriptions.shipping_tracking
+    return page.orderUpdates.serviceDescriptions[key]
   }
 
   const load = useCallback(async () => {
@@ -145,13 +145,6 @@ export default function NahlaTemplateLibrary() {
                 {page.orderUpdates.description}
               </p>
               <p className="text-[11px] text-slate-400 mt-2">{page.orderUpdates.scopeNote}</p>
-              <Link
-                to="/settings?tab=order_updates"
-                className="inline-flex items-center gap-1.5 mt-4 text-xs font-medium text-brand-600 hover:text-brand-700"
-              >
-                {page.orderUpdates.opsLink}
-                <ExternalLink className="w-3.5 h-3.5" />
-              </Link>
             </div>
           </div>
 
@@ -184,17 +177,20 @@ export default function NahlaTemplateLibrary() {
                       {page.orderUpdates.noPreview}
                     </p>
                   )}
-                  <Link
-                    to="/settings?tab=order_updates"
-                    className="inline-flex items-center gap-1 mt-3 text-xs font-medium text-brand-600 hover:text-brand-700"
-                  >
-                    {page.orderUpdates.opsLinkShort}
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </Link>
                 </div>
               ))}
             </div>
           )}
+        </section>
+      )}
+
+      {showOrderUpdates && (
+        <section id="order-update-settings" className="space-y-4 scroll-mt-24">
+          <div className="card px-5 py-4">
+            <h2 className="text-sm font-semibold text-slate-900">{page.orderUpdates.opsLink}</h2>
+            <p className="text-xs text-slate-500 mt-1 leading-relaxed">{page.orderUpdates.scopeNote}</p>
+          </div>
+          <OrderUpdatesSettingsTab />
         </section>
       )}
 
