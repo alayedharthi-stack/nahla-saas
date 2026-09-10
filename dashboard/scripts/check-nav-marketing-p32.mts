@@ -258,3 +258,6 @@ assert(
 if (failed > 0) {
   console.error(`\n${failed} marketing nav P3.2 check(s) failed`)
   process.exit(1)
+}
+
+console.log('\nAll marketing nav P3.2 checks passed.')
