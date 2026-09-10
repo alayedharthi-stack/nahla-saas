@@ -20,6 +20,7 @@ from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: E402
     build_checkout_slot_fallback_reply,
     is_checkout_continue_inbound,
 )
+from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER  # noqa: E402
 from modules.ai.brain.intent.active_order_quantity_extract import (  # noqa: E402
     message_has_bare_quantity_or_variant_signal,
     resolve_active_order_quantity_reply,
@@ -171,6 +172,7 @@ class TestBrokenFallbackPrevention:
         fallback, kind = select_arabic_commerce_fallback(
             inbound_text="مكة",
             state=state,
+            decision_action=ACTION_PROPOSE_DRAFT_ORDER,
         )
         assert kind == "checkout_slot_prompt"
         assert fallback != _BROKEN_GENERIC
@@ -181,6 +183,7 @@ class TestBrokenFallbackPrevention:
         fallback, kind = select_arabic_commerce_fallback(
             inbound_text="",
             state=state,
+            decision_action=ACTION_PROPOSE_DRAFT_ORDER,
         )
         assert kind == "checkout_slot_prompt"
         assert "العنوان" in fallback or "خرائط" in fallback
@@ -197,6 +200,7 @@ class TestContinueWordsInCheckout:
         fallback, kind = select_arabic_commerce_fallback(
             inbound_text=word,
             state=state,
+            decision_action=ACTION_PROPOSE_DRAFT_ORDER,
         )
         assert kind == "checkout_slot_prompt"
         assert _BROKEN_GENERIC not in fallback

@@ -5835,6 +5835,7 @@ class MerchantBrain:
                 )
                 _crqg = apply_commerce_reply_quality_guard(
                     reply=reply or "",
+                    decision_action=str(getattr(decision, "action", "") or ""),
                     inbound_text=message or "",
                     intent_name=str(getattr(intent, "name", "") or ""),
                     primary_customer_goal=str(
@@ -5923,6 +5924,9 @@ class MerchantBrain:
                         ).strip()
                         _crqg = apply_commerce_reply_quality_guard(
                             reply=recomposed_reply or "",
+                            decision_action=str(
+                                getattr(decision, "action", "") or ""
+                            ),
                             inbound_text=message or "",
                             intent_name=str(getattr(intent, "name", "") or ""),
                             primary_customer_goal=str(
