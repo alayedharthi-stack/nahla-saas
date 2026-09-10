@@ -27,7 +27,9 @@ The engine consumes this contract before CE2. Execution, tenant permissions and
 send gates remain authoritative. Active checkout, human priority, non-commerce
 blocks and URL-only enrichment are excluded. This is not a replacement of every
 existing inbound classifier: out-of-scope turns and an unconfigured provider
-retain the existing path. Failed configured interpretation requests clarification.
+retain the existing path. A timed-out, malformed, over-limit, forged or stale
+interpretation also defers to the existing routing path; model/protocol failure
+does not create a customer clarification decision.
 
 For browse replies, the model extracts all claims with subject IDs and exact
 quotes. Code validates IDs, boolean inventory evidence and Decimal prices against
@@ -51,9 +53,10 @@ correction blobs are not added to that export.
 ## Verification and limits
 
 - Targeted contracts, Salla presentation, existing product understanding, direct
-  PDP and brain/webhook-to-sender replays pass locally. Exact count is recorded
-  with the final commit report; model responses in these tests are fixtures.
-- Constitution: 57 passed. No-silent-except lint passed.
+  PDP, brain/webhook-to-sender replays and Constitution pass locally: 207 passed
+  and 9 skipped on the current review tree. Model responses in deterministic
+  tests are fixtures.
+- No-silent-except lint and the trusted-base GOV-002 scan pass.
 - Nine live-model tests are skipped without credentials. An opt-in evaluation
   file covers pronouns, photo/link requests, social turns, variants, coordinated
   products, false negatives and per-product prices. No claim of live model
@@ -70,21 +73,19 @@ correction blobs are not added to that export.
   finish in its worker; timeout is not a cancellation/billing guarantee. Live
   quality, latency and incremental cost remain unevaluated.
 
-## Governance — blocked, not approved for release
+## Governance and release status
 
-The scanner used for the local gate is identical to the trusted main BASE
-scanner (blob `bda0769d9fbaff69526ec26f19337bd02e7bad5b`). Scan against
-`f67b7681541bbab400781abc8428319a71c6a6af` exits 1. It flags protected persona,
-routing/regex and canned-reply surfaces. Some findings point at pre-existing
-literals shifted by insertions; they have not been suppressed or reclassified.
-The relevant surface changes and internal instructions are disclosed here.
+The owner-authorized exception registry was merged separately in PR #981 before
+this implementation was refreshed onto its trusted base. The current PR HEAD
+keeps the original implementation commit in its ancestry and includes current
+`main`. The trusted-base scanner, Constitution and all ten GitHub checks pass
+without a same-PR waiver, protection change or scanner change.
 
 Actual implementation: model choice unchanged; internal model instructions and
 provider user-payload construction changed; catalog decision ownership changed;
 no customer phrase map or regex was added; no fixed customer reply was added.
-Scanner flags must not be reported as all NO or CI green.
 
-`AGENTS.md` and `intelligence-non-interference-policy.md` require any necessary
-owner exception to exist in BASE through an authorization-only PR before runtime
-consumption. No same-PR waiver, protection change or scanner change was made.
-Resolve that gate and run the opt-in model evaluation before release approval.
+The PR remains a draft and is not approved for merge or deployment. Run the
+opt-in live-model evaluation before requesting release approval; deterministic
+fixtures and skipped Layer 3 tests are not proof of live model quality, latency
+or cost.
