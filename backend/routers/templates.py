@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -796,10 +797,59 @@ def _resolve_library_meta_for_template(template: WhatsAppTemplate) -> Dict[str, 
     return _enrich_library_meta(meta)
 
 
-def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
+def _saved_order_summary_preview_header_url(
+    t: WhatsAppTemplate,
+    *,
+    db: Optional[Session] = None,
+) -> Optional[str]:
+    """Return the merchant-facing IMAGE URL for the saved order summary only."""
+    if db is None or getattr(t, "service_key", None) != "order_confirmation":
+        return None
+
+    components = list(getattr(t, "components", None) or [])
+    has_image_header = any(
+        str((component or {}).get("type") or "").upper() == "HEADER"
+        and str((component or {}).get("format") or "").upper() == "IMAGE"
+        for component in components
+        if isinstance(component, dict)
+    )
+    if not has_image_header:
+        return None
+
+    from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+        resolve_order_confirmation_preview_header_url,
+    )
+
+    return resolve_order_confirmation_preview_header_url(
+        db,
+        int(getattr(t, "tenant_id")),
+        components,
+        dict(getattr(t, "ai_generation_metadata", None) or {}),
+    )
+
+
+def _tpl_to_dict(
+    t: WhatsAppTemplate,
+    *,
+    db: Optional[Session] = None,
+) -> Dict[str, Any]:
+    components = list(t.components or [])
+    preview_header_image_url = _saved_order_summary_preview_header_url(t, db=db)
+    if preview_header_image_url:
+        components = deepcopy(components)
+        for component in components:
+            if (
+                str((component or {}).get("type") or "").upper() == "HEADER"
+                and str((component or {}).get("format") or "").upper() == "IMAGE"
+            ):
+                example = dict(component.get("example") or {})
+                example["header_url"] = preview_header_image_url
+                component["example"] = example
+                break
+
     meta = dict(getattr(t, "ai_generation_metadata", None) or {})
     compatibility = meta.get("meta_compatibility") or _compute_template_compatibility(
-        t.components or [],
+        components,
         category=t.category,
         language=t.language,
         status=t.status,
@@ -816,7 +866,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         except Exception:
             pass
 
-    return {
+    result = {
         "id": t.id,
         "meta_template_id": t.meta_template_id,
         "name": t.name,
@@ -826,7 +876,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "workflow_status": "pending_approval" if t.status == "PENDING" else str(t.status or "DRAFT").lower(),
         "status_raw": meta.get("meta_status_raw", t.status),
         "rejection_reason": t.rejection_reason,
-        "components": t.components or [],
+        "components": components,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "synced_at": t.synced_at.isoformat() if t.synced_at else None,
@@ -855,6 +905,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "has_coupon": getattr(t, "has_coupon", False),
         "trigger_delay_hours": getattr(t, "trigger_delay_hours", None),
     }
+    return result
 
 
 def _tpl_bump_usage(db: Session, template_id: int, tenant_id: int | None = None) -> None:
@@ -1335,7 +1386,7 @@ async def list_templates(
         (WhatsAppTemplate.is_hidden == False) | (WhatsAppTemplate.is_hidden == None)  # noqa: E712
     )
     templates = q.order_by(WhatsAppTemplate.created_at.desc()).all()
-    return {"templates": [_tpl_to_dict(t) for t in templates]}
+    return {"templates": [_tpl_to_dict(t, db=db) for t in templates]}
 
 
 @router.post("/templates")
