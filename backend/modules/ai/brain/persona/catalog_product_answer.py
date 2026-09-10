@@ -957,7 +957,13 @@ def _catalog_product_answer_emergency_fallback(
     elif qkind == "compound":
         text = "لا تتوفر تفاصيل سعر وتوفر مؤكدة في الكتالوج حالياً."
     elif qkind == "browse":
-        text = "لا توجد منتجات قابلة للبيع مؤكدة في الكتالوج حالياً."
+        # Keep question_kind=browse. Do not deny catalog existence when
+        # eligible products are already in verified facts.
+        eligible = int(facts.get("eligible_product_count") or 0)
+        if eligible > 0 or bool(facts.get("has_eligible_products")):
+            text = "لا تتوفر تفاصيل مؤكدة من الكتالوج حالياً."
+        else:
+            text = "لا توجد منتجات قابلة للبيع مؤكدة في الكتالوج حالياً."
     else:
         text = "لا تتوفر تفاصيل مؤكدة من الكتالوج حالياً."
     return PersonaComposeResult(

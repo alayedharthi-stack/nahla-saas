@@ -344,13 +344,8 @@ def test_real_orchestration_three_turn_replay_reaches_whatsapp_wire(
         assert data_2 is not None
         assert data_2["question_kind"] == "browse"
         assert int(data_2["eligible_product_count"]) > 0
-        assert data_2["availability_claim_blocked"] is True
-        assert "product_availability_truth_guard" in data_2[
-            "final_transform_reasons"
-        ]
-        assert "product_availability_truth_guard" in data_2[
-            "quality_observability"
-        ]["guards_triggered"]
+        assert "لا توجد منتجات" not in (turn_2.reply_text or "")
+        assert data_2.get("availability_claim_blocked") is not True
         cards_2 = data_2.get("product_cards") or []
         assert len(cards_2) == 1
         assert int(cards_2[0].get("id") or 0) == 28
@@ -588,13 +583,8 @@ def test_layer2_webhook_three_turn_replay_reaches_provider_boundary(
         data_2 = brain_results[1]
         assert data_2["question_kind"] == "browse"
         assert int(data_2["eligible_product_count"]) > 0
-        assert data_2["availability_claim_blocked"] is True
-        assert "product_availability_truth_guard" in data_2[
-            "final_transform_reasons"
-        ]
-        assert "product_availability_truth_guard" in data_2[
-            "quality_observability"
-        ]["guards_triggered"]
+        assert "لا توجد منتجات" not in (turns[1].outbound_reply or "")
+        assert data_2.get("availability_claim_blocked") is not True
         cards_2 = data_2.get("product_cards") or []
         assert len(cards_2) == 1
         assert int(cards_2[0].get("id") or 0) == 28

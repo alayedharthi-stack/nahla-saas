@@ -575,48 +575,102 @@ def _eligible_catalog_browse_fallback_facts(
     return facts
 
 
+_BROWSE_CLAIM_STOP_TOKENS = frozenset({
+    "متوفر", "متوفره", "متاح", "متاحه", "موجود", "موجوده",
+    "حاليا", "الان", "كتالوج", "الكتالوج", "منتج", "منتجات",
+    "خيارات", "تشكيله", "ريال", "سعر", "سعره", "مل",
+    "غير", "توجد", "يوجد", "قابله", "للبيع", "مؤكده",
+    "هذه", "بعض", "من", "في", "عندنا", "عندكم", "عندك",
+})
+
+
 def _browse_title_tokens(title: str) -> set[str]:
-    norm_title = _norm(title)
-    if not norm_title:
-        return set()
-    return {token for token in norm_title.split() if len(token) >= 3}
+    from modules.ai.knowledge.product_matcher import tokenize  # noqa: PLC0415
+
+    return {token for token in tokenize(title or "") if len(token) >= 3}
+
+
+def _eligible_browse_rows(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        dict(row)
+        for row in (facts.get("eligible_catalog_products") or [])
+        if isinstance(row, dict)
+    ]
+
+
+def _strict_title_identity_in_text(text: str, title: str) -> bool:
+    """Require full title containment or every title token — not a 2-token overlap."""
+    text_norm = _norm(text)
+    title_norm = _norm(title)
+    if not text_norm or not title_norm:
+        return False
+    if title_norm in text_norm:
+        return True
+    toks = _browse_title_tokens(title)
+    if not toks:
+        return False
+    return all(token in text_norm for token in toks)
+
+
+def _referenced_eligible_browse_rows(
+    reply: str,
+    facts: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    referenced: List[Dict[str, Any]] = []
+    for row in _eligible_browse_rows(facts):
+        title = str(row.get("title") or "").strip()
+        if title and _strict_title_identity_in_text(reply, title):
+            referenced.append(row)
+    return referenced
+
+
+def _remove_eligible_titles(text: str, rows: Sequence[Dict[str, Any]]) -> str:
+    working = _norm(text)
+    for row in rows:
+        title = str(row.get("title") or "").strip()
+        title_norm = _norm(title)
+        if title_norm:
+            working = working.replace(title_norm, " ")
+        for token in _browse_title_tokens(title):
+            working = working.replace(token, " ")
+    return re.sub(r"\s+", " ", working).strip()
+
+
+def _is_catalog_wide_browse_denial(reply: str) -> bool:
+    return bool(_BROWSE_CATALOG_DENIAL_RE.search(_norm(reply)))
+
+
+def _browse_product_like_tokens(text: str) -> set[str]:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        extract_reply_prices,
+    )
+
+    prices = {str(amount) for amount in extract_reply_prices(text)}
+    leftover: set[str] = set()
+    for raw_token in _norm(text).split():
+        token = raw_token.strip(".,!?؟،")
+        if token.startswith("و") and len(token) > 3:
+            token = token[1:]
+        if len(token) < 3:
+            continue
+        if token in _BROWSE_CLAIM_STOP_TOKENS:
+            continue
+        if token.isdigit() or token in prices:
+            continue
+        leftover.add(token)
+    return leftover
 
 
 def _reply_grounds_eligible_catalog_products(
     reply: str,
     facts: Dict[str, Any],
 ) -> bool:
-    """True only when reply names an eligible catalog product identity."""
-    norm_reply = _norm(reply)
-    if not norm_reply:
+    """True only when every positive product claim binds to eligible catalog identity."""
+    referenced = _referenced_eligible_browse_rows(reply, facts)
+    if not referenced:
         return False
-    for row in facts.get("eligible_catalog_products") or []:
-        if not isinstance(row, dict):
-            continue
-        title = str(row.get("title") or "").strip()
-        norm_title = _norm(title)
-        if norm_title and norm_title in norm_reply:
-            return True
-        title_tokens = _browse_title_tokens(title)
-        if not title_tokens:
-            continue
-        overlap = title_tokens.intersection(norm_reply.split())
-        if len(overlap) >= min(2, len(title_tokens)):
-            return True
-        product_id = row.get("id")
-        if product_id is not None and str(product_id) in norm_reply:
-            return True
-    return False
-
-
-def _reply_denies_eligible_catalog_existence(reply: str) -> bool:
-    """True when browse wording denies catalog products despite eligible facts."""
-    if reply_availability_polarity(reply) == "negative":
-        return True
-    norm = _norm(reply)
-    if not norm:
-        return False
-    return bool(_BROWSE_CATALOG_DENIAL_RE.search(norm))
+    remainder = _remove_eligible_titles(reply, referenced)
+    return not _browse_product_like_tokens(remainder)
 
 
 def _browse_catalog_contradiction_reason(
@@ -626,11 +680,20 @@ def _browse_catalog_contradiction_reason(
     """
     Return a contradiction reason only when reply conflicts with eligible facts.
 
-    Neutral browse replies without availability claims are not contradictions.
+    Neutral browse replies and denials of other products are not contradictions.
     """
     if not facts.get("has_eligible_products"):
         return None
-    if _reply_denies_eligible_catalog_existence(reply):
+    referenced = _referenced_eligible_browse_rows(reply, facts)
+    remainder = _remove_eligible_titles(reply, referenced)
+    leftover = _browse_product_like_tokens(remainder)
+    if _is_catalog_wide_browse_denial(reply):
+        return "browse_false_negative_vs_eligible_products"
+    remainder_negative = (
+        reply_availability_polarity(remainder) == "negative"
+        or _is_catalog_wide_browse_denial(remainder)
+    )
+    if referenced and remainder_negative and not leftover:
         return "browse_false_negative_vs_eligible_products"
     if reply_availability_polarity(reply) == "positive" or reply_positive_options_claim(
         reply,
@@ -638,6 +701,58 @@ def _browse_catalog_contradiction_reason(
         if not _reply_grounds_eligible_catalog_products(reply, facts):
             return "browse_positive_ungrounded_in_eligible_products"
     return None
+
+
+def _strip_leftover_browse_tokens(reply: str, leftover: set[str]) -> str:
+    kept: List[str] = []
+    for word in re.split(r"(\s+)", reply):
+        if not word.strip():
+            kept.append(word)
+            continue
+        normalized = _norm(word).strip(".,!?؟،")
+        bare = (
+            normalized[1:]
+            if normalized.startswith("و") and len(normalized) > 3
+            else normalized
+        )
+        if normalized in leftover or bare in leftover:
+            continue
+        kept.append(word)
+    text = re.sub(r"\s+", " ", "".join(kept))
+    text = re.sub(r"(?:\s*(?:و|أو|او|,|،)\s*)+$", "", text)
+    text = re.sub(r"^(?:\s*(?:و|أو|او|,|،)\s*)+", "", text)
+    return text.strip(" .،,")
+
+
+def _strip_browse_contradictory_claims(
+    reply: str,
+    facts: Dict[str, Any],
+    conflict_reason: str,
+) -> str:
+    """Remove contradictory claims only. Never author replacement customer prose."""
+    original = str(reply or "")
+    if conflict_reason == "browse_false_negative_vs_eligible_products":
+        if _is_catalog_wide_browse_denial(original):
+            return ""
+        referenced = _referenced_eligible_browse_rows(original, facts)
+        remainder = _remove_eligible_titles(original, referenced)
+        leftover = _browse_product_like_tokens(remainder)
+        remainder_negative = (
+            reply_availability_polarity(remainder) == "negative"
+            or _is_catalog_wide_browse_denial(remainder)
+        )
+        if referenced and remainder_negative and not leftover:
+            return ""
+        return original
+    if conflict_reason != "browse_positive_ungrounded_in_eligible_products":
+        return original
+    referenced = _referenced_eligible_browse_rows(original, facts)
+    if not referenced:
+        return ""
+    leftover = _browse_product_like_tokens(_remove_eligible_titles(original, referenced))
+    if not leftover:
+        return original
+    return _strip_leftover_browse_tokens(original, leftover)
 
 
 def _synthetic_browse_evidence_from_facts(
@@ -868,19 +983,15 @@ def apply_product_availability_truth_guard(
             browse_facts,
             conflict_reason=conflict_reason,
         )
-        rewritten = build_operational_availability_conflict_reply(
-            evidence,
-            availability_context=availability_context,
-            inbound_text=inbound_text,
-        ).strip()
-        if not rewritten:
-            return ProductAvailabilityTruthGuardResult(
-                reply=original,
-                action="allowed_structured_catalog_browse",
-                reason="structured_catalog_browse_rewrite_blocked",
-            )
+        stripped = _strip_browse_contradictory_claims(
+            original,
+            browse_facts,
+            conflict_reason,
+        )
+        if stripped == original:
+            stripped = ""
         return ProductAvailabilityTruthGuardResult(
-            reply=rewritten,
+            reply=stripped,
             action=guard_action,
             replaced=True,
             reason=conflict_reason,
