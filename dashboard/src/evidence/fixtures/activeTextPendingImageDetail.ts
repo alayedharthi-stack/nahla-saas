@@ -19,21 +19,17 @@ export const ACTIVE_TEXT_PENDING_IMAGE_DETAIL: OrderUpdateServiceDetail = {
   preview_footer: null,
   meta_status: 'DRAFT',
   variables: ['customer_name', 'order_number', 'order_total', 'store_name'],
-  active: {
+  approved_revision: {
     id: 1,
     body_text: 'نسخة نشطة نصية {{1}} رقم {{2}}',
-    header_type: 'none',
     status: 'APPROVED',
-    revision: 1,
     label: 'r1',
   },
   pending_revision: {
     id: 2,
     body_text:
       'مسودة IMAGE {{1}} 📦\n\nمن {{4}}\nرقم الطلب: #{{2}}\nالمبلغ: {{3}} ريال',
-    header_type: 'image',
     status: 'DRAFT',
-    revision: 2,
     label: 'r2',
   },
 }
