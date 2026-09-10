@@ -1,4 +1,4 @@
-import type { OrderUpdateServiceDetail, OrderUpdateServiceKey } from '../../api/orderUpdates'
+import type { OrderUpdateServiceDetail } from '../../api/orderUpdates'
 
 export const ORDER_CONFIRMATION_PREVIEW_SAMPLES: Record<string, string> = {
   customer_name: 'أحمد',
@@ -22,24 +22,32 @@ export function buildOrderUpdatePreviewBody(
   return out
 }
 
-/** Meta utility templates have no Nahla assistant footer in merchant preview. */
+/** Footer only when the selected template revision includes a FOOTER component. */
 export function resolvePreviewFooter(
-  serviceKey: OrderUpdateServiceKey | string,
   detail: Pick<OrderUpdateServiceDetail, 'preview_footer'> | null,
-  isAr: boolean,
 ): string | undefined {
-  if (serviceKey === 'order_confirmation') {
-    return detail?.preview_footer ?? undefined
-  }
-  return detail?.preview_footer ?? (isAr ? 'نحلة — مساعد متجرك' : 'Nahla — your store assistant')
+  const footer = detail?.preview_footer
+  if (typeof footer === 'string' && footer.trim()) return footer.trim()
+  return undefined
 }
 
-/** IMAGE header preview only when the active/pending template has an IMAGE header. */
+/** IMAGE header preview only when the selected revision has header_type=image. */
 export function resolvePreviewHeaderImageUrl(
-  serviceKey: OrderUpdateServiceKey | string,
   detail: Pick<OrderUpdateServiceDetail, 'header_type' | 'preview_header_image_url'> | null,
 ): string | null {
-  if (serviceKey !== 'order_confirmation') return null
   if (String(detail?.header_type ?? 'none').toLowerCase() !== 'image') return null
   return detail?.preview_header_image_url ?? null
+}
+
+export function resolveOrderUpdatePreview(
+  detail: OrderUpdateServiceDetail | null,
+  variableKeys: string[],
+  samples: Record<string, string>,
+) {
+  const rawBody = (detail?.body_text ?? detail?.message_text ?? '').trim()
+  return {
+    body: buildOrderUpdatePreviewBody(rawBody, variableKeys, samples),
+    footer: resolvePreviewFooter(detail),
+    headerImageUrl: resolvePreviewHeaderImageUrl(detail),
+  }
 }

@@ -20,11 +20,8 @@ import {
   type OrderUpdatesSettings,
   ORDER_UPDATE_SERVICE_KEYS,
 } from '../../api/orderUpdates'
-import {
-  buildOrderUpdatePreviewBody,
-  resolvePreviewFooter,
-  resolvePreviewHeaderImageUrl,
-} from './orderUpdatesPreview'
+import { resolveOrderUpdatePreview } from './orderUpdatesPreview'
+import { WaBubblePreview } from './WaBubblePreview'
 
 // ── Static service metadata (UI only) ─────────────────────────────────────────
 
@@ -245,40 +242,6 @@ function Toggle({
   )
 }
 
-function WaBubblePreview({
-  body,
-  footer,
-  headerImageUrl,
-}: {
-  body: string
-  footer?: string
-  headerImageUrl?: string | null
-}) {
-  return (
-    <div className="bg-[#e5ddd5] rounded-xl p-4 flex items-end min-h-28" dir="rtl">
-      <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs w-full overflow-hidden">
-        {headerImageUrl ? (
-          <img
-            src={headerImageUrl}
-            alt=""
-            className="w-full h-32 object-cover border-b border-slate-100"
-            loading="lazy"
-          />
-        ) : null}
-        <div className="p-3 space-y-1">
-          {body ? (
-            <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">{body}</p>
-          ) : (
-            <p className="text-slate-400 text-xs italic">—</p>
-          )}
-          {footer && <p className="text-[10px] text-slate-400 mt-1">{footer}</p>}
-          <p className="text-[10px] text-slate-300 text-end">✓✓</p>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 function ServiceCard({
   meta,
   settings,
@@ -341,9 +304,12 @@ function ServiceCard({
 
   const approved = approvedRevision(detail)
   const pending = detail?.pending_revision ?? null
-  const previewBody = buildOrderUpdatePreviewBody(bodyText, variableKeys, PREVIEW_SAMPLES)
-  const previewFooter = resolvePreviewFooter(meta.key, detail, isAr)
-  const previewHeaderImageUrl = resolvePreviewHeaderImageUrl(meta.key, detail)
+  const preview = useMemo(() => {
+    const source = detail
+      ? { ...detail, body_text: bodyText, message_text: bodyText }
+      : null
+    return resolveOrderUpdatePreview(source, variableKeys, PREVIEW_SAMPLES)
+  }, [detail, bodyText, variableKeys])
 
   const handleToggle = async (next: boolean) => {
     setToggleSaving(true)
@@ -490,9 +456,9 @@ function ServiceCard({
             {isAr ? 'معاينة' : 'Preview'}
           </p>
           <WaBubblePreview
-            body={previewBody}
-            footer={previewFooter}
-            headerImageUrl={previewHeaderImageUrl}
+            body={preview.body}
+            footer={preview.footer}
+            headerImageUrl={preview.headerImageUrl}
           />
         </div>
 
