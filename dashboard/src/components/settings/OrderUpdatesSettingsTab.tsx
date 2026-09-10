@@ -20,6 +20,8 @@ import {
   type OrderUpdatesSettings,
   ORDER_UPDATE_SERVICE_KEYS,
 } from '../../api/orderUpdates'
+import { resolveOrderUpdatePreview } from './orderUpdatesPreview'
+import { WaBubblePreview } from './WaBubblePreview'
 
 // ── Static service metadata (UI only) ─────────────────────────────────────────
 
@@ -44,6 +46,8 @@ const SERVICE_META: Record<OrderUpdateServiceKey, ServiceMeta> = {
     defaultVariables: [
       { key: 'customer_name', labelAr: 'اسم العميل', labelEn: 'Customer name', sample: 'أحمد' },
       { key: 'order_number', labelAr: 'رقم الطلب', labelEn: 'Order number', sample: '12345' },
+      { key: 'order_total', labelAr: 'المبلغ الإجمالي', labelEn: 'Order total', sample: '350' },
+      { key: 'store_name', labelAr: 'اسم المتجر', labelEn: 'Store name', sample: 'متجر تجريبي عام' },
     ],
   },
   cod_confirmation: {
@@ -202,16 +206,6 @@ function metaStatusClasses(status: MetaRevisionStatus | null | undefined): strin
   return 'bg-slate-50 text-slate-600 border-slate-200'
 }
 
-function buildPreview(text: string, variableKeys: string[]): string {
-  let out = text
-  variableKeys.forEach((key, idx) => {
-    const sample = PREVIEW_SAMPLES[key] ?? `[${key}]`
-    out = out.split(`{{${key}}}`).join(sample)
-    out = out.split(`{{${idx + 1}}}`).join(sample)
-  })
-  return out
-}
-
 function revisionId(rev: { id?: string | number | null; template_id?: string | number | null } | null | undefined) {
   if (!rev) return null
   return rev.template_id ?? rev.id ?? null
@@ -244,22 +238,6 @@ function Toggle({
           ? <ToggleRight className="w-6 h-6 text-brand-500" />
           : <ToggleLeft className="w-6 h-6 text-slate-300" />}
       </button>
-    </div>
-  )
-}
-
-function WaBubblePreview({ body, footer }: { body: string; footer?: string }) {
-  return (
-    <div className="bg-[#e5ddd5] rounded-xl p-4 flex items-end min-h-28" dir="rtl">
-      <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm max-w-xs w-full p-3 space-y-1">
-        {body ? (
-          <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">{body}</p>
-        ) : (
-          <p className="text-slate-400 text-xs italic">—</p>
-        )}
-        {footer && <p className="text-[10px] text-slate-400 mt-1">{footer}</p>}
-        <p className="text-[10px] text-slate-300 text-end">✓✓</p>
-      </div>
     </div>
   )
 }
@@ -326,8 +304,12 @@ function ServiceCard({
 
   const approved = approvedRevision(detail)
   const pending = detail?.pending_revision ?? null
-  const previewBody = buildPreview(bodyText, variableKeys)
-  const previewFooter = detail?.preview_footer ?? (isAr ? 'نحلة — مساعد متجرك' : 'Nahla — your store assistant')
+  const preview = useMemo(() => {
+    const source = detail
+      ? { ...detail, body_text: bodyText, message_text: bodyText }
+      : null
+    return resolveOrderUpdatePreview(source, variableKeys, PREVIEW_SAMPLES)
+  }, [detail, bodyText, variableKeys])
 
   const handleToggle = async (next: boolean) => {
     setToggleSaving(true)
@@ -473,7 +455,11 @@ function ServiceCard({
           <p className="text-xs font-semibold text-slate-600 mb-2">
             {isAr ? 'معاينة' : 'Preview'}
           </p>
-          <WaBubblePreview body={previewBody} footer={previewFooter} />
+          <WaBubblePreview
+            body={preview.body}
+            footer={preview.footer}
+            headerImageUrl={preview.headerImageUrl}
+          />
         </div>
 
         {approvedLabel && (
