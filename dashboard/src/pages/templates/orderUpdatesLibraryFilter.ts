@@ -25,3 +25,25 @@ export function filterOrderUpdatesLibraryGroups(
     }))
     .filter(group => (group.templates?.length ?? 0) > 0)
 }
+
+/**
+ * The WhatsApp templates screen owns customer-facing WhatsApp templates.
+ * Order-update templates belong to the store templates screen, where their
+ * lifecycle settings and revisions are managed together.
+ */
+export function filterWhatsAppLibraryTemplates(
+  templates: NahlaLibraryTemplate[],
+): NahlaLibraryTemplate[] {
+  return templates.filter(tpl => !isOrderUpdatesLibraryTemplate(tpl))
+}
+
+export function filterWhatsAppLibraryGroups(
+  groups: NahlaLibraryGroup[],
+): NahlaLibraryGroup[] {
+  return groups
+    .map(group => ({
+      ...group,
+      templates: filterWhatsAppLibraryTemplates(group.templates ?? []),
+    }))
+    .filter(group => (group.templates?.length ?? 0) > 0)
+}
