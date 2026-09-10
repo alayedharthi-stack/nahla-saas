@@ -82,7 +82,11 @@ def catalog_request_snapshot(ctx: BrainContext) -> dict[str, Any] | None:
 
 
 def parse_catalog_request(raw: str, snapshot: dict[str, Any]) -> CatalogRequest:
-    unresolved = CatalogRequest("clarify", status="invalid")
+    # A malformed model result is not a customer clarification decision.  This
+    # interpreter is an optional semantic owner in front of the existing
+    # routing stack, so model/protocol failure must yield to that stack rather
+    # than hijack an otherwise valid greeting or commerce turn.
+    unresolved = CatalogRequest("defer", status="invalid")
     try:
         value = json.loads(raw)
     except (TypeError, ValueError):
@@ -109,7 +113,11 @@ def parse_catalog_request(raw: str, snapshot: dict[str, Any]) -> CatalogRequest:
         return unresolved
     if cap in {"details", "image", "link", "variant_question"} and not ids:
         return unresolved
-    if cap in {"defer", "conversation", "clarify"} and (ids or query):
+    if cap in {"defer", "conversation", "clarify"} and (
+        ids or query or value["reference"] != "none"
+    ):
+        return unresolved
+    if value["reference"] == "multiple" and len(ids) < 2:
         return unresolved
     if cap == "search" and not ids and not query.strip():
         return unresolved
@@ -121,7 +129,7 @@ async def interpret_catalog_request(ctx: BrainContext) -> CatalogRequest | None:
     if snapshot is None:
         return None
     if len(ctx.message) > 6000:
-        return CatalogRequest("clarify", status="input_limit")
+        return CatalogRequest("defer", status="input_limit")
     from modules.ai.brain.intent.slot_extractor import _resolve_slot_model  # noqa: PLC0415
     from modules.ai.orchestrator.providers.registry import get_provider  # noqa: PLC0415
 
@@ -145,9 +153,9 @@ async def interpret_catalog_request(ctx: BrainContext) -> CatalogRequest | None:
         ), timeout=8.0)
     except Exception as exc:  # noqa: BLE001
         logger.warning("catalog_interpretation_unresolved kind=%s", type(exc).__name__)
-        return CatalogRequest("clarify", status="unavailable")
+        return CatalogRequest("defer", status="unavailable")
     if not isinstance(raw, dict):
-        return CatalogRequest("clarify", status="unavailable")
+        return CatalogRequest("defer", status="unavailable")
     return parse_catalog_request(raw.get("reply_text") or "", snapshot)
 
 

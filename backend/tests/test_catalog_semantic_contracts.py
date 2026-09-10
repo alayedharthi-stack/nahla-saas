@@ -186,17 +186,45 @@ def test_identity_scope_staleness_and_operational_gates():
     snapshot = requests.catalog_request_snapshot(ctx)
     assert 999 not in snapshot["rows"]
     forged = requests.parse_catalog_request(json.dumps(request_payload(ids=[999])), snapshot)
-    assert forged.capability == "clarify"
+    assert forged.capability == "defer"
+    ctx.catalog_request = forged
+    assert requests.catalog_request_decision(ctx) is None
     ctx.state.turn = 100
     stale = requests.catalog_request_snapshot(ctx)
     assert stale["current_product_id"] is None
-    assert requests.parse_catalog_request(json.dumps(request_payload()), stale).capability == "clarify"
+    stale_request = requests.parse_catalog_request(json.dumps(request_payload()), stale)
+    assert stale_request.capability == "defer"
+    ctx.catalog_request = stale_request
+    assert requests.catalog_request_decision(ctx) is None
     for state in ("ordering", "payment_pending"):
         ctx.state.stage = state
         assert requests.catalog_request_snapshot(ctx) is None
     ctx.state.stage = "exploring"
     ctx.human_priority = True
     assert requests.catalog_request_snapshot(ctx) is None
+
+
+def test_invalid_or_unavailable_interpretation_yields_to_existing_routing(monkeypatch):
+    from modules.ai.orchestrator.providers import registry
+
+    snapshot = requests.catalog_request_snapshot(context())
+    invalid = requests.parse_catalog_request("not-json", snapshot)
+    assert invalid.capability == "defer"
+    assert invalid.status == "invalid"
+
+    class Provider:
+        def is_configured(self):
+            return True
+
+        def call(self, user, system, **kwargs):
+            raise TimeoutError()
+
+    monkeypatch.setattr(registry, "get_provider", lambda name: Provider())
+    ctx = context("تمام يعطيك العافية")
+    ctx.catalog_request = asyncio.run(requests.interpret_catalog_request(ctx))
+    assert ctx.catalog_request.capability == "defer"
+    assert ctx.catalog_request.status == "unavailable"
+    assert requests.catalog_request_decision(ctx) is None
 
 
 def test_multiple_products_are_preserved():
