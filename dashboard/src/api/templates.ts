@@ -25,6 +25,11 @@ export interface TemplateComponent {
   format?: 'TEXT' | 'IMAGE' | 'DOCUMENT' | 'VIDEO'
   text?: string
   buttons?: TemplateButton[]
+  example?: {
+    header_url?: string
+    header_handle?: string[]
+    body_text?: string[][]
+  }
 }
 
 export interface WhatsAppTemplateRecord {
