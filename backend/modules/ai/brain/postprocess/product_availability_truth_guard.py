@@ -16,7 +16,9 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Sequence
 
+from core.product_entity_resolution import EntityResolutionResult
 from modules.ai.brain.postprocess.product_availability_evidence import (
+    CONFLICT_ENTITY_MISMATCH,
     EVIDENCE_CONFLICT,
     EVIDENCE_RESOLVED_AVAILABLE,
     EVIDENCE_RESOLVED_UNAVAILABLE,
@@ -95,6 +97,16 @@ _WEIGHT_YEAR_NOISE_RE = re.compile(
     re.UNICODE | re.IGNORECASE,
 )
 _YEAR_NOISE_RE = re.compile(r"\b20\d{2}\b")
+
+_BROWSE_CATALOG_DENIAL_RE = re.compile(
+    r"(?:"
+    r"لا\s+توجد\s+منتجات"
+    r"|لا\s+منتجات"
+    r"|لا\s+يوجد\s+منتج"
+    r"|لا\s+توجد\s+.*قابل(?:ه|ة)\s+ل"
+    r")",
+    re.UNICODE | re.IGNORECASE,
+)
 
 _POSITIVE_OPTIONS_CLAIM_RE = re.compile(
     r"(?:"
@@ -369,6 +381,14 @@ def _product_label_for_reply(
         for p in (ctx.get("catalog_skus") or [])
         if p.get("id") is not None
     }
+    presentation = ctx.get("catalog_presentation_facts") or {}
+    presentation_rows: List[Dict[str, Any]] = []
+    for key in ("eligible_catalog_products", "catalog_products"):
+        presentation_rows.extend(
+            dict(row)
+            for row in (presentation.get(key) or [])
+            if isinstance(row, dict)
+        )
 
     focus = ctx.get("focus_product") or {}
     focus_title = ""
@@ -380,6 +400,24 @@ def _product_label_for_reply(
     pid = evidence.entity.product_id
     if pid is not None and pid in catalog_by_id:
         title = sanitize_product_label(str(catalog_by_id[pid].get("title") or ""))
+        if title:
+            return title
+    if pid is not None:
+        for row in presentation_rows:
+            try:
+                row_id = int(row.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if row_id == pid:
+                title = sanitize_product_label(str(row.get("title") or ""))
+                if title:
+                    return title
+    if presentation_rows and str(
+        getattr(evidence, "evidence_source", "") or "",
+    ).strip() == "structured_catalog_browse_facts":
+        title = sanitize_product_label(
+            str(presentation_rows[0].get("title") or ""),
+        )
         if title:
             return title
 
@@ -510,6 +548,309 @@ def _would_rewrite(action: str, mode: str) -> bool:
     return False
 
 
+def _eligible_catalog_browse_fallback_facts(
+    availability_context: Optional[Dict[str, Any]],
+    *,
+    question_kind: str,
+) -> Optional[Dict[str, Any]]:
+    facts = dict(
+        (availability_context or {}).get("catalog_presentation_facts") or {}
+    )
+    if str(question_kind or facts.get("question_kind") or "").strip() != "browse":
+        return None
+    if int(facts.get("eligible_product_count") or 0) <= 0:
+        return None
+    if not bool(facts.get("has_eligible_products")):
+        return None
+    if not bool(facts.get("pending_product_card_count_present")):
+        return None
+    if not list(facts.get("catalog_products") or []):
+        return None
+    if not list(facts.get("eligible_catalog_products") or []):
+        return None
+    return facts
+
+
+def _browse_title_tokens(title: str) -> set[str]:
+    from modules.ai.knowledge.product_matcher import tokenize  # noqa: PLC0415
+
+    return {token for token in tokenize(title or "") if len(token) >= 3}
+
+
+def _eligible_browse_rows(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        dict(row)
+        for row in (facts.get("eligible_catalog_products") or [])
+        if isinstance(row, dict)
+    ]
+
+
+def _strict_title_identity_in_text(text: str, title: str) -> bool:
+    """Require full title containment or every title token — not a 2-token overlap."""
+    text_norm = _norm(text)
+    title_norm = _norm(title)
+    if not text_norm or not title_norm:
+        return False
+    if title_norm in text_norm:
+        return True
+    toks = _browse_title_tokens(title)
+    if not toks:
+        return False
+    return all(token in text_norm for token in toks)
+
+
+def _referenced_eligible_browse_rows(
+    reply: str,
+    facts: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    referenced: List[Dict[str, Any]] = []
+    for row in _eligible_browse_rows(facts):
+        title = str(row.get("title") or "").strip()
+        if title and _strict_title_identity_in_text(reply, title):
+            referenced.append(row)
+    return referenced
+
+
+def _is_catalog_wide_browse_denial(reply: str) -> bool:
+    return bool(_BROWSE_CATALOG_DENIAL_RE.search(_norm(reply)))
+
+
+def _title_has_local_negative_claim(reply: str, title: str) -> bool:
+    """True when a negative availability marker is bound to this product title."""
+    norm = _norm(reply)
+    title_norm = _norm(title)
+    if not norm or not title_norm or title_norm not in norm:
+        if not _strict_title_identity_in_text(reply, title):
+            return False
+        title_norm = title_norm or _norm(title)
+    idx_title = norm.find(title_norm) if title_norm in norm else -1
+    marker_norms = [_norm(marker) for marker in _NEGATIVE_MARKERS if _norm(marker)]
+    if idx_title < 0:
+        return False
+    title_end = idx_title + len(title_norm)
+    for marker in marker_norms:
+        idx_marker = norm.find(marker, idx_title)
+        if idx_marker < 0:
+            continue
+        gap = idx_marker - title_end
+        if 0 <= gap <= 24:
+            return True
+        before = norm.rfind(marker, 0, idx_title)
+        if before >= 0 and 0 <= idx_title - (before + len(marker)) <= 8:
+            return True
+    return False
+
+
+def _row_catalog_price(row: Dict[str, Any]) -> Optional[int]:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    for key in ("price", "sale_price", "regular_price"):
+        amount = parse_price_amount(row.get(key))
+        if amount is not None:
+            return amount
+    return None
+
+
+_BOUND_PRICE_TAIL_RE = re.compile(
+    r"^\s*(?:سعر(?:ه|ها)?|ب)?\s*\d{1,6}(?:[.,]\d{1,2})?\s*(?:ريال|ر\.?\s*س\.?|sar)?",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _bound_claim_span(
+    norm: str,
+    title: str,
+    row: Dict[str, Any],
+) -> Optional[tuple[int, int]]:
+    """Span covering a product title plus adjacent polarity/price for that row."""
+    title_norm = _norm(title)
+    if not title_norm or title_norm not in norm:
+        return None
+    start = norm.find(title_norm)
+    end = start + len(title_norm)
+    marker_norms = sorted(
+        {_norm(marker) for marker in (_NEGATIVE_MARKERS + _POSITIVE_MARKERS) if _norm(marker)},
+        key=len,
+        reverse=True,
+    )
+    before = norm[:start]
+    trimmed_before = before.rstrip()
+    if 0 <= (len(before) - len(trimmed_before)) <= 3:
+        for marker in marker_norms:
+            if trimmed_before.endswith(marker):
+                start = len(trimmed_before) - len(marker)
+                break
+    after = norm[end:]
+    lead_ws = len(after) - len(after.lstrip())
+    rest = after.lstrip()
+    if 0 <= lead_ws <= 3:
+        for marker in marker_norms:
+            if rest.startswith(marker):
+                end = end + lead_ws + len(marker)
+                break
+    row_price = _row_catalog_price(row)
+    if row_price is not None:
+        tail = norm[end:]
+        match = _BOUND_PRICE_TAIL_RE.match(tail)
+        if match and str(row_price) in match.group(0):
+            end = end + match.end()
+    return start, end
+
+
+def _remainder_after_bound_eligible_claims(
+    reply: str,
+    referenced: Sequence[Dict[str, Any]],
+) -> str:
+    """Remove bound eligible claim spans. Do not strip leftover title tokens."""
+    working = _norm(reply)
+    if not working:
+        return ""
+    chars = list(working)
+    for row in referenced:
+        title = str(row.get("title") or "").strip()
+        span = _bound_claim_span(working, title, row)
+        if span is None:
+            continue
+        start, end = span
+        for idx in range(max(0, start), min(end, len(chars))):
+            chars[idx] = " "
+    return re.sub(r"\s+", " ", "".join(chars)).strip()
+
+
+def _remainder_has_unbound_product_claim(
+    remainder: str,
+    referenced: Sequence[Dict[str, Any]],
+) -> bool:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        extract_reply_prices,
+    )
+
+    if not remainder:
+        return False
+    if reply_availability_polarity(remainder) is not None:
+        return True
+    if reply_positive_options_claim(remainder):
+        return True
+    remainder_prices = extract_reply_prices(remainder)
+    if not remainder_prices:
+        return False
+    referenced_prices = {
+        price
+        for row in referenced
+        if (price := _row_catalog_price(row)) is not None
+    }
+    return bool(remainder_prices - referenced_prices)
+
+
+def _browse_catalog_contradiction_reason(
+    reply: str,
+    facts: Dict[str, Any],
+) -> Optional[str]:
+    """
+    Return a contradiction reason only when a product/availability claim conflicts.
+
+    Conversational remainder after a grounded eligible product is not a product.
+    """
+    if not facts.get("has_eligible_products"):
+        return None
+    referenced = _referenced_eligible_browse_rows(reply, facts)
+    if _is_catalog_wide_browse_denial(reply):
+        return "browse_false_negative_vs_eligible_products"
+    for row in referenced:
+        title = str(row.get("title") or "").strip()
+        if title and _title_has_local_negative_claim(reply, title):
+            return "browse_false_negative_vs_eligible_products"
+    if reply_availability_polarity(reply) == "positive" or reply_positive_options_claim(
+        reply,
+    ):
+        if not referenced:
+            return "browse_positive_ungrounded_in_eligible_products"
+        remainder = _remainder_after_bound_eligible_claims(reply, referenced)
+        if _remainder_has_unbound_product_claim(remainder, referenced):
+            return "browse_positive_ungrounded_in_eligible_products"
+    return None
+
+
+def _browse_correction_facts(
+    facts: Dict[str, Any],
+    conflict_reason: str,
+) -> Dict[str, Any]:
+    rows = _eligible_browse_rows(facts)
+    return {
+        "reason": conflict_reason,
+        "question_kind": "browse",
+        "eligible_product_ids": [
+            row.get("id") for row in rows if row.get("id") is not None
+        ],
+        "eligible_titles": [
+            str(row.get("title") or "").strip()
+            for row in rows
+            if str(row.get("title") or "").strip()
+        ],
+        "eligible_catalog_products": rows,
+    }
+
+
+def _synthetic_browse_evidence_from_facts(
+    facts: Dict[str, Any],
+    *,
+    conflict_reason: str,
+) -> ProductAvailabilityEvidenceResult:
+    eligible = [
+        dict(row)
+        for row in (facts.get("eligible_catalog_products") or [])
+        if isinstance(row, dict)
+    ]
+    first = eligible[0] if eligible else {}
+    product_id: Optional[int] = None
+    try:
+        if first.get("id") is not None:
+            product_id = int(first.get("id"))
+    except (TypeError, ValueError):
+        product_id = None
+    entity = EntityResolutionResult(
+        resolved=product_id is not None,
+        resolution_mode="catalog_sku",
+        product_id=product_id,
+        family_key=str(first.get("family_key") or "").strip() or None,
+        confidence=1.0 if product_id is not None else 0.0,
+        candidate_product_ids=(product_id,) if product_id is not None else (),
+    )
+    if conflict_reason == "browse_positive_ungrounded_in_eligible_products":
+        return ProductAvailabilityEvidenceResult(
+            evidence_state=EVIDENCE_CONFLICT,
+            evidence_ok_for_positive=False,
+            evidence_ok_for_negative=False,
+            conflict_type=CONFLICT_ENTITY_MISMATCH,
+            entity=entity,
+            catalog_checkout=True,
+            kb_avail_polarity=None,
+            family_checkout_summary=None,
+            evidence_source="structured_catalog_browse_facts",
+            reason=conflict_reason,
+        )
+    return ProductAvailabilityEvidenceResult(
+        evidence_state=EVIDENCE_RESOLVED_AVAILABLE,
+        evidence_ok_for_positive=True,
+        evidence_ok_for_negative=False,
+        conflict_type=None,
+        entity=entity,
+        catalog_checkout=True,
+        kb_avail_polarity=None,
+        family_checkout_summary=None,
+        evidence_source="structured_catalog_browse_facts",
+        reason=conflict_reason,
+    )
+
+
+def _browse_guard_action_for_conflict(conflict_reason: str) -> str:
+    if conflict_reason == "browse_positive_ungrounded_in_eligible_products":
+        return "rewrite_conflict"
+    return "rewrite_false_negative"
+
+
 @dataclass(frozen=True)
 class ProductAvailabilityTruthGuardResult:
     reply: str
@@ -520,6 +861,27 @@ class ProductAvailabilityTruthGuardResult:
     availability_claim_blocked: bool = False
     shadow_mode: bool = False
     would_rewrite: bool = False
+    requires_grounded_recompose: bool = False
+
+
+def stamp_product_availability_guard_transform(
+    result_data: Dict[str, Any],
+    guard_result: ProductAvailabilityTruthGuardResult,
+    guard_replaced: Optional[Dict[str, bool]] = None,
+) -> None:
+    if not guard_result.replaced:
+        return
+    result_data["final_text_transformed"] = True
+    reasons = [
+        str(reason)
+        for reason in (result_data.get("final_transform_reasons") or [])
+        if str(reason or "").strip()
+    ]
+    if "product_availability_truth_guard" not in reasons:
+        reasons.append("product_availability_truth_guard")
+    result_data["final_transform_reasons"] = reasons
+    if guard_replaced is not None:
+        guard_replaced["product_availability_truth_guard"] = True
 
 
 def log_product_availability_truth_guard(
@@ -584,6 +946,7 @@ def apply_product_availability_truth_guard(
     surface: str = "",
     invocation_site: str = "unknown",
     turn_token: str = "",
+    allow_recompose: bool = True,
 ) -> ProductAvailabilityTruthGuardResult:
     from modules.ai.brain.postprocess.product_availability_shadow_telemetry import (  # noqa: PLC0415
         ShadowObservationTimer,
@@ -625,6 +988,62 @@ def apply_product_availability_truth_guard(
 
     if mode == "off":
         return ProductAvailabilityTruthGuardResult(reply=original, action="disabled")
+
+    browse_facts = _eligible_catalog_browse_fallback_facts(
+        availability_context,
+        question_kind=question_kind,
+    )
+    if browse_facts is not None:
+        conflict_reason = _browse_catalog_contradiction_reason(original, browse_facts)
+        if conflict_reason is None:
+            return ProductAvailabilityTruthGuardResult(
+                reply=original,
+                action="allowed_structured_catalog_browse",
+                reason="structured_catalog_browse_no_contradiction",
+            )
+        guard_action = _browse_guard_action_for_conflict(conflict_reason)
+        if mode == "shadow":
+            _emit_shadow(
+                evidence_state=EVIDENCE_RESOLVED_AVAILABLE,
+                conflict_type="-",
+                guard_action=guard_action,
+                would_rewrite=True,
+                reason=conflict_reason,
+                customer_text_changed=False,
+            )
+            return ProductAvailabilityTruthGuardResult(
+                reply=original,
+                action=guard_action,
+                reason=conflict_reason,
+                availability_claim_blocked=True,
+                shadow_mode=True,
+                would_rewrite=True,
+            )
+        evidence = _synthetic_browse_evidence_from_facts(
+            browse_facts,
+            conflict_reason=conflict_reason,
+        )
+        if allow_recompose:
+            return ProductAvailabilityTruthGuardResult(
+                reply=original,
+                action=guard_action,
+                replaced=False,
+                reason=conflict_reason,
+                evidence=evidence,
+                availability_claim_blocked=True,
+                would_rewrite=True,
+                requires_grounded_recompose=True,
+            )
+        return ProductAvailabilityTruthGuardResult(
+            reply="",
+            action=guard_action,
+            replaced=True,
+            reason=conflict_reason,
+            evidence=evidence,
+            availability_claim_blocked=True,
+            would_rewrite=True,
+            requires_grounded_recompose=False,
+        )
 
     topic = str(decision_topic or "").strip()
     if topic in {

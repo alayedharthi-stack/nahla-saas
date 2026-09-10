@@ -73,12 +73,56 @@ def _kb_polarity(title: str, body: str) -> str:
     return "none"
 
 
+def _catalog_presentation_facts(
+    result_data: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    data = dict(result_data or {})
+    products: List[Dict[str, Any]] = []
+    for key in ("catalog_fact_products", "pending_candidates", "products"):
+        products = [
+            dict(row)
+            for row in (data.get(key) or [])
+            if isinstance(row, dict)
+        ]
+        if products:
+            break
+    eligible_rows = [
+        row
+        for row in products
+        if bool(row.get("can_checkout", row.get("orderable", False)))
+    ]
+    raw_count = data.get("eligible_product_count")
+    eligible_count = _safe_int(raw_count, len(eligible_rows))
+    return {
+        "question_kind": str(data.get("question_kind") or "").strip(),
+        "compose_source": str(data.get("compose_source") or "").strip(),
+        "fallback_action_type": str(data.get("fallback_action_type") or "").strip(),
+        "eligible_product_count": eligible_count,
+        "has_eligible_products": bool(eligible_count > 0 and eligible_rows),
+        "catalog_products": products,
+        "eligible_catalog_products": eligible_rows,
+        "pending_product_card_count": _safe_int(
+            data.get("pending_product_card_count"),
+            0,
+        ),
+        "pending_product_card_count_present": (
+            "pending_product_card_count" in data
+        ),
+        "catalog_search_query": str(data.get("catalog_search_query") or "").strip(),
+        "search_result_count": _safe_int(
+            data.get("search_result_count"),
+            len(products),
+        ),
+    }
+
+
 def build_availability_context(
     db: Session,
     tenant_id: int,
     *,
     focus_product: Optional[Dict[str, Any]] = None,
     recommended_product_ids: Optional[Sequence[int]] = None,
+    result_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble availability_context for evaluate_product_availability_evidence."""
     from models import Integration, MerchantKnowledgeSection, Product  # noqa: PLC0415
@@ -91,6 +135,7 @@ def build_availability_context(
         "catalog_skus": [],
         "kb_signals": [],
         "product_links": [],
+        "catalog_presentation_facts": _catalog_presentation_facts(result_data),
     }
 
     try:

@@ -14,9 +14,9 @@ import time
 import unicodedata
 from enum import Enum
 from typing import Any, Dict, Optional
+from .category_browse_selection_pick import try_category_browse_pick_decision, try_named_product_link_decision
 
 logger = logging.getLogger("nahla.brain.commerce_entry_catalog_delivery")
-
 TOPIC_COMMERCE_ENTRY_CATALOG = "commerce_entry_catalog"
 _SESSION_KEY = "commerce_entry_catalog_delivery"
 _BLOCK_KEY = "catalog_delivery_blocked"
@@ -857,6 +857,10 @@ def try_commerce_entry_catalog_decision(ctx: Any) -> Optional[Any]:
     if kb_dec is not None:
         _set_catalog_delivery_block(state, CatalogDeliveryKind.BLOCK_NON_CATALOG_SUBJECT.value)
         return kb_dec
+
+    named_product_link = try_named_product_link_decision(ctx) or try_category_browse_pick_decision(ctx)
+    if named_product_link is not None:
+        return named_product_link
 
     if _is_explicit_catalog_browse_request(message, ctx):
         if _catalog_block_reason(state) == "payment_evidence":

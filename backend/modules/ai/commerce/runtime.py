@@ -149,6 +149,23 @@ class CommerceToolRuntime:
             "tenant_id": self.tenant_id,
         }
 
+    def _stamp_catalog_tool_product(
+        self,
+        product: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Attach tenant-scoped identity/provenance. Never invent URLs or IDs."""
+        if not isinstance(product, dict):
+            return product
+        stamped = dict(product)
+        pid = stamped.get("id")
+        if pid is not None:
+            stamped.setdefault("product_id", pid)
+        stamped.setdefault("source", "merchant_catalog")
+        tenant_id = getattr(self, "tenant_id", None)
+        if tenant_id is not None:
+            stamped["tenant_id"] = tenant_id
+        return stamped
+
     async def _tool_search_products(self, payload: Dict[str, Any]) -> ToolExecutionResult:
         import time as _time_cs  # noqa: PLC0415
 
@@ -172,10 +189,21 @@ class CommerceToolRuntime:
                 products = list(search_result or [])
         else:
             products = self.catalog.get_top_products(limit=limit)
+        products = [
+            stamped
+            for row in products
+            if (stamped := self._stamp_catalog_tool_product(row)) is not None
+        ]
+        catalog_fact_products = [
+            stamped
+            for row in catalog_fact_products
+            if (stamped := self._stamp_catalog_tool_product(row)) is not None
+        ]
         result_payload: Dict[str, Any] = {
             "products": products,
             "count": len(products),
             "query": query,
+            "source": "merchant_catalog",
         }
         if catalog_fact_products:
             result_payload["catalog_fact_products"] = catalog_fact_products
@@ -203,21 +231,40 @@ class CommerceToolRuntime:
         )
 
     async def _tool_get_product_details(self, payload: Dict[str, Any]) -> ToolExecutionResult:
+        product = None
+        product_id_raw = payload.get("product_id")
+        if product_id_raw is None:
+            product_id_raw = payload.get("id")
+        getter_by_id = getattr(self.catalog, "get_by_id", None)
+        if product_id_raw not in (None, "") and callable(getter_by_id):
+            try:
+                found = getter_by_id(int(product_id_raw))
+            except (TypeError, ValueError):
+                found = None
+            product = found if isinstance(found, dict) else None
+            if not product:
+                return ToolExecutionResult(
+                    False,
+                    "get_product_details",
+                    payload={"product": None, "source": "merchant_catalog"},
+                    error="product_not_found",
+                    audit={"product_id": product_id_raw},
+                )
         external_id = str(payload.get("external_id") or "").strip()
-        if external_id:
+        if product is None and external_id:
             product = self.catalog.get_by_external_id(external_id)
-        else:
-            product = None
+        if product is None and product_id_raw in (None, "") and not external_id:
             query = str(payload.get("query") or "").strip()
             if query:
                 matches = self.catalog.search_products(query, limit=1)
                 product = matches[0] if matches else None
+        stamped = self._stamp_catalog_tool_product(product) if product else None
         return ToolExecutionResult(
-            ok=bool(product),
+            ok=bool(stamped),
             tool_name="get_product_details",
-            payload={"product": product},
-            error=None if product else "product_not_found",
-            audit={"external_id": external_id},
+            payload={"product": stamped, "source": "merchant_catalog"},
+            error=None if stamped else "product_not_found",
+            audit={"external_id": external_id, "product_id": product_id_raw},
         )
 
     async def _tool_check_stock(self, payload: Dict[str, Any]) -> ToolExecutionResult:
