@@ -22,6 +22,15 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
+def _order_summary_r3_components() -> List[Dict[str, Any]]:
+    """Canonical r3 contract: IMAGE header, 4 BODY vars, mtjr.at button."""
+    from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  # noqa: PLC0415
+        order_summary_r3_components,
+    )
+
+    return order_summary_r3_components()
+
+
 # ── Filter tags (تصنيفات الفلترة في الواجهة) ─────────────────────────
 FILTER_TAGS = {
     "all":       "الكل",
@@ -808,37 +817,24 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "key":            "order_summary",
         "service_key":    "order_confirmation",
         "name_ar":        "ملخص الطلب",
-        "description_ar": "تُرسل فور إنشاء الطلب بملخص شامل يتضمن رقم الطلب والمبلغ",
+        "description_ar": (
+            "تُرسل فور إنشاء الطلب بملخص شامل (صورة، 4 متغيرات، زر تتبع mtjr.at)"
+        ),
         "category":       "UTILITY",
-        "filter_tags":    ["orders"],
+        "filter_tags":    ["orders", "order_updates"],
         "smart_trigger":  "order_created",
         "smart_label":    "يُرسل تلقائياً: عند إنشاء الطلب",
-        "body_slots":   ["customer_name", "order_id", "order_total"],
-        "button_slots": ["tracking_url"],
-        "slots":          ["customer_name", "order_id", "order_total", "tracking_url"],
-        "components": [
-            {
-                "type": "BODY",
-                "text": (
-                    "تم استلام طلبك يا {{1}} 📦\n\n"
-                    "رقم الطلب: #{{2}}\n"
-                    "المبلغ الإجمالي: {{3}} ريال\n\n"
-                    "سنبدأ تجهيز طلبك فوراً ونُعلمك بكل جديد."
-                ),
-                "example": {"body_text": [["سارة", "45678", "350"]]},
-            },
-            {"type": "FOOTER", "text": "نحلة — مساعد متجرك"},
-            {
-                "type": "BUTTONS",
-                "buttons": [
-                    {
-                        "type": "URL", "text": "عرض تفاصيل الطلب",
-                        "url": "https://example.com/{{1}}",
-                        "example": ["https://example.com/orders/45678"],
-                    },
-                ],
-            },
+        "revision_contract": "r3",
+        "body_slots":     ["customer_name", "order_number", "order_total", "store_name"],
+        "button_slots":   ["order_tracking_url"],
+        "slots":          [
+            "customer_name",
+            "order_number",
+            "order_total",
+            "store_name",
+            "order_tracking_url",
         ],
+        "components": _order_summary_r3_components(),
     },
 
     # ══════════════════════════════════════════════════════════════════
