@@ -253,14 +253,19 @@ def _guard_catalog_browse_fallback(
         chosen_path="fact_bound_persona_compose",
         question_kind="browse",
         surface="catalog_product_answer",
+        allow_recompose=True,
     )
+    second_reply = guarded.reply
+    if guarded.requires_grounded_recompose:
+        second_reply = guarded.reply
     passed = apply_product_availability_truth_guard(
-        reply=guarded.reply,
+        reply=second_reply,
         availability_context=availability_context,
         inbound_text="وش المنتجات المتوفرة؟",
         chosen_path="fact_bound_persona_compose",
         question_kind="browse",
         surface="catalog_product_answer",
+        allow_recompose=False,
     )
     if prev_mode is None:
         os.environ.pop("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", None)
@@ -436,11 +441,12 @@ class TestSallaCategoryPickPresentation:
             products=list(result_2.data.get("pending_candidates") or []),
             pending_product_card_count=len(cards_2),
         )
-        assert guarded_2.replaced is True
+        assert guarded_2.requires_grounded_recompose is True
+        assert guarded_2.replaced is False
         assert guarded_2.action == "rewrite_false_negative"
-        assert "متوفر" not in guarded_2.reply
-        assert passed_2.action == "allowed_structured_catalog_browse"
-        assert passed_2.replaced is False
+        assert passed_2.replaced is True
+        assert "متوفر" not in passed_2.reply
+        assert passed_2.action == "rewrite_false_negative"
 
         structured = structured_product_from_turn(decision_2, result_2)
         assert structured is not None
@@ -600,12 +606,13 @@ class TestSallaCategoryPickPresentation:
         assert presentation_facts["eligible_product_count"] == 1
         assert presentation_facts["has_eligible_products"] is True
         assert presentation_facts["pending_product_card_count"] == 1
-        assert guarded.replaced is True
+        assert guarded.requires_grounded_recompose is True
+        assert guarded.replaced is False
         assert guarded.action == "rewrite_false_negative"
-        assert guarded.reply != text
-        assert "متوفر" not in guarded.reply
-        assert passed.action == "allowed_structured_catalog_browse"
-        assert passed.replaced is False
+        assert guarded.reply == text
+        assert passed.replaced is True
+        assert "متوفر" not in passed.reply
+        assert passed.action == "rewrite_false_negative"
 
     def test_browse_multiple_eligible_cannot_negate(self) -> None:
         products = [dict(GENERIC_SHOE), dict(JACKET_28)]
@@ -633,12 +640,13 @@ class TestSallaCategoryPickPresentation:
         assert presentation_facts["eligible_product_count"] == 2
         assert presentation_facts["has_eligible_products"] is True
         assert presentation_facts["pending_product_card_count"] == 0
-        assert guarded.replaced is True
+        assert guarded.requires_grounded_recompose is True
+        assert guarded.replaced is False
         assert guarded.action == "rewrite_false_negative"
-        assert guarded.reply != fallback.text
-        assert "متوفر" not in guarded.reply
-        assert passed.action == "allowed_structured_catalog_browse"
-        assert passed.replaced is False
+        assert guarded.reply == fallback.text
+        assert passed.replaced is True
+        assert "متوفر" not in passed.reply
+        assert passed.action == "rewrite_false_negative"
 
     def test_browse_emergency_without_eligible_may_deny_catalog(self) -> None:
         bundle = build_catalog_product_answer_facts_bundle(

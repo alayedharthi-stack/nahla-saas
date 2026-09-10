@@ -186,6 +186,9 @@ def should_clear_cards_for_availability_guard(guard_result: Any) -> bool:
         return False
     if not bool(getattr(guard_result, "replaced", False)):
         return False
+    reason = str(getattr(guard_result, "reason", "") or "").strip()
+    if reason.startswith("browse_"):
+        return False
     action = str(getattr(guard_result, "action", "") or "").strip()
     return action in _AVAILABILITY_CARD_CLEAR_ACTIONS
 

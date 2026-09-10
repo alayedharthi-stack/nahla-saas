@@ -670,7 +670,7 @@ class TestBrowseCatalogFallbackGuardModes:
         assert result.would_rewrite is True
         assert result.availability_claim_blocked is True
 
-    def test_enforce_mode_strips_contradictory_browse_fallback_without_authoring(
+    def test_enforce_mode_requests_recompose_then_blocks_without_authoring(
         self,
     ) -> None:
         os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
@@ -684,18 +684,30 @@ class TestBrowseCatalogFallbackGuardModes:
             question_kind="browse",
             surface="catalog_product_answer",
         )
-        assert result.replaced is True
-        assert result.reply != contradictory
+        assert result.replaced is False
+        assert result.reply == contradictory
+        assert result.requires_grounded_recompose is True
         assert result.action == "rewrite_false_negative"
-        assert "متوفر" not in result.reply
-        assert "حذاء" not in result.reply
-        passed = apply_product_availability_truth_guard(
+        blocked = apply_product_availability_truth_guard(
             reply=result.reply,
             availability_context=context,
             inbound_text="وش المنتجات المتوفرة؟",
             chosen_path="fact_bound_persona_compose",
             question_kind="browse",
             surface="catalog_product_answer",
+            allow_recompose=False,
+        )
+        assert blocked.replaced is True
+        assert blocked.reply == ""
+        assert "متوفر" not in blocked.reply
+        passed = apply_product_availability_truth_guard(
+            reply=blocked.reply,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+            allow_recompose=False,
         )
         assert passed.action == "allowed_structured_catalog_browse"
         assert passed.replaced is False
@@ -767,11 +779,64 @@ class TestBrowseCatalogFallbackGuardModes:
         assert result.replaced is False
         assert result.reply == grounded
 
+    def test_browse_conversational_photo_offer_is_not_ungrounded_product(self) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        conversational = "متوفر حذاء رياضي أبيض تقدر تشوف صورته."
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=conversational,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.action == "allowed_structured_catalog_browse"
+        assert result.replaced is False
+        assert result.reply == conversational
+        assert "صورته" in result.reply
+
+    def test_browse_grounded_product_keeps_its_own_price(self) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
+        priced = "متوفر حذاء رياضي أبيض سعره 249 ريال."
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=priced,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.action == "allowed_structured_catalog_browse"
+        assert result.replaced is False
+        assert result.reply == priced
+        assert "249" in result.reply
+
+    def test_browse_false_negative_with_conversational_tail_is_contradiction(
+        self,
+    ) -> None:
+        os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "shadow"
+        false_negative = "حذاء رياضي أبيض غير متوفر للأسف."
+        context = _browse_fallback_availability_context([_GENERIC_BROWSE_PRODUCT])
+        result = apply_product_availability_truth_guard(
+            reply=false_negative,
+            availability_context=context,
+            inbound_text="وش المنتجات المتوفرة؟",
+            chosen_path="fact_bound_persona_compose",
+            question_kind="browse",
+            surface="catalog_product_answer",
+        )
+        assert result.replaced is False
+        assert result.reply == false_negative
+        assert result.action == "rewrite_false_negative"
+        assert result.reason == "browse_false_negative_vs_eligible_products"
+
     def test_browse_positive_with_extra_ungrounded_products_is_contradiction(
         self,
     ) -> None:
         os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "shadow"
-        mixed = "متوفر حذاء رياضي أبيض وعطر ورد 100 مل وقميص قطني أزرق."
+        mixed = "متوفر حذاء رياضي أبيض وعطر ورد سعره 250 ريال."
         context = _browse_fallback_availability_context(
             [_GENERIC_BROWSE_PRODUCT, _GENERIC_BROWSE_JACKET],
         )
@@ -788,11 +853,9 @@ class TestBrowseCatalogFallbackGuardModes:
         assert result.action == "rewrite_conflict"
         assert result.reason == "browse_positive_ungrounded_in_eligible_products"
 
-    def test_enforce_strips_extra_ungrounded_products_and_keeps_eligible_wording(
-        self,
-    ) -> None:
+    def test_enforce_does_not_move_price_onto_eligible_product(self) -> None:
         os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "enforce"
-        mixed = "متوفر حذاء رياضي أبيض وعطر ورد 100 مل وقميص قطني أزرق."
+        mixed = "متوفر حذاء رياضي أبيض وعطر ورد سعره 250 ريال."
         context = _browse_fallback_availability_context(
             [_GENERIC_BROWSE_PRODUCT, _GENERIC_BROWSE_JACKET],
         )
@@ -804,20 +867,23 @@ class TestBrowseCatalogFallbackGuardModes:
             question_kind="browse",
             surface="catalog_product_answer",
         )
-        assert result.replaced is True
-        assert "حذاء" in result.reply
-        assert "عطر" not in result.reply
-        assert "قميص" not in result.reply
-        passed = apply_product_availability_truth_guard(
+        assert result.replaced is False
+        assert result.reply == mixed
+        assert "250" in result.reply
+        assert result.requires_grounded_recompose is True
+        blocked = apply_product_availability_truth_guard(
             reply=result.reply,
             availability_context=context,
             inbound_text="وش المنتجات المتوفرة؟",
             chosen_path="fact_bound_persona_compose",
             question_kind="browse",
             surface="catalog_product_answer",
+            allow_recompose=False,
         )
-        assert passed.action == "allowed_structured_catalog_browse"
-        assert passed.replaced is False
+        assert blocked.replaced is True
+        assert blocked.reply == ""
+        assert "سعره 250" not in blocked.reply
+        assert blocked.reply != "متوفر حذاء رياضي أبيض سعره 250 ريال."
 
     def test_browse_two_token_color_mismatch_is_not_identity(self) -> None:
         os.environ["NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE"] = "shadow"

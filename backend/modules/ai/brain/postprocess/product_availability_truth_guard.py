@@ -558,10 +558,6 @@ def _eligible_catalog_browse_fallback_facts(
     )
     if str(question_kind or facts.get("question_kind") or "").strip() != "browse":
         return None
-    if str(facts.get("compose_source") or "").strip() != "fallback_deterministic":
-        return None
-    if str(facts.get("fallback_action_type") or "").strip() != "catalog_product_answer":
-        return None
     if int(facts.get("eligible_product_count") or 0) <= 0:
         return None
     if not bool(facts.get("has_eligible_products")):
@@ -573,15 +569,6 @@ def _eligible_catalog_browse_fallback_facts(
     if not list(facts.get("eligible_catalog_products") or []):
         return None
     return facts
-
-
-_BROWSE_CLAIM_STOP_TOKENS = frozenset({
-    "متوفر", "متوفره", "متاح", "متاحه", "موجود", "موجوده",
-    "حاليا", "الان", "كتالوج", "الكتالوج", "منتج", "منتجات",
-    "خيارات", "تشكيله", "ريال", "سعر", "سعره", "مل",
-    "غير", "توجد", "يوجد", "قابله", "للبيع", "مؤكده",
-    "هذه", "بعض", "من", "في", "عندنا", "عندكم", "عندك",
-})
 
 
 def _browse_title_tokens(title: str) -> set[str]:
@@ -624,53 +611,137 @@ def _referenced_eligible_browse_rows(
     return referenced
 
 
-def _remove_eligible_titles(text: str, rows: Sequence[Dict[str, Any]]) -> str:
-    working = _norm(text)
-    for row in rows:
-        title = str(row.get("title") or "").strip()
-        title_norm = _norm(title)
-        if title_norm:
-            working = working.replace(title_norm, " ")
-        for token in _browse_title_tokens(title):
-            working = working.replace(token, " ")
-    return re.sub(r"\s+", " ", working).strip()
-
-
 def _is_catalog_wide_browse_denial(reply: str) -> bool:
     return bool(_BROWSE_CATALOG_DENIAL_RE.search(_norm(reply)))
 
 
-def _browse_product_like_tokens(text: str) -> set[str]:
+def _title_has_local_negative_claim(reply: str, title: str) -> bool:
+    """True when a negative availability marker is bound to this product title."""
+    norm = _norm(reply)
+    title_norm = _norm(title)
+    if not norm or not title_norm or title_norm not in norm:
+        if not _strict_title_identity_in_text(reply, title):
+            return False
+        title_norm = title_norm or _norm(title)
+    idx_title = norm.find(title_norm) if title_norm in norm else -1
+    marker_norms = [_norm(marker) for marker in _NEGATIVE_MARKERS if _norm(marker)]
+    if idx_title < 0:
+        return False
+    title_end = idx_title + len(title_norm)
+    for marker in marker_norms:
+        idx_marker = norm.find(marker, idx_title)
+        if idx_marker < 0:
+            continue
+        gap = idx_marker - title_end
+        if 0 <= gap <= 24:
+            return True
+        before = norm.rfind(marker, 0, idx_title)
+        if before >= 0 and 0 <= idx_title - (before + len(marker)) <= 8:
+            return True
+    return False
+
+
+def _row_catalog_price(row: Dict[str, Any]) -> Optional[int]:
+    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
+        parse_price_amount,
+    )
+
+    for key in ("price", "sale_price", "regular_price"):
+        amount = parse_price_amount(row.get(key))
+        if amount is not None:
+            return amount
+    return None
+
+
+_BOUND_PRICE_TAIL_RE = re.compile(
+    r"^\s*(?:سعر(?:ه|ها)?|ب)?\s*\d{1,6}(?:[.,]\d{1,2})?\s*(?:ريال|ر\.?\s*س\.?|sar)?",
+    re.UNICODE | re.IGNORECASE,
+)
+
+
+def _bound_claim_span(
+    norm: str,
+    title: str,
+    row: Dict[str, Any],
+) -> Optional[tuple[int, int]]:
+    """Span covering a product title plus adjacent polarity/price for that row."""
+    title_norm = _norm(title)
+    if not title_norm or title_norm not in norm:
+        return None
+    start = norm.find(title_norm)
+    end = start + len(title_norm)
+    marker_norms = sorted(
+        {_norm(marker) for marker in (_NEGATIVE_MARKERS + _POSITIVE_MARKERS) if _norm(marker)},
+        key=len,
+        reverse=True,
+    )
+    before = norm[:start]
+    trimmed_before = before.rstrip()
+    if 0 <= (len(before) - len(trimmed_before)) <= 3:
+        for marker in marker_norms:
+            if trimmed_before.endswith(marker):
+                start = len(trimmed_before) - len(marker)
+                break
+    after = norm[end:]
+    lead_ws = len(after) - len(after.lstrip())
+    rest = after.lstrip()
+    if 0 <= lead_ws <= 3:
+        for marker in marker_norms:
+            if rest.startswith(marker):
+                end = end + lead_ws + len(marker)
+                break
+    row_price = _row_catalog_price(row)
+    if row_price is not None:
+        tail = norm[end:]
+        match = _BOUND_PRICE_TAIL_RE.match(tail)
+        if match and str(row_price) in match.group(0):
+            end = end + match.end()
+    return start, end
+
+
+def _remainder_after_bound_eligible_claims(
+    reply: str,
+    referenced: Sequence[Dict[str, Any]],
+) -> str:
+    """Remove bound eligible claim spans. Do not strip leftover title tokens."""
+    working = _norm(reply)
+    if not working:
+        return ""
+    chars = list(working)
+    for row in referenced:
+        title = str(row.get("title") or "").strip()
+        span = _bound_claim_span(working, title, row)
+        if span is None:
+            continue
+        start, end = span
+        for idx in range(max(0, start), min(end, len(chars))):
+            chars[idx] = " "
+    return re.sub(r"\s+", " ", "".join(chars)).strip()
+
+
+def _remainder_has_unbound_product_claim(
+    remainder: str,
+    referenced: Sequence[Dict[str, Any]],
+) -> bool:
     from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
         extract_reply_prices,
     )
 
-    prices = {str(amount) for amount in extract_reply_prices(text)}
-    leftover: set[str] = set()
-    for raw_token in _norm(text).split():
-        token = raw_token.strip(".,!?؟،")
-        if token.startswith("و") and len(token) > 3:
-            token = token[1:]
-        if len(token) < 3:
-            continue
-        if token in _BROWSE_CLAIM_STOP_TOKENS:
-            continue
-        if token.isdigit() or token in prices:
-            continue
-        leftover.add(token)
-    return leftover
-
-
-def _reply_grounds_eligible_catalog_products(
-    reply: str,
-    facts: Dict[str, Any],
-) -> bool:
-    """True only when every positive product claim binds to eligible catalog identity."""
-    referenced = _referenced_eligible_browse_rows(reply, facts)
-    if not referenced:
+    if not remainder:
         return False
-    remainder = _remove_eligible_titles(reply, referenced)
-    return not _browse_product_like_tokens(remainder)
+    if reply_availability_polarity(remainder) is not None:
+        return True
+    if reply_positive_options_claim(remainder):
+        return True
+    remainder_prices = extract_reply_prices(remainder)
+    if not remainder_prices:
+        return False
+    referenced_prices = {
+        price
+        for row in referenced
+        if (price := _row_catalog_price(row)) is not None
+    }
+    return bool(remainder_prices - referenced_prices)
 
 
 def _browse_catalog_contradiction_reason(
@@ -678,81 +749,48 @@ def _browse_catalog_contradiction_reason(
     facts: Dict[str, Any],
 ) -> Optional[str]:
     """
-    Return a contradiction reason only when reply conflicts with eligible facts.
+    Return a contradiction reason only when a product/availability claim conflicts.
 
-    Neutral browse replies and denials of other products are not contradictions.
+    Conversational remainder after a grounded eligible product is not a product.
     """
     if not facts.get("has_eligible_products"):
         return None
     referenced = _referenced_eligible_browse_rows(reply, facts)
-    remainder = _remove_eligible_titles(reply, referenced)
-    leftover = _browse_product_like_tokens(remainder)
     if _is_catalog_wide_browse_denial(reply):
         return "browse_false_negative_vs_eligible_products"
-    remainder_negative = (
-        reply_availability_polarity(remainder) == "negative"
-        or _is_catalog_wide_browse_denial(remainder)
-    )
-    if referenced and remainder_negative and not leftover:
-        return "browse_false_negative_vs_eligible_products"
+    for row in referenced:
+        title = str(row.get("title") or "").strip()
+        if title and _title_has_local_negative_claim(reply, title):
+            return "browse_false_negative_vs_eligible_products"
     if reply_availability_polarity(reply) == "positive" or reply_positive_options_claim(
         reply,
     ):
-        if not _reply_grounds_eligible_catalog_products(reply, facts):
+        if not referenced:
+            return "browse_positive_ungrounded_in_eligible_products"
+        remainder = _remainder_after_bound_eligible_claims(reply, referenced)
+        if _remainder_has_unbound_product_claim(remainder, referenced):
             return "browse_positive_ungrounded_in_eligible_products"
     return None
 
 
-def _strip_leftover_browse_tokens(reply: str, leftover: set[str]) -> str:
-    kept: List[str] = []
-    for word in re.split(r"(\s+)", reply):
-        if not word.strip():
-            kept.append(word)
-            continue
-        normalized = _norm(word).strip(".,!?؟،")
-        bare = (
-            normalized[1:]
-            if normalized.startswith("و") and len(normalized) > 3
-            else normalized
-        )
-        if normalized in leftover or bare in leftover:
-            continue
-        kept.append(word)
-    text = re.sub(r"\s+", " ", "".join(kept))
-    text = re.sub(r"(?:\s*(?:و|أو|او|,|،)\s*)+$", "", text)
-    text = re.sub(r"^(?:\s*(?:و|أو|او|,|،)\s*)+", "", text)
-    return text.strip(" .،,")
-
-
-def _strip_browse_contradictory_claims(
-    reply: str,
+def _browse_correction_facts(
     facts: Dict[str, Any],
     conflict_reason: str,
-) -> str:
-    """Remove contradictory claims only. Never author replacement customer prose."""
-    original = str(reply or "")
-    if conflict_reason == "browse_false_negative_vs_eligible_products":
-        if _is_catalog_wide_browse_denial(original):
-            return ""
-        referenced = _referenced_eligible_browse_rows(original, facts)
-        remainder = _remove_eligible_titles(original, referenced)
-        leftover = _browse_product_like_tokens(remainder)
-        remainder_negative = (
-            reply_availability_polarity(remainder) == "negative"
-            or _is_catalog_wide_browse_denial(remainder)
-        )
-        if referenced and remainder_negative and not leftover:
-            return ""
-        return original
-    if conflict_reason != "browse_positive_ungrounded_in_eligible_products":
-        return original
-    referenced = _referenced_eligible_browse_rows(original, facts)
-    if not referenced:
-        return ""
-    leftover = _browse_product_like_tokens(_remove_eligible_titles(original, referenced))
-    if not leftover:
-        return original
-    return _strip_leftover_browse_tokens(original, leftover)
+) -> Dict[str, Any]:
+    rows = _eligible_browse_rows(facts)
+    return {
+        "reason": conflict_reason,
+        "question_kind": "browse",
+        "eligible_product_ids": [
+            row.get("id") for row in rows if row.get("id") is not None
+        ],
+        "eligible_titles": [
+            str(row.get("title") or "").strip()
+            for row in rows
+            if str(row.get("title") or "").strip()
+        ],
+        "eligible_catalog_products": rows,
+    }
 
 
 def _synthetic_browse_evidence_from_facts(
@@ -823,6 +861,7 @@ class ProductAvailabilityTruthGuardResult:
     availability_claim_blocked: bool = False
     shadow_mode: bool = False
     would_rewrite: bool = False
+    requires_grounded_recompose: bool = False
 
 
 def stamp_product_availability_guard_transform(
@@ -907,6 +946,7 @@ def apply_product_availability_truth_guard(
     surface: str = "",
     invocation_site: str = "unknown",
     turn_token: str = "",
+    allow_recompose: bool = True,
 ) -> ProductAvailabilityTruthGuardResult:
     from modules.ai.brain.postprocess.product_availability_shadow_telemetry import (  # noqa: PLC0415
         ShadowObservationTimer,
@@ -983,21 +1023,26 @@ def apply_product_availability_truth_guard(
             browse_facts,
             conflict_reason=conflict_reason,
         )
-        stripped = _strip_browse_contradictory_claims(
-            original,
-            browse_facts,
-            conflict_reason,
-        )
-        if stripped == original:
-            stripped = ""
+        if allow_recompose:
+            return ProductAvailabilityTruthGuardResult(
+                reply=original,
+                action=guard_action,
+                replaced=False,
+                reason=conflict_reason,
+                evidence=evidence,
+                availability_claim_blocked=True,
+                would_rewrite=True,
+                requires_grounded_recompose=True,
+            )
         return ProductAvailabilityTruthGuardResult(
-            reply=stripped,
+            reply="",
             action=guard_action,
             replaced=True,
             reason=conflict_reason,
             evidence=evidence,
             availability_claim_blocked=True,
             would_rewrite=True,
+            requires_grounded_recompose=False,
         )
 
     topic = str(decision_topic or "").strip()
