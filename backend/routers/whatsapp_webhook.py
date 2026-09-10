@@ -10544,6 +10544,9 @@ async def _handle_merchant_message(
                     from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
                         build_checkout_slot_fallback_reply,
                     )
+                    from modules.ai.brain.commerce.checkout_slot_turn_gate import (  # noqa: PLC0415
+                        current_turn_allows_checkout_slot_fallback,
+                    )
                     from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: PLC0415
                         order_support_reply_protected,
                     )
@@ -10581,7 +10584,13 @@ async def _handle_merchant_message(
                             "loop_guard_override_applied": False,
                             "loop_guard_override_skipped_reason": "order_support_owned",
                         }
-                    elif _loop_checkout_active and not _skip_legacy_loop:
+                    elif (
+                        _loop_checkout_active
+                        and not _skip_legacy_loop
+                        and current_turn_allows_checkout_slot_fallback(
+                            str(_br_dec_action or "")
+                        )
+                    ):
                         _loop_checkout_recovery = (
                             build_checkout_slot_fallback_reply(
                                 state=_loop_bs,

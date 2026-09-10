@@ -28,10 +28,16 @@ from modules.ai.brain.commerce.commerce_turn_contract import (  # noqa: E402
     build_commerce_turn_contract,
     maybe_enforce_commerce_turn_contract_decision,
 )
+from modules.ai.brain.commerce.checkout_slot_turn_gate import (  # noqa: E402
+    current_turn_allows_checkout_slot_fallback,
+)
 from modules.ai.brain.decision.actions import (  # noqa: E402
     ACTION_LLM_REPLY,
     ACTION_PROPOSE_DRAFT_ORDER,
     ACTION_SEARCH_PRODUCTS,
+)
+from modules.ai.brain.postprocess.commerce_reply_quality_guard import (  # noqa: E402
+    apply_commerce_reply_quality_guard,
 )
 from core.merchant_payment_methods import MerchantPaymentMethods  # noqa: E402
 from core.order_payment_policy import (  # noqa: E402
@@ -234,6 +240,52 @@ def _assert_checkout_owner_no_state_preserved(ctx: BrainContext, before: Dict[st
 
 
 class TestActiveCheckoutContextIsNotTurnOwnership:
+    @pytest.mark.parametrize(
+        ("message", "decision_action"),
+        [
+            ("كم سعر المنتج؟", ACTION_LLM_REPLY),
+            ("هل المنتج متوفر؟", ACTION_SEARCH_PRODUCTS),
+            ("وش عندكم غيره؟", ACTION_SEARCH_PRODUCTS),
+            ("وريني صورته", ACTION_LLM_REPLY),
+            ("أرسل رابط المتجر", ACTION_LLM_REPLY),
+        ],
+    )
+    def test_late_slot_fallback_does_not_turn_inquiry_into_checkout_prompt(
+        self,
+        message: str,
+        decision_action: str,
+    ) -> None:
+        ctx = _followup_ctx(message, intent_name="ask_product")
+
+        assert current_turn_allows_checkout_slot_fallback(decision_action) is False
+        guarded = apply_commerce_reply_quality_guard(
+            "",
+            inbound_text=message,
+            intent_name=ctx.intent.name,
+            state=ctx.state,
+            decision_action=decision_action,
+        )
+
+        assert guarded.fallback_kind != "checkout_slot_prompt"
+        assert "الدفع" not in guarded.reply
+
+    def test_late_slot_fallback_keeps_checkout_owned_turn(self) -> None:
+        ctx = _followup_ctx("كمل", intent_name="order_continue")
+
+        assert current_turn_allows_checkout_slot_fallback(
+            ACTION_PROPOSE_DRAFT_ORDER
+        ) is True
+        guarded = apply_commerce_reply_quality_guard(
+            "",
+            inbound_text=ctx.message,
+            intent_name=ctx.intent.name,
+            state=ctx.state,
+            decision_action=ACTION_PROPOSE_DRAFT_ORDER,
+        )
+
+        assert guarded.fallback_kind == "checkout_slot_prompt"
+        assert "الدفع" in guarded.reply
+
     def test_followup_unrelated_owner_does_not_become_checkout(
         self,
         monkeypatch: pytest.MonkeyPatch,
