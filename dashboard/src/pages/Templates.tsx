@@ -1631,6 +1631,22 @@ export function NahlaLibraryModal({ onClose, onImported, embedded = false }: {
                         </span>
                       </div>
 
+                      {/* Library cards must show the same image header that the
+                          merchant will see in the template preview.  Previously
+                          it was rendered only in the side preview, which made
+                          the image-backed order-confirmation template look like
+                          a text-only template in the shared library. */}
+                      {tpl.header_type === 'image' && tpl.preview_header_image_url && (
+                        <img
+                          src={tpl.preview_header_image_url}
+                          alt=""
+                          className="w-full h-28 object-cover rounded-lg border border-slate-100 mb-3 bg-slate-50"
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          data-testid={`library-template-header-${tpl.key}`}
+                        />
+                      )}
+
                       {/* Description */}
                       {tpl.description_ar && (
                         <p className="text-xs text-slate-500 mb-2 leading-relaxed line-clamp-2">{tpl.description_ar}</p>
