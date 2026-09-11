@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Plus, RefreshCw, CheckCircle, Clock, XCircle, AlertCircle,
   Eye, EyeOff, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
@@ -26,8 +26,6 @@ import {
 import { useDashboardPoll } from '../lib/dashboardPolling'
 import {
   ORDER_UPDATES_LIBRARY_TAG,
-  filterWhatsAppLibraryGroups,
-  filterWhatsAppLibraryTemplates,
   filterOrderUpdatesLibraryGroups,
   filterOrderUpdatesLibraryTemplates,
 } from './templates/orderUpdatesLibraryFilter'
@@ -1419,12 +1417,11 @@ const BUTTON_TYPE_ICON: Record<string, string> = {
   PHONE_NUMBER:'📞',
 }
 
-const LIBRARY_TAG_KEYS = ['all', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
+const LIBRARY_TAG_KEYS = ['all', 'order_updates', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
 
-export function NahlaLibraryModal({ onClose, onImported, embedded = false }: {
+export function NahlaLibraryModal({ onClose, onImported }: {
   onClose: () => void
   onImported: (tpl: WhatsAppTemplateRecord) => void
-  embedded?: boolean
 }) {
   const { t, dir, isRTL, lang } = useLanguage()
   const lib = t(tr => tr.templatesMgmt.library)
@@ -1464,10 +1461,6 @@ export function NahlaLibraryModal({ onClose, onImported, embedded = false }: {
       const res = await templatesApi.nahlaLibrary({ tag: apiTag, search: q || undefined })
       let groups = res.groups?.filter(g => (g.templates?.length ?? 0) > 0) ?? []
       let flatTemplates = res.templates ?? []
-      if (!embedded) {
-        groups = filterWhatsAppLibraryGroups(groups)
-        flatTemplates = filterWhatsAppLibraryTemplates(flatTemplates)
-      }
       if (tag === ORDER_UPDATES_LIBRARY_TAG) {
         groups = filterOrderUpdatesLibraryGroups(groups)
         flatTemplates = filterOrderUpdatesLibraryTemplates(flatTemplates)
@@ -1515,11 +1508,11 @@ export function NahlaLibraryModal({ onClose, onImported, embedded = false }: {
   }
 
   return (
-    <div className={embedded ? 'card overflow-hidden' : 'fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'} onClick={embedded ? undefined : onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <div
-        className={embedded ? 'bg-white w-full flex flex-col' : 'bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col'}
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
         dir={dir}
-        onClick={embedded ? undefined : ev => ev.stopPropagation()}
+        onClick={ev => ev.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
@@ -1532,11 +1525,9 @@ export function NahlaLibraryModal({ onClose, onImported, embedded = false }: {
               <p className="text-xs text-slate-500">{lib.subtitle}</p>
             </div>
           </div>
-          {!embedded && (
-            <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
-              <X className="w-4 h-4 text-slate-500" />
-            </button>
-          )}
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+            <X className="w-4 h-4 text-slate-500" />
+          </button>
         </div>
 
         {/* Search + Filter */}
@@ -1995,6 +1986,8 @@ function SyncMiniStat({ label, value, tone }: { label: string; value: number; to
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Templates() {
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [templates, setTemplates] = useState<WhatsAppTemplateRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
@@ -2074,6 +2067,13 @@ export default function Templates() {
   }, [])
 
   useEffect(() => { loadTemplates() }, [loadTemplates])
+
+  // The shared-library card opens this page with its dialog already visible.
+  // Once a template is customized, the dialog closes so the merchant lands on
+  // the concrete status/action panel rather than losing the imported template.
+  useEffect(() => {
+    if (searchParams.get('library') === 'nahla') setShowNahlaLibrary(true)
+  }, [searchParams])
 
   useDashboardPoll({
     pollKey: 'GET:/templates/sync/status',
@@ -2228,9 +2228,23 @@ export default function Templates() {
           onClose={() => {
             setShowNahlaLibrary(false)
             loadTemplates()
+            if (searchParams.get('library') === 'nahla') {
+              navigate('/templates', { replace: true })
+            }
           }}
           onImported={tpl => {
+            setShowNahlaLibrary(false)
+            if (isOrderUpdateServiceKey(tpl.service_key ?? '')) {
+              // Store lifecycle templates are managed in their real home,
+              // where the merchant sees their active/Meta-review state.
+              navigate('/marketing/templates#order-updates')
+              return
+            }
             setTemplates(ts => [tpl, ...ts])
+            setSourceFilter('library')
+            if (searchParams.get('library') === 'nahla') {
+              navigate('/templates', { replace: true })
+            }
           }}
         />
       )}
