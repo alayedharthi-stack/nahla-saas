@@ -39,6 +39,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -50,6 +51,28 @@ from models import Tenant, User, WhatsAppConnection, WhatsAppTemplate
 logger = logging.getLogger("nahla.admin_debug")
 
 router = APIRouter(prefix="/admin/debug", tags=["admin-debug"])
+
+
+@router.get("/conversation-trace-export")
+def admin_conversation_trace_export(
+    tenant_id: int = Query(..., ge=1),
+    conversation_id: int = Query(..., ge=1),
+    limit: int = Query(200, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Export stored diagnostics under normal admin auth; no runtime mutation."""
+    from core.admin_conversation_export import build_conversation_trace_export
+
+    if _admin.get("impersonation") and _admin.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Support session tenant mismatch")
+    payload = build_conversation_trace_export(
+        db, tenant_id=tenant_id, conversation_id=conversation_id, limit=limit,
+    )
+    audit("admin_conversation_trace_export", admin_sub=_admin.get("sub"),
+          tenant_id=tenant_id, conversation_id=conversation_id,
+          rows=len(payload["messages"]))
+    return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
 
 
 def _require_enabled(secret: Optional[str]) -> None:

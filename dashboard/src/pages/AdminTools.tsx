@@ -12,6 +12,7 @@ import {
   Trash2, WifiOff, CheckCircle, Loader2, Copy,
 } from 'lucide-react'
 import { apiCall } from '../api/client'
+import ConversationTraceExport from '../components/admin/ConversationTraceExport'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -414,6 +415,7 @@ export default function AdminTools() {
       </div>
 
       {/* ── Quick action panels — always visible ── */}
+      <ConversationTraceExport />
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <ForceDisconnectPanel />
         <DeleteTenantPanel />
