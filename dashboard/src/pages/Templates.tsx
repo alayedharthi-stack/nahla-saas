@@ -2235,9 +2235,11 @@ export default function Templates() {
           onImported={tpl => {
             setShowNahlaLibrary(false)
             if (isOrderUpdateServiceKey(tpl.service_key ?? '')) {
-              // Store lifecycle templates are managed in their real home,
-              // where the merchant sees their active/Meta-review state.
-              navigate('/marketing/templates#order-updates')
+              // Store lifecycle templates are managed in their real home.
+              // Keep the record id so that page can focus the exact imported
+              // template and show its real Meta state, rather than only the
+              // generic service configuration.
+              navigate(`/marketing/templates?imported=${tpl.id}#order-updates`)
               return
             }
             setTemplates(ts => [tpl, ...ts])

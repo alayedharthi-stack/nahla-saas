@@ -188,9 +188,9 @@ assert(
   templateLibrarySource.includes('id="order-updates"'),
 )
 assert(
-  'Store templates page does not call nahlaLibrary for store cards',
+  'Store templates page does not load the shared library itself',
   !templateLibrarySource.includes('templatesApi.nahlaLibrary')
-    && !templateLibrarySource.includes("from '../api/templates'"),
+    && templateLibrarySource.includes('templatesApi.list()'),
 )
 assert(
   'Store templates page loads order updates via ORDER_UPDATE_SERVICE_KEYS',
@@ -206,6 +206,13 @@ assert(
   templateLibrarySource.includes('OrderUpdatesSettingsTab')
     && templateLibrarySource.includes('id="order-update-settings"')
     && !templateLibrarySource.includes('/settings?tab=order_updates'),
+)
+assert(
+  'Store templates page shows imported order-update records and their Meta state',
+  templateLibrarySource.includes('id="imported-store-templates"')
+    && templateLibrarySource.includes('isOrderUpdateServiceKey(template.service_key')
+    && templateLibrarySource.includes('templateStatusLabel')
+    && templateLibrarySource.includes('templatesApi.submit(template.id)'),
 )
 const whatsappTemplatesSource = source('../src/pages/Templates.tsx')
 assert(
