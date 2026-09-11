@@ -65,6 +65,7 @@ def _active_cod(db):
 
 def test_cod_library_definition_carries_approved_image():
     definition = get_template_by_key("cod_confirmation")
+    assert definition["name_ar"] == "تأكيد طلب الدفع عند الاستلام"
     assert is_cod_confirmation_image_contract(definition["components"])
     assert definition["components"][0]["example"]["header_url"] == COD_CONFIRMATION_HEADER_DEFAULT_URL
 

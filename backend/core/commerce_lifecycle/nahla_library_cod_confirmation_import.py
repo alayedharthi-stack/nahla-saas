@@ -168,7 +168,7 @@ def import_cod_confirmation_from_library(
             "created_at": now,
             "updated_at": now,
             "synced_at": now,
-            "display_name_ar": tpl_def.get("name_ar") or "تأكيد الدفع عند الاستلام",
+            "display_name_ar": tpl_def.get("name_ar") or "تأكيد طلب الدفع عند الاستلام",
             "service_key": SERVICE_KEY,
             "nahla_source_key": LIBRARY_KEY,
             "is_active": False,
