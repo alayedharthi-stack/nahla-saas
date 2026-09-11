@@ -167,7 +167,9 @@ _TEMPLATE_OVERRIDES: Dict[str, TemplateFilterMeta] = {
     "cod_confirmation": TemplateFilterMeta(
         intent="cod_confirmation",
         order_channel="any",
-        required_capabilities=("supports_cod",),
+        # Keep the official COD template discoverable even when capability
+        # discovery has not yet observed a COD order/payment method. Importing
+        # a draft is harmless; runtime delivery remains independently gated.
     ),
     "cod_reminder_before_shipping": TemplateFilterMeta(
         intent="cod_confirmation",

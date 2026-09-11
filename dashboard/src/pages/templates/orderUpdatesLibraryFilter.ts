@@ -18,7 +18,19 @@ export function isOrderUpdatesLibraryTemplate(tpl: NahlaLibraryTemplate): boolea
 export function filterOrderUpdatesLibraryTemplates(
   templates: NahlaLibraryTemplate[],
 ): NahlaLibraryTemplate[] {
-  return templates.filter(isOrderUpdatesLibraryTemplate)
+  const servicePriority: Record<string, number> = {
+    cod_confirmation: 0,
+    order_confirmation: 1,
+  }
+  return templates
+    .filter(isOrderUpdatesLibraryTemplate)
+    .map((template, index) => ({ template, index }))
+    .sort((a, b) =>
+      (servicePriority[a.template.service_key] ?? 2)
+      - (servicePriority[b.template.service_key] ?? 2)
+      || a.index - b.index,
+    )
+    .map(({ template }) => template)
 }
 
 export function filterOrderUpdatesLibraryGroups(

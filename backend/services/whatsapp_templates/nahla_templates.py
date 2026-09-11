@@ -64,7 +64,7 @@ SERVICE_CATALOG: Dict[str, Dict[str, str]] = {
         "color":          "blue",
     },
     "cod_confirmation": {
-        "name_ar":        "تأكيد الدفع عند الاستلام",
+        "name_ar":        "تأكيد طلب الدفع عند الاستلام",
         "description_ar": "التحقق من جدية العميل في طلبات الدفع عند الاستلام لتقليل الطلبات الوهمية",
         "icon":           "💰",
         "color":          "emerald",
@@ -580,12 +580,12 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # 12. تأكيد الدفع عند الاستلام — COD CONFIRMATION ← QUICK_REPLY x2
+    # 12. تأكيد طلب الدفع عند الاستلام — COD CONFIRMATION ← QUICK_REPLY x2
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "cod_confirmation",
         "service_key":    "cod_confirmation",
-        "name_ar":        "تأكيد الدفع عند الاستلام",
+        "name_ar":        "تأكيد طلب الدفع عند الاستلام",
         "description_ar": "يطلب من العميل تأكيد طلب الدفع عند الاستلام بلمسة واحدة",
         "category":       "UTILITY",
         "filter_tags":    ["orders"],
