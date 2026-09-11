@@ -607,7 +607,10 @@ def sync_outbound_body_to_final(
                     try:
                         db.rollback()
                     except Exception:
-                        pass
+                        logger.exception(
+                            "[OUTBOUND_BODY_SYNC] no-op rollback failed tenant=%s row=%s",
+                            tenant_id, row.id,
+                        )
                 logger.debug(
                     "[OUTBOUND_BODY_SYNC] no-op (identical body) tenant=%s "
                     "to=%s row=%s reason=%s",
