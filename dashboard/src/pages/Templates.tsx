@@ -1198,6 +1198,8 @@ function EditModal({
   const headerComp = tpl.components.find(c => c.type === 'HEADER')
   const footerComp = tpl.components.find(c => c.type === 'FOOTER')
   const btnsComp   = tpl.components.find(c => c.type === 'BUTTONS')
+  const imageHeaderComp = headerComp?.format === 'IMAGE' ? headerComp : null
+  const headerImageUrl = imageHeaderComp?.example?.header_url?.trim() || null
 
   const [headerText, setHeaderText] = useState(headerComp?.text ?? '')
   const [bodyText,   setBodyText]   = useState(bodyComp?.text ?? '')
@@ -1211,7 +1213,14 @@ function EditModal({
 
   const buildComponents = (): TemplateComponent[] => {
     const out: TemplateComponent[] = []
-    if (headerText.trim()) out.push({ type: 'HEADER', format: 'TEXT', text: headerText.trim() })
+    if (imageHeaderComp) {
+      out.push({
+        ...imageHeaderComp,
+        example: imageHeaderComp.example ? { ...imageHeaderComp.example } : undefined,
+      })
+    } else if (headerText.trim()) {
+      out.push({ type: 'HEADER', format: 'TEXT', text: headerText.trim() })
+    }
     out.push({ type: 'BODY', text: bodyText.trim() })
     if (footerText.trim()) out.push({ type: 'FOOTER', text: footerText.trim() })
     if (buttons.length > 0) out.push({ type: 'BUTTONS', buttons })
@@ -1269,13 +1278,27 @@ function EditModal({
             {e.draftNoticeAfter}
           </div>
 
-          {/* Header text */}
-          <div>
-            <label className="label text-xs">{create.step2.headerLabel}</label>
-            <input className="input text-sm" value={headerText}
-              onChange={ev => setHeaderText(ev.target.value)}
-              placeholder={e.headerPlaceholder} />
-          </div>
+          {/* Header — IMAGE headers are platform-owned and preserved as-is. */}
+          {imageHeaderComp && headerImageUrl ? (
+            <div>
+              <label className="label text-xs">{create.step2.headerLabel}</label>
+              <img
+                src={headerImageUrl}
+                alt=""
+                className="w-full h-auto rounded-xl border border-slate-200 bg-slate-50"
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                data-testid="edit-template-image-header"
+              />
+            </div>
+          ) : (
+            <div>
+              <label className="label text-xs">{create.step2.headerLabel}</label>
+              <input className="input text-sm" value={headerText}
+                onChange={ev => setHeaderText(ev.target.value)}
+                placeholder={e.headerPlaceholder} />
+            </div>
+          )}
 
           {/* Body */}
           <div>
@@ -1388,6 +1411,7 @@ function EditModal({
             <p className="text-xs text-slate-500 mb-2">{e.previewLabel}</p>
             <WaPreview
               header={headerText}
+              headerImageUrl={headerImageUrl}
               body={bodyText}
               footer={footerText}
               buttons={buttons}

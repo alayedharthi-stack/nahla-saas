@@ -14,7 +14,12 @@ for _path in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 from routers import templates as router
 
 
-def _template(*, service_key: str, components: list[dict]) -> SimpleNamespace:
+def _template(
+    *,
+    service_key: str,
+    components: list[dict],
+    ai_generation_metadata: dict | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=1,
         tenant_id=7,
@@ -35,7 +40,7 @@ def _template(*, service_key: str, components: list[dict]) -> SimpleNamespace:
         health_score=None,
         recommendation_state="none",
         recommendation_note=None,
-        ai_generation_metadata={},
+        ai_generation_metadata=ai_generation_metadata or {},
         service_key=service_key,
         display_name_ar="ملخص الطلب",
         nahla_source_key="order_summary",
@@ -81,3 +86,56 @@ def test_saved_text_only_stays_text_and_cod_gets_its_own_image():
         router._tpl_to_dict(cod, db=MagicMock())["components"][0]["example"]["header_url"]
         == COD_CONFIRMATION_HEADER_DEFAULT_URL
     )
+
+
+def test_damaged_managed_cod_draft_recovers_missing_image_header():
+    from core.commerce_lifecycle.cod_confirmation_assets import (
+        COD_CONFIRMATION_HEADER_ASSET_KEY,
+        COD_CONFIRMATION_HEADER_DEFAULT_URL,
+    )
+
+    damaged = _template(
+        service_key="cod_confirmation",
+        components=[{"type": "BODY", "text": "هل تريد تأكيد الطلب؟"}],
+        ai_generation_metadata={
+            "header_image_asset_key": COD_CONFIRMATION_HEADER_ASSET_KEY,
+        },
+    )
+
+    payload = router._tpl_to_dict(damaged, db=MagicMock())
+
+    assert payload["components"][0] == {
+        "type": "HEADER",
+        "format": "IMAGE",
+        "example": {
+            "header_url": COD_CONFIRMATION_HEADER_DEFAULT_URL,
+            "header_handle": [],
+        },
+    }
+    assert payload["components"][1]["type"] == "BODY"
+
+
+def test_managed_cod_edit_keeps_image_and_discards_text_header_replacement():
+    from core.commerce_lifecycle.cod_confirmation_assets import (
+        COD_CONFIRMATION_HEADER_ASSET_KEY,
+    )
+
+    damaged = _template(
+        service_key="cod_confirmation",
+        components=[{"type": "BODY", "text": "قديم"}],
+        ai_generation_metadata={
+            "header_image_asset_key": COD_CONFIRMATION_HEADER_ASSET_KEY,
+        },
+    )
+
+    components = router._restore_managed_cod_image_header(
+        damaged,
+        [
+            {"type": "HEADER", "format": "TEXT", "text": "عنوان بديل"},
+            {"type": "BODY", "text": "جديد"},
+        ],
+    )
+
+    assert [component["type"] for component in components] == ["HEADER", "BODY"]
+    assert components[0]["format"] == "IMAGE"
+    assert components[1]["text"] == "جديد"

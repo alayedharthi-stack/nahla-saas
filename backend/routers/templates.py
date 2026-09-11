@@ -801,13 +801,18 @@ def _saved_lifecycle_preview_header_url(
     t: WhatsAppTemplate,
     *,
     db: Optional[Session] = None,
+    components_override: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """Return the merchant-facing IMAGE URL for supported lifecycle templates."""
     service_key = str(getattr(t, "service_key", None) or "")
     if db is None or service_key not in {"order_confirmation", "cod_confirmation"}:
         return None
 
-    components = list(getattr(t, "components", None) or [])
+    components = list(
+        components_override
+        if components_override is not None
+        else (getattr(t, "components", None) or [])
+    )
     has_image_header = any(
         str((component or {}).get("type") or "").upper() == "HEADER"
         and str((component or {}).get("format") or "").upper() == "IMAGE"
@@ -837,13 +842,60 @@ def _saved_lifecycle_preview_header_url(
     )
 
 
+def _restore_managed_cod_image_header(
+    t: WhatsAppTemplate,
+    components: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep the platform-owned COD IMAGE header across merchant edits.
+
+    Older dashboard builds rebuilt editable components from text fields and
+    accidentally dropped IMAGE headers. The asset marker lets us repair those
+    already-saved drafts on read and makes the image contract immutable on
+    subsequent edits.
+    """
+    from core.commerce_lifecycle.cod_confirmation_assets import (  # noqa: PLC0415
+        COD_CONFIRMATION_HEADER_ASSET_KEY,
+        cod_confirmation_image_header_component,
+    )
+
+    metadata = dict(getattr(t, "ai_generation_metadata", None) or {})
+    is_managed_cod = (
+        str(getattr(t, "service_key", None) or "") == "cod_confirmation"
+        and metadata.get("header_image_asset_key") == COD_CONFIRMATION_HEADER_ASSET_KEY
+    )
+    if not is_managed_cod:
+        return deepcopy(components)
+
+    existing_image = next(
+        (
+            deepcopy(component)
+            for component in (getattr(t, "components", None) or [])
+            if isinstance(component, dict)
+            and str(component.get("type") or "").upper() == "HEADER"
+            and str(component.get("format") or "").upper() == "IMAGE"
+        ),
+        None,
+    )
+    image_header = existing_image or cod_confirmation_image_header_component()
+    non_headers = [
+        deepcopy(component)
+        for component in components
+        if str((component or {}).get("type") or "").upper() != "HEADER"
+    ]
+    return [image_header, *non_headers]
+
+
 def _tpl_to_dict(
     t: WhatsAppTemplate,
     *,
     db: Optional[Session] = None,
 ) -> Dict[str, Any]:
-    components = list(t.components or [])
-    preview_header_image_url = _saved_lifecycle_preview_header_url(t, db=db)
+    components = _restore_managed_cod_image_header(t, list(t.components or []))
+    preview_header_image_url = _saved_lifecycle_preview_header_url(
+        t,
+        db=db,
+        components_override=components,
+    )
     if preview_header_image_url:
         components = deepcopy(components)
         for component in components:
@@ -1487,6 +1539,11 @@ async def update_template(
         )
 
     new_components = [c.model_dump(exclude_none=True) for c in body.components] if body.components is not None else (tpl.components or [])
+
+    # The COD library image is platform-owned and must survive text/button
+    # customization. This also repairs drafts saved by older dashboards that
+    # accidentally removed the IMAGE header.
+    new_components = _restore_managed_cod_image_header(tpl, new_components)
 
     # Preserve Meta `example` fields from the existing stored components so a
     # merchant edit through the dashboard never accidentally strips them.
