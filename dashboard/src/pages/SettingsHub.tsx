@@ -3,7 +3,6 @@ import {
   Settings,
   ShieldCheck,
   CreditCard,
-  Package,
   Brain,
   BookOpen,
   Activity,
@@ -41,12 +40,6 @@ export default function SettingsHub() {
       icon: CreditCard,
       title: page.cards.billing.title,
       description: page.cards.billing.description,
-    },
-    {
-      to: '/settings?tab=order_updates',
-      icon: Package,
-      title: page.cards.orderUpdates.title,
-      description: page.cards.orderUpdates.description,
     },
   ]
 

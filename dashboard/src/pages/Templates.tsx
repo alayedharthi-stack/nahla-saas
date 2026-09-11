@@ -1421,9 +1421,10 @@ const BUTTON_TYPE_ICON: Record<string, string> = {
 
 const LIBRARY_TAG_KEYS = ['all', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
 
-function NahlaLibraryModal({ onClose, onImported }: {
+export function NahlaLibraryModal({ onClose, onImported, embedded = false }: {
   onClose: () => void
   onImported: (tpl: WhatsAppTemplateRecord) => void
+  embedded?: boolean
 }) {
   const { t, dir, isRTL, lang } = useLanguage()
   const lib = t(tr => tr.templatesMgmt.library)
@@ -1461,10 +1462,12 @@ function NahlaLibraryModal({ onClose, onImported }: {
     try {
       const apiTag = tag !== 'all' && tag !== ORDER_UPDATES_LIBRARY_TAG ? tag : undefined
       const res = await templatesApi.nahlaLibrary({ tag: apiTag, search: q || undefined })
-      let groups = filterWhatsAppLibraryGroups(
-        res.groups?.filter(g => (g.templates?.length ?? 0) > 0) ?? [],
-      )
-      let flatTemplates = filterWhatsAppLibraryTemplates(res.templates ?? [])
+      let groups = res.groups?.filter(g => (g.templates?.length ?? 0) > 0) ?? []
+      let flatTemplates = res.templates ?? []
+      if (!embedded) {
+        groups = filterWhatsAppLibraryGroups(groups)
+        flatTemplates = filterWhatsAppLibraryTemplates(flatTemplates)
+      }
       if (tag === ORDER_UPDATES_LIBRARY_TAG) {
         groups = filterOrderUpdatesLibraryGroups(groups)
         flatTemplates = filterOrderUpdatesLibraryTemplates(flatTemplates)
@@ -1512,11 +1515,11 @@ function NahlaLibraryModal({ onClose, onImported }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+    <div className={embedded ? 'card overflow-hidden' : 'fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4'} onClick={embedded ? undefined : onClose}>
       <div
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
+        className={embedded ? 'bg-white w-full flex flex-col' : 'bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col'}
         dir={dir}
-        onClick={ev => ev.stopPropagation()}
+        onClick={embedded ? undefined : ev => ev.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
@@ -1529,9 +1532,11 @@ function NahlaLibraryModal({ onClose, onImported }: {
               <p className="text-xs text-slate-500">{lib.subtitle}</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
-            <X className="w-4 h-4 text-slate-500" />
-          </button>
+          {!embedded && (
+            <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+              <X className="w-4 h-4 text-slate-500" />
+            </button>
+          )}
         </div>
 
         {/* Search + Filter */}
