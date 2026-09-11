@@ -528,7 +528,7 @@ class DefaultComposer:
                         if nav_buttons:
                             result.data["pending_buttons"] = nav_buttons[:3]
                 if chosen_path == PATH_TOP_FALLBACK:
-                    from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                    from services.catalog_navigation_compose_retry import (  # noqa: PLC0415
                         build_catalog_navigation_emergency_outcome,
                         try_compose_catalog_navigation_browse_answer,
                     )

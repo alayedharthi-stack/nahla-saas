@@ -11233,6 +11233,23 @@ async def _handle_merchant_message(
             or _fulfillment_discovery_blocked
             or not _allow_product_cards
         )
+        _structured_catalog_miss = False
+        try:
+            from services.final_dispatch_guard import (  # noqa: PLC0415
+                is_structured_catalog_miss as _is_structured_catalog_miss,
+            )
+
+            _structured_catalog_miss = _is_structured_catalog_miss(brain_result)
+        except Exception as _catalog_miss_exc:  # noqa: BLE001
+            logger.debug(
+                "[FINAL_DISPATCH_GUARD] structured catalog miss check failed "
+                "tenant=%s: %s",
+                tenant_id,
+                _catalog_miss_exc,
+            )
+        _visual_product_escalation_blocked = (
+            _product_escalation_blocked or _structured_catalog_miss
+        )
 
         # ── [PRODUCT:<query>] markers ──────────────────────────────
         # Resolve LLM-cited products against the synced catalog and
@@ -12790,7 +12807,7 @@ async def _handle_merchant_message(
                 brain_state=_bs_for_nc if isinstance(_bs_for_nc, dict) else {},
                 product_attachments=_product_attachments,
                 media_attachments=_media_attachments,
-                product_escalation_blocked=_product_escalation_blocked,
+                product_escalation_blocked=_visual_product_escalation_blocked,
                 fulfillment_discovery_blocked=_fulfillment_discovery_blocked,
                 allow_product_cards=_allow_product_cards,
                 dispatch_guard_reason=_dispatch_guard_reason,
@@ -13448,16 +13465,15 @@ async def _handle_merchant_message(
                     str(_a.get("media_type") or "").lower().startswith("image")
                     for _a in (_media_attachments or [])
                 )
-                if _product_escalation_blocked:
-                    _vp_skip_reason = (
-                        "fulfillment_lock"
-                        if _fulfillment_discovery_blocked
-                        else (
-                            _dispatch_guard_reason
-                            if not _allow_product_cards
-                            else "non_commerce_block"
-                        )
-                    )
+                if _visual_product_escalation_blocked:
+                    if _structured_catalog_miss:
+                        _vp_skip_reason = "structured_catalog_miss"
+                    elif _fulfillment_discovery_blocked:
+                        _vp_skip_reason = "fulfillment_lock"
+                    elif not _allow_product_cards:
+                        _vp_skip_reason = _dispatch_guard_reason
+                    else:
+                        _vp_skip_reason = "non_commerce_block"
                     logger.info(
                         "[VISUAL_PRODUCT_ENFORCEMENT] tenant=%s SKIP "
                         "reason=%s inbound=%r",
@@ -13785,6 +13801,7 @@ async def _handle_merchant_message(
                     try:
                         from services.final_dispatch_guard import (  # noqa: PLC0415
                             log_final_product_send_attempt as _log_product_send,
+                            record_fail_closed_product_suppression,
                             validate_product_attachment_for_send as _validate_product_send,
                         )
                         _send_ok, _send_reason = _validate_product_send(
@@ -13818,7 +13835,15 @@ async def _handle_merchant_message(
                         )
                     if not _allow_product_cards or not _send_ok:
                         if _allow_product_cards and not _send_ok:
-                            pass  # logged above via _log_product_send
+                            record_fail_closed_product_suppression(
+                                attachment=_att,
+                                delivery_audit=(
+                                    _delivery_audit
+                                    if isinstance(_delivery_audit, dict)
+                                    else None
+                                ),
+                                reason=_send_reason,
+                            )
                         else:
                             logger.info(
                                 "[PRODUCT_ATTACHMENT_SUPPRESSED] tenant=%s "
@@ -14390,6 +14415,7 @@ async def _handle_merchant_message(
                     and _final_mode == _MODE_TEXT_ONLY
                     and not _delivery_audit.get("first_send_failed")
                     and _allow_product_cards
+                    and not _structured_catalog_miss
                 ):
                     _rescue_url = ""
                     _rescue_title = ""
@@ -14407,6 +14433,9 @@ async def _handle_merchant_message(
                             extract_structured_product_id as _structured_id,
                             extract_structured_variant_id as _structured_vid,
                             should_block_title_query_substitution as _block_title_sub,
+                        )
+                        from services.final_dispatch_guard import (  # noqa: PLC0415
+                            has_fail_closed_product_suppression as _has_product_suppression,
                         )
 
                         _focus = (
@@ -14426,7 +14455,9 @@ async def _handle_merchant_message(
                             _focus,
                             _product_attachments,
                         )
-                        _block_title_rescue = _block_title_sub(
+                        _block_title_rescue = _has_product_suppression(
+                            _delivery_audit,
+                        ) or _block_title_sub(
                             membership_fail_closed=bool(
                                 _delivery_audit.get("membership_fail_closed")
                             ),
