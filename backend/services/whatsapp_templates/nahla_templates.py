@@ -21,6 +21,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from core.commerce_lifecycle.cod_confirmation_assets import (
+    cod_confirmation_image_header_component,
+)
+
 
 def _order_summary_r3_components() -> List[Dict[str, Any]]:
     """Canonical r3 contract: IMAGE header, 4 BODY vars, mtjr.at button."""
@@ -589,6 +593,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "smart_label":    "يُرسل تلقائياً: لطلبات الدفع عند الاستلام",
         "slots":          ["customer_name", "order_id", "store_name"],
         "components": [
+            cod_confirmation_image_header_component(),
             {
                 "type": "BODY",
                 "text": (
@@ -1389,9 +1394,9 @@ def template_preview(tpl: Dict[str, Any]) -> Dict[str, Any]:
         "trigger_delay_hours":    tpl.get("trigger_delay_hours"),
     }
     # Library cards have their own preview contract; do not drop the IMAGE
-    # component when projecting the order-confirmation definition into it.
+    # component when projecting an approved image-backed lifecycle definition.
     # Other services retain their existing preview until separately designed.
-    if service_key == "order_confirmation" and any(
+    if service_key in {"order_confirmation", "cod_confirmation"} and any(
         c.get("type") == "HEADER" and c.get("format") == "IMAGE"
         for c in tpl["components"]
     ):
