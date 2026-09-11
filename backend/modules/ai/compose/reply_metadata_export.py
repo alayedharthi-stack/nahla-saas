@@ -23,6 +23,11 @@ _LLM_COMPOSE_SOURCES = frozenset({"llm", "persona_llm"})
 
 BRAIN_REPLY_METADATA_EXPORT_KEYS: Tuple[str, ...] = (
     *REQUIRED_REPLY_METADATA_KEYS,
+    "requested_model",
+    "actual_model",
+    "attempted_model",
+    "model_identity_source",
+    "escalation_reason",
     "final_customer_text_source",
     "product_presentation_kind",
     "product_presentation_reason",

@@ -1911,7 +1911,7 @@ async def get_conversation_messages(
         ``core.outbound_send_status``. Returns:
 
           {
-            "status":     "queued" | "sent" | "failed" | null,
+            "status":     "queued" | "sent" | "failed" | "suppressed" | null,
             "wamid":      str | null,
             "error": {
               "labelAr":       Arabic merchant-facing label,

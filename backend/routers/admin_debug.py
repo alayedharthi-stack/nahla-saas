@@ -3383,6 +3383,7 @@ async def admin_debug_outbound_trace(
             "sent":          int,
             "failed":        int,
             "queued":        int,
+            "suppressed":    int,
             "unstamped":     int,        # rows with no provider_send
             "by_error_key":  { key: count, ... }
         },
@@ -3401,7 +3402,7 @@ async def admin_debug_outbound_trace(
             "event_type":       str|null,
             "body_preview":     str (≤200 chars),
             "to":               str (masked),
-            "send_status":      "queued" | "sent" | "failed" | null,
+            "send_status":      "queued" | "sent" | "failed" | "suppressed" | null,
             "wamid":            str|null,
             "operation":        str|null,
             "duration_ms":      number|null,
@@ -3426,6 +3427,7 @@ async def admin_debug_outbound_trace(
     from datetime import datetime, timezone, timedelta  # noqa: PLC0415
     from sqlalchemy import or_, func  # noqa: PLC0415
     from models import MessageEvent  # noqa: PLC0415
+    from core.outbound_provenance import extract_outbound_provenance  # noqa: PLC0415
 
     admin_sub = _admin.get("sub") or "?"
     logger.info(
@@ -3507,7 +3509,13 @@ async def admin_debug_outbound_trace(
         s2 = str(s)
         return s2 if len(s2) <= n else s2[:n] + "…"
 
-    counts = {"sent": 0, "failed": 0, "queued": 0, "unstamped": 0}
+    counts = {
+        "sent": 0,
+        "failed": 0,
+        "queued": 0,
+        "suppressed": 0,
+        "unstamped": 0,
+    }
     by_error_key: Dict[str, int] = {}
     rows_out: List[Dict[str, Any]] = []
     for r in me_rows:
@@ -3522,6 +3530,8 @@ async def admin_debug_outbound_trace(
             by_error_key[key] = by_error_key.get(key, 0) + 1
         elif send_status == "queued":
             counts["queued"] += 1
+        elif send_status == "suppressed":
+            counts["suppressed"] += 1
         else:
             counts["unstamped"] += 1
 
@@ -3553,6 +3563,7 @@ async def admin_debug_outbound_trace(
             "queued_at":        (ps or {}).get("queued_at"),
             "completed_at":     (ps or {}).get("completed_at"),
             "error":            err_out,
+            "provenance":       extract_outbound_provenance(meta),
         })
 
     summary = {
@@ -3572,6 +3583,11 @@ async def admin_debug_outbound_trace(
         issues.append(
             f"{counts['queued']} رسائل بقيت بحالة 'queued' — الإرسال لم يكتمل. "
             "تحقق من logs /admin/debug/last-provider-send وأعد تشغيل الـ worker إن لزم."
+        )
+    if counts["suppressed"] > 0:
+        hints.append(
+            f"{counts['suppressed']} رسائل أوقفها حاجز الإرسال النهائي عمدًا؛ "
+            "راجع provenance.suppression لمعرفة السبب دون اعتبارها فشل مزود."
         )
     if counts["unstamped"] > 0:
         hints.append(
@@ -3609,11 +3625,12 @@ async def admin_debug_outbound_trace(
         rows=len(rows_out),
         failed=counts["failed"],
         queued=counts["queued"],
+        suppressed=counts["suppressed"],
     )
     logger.info(
-        "[ADMIN/OUTBOUND_TRACE] done admin=%s tenant=%s rows=%d sent=%d failed=%d queued=%d",
+        "[ADMIN/OUTBOUND_TRACE] done admin=%s tenant=%s rows=%d sent=%d failed=%d queued=%d suppressed=%d",
         admin_sub, tenant_id, len(rows_out),
-        counts["sent"], counts["failed"], counts["queued"],
+        counts["sent"], counts["failed"], counts["queued"], counts["suppressed"],
     )
     return response
 

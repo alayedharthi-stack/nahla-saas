@@ -1996,6 +1996,9 @@ export default function Conversations() {
                                     } else if (m.sendStatus === 'failed') {
                                       outboundTheme =
                                         'bg-red-50 text-red-900 border border-red-300 ring-1 ring-red-100'
+                                    } else if (m.sendStatus === 'suppressed') {
+                                      outboundTheme =
+                                        'bg-slate-100 text-slate-600 border border-slate-300 border-dashed'
                                     }
                                   }
                                   const radiusOut = btnLines.length
@@ -2018,7 +2021,7 @@ export default function Conversations() {
                                           messages — makes the bubble feel like
                                           something that did NOT leave the
                                           merchant's outbox. */}
-                                      {isOut && m.sendStatus === 'failed' && (
+                                      {isOut && (m.sendStatus === 'failed' || m.sendStatus === 'suppressed') && (
                                         <span className="absolute -top-2 start-2 px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-red-500 text-white shadow-sm">
                                           {cp.delivery.notSent}
                                         </span>
@@ -2153,6 +2156,13 @@ export default function Conversations() {
                                   <AlertCircle
                                     className="w-3.5 h-3.5 text-red-500"
                                     aria-label={cp.delivery.failed}
+                                  />
+                                )
+                              case 'suppressed':
+                                return (
+                                  <Ban
+                                    className="w-3.5 h-3.5 text-slate-500"
+                                    aria-label={cp.delivery.suppressed}
                                   />
                                 )
                               case 'sent': {

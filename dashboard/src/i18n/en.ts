@@ -877,6 +877,7 @@ const en: Translations = {
       notSent:     'Not sent',
       pending:     'Pending delivery',
       failed:      'Send failed',
+      suppressed:  'Stopped before sending',
       awaitingWamid: 'Delivered to provider — awaiting wamid',
       sent:        'Sent',
     },

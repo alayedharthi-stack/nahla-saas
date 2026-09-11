@@ -881,6 +881,7 @@ const ar: Translations = {
       notSent:       'لم تُرسَل',
       pending:       'بانتظار التسليم',
       failed:        'فشل الإرسال',
+      suppressed:    'أُوقفت قبل الإرسال',
       awaitingWamid: 'استُلمت من المزود لكن بانتظار wamid',
       sent:          'مُرسَلة',
     },

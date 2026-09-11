@@ -1147,7 +1147,7 @@ class StateManager:
                      *,
                      event_type: Optional[str] = None,
                      created_at: Optional[datetime] = None,
-                     extra_metadata: Optional[Dict[str, Any]] = None) -> None:
+                     extra_metadata: Optional[Dict[str, Any]] = None) -> Optional[int]:
         _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
 
         # ── Marker scrub on outbound persistence ──────────────────
@@ -1302,7 +1302,7 @@ class StateManager:
                         )
 
             ts = created_at if created_at is not None else datetime.utcnow()
-            db.add(MessageEvent(
+            saved_message = MessageEvent(
                 tenant_id=_tid,
                 conversation_id=conversation_id,
                 direction=direction,
@@ -1310,8 +1310,10 @@ class StateManager:
                 event_type=event_type or "whatsapp",
                 created_at=ts,
                 extra_metadata=meta,
-            ))
+            )
+            db.add(saved_message)
             db.commit()
+            saved_message_id = saved_message.id
             # ── W2.0.1 (May 2026): Inbound-lifecycle telemetry.
             # We record the persistence outcome on the active trace
             # so the summary line knows whether a MessageEvent was
@@ -1347,6 +1349,7 @@ class StateManager:
                         )
             except Exception:
                 pass
+            return saved_message_id
         except Exception as exc:
             # ── Surface psycopg2 details (May 2026 #19) ─────────────
             # The original ``logger.warning("...: %s", exc)`` dropped

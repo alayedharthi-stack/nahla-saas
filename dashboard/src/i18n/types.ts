@@ -792,6 +792,7 @@ export interface Translations {
       notSent: string
       pending: string
       failed: string
+      suppressed: string
       awaitingWamid: string
       sent: string
     }
