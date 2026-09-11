@@ -49,7 +49,9 @@ def test_extracts_persona_route_models_without_inference_from_text() -> None:
     )
 
     assert provenance["requested_model"] == "model-requested"
-    assert provenance["actual_model"] == "model-actual"
+    assert provenance["actual_model"] is None
+    assert provenance["attempted_model"] == "model-actual"
+    assert provenance["model_identity_source"] == "unknown"
     assert provenance["compose_source"] == "persona_llm"
     assert provenance["final_expression_owner"] == "persona_composer"
 

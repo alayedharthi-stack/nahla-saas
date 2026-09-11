@@ -6278,6 +6278,8 @@ async def _handle_merchant_message(
     _brain_reply_candidate = ""
     _outbound_abort_suppressor = ""
     _outbound_abort_audited = False
+    _outbound_event_id = None
+    _wire_audit_token = None
     _outbound_customer_id: int | None = None
     _t_merchant_entry_gates = None
     _generic_handoff_signal = False
@@ -10755,7 +10757,10 @@ async def _handle_merchant_message(
                 _brain_reply_candidate = (reply or "").strip()
         except Exception:  # noqa: BLE001  # noqa: silent-ok — defer must not block persist gate
             pass
-        if _should_suppress_empty_outbound_reply(reply, brain_buttons=_brain_buttons):
+        if (
+            _should_suppress_empty_outbound_reply(reply, brain_buttons=_brain_buttons)
+            and not _native_catalog_entry.get("thumbnail_product_retailer_id")
+        ):
             if not _outbound_abort_audited:
                 _maybe_log_outbound_candidate_abort(
                     tenant_id=tenant_id,
@@ -10784,7 +10789,7 @@ async def _handle_merchant_message(
                 _t_outp = _time_outp.monotonic()
             except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 _t_outp = None
-            StateManager.save_message(
+            _outbound_event_id = StateManager.save_message(
                 db, to, reply, "outbound",
                 conversation_id=convo.id, tenant_id=tenant_id,
                 extra_metadata=_otp_merge_save_metadata(
@@ -10810,6 +10815,17 @@ async def _handle_merchant_message(
                     )
             except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                 pass
+
+        from core.outbound_wire_audit import bind_wire_audit  # noqa: PLC0415
+
+        _wire_audit_token = bind_wire_audit(
+            db, _outbound_event_id, tenant_id, to, reply or "",
+            _otp_merge_save_metadata(
+                _outbound_text_tracker, _persona_ownership.to_metadata(),
+                persona_compose_event=_payment_persona_compose_event or _brain_persona_compose_event,
+                brain_result=brain_result if isinstance(brain_result, dict) else None,
+            ),
+        )
 
         latency_ms = 0
         try:
@@ -12918,7 +12934,7 @@ async def _handle_merchant_message(
         if _outbound_text_tracker is not None:
             for _mutation in (_outbound_text_tracker.postprocess_mutations or []):
                 _layer = str(getattr(_mutation, "layer", "") or "").strip()
-                if _layer and _layer not in _wire_transform_reasons:
+                if getattr(_mutation, "text_changed", False) and _layer and _layer not in _wire_transform_reasons:
                     _wire_transform_reasons.append(_layer)
 
         _final_expression_owner = str(
@@ -12965,6 +12981,22 @@ async def _handle_merchant_message(
                 _final_sync_exc,
             )
 
+        from core.outbound_wire_audit import refresh_wire_audit  # noqa: PLC0415
+
+        refresh_wire_audit(
+            tenant_id, to, reply or "",
+            {
+                **_otp_merge_save_metadata(
+                    _outbound_text_tracker,
+                    _persona_ownership.to_metadata(),
+                    persona_compose_event=_payment_persona_compose_event or _brain_persona_compose_event,
+                    brain_result=brain_result if isinstance(brain_result, dict) else None,
+                ),
+                "final_expression_owner": _final_expression_owner,
+                "final_text_transformed": bool(_brain_final_text_transformed or _wire_transform_reasons),
+                "final_transform_reasons": _wire_transform_reasons,
+            },
+        )
         _send_ok = False
         _social_send_suppressed = False
         _outbound_wire_boundary_done = False
@@ -13168,6 +13200,12 @@ async def _handle_merchant_message(
                         customer_message=text or reply or "",
                     )
                     reply = str(_nc_fallback.text or "").strip()
+                    from core.outbound_wire_audit import set_wire_expression  # noqa: PLC0415
+
+                    set_wire_expression(
+                        tenant_id, to, reply, "native_catalog_failure_fallback",
+                        source="deterministic",
+                    )
                 except Exception as _nc_fb_exc:  # noqa: BLE001  # noqa: silent-ok — honest fallback must not block webhook reply
                     logger.debug(
                         "[NATIVE_CATALOG] honest_fallback_failed tenant=%s err=%s",
@@ -15034,6 +15072,12 @@ async def _handle_merchant_message(
             except Exception:  # noqa: BLE001
                 pass
             try:
+                from core.outbound_wire_audit import set_wire_expression  # noqa: PLC0415
+
+                set_wire_expression(
+                    tenant_id, to, _fallback_text, "outer_exception_fallback",
+                    source="deterministic",
+                )
                 await _send_whatsapp_message(
                     phone_id=phone_id, to=to,
                     text=_fallback_text,
@@ -15059,6 +15103,10 @@ async def _handle_merchant_message(
                     tenant_id, to,
                 )
     finally:
+        if _wire_audit_token is not None:
+            from core.outbound_wire_audit import reset_wire_audit  # noqa: PLC0415
+
+            reset_wire_audit(_wire_audit_token)
         # Emit ONE structured turn-trace line, no matter how the
         # function exited. ``emit()`` is wrapped in its own try/except
         # internally — observability MUST NOT take down the response
@@ -15178,6 +15226,10 @@ async def _post_wa(
     _blocked_path: str = "post_wa",
     _treat_dedup_as_success: bool = True,
 ) -> bool:
+    from core.outbound_wire_audit import observe_wire_payload  # noqa: PLC0415
+
+    _payload_kind = (payload.get("interactive") or {}).get("type") or payload.get("type") or "unknown"
+    observe_wire_payload(_tenant_id, payload, "whatsapp_payload_assembly:" + str(_payload_kind))
     # ── External-research leakage guard (May 2026) ────────────────
     # Final scrubber for the May 2026 DuckDuckGo-leak incident: if any
     # subsystem (brain, LLM, legacy code path) produced an outbound
@@ -15220,6 +15272,7 @@ async def _post_wa(
         # sanitiser; here we just continue with the original payload.
         pass
 
+    observe_wire_payload(_tenant_id, payload, "outbound_payload_sanitizer")
     owns_db = False
     wa_conn = None
     if _tenant_id and _db:

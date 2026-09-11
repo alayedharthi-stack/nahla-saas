@@ -185,6 +185,10 @@ class OpenAICompatibleProvider(BaseAIProvider):
                 "provider":   "openai_compatible",
                 "model":      model,
                 "reply_text": reply,
+                "requested_model": model,
+                "attempted_model": model,
+                "actual_model": (data["model"].strip() or None) if isinstance(data.get("model"), str) else None,
+                "model_identity_source": "provider_response" if isinstance(data.get("model"), str) and data["model"].strip() else "unknown",
                 "status":     "ok",
             }
 

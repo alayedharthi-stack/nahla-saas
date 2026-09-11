@@ -349,16 +349,16 @@ def stamp_outbound_send_status(
         from sqlalchemy import or_, func  # noqa: PLC0415
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
 
-        # We compare the suffix of either ``phone`` or ``customer_phone``
-        # in metadata. JSONB ``->>`` returns text, so ``func.right``
-        # gives us the last N characters cheaply.
-        phone_text   = MessageEvent.extra_metadata["phone"].astext
-        customer_txt = MessageEvent.extra_metadata["customer_phone"].astext
-        # Filter to rows already in ``queued`` state. We deliberately
-        # don't re-stamp rows already marked ``sent`` so a webhook
-        # status callback (delivered / read) from Meta can't overwrite
-        # the wire-layer outcome.
-        status_text  = MessageEvent.extra_metadata["provider_send"]["status"].astext
+        from core.outbound_wire_audit import wire_row_id, current_wire_audit  # noqa: PLC0415
+
+        bound_id = wire_row_id(tenant_id, recipient)
+        if current_wire_audit(tenant_id, recipient) is not None and bound_id is None:
+            return None
+        if bound_id is None:
+            # Legacy unbound callers retain the queued-row lookup.
+            phone_text = MessageEvent.extra_metadata["phone"].astext
+            customer_txt = MessageEvent.extra_metadata["customer_phone"].astext
+            status_text = MessageEvent.extra_metadata["provider_send"]["status"].astext
 
         # NB: db.begin_nested() may not be supported when the outer
         # transaction is in a bad state. We try, and on failure we
@@ -373,6 +373,12 @@ def stamp_outbound_send_status(
 
         try:
             row = (
+                db.query(MessageEvent).filter(
+                    MessageEvent.id == bound_id,
+                    MessageEvent.tenant_id == tenant_id,
+                    func.lower(MessageEvent.direction) == "outbound",
+                ).first()
+            ) if bound_id is not None else (
                 db.query(MessageEvent)
                 .filter(
                     MessageEvent.tenant_id == tenant_id,
@@ -479,6 +485,17 @@ def _find_queued_outbound_row(
         from models import MessageEvent  # noqa: PLC0415
         from sqlalchemy import or_, func  # noqa: PLC0415
 
+        from core.outbound_wire_audit import wire_row_id, current_wire_audit  # noqa: PLC0415
+
+        bound_id = wire_row_id(tenant_id, recipient)
+        if current_wire_audit(tenant_id, recipient) is not None and bound_id is None:
+            return None
+        if bound_id is not None:
+            return db.query(MessageEvent).filter(
+                MessageEvent.id == bound_id,
+                MessageEvent.tenant_id == tenant_id,
+                func.lower(MessageEvent.direction) == "outbound",
+            ).first()
         phone_text   = MessageEvent.extra_metadata["phone"].astext
         customer_txt = MessageEvent.extra_metadata["customer_phone"].astext
         status_text  = MessageEvent.extra_metadata["provider_send"]["status"].astext
@@ -595,7 +612,9 @@ def sync_outbound_body_to_final(
                 return None
 
             previous_body = row.body or ""
-            new_body = final_body or ""
+            # Provider-attempt evidence is later and authoritative. Legacy
+            # post-send sync callers must not restore pre-scrub text over it.
+            new_body = previous_body if (row.extra_metadata or {}).get("wire_attempts") else (final_body or "")
             metadata_changed = bool(
                 cta_metadata
                 or outbound_text_policy
@@ -657,6 +676,10 @@ def sync_outbound_body_to_final(
                 for key, value in provenance_metadata.items():
                     if value is not None:
                         meta[str(key)] = value
+            attempts = meta.get("wire_attempts") or []
+            if attempts:
+                # A caller's pre-send snapshot cannot supersede actual wire evidence.
+                meta.update(attempts[-1].get("provenance") or {})
             row.extra_metadata = meta
             flag_modified(row, "extra_metadata")
             db.add(row)

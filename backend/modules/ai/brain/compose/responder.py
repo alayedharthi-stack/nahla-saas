@@ -3447,8 +3447,10 @@ def _stamp_outbound_model_provenance(
         payload_metadata.get("requested_model") or model
     )
     target["actual_model"] = str(
-        payload_metadata.get("actual_model") or model
+        payload_metadata.get("actual_model") or ""
     )
+    target["attempted_model"] = payload_metadata.get("attempted_model") or model
+    target["model_identity_source"] = payload_metadata.get("model_identity_source", "unknown")
     target["escalation_reason"] = str(
         payload_metadata.get("escalation_reason") or ""
     )

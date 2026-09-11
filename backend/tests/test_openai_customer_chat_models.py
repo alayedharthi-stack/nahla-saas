@@ -166,7 +166,8 @@ class TestEngineNoAnthropicGemini:
         assert result.get("status") == "openai_chain_exhausted"
         assert result.get("reply_text") == ""
         assert result.get("requested_model") == MODEL_LUNA
-        assert result.get("actual_model") == MODEL_LUNA
+        assert result.get("actual_model") is None
+        assert result.get("model_identity_source") == "unknown"
         assert result.get("escalation_reason") == "openai_chain_exhausted"
         joined = "\n".join(r.message for r in caplog.records)
         assert "[CUSTOMER_CHAT_MODEL]" in joined

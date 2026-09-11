@@ -35,16 +35,14 @@ def extract_outbound_provenance(extra_metadata: object) -> Dict[str, Any]:
         reasons = []
 
     return {
-        "requested_model": meta.get("requested_model")
-        or persona.get("requested_model")
-        or persona.get("route_model"),
-        "actual_model": meta.get("actual_model")
-        or persona.get("actual_model")
-        or persona.get("model"),
+        "requested_model": meta.get("requested_model", persona.get("requested_model") or persona.get("route_model")),
+        "actual_model": meta.get("actual_model", persona.get("actual_model")),
+        "attempted_model": meta.get("attempted_model", persona.get("model")),
+        "model_identity_source": meta.get("model_identity_source") or "unknown",
         "escalation_reason": meta.get("escalation_reason")
         if meta.get("escalation_reason") is not None
         else persona.get("escalation_reason"),
-        "compose_source": meta.get("compose_source") or persona.get("source"),
+        "compose_source": meta.get("compose_source", persona.get("source")),
         "response_mode": meta.get("response_mode"),
         "chosen_path": meta.get("chosen_path"),
         "llm_candidate_present": meta.get("llm_candidate_present"),
@@ -61,6 +59,7 @@ def extract_outbound_provenance(extra_metadata: object) -> Dict[str, Any]:
             "final_wire_structured_delivery"
         ),
         "suppression": dict(suppression) if suppression is not None else None,
+        "wire_attempts": list(meta.get("wire_attempts") or []),
     }
 
 

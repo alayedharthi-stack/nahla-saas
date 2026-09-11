@@ -221,10 +221,11 @@ class AIOrchestratorEngine:
                 _requested_model = str(
                     router_meta.get("model")
                     or audit_context.get("model_override")
+                    or raw.get("requested_model")
                     or ""
                 ).strip()
                 _actual_model = str(
-                    raw.get("model") or audit_context.get("model_override") or ""
+                    raw.get("actual_model") or ""
                 ).strip()
                 raw["requested_model"] = _requested_model
                 raw["actual_model"] = _actual_model
@@ -271,7 +272,7 @@ class AIOrchestratorEngine:
         emit_customer_chat_model_telemetry(
             provider=customer_chat_provider(),
             requested_model=requested_model,
-            actual_model=requested_model or None,
+            actual_model=None,
             escalation_reason="openai_chain_exhausted",
             tenant_id=audit_context.get("tenant_id"),
             conversation_id=audit_context.get("conversation_id"),
@@ -284,7 +285,8 @@ class AIOrchestratorEngine:
             "model": requested_model,
             "status": "openai_chain_exhausted",
             "requested_model": requested_model,
-            "actual_model": requested_model,
+            "actual_model": None,
+            "model_identity_source": "unknown",
             "escalation_reason": "openai_chain_exhausted",
         }
         if block_anthropic_fallback:
@@ -335,7 +337,8 @@ class AIOrchestratorEngine:
                 raw["provider_chain_fallback_used"] = True
                 raw["model_escalation"] = True
                 raw["requested_model"] = requested_model
-                raw["actual_model"] = str(raw.get("model") or escalation_model)
+                raw["actual_model"] = str(raw.get("actual_model") or "")
+                raw["attempted_model"] = escalation_model
                 raw["escalation_reason"] = "technical_failure"
                 emit_customer_chat_model_telemetry(
                     provider=customer_chat_provider(),
@@ -532,7 +535,7 @@ class AIOrchestratorEngine:
             or ""
         ).strip()
         actual_model = str(
-            raw.get("actual_model") or raw.get("model") or ""
+            raw.get("actual_model") or ""
         ).strip()
 
         cost_meta: Dict[str, Any] = {}
@@ -592,7 +595,9 @@ class AIOrchestratorEngine:
                 "provider":       provider_str,
                 "model":          raw.get("model", "unknown"),
                 "requested_model": requested_model,
-                "actual_model":    actual_model,
+                "actual_model":    actual_model or None,
+                "attempted_model": raw.get("attempted_model") or raw.get("model"),
+                "model_identity_source": raw.get("model_identity_source", "unknown"),
                 "escalation_reason": raw.get("escalation_reason", ""),
                 "cost":           cost_meta,        # {} when no reply produced
                 "prompt":         prompt_meta_dict, # {} when no reply produced
