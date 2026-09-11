@@ -178,6 +178,7 @@ export function getTemplateSyncErrorMessage(
 // ── API client ────────────────────────────────────────────────────────────────
 
 import { apiCall } from './client'
+import { getApiBase, getTenantId, getToken } from '../auth'
 
 export interface VarMapAnnotated {
   field: string
@@ -232,6 +233,29 @@ export const templatesApi = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+
+  uploadHeaderImage: async (id: number, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const token = getToken()
+    const tenantId = getTenantId()
+    const res = await fetch(`${getApiBase()}/templates/${id}/header-image`, {
+      method: 'POST',
+      cache: 'no-store',
+      mode: 'cors',
+      headers: {
+        ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: form,
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const detail = typeof data?.detail === 'string' ? data.detail : 'image_upload_failed'
+      throw new Error(detail)
+    }
+    return data as { template: WhatsAppTemplateRecord; image_url: string }
+  },
 
   updateStatus: (id: number, status: TemplateStatus, rejectionReason?: string) =>
     apiCall<WhatsAppTemplateRecord>(`/templates/${id}/status`, {

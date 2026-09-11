@@ -226,6 +226,16 @@ assert(
     && whatsappTemplatesSource.includes('data-testid="template-order-summary-header"'),
 )
 assert(
+  'template editor preserves and previews imported IMAGE headers',
+  whatsappTemplatesSource.includes("const initialImageHeaderComp = headerComp?.format === 'IMAGE'")
+    && whatsappTemplatesSource.includes('const [imageHeaderComp, setImageHeaderComp]')
+    && whatsappTemplatesSource.includes('out.push({\n        ...imageHeaderComp')
+    && whatsappTemplatesSource.includes('data-testid="edit-template-image-header"')
+    && whatsappTemplatesSource.includes('data-testid="edit-template-image-upload"')
+    && whatsappTemplatesSource.includes('templatesApi.uploadHeaderImage')
+    && whatsappTemplatesSource.includes('headerImageUrl={headerImageUrl}'),
+)
+assert(
   'Settings tab follows order_updates deep-link changes',
   source('../src/pages/Settings.tsx').includes('Keep the rendered tab aligned with deep links')
     && source('../src/pages/Settings.tsx').includes('setActiveTab(nextTab)'),
