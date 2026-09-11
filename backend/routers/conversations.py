@@ -291,7 +291,7 @@ def _get_or_create_conversation(
     convo = db.query(Conversation).filter(
         Conversation.tenant_id == tenant_id,
         Conversation.customer_id == customer.id,
-    ).first()
+    ).order_by(Conversation.id.desc()).first()
     if not convo:
         convo = Conversation(
             tenant_id=tenant_id,

@@ -101,12 +101,18 @@ class TestTemplateCapabilityGates:
         assert template_passes_capabilities(meta, EXTERNAL_STORE) is True
         assert template_passes_capabilities(meta, WHATSAPP_ONLY) is False
 
-    def test_cod_template_requires_cod_capability(self):
+    def test_cod_template_remains_discoverable_before_cod_capability_detection(self):
         tpl = get_template_by_key("cod_confirmation")
         assert tpl is not None
         meta = resolve_template_filter_meta(tpl)
         assert template_passes_capabilities(meta, _caps(supports_cod=True)) is True
-        assert template_passes_capabilities(meta, _caps(supports_cod=False)) is False
+        assert template_passes_capabilities(meta, _caps(supports_cod=False)) is True
+
+        result = filter_and_group_library_templates(
+            get_all_templates(),
+            _caps(has_external_store=True, supports_external_checkout=True),
+        )
+        assert "cod_confirmation" in {item["key"] for item in result["templates"]}
 
     def test_coupon_template_hidden_without_coupon_support(self):
         tpl = get_template_by_key("seasonal_offer_template")

@@ -143,8 +143,8 @@ function WaPreview({
   )
 }
 
-function getOrderSummaryHeaderImageUrl(tpl: WhatsAppTemplateRecord): string | null {
-  if (tpl.service_key !== 'order_confirmation') return null
+function getLifecycleHeaderImageUrl(tpl: WhatsAppTemplateRecord): string | null {
+  if (!['order_confirmation', 'cod_confirmation'].includes(tpl.service_key ?? '')) return null
   const header = tpl.components.find(component => component.type === 'HEADER')
   if (header?.format !== 'IMAGE') return null
   return header.example?.header_url?.trim() || null
@@ -462,7 +462,7 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
   const varKeys = extractVars(bodyRaw)
   const footer  = getFooter(tpl)
   const buttons = getButtons(tpl)
-  const headerImageUrl = getOrderSummaryHeaderImageUrl(tpl)
+  const headerImageUrl = getLifecycleHeaderImageUrl(tpl)
   const isDefault = isDefaultTemplate(tpl.name, page)
   const defaultMeta = isDefault ? page.defaultTemplates[tpl.name] : null
 
@@ -1762,8 +1762,7 @@ export function NahlaLibraryModal({ onClose, onImported, serviceKey }: {
               {/* WhatsApp bubble */}
               <div className="bg-[#e5ddd5] rounded-xl p-3 mb-4">
                 <div className="bg-white rounded-2xl rounded-bl-sm shadow-sm p-3 space-y-2" dir="rtl">
-                  {preview.key === 'order_summary'
-                    && preview.header_type === 'image'
+                  {preview.header_type === 'image'
                     && preview.preview_header_image_url && (
                       <img
                         src={preview.preview_header_image_url}
@@ -1771,7 +1770,7 @@ export function NahlaLibraryModal({ onClose, onImported, serviceKey }: {
                         className="w-full h-auto rounded-lg"
                         loading="lazy"
                         referrerPolicy="no-referrer"
-                        data-testid="library-order-confirmation-header"
+                        data-testid={`library-template-preview-header-${preview.key}`}
                       />
                     )}
                   <p className="text-slate-800 text-xs leading-relaxed whitespace-pre-line">

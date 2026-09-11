@@ -1410,17 +1410,44 @@ class StateManager:
         _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
         try:
             from models import MessageEvent  # noqa: PLC0415
+            from sqlalchemy import and_, or_  # noqa: PLC0415
+            from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+            conv = cls._find_conversation(db, phone, _tid)
+            normalized = normalize_phone(phone) or phone
+            phones = tuple({p for p in (phone, normalized, normalized.lstrip("+")) if p})
+            # Linked messages belong to their conversation, even when legacy
+            # phone metadata is missing, differently formatted, or stale.
+            # Preserve older unlinked messages through their delivery phone.
+            history_scope = and_(
+                MessageEvent.conversation_id.is_(None),
+                MessageEvent.extra_metadata.op("->>")("phone").in_(phones),
+            )
+            if conv is not None:
+                history_scope = or_(MessageEvent.conversation_id == conv.id, history_scope)
             events = (
                 db.query(MessageEvent)
                 .filter(
                     MessageEvent.tenant_id == _tid,
-                    MessageEvent.extra_metadata["phone"].astext == phone,
+                    history_scope,
                 )
                 .order_by(MessageEvent.id.desc())
                 .limit(limit)
                 .all()
             )
-            return [{"direction": e.direction, "body": e.body} for e in reversed(events)]
+            from core.outbound_wire_audit import wire_transcript_text  # noqa: PLC0415
+
+            history = []
+            for event in reversed(events):
+                body = event.body
+                if event.direction in ("out", "outbound"):
+                    wire_body = wire_transcript_text((event.extra_metadata or {}).get("wire_attempts"))
+                    if wire_body is not None:
+                        if not wire_body:
+                            continue
+                        body = wire_body
+                history.append({"direction": event.direction, "body": body})
+            return history
         except Exception as exc:
             logger.warning("[StateManager] load_history error: %s", exc)
             return []

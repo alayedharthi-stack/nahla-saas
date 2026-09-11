@@ -394,6 +394,7 @@ def test_dispatch_persists_fresh_id_and_delivers_unchanged_customer_text(db):
 def test_first_contact_dedup_and_brain_share_one_customer_conversation(db, product):
     from core.conversation_engine import ConversationState, IdempotencyGuard, StateManager
     from core.order_flow import _load_brain_state
+    from modules.ai.brain.state.store import DefaultStateStore
     from routers.conversations import _get_or_create_conversation
     from database.models import Conversation
 
@@ -422,6 +423,9 @@ def test_first_contact_dedup_and_brain_share_one_customer_conversation(db, produ
     brain_conversation, retrieved_brain = _load_brain_state(db, tenant_id=tenant_id, phone=phone)
     assert brain_conversation.id == saved_id
     assert retrieved_brain == brain_state
+    loaded_by_brain = DefaultStateStore().load(db, tenant_id, phone)
+    assert loaded_by_brain.stage == "exploring"
+    assert loaded_by_brain.current_product_focus == brain_state["current_product_focus"]
     assert brain_conversation.extra_metadata["custom_metadata"] == {"keep": True}
 
 
@@ -478,3 +482,102 @@ def test_legacy_phone_only_state_is_linked_without_losing_context(db):
     assert canonical.customer_id is not None
     assert canonical.extra_metadata["brain_state"] == brain
     assert db.query(Conversation).filter(Conversation.tenant_id == tenant_id).count() == 1
+
+
+def test_existing_conversations_use_same_latest_row_for_inbound_and_brain(db):
+    from core.conversation_engine import StateManager
+    from modules.ai.brain.state.store import DefaultStateStore
+    from routers.conversations import _get_or_create_conversation
+    from database.models import Conversation
+
+    tenant, _ = _seed(db, tenant_name="Generic clothing store", phone_number_id="PID_LATEST",
+                      waba_id="WABA_LATEST")
+    phone = "966500000123"
+    older = _get_or_create_conversation(db, tenant.id, phone)
+    older.extra_metadata = {"brain_state": {"turn": 2, "stage": "ordering"}}
+    db.flush()
+    newer = Conversation(tenant_id=tenant.id, customer_id=older.customer_id, status="active",
+                         extra_metadata={"brain_state": {"turn": 8, "stage": "exploring"}})
+    db.add(newer)
+    db.commit()
+    inbound_convo = _get_or_create_conversation(db, tenant.id, phone)
+    assert inbound_convo.id == newer.id
+    assert StateManager._find_conversation(db, phone, tenant.id).id == inbound_convo.id
+    assert DefaultStateStore().load(db, tenant.id, phone).turn == 8
+    assert older.extra_metadata == {"brain_state": {"turn": 2, "stage": "ordering"}}
+
+
+def test_history_uses_conversation_identity_without_requiring_phone_metadata(db):
+    from core.conversation_engine import StateManager
+    from routers.conversations import _get_or_create_conversation
+
+    tenant, _ = _seed(db, tenant_name="Generic footwear store", phone_number_id="PID_HISTORY",
+                      waba_id="WABA_HISTORY")
+    other, _ = _seed(db, tenant_name="Generic perfume store", phone_number_id="PID_OTHER_HISTORY",
+                     waba_id="WABA_OTHER_HISTORY")
+    phone = "966500000123"
+    convo = _get_or_create_conversation(db, tenant.id, phone)
+    unrelated = _get_or_create_conversation(db, tenant.id, "966500000456")
+    other_convo = _get_or_create_conversation(db, other.id, phone)
+    for tid, cid, direction, body, meta in [
+        (tenant.id, convo.id, "inbound", "أريد صورة حذاء رياضي أبيض", {}),
+        (tenant.id, convo.id, "outbound", "model-generated product reply", {"phone": "+" + phone}),
+        (tenant.id, unrelated.id, "outbound", "unrelated customer", {"phone": phone}),
+        (other.id, other_convo.id, "outbound", "other tenant", {"phone": phone}),
+    ]:
+        db.add(MessageEvent(tenant_id=tid, conversation_id=cid, direction=direction,
+                            event_type="whatsapp", body=body, extra_metadata=meta))
+    db.commit()
+    expected = [
+        {"direction": "inbound", "body": "أريد صورة حذاء رياضي أبيض"},
+        {"direction": "outbound", "body": "model-generated product reply"},
+    ]
+    for delivery_phone in (phone, "+" + phone):
+        assert StateManager.load_history(db, delivery_phone, tenant_id=tenant.id) == expected
+        assert StateManager.load_history(db, delivery_phone, limit=1, tenant_id=tenant.id) == expected[-1:]
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_history_preserves_unlinked_legacy_messages_without_adopting_other_threads(db, linked):
+    from core.conversation_engine import StateManager
+    from routers.conversations import _get_or_create_conversation
+
+    tenant, _ = _seed(db, tenant_name="Generic store", phone_number_id="PID_LEGACY_HISTORY",
+                      waba_id="WABA_LEGACY_HISTORY")
+    phone = "966500000123"
+    if linked:
+        _get_or_create_conversation(db, tenant.id, phone)
+    for stored_phone, body in [(phone, "legacy inbound"), ("+" + phone, "legacy outbound"),
+                               ("966500000456", "other phone")]:
+        db.add(MessageEvent(tenant_id=tenant.id, direction="inbound", event_type="whatsapp",
+                            body=body, extra_metadata={"phone": stored_phone}))
+    db.commit()
+    assert [m["body"] for m in StateManager.load_history(db, phone, tenant_id=tenant.id)] == [
+        "legacy inbound", "legacy outbound",
+    ]
+
+
+def test_history_recovers_older_split_sends_from_actual_wire_evidence(db):
+    from core.conversation_engine import StateManager
+    from routers.conversations import _get_or_create_conversation
+
+    tenant, _ = _seed(db, tenant_name="Generic clothing store", phone_number_id="PID_SPLIT_HISTORY",
+                      waba_id="WABA_SPLIT_HISTORY")
+    phone = "966500000123"
+    convo = _get_or_create_conversation(db, tenant.id, phone)
+    text = "model reply before a separately sent product card"
+    attempts = [
+        {"classification": "ok", "wamid": "part-1", "text_fields": {"text.body": text}},
+        {"classification": "ok", "wamid": "part-2", "text_fields": {"interactive.body.text": "جاكيت"}},
+        {"classification": "exception", "text_fields": {"text.body": "unsent retry"}},
+    ]
+    row = MessageEvent(tenant_id=tenant.id, conversation_id=convo.id, direction="outbound",
+                       event_type="whatsapp", body="جاكيت", extra_metadata={"phone": phone,
+                       "wire_attempts": attempts})
+    db.add(row)
+    db.commit()
+    assert StateManager.load_history(db, phone, tenant_id=tenant.id) == [
+        {"direction": "outbound", "body": text + "\nجاكيت"},
+    ]
+    db.refresh(row)
+    assert row.body == "جاكيت"  # Reading historical evidence does not rewrite stored rows.

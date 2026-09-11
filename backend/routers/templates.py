@@ -797,13 +797,14 @@ def _resolve_library_meta_for_template(template: WhatsAppTemplate) -> Dict[str, 
     return _enrich_library_meta(meta)
 
 
-def _saved_order_summary_preview_header_url(
+def _saved_lifecycle_preview_header_url(
     t: WhatsAppTemplate,
     *,
     db: Optional[Session] = None,
 ) -> Optional[str]:
-    """Return the merchant-facing IMAGE URL for the saved order summary only."""
-    if db is None or getattr(t, "service_key", None) != "order_confirmation":
+    """Return the merchant-facing IMAGE URL for supported lifecycle templates."""
+    service_key = str(getattr(t, "service_key", None) or "")
+    if db is None or service_key not in {"order_confirmation", "cod_confirmation"}:
         return None
 
     components = list(getattr(t, "components", None) or [])
@@ -817,14 +818,22 @@ def _saved_order_summary_preview_header_url(
         return None
 
     from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+        resolve_lifecycle_preview_header_url,
         resolve_order_confirmation_preview_header_url,
     )
 
-    return resolve_order_confirmation_preview_header_url(
+    resolver = (
+        resolve_order_confirmation_preview_header_url
+        if service_key == "order_confirmation"
+        else resolve_lifecycle_preview_header_url
+    )
+    kwargs = {} if service_key == "order_confirmation" else {"service_key": service_key}
+    return resolver(
         db,
         int(getattr(t, "tenant_id")),
         components,
         dict(getattr(t, "ai_generation_metadata", None) or {}),
+        **kwargs,
     )
 
 
@@ -834,7 +843,7 @@ def _tpl_to_dict(
     db: Optional[Session] = None,
 ) -> Dict[str, Any]:
     components = list(t.components or [])
-    preview_header_image_url = _saved_order_summary_preview_header_url(t, db=db)
+    preview_header_image_url = _saved_lifecycle_preview_header_url(t, db=db)
     if preview_header_image_url:
         components = deepcopy(components)
         for component in components:
@@ -1255,7 +1264,7 @@ async def _submit_template_to_meta(
                     )
                 btn["text"] = cleaned_text
 
-    if str(service_key or "").strip() == "order_confirmation":
+    if str(service_key or "").strip() in {"order_confirmation", "cod_confirmation"}:
         from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
             ensure_order_confirmation_image_header_for_meta,
         )
@@ -1267,16 +1276,18 @@ async def _submit_template_to_meta(
                 tenant_id=int(tenant_id),
                 components=components,
                 metadata=template_metadata or {},
+                service_key=str(service_key or "").strip(),
             )
         except Exception as exc:
             logger.error(
-                "[template/submit] order_confirmation header upload failed tenant=%s name=%s",
+                "[template/submit] lifecycle image header upload failed service=%s tenant=%s name=%s",
+                service_key,
                 tenant_id,
                 name,
                 exc_info=True,
             )
             raise ValueError(
-                "تعذّر تجهيز صورة رأس قالب تأكيد الطلب لـ Meta. حاول مرة أخرى لاحقاً."
+                "تعذّر تجهيز صورة رأس القالب لـ Meta. حاول مرة أخرى لاحقاً."
             ) from exc
 
     # Ensure all components have the Meta-required `example` fields before
@@ -3444,6 +3455,27 @@ async def import_nahla_template(
             outcome,
             template_to_dict=_tpl_to_dict,
         )
+
+    if body.template_key == "cod_confirmation":
+        from core.commerce_lifecycle.nahla_library_cod_confirmation_import import (  # noqa: PLC0415
+            import_cod_confirmation_from_library,
+        )
+        from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  # noqa: PLC0415
+            NahlaLibraryImportError,
+            build_merchant_import_api_payload,
+        )
+
+        try:
+            outcome = import_cod_confirmation_from_library(
+                db,
+                tenant_id,
+                tpl_def,
+                language=body.language,
+                custom_name=body.custom_name,
+            )
+        except NahlaLibraryImportError as exc:
+            raise HTTPException(status_code=409, detail=exc.message)
+        return build_merchant_import_api_payload(outcome, template_to_dict=_tpl_to_dict)
 
     # ── اكتشاف رابط المتجر الحقيقي للتاجر ──────────────────────────
     # نأخذه من TenantSettings.store.store_url أو Integration.config

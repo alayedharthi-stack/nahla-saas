@@ -12,7 +12,7 @@ from sqlalchemy.orm import declarative_base, Session
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.outbound_wire_audit import (
     bind_wire_audit, reset_wire_audit, record_wire_attempt,
-    observe_wire_payload, set_wire_expression, wire_row_id,
+    observe_wire_payload, set_wire_expression, wire_row_id, wire_transcript_text,
 )
 
 Base = declarative_base()
@@ -92,8 +92,40 @@ def test_split_attempts_and_native_fallback_have_separate_provenance(db):
         assert attempts[1]["provenance"]["final_customer_text_source"] == "deterministic"
         assert attempts[1]["provenance"]["final_expression_owner"] == "native_catalog_failure_fallback"
         assert attempts[2]["text_fields"]["interactive.body.text"] == "second part"
+        assert db.get(AuditRow, 1).body == "fallback evidence\nsecond part"
     finally:
         reset_wire_audit(token)
+
+
+@pytest.mark.parametrize("caption", ["جاكيت", "حذاء رياضي أبيض"])
+def test_successful_text_survives_followup_card_and_failed_retry(db, caption):
+    text = "model response preceding the product card"
+    token = bind_wire_audit(db, 1, 1, PHONE, text, META)
+    try:
+        record_wire_attempt(tenant_id=1, payload=payload(text), operation="send_message",
+                            classification="ok", wamid="text-accepted")
+        record_wire_attempt(tenant_id=1, payload=payload(caption, "interactive"), operation="card",
+                            classification="ok", wamid="card-accepted")
+        record_wire_attempt(tenant_id=1, payload=payload("unsent attempt"), operation="retry",
+                            classification="exception")
+        assert db.get(AuditRow, 1).body == text + "\n" + caption
+    finally:
+        reset_wire_audit(token)
+
+
+def test_wire_transcript_uses_provider_identity_for_duplicate_audit_records():
+    accepted = {"classification": "ok", "wamid": "first-send",
+                "text_fields": {"text.body": "sent text"}}
+    assert wire_transcript_text([
+        {"classification": "exception", "text_fields": {"text.body": "unsent text"}},
+        accepted, dict(accepted),
+        {**accepted, "wamid": "distinct-send"},
+        {"classification": "ok", "wamid": "image-send",
+         "text_fields": {"image.caption": "قميص قطني أزرق"}},
+    ]) == "sent text\nsent text\nقميص قطني أزرق"
+    assert wire_transcript_text([]) is None
+    assert wire_transcript_text(None) is None
+    assert wire_transcript_text([{"classification": "exception"}]) == ""
 
 
 def test_tenant_recipient_and_child_task_are_excluded(db):
