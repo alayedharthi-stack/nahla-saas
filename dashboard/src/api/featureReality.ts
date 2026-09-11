@@ -568,13 +568,15 @@ export type DashboardMessageMedia =
 //                ``sendError`` block carries the Arabic merchant
 //                label + advice + Meta code/subcode. Render a red
 //                × with a tooltip on top of the bubble.
+// * 'suppressed' → the final Nahla wire guard intentionally stopped
+//                  a non-sendable payload before calling the provider.
 // * null/absent → historical row from before the stamping fix, or
 //                 a row written from a path that doesn't go through
 //                 ``_post_wa`` (campaign dispatcher has its own
 //                 status surface). Render the previous unconditional
 //                 double-check so old conversations don't suddenly
 //                 show red ×s.
-export type OutboundSendStatus = 'queued' | 'sent' | 'failed' | null
+export type OutboundSendStatus = 'queued' | 'sent' | 'failed' | 'suppressed' | null
 
 export interface OutboundSendError {
   labelAr: string

@@ -18,25 +18,31 @@ def log_outbound_candidate_abort(
     final_response_empty: bool,
     abort_reason: str,
     final_stage: str,
+    final_response_non_substantive: bool = False,
     suppressor: Optional[str] = None,
     expression_owner: Optional[str] = None,
     candidate_preview: Optional[str] = None,
 ) -> None:
-    """Emit one greppable line when the turn ends with empty outbound."""
-    if not final_response_empty:
+    """Emit one greppable line when the final outbound is empty or unusable."""
+    if not final_response_empty and not final_response_non_substantive:
         return
     payload: dict[str, Any] = {
         "event": (
-            "outbound_candidate_abort"
-            if generated_candidate_non_empty
-            else "outbound_empty_lifecycle"
+            "outbound_non_substantive_suppressed"
+            if final_response_non_substantive
+            else (
+                "outbound_candidate_abort"
+                if generated_candidate_non_empty
+                else "outbound_empty_lifecycle"
+            )
         ),
         "tenant_id": tenant_id,
         "conversation_id": conversation_id,
         "customer_id": customer_id,
         "inbound_message_event_id": inbound_message_event_id,
         "generated_candidate_non_empty": bool(generated_candidate_non_empty),
-        "final_response_empty": True,
+        "final_response_empty": bool(final_response_empty),
+        "final_response_non_substantive": bool(final_response_non_substantive),
         "abort_reason": abort_reason,
         "final_stage": final_stage,
         "suppressor": suppressor,

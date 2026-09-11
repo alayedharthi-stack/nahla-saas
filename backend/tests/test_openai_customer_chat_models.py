@@ -165,6 +165,9 @@ class TestEngineNoAnthropicGemini:
         assert gemini.call_count == 0
         assert result.get("status") == "openai_chain_exhausted"
         assert result.get("reply_text") == ""
+        assert result.get("requested_model") == MODEL_LUNA
+        assert result.get("actual_model") == MODEL_LUNA
+        assert result.get("escalation_reason") == "openai_chain_exhausted"
         joined = "\n".join(r.message for r in caplog.records)
         assert "[CUSTOMER_CHAT_MODEL]" in joined
         payload = json.loads(joined.split("[CUSTOMER_CHAT_MODEL] ", 1)[1])
@@ -233,3 +236,26 @@ class TestTelemetry:
         payload = json.loads(joined.split("[CUSTOMER_CHAT_MODEL] ", 1)[1])
         assert payload["requested_model"] == MODEL_LUNA
         assert payload["actual_model"] == MODEL_TERRA
+
+    def test_reply_payload_exports_requested_actual_and_escalation(self) -> None:
+        engine = AIOrchestratorEngine()
+        request = AIOrchestrationRequest(
+            context=AIContext(tenant_id=1),
+            message="test",
+        )
+        raw = {
+            "reply_text": "composed response",
+            "provider": "openai_compatible",
+            "model": MODEL_TERRA,
+            "requested_model": MODEL_LUNA,
+            "actual_model": MODEL_TERRA,
+            "escalation_reason": "technical_failure",
+            "status": "ok",
+        }
+
+        with patch.object(engine, "call_provider", return_value=raw):
+            payload = engine.generate_reply(request)
+
+        assert payload.metadata["requested_model"] == MODEL_LUNA
+        assert payload.metadata["actual_model"] == MODEL_TERRA
+        assert payload.metadata["escalation_reason"] == "technical_failure"

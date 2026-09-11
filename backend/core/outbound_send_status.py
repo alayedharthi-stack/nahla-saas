@@ -29,7 +29,7 @@ the ``queued`` state and writes the wire-layer result into
 ``extra_metadata.provider_send``:
 
   {
-    "status":         "sent" | "failed",
+    "status":         "sent" | "failed" | "suppressed",
     "classification": "ok" | "non_2xx" | "provider_error_field"
                       | "missing_wamid" | "exception",
     "wamid":          "wamid.HBgL..." | null,
@@ -79,6 +79,8 @@ Operational guarantees
   different outcome overwrites the previous stamp. Callers that emit
   a retry-after-register sequence (``send_message`` →
   ``send_message_retry``) get the final outcome.
+* A final wire guard can close a queued row as ``suppressed`` without a
+  provider call; this is distinct from a provider failure.
 
 Cross-references
 ────────────────
@@ -111,6 +113,7 @@ _STAMP_LOOKUP_WINDOW = timedelta(minutes=5)
 STATUS_QUEUED = "queued"
 STATUS_SENT   = "sent"
 STATUS_FAILED = "failed"
+STATUS_SUPPRESSED = "suppressed"
 
 # Classification constants from `core.wa_provider_observability`. We
 # re-export them here so callers don't have to pull both modules.
@@ -516,6 +519,7 @@ def sync_outbound_body_to_final(
     cta_metadata: Optional[Dict[str, Any]] = None,
     outbound_text_policy: Optional[Dict[str, Any]] = None,
     persona_compose_event: Optional[Dict[str, Any]] = None,
+    provenance_metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
     """Update the body of the most recent queued outbound MessageEvent
     for ``(tenant_id, recipient)`` so the dashboard sees what the
@@ -592,7 +596,13 @@ def sync_outbound_body_to_final(
 
             previous_body = row.body or ""
             new_body = final_body or ""
-            if previous_body == new_body:
+            metadata_changed = bool(
+                cta_metadata
+                or outbound_text_policy
+                or persona_compose_event
+                or provenance_metadata
+            )
+            if previous_body == new_body and not metadata_changed:
                 if nested_ok:
                     try:
                         db.rollback()
@@ -605,25 +615,28 @@ def sync_outbound_body_to_final(
                 )
                 return int(row.id)
 
-            row.body = new_body
+            body_changed = previous_body != new_body
+            if body_changed:
+                row.body = new_body
             # Stamp a small audit trail in extra_metadata so we can
             # always reconstruct what the brain originally produced.
             meta = dict(row.extra_metadata or {})
-            history = list(meta.get("body_sync_history") or [])
-            # Cap history at the last 3 sync events — enough to debug
-            # without bloating the JSONB column.
-            history.append({
-                "reason":       reason,
-                "at":           datetime.now(timezone.utc).isoformat(),
-                "len_before":   len(previous_body),
-                "len_after":    len(new_body),
-                # Short preview so a grep is enough to verify a fix
-                # without joining tables. Truncated aggressively so
-                # PII / long URLs don't blow up the JSONB.
-                "preview_from": previous_body[:80],
-                "preview_to":   new_body[:80],
-            })
-            meta["body_sync_history"] = history[-3:]
+            if body_changed:
+                history = list(meta.get("body_sync_history") or [])
+                # Cap history at the last 3 sync events — enough to debug
+                # without bloating the JSONB column.
+                history.append({
+                    "reason":       reason,
+                    "at":           datetime.now(timezone.utc).isoformat(),
+                    "len_before":   len(previous_body),
+                    "len_after":    len(new_body),
+                    # Short preview so a grep is enough to verify a fix
+                    # without joining tables. Truncated aggressively so
+                    # PII / long URLs don't blow up the JSONB.
+                    "preview_from": previous_body[:80],
+                    "preview_to":   new_body[:80],
+                })
+                meta["body_sync_history"] = history[-3:]
             if cta_metadata:
                 meta["cta_delivery"] = dict(cta_metadata)
             if outbound_text_policy:
@@ -637,6 +650,10 @@ def sync_outbound_body_to_final(
                     meta,
                     persona_compose_event,
                 )
+            if provenance_metadata:
+                for key, value in provenance_metadata.items():
+                    if value is not None:
+                        meta[str(key)] = value
             row.extra_metadata = meta
             flag_modified(row, "extra_metadata")
             db.add(row)
@@ -665,6 +682,70 @@ def sync_outbound_body_to_final(
         logger.warning(
             "[OUTBOUND_BODY_SYNC] setup failed tenant=%s to=%s err=%s",
             tenant_id, recipient, outer_exc,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def stamp_outbound_suppressed(
+    db: Any,
+    *,
+    tenant_id: Optional[int],
+    recipient: str,
+    reason: str,
+    final_stage: str,
+    body_kind: str,
+) -> Optional[int]:
+    """Mark a queued row as deliberately not sent at the final wire boundary."""
+    if db is None or tenant_id is None or not recipient:
+        return None
+    try:
+        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+        row = _find_queued_outbound_row(
+            db,
+            tenant_id=int(tenant_id),
+            recipient=recipient,
+        )
+        if row is None:
+            return None
+        meta = dict(row.extra_metadata or {})
+        queued = dict(meta.get("provider_send") or {})
+        meta["provider_send"] = {
+            "status": STATUS_SUPPRESSED,
+            "classification": "final_boundary_suppression",
+            "operation": "wire_guard",
+            "queued_at": queued.get("queued_at"),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        meta["outbound_suppression"] = {
+            "reason": str(reason or ""),
+            "final_stage": str(final_stage or ""),
+            "body_kind": str(body_kind or ""),
+        }
+        row.extra_metadata = meta
+        flag_modified(row, "extra_metadata")
+        db.add(row)
+        db.flush()
+        db.commit()
+        logger.info(
+            "[OUTBOUND_SUPPRESSED] tenant=%s to=%s row=%s reason=%s body_kind=%s",
+            tenant_id,
+            recipient,
+            row.id,
+            reason,
+            body_kind,
+        )
+        return int(row.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[OUTBOUND_SUPPRESSED] stamp failed tenant=%s to=%s err=%s",
+            tenant_id,
+            recipient,
+            exc,
         )
         try:
             db.rollback()
