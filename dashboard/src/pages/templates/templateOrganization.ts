@@ -1,5 +1,5 @@
 import type { NahlaLibraryResponse, WhatsAppTemplateRecord } from '../../api/templates'
-import { isOrderUpdateServiceKey } from '../../api/orderUpdates'
+import { isOrderUpdateServiceKey } from '../../lib/orderUpdateServiceKeys'
 
 export type TemplateChannel = 'all' | 'whatsapp' | 'store'
 
