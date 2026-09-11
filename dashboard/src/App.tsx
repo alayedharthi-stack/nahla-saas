@@ -81,13 +81,20 @@ import WhatsAppCatalog from './pages/WhatsAppCatalog'
 import AdminCatalog from './pages/AdminCatalog'
 import ManualCouponCampaign from './pages/ManualCouponCampaign'
 import MarketingHub from './pages/MarketingHub'
-import NahlaTemplateLibrary from './pages/NahlaTemplateLibrary'
 import ChannelsHub from './pages/ChannelsHub'
 import SettingsHub from './pages/SettingsHub'
 import AutomationHub from './pages/AutomationHub'
 import TemplatesHub from './pages/TemplatesHub'
 
 /** Preserve search when retiring hub entry points (no redirect loops). */
+function LegacyStoreTemplatesRedirect() {
+  const { search, hash } = useLocation()
+  const params = new URLSearchParams(search)
+  params.set('channel', 'store')
+  const destination = hash === '#order-update-settings' ? '/templates/order-updates' : '/templates'
+  return <Navigate to={`${destination}?${params.toString()}`} replace />
+}
+
 function RedirectPreserveSearch({ to }: { to: string }) {
   const { search } = useLocation()
   return <Navigate to={`${to}${search}`} replace />
@@ -100,6 +107,9 @@ function RedirectPreserveSearch({ to }: { to: string }) {
  */
 function LegacySettingsEntryRedirect() {
   const [params] = useSearchParams()
+  if (['order-updates', 'order_updates'].includes(params.get('tab') ?? '')) {
+    return <Navigate to="/templates/order-updates" replace />
+  }
   if (params.get('tab')) {
     return <Settings />
   }
@@ -173,8 +183,8 @@ export default function App() {
             <Route path="campaigns"          element={<Campaigns />} />
             <Route path="campaigns/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="marketing"            element={<MarketingHub />} />
-            <Route path="marketing/templates"  element={<NahlaTemplateLibrary />} />
-            <Route path="marketing/templates/imported" element={<NahlaTemplateLibrary />} />
+            <Route path="marketing/templates" element={<LegacyStoreTemplatesRedirect />} />
+            <Route path="marketing/templates/imported" element={<LegacyStoreTemplatesRedirect />} />
             <Route path="products"           element={<Navigate to="/catalog" replace />} />
             <Route path="orders-hub"         element={<RedirectPreserveSearch to="/orders" />} />
             <Route path="automation"         element={<AutomationHub />} />
@@ -182,6 +192,7 @@ export default function App() {
             <Route path="channels"           element={<ChannelsHub />} />
             <Route path="settings-hub"       element={<SettingsHub />} />
             <Route path="templates"          element={<Templates />} />
+            <Route path="templates/order-updates" element={<Templates orderUpdates />} />
             <Route path="templates/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="smart-automations"  element={<SmartAutomations />} />
             <Route path="automations"        element={<Navigate to="/smart-automations" replace />} />

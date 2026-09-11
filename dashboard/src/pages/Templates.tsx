@@ -29,7 +29,9 @@ import {
   filterOrderUpdatesLibraryGroups,
   filterOrderUpdatesLibraryTemplates,
 } from './templates/orderUpdatesLibraryFilter'
-import { isOrderUpdateServiceKey } from '../api/orderUpdates'
+import { type OrderUpdateServiceKey } from '../api/orderUpdates'
+import OrderUpdatesSettingsTab from '../components/settings/OrderUpdatesSettingsTab'
+import { libraryChannels, matchesTemplateChannel, upsertImportedTemplate, type TemplateChannel } from './templates/templateOrganization'
 
 // ── Service catalog (mirrors backend SERVICE_CATALOG) ─────────────────────────
 
@@ -151,8 +153,8 @@ function getOrderSummaryHeaderImageUrl(tpl: WhatsAppTemplateRecord): string | nu
 // ── Template row ──────────────────────────────────────────────────────────────
 
 function TemplateRow({
-  tpl, onPreview, onDelete, onSubmit, onEdit, isSubmitting,
-}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void; onEdit: () => void; isSubmitting?: boolean }) {
+  tpl, onPreview, onDelete, onSubmit, onEdit, isSubmitting, highlighted = false,
+}: { tpl: WhatsAppTemplateRecord; onPreview: () => void; onDelete: () => void; onSubmit: () => void; onEdit: () => void; isSubmitting?: boolean; highlighted?: boolean }) {
   const { tStatic, lang } = useLanguage()
   const row = tStatic(tr => tr.templatesMgmt.row)
   const lib = tStatic(tr => tr.templatesMgmt.library)
@@ -212,7 +214,7 @@ function TemplateRow({
   })()
 
   return (
-    <tr className={`hover:bg-slate-50 transition-colors ${isDefault ? 'bg-brand-50/30' : ''} ${isInactive ? 'opacity-60' : ''}`}>
+    <tr id={`template-${tpl.id}`} className={`hover:bg-slate-50 transition-colors ${highlighted ? 'bg-amber-50' : ''} ${isDefault ? 'bg-brand-50/30' : ''} ${isInactive ? 'opacity-60' : ''}`}>
       <td className="px-5 py-3.5">
         <div className="flex items-center gap-2 flex-wrap">
           {serviceInfo && (
@@ -1419,7 +1421,8 @@ const BUTTON_TYPE_ICON: Record<string, string> = {
 
 const LIBRARY_TAG_KEYS = ['all', 'order_updates', 'marketing', 'orders', 'shipping', 'recovery', 'discounts', 'welcome'] as const
 
-export function NahlaLibraryModal({ onClose, onImported }: {
+export function NahlaLibraryModal({ onClose, onImported, serviceKey }: {
+  serviceKey?: OrderUpdateServiceKey
   onClose: () => void
   onImported: (tpl: WhatsAppTemplateRecord) => void
 }) {
@@ -1465,6 +1468,13 @@ export function NahlaLibraryModal({ onClose, onImported }: {
         groups = filterOrderUpdatesLibraryGroups(groups)
         flatTemplates = filterOrderUpdatesLibraryTemplates(flatTemplates)
       }
+      if (serviceKey) {
+        groups = filterOrderUpdatesLibraryGroups(groups).filter(group => group.channel !== 'whatsapp')
+          .map(group => ({ ...group, templates: group.templates.filter(item => item.service_key === serviceKey) }))
+          .filter(group => group.templates.length > 0)
+        flatTemplates = filterOrderUpdatesLibraryTemplates(flatTemplates)
+          .filter(item => item.service_key === serviceKey && item.filter_meta?.order_channel !== 'whatsapp')
+      }
       setLibraryGroups(groups)
       if (groups.length > 0) {
         setActiveGroupChannel(groups[0].channel)
@@ -1480,7 +1490,7 @@ export function NahlaLibraryModal({ onClose, onImported }: {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [serviceKey])
 
   const selectLibraryGroup = (channel: string) => {
     setActiveGroupChannel(channel)
@@ -1985,13 +1995,17 @@ function SyncMiniStat({ label, value, tone }: { label: string; value: number; to
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function Templates() {
+export default function Templates({ orderUpdates = false }: { orderUpdates?: boolean }) {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [templates, setTemplates] = useState<WhatsAppTemplateRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [filterTab, setFilterTab] = useState<TemplateStatus | 'all'>('all')
+  const [channelFilter, setChannelFilter] = useState<TemplateChannel>('all')
+  const [channels, setChannels] = useState<Record<string, string>>({})
+  const [libraryService, setLibraryService] = useState<OrderUpdateServiceKey | undefined>()
+  const [listError, setListError] = useState<string | null>(null)
   const [sourceFilter, setSourceFilter] = useState<'all' | 'library' | 'mine'>('all')
   const [showCreate, setShowCreate] = useState(false)
   const [showNahlaLibrary, setShowNahlaLibrary] = useState(false)
@@ -1999,7 +2013,10 @@ export default function Templates() {
   const [editTemplate, setEditTemplate] = useState<WhatsAppTemplateRecord | null>(null)
   const [submitError, setSubmitError] = useState<{id: number; msg: string; code?: string} | null>(null)
   const [submitting, setSubmitting] = useState<number | null>(null)
-  const { tStatic, t, dir } = useLanguage()
+  const { tStatic, t, dir, lang } = useLanguage()
+  const isAr = lang === 'ar'
+  const pagePath = orderUpdates ? '/templates/order-updates' : '/templates'
+  const importedId = Number(searchParams.get('imported')) || null
   void UI_ONLY_GUARD
   const submitErr = tStatic(tr => tr.templatesMgmt.submitErrors)
   const del = tStatic(tr => tr.templatesMgmt.delete)
@@ -2050,10 +2067,8 @@ export default function Templates() {
   const loadTemplates = useCallback(() => {
     setLoading(true)
     templatesApi.list()
-      .then(r => setTemplates(
-        r.templates.filter(template => !isOrderUpdateServiceKey(template.service_key ?? '')),
-      ))
-      .catch(() => setTemplates([]))
+      .then(r => { setTemplates(r.templates); setListError(null) })
+      .catch(error => setListError(error instanceof Error ? error.message : 'Could not load templates'))
       .finally(() => setLoading(false))
   }, [])
 
@@ -2067,6 +2082,22 @@ export default function Templates() {
   }, [])
 
   useEffect(() => { loadTemplates() }, [loadTemplates])
+  useEffect(() => {
+    templatesApi.nahlaLibrary().then(result => setChannels(libraryChannels(result))).catch(() => {
+      // All records remain accessible even if library metadata is unavailable.
+      setChannels({})
+    })
+  }, [])
+  useEffect(() => {
+    const channel = searchParams.get('channel')
+    setChannelFilter(channel === 'store' || channel === 'whatsapp' ? channel : 'all')
+  }, [searchParams])
+  useEffect(() => {
+    if (!importedId || loading) return
+    const frame = requestAnimationFrame(() => document.getElementById(`template-${importedId}`)?.scrollIntoView({ block: 'center' }))
+    return () => cancelAnimationFrame(frame)
+  }, [importedId, loading, orderUpdates])
+
 
   // The shared-library card opens this page with its dialog already visible.
   // Once a template is customized, the dialog closes so the merchant lands on
@@ -2188,7 +2219,7 @@ export default function Templates() {
     }
   }
 
-  const bySource = templates.filter(t => {
+  const bySource = templates.filter(t => matchesTemplateChannel(t, channelFilter, channels)).filter(t => {
     if (sourceFilter === 'library') return Boolean(t.nahla_source_key)
     if (sourceFilter === 'mine') return !t.nahla_source_key
     return true
@@ -2225,28 +2256,23 @@ export default function Templates() {
       )}
       {showNahlaLibrary && (
         <NahlaLibraryModal
+          serviceKey={libraryService}
           onClose={() => {
             setShowNahlaLibrary(false)
             loadTemplates()
             if (searchParams.get('library') === 'nahla') {
-              navigate('/templates', { replace: true })
+              navigate(pagePath, { replace: true })
             }
           }}
           onImported={tpl => {
             setShowNahlaLibrary(false)
-            if (isOrderUpdateServiceKey(tpl.service_key ?? '')) {
-              // Store lifecycle templates are managed in their real home.
-              // Keep the record id so that page can focus the exact imported
-              // template and show its real Meta state, rather than only the
-              // generic service configuration.
-              navigate(`/marketing/templates/imported?imported=${tpl.id}`)
-              return
-            }
-            setTemplates(ts => [tpl, ...ts])
-            setSourceFilter('library')
-            if (searchParams.get('library') === 'nahla') {
-              navigate('/templates', { replace: true })
-            }
+            setTemplates(ts => upsertImportedTemplate(ts, tpl))
+            setChannelFilter('all')
+            setSourceFilter('all')
+            setFilterTab('all')
+            navigate(`${pagePath}?imported=${tpl.id}`, { replace: true })
+            if (tpl.editable) setEditTemplate(tpl)
+            else setPreview(tpl)
           }}
         />
       )}
@@ -2351,18 +2377,36 @@ export default function Templates() {
         </div>
       )}
 
+      {orderUpdates ? (
+        <>
+          <PageHeader title={isAr ? 'إعدادات تحديثات الطلبات' : 'Order update settings'}
+            action={<Link to="/templates" className="btn-secondary">{isAr ? 'القوالب' : 'Templates'}</Link>} />
+          {listError && <p role="alert" className="text-red-600">{listError}</p>}
+          <OrderUpdatesSettingsTab renderTemplateControl={serviceKey => (
+            <div className="space-y-3">
+              <button type="button" className="btn-secondary" onClick={() => {
+                setLibraryService(serviceKey)
+                setShowNahlaLibrary(true)
+              }}>{isAr ? 'استيراد وتخصيص من مكتبة نحلة' : 'Import & customize from Nahla library'}</button>
+              <div className="overflow-x-auto">
+                <table className="w-full"><tbody>
+                  {templates.filter(tpl => tpl.service_key === serviceKey).map(tpl => (
+                    <TemplateRow key={tpl.id} tpl={tpl} highlighted={tpl.id === importedId}
+                      onPreview={() => setPreview(tpl)} onEdit={() => setEditTemplate(tpl)}
+                      onDelete={() => handleDelete(tpl.id)} onSubmit={() => handleSubmitTemplate(tpl.id)}
+                      isSubmitting={submitting === tpl.id} />
+                  ))}
+                </tbody></table>
+              </div>
+            </div>
+          )} />
+        </>
+      ) : <>
       <PageHeader
-        title={t(tr => tr.pages.templates.title)}
-        subtitle={t(tr => tr.pages.templates.subtitle)}
+        title={t(tr => tr.pages.templatesHub.title)}
+        subtitle={t(tr => tr.pages.templatesHub.subtitle)}
         action={
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowNahlaLibrary(true)}
-              className="btn-secondary text-sm border-amber-300 text-amber-700 hover:bg-amber-50"
-            >
-              <BookOpen className="w-4 h-4" />
-              {t(tr => tr.templatesMgmt.libraryBtn)}
-            </button>
             <button
               onClick={handleSync}
               disabled={syncing}
@@ -2378,42 +2422,27 @@ export default function Templates() {
         }
       />
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-4">
-        <StatCard label={t(tr => tr.templatesMgmt.statDraft)}    value={String(counts.draft)}    change={0}  icon={Type}         iconColor="text-slate-600"    iconBg="bg-slate-100" />
-        <StatCard label={t(tr => tr.templatesMgmt.statApproved)} value={String(counts.approved)} change={0}  icon={CheckCircle}  iconColor="text-emerald-600" iconBg="bg-emerald-50" />
-        <StatCard label={t(tr => tr.templatesMgmt.statPending)}  value={String(counts.pending)}  change={0}  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+      <button type="button" onClick={() => { setLibraryService(undefined); setShowNahlaLibrary(true) }}
+        className="w-full text-start rounded-2xl border border-[#e9dccd] bg-[#fdf9f4] p-6 flex items-center gap-5 hover:border-[#cfad8b]">
+        <BookOpen className="w-14 h-14 text-[#8a5a32] shrink-0" strokeWidth={1.65} />
+        <span>
+          <span className="block text-base font-bold text-[#573921]">{t(tr => tr.pages.templatesHub.library.title)}</span>
+          <span className="block mt-1 text-sm text-[#836a54]">{t(tr => tr.pages.templatesHub.library.description)}</span>
+        </span>
+      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        {(['all', 'whatsapp', 'store'] as const).map(channel => (
+          <button key={channel} type="button" aria-pressed={channelFilter === channel}
+            className={channelFilter === channel ? 'btn-primary' : 'btn-secondary'}
+            onClick={() => { setChannelFilter(channel); setFilterTab('all'); setSourceFilter('all') }}>
+            {channel === 'all' ? mgmt.filterAll : channel === 'store'
+              ? t(tr => tr.pages.templatesHub.cards.ecommerceTemplates.title)
+              : t(tr => tr.pages.templatesHub.cards.whatsappTemplates.title)}
+          </button>
+        ))}
+        <Link to="/templates/order-updates" className="btn-secondary ms-auto">{isAr ? 'إعدادات تحديثات الطلبات' : 'Order update settings'}</Link>
       </div>
-
-      {/* Sync status card — surfaces the background scheduler so it isn't silent */}
-      <SyncStatusCard status={syncStatus} onRefresh={loadSyncStatus} />
-
-      {/* Compliance notice */}
-      <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
-        <MessageSquare className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
-        <p className="text-xs text-blue-800">
-          <span className="font-semibold">{t(tr => tr.templatesMgmt.metaPolicy)} </span>
-          {t(tr => tr.templatesMgmt.metaPolicyText)}
-        </p>
-      </div>
-
-      {/* Manual coupon campaign quick entry — interim flow before Salla coupon API */}
-      <Link
-        to="/campaigns/manual-coupon"
-        className="card p-4 flex items-center gap-4 hover:border-amber-300 hover:bg-amber-50/40 transition-colors group"
-      >
-        <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-600 flex items-center justify-center shrink-0 group-hover:bg-amber-200">
-          <Ticket className="w-5 h-5" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-slate-900 mb-0.5">{manualCoupon.title}</p>
-          <p className="text-xs text-slate-500 leading-relaxed">
-            {manualCoupon.description}
-          </p>
-        </div>
-        <ArrowEnd className="w-4 h-4 text-slate-400 shrink-0 rotate-180" />
-      </Link>
-
+      {listError && <p role="alert" className="text-red-600">{listError}</p>}
       {/* Table */}
       <div className="card">
         {/* Source filters — Nahla library is a source, not a third hub type */}
@@ -2492,6 +2521,7 @@ export default function Templates() {
                   <TemplateRow
                     key={tpl.id}
                     tpl={tpl}
+                    highlighted={tpl.id === importedId}
                     onPreview={() => setPreview(tpl)}
                     onDelete={() => handleDelete(tpl.id)}
                     onSubmit={() => handleSubmitTemplate(tpl.id)}
@@ -2504,6 +2534,49 @@ export default function Templates() {
           </div>
         )}
       </div>
+      <details className="card p-4">
+        <summary className="cursor-pointer text-sm font-medium">{isAr ? 'تفاصيل القوالب والمزامنة' : 'Template details and synchronization'}</summary>
+        <div className="mt-4 space-y-4">
+      {/* Stats */}
+      <div className="grid grid-cols-3 gap-4">
+        <StatCard label={t(tr => tr.templatesMgmt.statDraft)}    value={String(counts.draft)}    change={0}  icon={Type}         iconColor="text-slate-600"    iconBg="bg-slate-100" />
+        <StatCard label={t(tr => tr.templatesMgmt.statApproved)} value={String(counts.approved)} change={0}  icon={CheckCircle}  iconColor="text-emerald-600" iconBg="bg-emerald-50" />
+        <StatCard label={t(tr => tr.templatesMgmt.statPending)}  value={String(counts.pending)}  change={0}  icon={Clock}        iconColor="text-amber-600"   iconBg="bg-amber-50" />
+      </div>
+
+      {/* Sync status card — surfaces the background scheduler so it isn't silent */}
+      <SyncStatusCard status={syncStatus} onRefresh={loadSyncStatus} />
+
+      {/* Compliance notice */}
+      <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+        <MessageSquare className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
+        <p className="text-xs text-blue-800">
+          <span className="font-semibold">{t(tr => tr.templatesMgmt.metaPolicy)} </span>
+          {t(tr => tr.templatesMgmt.metaPolicyText)}
+        </p>
+      </div>
+
+      {/* Manual coupon campaign quick entry — interim flow before Salla coupon API */}
+      <Link
+        to="/campaigns/manual-coupon"
+        className="card p-4 flex items-center gap-4 hover:border-amber-300 hover:bg-amber-50/40 transition-colors group"
+      >
+        <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-600 flex items-center justify-center shrink-0 group-hover:bg-amber-200">
+          <Ticket className="w-5 h-5" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-slate-900 mb-0.5">{manualCoupon.title}</p>
+          <p className="text-xs text-slate-500 leading-relaxed">
+            {manualCoupon.description}
+          </p>
+        </div>
+        <ArrowEnd className="w-4 h-4 text-slate-400 shrink-0 rotate-180" />
+      </Link>
+
+
+        </div>
+      </details>
+      </>}
     </div>
   )
 }
