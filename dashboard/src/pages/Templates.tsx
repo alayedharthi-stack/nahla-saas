@@ -5,7 +5,7 @@ import {
   Eye, EyeOff, Trash2, ChevronLeft, ChevronRight, X, MessageSquare,
   Type, Link2, Phone, Copy as CopyIcon, Zap, Star,
   BookOpen, Download, Sparkles, Tag, Search, Bot, CheckCheck,
-  Pencil, PenLine, Send, Ticket, ChevronLeft as ArrowEnd,
+  Pencil, PenLine, Send, Ticket, Upload, ChevronLeft as ArrowEnd,
 } from 'lucide-react'
 import Badge from '../components/ui/Badge'
 import PageHeader from '../components/ui/PageHeader'
@@ -1198,15 +1198,17 @@ function EditModal({
   const headerComp = tpl.components.find(c => c.type === 'HEADER')
   const footerComp = tpl.components.find(c => c.type === 'FOOTER')
   const btnsComp   = tpl.components.find(c => c.type === 'BUTTONS')
-  const imageHeaderComp = headerComp?.format === 'IMAGE' ? headerComp : null
-  const headerImageUrl = imageHeaderComp?.example?.header_url?.trim() || null
+  const initialImageHeaderComp = headerComp?.format === 'IMAGE' ? headerComp : null
 
   const [headerText, setHeaderText] = useState(headerComp?.text ?? '')
   const [bodyText,   setBodyText]   = useState(bodyComp?.text ?? '')
   const [footerText, setFooterText] = useState(footerComp?.text ?? '')
   const [buttons, setButtons]       = useState<TemplateButton[]>(btnsComp?.buttons ?? [])
+  const [imageHeaderComp, setImageHeaderComp] = useState<TemplateComponent | null>(initialImageHeaderComp)
+  const [uploadingImage, setUploadingImage] = useState(false)
   const [saving, setSaving]         = useState(false)
   const [error, setError]           = useState('')
+  const headerImageUrl = imageHeaderComp?.example?.header_url?.trim() || null
 
   const updateBtn = (i: number, patch: Partial<TemplateButton>) =>
     setButtons(bs => bs.map((b, idx) => idx === i ? { ...b, ...patch } : b))
@@ -1241,6 +1243,24 @@ function EditModal({
       setError(msg ?? e.errors.saveFailed)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleHeaderImageUpload = async (file: File | undefined) => {
+    if (!file) return
+    setUploadingImage(true)
+    setError('')
+    try {
+      const result = await templatesApi.uploadHeaderImage(tpl.id, file)
+      const nextHeader = result.template.components.find(
+        component => component.type === 'HEADER' && component.format === 'IMAGE',
+      ) ?? null
+      setImageHeaderComp(nextHeader)
+      onSaved(result.template)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : e.imageUploadFailed)
+    } finally {
+      setUploadingImage(false)
     }
   }
 
@@ -1290,6 +1310,24 @@ function EditModal({
                 referrerPolicy="no-referrer"
                 data-testid="edit-template-image-header"
               />
+              <div className="flex items-center justify-between gap-3 mt-2">
+                <p className="text-[11px] text-slate-500">{e.imageUploadHint}</p>
+                <label className={`btn-secondary text-xs py-1.5 cursor-pointer ${uploadingImage ? 'opacity-50 pointer-events-none' : ''}`}>
+                  <Upload className={`w-3.5 h-3.5 ${uploadingImage ? 'animate-pulse' : ''}`} />
+                  {uploadingImage ? e.imageUploading : e.changeImage}
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    className="hidden"
+                    disabled={uploadingImage}
+                    onChange={event => {
+                      void handleHeaderImageUpload(event.target.files?.[0])
+                      event.target.value = ''
+                    }}
+                    data-testid="edit-template-image-upload"
+                  />
+                </label>
+              </div>
             </div>
           ) : (
             <div>

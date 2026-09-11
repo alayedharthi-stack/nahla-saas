@@ -1,6 +1,7 @@
 """Saved order-summary previews must receive a browser-loadable IMAGE URL."""
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -139,3 +140,90 @@ def test_managed_cod_edit_keeps_image_and_discards_text_header_replacement():
     assert [component["type"] for component in components] == ["HEADER", "BODY"]
     assert components[0]["format"] == "IMAGE"
     assert components[1]["text"] == "جديد"
+
+
+def test_managed_cod_edit_keeps_merchant_uploaded_image():
+    from core.commerce_lifecycle.cod_confirmation_assets import (
+        COD_CONFIRMATION_HEADER_ASSET_KEY,
+    )
+
+    merchant_url = "https://media.example/template-headers/7/custom.webp"
+    template = _template(
+        service_key="cod_confirmation",
+        components=[
+            {
+                "type": "HEADER",
+                "format": "IMAGE",
+                "example": {"header_url": merchant_url, "header_handle": []},
+            },
+            {"type": "BODY", "text": "قديم"},
+        ],
+        ai_generation_metadata={
+            "header_image_asset_key": COD_CONFIRMATION_HEADER_ASSET_KEY,
+            "merchant_header_image_url": merchant_url,
+            "header_image_source": "merchant_upload",
+        },
+    )
+
+    components = router._restore_managed_cod_image_header(
+        template,
+        [{"type": "BODY", "text": "تم تعديل النص"}],
+    )
+
+    assert components[0]["example"]["header_url"] == merchant_url
+    assert components[1]["text"] == "تم تعديل النص"
+
+
+def test_header_upload_replaces_image_and_persists_merchant_source(monkeypatch):
+    from core.commerce_lifecycle.cod_confirmation_assets import (
+        COD_CONFIRMATION_HEADER_ASSET_KEY,
+    )
+    from services.catalog_media_storage import MAX_UPLOAD_BYTES
+
+    template = _template(
+        service_key="cod_confirmation",
+        components=[
+            {"type": "HEADER", "format": "IMAGE"},
+            {"type": "BODY", "text": "هل تريد تأكيد الطلب؟"},
+        ],
+        ai_generation_metadata={
+            "header_image_asset_key": COD_CONFIRMATION_HEADER_ASSET_KEY,
+        },
+    )
+    query = MagicMock()
+    query.filter.return_value.first.return_value = template
+    db = MagicMock()
+    db.query.return_value = query
+    monkeypatch.setattr(router, "resolve_tenant_id", lambda _request: 7)
+    merchant_url = "https://media.example/template-headers/7/new.webp"
+    monkeypatch.setattr(
+        "services.template_media_storage.upload_template_header_image",
+        lambda **_kwargs: {"image_url": merchant_url},
+    )
+
+    class Upload:
+        read_size = None
+
+        async def read(self, size):
+            self.read_size = size
+            return b"valid-image-bytes"
+
+    upload = Upload()
+    result = asyncio.run(
+        router.upload_template_header_image(
+            template_id=template.id,
+            request=MagicMock(),
+            file=upload,
+            db=db,
+        )
+    )
+
+    assert upload.read_size == MAX_UPLOAD_BYTES + 1
+    assert result["image_url"] == merchant_url
+    assert template.components[0]["example"] == {
+        "header_url": merchant_url,
+        "header_handle": [],
+    }
+    assert template.ai_generation_metadata["header_image_source"] == "merchant_upload"
+    assert template.ai_generation_metadata["merchant_header_image_url"] == merchant_url
+    db.commit.assert_called_once()

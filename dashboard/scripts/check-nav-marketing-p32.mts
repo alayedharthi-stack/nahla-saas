@@ -227,9 +227,12 @@ assert(
 )
 assert(
   'template editor preserves and previews imported IMAGE headers',
-  whatsappTemplatesSource.includes("const imageHeaderComp = headerComp?.format === 'IMAGE'")
+  whatsappTemplatesSource.includes("const initialImageHeaderComp = headerComp?.format === 'IMAGE'")
+    && whatsappTemplatesSource.includes('const [imageHeaderComp, setImageHeaderComp]')
     && whatsappTemplatesSource.includes('out.push({\n        ...imageHeaderComp')
     && whatsappTemplatesSource.includes('data-testid="edit-template-image-header"')
+    && whatsappTemplatesSource.includes('data-testid="edit-template-image-upload"')
+    && whatsappTemplatesSource.includes('templatesApi.uploadHeaderImage')
     && whatsappTemplatesSource.includes('headerImageUrl={headerImageUrl}'),
 )
 assert(

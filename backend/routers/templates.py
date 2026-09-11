@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("nahla.templates")
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -1603,6 +1603,86 @@ async def update_template(
     db.commit()
     db.refresh(tpl)
     return _tpl_to_dict(tpl)
+
+
+@router.post("/templates/{template_id}/header-image")
+async def upload_template_header_image(
+    template_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Replace a draft lifecycle template's IMAGE header with a merchant upload."""
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if str(tpl.status or "").upper() not in {"DRAFT", "REJECTED"}:
+        raise HTTPException(
+            status_code=409,
+            detail="يمكن تغيير الصورة في المسودة فقط قبل إرسالها إلى Meta.",
+        )
+    if str(tpl.service_key or "") not in {"cod_confirmation", "order_confirmation"}:
+        raise HTTPException(status_code=400, detail="template_image_header_not_supported")
+
+    from services.catalog_media_storage import (  # noqa: PLC0415
+        CatalogMediaStorageError,
+        CatalogMediaValidationError,
+        MAX_UPLOAD_BYTES,
+    )
+    from services.template_media_storage import (  # noqa: PLC0415
+        upload_template_header_image as store_header_image,
+    )
+
+    try:
+        # Read one byte beyond the limit so oversized uploads are rejected
+        # without buffering an arbitrarily large request in application memory.
+        content = await file.read(MAX_UPLOAD_BYTES + 1)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="upload_read_failed") from exc
+
+    try:
+        uploaded = store_header_image(tenant_id=tenant_id, content=content)
+    except CatalogMediaValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CatalogMediaStorageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    components = _restore_managed_cod_image_header(tpl, list(tpl.components or []))
+    image_replaced = False
+    for component in components:
+        if (
+            str((component or {}).get("type") or "").upper() == "HEADER"
+            and str((component or {}).get("format") or "").upper() == "IMAGE"
+        ):
+            component["example"] = {
+                "header_url": uploaded["image_url"],
+                "header_handle": [],
+            }
+            image_replaced = True
+            break
+    if not image_replaced:
+        raise HTTPException(status_code=400, detail="template_image_header_not_supported")
+
+    tpl.components = components
+    tpl.status = "DRAFT"
+    tpl.rejection_reason = None
+    tpl.meta_template_id = None
+    tpl.updated_at = datetime.now(timezone.utc)
+    tpl.ai_generation_metadata = {
+        **(tpl.ai_generation_metadata or {}),
+        "merchant_header_image_url": uploaded["image_url"],
+        "header_image_source": "merchant_upload",
+    }
+    db.commit()
+    db.refresh(tpl)
+    return {
+        "template": _tpl_to_dict(tpl, db=db),
+        "image_url": uploaded["image_url"],
+    }
 
 
 @router.put("/templates/{template_id}/status")

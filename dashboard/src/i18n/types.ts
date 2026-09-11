@@ -1492,6 +1492,10 @@ export interface Translations {
       previewLabel: string
       save: string
       saving: string
+      changeImage: string
+      imageUploading: string
+      imageUploadHint: string
+      imageUploadFailed: string
       headerPlaceholder: string
       bodyPlaceholder: string
       footerPlaceholder: string
