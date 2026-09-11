@@ -216,12 +216,12 @@ assert(
     && libraryFilterSource.includes('order_summary uses order_confirmation internally'),
 )
 assert(
-  'library preview image is scoped to order_summary',
-  whatsappTemplatesSource.includes("preview.key === 'order_summary'"),
+  'library preview renders declared image-backed templates',
+  whatsappTemplatesSource.includes("preview.header_type === 'image'"),
 )
 assert(
-  'saved order_summary preview renders its IMAGE header',
-  whatsappTemplatesSource.includes('getOrderSummaryHeaderImageUrl')
+  'saved lifecycle preview renders its IMAGE header',
+  whatsappTemplatesSource.includes('getLifecycleHeaderImageUrl')
     && whatsappTemplatesSource.includes('headerImageUrl={headerImageUrl}')
     && whatsappTemplatesSource.includes('data-testid="template-order-summary-header"'),
 )

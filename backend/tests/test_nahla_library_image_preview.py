@@ -12,6 +12,9 @@ from starlette.requests import Request
 from core.commerce_lifecycle.order_confirmation_assets import (
     ORDER_CONFIRMATION_HEADER_R2_DEFAULT_URL,
 )
+from core.commerce_lifecycle.cod_confirmation_assets import (
+    COD_CONFIRMATION_HEADER_DEFAULT_URL,
+)
 from services.whatsapp_templates.nahla_templates import (
     get_all_templates,
     get_template_by_key,
@@ -40,6 +43,13 @@ def test_component_custom_image_is_not_replaced_by_platform_default():
     assert template_preview(definition)["preview_header_image_url"] == image["example"]["header_url"]
 
 
+def test_cod_confirmation_preview_uses_its_own_image():
+    definition = get_template_by_key("cod_confirmation")
+    preview = template_preview(definition)
+    assert preview["header_type"] == "image"
+    assert preview["preview_header_image_url"] == COD_CONFIRMATION_HEADER_DEFAULT_URL
+
+
 def test_text_only_order_confirmation_gets_no_image_fallback():
     definition = deepcopy(get_template_by_key("order_summary"))
     definition["components"] = [c for c in definition["components"] if c["type"] != "HEADER"]
@@ -48,9 +58,9 @@ def test_text_only_order_confirmation_gets_no_image_fallback():
     assert "preview_header_image_url" not in preview
 
 
-def test_other_library_services_do_not_gain_order_confirmation_image():
+def test_other_library_services_do_not_gain_lifecycle_image():
     for definition in get_all_templates():
-        if definition.get("service_key") == "order_confirmation":
+        if definition.get("service_key") in {"order_confirmation", "cod_confirmation"}:
             continue
         preview = template_preview(definition)
         assert "header_type" not in preview, definition["key"]
