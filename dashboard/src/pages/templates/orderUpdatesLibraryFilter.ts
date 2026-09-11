@@ -6,7 +6,13 @@ const ORDER_UPDATE_SERVICE_SET = new Set<string>(ORDER_UPDATE_SERVICE_KEYS)
 export const ORDER_UPDATES_LIBRARY_TAG = 'order_updates' as const
 
 export function isOrderUpdatesLibraryTemplate(tpl: NahlaLibraryTemplate): boolean {
-  return ORDER_UPDATE_SERVICE_SET.has(tpl.service_key)
+  // The public order-updates filter is explicit so lifecycle templates with
+  // distinct service keys (for example post-delivery) remain discoverable.
+  // Meta-review demos share service keys with real templates, but must never
+  // be presented as merchant-facing order-update templates.
+  if (tpl.filter_tags.includes('english_demo')) return false
+  return tpl.filter_tags.includes(ORDER_UPDATES_LIBRARY_TAG)
+    || ORDER_UPDATE_SERVICE_SET.has(tpl.service_key)
 }
 
 export function filterOrderUpdatesLibraryTemplates(

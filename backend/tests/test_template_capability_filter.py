@@ -162,6 +162,12 @@ class TestFilterAndGroup:
         keys = {t["key"] for t in result["templates"]}
         assert "order_summary" not in keys
 
+    def test_order_summary_is_visible_without_external_tracking(self):
+        caps = _caps(has_external_store=True, supports_external_checkout=True)
+        result = filter_and_group_library_templates(get_all_templates(), caps)
+        keys = {t["key"] for t in result["templates"]}
+        assert "order_summary" in keys
+
     def test_default_order_channel_whatsapp_sorts_groups(self):
         result = filter_and_group_library_templates(
             get_all_templates(),
