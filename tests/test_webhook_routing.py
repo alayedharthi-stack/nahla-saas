@@ -323,3 +323,68 @@ def test_dispatch_message_closes_db_session_after_merchant_route(db):
 
     mock_merchant.assert_awaited_once()
     assert close_calls["count"] == 1, "_dispatch_message leaked its DB session on merchant route"
+
+
+@pytest.mark.parametrize("body", ["ابي جاكيت", "أريد صورة حذاء رياضي أبيض"])
+def test_dispatch_uses_persisted_dedup_after_worker_cache_reset(db, body):
+    """A provider retry on a fresh worker must stop before merchant execution."""
+    from core.conversation_engine import ConversationState, IdempotencyGuard
+    from core.inbound_dedup import reset_cache
+    import routers.whatsapp_webhook as webhook
+
+    tenant, _ = _seed(db, tenant_name="Generic store", phone_number_id="PID_RETRY",
+                      waba_id="WABA_RETRY")
+    tenant_id = tenant.id
+    sender = "966500000123"
+    msg_id = "wamid.persisted-retry"
+    state = ConversationState(phone=sender)
+    IdempotencyGuard.mark_processed(state, msg_id)
+    reset_cache()
+    with (
+        patch.object(webhook, "get_db", return_value=iter([db])),
+        patch.object(webhook.StateManager, "load", return_value=state) as load,
+        patch.object(webhook.StateManager, "save") as save,
+        patch.object(webhook, "_handle_merchant_message", new=AsyncMock()) as merchant,
+        patch.object(webhook, "_post_wa", new=AsyncMock()) as send,
+    ):
+        asyncio.run(webhook._dispatch_message("PID_RETRY", {
+            "from": sender, "id": msg_id, "type": "text", "text": {"body": body},
+        }, {}))
+    load.assert_called_once_with(db, phone=sender, tenant_id=tenant_id)
+    save.assert_not_called()
+    merchant.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+def test_dispatch_persists_fresh_id_and_delivers_unchanged_customer_text(db):
+    """The restored guard must allow a new turn with the correct tenant/text."""
+    from core.conversation_engine import ConversationState
+    from core.inbound_dedup import reset_cache
+    import routers.whatsapp_webhook as webhook
+
+    tenant, _ = _seed(db, tenant_name="Generic clothing store", phone_number_id="PID_FRESH",
+                      waba_id="WABA_FRESH")
+    tenant_id = tenant.id
+    sender = "966500000123"
+    state = ConversationState(phone=sender)
+    body = "أريد صورة قميص قطني أزرق"
+    reset_cache()
+    with (
+        patch.object(webhook, "get_db", return_value=iter([db])),
+        patch.object(webhook.StateManager, "load", return_value=state) as load,
+        patch.object(webhook.StateManager, "save") as save,
+        patch.object(webhook, "_is_platform_tenant", return_value=False),
+        patch.object(webhook, "_handle_merchant_message", new=AsyncMock()) as merchant,
+        patch.object(webhook, "_post_wa", new=AsyncMock()) as send,
+    ):
+        asyncio.run(webhook._dispatch_message("PID_FRESH", {
+            "from": sender, "id": "wamid.fresh", "type": "text", "text": {"body": body},
+        }, {}))
+    load.assert_called_once_with(db, phone=sender, tenant_id=tenant_id)
+    save.assert_called_once_with(db, state, tenant_id=tenant_id)
+    assert state.processed_ids == ["wamid.fresh"]
+    merchant.assert_awaited_once()
+    assert merchant.await_args.kwargs["tenant_id"] == tenant_id
+    assert merchant.await_args.kwargs["text"] == body
+    assert merchant.await_args.kwargs["wa_msg_id"] == "wamid.fresh"
+    send.assert_not_awaited()

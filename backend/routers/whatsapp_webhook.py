@@ -4440,7 +4440,6 @@ async def _dispatch_message(
         text = normalized_inbound.text.strip()
         route_unclear_audio_order_support = False
         try:
-            from core.conversation_engine import StateManager  # noqa: PLC0415
             from modules.ai.media.routing_guard import (  # noqa: PLC0415
                 resolve_inbound_semantic_routing,
             )
