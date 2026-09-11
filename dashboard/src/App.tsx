@@ -174,6 +174,7 @@ export default function App() {
             <Route path="campaigns/manual-coupon" element={<ManualCouponCampaign />} />
             <Route path="marketing"            element={<MarketingHub />} />
             <Route path="marketing/templates"  element={<NahlaTemplateLibrary />} />
+            <Route path="marketing/templates/imported" element={<NahlaTemplateLibrary />} />
             <Route path="products"           element={<Navigate to="/catalog" replace />} />
             <Route path="orders-hub"         element={<RedirectPreserveSearch to="/orders" />} />
             <Route path="automation"         element={<AutomationHub />} />

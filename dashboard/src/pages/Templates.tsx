@@ -2239,7 +2239,7 @@ export default function Templates() {
               // Keep the record id so that page can focus the exact imported
               // template and show its real Meta state, rather than only the
               // generic service configuration.
-              navigate(`/marketing/templates?imported=${tpl.id}#imported-store-templates`)
+              navigate(`/marketing/templates/imported?imported=${tpl.id}`)
               return
             }
             setTemplates(ts => [tpl, ...ts])
