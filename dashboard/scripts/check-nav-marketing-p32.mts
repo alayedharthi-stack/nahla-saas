@@ -171,11 +171,12 @@ assert(
 )
 
 assert(
-  'TemplatesHub exposes exactly two hub cards',
+  'TemplatesHub exposes the library entry plus exactly two template-area cards',
   (templatesHubSource.match(/to:\s*'\/[^']+'/g) ?? []).length === 2
     && templatesHubSource.includes("to: '/templates'")
     && templatesHubSource.includes("to: '/marketing/templates'")
-    && !templatesHubSource.includes('nahlaLibrary'),
+    && templatesHubSource.includes('to="/templates?library=nahla"')
+    && !templatesHubSource.includes('NahlaLibraryModal'),
 )
 
 assert(
@@ -208,10 +209,11 @@ assert(
 )
 const whatsappTemplatesSource = source('../src/pages/Templates.tsx')
 assert(
-  'WhatsApp templates page excludes order-update service rows',
+  'shared library includes store templates while the WhatsApp status list excludes their rows',
   whatsappTemplatesSource.includes('isOrderUpdateServiceKey')
-    && whatsappTemplatesSource.includes('filterWhatsAppLibraryTemplates')
-    && !whatsappTemplatesSource.includes("'order_updates',"),
+    && whatsappTemplatesSource.includes("filter(template => !isOrderUpdateServiceKey")
+    && whatsappTemplatesSource.includes("'order_updates',")
+    && whatsappTemplatesSource.includes('filterOrderUpdatesLibraryTemplates'),
 )
 const libraryFilterSource = source('../src/pages/templates/orderUpdatesLibraryFilter.ts')
 assert(

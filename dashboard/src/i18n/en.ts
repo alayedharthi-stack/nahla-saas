@@ -235,8 +235,8 @@ const en: Translations = {
       title:    'Templates',
       subtitle: 'WhatsApp templates and store templates',
       library: {
-        title: 'Shared template library',
-        description: 'Browse Nahla templates for e-commerce and WhatsApp in one place, then manage them in the appropriate section.',
+        title: 'Nahla template library',
+        description: 'Browse ready-made e-commerce and WhatsApp templates, then customize and track their status.',
       },
       sections: {
         title: 'Template sections',
