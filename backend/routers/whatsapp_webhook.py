@@ -319,12 +319,14 @@ def _otp_merge_save_metadata(
             extract_reply_metadata_export,
         )
 
-        base.update(
-            extract_reply_metadata_export(
-                brain_result,
-                chosen_path=str((brain_result or {}).get("chosen_path") or ""),
-            )
+        brain_metadata = extract_reply_metadata_export(
+            brain_result,
+            chosen_path=str((brain_result or {}).get("chosen_path") or ""),
         )
+        # Later owners may already have stamped post-compose transformations.
+        # Brain metadata fills missing fields without overwriting that evidence.
+        for key, value in brain_metadata.items():
+            base.setdefault(key, value)
         ownership = base.get("persona_ownership")
         if isinstance(ownership, dict) and ownership.get("expression_owner"):
             base["final_expression_owner"] = ownership.get("expression_owner")
