@@ -3513,15 +3513,18 @@ async def import_nahla_template(
     # Deactivate any existing active template for this service slot BEFORE inserting,
     # so the unique constraint on (tenant_id, service_key, step_number, is_active)
     # is never violated during the flush.
-    if svc and step is not None:
-        from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+    if svc:
         from models import WhatsAppTemplate as _WaTpl  # noqa: PLC0415
-        db.query(_WaTpl).filter(
+        active_slot = db.query(_WaTpl).filter(
             _WaTpl.tenant_id   == tenant_id,
             _WaTpl.service_key == svc,
-            _WaTpl.step_number == step,
             _WaTpl.is_active   == True,  # noqa: E712
-        ).update({"is_active": False}, synchronize_session="fetch")
+        )
+        if step is None:
+            active_slot = active_slot.filter(_WaTpl.step_number.is_(None))
+        else:
+            active_slot = active_slot.filter(_WaTpl.step_number == step)
+        active_slot.update({"is_active": False}, synchronize_session="fetch")
 
     now = datetime.now(timezone.utc)
     new_tpl = WhatsAppTemplate(

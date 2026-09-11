@@ -141,7 +141,6 @@ _TEMPLATE_OVERRIDES: Dict[str, TemplateFilterMeta] = {
         intent="order_confirmed",
         order_channel="external_store",
         required_capabilities=("supports_external_checkout",),
-        required_buttons=("order_tracking_url",),
     ),
     "order_confirmed": TemplateFilterMeta(
         intent="order_confirmed",
