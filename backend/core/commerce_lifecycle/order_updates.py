@@ -489,16 +489,20 @@ def resolve_active_and_pending(
     header_type = (preview_pub or {}).get("header_type") or "none"
     preview_footer = _extract_footer_text(preview_components)
     preview_header_image_url: Optional[str] = None
-    if str(header_type).lower() == "image" and service_key == "order_confirmation":
+    if str(header_type).lower() == "image" and service_key in {
+        "order_confirmation",
+        "cod_confirmation",
+    }:
         from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
-            resolve_order_confirmation_preview_header_url,
+            resolve_lifecycle_preview_header_url,
         )
 
-        preview_header_image_url = resolve_order_confirmation_preview_header_url(
+        preview_header_image_url = resolve_lifecycle_preview_header_url(
             db,
             int(tenant_id),
             preview_components,
             preview_metadata if isinstance(preview_metadata, dict) else None,
+            service_key=service_key,
         )
     persisted = get_order_update_flags(db, tenant_id).get(
         service_key, _default_enabled_for(service_key)

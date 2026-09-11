@@ -67,10 +67,17 @@ def test_saved_order_summary_projects_resolved_image_url(monkeypatch):
     resolver.assert_called_once()
 
 
-def test_saved_text_only_and_cod_templates_do_not_gain_order_summary_image():
+def test_saved_text_only_stays_text_and_cod_gets_its_own_image():
+    from core.commerce_lifecycle.cod_confirmation_assets import (
+        COD_CONFIRMATION_HEADER_DEFAULT_URL,
+    )
+
     image_components = [{"type": "HEADER", "format": "IMAGE"}]
     text_only = _template(service_key="order_confirmation", components=[{"type": "BODY", "text": "تم"}])
     cod = _template(service_key="cod_confirmation", components=image_components)
 
     assert "header_url" not in router._tpl_to_dict(text_only, db=MagicMock())["components"][0].get("example", {})
-    assert "header_url" not in router._tpl_to_dict(cod, db=MagicMock())["components"][0].get("example", {})
+    assert (
+        router._tpl_to_dict(cod, db=MagicMock())["components"][0]["example"]["header_url"]
+        == COD_CONFIRMATION_HEADER_DEFAULT_URL
+    )
