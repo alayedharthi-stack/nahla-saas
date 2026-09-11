@@ -1051,21 +1051,27 @@ class StateManager:
     """
 
     @classmethod
+    def _find_conversation(cls, db, phone: str, tenant_id: int):
+        from core.order_flow import _find_conversation_by_phone  # noqa: PLC0415
+        from models import Conversation, Customer  # noqa: PLC0415
+        from services.customer_intelligence import normalize_phone  # noqa: PLC0415
+
+        return _find_conversation_by_phone(
+            db, tenant_id=tenant_id,
+            phones=(phone, normalize_phone(phone) or phone),
+            Conversation=Conversation, Customer=Customer,
+        )
+
+    @classmethod
     def load(cls, db, phone: str, tenant_id: Optional[int] = None) -> "ConversationState":
         _tid = tenant_id if tenant_id is not None else PLATFORM_TENANT_ID
         try:
-            from models import Conversation  # noqa: PLC0415
-            conv = (
-                db.query(Conversation)
-                .filter(
-                    Conversation.tenant_id == _tid,
-                    Conversation.extra_metadata["phone"].astext == phone,
-                )
-                .order_by(Conversation.id.desc())
-                .first()
-            )
+            conv = cls._find_conversation(db, phone, _tid)
             if conv and conv.extra_metadata and "stage" in conv.extra_metadata:
-                return ConversationState.from_dict(dict(conv.extra_metadata))
+                persisted = dict(conv.extra_metadata)
+                persisted["phone"] = phone
+                persisted["tenant_id"] = _tid
+                return ConversationState.from_dict(persisted)
         except Exception as exc:
             logger.warning("[StateManager] load error phone=%s tenant=%s: %s", phone, _tid, exc)
         state = ConversationState(phone=phone)
@@ -1087,18 +1093,20 @@ class StateManager:
         # Prefer explicit tenant_id arg, then the one attached to the state, then platform default
         _tid = tenant_id if tenant_id is not None else getattr(state, "tenant_id", None) or PLATFORM_TENANT_ID
         try:
-            from models import Conversation  # noqa: PLC0415
             state.updated_at = time.time()
             meta = state.to_dict()
-            conv = (
-                db.query(Conversation)
-                .filter(
-                    Conversation.tenant_id == _tid,
-                    Conversation.extra_metadata["phone"].astext == state.phone,
-                )
-                .order_by(Conversation.id.desc())
-                .first()
-            )
+            conv = cls._find_conversation(db, state.phone, _tid)
+            if conv is None:
+                from routers.conversations import _get_or_create_conversation  # noqa: PLC0415
+
+                # First-contact dedup must use the customer-linked row that
+                # inbound persistence and Brain will subsequently retrieve.
+                conv = _get_or_create_conversation(db, _tid, state.phone)
+            elif conv.customer_id is None:
+                from routers.conversations import _get_or_create_customer  # noqa: PLC0415
+
+                # Adopt an older phone-only row without discarding its state.
+                conv.customer_id = _get_or_create_customer(db, _tid, state.phone).id
             if conv:
                 # ── CRITICAL: merge with existing metadata ──────────────────
                 # Direct ``conv.extra_metadata = meta`` would wipe keys this
@@ -1123,13 +1131,6 @@ class StateManager:
                     flag_modified(conv, "extra_metadata")
                 except Exception:
                     pass
-            else:
-                conv = Conversation(
-                    tenant_id=_tid,
-                    status="active",
-                    extra_metadata=meta,
-                )
-                db.add(conv)
             db.commit()
             return conv
         except Exception as exc:

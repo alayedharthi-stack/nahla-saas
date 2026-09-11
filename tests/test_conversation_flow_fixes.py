@@ -707,6 +707,7 @@ class _FakeConvWithMeta:
     def __init__(self, conv_id: int, tenant_id: int, extra_metadata: dict):
         self.id = conv_id
         self.tenant_id = tenant_id
+        self.customer_id = 42
         self.status = "active"
         self.extra_metadata = extra_metadata
 
