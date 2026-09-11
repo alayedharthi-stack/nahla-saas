@@ -6,6 +6,7 @@
  * CI-safe: reads source files as text — no imports from app modules (avoids lucide-react).
  */
 import { readFileSync } from 'node:fs'
+import './check-template-organization.mts'
 
 let failed = 0
 
@@ -44,7 +45,7 @@ function extractSimplifiedNavPaths(tsSource: string): string[] {
 
 const navDataSource = source('../src/lib/merchantNavSimplified.ts')
 const appSource = source('../src/App.tsx')
-const templateLibrarySource = source('../src/pages/NahlaTemplateLibrary.tsx')
+const templateLibrarySource = source('../src/pages/Templates.tsx')
 const templatesHubSource = source('../src/pages/TemplatesHub.tsx')
 const flagsSource = source('../src/lib/platformFeatureFlags.ts')
 
@@ -120,7 +121,7 @@ assert(
 )
 assert(
   'App.tsx registers /marketing/templates route',
-  appSource.includes('path="marketing/templates"') && appSource.includes('NahlaTemplateLibrary'),
+  appSource.includes('path="marketing/templates"') && appSource.includes('LegacyStoreTemplatesRedirect'),
 )
 assert(
   'App.tsx redirects inbox hub to conversations',
@@ -171,49 +172,42 @@ assert(
 )
 
 assert(
-  'TemplatesHub exposes the library entry plus exactly two template-area cards',
-  (templatesHubSource.match(/to:\s*'\/[^']+'/g) ?? []).length === 2
-    && templatesHubSource.includes("to: '/templates'")
-    && templatesHubSource.includes("to: '/marketing/templates'")
-    && templatesHubSource.includes('to="/templates?library=nahla"')
-    && !templatesHubSource.includes('NahlaLibraryModal'),
-)
-
-assert(
-  'Store templates page keeps #ecommerce anchor for legacy links',
-  templateLibrarySource.includes('id="ecommerce"'),
+  'TemplatesHub redirects to the unified list without forcing the modal open',
+  templatesHubSource.includes('/templates${search}')
+    && !templatesHubSource.includes('library=nahla')
+    && !templatesHubSource.includes('HubCardGrid'),
 )
 assert(
-  'Store templates page anchors order-updates section',
-  templateLibrarySource.includes('id="order-updates"'),
+  'Legacy store URLs preserve imported id and select store channel',
+  appSource.includes("params.set('channel', 'store')")
+    && appSource.includes("new URLSearchParams(search)")
+    && appSource.includes('path="marketing/templates/imported"'),
 )
 assert(
-  'Store templates page does not call nahlaLibrary for store cards',
-  !templateLibrarySource.includes('templatesApi.nahlaLibrary')
-    && !templateLibrarySource.includes("from '../api/templates'"),
+  'Settings has a dedicated route; store routes no longer render settings',
+  appSource.includes('path="templates/order-updates" element={<Templates orderUpdates')
+    && appSource.includes('path="marketing/templates" element={<LegacyStoreTemplatesRedirect'),
+)
+const whatsappTemplatesSource = templateLibrarySource
+assert(
+  'Unified list retains all template records and has three channel filters',
+  whatsappTemplatesSource.includes('setTemplates(r.templates)')
+    && whatsappTemplatesSource.includes("['all', 'whatsapp', 'store']")
+    && whatsappTemplatesSource.includes('matchesTemplateChannel'),
 )
 assert(
-  'Store templates page loads order updates via ORDER_UPDATE_SERVICE_KEYS',
-  templateLibrarySource.includes('ORDER_UPDATE_SERVICE_KEYS')
-    && templateLibrarySource.includes('orderUpdatesApi.getService'),
+  'Library import closes modal, deduplicates and resets status/source filters',
+  whatsappTemplatesSource.includes('upsertImportedTemplate(ts, tpl)')
+    && whatsappTemplatesSource.includes("setFilterTab('all')")
+    && whatsappTemplatesSource.includes("setSourceFilter('all')")
+    && whatsappTemplatesSource.includes('if (tpl.editable) setEditTemplate(tpl)'),
 )
 assert(
-  'Store templates page does not expose order-updates as a primary hub family key',
-  !templateLibrarySource.includes('ORDER_UPDATE_TEMPLATE_KEYS'),
-)
-assert(
-  'Store templates page keeps order-update settings inline',
-  templateLibrarySource.includes('OrderUpdatesSettingsTab')
-    && templateLibrarySource.includes('id="order-update-settings"')
-    && !templateLibrarySource.includes('/settings?tab=order_updates'),
-)
-const whatsappTemplatesSource = source('../src/pages/Templates.tsx')
-assert(
-  'shared library includes store templates while the WhatsApp status list excludes their rows',
-  whatsappTemplatesSource.includes('isOrderUpdateServiceKey')
-    && whatsappTemplatesSource.includes("filter(template => !isOrderUpdateServiceKey")
-    && whatsappTemplatesSource.includes("'order_updates',")
-    && whatsappTemplatesSource.includes('filterOrderUpdatesLibraryTemplates'),
+  'Settings uses shared template actions and manual submission',
+  whatsappTemplatesSource.includes('renderTemplateControl={serviceKey')
+    && whatsappTemplatesSource.includes('tpl.service_key === serviceKey')
+    && whatsappTemplatesSource.includes('onSubmit={() => handleSubmitTemplate(tpl.id)}')
+    && source('../src/components/settings/OrderUpdatesSettingsTab.tsx').includes('renderTemplateControl ? renderTemplateControl(meta.key)'),
 )
 const libraryFilterSource = source('../src/pages/templates/orderUpdatesLibraryFilter.ts')
 assert(
@@ -235,11 +229,6 @@ assert(
   'Settings tab follows order_updates deep-link changes',
   source('../src/pages/Settings.tsx').includes('Keep the rendered tab aligned with deep links')
     && source('../src/pages/Settings.tsx').includes('setActiveTab(nextTab)'),
-)
-assert(
-  'Store templates page documents Meta open-window scope comment',
-  templateLibrarySource.includes('Open-window')
-    && templateLibrarySource.includes('Lifecycle'),
 )
 assert(
   'Active-path helper prefers longer destination matches',

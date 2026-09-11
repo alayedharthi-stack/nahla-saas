@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertCircle, CheckCircle, Clock, Loader2, Package, Send, ToggleLeft, ToggleRight,
 } from 'lucide-react'
@@ -249,7 +249,9 @@ function ServiceCard({
   apiMissing,
   onSettingsChange,
   onDetailChange,
+  renderTemplateControl,
 }: {
+  renderTemplateControl?: (key: OrderUpdateServiceKey) => ReactNode
   meta: ServiceMeta
   settings: OrderUpdatesSettings | null
   detail: OrderUpdateServiceDetail | null
@@ -374,9 +376,9 @@ function ServiceCard({
             </p>
           </div>
         </div>
-        <span className={`shrink-0 text-[11px] font-medium px-2 py-1 rounded-full border ${metaStatusClasses(metaStatus)}`}>
+        {!renderTemplateControl && <span className={`shrink-0 text-[11px] font-medium px-2 py-1 rounded-full border ${metaStatusClasses(metaStatus)}`}>
           {metaStatusLabel(metaStatus, isAr)}
-        </span>
+        </span>}
       </div>
 
       <div className="p-5 space-y-4">
@@ -415,6 +417,7 @@ function ServiceCard({
           </p>
         )}
 
+        {renderTemplateControl ? renderTemplateControl(meta.key) : <>
         <div>
           <label className="block text-sm font-medium text-slate-700 mb-1">
             {isAr ? 'نص الرسالة' : 'Message text'}
@@ -524,6 +527,7 @@ function ServiceCard({
             </span>
           )}
         </div>
+        </>}
       </div>
     </div>
   )
@@ -531,7 +535,9 @@ function ServiceCard({
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
 
-export default function OrderUpdatesSettingsTab() {
+export default function OrderUpdatesSettingsTab({ renderTemplateControl }: {
+  renderTemplateControl?: (key: OrderUpdateServiceKey) => ReactNode
+} = {}) {
   const { lang } = useLanguage()
   const isAr = lang === 'ar'
 
@@ -671,6 +677,7 @@ export default function OrderUpdatesSettingsTab() {
         <ServiceCard
           key={key}
           meta={SERVICE_META[key]}
+          renderTemplateControl={renderTemplateControl}
           settings={settings}
           detail={details[key] ?? null}
           apiMissing={apiMissing}

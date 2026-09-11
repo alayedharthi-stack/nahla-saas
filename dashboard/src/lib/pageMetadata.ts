@@ -24,7 +24,11 @@ const PAGE_META: Record<string, PageMetaSelector> = {
   '/templates-hub':              tr => tr.pages.templatesHub,
   '/channels':                   tr => tr.pages.channelsHub,
   '/settings-hub':               tr => tr.pages.settingsHub,
-  '/templates':                  tr => tr.pages.templates,
+  '/templates':                  tr => tr.pages.templatesHub,
+  '/templates/order-updates':     tr => ({
+    title: tr.pages.ecommerceTemplates.orderUpdates.opsLink,
+    subtitle: '',
+  }),
   '/templates/manual-coupon':    tr => tr.pages.campaigns,
   '/integrations':               tr => tr.pages.integrations,
   '/analytics':                  tr => tr.pages.analytics,

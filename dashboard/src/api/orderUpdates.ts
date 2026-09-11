@@ -1,37 +1,7 @@
 import { apiCall } from './client'
-
-// ── Service keys (lifecycle slice A scope) ───────────────────────────────────
-
-export type OrderUpdateServiceKey =
-  | 'order_confirmation'
-  | 'cod_confirmation'
-  | 'payment_pending'
-  | 'payment_confirmed'
-  | 'order_preparing'
-  | 'order_ready'
-  | 'shipping_tracking'
-  | 'out_for_delivery'
-  | 'order_delivered'
-  | 'order_cancelled'
-  | 'order_refunded'
-
-export const ORDER_UPDATE_SERVICE_KEYS: readonly OrderUpdateServiceKey[] = [
-  'order_confirmation',
-  'cod_confirmation',
-  'payment_pending',
-  'payment_confirmed',
-  'order_preparing',
-  'order_ready',
-  'shipping_tracking',
-  'out_for_delivery',
-  'order_delivered',
-  'order_cancelled',
-  'order_refunded',
-] as const
-
-export function isOrderUpdateServiceKey(key: string): key is OrderUpdateServiceKey {
-  return (ORDER_UPDATE_SERVICE_KEYS as readonly string[]).includes(key)
-}
+import type { OrderUpdateServiceKey } from '../lib/orderUpdateServiceKeys'
+export { ORDER_UPDATE_SERVICE_KEYS, isOrderUpdateServiceKey } from '../lib/orderUpdateServiceKeys'
+export type { OrderUpdateServiceKey } from '../lib/orderUpdateServiceKeys'
 
 // ── Types (resilient to partial / evolving backend payloads) ─────────────────
 

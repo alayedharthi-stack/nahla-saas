@@ -222,7 +222,10 @@ async def ensure_order_confirmation_image_header_for_meta(
         tenant_id=int(tenant_id),
         operation="template_submit",
     )
-    access_token = str(ctx.access_token or "").strip()
+    # ``get_token_for_operation`` returns WhatsAppTokenContext whose public
+    # token field is ``token``.  Using the old ``access_token`` attribute
+    # stopped the Meta header-upload path before it could create a handle.
+    access_token = str(ctx.token or "").strip()
     if not access_token:
         raise ValueError("missing_access_token")
 
