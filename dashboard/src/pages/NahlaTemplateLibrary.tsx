@@ -120,10 +120,10 @@ export default function NahlaTemplateLibrary() {
   }, [load])
 
   useEffect(() => {
-    if (hash === '#ecommerce' || hash === '#order-updates') {
+    if (hash === '#ecommerce' || hash === '#order-updates' || hash === '#imported-store-templates') {
       setFilter('order_updates')
       requestAnimationFrame(() => {
-        document.getElementById('order-updates')?.scrollIntoView({
+        document.getElementById(hash.slice(1))?.scrollIntoView({
           behavior: 'smooth',
           block: 'start',
         })
