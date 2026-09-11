@@ -83,7 +83,7 @@ class TestOrderConfirmationMetaSubmitPayload:
                 return "4::uploaded_handle"
 
         class _FakeCtx:
-            access_token = "token"
+            token = "token"
 
         async def _fake_token(*_a, **_k):
             return _FakeCtx()
