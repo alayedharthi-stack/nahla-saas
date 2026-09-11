@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { CheckCircle, Clock, Package, RefreshCw, Send, Store } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
@@ -44,10 +44,11 @@ type OrderUpdateCard = {
  */
 export default function NahlaTemplateLibrary() {
   const { t, dir, lang } = useLanguage()
-  const { hash, search } = useLocation()
+  const { hash, search, pathname } = useLocation()
   const page = t(tr => tr.pages.ecommerceTemplates)
   const isAr = lang === 'ar'
   const importedTemplateId = Number(new URLSearchParams(search).get('imported')) || null
+  const importedOnly = pathname.endsWith('/imported')
 
   const [filter, setFilter] = useState<StoreFilter>('all')
   const [loading, setLoading] = useState(true)
@@ -164,16 +165,21 @@ export default function NahlaTemplateLibrary() {
     }
   }
 
-  const showOrderUpdates =
-    filter === 'all' || filter === 'order_updates'
+  const showOrderUpdates = !importedOnly && (filter === 'all' || filter === 'order_updates')
+  const showImportedTemplates = importedOnly || showOrderUpdates
   const showMarketingEmpty = filter === 'marketing'
   const showAllUnsupportedNote = filter === 'all'
 
   return (
     <div className="space-y-6" dir={dir}>
-      <PageHeader title={page.title} subtitle={page.subtitle} />
+      <PageHeader
+        title={importedOnly ? (isAr ? 'قوالب المتجر المستوردة' : 'Imported store templates') : page.title}
+        subtitle={importedOnly
+          ? (isAr ? 'قوالبك المستوردة من مكتبة قوالب نحلة وحالتها الفعلية لدى Meta.' : 'Templates imported from Nahla’s library and their real Meta state.')
+          : page.subtitle}
+      />
 
-      <div className="flex flex-wrap gap-2">
+      {!importedOnly && <div className="flex flex-wrap gap-2">
         {filters.map(item => (
           <button
             key={item.key}
@@ -188,7 +194,7 @@ export default function NahlaTemplateLibrary() {
             {item.label}
           </button>
         ))}
-      </div>
+      </div>}
 
       {showOrderUpdates && (
         <section id="order-updates" className="card p-5 scroll-mt-24">
@@ -241,22 +247,25 @@ export default function NahlaTemplateLibrary() {
         </section>
       )}
 
-      {showOrderUpdates && (
+      {showImportedTemplates && (
         <section id="imported-store-templates" className="card p-5 scroll-mt-24">
-          <div className="flex items-start gap-3 mb-4">
-            <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0">
-              <Store className="w-5 h-5 text-amber-700" />
+          <div className="flex items-start justify-between gap-4 mb-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0">
+                <Store className="w-5 h-5 text-amber-700" />
+              </div>
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-slate-900">
+                  {isAr ? 'قوالب المتجر المستوردة' : 'Imported store templates'}
+                </h2>
+                <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                  {isAr
+                    ? 'هذه هي القوالب التي استوردتها من مكتبة قوالب نحلة. تظهر هنا حالتها الحقيقية لدى Meta، وليست مجرد إعدادات الخدمة.'
+                    : 'These are the templates imported from Nahla’s library. Their real Meta status appears here, not only the service settings.'}
+                </p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-slate-900">
-                {isAr ? 'قوالب المتجر المستوردة' : 'Imported store templates'}
-              </h2>
-              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                {isAr
-                  ? 'هذه هي القوالب التي استوردتها من مكتبة قوالب نحلة. تظهر هنا حالتها الحقيقية لدى Meta، وليست مجرد إعدادات الخدمة.'
-                  : 'These are the templates imported from Nahla’s library. Their real Meta status appears here, not only the service settings.'}
-              </p>
-            </div>
+            {!importedOnly && <Link to="/marketing/templates/imported" className="shrink-0 text-xs font-medium text-brand-600 hover:text-brand-700">{isAr ? 'فتح الصفحة المستقلة' : 'Open separate page'}</Link>}
           </div>
 
           {templateError && (
@@ -335,7 +344,7 @@ export default function NahlaTemplateLibrary() {
         </section>
       )}
 
-      <section id="ecommerce" className="card p-5 scroll-mt-24">
+      {!importedOnly && <section id="ecommerce" className="card p-5 scroll-mt-24">
         <div className="flex items-start gap-3 mb-3">
           <div className="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0">
             <Store className="w-5 h-5 text-amber-600" />
@@ -359,7 +368,7 @@ export default function NahlaTemplateLibrary() {
             {page.empty.orderUpdatesOnlyHint}
           </p>
         )}
-      </section>
+      </section>}
     </div>
   )
 }
