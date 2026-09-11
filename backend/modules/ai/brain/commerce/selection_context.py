@@ -825,6 +825,10 @@ def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution
         return None
 
     presented = get_presented_products(state)
+    # Search rank is not a customer-visible list order. Ordinal references
+    # require the list recorded by the presentation boundary; named/price
+    # references below may still resolve against trusted search candidates.
+    ordinal_products = list(getattr(state, "last_presented_products", None) or [])
     pool = selection_product_pool(state)
     reference = _resolve_reference_product(state)
 
@@ -895,7 +899,7 @@ def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution
     price_ord = _PRICE_ORDINAL_RE.search(norm)
     if price_ord:
         idx = _ORDINAL_INDEX.get(price_ord.group(1).lower())
-        product = _product_at_index(presented, idx or 0)
+        product = _product_at_index(ordinal_products, idx or 0)
         if product:
             return SelectionResolution(
                 kind="price_ordinal",
@@ -972,7 +976,7 @@ def resolve_selection_context(ctx: BrainContext) -> Optional[SelectionResolution
 
     ordinal = _extract_ordinal_pick(norm)
     if ordinal is not None:
-        product = _product_at_index(presented, ordinal)
+        product = _product_at_index(ordinal_products, ordinal)
         if product:
             return SelectionResolution(
                 kind="ordinal_select",

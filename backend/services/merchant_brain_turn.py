@@ -405,6 +405,7 @@ def _apply_brain_silent_and_welcome_guards(
     billing_denied: bool,
     trace: Any,
     persona_ownership: Any,
+    history: Optional[List[Dict[str, Any]]] = None,
     live_provenance_tracker: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, bool]:
     from modules.ai.brain.persona_ownership import PersonaBypassReason as POReason
@@ -448,14 +449,13 @@ def _apply_brain_silent_and_welcome_guards(
     persona_ownership.mark_bypass(POReason.BRAIN_SILENT_ACK, owner="brain_silent_ack")
     try:
         from modules.ai.brain.postprocess.conversation_recovery import try_guard_recovery_reply
-        from core.order_flow import _load_brain_state
 
-        conv_hist, _bs = _load_brain_state(db, tenant_id=tenant_id, phone=to)
-        hist = list(getattr(conv_hist, "messages", None) or [])
+        # Reuse the canonical turn history supplied to Brain. Conversation
+        # has no messages relationship; probing it silently lost all history.
         recovery = try_guard_recovery_reply(
             inbound_text=text or "",
             state=(convo.extra_metadata or {}).get("brain_state"),
-            history=hist,
+            history=history or [],
             tenant_id=tenant_id,
             db=db,
         )
@@ -1134,6 +1134,7 @@ async def evaluate_live_merchant_brain_turn(
             billing_denied=billing_denied,
             trace=trace,
             persona_ownership=persona_ownership,
+            history=turn_input.history,
             live_provenance_tracker=live_provenance_tracker,
         )
         try:

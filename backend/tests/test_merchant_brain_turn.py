@@ -48,6 +48,7 @@ def _run(
     preconditions: LiveMerchantBrainPreconditions | None = None,
     convo: SimpleNamespace | None = None,
     db: MagicMock | None = None,
+    history: list | None = None,
 ):
     brain = MagicMock()
     if isinstance(brain_result, BaseException):
@@ -68,7 +69,7 @@ def _run(
                 customer_phone="966500000123",
                 text="generic product inquiry",
                 conversation_id=conversation.id,
-                history=[],
+                history=history or [],
                 preconditions=preconditions or LiveMerchantBrainPreconditions(),
                 profile={"id": 9, "name": "Generic Customer"},
             ),
@@ -144,6 +145,33 @@ def test_live_brain_silent_uses_existing_registered_fallback() -> None:
     assert result.brain_silent is True
     assert result.reply_text == "registered-emergency-fallback"
     assert result.provenance.final_text_transformed is False
+
+
+@pytest.mark.parametrize("product", ["جاكيت", "حذاء رياضي أبيض", "عطر ورد 100ml"])
+def test_silent_recovery_receives_same_history_as_brain(product: str) -> None:
+    from models import Conversation
+    from modules.ai.brain.postprocess.conversation_recovery import ConversationRecoveryResult
+
+    # The real ORM row has no messages relationship. Recovery must consume
+    # the already retrieved, tenant-scoped turn history, not query that field.
+    conversation = Conversation(
+        id=77, tenant_id=55001, status="active", extra_metadata={"brain_state": {}}
+    )
+    history = [
+        {"direction": "in", "body": product},
+        {"direction": "out", "body": f"Product details\n{product}"},
+    ]
+    with patch(
+        "modules.ai.brain.postprocess.conversation_recovery.try_guard_recovery_reply",
+        return_value=ConversationRecoveryResult(needs_persona_compose=True),
+    ) as recover, patch(
+        "services.merchant_brain_turn._empty_reply_fallback",
+        return_value="registered-emergency-fallback",
+    ):
+        _, brain, *_ = _run({"reply": ""}, convo=conversation, history=history)
+
+    assert recover.call_args.kwargs["history"] == history
+    assert recover.call_args.kwargs["history"] == brain.process.call_args.kwargs["history"]
 
 
 def test_live_handoff_executes_existing_persistence_mutations() -> None:
@@ -573,4 +601,3 @@ def test_build_provenance_merges_guard_transform_reasons_from_live_tracker() -> 
     assert provenance.final_transform_reasons == ["payment_reply_guard"]
     assert provenance.llm_candidate_present is True
     assert provenance.compose_source == ""
-

@@ -110,6 +110,36 @@ def _body(payload: dict) -> str:
     return ""
 
 
+def wire_transcript_text(attempts: Any) -> str | None:
+    """Text accepted by the provider, in send order; None for legacy rows.
+
+    A single MessageEvent can carry several sends. Its last card title is
+    not the entire assistant turn. Failed attempts never add conversation
+    evidence; repeated records of the same provider message add it once.
+    """
+    if not isinstance(attempts, list) or not attempts:
+        return None
+    parts: list[str] = []
+    seen: set[str] = set()
+    for attempt in attempts:
+        if not isinstance(attempt, dict) or attempt.get("classification") != "ok":
+            continue
+        wamid = attempt.get("wamid")
+        if isinstance(wamid, str) and wamid:
+            if wamid in seen:
+                continue
+            seen.add(wamid)
+        fields = attempt.get("text_fields")
+        if not isinstance(fields, dict):
+            continue
+        for key in ("text.body", "interactive.header.text", "interactive.body.text",
+                    "interactive.footer.text", "image.caption", "video.caption", "document.caption"):
+            value = fields.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+    return "\n".join(parts)
+
+
 def observe_wire_payload(tenant_id: Any, payload: dict, layer: str) -> None:
     ctx = current_wire_audit(tenant_id, payload.get("to", ""))
     if ctx is None:
@@ -197,10 +227,11 @@ def record_wire_attempt(*, tenant_id: Any, payload: dict, operation: str,
             extra["wire_attempts"] = list(ctx.attempts)
             extra.update(meta)
             row.extra_metadata = extra
-            # The attempt list preserves retries, split sends, captions and failures.
-            # For text/interactive replies, keep the transcript aligned with wire text.
-            if payload.get("type") in ("text", "interactive"):
-                row.body = body
+            # Preserve all accepted parts, not just the last title/caption.
+            # A failed later attempt must not replace an already sent reply.
+            transcript = wire_transcript_text(ctx.attempts)
+            if transcript:
+                row.body = transcript
             flag_modified(row, "extra_metadata")
             ctx.db.add(row)
             ctx.db.flush()
