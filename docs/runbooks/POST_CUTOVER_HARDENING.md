@@ -1,5 +1,12 @@
 # Post-Cutover Hardening Checklist
 
+> **Control notice (2026-08-03):** Database identity, binding, and password
+> operations are now governed by
+> `docs/runbooks/CANONICAL_PRODUCTION_DATABASE_BINDING.md` and
+> `scripts/operators/verify_canonical_production_database.py`. Those controls
+> override any historical command below that captures a resolved URL or
+> credential.
+>
 > **Status**: Migration cutover from `efficient-insight → Postgres`
 > (switchyard.proxy.rlwy.net:14159) to `desirable-growth → nahla-postgres-prod`
 > (kodama.proxy.rlwy.net:35880, internal `postgres-ancu.railway.internal`)
