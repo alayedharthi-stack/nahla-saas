@@ -19,6 +19,7 @@ for _path in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
         sys.path.insert(0, str(_path))
 
 from core.automation_engine import (  # noqa: E402
+    _derive_service_key,
     _is_automation_effectively_enabled,
     _process_event,
 )
@@ -73,6 +74,12 @@ def test_runtime_uses_canonical_on_even_when_legacy_row_is_off():
 
     assert _is_automation_effectively_enabled(db, 9, automation) is True
     assert automation.enabled is True
+
+
+def test_order_notifications_resolves_order_confirmation_template_slot():
+    automation = _automation(enabled=True)
+
+    assert _derive_service_key(automation, {}) == "order_confirmation"
 
 
 def test_runtime_fails_closed_when_canonical_setting_is_off():
