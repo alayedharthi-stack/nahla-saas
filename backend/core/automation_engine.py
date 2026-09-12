@@ -2306,6 +2306,7 @@ _AUTOMATION_TYPE_TO_SERVICE_KEY: Dict[str, str] = {
     "abandoned_order_draft":   "wa_draft_reminder",
     "post_delivery_review":    "post_delivery",
     "cod_confirmation":        "cod_confirmation",
+    "order_notifications":     "order_confirmation",
     "order_confirmation":      "order_confirmation",
     "shipping_update":         "shipping_update",
     "predictive_reorder":      "predictive_reorder",
