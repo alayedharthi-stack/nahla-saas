@@ -781,6 +781,23 @@ def test_canonical_catalog_claims_accept_formatting_and_natural_arabic(seeded: S
     )
     assert validate_grounded_reply(context, plural_availability) == []
 
+    grounded_upper_bound = CommerceReply(
+        text="سعره 150 ريال، لذلك هو أقل من 200 ريال.",
+        evidence_refs=[ref],
+        fact_claims=[
+            reply.fact_claims[3].model_copy(update={"text_span": "150 ريال"}),
+            reply.fact_claims[4].model_copy(update={"text_span": "150 ريال"}),
+        ],
+    )
+    assert validate_grounded_reply(context, grounded_upper_bound) == []
+
+    false_upper_bound = grounded_upper_bound.model_copy(
+        update={"text": "سعره 150 ريال، لذلك هو أقل من 100 ريال."}
+    )
+    assert "price_in_text_without_verified_claim" in validate_grounded_reply(
+        context, false_upper_bound
+    )
+
 
 def test_description_claim_accepts_supported_shorter_natural_span(seeded: Seed) -> None:
     context = _context(seeded)
@@ -817,6 +834,23 @@ def test_description_claim_accepts_supported_shorter_natural_span(seeded: Seed) 
             ],
         ),
     ) == []
+
+    unsupported = CommerceReply(
+        text="وزنها 500 جرام ومستوردة.",
+        evidence_refs=[ref],
+        fact_claims=[
+            FactClaim(
+                kind="description",
+                value="عبوة 500 جرام",
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="وزنها 500 جرام ومستوردة",
+            )
+        ],
+    )
+    assert "claim_span_not_equivalent:description" in validate_grounded_reply(
+        context, unsupported
+    )
 
 
 def test_structured_ui_and_media_can_render_verified_urls_without_raw_text_url(

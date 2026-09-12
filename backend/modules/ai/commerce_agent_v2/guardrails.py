@@ -20,6 +20,10 @@ from modules.ai.commerce_agent_v2.output import (
 _LEGACY_MARKER_RE = re.compile(r"\[(?:PRODUCT|MEDIA_KEY|CALL):", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _SAR_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(?:ريال|ر\.س|SAR)\b", re.IGNORECASE)
+_PRICE_UPPER_BOUND_RE = re.compile(
+    r"(?:اقل|أقل)\s+من\s*(\d+(?:[.,]\d+)?)\s*(?:ريال|ر\.س|SAR)\b",
+    re.IGNORECASE,
+)
 _CURRENCY_RE = re.compile(
     r"SAR\b|SR\b|ر\s*\.?\s*س\.?|ريال(?:\s+سعودي)?",
     re.IGNORECASE,
@@ -71,6 +75,9 @@ _NEGATION_TOKENS = frozenset({"لا", "لم", "لن", "ليس", "ليست", "غ�
 _SCOPE_TOKENS = frozenset(
     {"فقط", "حصريا", "كل", "جميع", "بعض", "مختار", "only", "all", "some", "selected"}
 )
+_DESCRIPTION_RELATION_TOKENS = frozenset(
+    {"وزن", "الوزن", "حجم", "الحجم", "سعه", "السعه", "capacity", "size", "weight"}
+)
 _PRODUCT_BOUND_KINDS = frozenset(
     {
         "product_name",
@@ -113,7 +120,7 @@ def _normalize_text(value: Any) -> str:
 def _light_token(token: str) -> str:
     if token.startswith("ال") and len(token) > 4:
         token = token[2:]
-    if token.startswith("و") and len(token) > 4:
+    if token.startswith("و") and len(token) > 4 and not token.startswith("وزن"):
         token = token[1:]
     for suffix in ("هما", "كم", "كن", "هم", "هن", "ها", "ه"):
         if token.endswith(suffix) and len(token) - len(suffix) >= 3:
@@ -265,7 +272,7 @@ def _span_expresses_claim(
         return _knowledge_span_supported(record, span)
     if claim.kind == "description":
         claim_tokens = _knowledge_tokens(str(claim.value))
-        span_tokens = _knowledge_tokens(span)
+        span_tokens = _knowledge_tokens(span) - _DESCRIPTION_RELATION_TOKENS
         claim_negation = bool(
             set(_TOKEN_RE.findall(_normalize_text(str(claim.value)))) & _NEGATION_TOKENS
         )
@@ -274,11 +281,9 @@ def _span_expresses_claim(
         )
         claim_numbers = {_decimal(value) for value in _NUMBER_RE.findall(str(claim.value))}
         span_numbers = {_decimal(value) for value in _NUMBER_RE.findall(span)}
-        overlap = span_tokens & claim_tokens
         return bool(
-            len(overlap) >= 2
-            and len(overlap) / len(span_tokens) >= 0.60
-            and len(overlap) / len(claim_tokens) >= 0.50
+            span_tokens
+            and span_tokens <= claim_tokens
             and span_negation == claim_negation
             and span_numbers <= claim_numbers
         )
@@ -422,15 +427,29 @@ def validate_grounded_reply(
         for claim in verified_claims
         if claim.kind in {"price", "sale_price", "regular_price"}
     ]
+    verified_upper_bounds = [
+        (match.span(1), _decimal(match.group(1)))
+        for match in _PRICE_UPPER_BOUND_RE.finditer(reply.text)
+    ]
     for match in _SAR_RE.finditer(reply.text):
         amount = _decimal(match.group(1))
         rendered = match.group(0)
-        if not any(
+        exact_price_verified = any(
             _decimal(claim.value) == amount
             and claim.text_span is not None
             and (rendered in claim.text_span or claim.text_span in rendered)
             for claim in verified_prices
-        ):
+        )
+        derived_upper_bound_verified = any(
+            amount == bound
+            and match.span(1) == bound_span
+            and any(
+                price is not None and bound is not None and price < bound
+                for price in (_decimal(claim.value) for claim in verified_prices)
+            )
+            for bound_span, bound in verified_upper_bounds
+        )
+        if not exact_price_verified and not derived_upper_bound_verified:
             errors.append("price_in_text_without_verified_claim")
 
     verified_quantities = [
