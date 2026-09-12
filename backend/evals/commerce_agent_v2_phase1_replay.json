@@ -75,8 +75,14 @@
     "replay_plan": ["search_products"],
     "tool_contract": {
       "required_tools": ["search_products"],
-      "acceptable_plans": [["search_products"]],
-      "forbidden_tools": ["get_product_details", "search_merchant_knowledge", "search_product_knowledge"],
+      "acceptable_plans": [
+        ["search_products"],
+        ["search_products", "search_products"],
+        ["search_products", "search_merchant_knowledge"],
+        ["search_products", "search_products", "search_merchant_knowledge"]
+      ],
+      "forbidden_tools": ["get_product_details", "search_product_knowledge"],
+      "forbid_identical_duplicate_calls": true,
       "required_evidence_sources": ["catalog_product"],
       "expected_outcome": "grounded_reply"
     },
@@ -90,8 +96,9 @@
     "replay_plan": ["search_products"],
     "tool_contract": {
       "required_tools": ["search_products"],
-      "acceptable_plans": [["search_products"]],
+      "acceptable_plans": [["search_products"], ["search_products", "search_products"]],
       "forbidden_tools": ["get_product_details", "search_merchant_knowledge", "search_product_knowledge"],
+      "forbid_identical_duplicate_calls": true,
       "required_evidence_sources": ["catalog_product"],
       "expected_outcome": "grounded_reply"
     },

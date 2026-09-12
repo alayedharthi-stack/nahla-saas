@@ -168,10 +168,13 @@ class FactClaim(BaseModel):
         gt=0,
         description="Trusted product_id for every product-bound fact; null only for merchant knowledge.",
     )
-    text_span: str = Field(
-        min_length=1,
+    text_span: str | None = Field(
+        default=None,
         max_length=2000,
-        description="Exact excerpt from CommerceReply.text that expresses this fact naturally.",
+        description=(
+            "Exact excerpt from CommerceReply.text that expresses this fact naturally; "
+            "null only when a URL or image is rendered solely by ui_actions or media_refs."
+        ),
     )
 
     @model_validator(mode="after")

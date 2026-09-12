@@ -752,6 +752,81 @@ def test_canonical_catalog_claims_accept_formatting_and_natural_arabic(seeded: S
     )
     assert validate_grounded_reply(context, decimal_rendering) == []
 
+    compact_spans = CommerceReply(
+        text="عسل طلح بلدي متوفرة، والكمية 8 عبوات، والسعر 150 ر.س.",
+        evidence_refs=[ref],
+        fact_claims=[
+            reply.fact_claims[0],
+            reply.fact_claims[1].model_copy(
+                update={"text_span": "متوفرة"}
+            ),
+            reply.fact_claims[2].model_copy(update={"text_span": "8"}),
+            reply.fact_claims[3].model_copy(update={"text_span": "150"}),
+            reply.fact_claims[4].model_copy(update={"text_span": "ر.س"}),
+        ],
+    )
+    assert validate_grounded_reply(context, compact_spans) == []
+
+
+def test_structured_ui_and_media_can_render_verified_urls_without_raw_text_url(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded)
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    product_url = "https://shop.example.test/products/a-honey"
+    image_url = "https://cdn.example.test/a-honey.jpg"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="product_url",
+                        value=product_url,
+                        subject_product_id=seeded.honey_a.id,
+                    ),
+                    CanonicalEvidenceFact(
+                        kind="image_url",
+                        value=image_url,
+                        subject_product_id=seeded.honey_a.id,
+                    ),
+                ],
+            )
+        ]
+    )
+    reply = CommerceReply(
+        text="تقدر تفتح صفحة المنتج وتشوف صورته.",
+        evidence_refs=[ref],
+        fact_claims=[
+            FactClaim(
+                kind="product_url",
+                value=product_url,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span=None,
+            ),
+            FactClaim(
+                kind="image_url",
+                value=image_url,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span=None,
+            ),
+        ],
+        media_refs=[MediaReference(url=image_url, evidence_ref=ref)],
+        ui_actions=[
+            UIAction(
+                kind="open_product",
+                label="عرض المنتج",
+                url=product_url,
+                evidence_ref=ref,
+            )
+        ],
+    )
+    assert validate_grounded_reply(context, reply) == []
+
 
 def test_canonical_claim_types_reject_string_prices() -> None:
     with pytest.raises(Exception, match="price must be a JSON number"):
@@ -800,6 +875,9 @@ def test_knowledge_claim_allows_supported_paraphrase_but_rejects_changed_fact(
             text="هذا العسل مصدره نحل بلدي.",
             evidence_refs=[ref],
             fact_claims=[claim],
+            product_refs=[
+                ProductReference(product_id=seeded.honey_a.id, evidence_ref=ref)
+            ],
         ),
     ) == []
 
@@ -813,6 +891,18 @@ def test_knowledge_claim_allows_supported_paraphrase_but_rejects_changed_fact(
         ),
     )
     assert "claim_span_not_equivalent:product_knowledge" in errors
+
+    assert "invalid_product_reference" in validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="هذا العسل مصدره نحل بلدي.",
+            evidence_refs=[ref],
+            fact_claims=[claim],
+            product_refs=[
+                ProductReference(product_id=seeded.gift_a.id, evidence_ref=ref)
+            ],
+        ),
+    )
 
 
 def test_merchant_knowledge_claim_uses_canonical_body_with_natural_paraphrase(

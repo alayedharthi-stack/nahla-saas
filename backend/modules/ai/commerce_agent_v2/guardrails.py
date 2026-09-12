@@ -19,14 +19,19 @@ from modules.ai.commerce_agent_v2.output import (
 _LEGACY_MARKER_RE = re.compile(r"\[(?:PRODUCT|MEDIA_KEY|CALL):", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _SAR_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(?:ريال|ر\.س|SAR)\b", re.IGNORECASE)
+_CURRENCY_RE = re.compile(
+    r"SAR\b|SR\b|ر\s*\.?\s*س\.?|ريال(?:\s+سعودي)?",
+    re.IGNORECASE,
+)
 _NUMBER_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)(?!\d)")
 _QUANTITY_RE = re.compile(
     r"(?<!\d)(\d+)\s*(?:قطع(?:ة)?|عبو(?:ة|ات)|حب(?:ة|ات)|وحد(?:ة|ات))\b",
     re.IGNORECASE,
 )
 _AVAILABILITY_RE = re.compile(
-    r"غير\s+(?:متوفر|متاح)\b|(?:نافد|نفد)\b|out\s+of\s+stock\b|unavailable\b|"
-    r"(?:متوفر|متاح|موجود)\b|in\s+stock\b|available\b",
+    r"غير\s+(?:متوفر(?:ة|ه)?|متاح(?:ة|ه)?)\b|(?:نافد(?:ة|ه)?|نفد)\b|"
+    r"out\s+of\s+stock\b|unavailable\b|"
+    r"(?:متوفر(?:ة|ه)?|متاح(?:ة|ه)?|موجود(?:ة|ه)?)\b|in\s+stock\b|available\b",
     re.IGNORECASE,
 )
 _ARABIC_DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
@@ -217,22 +222,37 @@ def _matching_evidence_fact(
     return None
 
 
-def _span_expresses_claim(record: EvidenceRecord, claim: FactClaim) -> bool:
-    span = claim.text_span
+def _span_expresses_claim(
+    record: EvidenceRecord,
+    claim: FactClaim,
+    reply: CommerceReply,
+) -> bool:
+    span = claim.text_span or ""
     if claim.kind in {"price", "sale_price", "regular_price"}:
         expected = _decimal(claim.value)
         return any(_decimal(value) == expected for value in _NUMBER_RE.findall(span))
     if claim.kind == "currency":
         return _canonical_currency(claim.value) in {
-            _canonical_currency(token) for token in _TOKEN_RE.findall(span)
+            _canonical_currency(match.group(0)) for match in _CURRENCY_RE.finditer(span)
         }
     if claim.kind == "availability":
         states = {_availability_value(match.group(0)) for match in _AVAILABILITY_RE.finditer(span)}
         return claim.value in states
     if claim.kind == "stock_quantity":
-        return any(int(value) == claim.value for value in _QUANTITY_RE.findall(span))
-    if claim.kind in {"product_url", "image_url"}:
-        return str(claim.value).strip() in span
+        expected = _decimal(claim.value)
+        return any(_decimal(value) == expected for value in _NUMBER_RE.findall(span))
+    if claim.kind == "product_url":
+        return str(claim.value).strip() in span or any(
+            action.evidence_ref == claim.evidence_ref
+            and str(action.url) == str(claim.value)
+            for action in reply.ui_actions
+        )
+    if claim.kind == "image_url":
+        return str(claim.value).strip() in span or any(
+            media.evidence_ref == claim.evidence_ref
+            and str(media.url) == str(claim.value)
+            for media in reply.media_refs
+        )
     if claim.kind in {"merchant_knowledge", "product_knowledge"}:
         return _knowledge_span_supported(record, span)
     claim_tokens = _knowledge_tokens(str(claim.value))
@@ -308,21 +328,32 @@ def validate_grounded_reply(
         if _matching_evidence_fact(record, claim) is None:
             errors.append(f"claim_not_in_evidence:{claim.kind}")
             continue
-        if claim.text_span not in reply.text:
+        if claim.text_span is None and claim.kind not in {"product_url", "image_url"}:
+            errors.append(f"claim_span_missing:{claim.kind}")
+            continue
+        if claim.text_span is not None and claim.text_span not in reply.text:
             errors.append(f"claim_span_not_in_text:{claim.kind}")
             continue
-        if not _span_expresses_claim(record, claim):
+        if not _span_expresses_claim(record, claim, reply):
             errors.append(f"claim_span_not_equivalent:{claim.kind}")
             continue
         verified_claims.append(claim)
 
     for product_ref in reply.product_refs:
         record = evidence.get(product_ref.evidence_ref)
-        if (
-            record is None
-            or record.source != "catalog_product"
-            or record.source_id != str(product_ref.product_id)
-        ):
+        valid_catalog_ref = bool(
+            record is not None
+            and record.source == "catalog_product"
+            and record.source_id == str(product_ref.product_id)
+        )
+        valid_linked_knowledge_ref = bool(
+            record is not None
+            and record.source == "product_knowledge"
+            and any(
+                fact.subject_product_id == product_ref.product_id for fact in record.facts
+            )
+        )
+        if not (valid_catalog_ref or valid_linked_knowledge_ref):
             errors.append("invalid_product_reference")
 
     for media_ref in reply.media_refs:
@@ -358,7 +389,9 @@ def validate_grounded_reply(
         amount = _decimal(match.group(1))
         rendered = match.group(0)
         if not any(
-            _decimal(claim.value) == amount and rendered in claim.text_span
+            _decimal(claim.value) == amount
+            and claim.text_span is not None
+            and (rendered in claim.text_span or claim.text_span in rendered)
             for claim in verified_prices
         ):
             errors.append("price_in_text_without_verified_claim")
@@ -370,7 +403,9 @@ def validate_grounded_reply(
         quantity = int(match.group(1))
         rendered = match.group(0)
         if not any(
-            claim.value == quantity and rendered in claim.text_span
+            claim.value == quantity
+            and claim.text_span is not None
+            and (rendered in claim.text_span or claim.text_span in rendered)
             for claim in verified_quantities
         ):
             errors.append("stock_quantity_in_text_without_verified_claim")
@@ -383,7 +418,9 @@ def validate_grounded_reply(
             availability = _availability_value(match.group(0))
             rendered = match.group(0)
             if not any(
-                claim.value is availability and rendered in claim.text_span
+                claim.value is availability
+                and claim.text_span is not None
+                and rendered in claim.text_span
                 for claim in verified_availability
             ):
                 errors.append("availability_in_text_without_verified_claim")
