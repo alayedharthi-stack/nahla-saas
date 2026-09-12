@@ -2,6 +2,7 @@
   {
     "id": "catalog-browse-ar",
     "message": "وش منتجاتكم؟",
+    "turn_mode": "single",
     "pattern": "catalog_browse",
     "expected_tools": ["search_products"],
     "expected_behavior": "Return only catalog-backed products."
@@ -9,6 +10,7 @@
   {
     "id": "catalog-specific-ar",
     "message": "عندكم عسل طلح؟",
+    "turn_mode": "single",
     "pattern": "catalog_search",
     "expected_tools": ["search_products"],
     "expected_behavior": "Search the tenant catalog and do not infer availability."
@@ -16,20 +18,31 @@
   {
     "id": "price-followup-ar",
     "message": "كم سعره؟",
+    "turn_mode": "multi",
     "pattern": "grounded_price_followup",
     "expected_tools": ["search_products", "get_product_details"],
-    "expected_behavior": "Resolve the product from conversation context and cite catalog price evidence."
+    "history": [
+      {"direction": "inbound", "body": "عندكم عسل طلح؟"},
+      {"direction": "outbound", "body": "نعم، يوجد عسل طلح بلدي ضمن الكتالوج."}
+    ],
+    "expected_behavior": "Resolve the product from explicitly isolated conversation history and cite catalog price evidence."
   },
   {
     "id": "product-provenance-ar",
     "message": "هل هذا العسل من نحل بلدي؟",
+    "turn_mode": "multi",
     "pattern": "product_linked_kb",
     "expected_tools": ["search_products", "search_product_knowledge"],
-    "expected_behavior": "Use knowledge linked to the resolved product only."
+    "history": [
+      {"direction": "inbound", "body": "أرسل لي تفاصيل عسل الطلح"},
+      {"direction": "outbound", "body": "هذا هو عسل الطلح البلدي."}
+    ],
+    "expected_behavior": "Use explicitly isolated history and knowledge linked to the resolved product only."
   },
   {
     "id": "gift-recommendation-ar",
     "message": "أبغى عسل هدية",
+    "turn_mode": "single",
     "pattern": "recommendation",
     "expected_tools": ["search_products"],
     "expected_behavior": "Recommend only products returned by catalog evidence."
@@ -37,6 +50,7 @@
   {
     "id": "budget-recommendation-ar",
     "message": "أبغى شيء أقل من 200 ريال",
+    "turn_mode": "single",
     "pattern": "budget_recommendation",
     "expected_tools": ["search_products"],
     "expected_behavior": "Compare the requested budget against catalog prices without inventing products."
@@ -44,6 +58,7 @@
   {
     "id": "global-kb-ar",
     "message": "هل عندكم تغليف هدايا؟",
+    "turn_mode": "single",
     "pattern": "global_merchant_kb",
     "expected_tools": ["search_merchant_knowledge"],
     "expected_behavior": "Answer from a global AI-visible merchant KB section."
@@ -51,6 +66,7 @@
   {
     "id": "linked-kb-ar",
     "message": "وش مصدر عسل الطلح؟",
+    "turn_mode": "single",
     "pattern": "product_linked_kb",
     "expected_tools": ["search_products", "search_product_knowledge"],
     "expected_behavior": "Retrieve only sections linked to the selected product."
@@ -58,6 +74,7 @@
   {
     "id": "missing-product-ar",
     "message": "عندكم عسل مانوكا نادر؟",
+    "turn_mode": "single",
     "pattern": "product_not_found",
     "expected_tools": ["search_products"],
     "expected_behavior": "State that no matching product was found; do not substitute one silently."
@@ -65,8 +82,13 @@
   {
     "id": "missing-fact-ar",
     "message": "وش سنة قطف هذا العسل؟",
+    "turn_mode": "multi",
     "pattern": "missing_fact_no_invention",
     "expected_tools": ["search_products", "search_product_knowledge"],
+    "history": [
+      {"direction": "inbound", "body": "أرسل لي عسل الطلح"},
+      {"direction": "outbound", "body": "هذا هو عسل الطلح البلدي."}
+    ],
     "expected_behavior": "Use a structured safe fallback when harvest-year evidence is absent."
   }
 ]

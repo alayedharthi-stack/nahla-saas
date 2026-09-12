@@ -79,26 +79,38 @@ class CommerceTracingHooks(RunHooks[CommerceAgentContext]):
             "output_tokens": 0,
             "total_tokens": 0,
         }
+        self._usage_requests = 0
 
     async def on_llm_start(self, _context, _agent, _system_prompt, _input_items) -> None:
         self._started["llm"] = time.monotonic()
         self.events.append({"kind": "model_start", "model": self.model})
 
-    async def on_llm_end(self, context, _agent, _response) -> None:
+    async def on_llm_end(self, context, _agent, response) -> None:
         started = self._started.pop("llm", time.monotonic())
-        self.usage = {
+        cumulative_usage = {
             "input_tokens": int(context.usage.input_tokens or 0),
             "output_tokens": int(context.usage.output_tokens or 0),
             "total_tokens": int(context.usage.total_tokens or 0),
         }
+        cumulative_requests = int(context.usage.requests or 0)
+        call_usage = {
+            key: max(0, value - self.usage[key])
+            for key, value in cumulative_usage.items()
+        }
+        call_requests = max(0, cumulative_requests - self._usage_requests)
+        self.usage = cumulative_usage
+        self._usage_requests = cumulative_requests
         self.events.append(
             {
                 "kind": "model_end",
                 "model": self.model,
+                "provider_response_received": True,
+                "response_id_present": bool(getattr(response, "response_id", None)),
+                "request_id_present": bool(getattr(response, "request_id", None)),
                 "latency_ms": int((time.monotonic() - started) * 1000),
                 "usage": {
-                    "requests": context.usage.requests,
-                    **self.usage,
+                    "requests": call_requests,
+                    **call_usage,
                 },
             }
         )
