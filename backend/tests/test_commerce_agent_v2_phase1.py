@@ -804,7 +804,7 @@ def test_description_claim_accepts_supported_shorter_natural_span(seeded: Seed) 
     assert validate_grounded_reply(
         context,
         CommerceReply(
-            text="الوزن 500 جرام.",
+            text="وزنها 500 جرام.",
             evidence_refs=[ref],
             fact_claims=[
                 FactClaim(
@@ -812,7 +812,7 @@ def test_description_claim_accepts_supported_shorter_natural_span(seeded: Seed) 
                     value="عبوة 500 جرام",
                     evidence_ref=ref,
                     subject_product_id=seeded.honey_a.id,
-                    text_span="500 جرام",
+                    text_span="وزنها 500 جرام",
                 )
             ],
         ),
@@ -1843,6 +1843,14 @@ async def test_live_sol_eval_reports_grounding_and_usage(
             for guardrail in result.guardrail_results
             for error in (guardrail.get("output_info") or {}).get("errors", [])
         ]
+        rejected_eval_reply = next(
+            (
+                (guardrail.get("output_info") or {}).get("rejected_eval_reply")
+                for guardrail in result.guardrail_results
+                if (guardrail.get("output_info") or {}).get("rejected_eval_reply")
+            ),
+            None,
+        )
         unsupported_claims = sorted(set([*post_validation_errors, *guardrail_errors]))
         costs = compute_usage_cost_usd(
             provider="openai_compatible",
@@ -1864,6 +1872,7 @@ async def test_live_sol_eval_reports_grounding_and_usage(
                 "tool_arguments": tool_arguments,
                 "evidence": evidence,
                 "final_reply": result.reply.model_dump(mode="json"),
+                "rejected_eval_reply": rejected_eval_reply,
                 "unsupported_claims": unsupported_claims,
                 "status": result.status,
                 "failure_reason": result.failure_reason or None,

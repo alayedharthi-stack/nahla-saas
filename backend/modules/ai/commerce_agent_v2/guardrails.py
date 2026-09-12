@@ -1,6 +1,7 @@
 """Grounding and read-only guardrails for Commerce Agent V2."""
 from __future__ import annotations
 
+import os
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
@@ -273,9 +274,11 @@ def _span_expresses_claim(
         )
         claim_numbers = {_decimal(value) for value in _NUMBER_RE.findall(str(claim.value))}
         span_numbers = {_decimal(value) for value in _NUMBER_RE.findall(span)}
+        overlap = span_tokens & claim_tokens
         return bool(
-            span_tokens
-            and span_tokens <= claim_tokens
+            len(overlap) >= 2
+            and len(overlap) / len(span_tokens) >= 0.60
+            and len(overlap) / len(claim_tokens) >= 0.50
             and span_negation == claim_negation
             and span_numbers <= claim_numbers
         )
@@ -481,8 +484,15 @@ async def grounded_output_guardrail(
         if isinstance(output, CommerceReply)
         else ["malformed_commerce_reply"]
     )
+    output_info: dict[str, Any] = {"passed": not errors, "errors": errors}
+    if (
+        errors
+        and isinstance(output, CommerceReply)
+        and os.environ.get("NAHLA_RUN_COMMERCE_V2_LIVE_EVAL") == "1"
+    ):
+        output_info["rejected_eval_reply"] = output.model_dump(mode="json")
     return GuardrailFunctionOutput(
-        output_info={"passed": not errors, "errors": errors},
+        output_info=output_info,
         tripwire_triggered=bool(errors),
     )
 
