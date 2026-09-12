@@ -966,6 +966,25 @@ def test_knowledge_claim_allows_supported_paraphrase_but_rejects_changed_fact(
         ),
     ) == []
 
+    informational_availability = claim.model_copy(
+        update={"text_span": "مصدر هذا المنتج من خلايا نحل بلدي"}
+    )
+    assert validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="المتوفر لدينا أن مصدر هذا المنتج من خلايا نحل بلدي.",
+            evidence_refs=[ref],
+            fact_claims=[informational_availability],
+        ),
+    ) == []
+
+    assert "availability_in_text_without_verified_claim" in validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="هذا المنتج متوفر.",
+        ),
+    )
+
     wrong = claim.model_copy(update={"text_span": "هذا العسل مستورد من نيوزيلندا"})
     errors = validate_grounded_reply(
         context,

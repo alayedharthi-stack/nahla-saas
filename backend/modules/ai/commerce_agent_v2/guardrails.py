@@ -42,6 +42,11 @@ _AVAILABILITY_RE = re.compile(
     r"in\s+stock\b|available\b",
     re.IGNORECASE,
 )
+_INFORMATIONAL_AVAILABILITY_RE = re.compile(
+    r"(?:المعلومات?|البيانات)\s+(?:ال)?(?:متوفر|متاح)(?:ة|ه|ات)?\b|"
+    r"(?:ال)?(?:متوفر|متاح)(?:ة|ه|ات)?\s+لدينا\s+(?:ان|أن|من)\b",
+    re.IGNORECASE,
+)
 _ARABIC_DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
 _TOKEN_RE = re.compile(r"[\w\u0600-\u06FF]+", re.UNICODE)
 _KNOWLEDGE_FILLER = frozenset(
@@ -248,6 +253,8 @@ def _span_expresses_claim(
         }
     if claim.kind == "availability":
         normalized_span = _normalize_text(span)
+        if _INFORMATIONAL_AVAILABILITY_RE.search(normalized_span):
+            return False
         states = {
             _availability_value(match.group(0))
             for match in _AVAILABILITY_RE.finditer(normalized_span)
@@ -307,6 +314,14 @@ def _availability_value(value: str) -> bool:
             "unavailable",
             "out of stock",
         )
+    )
+
+
+def _availability_mention_is_informational(text: str, mention: re.Match[str]) -> bool:
+    """Exclude lexical availability words that qualify information, not stock."""
+    return any(
+        candidate.start() <= mention.start() < candidate.end()
+        for candidate in _INFORMATIONAL_AVAILABILITY_RE.finditer(text)
     )
 
 
@@ -471,6 +486,8 @@ def validate_grounded_reply(
             claim for claim in verified_claims if claim.kind == "availability"
         ]
         for match in _AVAILABILITY_RE.finditer(reply.text):
+            if _availability_mention_is_informational(reply.text, match):
+                continue
             availability = _availability_value(match.group(0))
             rendered = match.group(0)
             if not any(
