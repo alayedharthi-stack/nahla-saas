@@ -1,6 +1,7 @@
 """Surface prompts for FactBoundPersonaComposer."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .facts_bundle import PERSONA_SURFACE_CUSTOMER_CONDITIONAL_COUPON_ANSWER, PersonaFactsBundle
@@ -101,6 +102,15 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
                 "no checkout pressure, name/address/payment/quantity asks"
             )
     elif bundle.surface == "catalog_product_answer":
+        correction = facts.get("availability_guard_correction")
+        if isinstance(correction, dict):
+            lines.append("catalog_correction: " + json.dumps(correction, ensure_ascii=False))
+            lines.append(
+                "correction_task: compose a fresh natural reply from the supplied catalog facts; "
+                "the previous candidate was not verified. Bind each claim and price to its own "
+                "product. Preserve conversational wording freedom; do not infer stock or variants "
+                "from missing evidence. Do not mention internal correction diagnostics."
+            )
         requested_facets = list(facts.get("requested_facets") or [])
         lines.append(f"question_kind: {facts.get('question_kind') or ''}")
         if requested_facets:
@@ -189,6 +199,10 @@ def build_user_prompt(bundle: PersonaFactsBundle) -> str:
             if not title:
                 continue
             parts = [f"product: {title}"]
+            if product.get("id") is not None:
+                parts.append(f"product_id={product['id']}")
+            if product.get("product_url"):
+                parts.append(f"product_url={product['product_url']}")
             if product.get("category"):
                 parts.append(f"category={product.get('category')}")
             if facts.get("allow_price_mention"):

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from core.product_entity_resolution import EntityResolutionResult
@@ -571,206 +571,17 @@ def _eligible_catalog_browse_fallback_facts(
     return facts
 
 
-def _browse_title_tokens(title: str) -> set[str]:
-    from modules.ai.knowledge.product_matcher import tokenize  # noqa: PLC0415
-
-    return {token for token in tokenize(title or "") if len(token) >= 3}
-
-
 def _eligible_browse_rows(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
-    return [
-        dict(row)
-        for row in (facts.get("eligible_catalog_products") or [])
-        if isinstance(row, dict)
-    ]
-
-
-def _strict_title_identity_in_text(text: str, title: str) -> bool:
-    """Require full title containment or every title token — not a 2-token overlap."""
-    text_norm = _norm(text)
-    title_norm = _norm(title)
-    if not text_norm or not title_norm:
-        return False
-    if title_norm in text_norm:
-        return True
-    toks = _browse_title_tokens(title)
-    if not toks:
-        return False
-    return all(token in text_norm for token in toks)
-
-
-def _referenced_eligible_browse_rows(
-    reply: str,
-    facts: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    referenced: List[Dict[str, Any]] = []
-    for row in _eligible_browse_rows(facts):
-        title = str(row.get("title") or "").strip()
-        if title and _strict_title_identity_in_text(reply, title):
-            referenced.append(row)
-    return referenced
-
-
-def _is_catalog_wide_browse_denial(reply: str) -> bool:
-    return bool(_BROWSE_CATALOG_DENIAL_RE.search(_norm(reply)))
-
-
-def _title_has_local_negative_claim(reply: str, title: str) -> bool:
-    """True when a negative availability marker is bound to this product title."""
-    norm = _norm(reply)
-    title_norm = _norm(title)
-    if not norm or not title_norm or title_norm not in norm:
-        if not _strict_title_identity_in_text(reply, title):
-            return False
-        title_norm = title_norm or _norm(title)
-    idx_title = norm.find(title_norm) if title_norm in norm else -1
-    marker_norms = [_norm(marker) for marker in _NEGATIVE_MARKERS if _norm(marker)]
-    if idx_title < 0:
-        return False
-    title_end = idx_title + len(title_norm)
-    for marker in marker_norms:
-        idx_marker = norm.find(marker, idx_title)
-        if idx_marker < 0:
-            continue
-        gap = idx_marker - title_end
-        if 0 <= gap <= 24:
-            return True
-        before = norm.rfind(marker, 0, idx_title)
-        if before >= 0 and 0 <= idx_title - (before + len(marker)) <= 8:
-            return True
-    return False
-
-
-def _row_catalog_price(row: Dict[str, Any]) -> Optional[int]:
-    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
-        parse_price_amount,
-    )
-
-    for key in ("price", "sale_price", "regular_price"):
-        amount = parse_price_amount(row.get(key))
-        if amount is not None:
-            return amount
-    return None
-
-
-_BOUND_PRICE_TAIL_RE = re.compile(
-    r"^\s*(?:سعر(?:ه|ها)?|ب)?\s*\d{1,6}(?:[.,]\d{1,2})?\s*(?:ريال|ر\.?\s*س\.?|sar)?",
-    re.UNICODE | re.IGNORECASE,
-)
-
-
-def _bound_claim_span(
-    norm: str,
-    title: str,
-    row: Dict[str, Any],
-) -> Optional[tuple[int, int]]:
-    """Span covering a product title plus adjacent polarity/price for that row."""
-    title_norm = _norm(title)
-    if not title_norm or title_norm not in norm:
-        return None
-    start = norm.find(title_norm)
-    end = start + len(title_norm)
-    marker_norms = sorted(
-        {_norm(marker) for marker in (_NEGATIVE_MARKERS + _POSITIVE_MARKERS) if _norm(marker)},
-        key=len,
-        reverse=True,
-    )
-    before = norm[:start]
-    trimmed_before = before.rstrip()
-    if 0 <= (len(before) - len(trimmed_before)) <= 3:
-        for marker in marker_norms:
-            if trimmed_before.endswith(marker):
-                start = len(trimmed_before) - len(marker)
-                break
-    after = norm[end:]
-    lead_ws = len(after) - len(after.lstrip())
-    rest = after.lstrip()
-    if 0 <= lead_ws <= 3:
-        for marker in marker_norms:
-            if rest.startswith(marker):
-                end = end + lead_ws + len(marker)
-                break
-    row_price = _row_catalog_price(row)
-    if row_price is not None:
-        tail = norm[end:]
-        match = _BOUND_PRICE_TAIL_RE.match(tail)
-        if match and str(row_price) in match.group(0):
-            end = end + match.end()
-    return start, end
-
-
-def _remainder_after_bound_eligible_claims(
-    reply: str,
-    referenced: Sequence[Dict[str, Any]],
-) -> str:
-    """Remove bound eligible claim spans. Do not strip leftover title tokens."""
-    working = _norm(reply)
-    if not working:
-        return ""
-    chars = list(working)
-    for row in referenced:
-        title = str(row.get("title") or "").strip()
-        span = _bound_claim_span(working, title, row)
-        if span is None:
-            continue
-        start, end = span
-        for idx in range(max(0, start), min(end, len(chars))):
-            chars[idx] = " "
-    return re.sub(r"\s+", " ", "".join(chars)).strip()
-
-
-def _remainder_has_unbound_product_claim(
-    remainder: str,
-    referenced: Sequence[Dict[str, Any]],
-) -> bool:
-    from modules.ai.brain.postprocess.product_claim_grounding_evidence import (  # noqa: PLC0415
-        extract_reply_prices,
-    )
-
-    if not remainder:
-        return False
-    if reply_availability_polarity(remainder) is not None:
-        return True
-    if reply_positive_options_claim(remainder):
-        return True
-    remainder_prices = extract_reply_prices(remainder)
-    if not remainder_prices:
-        return False
-    referenced_prices = {
-        price
-        for row in referenced
-        if (price := _row_catalog_price(row)) is not None
-    }
-    return bool(remainder_prices - referenced_prices)
+    return [dict(row) for row in (facts.get("eligible_catalog_products") or [])
+            if isinstance(row, dict)]
 
 
 def _browse_catalog_contradiction_reason(
-    reply: str,
-    facts: Dict[str, Any],
+    reply: str, facts: Dict[str, Any], semantic_claims=None,
 ) -> Optional[str]:
-    """
-    Return a contradiction reason only when a product/availability claim conflicts.
+    from .catalog_semantic_claims import contradiction_reason  # noqa: PLC0415
 
-    Conversational remainder after a grounded eligible product is not a product.
-    """
-    if not facts.get("has_eligible_products"):
-        return None
-    referenced = _referenced_eligible_browse_rows(reply, facts)
-    if _is_catalog_wide_browse_denial(reply):
-        return "browse_false_negative_vs_eligible_products"
-    for row in referenced:
-        title = str(row.get("title") or "").strip()
-        if title and _title_has_local_negative_claim(reply, title):
-            return "browse_false_negative_vs_eligible_products"
-    if reply_availability_polarity(reply) == "positive" or reply_positive_options_claim(
-        reply,
-    ):
-        if not referenced:
-            return "browse_positive_ungrounded_in_eligible_products"
-        remainder = _remainder_after_bound_eligible_claims(reply, referenced)
-        if _remainder_has_unbound_product_claim(remainder, referenced):
-            return "browse_positive_ungrounded_in_eligible_products"
-    return None
+    return contradiction_reason(reply, facts, semantic_claims)
 
 
 def _browse_correction_facts(
@@ -845,10 +656,33 @@ def _synthetic_browse_evidence_from_facts(
     )
 
 
+async def apply_product_availability_truth_guard_async(**kwargs):
+    """Inspect the exact candidate once; sync consumers fail closed without it."""
+    if product_availability_guard_mode() != "off":
+        facts = _eligible_catalog_browse_fallback_facts(
+            kwargs.get("availability_context"),
+            question_kind=kwargs.get("question_kind", ""),
+        )
+        if facts is not None and str(kwargs.get("reply") or "").strip():
+            from .catalog_semantic_claims import classify_catalog_claims  # noqa: PLC0415
+
+            try:
+                kwargs["semantic_claims"] = await classify_catalog_claims(
+                    kwargs["reply"], facts, tenant_id=kwargs.get("tenant_id"),
+                    conversation_id=kwargs.get("conversation_id"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("catalog_claim_verifier_failed kind=%s", type(exc).__name__)
+                kwargs["semantic_claims"] = None
+    result = apply_product_availability_truth_guard(**kwargs)
+    status = getattr(kwargs.get("semantic_claims"), "status", "not_run")
+    return replace(result, semantic_status=status)
+
+
 def _browse_guard_action_for_conflict(conflict_reason: str) -> str:
-    if conflict_reason == "browse_positive_ungrounded_in_eligible_products":
-        return "rewrite_conflict"
-    return "rewrite_false_negative"
+    if conflict_reason == "browse_false_negative_vs_eligible_products":
+        return "rewrite_false_negative"
+    return "rewrite_conflict"
 
 
 @dataclass(frozen=True)
@@ -862,6 +696,8 @@ class ProductAvailabilityTruthGuardResult:
     shadow_mode: bool = False
     would_rewrite: bool = False
     requires_grounded_recompose: bool = False
+    semantic_status: str = "not_run"
+    verification_unresolved: bool = False
 
 
 def stamp_product_availability_guard_transform(
@@ -871,6 +707,10 @@ def stamp_product_availability_guard_transform(
 ) -> None:
     if not guard_result.replaced:
         return
+    if not guard_result.reply.strip():
+        # A deliberate hold is not a compose failure for downstream recovery
+        # to fill with new prose. Grounded cards retain their own send gates.
+        result_data["catalog_reply_withheld"] = True
     result_data["final_text_transformed"] = True
     reasons = [
         str(reason)
@@ -947,6 +787,7 @@ def apply_product_availability_truth_guard(
     invocation_site: str = "unknown",
     turn_token: str = "",
     allow_recompose: bool = True,
+    semantic_claims=None,
 ) -> ProductAvailabilityTruthGuardResult:
     from modules.ai.brain.postprocess.product_availability_shadow_telemetry import (  # noqa: PLC0415
         ShadowObservationTimer,
@@ -994,12 +835,36 @@ def apply_product_availability_truth_guard(
         question_kind=question_kind,
     )
     if browse_facts is not None:
-        conflict_reason = _browse_catalog_contradiction_reason(original, browse_facts)
+        conflict_reason = _browse_catalog_contradiction_reason(
+            original, browse_facts, semantic_claims,
+        )
         if conflict_reason is None:
             return ProductAvailabilityTruthGuardResult(
                 reply=original,
                 action="allowed_structured_catalog_browse",
                 reason="structured_catalog_browse_no_contradiction",
+            )
+        if conflict_reason == "browse_semantic_verification_unresolved":
+            # Missing interpretation or stock evidence proves no contradiction.
+            # Re-composing cannot repair a verifier outage; do not create a
+            # second generation/verification loop or fabricate conflict facts.
+            shadow = mode == "shadow"
+            _emit_shadow(
+                evidence_state=EVIDENCE_UNKNOWN,
+                conflict_type="-",
+                guard_action="hold_unverified_text",
+                would_rewrite=True,
+                reason=conflict_reason,
+                customer_text_changed=False,
+            )
+            return ProductAvailabilityTruthGuardResult(
+                reply=original if shadow else "",
+                action="hold_unverified_text",
+                replaced=not shadow,
+                reason=conflict_reason,
+                shadow_mode=shadow,
+                would_rewrite=True,
+                verification_unresolved=True,
             )
         guard_action = _browse_guard_action_for_conflict(conflict_reason)
         if mode == "shadow":

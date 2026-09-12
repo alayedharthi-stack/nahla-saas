@@ -2631,6 +2631,9 @@ class MerchantBrain:
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             _t_dec = None
             _tl_dec = None  # type: ignore[assignment]
+        from .commerce.catalog_request_interpreter import interpret_catalog_request  # noqa: PLC0415
+
+        ctx.catalog_request = await interpret_catalog_request(ctx)
         decision: Decision   = self._decision_engine.decide(ctx)
         try:
             if _t_dec is not None and _tl_dec is not None:
@@ -2922,6 +2925,9 @@ class MerchantBrain:
             _t_ex = None
             _tl_ex = None  # type: ignore[assignment]
         result: ActionResult = await self._executor.execute(decision, ctx)
+        if ctx.catalog_request is not None:
+            result.data["catalog_capability"] = ctx.catalog_request.capability
+            result.data["catalog_request_status"] = ctx.catalog_request.status
         try:
             if _t_ex is not None and _tl_ex is not None:
                 import time as _time_ex2  # noqa: PLC0415
@@ -5248,7 +5254,6 @@ class MerchantBrain:
 
         try:
             from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
-                apply_product_availability_truth_guard,
                 product_availability_guard_mode, stamp_product_availability_guard_transform,
             )
             if product_availability_guard_mode() != "off":
@@ -5285,7 +5290,11 @@ class MerchantBrain:
                         recommended_product_ids=_pavg_rec_ids, result_data=result.data,
                     )
                     _pavg_pc = dict(result.data.get("persona_compose") or {})
-                    _pavg = apply_product_availability_truth_guard(
+                    from modules.ai.brain.postprocess.product_availability_truth_guard import (  # noqa: PLC0415
+                        apply_product_availability_truth_guard_async,
+                    )
+
+                    _pavg = await apply_product_availability_truth_guard_async(
                         reply=reply or "",
                         availability_context=_availability_ctx,
                         inbound_text=message or "",
@@ -5300,6 +5309,10 @@ class MerchantBrain:
                         invocation_site="pipeline",
                         turn_token=str(getattr(new_state, "turn", None) or ""),
                     )
+                    result.data["catalog_claim_verification_status"] = _pavg.semantic_status
+                    result.data["catalog_claim_verification_unresolved"] = _pavg.verification_unresolved
+                    if _pavg.verification_unresolved:
+                        result.data["availability_guard_reason"] = _pavg.reason
                     if _pavg.availability_claim_blocked:
                         result.data["availability_claim_blocked"] = True
                         if _pavg.reason:
@@ -5339,7 +5352,7 @@ class MerchantBrain:
                             _pavg_recompose_calls
                         )
                         result.data["product_claim_recompose_performed"] = True
-                        _pavg_second = apply_product_availability_truth_guard(
+                        _pavg_second = await apply_product_availability_truth_guard_async(
                             reply=_pavg_recomposed or "",
                             availability_context=_availability_ctx,
                             inbound_text=message or "",
@@ -5355,6 +5368,10 @@ class MerchantBrain:
                             turn_token=str(getattr(new_state, "turn", None) or ""),
                             allow_recompose=False,
                         )
+                        result.data["catalog_claim_reverification_status"] = _pavg_second.semantic_status
+                        result.data["catalog_claim_verification_unresolved"] = _pavg_second.verification_unresolved
+                        if _pavg_second.verification_unresolved:
+                            result.data["availability_guard_reason"] = _pavg_second.reason
                         if _pavg_second.replaced:
                             reply = _pavg_second.reply
                             stamp_product_availability_guard_transform(
@@ -5364,6 +5381,7 @@ class MerchantBrain:
                             reply = _pavg_recomposed
                         else:
                             reply = ""
+                            result.data["catalog_reply_withheld"] = True
                             stamp_product_availability_guard_transform(
                                 result.data, _pavg_second, _guard_replaced,
                             )
@@ -5817,7 +5835,8 @@ class MerchantBrain:
                 apply_commerce_reply_quality_guard,
             )
 
-            if not result.data.get("shipment_claim_scrubbed_empty"):
+            if not (result.data.get("shipment_claim_scrubbed_empty")
+                    or result.data.get("catalog_reply_withheld") is True):
                 _crqg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 if _turn_owner_contract_meta:
                     _crqg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)

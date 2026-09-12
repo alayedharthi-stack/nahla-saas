@@ -156,6 +156,34 @@ def _seed_catalog(db, tenant_id: int) -> None:
     db.commit()
 
 
+async def _replay_fixture_claims(candidate, snapshot, **kwargs):
+    # Model-boundary fixtures for the unchanged compose-failure replay.
+    # Provider unavailability is not evidence of the denial's contradiction.
+    import json
+    from modules.ai.brain.postprocess.catalog_semantic_claims import parse_claims
+
+    denial = "لا توجد منتجات قابلة للبيع مؤكدة في الكتالوج حالياً."
+    assert candidate in {denial, "هذا رابط جاكيت."}
+    row = ({"scope": "catalog", "product_id": None, "attribute": "exists",
+            "value": False, "quote": candidate} if candidate == denial else
+           {"scope": "product", "product_id": 28, "attribute": "exists",
+            "value": True, "quote": candidate})
+    return parse_claims(json.dumps({"complete": True, "confidence": 1,
+                                   "claims": [row]}), candidate, snapshot)
+
+
+def _final_fixture_claims(reply, context):
+    # This replay mocks composition with a neutral catalog overview. Supply its
+    # structured interpretation explicitly; do not call the live verifier here.
+    import json
+    from modules.ai.brain.postprocess.catalog_semantic_claims import parse_claims
+
+    return parse_claims(json.dumps({"complete": True, "confidence": 1, "claims": [{
+        "scope": "catalog", "product_id": None, "attribute": "exists",
+        "value": True, "quote": reply,
+    }]}), reply, context["catalog_presentation_facts"])
+
+
 def test_real_orchestration_three_turn_replay_reaches_whatsapp_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -164,6 +192,10 @@ def test_real_orchestration_three_turn_replay_reaches_whatsapp_wire(
 
     monkeypatch.delenv("NAHLA_TEST_NO_DB", raising=False)
     monkeypatch.setenv("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", "enforce")
+    monkeypatch.setattr(
+        "modules.ai.brain.postprocess.catalog_semantic_claims.classify_catalog_claims",
+        _replay_fixture_claims,
+    )
     db, _engine = make_scenario_db()
     tenant = seed_tenant(db, name="متجر تجريبي عام")
     customer = seed_customer(db, tenant.id, phone=DEFAULT_PHONE_E164, name="نورة عبدالله")
@@ -370,6 +402,7 @@ def test_real_orchestration_three_turn_replay_reaches_whatsapp_wire(
         )
         final_guard_pass = apply_product_availability_truth_guard(
             reply=turn_2.reply_text,
+            semantic_claims=_final_fixture_claims(turn_2.reply_text, final_availability_context),
             availability_context=final_availability_context,
             inbound_text=messages[1],
             chosen_path=str(data_2.get("chosen_path") or ""),
@@ -439,6 +472,10 @@ def test_layer2_webhook_three_turn_replay_reaches_provider_boundary(
 
     monkeypatch.delenv("NAHLA_TEST_NO_DB", raising=False)
     monkeypatch.setenv("NAHLA_PRODUCT_AVAILABILITY_TRUTH_GUARD_MODE", "enforce")
+    monkeypatch.setattr(
+        "modules.ai.brain.postprocess.catalog_semantic_claims.classify_catalog_claims",
+        _replay_fixture_claims,
+    )
     monkeypatch.setenv("ORDER_FLOW_V2_ENABLED", "false")
     monkeypatch.setenv("ORDER_FLOW_V2_SHADOW_ENABLED", "true")
     reset_cache()
@@ -616,6 +653,7 @@ def test_layer2_webhook_three_turn_replay_reaches_provider_boundary(
         )
         final_guard_pass = apply_product_availability_truth_guard(
             reply=turns[1].outbound_reply,
+            semantic_claims=_final_fixture_claims(turns[1].outbound_reply, final_context),
             availability_context=final_context,
             inbound_text=messages[1],
             chosen_path=str(data_2.get("chosen_path") or ""),

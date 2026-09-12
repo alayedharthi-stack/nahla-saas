@@ -13285,7 +13285,7 @@ async def _handle_merchant_message(
             if _send_ok and isinstance(_delivery_audit, dict):
                 _delivery_audit["interactive_buttons_sent"] = True
                 _delivery_audit["text_sent"] = True
-        else:
+        elif (reply or "").strip():
             _outbound_wire_boundary_done = True
             # ── URL → CTA-button normaliser ─────────────────────────
             # The reply may carry 0, 1 or >1 URLs. WhatsApp's
@@ -13472,6 +13472,10 @@ async def _handle_merchant_message(
                 )
                 if _send_ok and isinstance(_delivery_audit, dict):
                     _delivery_audit["text_sent"] = True
+        else:
+            # Cards/media dispatch separately below. Do not send an empty
+            # standalone text merely because a structured attachment exists.
+            _outbound_wire_boundary_done = True
         if _send_ok:
             logger.info("[TRACE][5/6] MERCHANT_AI_SENT | tenant=%s to=%s", tenant_id, to)
             logger.info("[Merchant] replied tenant=%s to=%s", tenant_id, to)

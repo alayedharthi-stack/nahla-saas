@@ -481,6 +481,12 @@ def _catalog_rows_from_products(
             "id": pid,
             "title": str(raw.get("title") or "").strip(),
         }
+        from core.native_product_public_url import is_valid_https_product_url  # noqa: PLC0415
+        from services.url_enrichment.url_safety import sanitize_public_metadata_url  # noqa: PLC0415
+
+        product_url = sanitize_public_metadata_url(str(raw.get("product_url") or ""))
+        if is_valid_https_product_url(product_url):
+            row["product_url"] = product_url
         category = str(raw.get("category") or "").strip()
         if category:
             row["category"] = category
@@ -715,6 +721,20 @@ def build_catalog_product_answer_facts_bundle(
     if include_availability and any_availability:
         verified_facts["availability_source"] = "catalog"
     verified_facts.update(_precomputed_catalog_kb_facts(args))
+    correction = args.get("availability_guard_correction")
+    if isinstance(correction, dict) and correction.get("reason") in {
+        "browse_false_negative_vs_eligible_products",
+        "browse_positive_ungrounded_in_eligible_products",
+        "browse_semantic_verification_unresolved",
+    }:
+        # Rebuild from this bundle's authoritative products; never forward a
+        # free-form instruction, stale product row, or rejected candidate.
+        verified_facts["availability_guard_correction"] = {
+            "reason": correction["reason"],
+            "question_kind": qkind,
+            "catalog_product_ids": list(catalog_product_ids),
+            "attempt": 1,
+        }
     return PersonaFactsBundle(
         surface=PERSONA_SURFACE_CATALOG_PRODUCT_ANSWER,
         inbound_text=inbound,

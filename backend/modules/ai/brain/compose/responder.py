@@ -2677,6 +2677,13 @@ class DefaultComposer:
                 fresh_social_context=bool(getattr(ctx, "fresh_social_context", False)),
             )
             user_turn_message = ctx.message
+            from modules.ai.brain.commerce.catalog_request_interpreter import (  # noqa: PLC0415
+                bind_catalog_request_data,
+            )
+
+            user_turn_message, history_messages = bind_catalog_request_data(
+                ctx, user_turn_message, history_messages,
+            )
             if _url_facts:
                 from modules.ai.brain.facts.url_context_facts import (  # noqa: PLC0415
                     bind_url_context_to_user_turn,

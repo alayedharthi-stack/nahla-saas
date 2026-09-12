@@ -418,6 +418,18 @@ def _apply_brain_silent_and_welcome_guards(
         trace.reply_source = TS.SOURCE_BILLING_DENIED
         return reply, brain_silent
 
+    if isinstance(brain_result, dict) and brain_result.get("catalog_reply_withheld") is True:
+        # The catalog guard deliberately withheld unverified text. This is
+        # not a silent Brain turn, and a canned recovery cannot validate it.
+        # Keep product cards/buttons for their existing structured send path.
+        _note_live_text_mutation(
+            live_provenance_tracker,
+            reason_token="catalog_guard_text_withheld",
+            before=reply,
+            after="",
+        )
+        return "", brain_silent
+
     if (reply or "").strip():
         return reply, brain_silent
 
