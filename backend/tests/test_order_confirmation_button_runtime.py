@@ -74,6 +74,7 @@ def test_production_order_event_sends_non_empty_meta_button_parameter():
         language="ar",
         service_key="order_confirmation",
         status="APPROVED",
+        ai_generation_metadata={},
         components=[
             {"type": "HEADER", "format": "IMAGE"},
             {"type": "BODY", "text": "{{1}} {{2}} {{3}} {{4}}"},
@@ -110,9 +111,20 @@ def test_production_order_event_sends_non_empty_meta_button_parameter():
         template_id=None,
     )
     db = MagicMock()
+    merchant_header_url = "https://cdn.example/merchant-order-confirmation.jpg"
+    settings = SimpleNamespace(
+        extra_metadata={
+            "order_updates": {
+                "order_confirmation": {
+                    "runtime": {"header_image_url": merchant_header_url}
+                }
+            }
+        }
+    )
     db.query.return_value.filter.return_value.first.side_effect = [
         customer,
         connection,
+        settings,
     ]
     provider_send = AsyncMock(
         return_value=({"messages": [{"id": "wamid.order.1"}]}, object())
@@ -167,4 +179,12 @@ def test_production_order_event_sends_non_empty_meta_button_parameter():
     )
     assert button["parameters"] == [
         {"type": "text", "text": "orders/2118127694"}
+    ]
+    header = next(
+        component
+        for component in sent_payload["template"]["components"]
+        if component.get("type") == "header"
+    )
+    assert header["parameters"] == [
+        {"type": "image", "image": {"link": merchant_header_url}}
     ]
