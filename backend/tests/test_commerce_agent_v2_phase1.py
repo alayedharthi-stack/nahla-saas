@@ -41,8 +41,10 @@ from modules.ai.commerce_agent_v2.output import (
     CommerceReply,
     FactClaim,
     KnowledgeSearchResult,
+    MediaReference,
     ProductDetailsResult,
     ProductReference,
+    UIAction,
 )
 from modules.ai.commerce_agent_v2.runner import run_commerce_agent
 from modules.ai.commerce_agent_v2.session import ConversationMessageSession, is_agents_session
@@ -573,6 +575,23 @@ def test_structured_reply_validation_and_grounding(seeded: Seed) -> None:
 def test_v2_output_rejects_legacy_markers() -> None:
     for marker in ("[PRODUCT:1]", "[MEDIA_KEY:x]", "[CALL:foo]"):
         assert contains_legacy_marker(marker)
+
+
+def test_structured_output_schema_uses_provider_compatible_validated_urls() -> None:
+    schema_text = json.dumps(CommerceReply.model_json_schema(), sort_keys=True)
+    assert '"format": "uri"' not in schema_text
+    assert MediaReference(
+        url="https://example.test/image.jpg",
+        evidence_ref="catalog:product:1",
+    ).url == "https://example.test/image.jpg"
+    assert UIAction(
+        kind="open_product",
+        label="افتح المنتج",
+        url="https://example.test/products/1",
+        evidence_ref="catalog:product:1",
+    ).url == "https://example.test/products/1"
+    with pytest.raises(Exception):
+        MediaReference(url="not-a-url", evidence_ref="catalog:product:1")
 
 
 @pytest.mark.asyncio

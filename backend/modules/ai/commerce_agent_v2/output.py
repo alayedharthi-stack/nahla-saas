@@ -3,11 +3,25 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 
 ToolStatus = Literal["ok", "not_found", "no_evidence", "denied", "error"]
 EvidenceSource = Literal["catalog_product", "merchant_knowledge", "product_knowledge"]
+_HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
+
+
+def _validated_http_url(value: str) -> str:
+    """Validate URLs without emitting an unsupported ``format: uri`` schema keyword."""
+    return str(_HTTP_URL_ADAPTER.validate_python(value))
 
 
 class EvidenceRecord(BaseModel):
@@ -110,9 +124,11 @@ class ProductReference(BaseModel):
 class MediaReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    url: HttpUrl
+    url: str
     media_type: Literal["image"] = "image"
     evidence_ref: str
+
+    _validate_url = field_validator("url")(_validated_http_url)
 
 
 class UIAction(BaseModel):
@@ -120,8 +136,10 @@ class UIAction(BaseModel):
 
     kind: Literal["open_product"]
     label: str = Field(min_length=1, max_length=120)
-    url: HttpUrl
+    url: str
     evidence_ref: str
+
+    _validate_url = field_validator("url")(_validated_http_url)
 
 
 class CommerceReply(BaseModel):
