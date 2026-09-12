@@ -47,6 +47,20 @@ POLL_INTERVAL_SECONDS = 60
 # Max events processed per tenant per cycle
 _BATCH_SIZE = 100
 
+# Named URL slots used by Meta dynamic-button templates.  Keep this shared by
+# both the legacy automation sender and the lifecycle sender so their payloads
+# cannot drift.
+_DYNAMIC_URL_SLOT_PRECEDENCE = (
+    "order_tracking_url",
+    "checkout_url",
+    "cart_url",
+    "tracking_url",
+    "payment_url",
+    "product_url",
+    "reorder_url",
+    "store_url",
+)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1649,10 +1663,6 @@ async def _execute_action(
     #   • Dynamic URL buttons (``{{1}}`` in the URL) — suffix text
     #   • COPY_CODE buttons — coupon_code value
     # Missing either causes Meta error 132000 / template_param_mismatch.
-    _URL_SLOT_PRECEDENCE = (
-        "checkout_url", "cart_url", "tracking_url", "payment_url",
-        "product_url", "reorder_url", "store_url",
-    )
     # Greeting-name policy (May 2026): use Customer.name verbatim and
     # only swap in the static fallback when the stored value is empty.
     # Bad names get cleaned once via the bulk "تنظيف أسماء العملاء"
@@ -1704,52 +1714,30 @@ async def _execute_action(
             if "{{1}}" not in btn_url_tpl:
                 continue
             _has_dynamic_url_btn = True
-            btn_suffix = ""
-            for url_slot in _URL_SLOT_PRECEDENCE:
-                resolved = _resolve_slot_value(
-                    slot=url_slot,
-                    customer_name=_customer_name_for_btn,
-                    store_name=_store_name_for_btn,
-                    payload=_payload_for_btn,
-                    config=config,
-                    coupon_extras=coupon_extras,
-                )
-                if resolved:
-                    btn_suffix = _extract_button_url_suffix(btn_url_tpl, resolved)
-                    if btn_suffix:
-                        break
+            btn_suffix = _resolve_dynamic_url_button_suffix(
+                btn_url_tpl,
+                customer_name=_customer_name_for_btn,
+                store_name=_store_name_for_btn,
+                payload=_payload_for_btn,
+                config=config,
+                coupon_extras=coupon_extras,
+            )
             if not btn_suffix:
-                # ── CRITICAL FIX: never omit the button component ──────────
-                # If no URL was found in the event payload, try a chain of
-                # safe fallbacks so we ALWAYS emit the button param component.
-                # Skipping it entirely causes template_param_mismatch (Meta
-                # error 132000) because the approved template declares {{1}}
-                # in the button URL but we send 0 button-param components.
-                _btn_fallback_url = str(
-                    _payload_for_btn.get("payment_url")
-                    or _payload_for_btn.get("checkout_url")
-                    or _payload_for_btn.get("cart_url")
-                    or _payload_for_btn.get("tracking_url")
-                    or _payload_for_btn.get("store_url")
-                    or config.get("store_url")
-                    or ""
+                # A whitespace value is rejected by Meta as an empty mandatory
+                # text parameter.  Fail locally with an actionable error rather
+                # than making a provider call that is guaranteed to return 400.
+                logger.error(
+                    "[WA TEMPLATE BUILD] Dynamic URL button unresolved "
+                    "template=%s tenant=%s event=%s",
+                    template.name, tenant_id, getattr(event, "id", None),
                 )
-                if _btn_fallback_url:
-                    btn_suffix = _extract_button_url_suffix(btn_url_tpl, _btn_fallback_url)
-                if not btn_suffix:
-                    # Last resort: use a single space so Meta accepts the
-                    # call. The button URL suffix will be empty/blank but the
-                    # parameter COUNT will be correct and the send won't fail
-                    # with 132000. A real URL should be populated in the event
-                    # payload by the store adapter or order enrichment step.
-                    btn_suffix = " "
-                logger.warning(
-                    "[WA TEMPLATE BUILD] Dynamic URL button on template=%s — "
-                    "primary URL slots empty; using fallback suffix=%r "
-                    "(tenant=%s). Populate payment_url/checkout_url in the "
-                    "order record to get the real link.",
-                    template.name, btn_suffix, tenant_id,
-                )
+                return False, {
+                    "error": "missing_dynamic_button_value",
+                    "error_code": "missing_dynamic_button_value",
+                    "error_label": "تعذر إنشاء رابط زر القالب من بيانات الطلب",
+                    "template": template.name,
+                    "to": to_phone,
+                }
 
             if btn_suffix:
                 _btn_suffix_resolved = True
@@ -2109,6 +2097,14 @@ def _resolve_slot_value(
     if slot == "tracking_url":
         return str(
             payload.get("tracking_url")
+            or payload.get("tracking_link")
+            or payload.get("shipping_tracking_url")
+            or ""
+        )
+    if slot == "order_tracking_url":
+        return str(
+            payload.get("order_tracking_url")
+            or payload.get("tracking_url")
             or payload.get("tracking_link")
             or payload.get("shipping_tracking_url")
             or ""
@@ -2803,6 +2799,61 @@ def _extract_button_url_suffix(button_url_template: str, full_url: str) -> str:
         return suffix
     except Exception:
         return full_url
+
+
+def _resolve_dynamic_url_button_suffix(
+    button_url_template: str,
+    *,
+    customer_name: str,
+    store_name: Optional[str],
+    payload: Dict[str, Any],
+    config: Dict[str, Any],
+    coupon_extras: Dict[str, str],
+) -> str:
+    """Resolve a non-empty Meta dynamic URL-button text parameter.
+
+    The canonical order-confirmation templates are approved with either
+    ``https://mtjr.at/{{1}}`` (whose approved example is ``orders/45678``)
+    or a fixed ``.../orders/{{1}}`` prefix.  New-order webhooks always carry
+    an order reference even when the commerce platform supplies no checkout
+    or tracking URL, so derive the approved suffix from that reference.
+    """
+    for url_slot in _DYNAMIC_URL_SLOT_PRECEDENCE:
+        resolved = _resolve_slot_value(
+            slot=url_slot,
+            customer_name=customer_name,
+            store_name=store_name,
+            payload=payload,
+            config=config,
+            coupon_extras=coupon_extras,
+        ).strip()
+        if not resolved:
+            continue
+        suffix = _extract_button_url_suffix(button_url_template, resolved).strip()
+        if suffix:
+            return suffix
+
+    order_reference = str(
+        payload.get("order_number")
+        or payload.get("external_order_number")
+        or payload.get("external_id")
+        or payload.get("order_id")
+        or ""
+    ).strip()
+    if not order_reference:
+        return ""
+
+    from urllib.parse import quote  # noqa: PLC0415
+
+    encoded_reference = quote(order_reference, safe="")
+    if button_url_template == "https://mtjr.at/{{1}}":
+        return f"orders/{encoded_reference}"
+
+    placeholder_pos = button_url_template.find("{{1}}")
+    fixed_prefix = button_url_template[:placeholder_pos].rstrip("/")
+    if placeholder_pos >= 0 and fixed_prefix.endswith("/orders"):
+        return encoded_reference
+    return ""
 
 
 def _write_execution(
@@ -3910,10 +3961,6 @@ async def send_lifecycle_whatsapp_template(
     if body_params:
         components.append({"type": "body", "parameters": body_params})
 
-    _URL_SLOT_PRECEDENCE = (
-        "checkout_url", "cart_url", "tracking_url", "payment_url",
-        "product_url", "reorder_url", "store_url",
-    )
     _customer_name_for_btn = display_name_passthrough_or_fallback(customer_name)
     _store_name_for_btn = store_name
     _payload_for_btn: Dict[str, Any] = dict(payload or {})
@@ -3937,17 +3984,31 @@ async def send_lifecycle_whatsapp_template(
                     ],
                 })
             elif btn_type == "URL" and "{{" in str(btn.get("url", "") or ""):
-                _full_url = ""
-                for slot in _URL_SLOT_PRECEDENCE:
-                    _full_url = str(_payload_for_btn.get(slot) or "").strip()
-                    if _full_url:
-                        break
-                _suffix = _extract_button_url_suffix(str(btn.get("url") or ""), _full_url)
+                _suffix = _resolve_dynamic_url_button_suffix(
+                    str(btn.get("url") or ""),
+                    customer_name=_customer_name_for_btn,
+                    store_name=_store_name_for_btn,
+                    payload=_payload_for_btn,
+                    config=config_stub,
+                    coupon_extras={},
+                )
+                if not _suffix:
+                    logger.error(
+                        "[LifecycleSend] Dynamic URL button unresolved "
+                        "template=%s tenant=%s",
+                        template.name, tenant_id,
+                    )
+                    return "failed", {
+                        "error_code": "missing_dynamic_button_value",
+                        "template": template.name,
+                        "service_key": service_key,
+                        "send_method": "template",
+                    }
                 components.append({
                     "type": "button",
                     "sub_type": "url",
                     "index": str(btn_idx),
-                    "parameters": [{"type": "text", "text": _suffix or " "}],
+                    "parameters": [{"type": "text", "text": _suffix}],
                 })
             elif btn_type == "QUICK_REPLY":
                 title = str(btn.get("text") or "").strip()
