@@ -768,6 +768,56 @@ def test_canonical_catalog_claims_accept_formatting_and_natural_arabic(seeded: S
     )
     assert validate_grounded_reply(context, compact_spans) == []
 
+    plural_availability = compact_spans.model_copy(
+        update={
+            "text": compact_spans.text.replace("متوفرة", "جاهزة للطلب"),
+            "fact_claims": [
+                claim.model_copy(update={"text_span": "جاهزة للطلب"})
+                if claim.kind == "availability"
+                else claim
+                for claim in compact_spans.fact_claims
+            ],
+        }
+    )
+    assert validate_grounded_reply(context, plural_availability) == []
+
+
+def test_description_claim_accepts_supported_shorter_natural_span(seeded: Seed) -> None:
+    context = _context(seeded)
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="description",
+                        value="عبوة 500 جرام",
+                        subject_product_id=seeded.honey_a.id,
+                    )
+                ],
+            )
+        ]
+    )
+    assert validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="الوزن 500 جرام.",
+            evidence_refs=[ref],
+            fact_claims=[
+                FactClaim(
+                    kind="description",
+                    value="عبوة 500 جرام",
+                    evidence_ref=ref,
+                    subject_product_id=seeded.honey_a.id,
+                    text_span="500 جرام",
+                )
+            ],
+        ),
+    ) == []
+
 
 def test_structured_ui_and_media_can_render_verified_urls_without_raw_text_url(
     seeded: Seed,

@@ -29,9 +29,12 @@ _QUANTITY_RE = re.compile(
     re.IGNORECASE,
 )
 _AVAILABILITY_RE = re.compile(
-    r"غير\s+(?:متوفر(?:ة|ه)?|متاح(?:ة|ه)?)\b|(?:نافد(?:ة|ه)?|نفد)\b|"
+    r"غير\s+(?:متوفر|متاح|موجود|قابل)(?:ة|ه|ان|ين|ون|ات)?(?:\s+للطلب)?\b|"
+    r"لا\s+يمكن\s+طلب\w*|(?:نافد|نفد)(?:ة|ه|ان|ين|ون|ات)?\b|"
     r"out\s+of\s+stock\b|unavailable\b|"
-    r"(?:متوفر(?:ة|ه)?|متاح(?:ة|ه)?|موجود(?:ة|ه)?)\b|in\s+stock\b|available\b",
+    r"(?:متوفر|متاح|موجود)(?:ة|ه|ان|ين|ون|ات)?\b|"
+    r"(?:قابل|جاهز)(?:ة|ه|ان|ين|ون|ات)?\s+للطلب\b|يمكن\s+طلب\w*|"
+    r"in\s+stock\b|available\b",
     re.IGNORECASE,
 )
 _ARABIC_DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
@@ -236,7 +239,11 @@ def _span_expresses_claim(
             _canonical_currency(match.group(0)) for match in _CURRENCY_RE.finditer(span)
         }
     if claim.kind == "availability":
-        states = {_availability_value(match.group(0)) for match in _AVAILABILITY_RE.finditer(span)}
+        normalized_span = _normalize_text(span)
+        states = {
+            _availability_value(match.group(0))
+            for match in _AVAILABILITY_RE.finditer(normalized_span)
+        }
         return claim.value in states
     if claim.kind == "stock_quantity":
         expected = _decimal(claim.value)
@@ -255,6 +262,23 @@ def _span_expresses_claim(
         )
     if claim.kind in {"merchant_knowledge", "product_knowledge"}:
         return _knowledge_span_supported(record, span)
+    if claim.kind == "description":
+        claim_tokens = _knowledge_tokens(str(claim.value))
+        span_tokens = _knowledge_tokens(span)
+        claim_negation = bool(
+            set(_TOKEN_RE.findall(_normalize_text(str(claim.value)))) & _NEGATION_TOKENS
+        )
+        span_negation = bool(
+            set(_TOKEN_RE.findall(_normalize_text(span))) & _NEGATION_TOKENS
+        )
+        claim_numbers = {_decimal(value) for value in _NUMBER_RE.findall(str(claim.value))}
+        span_numbers = {_decimal(value) for value in _NUMBER_RE.findall(span)}
+        return bool(
+            span_tokens
+            and span_tokens <= claim_tokens
+            and span_negation == claim_negation
+            and span_numbers <= claim_numbers
+        )
     claim_tokens = _knowledge_tokens(str(claim.value))
     span_tokens = _knowledge_tokens(span)
     return bool(claim_tokens) and claim_tokens <= span_tokens
@@ -264,7 +288,17 @@ def _availability_value(value: str) -> bool:
     normalized = _normalize_text(value)
     return not any(
         term in normalized
-        for term in ("غير متوفر", "غير متاح", "نافد", "نفد", "unavailable", "out of stock")
+        for term in (
+            "غير متوفر",
+            "غير متاح",
+            "غير موجود",
+            "غير قابل",
+            "لا يمكن طلب",
+            "نافد",
+            "نفد",
+            "unavailable",
+            "out of stock",
+        )
     )
 
 
