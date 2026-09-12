@@ -53,6 +53,13 @@ logger = logging.getLogger("nahla.admin_debug")
 router = APIRouter(prefix="/admin/debug", tags=["admin-debug"])
 
 
+class ConversationContextResetRequest(BaseModel):
+    tenant_id: int = Field(gt=0)
+    conversation_id: int = Field(gt=0)
+    apply: bool = False
+    confirmation: str = Field(default="", max_length=64)
+
+
 @router.get("/conversation-trace-export")
 def admin_conversation_trace_export(
     tenant_id: int = Query(..., ge=1),
@@ -73,6 +80,51 @@ def admin_conversation_trace_export(
           tenant_id=tenant_id, conversation_id=conversation_id,
           rows=len(payload["messages"]))
     return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/conversation-context-reset")
+def admin_conversation_context_reset(
+    body: ConversationContextResetRequest,
+    secret: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    _admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Preview or create a clean session for an explicitly selected test conversation."""
+    from core.admin_conversation_reset import (  # noqa: PLC0415
+        ConversationContextResetError,
+        reset_conversation_context,
+    )
+
+    _require_enabled(secret)
+    if _admin.get("impersonation") and _admin.get("tenant_id") != body.tenant_id:
+        raise HTTPException(status_code=403, detail="Support session tenant mismatch")
+    if body.apply and body.confirmation != "RESET_CONVERSATION_CONTEXT":
+        raise HTTPException(
+            status_code=400,
+            detail="Set confirmation=RESET_CONVERSATION_CONTEXT to apply the reset.",
+        )
+    actor = str(
+        _admin.get("email") or _admin.get("sub") or _admin.get("user") or "admin"
+    )
+    try:
+        result = reset_conversation_context(
+            db,
+            tenant_id=body.tenant_id,
+            conversation_id=body.conversation_id,
+            actor=actor,
+            apply=body.apply,
+        )
+    except ConversationContextResetError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    audit(
+        "admin_conversation_context_reset",
+        admin_sub=_admin.get("sub"),
+        tenant_id=body.tenant_id,
+        source_conversation_id=body.conversation_id,
+        new_conversation_id=result.get("new_conversation_id"),
+        applied=result["applied"],
+    )
+    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
 
 
 def _require_enabled(secret: Optional[str]) -> None:

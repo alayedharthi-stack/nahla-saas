@@ -2538,6 +2538,43 @@ class AIUsageEvent(Base):
     tenant = relationship("Tenant")
 
 
+class CommerceAgentV2ShadowRun(Base):
+    """Append-only, PII-redacted comparison record for V2 shadow runs."""
+
+    __tablename__ = "commerce_agent_v2_shadow_runs"
+    __table_args__ = (
+        Index("ix_commerce_v2_shadow_tenant_created", "tenant_id", "created_at"),
+        Index(
+            "ix_commerce_v2_shadow_conversation_created",
+            "conversation_id",
+            "created_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
+    sdk_trace_id = Column(String(64), nullable=False, index=True)
+    model = Column(String(128), nullable=False)
+    status = Column(String(32), nullable=False)
+    structured_output = Column(JSONB, nullable=True)
+    tool_trace = Column(JSONB, nullable=True)
+    guardrail_results = Column(JSONB, nullable=True)
+    latency_ms = Column(Integer, nullable=False, default=0)
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    total_tokens = Column(Integer, nullable=False, default=0)
+    failure_reason = Column(String(240), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    tenant = relationship("Tenant")
+    conversation = relationship("Conversation")
+
+
 class ConversationTrace(Base):
     """Per-turn debug trace for every AI Sales conversation step."""
     __tablename__ = 'conversation_traces'
