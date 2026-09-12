@@ -1542,6 +1542,7 @@ async def _execute_action(
 
     _body_ph_count = 0
     _header_ph_count = 0
+    _header_param_count = 0
     _header_format = ""
     _button_ph_count = 0  # number of BUTTON components Meta expects (URL+COPY_CODE)
     for _tcomp in (template.components or []):
@@ -1552,6 +1553,9 @@ async def _execute_action(
             _header_format = str(_tcomp.get("format", "")).upper()
             if _header_format == "TEXT":
                 _header_ph_count = _ph_count(_tcomp.get("text"))
+                _header_param_count = _header_ph_count
+            elif _header_format == "IMAGE":
+                _header_param_count = 1
         elif _ttype == "BUTTONS":
             for _btn in (_tcomp.get("buttons") or []):
                 _btype = str(_btn.get("type", "")).upper()
@@ -1652,6 +1656,32 @@ async def _execute_action(
             "parameters": [
                 {"type": "text", "text": (str(v) if str(v).strip() else " ")}
                 for v in _hdr_values
+            ],
+        })
+    elif _header_format == "IMAGE":
+        _header_image_url = _resolve_runtime_image_header_url(
+            db,
+            tenant_id,
+            template,
+            service_key=svc_key,
+        )
+        if not _header_image_url:
+            logger.error(
+                "[WA TEMPLATE BUILD] IMAGE header unresolved "
+                "template=%s tenant=%s event=%s",
+                template.name, tenant_id, getattr(event, "id", None),
+            )
+            return False, {
+                "error": "missing_template_header_image",
+                "error_code": "missing_template_header_image",
+                "error_label": "تعذر تحميل صورة رأس القالب",
+                "template": template.name,
+                "to": to_phone,
+            }
+        components.append({
+            "type": "header",
+            "parameters": [
+                {"type": "image", "image": {"link": _header_image_url}}
             ],
         })
 
@@ -1781,14 +1811,14 @@ async def _execute_action(
         "component=body expected=%d sent=%d | "
         "component=buttons expected=%d sent=%d",
         template.name, template.language or "ar", _svc_key_log,
-        _header_ph_count, _sent_header_params,
+        _header_param_count, _sent_header_params,
         _body_ph_count, _sent_body_params,
         _button_ph_count, _sent_button_params,
     )
 
     if (
         _sent_body_params   != _body_ph_count
-        or _sent_header_params != _header_ph_count
+        or _sent_header_params != _header_param_count
         or _sent_button_params  != _button_ph_count
     ):
         logger.error(
@@ -1799,7 +1829,7 @@ async def _execute_action(
             "buttons: expected=%d sent=%d | "
             "body_values=%r",
             template.name, _svc_key_log,
-            _header_ph_count, _sent_header_params,
+            _header_param_count, _sent_header_params,
             _body_ph_count, _sent_body_params,
             _button_ph_count, _sent_button_params,
             [str(v)[:40] for v in _var_values],
@@ -1841,7 +1871,7 @@ async def _execute_action(
                 "sent(body=%d header=%d buttons=%d)",
                 tenant_id, event.id, automation.id, template.name,
                 code, label_ar, raw_meta,
-                _body_ph_count, _header_ph_count, _button_ph_count,
+                _body_ph_count, _header_param_count, _button_ph_count,
                 _sent_body_params, _sent_header_params, _sent_button_params,
             )
             return False, {
@@ -1855,7 +1885,7 @@ async def _execute_action(
                 "param_counts": {
                     "expected": {
                         "body":    _body_ph_count,
-                        "header":  _header_ph_count,
+                        "header":  _header_param_count,
                         "buttons": _button_ph_count,
                     },
                     "sent": {
@@ -2854,6 +2884,54 @@ def _resolve_dynamic_url_button_suffix(
     if placeholder_pos >= 0 and fixed_prefix.endswith("/orders"):
         return encoded_reference
     return ""
+
+
+def _resolve_runtime_image_header_url(
+    db: Session,
+    tenant_id: int,
+    template: Any,
+    *,
+    service_key: Optional[str] = None,
+) -> str:
+    """Resolve the public image URL required by a Meta IMAGE header.
+
+    Lifecycle confirmation images can be replaced by the merchant before Meta
+    submission.  The runtime resolver follows the same precedence as the
+    dashboard preview so the image the merchant reviewed is the image sent.
+    """
+    resolved_service = str(
+        service_key or getattr(template, "service_key", None) or ""
+    ).strip()
+    components = list(getattr(template, "components", None) or [])
+    metadata = dict(getattr(template, "ai_generation_metadata", None) or {})
+
+    if resolved_service in {"order_confirmation", "cod_confirmation"}:
+        from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+            resolve_lifecycle_preview_header_url,
+        )
+
+        return str(
+            resolve_lifecycle_preview_header_url(
+                db,
+                int(tenant_id),
+                components,
+                metadata,
+                service_key=resolved_service,
+            )
+            or ""
+        ).strip()
+
+    for component in components:
+        if (
+            str((component or {}).get("type") or "").upper() == "HEADER"
+            and str((component or {}).get("format") or "").upper() == "IMAGE"
+        ):
+            example = dict((component or {}).get("example") or {})
+            url = str(example.get("header_url") or "").strip()
+            if url:
+                return url
+
+    return str(metadata.get("merchant_header_image_url") or "").strip()
 
 
 def _write_execution(
@@ -3955,6 +4033,30 @@ async def send_lifecycle_whatsapp_template(
             "parameters": [
                 {"type": "text", "text": (str(v) if str(v).strip() else " ")}
                 for v in _hdr_values
+            ],
+        })
+    elif _header_format == "IMAGE":
+        _header_image_url = _resolve_runtime_image_header_url(
+            db,
+            tenant_id,
+            template,
+            service_key=service_key,
+        )
+        if not _header_image_url:
+            logger.error(
+                "[LifecycleSend] IMAGE header unresolved template=%s tenant=%s",
+                template.name, tenant_id,
+            )
+            return "failed", {
+                "error_code": "missing_template_header_image",
+                "template": template.name,
+                "service_key": service_key,
+                "send_method": "template",
+            }
+        components.append({
+            "type": "header",
+            "parameters": [
+                {"type": "image", "image": {"link": _header_image_url}}
             ],
         })
 
