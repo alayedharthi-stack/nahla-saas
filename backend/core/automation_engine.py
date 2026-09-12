@@ -63,6 +63,41 @@ def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _is_automation_effectively_enabled(
+    db: Session, tenant_id: int, automation: Any
+) -> bool:
+    """Resolve the canonical enablement gate for a matching automation.
+
+    ``order_notifications`` is owned by the Order Updates settings screen.
+    Older tenants can have a stale disabled SmartAutomation row even while
+    both canonical switches are enabled.  Read canonical consent at runtime
+    so existing tenants recover without requiring them to toggle a setting.
+    """
+    if str(getattr(automation, "automation_type", "") or "") != "order_notifications":
+        return bool(getattr(automation, "enabled", False))
+
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        REASON_SETTINGS_UNAVAILABLE,
+        evaluate_order_update_delivery,
+    )
+
+    allowed, reason = evaluate_order_update_delivery(
+        db, int(tenant_id), "order_confirmation"
+    )
+    if reason != REASON_SETTINGS_UNAVAILABLE and bool(automation.enabled) != allowed:
+        # Self-heal stale rows.  The surrounding event transaction owns the
+        # flush/commit, so delivery and repair remain atomic.
+        automation.enabled = allowed
+        automation.updated_at = datetime.now(timezone.utc)
+        logger.info(
+            "[AutoEngine] synced order_notifications enabled=%s tenant=%s automation=%s",
+            allowed,
+            tenant_id,
+            getattr(automation, "id", None),
+        )
+    return allowed
+
+
 # ── Public: event emitter helper ─────────────────────────────────────────────
 
 def emit_automation_event(
@@ -438,7 +473,10 @@ async def _process_event(
         )
         .all()
     )
-    automations: List[Any] = [a for a in all_matches if a.enabled]
+    automations: List[Any] = [
+        a for a in all_matches
+        if _is_automation_effectively_enabled(db, tenant_id, a)
+    ]
 
     if not automations:
         # Previously this branch called `logger.debug(...)` and silently set

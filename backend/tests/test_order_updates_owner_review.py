@@ -38,6 +38,7 @@ from core.commerce_lifecycle.order_updates import (  # noqa: E402
 )
 from models import (  # noqa: E402
     CommerceLifecycleNotificationLedger,
+    SmartAutomation,
     TenantSettings,
     WaConversationWindow,
     WhatsAppTemplate,
@@ -158,7 +159,7 @@ class TestSettingsFailClosed:
 
 class TestSettingsApiSnapshot:
     def test_patch_master_does_not_write_effective_false_into_flags(self):
-        db, _ = _make_db(TenantSettings, WhatsAppTemplate)
+        db, _ = _make_db(TenantSettings, WhatsAppTemplate, SmartAutomation)
         set_order_update_flags(
             db,
             9,
@@ -189,7 +190,7 @@ class TestSettingsApiSnapshot:
         assert restored["effective"]["order_confirmation"] is True
 
     def test_patch_only_changed_key(self):
-        db, _ = _make_db(TenantSettings, WhatsAppTemplate)
+        db, _ = _make_db(TenantSettings, WhatsAppTemplate, SmartAutomation)
         set_order_update_flags(
             db, 9, {"order_confirmation": True, "shipping_tracking": True}, commit=True
         )
