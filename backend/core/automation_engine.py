@@ -3699,6 +3699,29 @@ async def send_lifecycle_whatsapp_session_body(
         }
 
 
+def _lifecycle_template_body_var_map(template: Any) -> Dict[str, str]:
+    """Resolve BODY slots for a tenant clone from its immutable library source key."""
+    source_key = str(getattr(template, "nahla_source_key", None) or "").strip()
+    if not source_key:
+        return {}
+    try:
+        from services.whatsapp_templates.nahla_templates import (  # noqa: PLC0415
+            get_template_by_key,
+        )
+
+        definition = get_template_by_key(source_key) or {}
+    except Exception:
+        return {}
+    body_slots = definition.get("body_slots")
+    if not isinstance(body_slots, list):
+        return {}
+    return {
+        f"{{{{{index + 1}}}}}": str(slot)
+        for index, slot in enumerate(body_slots)
+        if str(slot or "").strip()
+    }
+
+
 async def send_lifecycle_whatsapp_template(
     db: Session,
     tenant_id: int,
@@ -3781,7 +3804,9 @@ async def send_lifecycle_whatsapp_template(
         {"name": customer_name or "", "phone": normalized_phone},
     )()
     event_stub = type("LifecycleEvent", (), {"payload": dict(payload or {})})()
-    config_stub: Dict[str, Any] = {}
+    config_stub: Dict[str, Any] = {
+        "var_map": _lifecycle_template_body_var_map(template),
+    }
     store_name = _resolve_store_name(db, tenant_id)
 
     vars_map = _build_template_vars(
@@ -3879,6 +3904,7 @@ async def send_lifecycle_whatsapp_template(
     _store_name_for_btn = store_name
     _payload_for_btn: Dict[str, Any] = dict(payload or {})
     _coupon_code_for_btn = str(_payload_for_btn.get("coupon_code") or "")
+    _missing_template_parameters: List[str] = []
 
     for comp in (template.components or []):
         if str(comp.get("type", "")).upper() != "BUTTONS":
@@ -3903,12 +3929,21 @@ async def send_lifecycle_whatsapp_template(
                     _full_url = str(_payload_for_btn.get(slot) or "").strip()
                     if _full_url:
                         break
+                from core.commerce_lifecycle.evidence import (  # noqa: PLC0415
+                    is_valid_https_evidence_url,
+                )
+                if not is_valid_https_evidence_url(_full_url):
+                    _missing_template_parameters.append(f"button[{btn_idx}].url")
+                    continue
                 _suffix = _extract_button_url_suffix(str(btn.get("url") or ""), _full_url)
+                if not _suffix.strip():
+                    _missing_template_parameters.append(f"button[{btn_idx}].url")
+                    continue
                 components.append({
                     "type": "button",
                     "sub_type": "url",
                     "index": str(btn_idx),
-                    "parameters": [{"type": "text", "text": _suffix or " "}],
+                    "parameters": [{"type": "text", "text": _suffix}],
                 })
             elif btn_type == "QUICK_REPLY":
                 title = str(btn.get("text") or "").strip()
@@ -3926,6 +3961,20 @@ async def send_lifecycle_whatsapp_template(
                         }
                     ],
                 })
+
+    if _missing_template_parameters:
+        logger.error(
+            "[LifecycleTemplate] provider call blocked template=%s "
+            "missing_parameters=%s",
+            template.name,
+            _missing_template_parameters,
+        )
+        return "failed", {
+            "error_code": "missing_template_evidence",
+            "template": template.name,
+            "service_key": service_key,
+            "missing_fields": _missing_template_parameters,
+        }
 
     send_payload: Dict[str, Any] = {
         "messaging_product": "whatsapp",
