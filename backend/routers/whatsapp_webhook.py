@@ -32,6 +32,7 @@ from models import MessageEvent, WhatsAppConnection
 from core.config import (
     ANTHROPIC_API_KEY,
     CLAUDE_MODEL,
+    COMMERCE_AGENT_V2_ENABLED,
     MERCHANT_BRAIN_ALLOW_LEGACY_FALLBACK,
     MERCHANT_BRAIN_ENABLED,
     MERCHANT_BRAIN_TENANT_IDS,
@@ -9382,6 +9383,35 @@ async def _handle_merchant_message(
                 preconditions=_turn_preconditions,
                 profile=profile,
             )
+            # V2 Phase 1 is a shadow-only copy. It owns no outbound function,
+            # runs in a separate DB session/task, and is fully gated OFF by
+            # default. V1 remains the sole reply owner below.
+            if not _skip and COMMERCE_AGENT_V2_ENABLED:
+                try:
+                    from modules.ai.commerce_agent_v2.shadow import (  # noqa: PLC0415
+                        schedule_commerce_agent_v2_shadow,
+                    )
+
+                    schedule_commerce_agent_v2_shadow(
+                        tenant_id=int(tenant_id),
+                        conversation_id=int(convo.id),
+                        customer_id=(
+                            int(convo.customer_id)
+                            if getattr(convo, "customer_id", None) is not None
+                            else None
+                        ),
+                        normalized_customer_phone=normalize_phone(to),
+                        connection_id=str(getattr(wa_conn_hist, "id", "") or ""),
+                        inbound_trace_id=str(wa_msg_id or f"conversation-{convo.id}"),
+                        user_input=text or "",
+                    )
+                except Exception as _v2_shadow_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[COMMERCE_V2_SHADOW_SCHEDULE_FAILED] tenant=%s conversation=%s error=%s",
+                        tenant_id,
+                        getattr(convo, "id", None),
+                        type(_v2_shadow_exc).__name__,
+                    )
             # Trusted-context source-order contract marker: brain.process(
             try:
                 if _t_pre_brain_remaining is not None:

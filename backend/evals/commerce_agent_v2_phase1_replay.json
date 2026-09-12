@@ -1,0 +1,72 @@
+[
+  {
+    "id": "catalog-browse-ar",
+    "message": "وش منتجاتكم؟",
+    "pattern": "catalog_browse",
+    "expected_tools": ["search_products"],
+    "expected_behavior": "Return only catalog-backed products."
+  },
+  {
+    "id": "catalog-specific-ar",
+    "message": "عندكم عسل طلح؟",
+    "pattern": "catalog_search",
+    "expected_tools": ["search_products"],
+    "expected_behavior": "Search the tenant catalog and do not infer availability."
+  },
+  {
+    "id": "price-followup-ar",
+    "message": "كم سعره؟",
+    "pattern": "grounded_price_followup",
+    "expected_tools": ["search_products", "get_product_details"],
+    "expected_behavior": "Resolve the product from conversation context and cite catalog price evidence."
+  },
+  {
+    "id": "product-provenance-ar",
+    "message": "هل هذا العسل من نحل بلدي؟",
+    "pattern": "product_linked_kb",
+    "expected_tools": ["search_products", "search_product_knowledge"],
+    "expected_behavior": "Use knowledge linked to the resolved product only."
+  },
+  {
+    "id": "gift-recommendation-ar",
+    "message": "أبغى عسل هدية",
+    "pattern": "recommendation",
+    "expected_tools": ["search_products"],
+    "expected_behavior": "Recommend only products returned by catalog evidence."
+  },
+  {
+    "id": "budget-recommendation-ar",
+    "message": "أبغى شيء أقل من 200 ريال",
+    "pattern": "budget_recommendation",
+    "expected_tools": ["search_products"],
+    "expected_behavior": "Compare the requested budget against catalog prices without inventing products."
+  },
+  {
+    "id": "global-kb-ar",
+    "message": "هل عندكم تغليف هدايا؟",
+    "pattern": "global_merchant_kb",
+    "expected_tools": ["search_merchant_knowledge"],
+    "expected_behavior": "Answer from a global AI-visible merchant KB section."
+  },
+  {
+    "id": "linked-kb-ar",
+    "message": "وش مصدر عسل الطلح؟",
+    "pattern": "product_linked_kb",
+    "expected_tools": ["search_products", "search_product_knowledge"],
+    "expected_behavior": "Retrieve only sections linked to the selected product."
+  },
+  {
+    "id": "missing-product-ar",
+    "message": "عندكم عسل مانوكا نادر؟",
+    "pattern": "product_not_found",
+    "expected_tools": ["search_products"],
+    "expected_behavior": "State that no matching product was found; do not substitute one silently."
+  },
+  {
+    "id": "missing-fact-ar",
+    "message": "وش سنة قطف هذا العسل؟",
+    "pattern": "missing_fact_no_invention",
+    "expected_tools": ["search_products", "search_product_knowledge"],
+    "expected_behavior": "Use a structured safe fallback when harvest-year evidence is absent."
+  }
+]
