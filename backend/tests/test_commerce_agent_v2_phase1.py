@@ -1500,6 +1500,43 @@ def test_tool_eval_accepts_evidence_equivalent_price_plans_and_rejects_forbidden
     assert rejected["forbidden_tools_absent"] is False
 
 
+def test_tool_eval_accepts_one_details_check_after_missing_product_knowledge() -> None:
+    case = {
+        "tool_contract": {
+            "required_tools": ["search_products", "search_product_knowledge"],
+            "acceptable_plans": [
+                ["search_products", "search_product_knowledge"],
+                [
+                    "search_products",
+                    "search_product_knowledge",
+                    "get_product_details",
+                ],
+            ],
+            "forbidden_tools": ["search_merchant_knowledge"],
+            "required_evidence_sources": ["catalog_product"],
+            "forbid_identical_duplicate_calls": True,
+        }
+    }
+    evaluated = _evaluate_tool_contract(
+        case,
+        actual_tools=[
+            "search_products",
+            "search_product_knowledge",
+            "get_product_details",
+        ],
+        tool_arguments=[
+            {"tool": "search_products", "arguments": {"query": "عسل طلح"}},
+            {
+                "tool": "search_product_knowledge",
+                "arguments": {"product_id": 1, "query": "سنة قطف"},
+            },
+            {"tool": "get_product_details", "arguments": {"product_id": 1}},
+        ],
+        evidence=[{"source": "catalog_product"}],
+    )
+    assert evaluated["passed"] is True
+
+
 def test_outcome_eval_accepts_grounded_partial_answer_with_scoped_fallback() -> None:
     case = {"tool_contract": {"expected_outcome": "grounded_reply"}}
     result = SimpleNamespace(

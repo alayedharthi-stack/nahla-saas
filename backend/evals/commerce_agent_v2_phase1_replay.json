@@ -56,8 +56,12 @@
     "replay_plan": ["search_products", "search_product_knowledge"],
     "tool_contract": {
       "required_tools": ["search_products", "search_product_knowledge"],
-      "acceptable_plans": [["search_products", "search_product_knowledge"]],
-      "forbidden_tools": ["get_product_details", "search_merchant_knowledge"],
+      "acceptable_plans": [
+        ["search_products", "search_product_knowledge"],
+        ["search_products", "search_product_knowledge", "get_product_details"]
+      ],
+      "forbidden_tools": ["search_merchant_knowledge"],
+      "forbid_identical_duplicate_calls": true,
       "required_evidence_sources": ["catalog_product", "product_knowledge"],
       "expected_outcome": "grounded_reply"
     },
