@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 _here = os.path.dirname(os.path.abspath(__file__))
 _backend = os.path.dirname(_here)
 for _p in [_backend, os.path.join(_backend, "..")]:
@@ -85,6 +87,39 @@ def _size_context_state(**kwargs) -> MerchantConversationState:
 
 
 class TestSemanticInterpreterRepair:
+    @pytest.mark.parametrize("title", ["جاكيت", "حذاء رياضي أبيض", "عطر ورد 100ml"])
+    def test_catalog_option_metadata_does_not_establish_an_asked_size_question(self, title):
+        # Loading a product's required options is not evidence that an option
+        # list was presented to the customer. The latest delivery was a card.
+        state = MerchantConversationState(
+            greeted=True,
+            stage="exploring",
+            current_product_focus={"id": "p1", "title": title},
+            last_search_candidates=[{"id": "p1", "title": title}],
+            pending_option_groups=[{"name": "المقاس", "values": ["S", "M", "L"]}],
+            last_question_asked="إذا ناسبك المنتج أقدر أجهز لك الطلب مباشرة.",
+            last_question_answered=True,
+        )
+        history = _history(("in", "ابي اشوف صورته"), ("out", title))
+        interp = interpret_semantic_turn(raw_text="اول", state=state, history=history)
+        assert interp is None
+        from modules.ai.brain.decision.actions import ACTION_PROPOSE_DRAFT_ORDER
+        from modules.ai.brain.commerce.selection_context import resolve_selection_context
+
+        ctx = _ctx("اول", state=state, history=history, semantic=interp)
+        assert resolve_selection_context(ctx) is None
+        decision = DefaultDecisionEngine().decide(ctx)
+        assert decision.action != ACTION_PROPOSE_DRAFT_ORDER
+
+    def test_explicit_pending_variant_selection_keeps_ordinal_context(self):
+        state = MerchantConversationState(
+            current_product_focus={"id": "p1", "title": "قميص قطني"},
+            order_prep=OrderPreparationState(awaiting_variant_choice=True),
+        )
+        interp = interpret_semantic_turn(raw_text="الثاني", state=state, history=[])
+        assert interp is not None
+        assert interp.slots["list_index"] == 2
+
     def test_typo_all_sizes_with_size_context(self):
         state = _size_context_state()
         history = _history(

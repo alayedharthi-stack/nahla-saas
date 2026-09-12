@@ -410,6 +410,11 @@ async def provider_post_with_context(
             connection_id=conn_id,
             connection_type=conn_type,
         )
+        if is_send:
+            from core.outbound_wire_audit import record_wire_attempt  # noqa: PLC0415
+
+            record_wire_attempt(tenant_id=tenant_id, payload=json or {},
+                                operation=operation, classification=CLASSIFICATION_EXCEPTION)
         # Preserve the historical contract: re-raise on transport
         # failure so existing exception handlers in the webhook /
         # campaign dispatcher keep working.
@@ -501,6 +506,11 @@ async def provider_post_with_context(
         connection_type=conn_type,
     )
 
+    if is_send:
+        from core.outbound_wire_audit import record_wire_attempt  # noqa: PLC0415
+
+        record_wire_attempt(tenant_id=tenant_id, payload=json or {}, operation=operation,
+                            classification=classification, wamid=wamid)
     # ── Outbound MessageEvent send-status bridge ──────────────────────
     # Attach the F18 classification + parsed wamid + timing to the
     # returned dict so the upstream caller (``_post_wa`` in
@@ -797,7 +807,11 @@ async def provider_send_message(
     # manual /conversations/reply, automation engine, orders,
     # cart recovery, admin direct-send) before any byte leaves
     # this process. See _scrub_outbound_payload docstring.
+    from core.outbound_wire_audit import observe_wire_payload  # noqa: PLC0415
+
+    observe_wire_payload(tenant_id, send_payload, "provider_payload_assembly")
     send_payload = _scrub_outbound_payload(send_payload)
+    observe_wire_payload(tenant_id, send_payload, "provider_marker_scrub")
     if provider == WHATSAPP_PROVIDER_360DIALOG:
         send_payload.setdefault("recipient_type", "individual")
         data = await provider_post_with_context(

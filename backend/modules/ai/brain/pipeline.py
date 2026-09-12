@@ -5310,6 +5310,9 @@ class MerchantBrain:
                         turn_token=str(getattr(new_state, "turn", None) or ""),
                     )
                     result.data["catalog_claim_verification_status"] = _pavg.semantic_status
+                    result.data["catalog_claim_verification_unresolved"] = _pavg.verification_unresolved
+                    if _pavg.verification_unresolved:
+                        result.data["availability_guard_reason"] = _pavg.reason
                     if _pavg.availability_claim_blocked:
                         result.data["availability_claim_blocked"] = True
                         if _pavg.reason:
@@ -5366,6 +5369,9 @@ class MerchantBrain:
                             allow_recompose=False,
                         )
                         result.data["catalog_claim_reverification_status"] = _pavg_second.semantic_status
+                        result.data["catalog_claim_verification_unresolved"] = _pavg_second.verification_unresolved
+                        if _pavg_second.verification_unresolved:
+                            result.data["availability_guard_reason"] = _pavg_second.reason
                         if _pavg_second.replaced:
                             reply = _pavg_second.reply
                             stamp_product_availability_guard_transform(
@@ -5375,6 +5381,7 @@ class MerchantBrain:
                             reply = _pavg_recomposed
                         else:
                             reply = ""
+                            result.data["catalog_reply_withheld"] = True
                             stamp_product_availability_guard_transform(
                                 result.data, _pavg_second, _guard_replaced,
                             )
@@ -5828,7 +5835,8 @@ class MerchantBrain:
                 apply_commerce_reply_quality_guard,
             )
 
-            if not result.data.get("shipment_claim_scrubbed_empty"):
+            if not (result.data.get("shipment_claim_scrubbed_empty")
+                    or result.data.get("catalog_reply_withheld") is True):
                 _crqg_meta = dict((profile or {}).get("inbound_metadata") or {})
                 if _turn_owner_contract_meta:
                     _crqg_meta["turn_owner_contract"] = dict(_turn_owner_contract_meta)
@@ -5846,6 +5854,7 @@ class MerchantBrain:
                 )
                 _crqg = apply_commerce_reply_quality_guard(
                     reply=reply or "",
+                    decision_action=str(getattr(decision, "action", "") or ""),
                     inbound_text=message or "",
                     intent_name=str(getattr(intent, "name", "") or ""),
                     primary_customer_goal=str(
@@ -5934,6 +5943,9 @@ class MerchantBrain:
                         ).strip()
                         _crqg = apply_commerce_reply_quality_guard(
                             reply=recomposed_reply or "",
+                            decision_action=str(
+                                getattr(decision, "action", "") or ""
+                            ),
                             inbound_text=message or "",
                             intent_name=str(getattr(intent, "name", "") or ""),
                             primary_customer_goal=str(

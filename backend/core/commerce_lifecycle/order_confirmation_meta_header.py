@@ -16,6 +16,10 @@ from core.commerce_lifecycle.order_confirmation_assets import (
     ORDER_CONFIRMATION_HEADER_ASSET_KEY,
     order_confirmation_header_public_url,
 )
+from core.commerce_lifecycle.cod_confirmation_assets import (
+    COD_CONFIRMATION_HEADER_ASSET_KEY,
+    cod_confirmation_header_public_url,
+)
 from core.commerce_lifecycle.order_confirmation_header_image_fetch import (
     HeaderImageFetchError,
     fetch_header_image_bytes_secure,
@@ -55,10 +59,37 @@ def resolve_order_confirmation_preview_header_url(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Merchant-facing preview URL for order_confirmation IMAGE header only."""
+    return resolve_lifecycle_preview_header_url(
+        db,
+        tenant_id,
+        components,
+        metadata,
+        service_key="order_confirmation",
+    )
+
+
+def resolve_lifecycle_preview_header_url(
+    db: Any,
+    tenant_id: int,
+    components: Any,
+    metadata: Optional[Dict[str, Any]] = None,
+    *,
+    service_key: str,
+) -> str:
+    """Resolve an IMAGE preview without leaking another lifecycle slot's override."""
     return resolve_header_image_source_url(
         components,
         metadata,
-        tenant_runtime_url=_tenant_runtime_header_image_url(db, int(tenant_id)),
+        tenant_runtime_url=_tenant_runtime_header_image_url(
+            db,
+            int(tenant_id),
+            service_key=service_key,
+        ),
+        platform_default_url=(
+            cod_confirmation_header_public_url()
+            if service_key == "cod_confirmation"
+            else order_confirmation_header_public_url()
+        ),
     )
 
 
@@ -67,6 +98,7 @@ def resolve_header_image_source_url(
     metadata: Optional[Dict[str, Any]] = None,
     *,
     tenant_runtime_url: Optional[str] = None,
+    platform_default_url: Optional[str] = None,
 ) -> str:
     """
     Single source of truth for order_confirmation header image URL.
@@ -89,7 +121,7 @@ def resolve_header_image_source_url(
     if explicit:
         return explicit
 
-    return order_confirmation_header_public_url()
+    return platform_default_url or order_confirmation_header_public_url()
 
 
 def prepare_order_confirmation_meta_submit_components(
@@ -113,8 +145,12 @@ def prepare_order_confirmation_meta_submit_components(
     return out
 
 
-def _tenant_runtime_header_image_url(db: Any, tenant_id: int) -> Optional[str]:
-    """Read merchant runtime header override from TenantSettings (order_confirmation)."""
+def _tenant_runtime_header_image_url(
+    db: Any,
+    tenant_id: int,
+    service_key: str = "order_confirmation",
+) -> Optional[str]:
+    """Read a lifecycle service's merchant runtime header override."""
     try:
         from models import TenantSettings  # noqa: PLC0415
 
@@ -129,7 +165,7 @@ def _tenant_runtime_header_image_url(db: Any, tenant_id: int) -> Optional[str]:
         if not isinstance(extra, dict):
             return None
         bucket = dict(extra.get("order_updates") or {})
-        slot = bucket.get("order_confirmation")
+        slot = bucket.get(str(service_key or "order_confirmation"))
         if not isinstance(slot, dict):
             return None
         runtime = slot.get("runtime")
@@ -197,6 +233,7 @@ async def ensure_order_confirmation_image_header_for_meta(
     components: List[Dict[str, Any]],
     metadata: Optional[Dict[str, Any]] = None,
     uploader: Optional[HeaderImageUploader] = None,
+    service_key: str = "order_confirmation",
 ) -> List[Dict[str, Any]]:
     """
     Resolve/upload IMAGE header and return Meta-safe components for submit.
@@ -222,11 +259,18 @@ async def ensure_order_confirmation_image_header_for_meta(
         tenant_id=int(tenant_id),
         operation="template_submit",
     )
-    access_token = str(ctx.access_token or "").strip()
+    # ``get_token_for_operation`` returns WhatsAppTokenContext whose public
+    # token field is ``token``.  Using the old ``access_token`` attribute
+    # stopped the Meta header-upload path before it could create a handle.
+    access_token = str(ctx.token or "").strip()
     if not access_token:
         raise ValueError("missing_access_token")
 
-    tenant_runtime = _tenant_runtime_header_image_url(db, int(tenant_id))
+    tenant_runtime = _tenant_runtime_header_image_url(
+        db,
+        int(tenant_id),
+        service_key=service_key,
+    )
     source_url = resolve_header_image_source_url(
         components,
         meta,
@@ -250,7 +294,11 @@ async def ensure_order_confirmation_image_header_for_meta(
     )
     logger.info(
         "[order_confirmation_meta_header] uploaded header asset_key=%s bytes=%d",
-        ORDER_CONFIRMATION_HEADER_ASSET_KEY,
+        (
+            COD_CONFIRMATION_HEADER_ASSET_KEY
+            if service_key == "cod_confirmation"
+            else ORDER_CONFIRMATION_HEADER_ASSET_KEY
+        ),
         len(image_bytes),
     )
     return prepare_order_confirmation_meta_submit_components(
@@ -264,5 +312,6 @@ __all__ = [
     "ensure_order_confirmation_image_header_for_meta",
     "prepare_order_confirmation_meta_submit_components",
     "resolve_header_image_source_url",
+    "resolve_lifecycle_preview_header_url",
     "resolve_order_confirmation_preview_header_url",
 ]

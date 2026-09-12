@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import logging
 import os
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("nahla.templates")
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -796,10 +797,120 @@ def _resolve_library_meta_for_template(template: WhatsAppTemplate) -> Dict[str, 
     return _enrich_library_meta(meta)
 
 
-def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
+def _saved_lifecycle_preview_header_url(
+    t: WhatsAppTemplate,
+    *,
+    db: Optional[Session] = None,
+    components_override: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Return the merchant-facing IMAGE URL for supported lifecycle templates."""
+    service_key = str(getattr(t, "service_key", None) or "")
+    if db is None or service_key not in {"order_confirmation", "cod_confirmation"}:
+        return None
+
+    components = list(
+        components_override
+        if components_override is not None
+        else (getattr(t, "components", None) or [])
+    )
+    has_image_header = any(
+        str((component or {}).get("type") or "").upper() == "HEADER"
+        and str((component or {}).get("format") or "").upper() == "IMAGE"
+        for component in components
+        if isinstance(component, dict)
+    )
+    if not has_image_header:
+        return None
+
+    from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+        resolve_lifecycle_preview_header_url,
+        resolve_order_confirmation_preview_header_url,
+    )
+
+    resolver = (
+        resolve_order_confirmation_preview_header_url
+        if service_key == "order_confirmation"
+        else resolve_lifecycle_preview_header_url
+    )
+    kwargs = {} if service_key == "order_confirmation" else {"service_key": service_key}
+    return resolver(
+        db,
+        int(getattr(t, "tenant_id")),
+        components,
+        dict(getattr(t, "ai_generation_metadata", None) or {}),
+        **kwargs,
+    )
+
+
+def _restore_managed_cod_image_header(
+    t: WhatsAppTemplate,
+    components: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep the platform-owned COD IMAGE header across merchant edits.
+
+    Older dashboard builds rebuilt editable components from text fields and
+    accidentally dropped IMAGE headers. The asset marker lets us repair those
+    already-saved drafts on read and makes the image contract immutable on
+    subsequent edits.
+    """
+    from core.commerce_lifecycle.cod_confirmation_assets import (  # noqa: PLC0415
+        COD_CONFIRMATION_HEADER_ASSET_KEY,
+        cod_confirmation_image_header_component,
+    )
+
+    metadata = dict(getattr(t, "ai_generation_metadata", None) or {})
+    is_managed_cod = (
+        str(getattr(t, "service_key", None) or "") == "cod_confirmation"
+        and metadata.get("header_image_asset_key") == COD_CONFIRMATION_HEADER_ASSET_KEY
+    )
+    if not is_managed_cod:
+        return deepcopy(components)
+
+    existing_image = next(
+        (
+            deepcopy(component)
+            for component in (getattr(t, "components", None) or [])
+            if isinstance(component, dict)
+            and str(component.get("type") or "").upper() == "HEADER"
+            and str(component.get("format") or "").upper() == "IMAGE"
+        ),
+        None,
+    )
+    image_header = existing_image or cod_confirmation_image_header_component()
+    non_headers = [
+        deepcopy(component)
+        for component in components
+        if str((component or {}).get("type") or "").upper() != "HEADER"
+    ]
+    return [image_header, *non_headers]
+
+
+def _tpl_to_dict(
+    t: WhatsAppTemplate,
+    *,
+    db: Optional[Session] = None,
+) -> Dict[str, Any]:
+    components = _restore_managed_cod_image_header(t, list(t.components or []))
+    preview_header_image_url = _saved_lifecycle_preview_header_url(
+        t,
+        db=db,
+        components_override=components,
+    )
+    if preview_header_image_url:
+        components = deepcopy(components)
+        for component in components:
+            if (
+                str((component or {}).get("type") or "").upper() == "HEADER"
+                and str((component or {}).get("format") or "").upper() == "IMAGE"
+            ):
+                example = dict(component.get("example") or {})
+                example["header_url"] = preview_header_image_url
+                component["example"] = example
+                break
+
     meta = dict(getattr(t, "ai_generation_metadata", None) or {})
     compatibility = meta.get("meta_compatibility") or _compute_template_compatibility(
-        t.components or [],
+        components,
         category=t.category,
         language=t.language,
         status=t.status,
@@ -816,7 +927,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         except Exception:
             pass
 
-    return {
+    result = {
         "id": t.id,
         "meta_template_id": t.meta_template_id,
         "name": t.name,
@@ -826,7 +937,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "workflow_status": "pending_approval" if t.status == "PENDING" else str(t.status or "DRAFT").lower(),
         "status_raw": meta.get("meta_status_raw", t.status),
         "rejection_reason": t.rejection_reason,
-        "components": t.components or [],
+        "components": components,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
         "synced_at": t.synced_at.isoformat() if t.synced_at else None,
@@ -855,6 +966,7 @@ def _tpl_to_dict(t: WhatsAppTemplate) -> Dict[str, Any]:
         "has_coupon": getattr(t, "has_coupon", False),
         "trigger_delay_hours": getattr(t, "trigger_delay_hours", None),
     }
+    return result
 
 
 def _tpl_bump_usage(db: Session, template_id: int, tenant_id: int | None = None) -> None:
@@ -1204,7 +1316,7 @@ async def _submit_template_to_meta(
                     )
                 btn["text"] = cleaned_text
 
-    if str(service_key or "").strip() == "order_confirmation":
+    if str(service_key or "").strip() in {"order_confirmation", "cod_confirmation"}:
         from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
             ensure_order_confirmation_image_header_for_meta,
         )
@@ -1216,16 +1328,18 @@ async def _submit_template_to_meta(
                 tenant_id=int(tenant_id),
                 components=components,
                 metadata=template_metadata or {},
+                service_key=str(service_key or "").strip(),
             )
         except Exception as exc:
             logger.error(
-                "[template/submit] order_confirmation header upload failed tenant=%s name=%s",
+                "[template/submit] lifecycle image header upload failed service=%s tenant=%s name=%s",
+                service_key,
                 tenant_id,
                 name,
                 exc_info=True,
             )
             raise ValueError(
-                "تعذّر تجهيز صورة رأس قالب تأكيد الطلب لـ Meta. حاول مرة أخرى لاحقاً."
+                "تعذّر تجهيز صورة رأس القالب لـ Meta. حاول مرة أخرى لاحقاً."
             ) from exc
 
     # Ensure all components have the Meta-required `example` fields before
@@ -1335,7 +1449,7 @@ async def list_templates(
         (WhatsAppTemplate.is_hidden == False) | (WhatsAppTemplate.is_hidden == None)  # noqa: E712
     )
     templates = q.order_by(WhatsAppTemplate.created_at.desc()).all()
-    return {"templates": [_tpl_to_dict(t) for t in templates]}
+    return {"templates": [_tpl_to_dict(t, db=db) for t in templates]}
 
 
 @router.post("/templates")
@@ -1426,6 +1540,11 @@ async def update_template(
 
     new_components = [c.model_dump(exclude_none=True) for c in body.components] if body.components is not None else (tpl.components or [])
 
+    # The COD library image is platform-owned and must survive text/button
+    # customization. This also repairs drafts saved by older dashboards that
+    # accidentally removed the IMAGE header.
+    new_components = _restore_managed_cod_image_header(tpl, new_components)
+
     # Preserve Meta `example` fields from the existing stored components so a
     # merchant edit through the dashboard never accidentally strips them.
     # (`example` is required by Meta for BODY vars and URL button vars, but is
@@ -1484,6 +1603,86 @@ async def update_template(
     db.commit()
     db.refresh(tpl)
     return _tpl_to_dict(tpl)
+
+
+@router.post("/templates/{template_id}/header-image")
+async def upload_template_header_image(
+    template_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Replace a draft lifecycle template's IMAGE header with a merchant upload."""
+    tenant_id = resolve_tenant_id(request)
+    tpl = db.query(WhatsAppTemplate).filter(
+        WhatsAppTemplate.id == template_id,
+        WhatsAppTemplate.tenant_id == tenant_id,
+    ).first()
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    if str(tpl.status or "").upper() not in {"DRAFT", "REJECTED"}:
+        raise HTTPException(
+            status_code=409,
+            detail="يمكن تغيير الصورة في المسودة فقط قبل إرسالها إلى Meta.",
+        )
+    if str(tpl.service_key or "") not in {"cod_confirmation", "order_confirmation"}:
+        raise HTTPException(status_code=400, detail="template_image_header_not_supported")
+
+    from services.catalog_media_storage import (  # noqa: PLC0415
+        CatalogMediaStorageError,
+        CatalogMediaValidationError,
+        MAX_UPLOAD_BYTES,
+    )
+    from services.template_media_storage import (  # noqa: PLC0415
+        upload_template_header_image as store_header_image,
+    )
+
+    try:
+        # Read one byte beyond the limit so oversized uploads are rejected
+        # without buffering an arbitrarily large request in application memory.
+        content = await file.read(MAX_UPLOAD_BYTES + 1)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="upload_read_failed") from exc
+
+    try:
+        uploaded = store_header_image(tenant_id=tenant_id, content=content)
+    except CatalogMediaValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CatalogMediaStorageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    components = _restore_managed_cod_image_header(tpl, list(tpl.components or []))
+    image_replaced = False
+    for component in components:
+        if (
+            str((component or {}).get("type") or "").upper() == "HEADER"
+            and str((component or {}).get("format") or "").upper() == "IMAGE"
+        ):
+            component["example"] = {
+                "header_url": uploaded["image_url"],
+                "header_handle": [],
+            }
+            image_replaced = True
+            break
+    if not image_replaced:
+        raise HTTPException(status_code=400, detail="template_image_header_not_supported")
+
+    tpl.components = components
+    tpl.status = "DRAFT"
+    tpl.rejection_reason = None
+    tpl.meta_template_id = None
+    tpl.updated_at = datetime.now(timezone.utc)
+    tpl.ai_generation_metadata = {
+        **(tpl.ai_generation_metadata or {}),
+        "merchant_header_image_url": uploaded["image_url"],
+        "header_image_source": "merchant_upload",
+    }
+    db.commit()
+    db.refresh(tpl)
+    return {
+        "template": _tpl_to_dict(tpl, db=db),
+        "image_url": uploaded["image_url"],
+    }
 
 
 @router.put("/templates/{template_id}/status")
@@ -3394,6 +3593,27 @@ async def import_nahla_template(
             template_to_dict=_tpl_to_dict,
         )
 
+    if body.template_key == "cod_confirmation":
+        from core.commerce_lifecycle.nahla_library_cod_confirmation_import import (  # noqa: PLC0415
+            import_cod_confirmation_from_library,
+        )
+        from core.commerce_lifecycle.nahla_library_order_confirmation_import import (  # noqa: PLC0415
+            NahlaLibraryImportError,
+            build_merchant_import_api_payload,
+        )
+
+        try:
+            outcome = import_cod_confirmation_from_library(
+                db,
+                tenant_id,
+                tpl_def,
+                language=body.language,
+                custom_name=body.custom_name,
+            )
+        except NahlaLibraryImportError as exc:
+            raise HTTPException(status_code=409, detail=exc.message)
+        return build_merchant_import_api_payload(outcome, template_to_dict=_tpl_to_dict)
+
     # ── اكتشاف رابط المتجر الحقيقي للتاجر ──────────────────────────
     # نأخذه من TenantSettings.store.store_url أو Integration.config
     from models import Integration  # noqa: PLC0415
@@ -3462,15 +3682,18 @@ async def import_nahla_template(
     # Deactivate any existing active template for this service slot BEFORE inserting,
     # so the unique constraint on (tenant_id, service_key, step_number, is_active)
     # is never violated during the flush.
-    if svc and step is not None:
-        from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+    if svc:
         from models import WhatsAppTemplate as _WaTpl  # noqa: PLC0415
-        db.query(_WaTpl).filter(
+        active_slot = db.query(_WaTpl).filter(
             _WaTpl.tenant_id   == tenant_id,
             _WaTpl.service_key == svc,
-            _WaTpl.step_number == step,
             _WaTpl.is_active   == True,  # noqa: E712
-        ).update({"is_active": False}, synchronize_session="fetch")
+        )
+        if step is None:
+            active_slot = active_slot.filter(_WaTpl.step_number.is_(None))
+        else:
+            active_slot = active_slot.filter(_WaTpl.step_number == step)
+        active_slot.update({"is_active": False}, synchronize_session="fetch")
 
     now = datetime.now(timezone.utc)
     new_tpl = WhatsAppTemplate(

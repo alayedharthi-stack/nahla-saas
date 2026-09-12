@@ -340,3 +340,70 @@ def test_body_sync_preserves_other_metadata_fields(
     assert meta["handoff_active"] is False
     assert meta["deterministic_path"] == "merchant_reply"
     assert "body_sync_history" in meta  # audit trail added
+
+
+def test_body_sync_persists_provenance_even_when_body_is_unchanged(
+    install_stubs: Any,
+) -> None:
+    from core.outbound_send_status import sync_outbound_body_to_final
+
+    row = _FakeRow(
+        row_id=100,
+        tenant_id=8,
+        body="Model-composed reply",
+        extra_metadata={"provider_send": {"status": "queued"}},
+    )
+    db = install_stubs(row)
+
+    result = sync_outbound_body_to_final(
+        db,
+        tenant_id=8,
+        recipient="15555550100",
+        final_body="Model-composed reply",
+        provenance_metadata={
+            "requested_model": "model-a",
+            "actual_model": "model-b",
+            "final_expression_owner": "llm_compose",
+        },
+    )
+
+    assert result == 100
+    assert db.committed == 1
+    assert row.extra_metadata["requested_model"] == "model-a"
+    assert row.extra_metadata["actual_model"] == "model-b"
+    assert row.extra_metadata["final_expression_owner"] == "llm_compose"
+    assert "body_sync_history" not in row.extra_metadata
+
+
+def test_suppression_stamp_closes_queued_row(install_stubs: Any) -> None:
+    from core.outbound_send_status import stamp_outbound_suppressed
+
+    row = _FakeRow(
+        row_id=101,
+        tenant_id=8,
+        body="🛒",
+        extra_metadata={
+            "provider_send": {
+                "status": "queued",
+                "queued_at": "2026-01-01T00:00:00+00:00",
+            },
+        },
+    )
+    db = install_stubs(row)
+
+    result = stamp_outbound_suppressed(
+        db,
+        tenant_id=8,
+        recipient="15555550100",
+        reason="non_substantive_commerce_reply",
+        final_stage="pre_provider_send",
+        body_kind="symbols_only",
+    )
+
+    assert result == 101
+    assert row.extra_metadata["provider_send"]["status"] == "suppressed"
+    assert row.extra_metadata["provider_send"]["queued_at"] == (
+        "2026-01-01T00:00:00+00:00"
+    )
+    assert row.extra_metadata["outbound_suppression"]["body_kind"] == "symbols_only"
+    assert db.committed == 1

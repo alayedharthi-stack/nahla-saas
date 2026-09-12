@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -990,6 +991,79 @@ def _scan_regex(
     )
 
 
+def _literal_hit_identities(source: str, hits: Set[str]) -> Dict[str, tuple]:
+    """Match checks by syntax and ownership context; keep locations for reports.
+
+    Moving source lines does not introduce a rule. Changing the checked value,
+    call, owning function, or enclosing condition does. Repeated checks retain
+    multiplicity, so copying an existing rule cannot hide a new occurrence.
+    """
+    if not hits:
+        return {}
+    expressions: Dict[int, list] = defaultdict(list)
+    tree = parse_ast(source)
+
+    def visit(node: ast.AST, scope: tuple = (), conditions: tuple = ()) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scope = (*scope, (type(node).__name__, node.name))
+        if isinstance(node, (ast.Call, ast.Compare)):
+            expressions[getattr(node, "lineno", 1)].append(
+                (scope, conditions, dump_node(node))
+            )
+        for field_name, value in ast.iter_fields(node):
+            child_conditions = conditions
+            if isinstance(node, (ast.If, ast.While, ast.IfExp)):
+                child_conditions = (
+                    *conditions, (type(node).__name__, field_name, dump_node(node.test))
+                )
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                child_conditions = (
+                    *conditions,
+                    (type(node).__name__, field_name, dump_node(node.target), dump_node(node.iter)),
+                )
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                child_conditions = (
+                    *conditions, (type(node).__name__, field_name, tuple(map(dump_node, node.items)))
+                )
+            elif isinstance(node, (ast.Try, ast.TryStar)):
+                child_conditions = (*conditions, (type(node).__name__, field_name))
+            elif isinstance(node, ast.ExceptHandler):
+                child_conditions = (
+                    *conditions, ("ExceptHandler", field_name, dump_node(node.type) if node.type else "", node.name or "")
+                )
+            elif isinstance(node, ast.Match):
+                child_conditions = (*conditions, ("Match", field_name, dump_node(node.subject)))
+            elif isinstance(node, ast.match_case):
+                child_conditions = (
+                    *conditions, ("match_case", field_name, dump_node(node.pattern), dump_node(node.guard) if node.guard else "")
+                )
+            children = value if isinstance(value, list) else [value]
+            for child in children:
+                if isinstance(child, ast.AST):
+                    visit(child, scope, child_conditions)
+
+    if tree is not None:
+        visit(tree)
+    identities = {}
+    for hit in sorted(hits, key=lambda value: (int(value.split(":", 1)[0]), value)):
+        line, descriptor = hit.split(":", 1)
+        context = tuple(sorted(expressions.get(int(line), [])))
+        # Fail closed if an extractor reports a hit with no matching AST node.
+        identities[hit] = (descriptor, context) if context else (descriptor, line)
+    return identities
+
+
+def _new_literal_hits(base_src: str, head_src: str, base_hits: Set[str], head_hits: Set[str]) -> Set[str]:
+    remaining = Counter(_literal_hit_identities(base_src, base_hits).values())
+    added = set()
+    for hit, identity in _literal_hit_identities(head_src, head_hits).items():
+        if remaining[identity]:
+            remaining[identity] -= 1
+        else:
+            added.add(hit)
+    return added
+
+
 def _scan_phrase_keyword(
     result: ScanResult,
     exceptions: Sequence[OwnerException],
@@ -1015,7 +1089,7 @@ def _scan_phrase_keyword(
             )
     base_kw = keyword_in_checks(base_src or "")
     head_kw = keyword_in_checks(head_src)
-    for extra in sorted(head_kw - base_kw):
+    for extra in sorted(_new_literal_hits(base_src or "", head_src, base_kw, head_kw)):
         parts = extra.split(":", 2)
         line_s = parts[0] if parts else "1"
         kind = parts[1] if len(parts) > 1 else "in"
@@ -1039,7 +1113,7 @@ def _scan_phrase_keyword(
         )
     base_helpers = helper_literal_hits(base_src or "")
     head_helpers = helper_literal_hits(head_src)
-    for extra in sorted(head_helpers - base_helpers):
+    for extra in sorted(_new_literal_hits(base_src or "", head_src, base_helpers, head_helpers)):
         parts = extra.split(":", 2)
         line_s = parts[0] if parts else "1"
         text = parts[2] if len(parts) > 2 else extra

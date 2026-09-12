@@ -186,9 +186,9 @@ def detect_context_anchor(
     if getattr(op, "awaiting_variant_choice", False):
         return ANCHOR_VARIANT_SELECTION_PENDING
 
-    pending_opts = list(getattr(state, "pending_option_groups", None) or [])
-    if pending_opts:
-        return ANCHOR_LAST_ASSISTANT_SIZE_QUESTION
+    # Catalog option definitions can survive a browse or image turn. Their
+    # presence does not prove that the customer was asked to select a variant;
+    # use the explicit awaiting flag above or the conversation below.
 
     if any(tok in combined for tok in _SIZE_TOKENS):
         return ANCHOR_LAST_ASSISTANT_SIZE_QUESTION

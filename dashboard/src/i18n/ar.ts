@@ -238,14 +238,22 @@ const ar: Translations = {
     templatesHub: {
       title:    'القوالب',
       subtitle: 'قوالب واتساب وقوالب المتجر الإلكتروني',
+      library: {
+        title: 'مكتبة قوالب نحلة',
+        description: 'تصفح القوالب الجاهزة للمتجر الإلكتروني وواتساب، ثم خصصها وتابع حالتها.',
+      },
+      sections: {
+        title: 'أقسام القوالب',
+        description: 'اختر نوع القوالب حسب طريقة عمل التاجر.',
+      },
       cards: {
         whatsappTemplates: {
           title:       'قوالب واتساب',
-          description: 'مكتبة نحلة وقوالبك وحالات اعتماد Meta',
+          description: 'للتاجر الذي لا يملك متجرًا إلكترونيًا ولا يستخدم روابط ديناميكية.',
         },
         ecommerceTemplates: {
           title:       'قوالب المتجر الإلكتروني',
-          description: 'التسويق وتحديثات الطلبات وتجربة المتجر',
+          description: 'للتاجر الذي لديه متجر إلكتروني ويستخدم الروابط الديناميكية، وتشمل إعدادات تحديثات الطلبات.',
         },
       },
     },
@@ -873,6 +881,7 @@ const ar: Translations = {
       notSent:       'لم تُرسَل',
       pending:       'بانتظار التسليم',
       failed:        'فشل الإرسال',
+      suppressed:    'أُوقفت قبل الإرسال',
       awaitingWamid: 'استُلمت من المزود لكن بانتظار wamid',
       sent:          'مُرسَلة',
     },
@@ -1633,6 +1642,10 @@ const ar: Translations = {
       previewLabel: 'معاينة',
       save: 'حفظ التعديلات',
       saving: 'جارٍ الحفظ…',
+      changeImage: 'تغيير الصورة',
+      imageUploading: 'جارٍ رفع الصورة…',
+      imageUploadHint: 'JPG أو PNG أو WEBP — بحد أقصى 5 ميجابايت',
+      imageUploadFailed: 'تعذر رفع الصورة.',
       headerPlaceholder: 'عنوان الرسالة…',
       bodyPlaceholder: 'نص الرسالة…',
       footerPlaceholder: 'مثال: نحلة — مساعد متجرك 🐝',

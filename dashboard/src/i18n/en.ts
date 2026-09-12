@@ -234,14 +234,22 @@ const en: Translations = {
     templatesHub: {
       title:    'Templates',
       subtitle: 'WhatsApp templates and store templates',
+      library: {
+        title: 'Nahla template library',
+        description: 'Browse ready-made e-commerce and WhatsApp templates, then customize and track their status.',
+      },
+      sections: {
+        title: 'Template sections',
+        description: 'Choose the template area that matches the merchant setup.',
+      },
       cards: {
         whatsappTemplates: {
           title:       'WhatsApp templates',
-          description: 'Nahla library, your templates, and Meta approval statuses',
+          description: 'For merchants without an online store and without dynamic links.',
         },
         ecommerceTemplates: {
           title:       'E-commerce store templates',
-          description: 'Marketing, order updates, and store experience templates',
+          description: 'For merchants with an online store and dynamic links, including order-update settings.',
         },
       },
     },
@@ -869,6 +877,7 @@ const en: Translations = {
       notSent:     'Not sent',
       pending:     'Pending delivery',
       failed:      'Send failed',
+      suppressed:  'Stopped before sending',
       awaitingWamid: 'Delivered to provider — awaiting wamid',
       sent:        'Sent',
     },
@@ -1629,6 +1638,10 @@ const en: Translations = {
       previewLabel: 'Preview',
       save: 'Save changes',
       saving: 'Saving…',
+      changeImage: 'Change image',
+      imageUploading: 'Uploading image…',
+      imageUploadHint: 'JPG, PNG, or WEBP — up to 5 MB',
+      imageUploadFailed: 'Could not upload the image.',
       headerPlaceholder: 'Message header…',
       bodyPlaceholder: 'Message body…',
       footerPlaceholder: 'e.g. Nahla — your store assistant 🐝',

@@ -362,6 +362,7 @@ def select_arabic_commerce_fallback(
     availability_polarity: str = "",
     chosen_path: str = "",
     kb_availability_facts: Optional[Dict[str, Any]] = None,
+    decision_action: str = "",
 ) -> Tuple[str, str]:
     try:
         from modules.ai.order_flow_v2.triggers import is_catalog_selection_acknowledgment  # noqa: PLC0415
@@ -556,16 +557,20 @@ def select_arabic_commerce_fallback(
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — V2 gate must not break checkout fallback
                     pass
                 if not _skip_legacy_checkout:
+                    from modules.ai.brain.commerce.checkout_slot_turn_gate import (  # noqa: PLC0415
+                        current_turn_allows_checkout_slot_fallback,
+                    )
                     from modules.ai.brain.commerce.checkout_slot_fallback import (  # noqa: PLC0415
                         build_checkout_slot_fallback_reply,
                     )
 
-                    slot_reply = build_checkout_slot_fallback_reply(
-                        state=state,
-                        inbound_text=inbound_text,
-                    )
-                    if slot_reply:
-                        return slot_reply, "checkout_slot_prompt"
+                    if current_turn_allows_checkout_slot_fallback(decision_action):
+                        slot_reply = build_checkout_slot_fallback_reply(
+                            state=state,
+                            inbound_text=inbound_text,
+                        )
+                        if slot_reply:
+                            return slot_reply, "checkout_slot_prompt"
         except Exception:  # noqa: silent-ok
             pass
 
@@ -680,6 +685,7 @@ def apply_commerce_reply_quality_guard(
     customer_conditional_coupon_facts: Optional[Dict[str, Any]] = None,
     customer_conditional_coupon_compose_active: bool = False,
     llm_candidate_present: bool = False,
+    decision_action: str = "",
 ) -> CommerceReplyQualityGuardResult:
     original = (reply or "").strip()
     kb_negative = _kb_negative_availability_decision(
@@ -744,6 +750,7 @@ def apply_commerce_reply_quality_guard(
             availability_polarity=availability_polarity,
             chosen_path=chosen_path,
             kb_availability_facts=kb_availability_facts,
+            decision_action=decision_action,
         )
         fallback, kind = _finalize_commerce_fallback(
             fallback,
@@ -853,6 +860,7 @@ def apply_commerce_reply_quality_guard(
             availability_polarity=availability_polarity,
             chosen_path=chosen_path,
             kb_availability_facts=kb_availability_facts,
+            decision_action=decision_action,
         )
         text, fallback_kind = _finalize_commerce_fallback(
             text,

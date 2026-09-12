@@ -58,6 +58,7 @@ class PostprocessMutation:
     layer: str
     op: str  # append | replace | strip | reconcile | block | noop
     text_written: bool
+    text_changed: bool = False
     len_before: int = 0
     len_after: int = 0
     preview_before: str = ""
@@ -68,6 +69,7 @@ class PostprocessMutation:
             "layer": self.layer,
             "op": self.op,
             "text_written": self.text_written,
+            "text_changed": self.text_changed,
             "len_before": self.len_before,
             "len_after": self.len_after,
             "preview_before": self.preview_before[:80],
@@ -161,6 +163,7 @@ class OutboundTextTracker:
             layer=layer,
             op=op,
             text_written=bool(text_written),
+            text_changed=(a != b),
             len_before=len(b),
             len_after=len(a),
             preview_before=b[:80],

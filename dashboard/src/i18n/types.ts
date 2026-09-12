@@ -219,6 +219,8 @@ export interface Translations {
     templatesHub: {
       title: string
       subtitle: string
+      library: { title: string; description: string }
+      sections: { title: string; description: string }
       cards: {
         whatsappTemplates:   { title: string; description: string }
         ecommerceTemplates:  { title: string; description: string }
@@ -790,6 +792,7 @@ export interface Translations {
       notSent: string
       pending: string
       failed: string
+      suppressed: string
       awaitingWamid: string
       sent: string
     }
@@ -1489,6 +1492,10 @@ export interface Translations {
       previewLabel: string
       save: string
       saving: string
+      changeImage: string
+      imageUploading: string
+      imageUploadHint: string
+      imageUploadFailed: string
       headerPlaceholder: string
       bodyPlaceholder: string
       footerPlaceholder: string

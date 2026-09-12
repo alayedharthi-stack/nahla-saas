@@ -697,6 +697,7 @@ class ProductAvailabilityTruthGuardResult:
     would_rewrite: bool = False
     requires_grounded_recompose: bool = False
     semantic_status: str = "not_run"
+    verification_unresolved: bool = False
 
 
 def stamp_product_availability_guard_transform(
@@ -706,6 +707,10 @@ def stamp_product_availability_guard_transform(
 ) -> None:
     if not guard_result.replaced:
         return
+    if not guard_result.reply.strip():
+        # A deliberate hold is not a compose failure for downstream recovery
+        # to fill with new prose. Grounded cards retain their own send gates.
+        result_data["catalog_reply_withheld"] = True
     result_data["final_text_transformed"] = True
     reasons = [
         str(reason)
@@ -838,6 +843,28 @@ def apply_product_availability_truth_guard(
                 reply=original,
                 action="allowed_structured_catalog_browse",
                 reason="structured_catalog_browse_no_contradiction",
+            )
+        if conflict_reason == "browse_semantic_verification_unresolved":
+            # Missing interpretation or stock evidence proves no contradiction.
+            # Re-composing cannot repair a verifier outage; do not create a
+            # second generation/verification loop or fabricate conflict facts.
+            shadow = mode == "shadow"
+            _emit_shadow(
+                evidence_state=EVIDENCE_UNKNOWN,
+                conflict_type="-",
+                guard_action="hold_unverified_text",
+                would_rewrite=True,
+                reason=conflict_reason,
+                customer_text_changed=False,
+            )
+            return ProductAvailabilityTruthGuardResult(
+                reply=original if shadow else "",
+                action="hold_unverified_text",
+                replaced=not shadow,
+                reason=conflict_reason,
+                shadow_mode=shadow,
+                would_rewrite=True,
+                verification_unresolved=True,
             )
         guard_action = _browse_guard_action_for_conflict(conflict_reason)
         if mode == "shadow":

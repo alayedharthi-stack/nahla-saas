@@ -528,7 +528,7 @@ class DefaultComposer:
                         if nav_buttons:
                             result.data["pending_buttons"] = nav_buttons[:3]
                 if chosen_path == PATH_TOP_FALLBACK:
-                    from ..persona.catalog_product_answer import (  # noqa: PLC0415
+                    from services.catalog_navigation_compose_retry import (  # noqa: PLC0415
                         build_catalog_navigation_emergency_outcome,
                         try_compose_catalog_navigation_browse_answer,
                     )
@@ -3012,7 +3012,7 @@ class DefaultComposer:
 
                 result.data["chosen_path"] = "llm"
                 result.data["llm_provider"] = payload.provider_used
-                result.data["model_used"] = payload.metadata.get("model", payload.provider_used)
+                _stamp_outbound_model_provenance(result.data, _payload_meta)
                 result.data["prompt_mode"] = "merchant_brain_thin"
                 _chain_fallback = bool(
                     (payload.metadata or {}).get("provider_chain_fallback_used")
@@ -3214,7 +3214,7 @@ class DefaultComposer:
 
             result.data["chosen_path"] = "llm_thin_retry"
             result.data["llm_provider"] = payload.provider_used
-            result.data["model_used"] = payload.metadata.get("model", payload.provider_used)
+            _stamp_outbound_model_provenance(result.data, payload.metadata)
             result.data["prompt_mode"] = "merchant_brain_thin_retry"
             from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
                 stamp_general_llm_compose_metadata,
@@ -3300,7 +3300,7 @@ class DefaultComposer:
             reply_text = (legacy.get("reply", "") or "").strip()
             if reply_text:
                 result.data["chosen_path"] = "llm_legacy_fallback"
-                result.data["model_used"] = legacy.get("model", "legacy_orchestrator")
+                _stamp_outbound_model_provenance(result.data, legacy, llm_candidate=reply_text)
                 result.data["prompt_mode"] = "legacy_orchestrator_fallback"
                 return reply_text
         except Exception as exc:
@@ -3431,3 +3431,43 @@ def attach_catalog_candidate_kb_to_decision_args(
 
         merged.update(catalog_kb_retrieval_failure_payload())
     return merged
+
+
+def _stamp_outbound_model_provenance(
+    target: Dict[str, Any],
+    metadata: Any,
+    *,
+    llm_candidate: str = "",
+) -> None:
+    """Copy provider-returned model identity without affecting composition."""
+    payload_metadata = metadata if isinstance(metadata, dict) else {}
+    model = str(
+        payload_metadata.get("model")
+        or (
+            "legacy_orchestrator"
+            if target.get("chosen_path") == "llm_legacy_fallback"
+            else ""
+        )
+    )
+    target["model_used"] = model
+    target["requested_model"] = str(
+        payload_metadata.get("requested_model") or model
+    )
+    target["actual_model"] = str(
+        payload_metadata.get("actual_model") or ""
+    )
+    target["attempted_model"] = payload_metadata.get("attempted_model") or model
+    target["model_identity_source"] = payload_metadata.get("model_identity_source", "unknown")
+    target["escalation_reason"] = str(
+        payload_metadata.get("escalation_reason") or ""
+    )
+    if llm_candidate:
+        from modules.ai.compose.reply_metadata_export import (  # noqa: PLC0415
+            stamp_general_llm_compose_metadata,
+        )
+
+        stamp_general_llm_compose_metadata(
+            target,
+            llm_candidate=llm_candidate,
+            chosen_path=str(target.get("chosen_path") or "llm"),
+        )

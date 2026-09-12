@@ -412,6 +412,59 @@ def validate_product_attachment_for_send(
     return allow, reason
 
 
+def record_fail_closed_product_suppression(
+    *,
+    attachment: dict,
+    delivery_audit: Optional[dict] = None,
+    reason: str = "",
+) -> None:
+    """Persist a rejected product verdict through every later rescue layer.
+
+    The final wire validator is authoritative.  Once it proves that a queued
+    product is stale or unrelated to the current turn, no CTA/image recovery
+    may resurrect the same attachment or run an unstructured replacement
+    lookup for that turn.
+    """
+    if isinstance(attachment, dict):
+        attachment["fail_closed_visual_suppressed"] = True
+        attachment["fail_closed_visual_suppression_reason"] = str(
+            reason or "product_attachment_rejected"
+        )
+    if isinstance(delivery_audit, dict):
+        delivery_audit["fail_closed_visual_suppressed"] = True
+        delivery_audit["fail_closed_visual_suppression_reason"] = str(
+            reason or "product_attachment_rejected"
+        )
+
+
+def has_fail_closed_product_suppression(
+    delivery_audit: Optional[dict],
+) -> bool:
+    """Return whether product rescue is forbidden for the current turn."""
+    return bool(
+        isinstance(delivery_audit, dict)
+        and delivery_audit.get("fail_closed_visual_suppressed")
+    )
+
+
+def is_structured_catalog_miss(brain_result: Optional[dict]) -> bool:
+    """True when the Brain completed a catalog search with no grounded card.
+
+    This consumes structured orchestration evidence only.  It deliberately
+    does not inspect the customer's wording or the model's prose.
+    """
+    if not isinstance(brain_result, dict):
+        return False
+    if str(brain_result.get("decision_action") or "") != ACTION_SEARCH_PRODUCTS:
+        return False
+    if str(brain_result.get("chosen_path") or "") != "catalog_miss_resolved_subject":
+        return False
+    return not (
+        brain_result.get("product_cards")
+        or brain_result.get("catalog_product_ids")
+    )
+
+
 def log_final_product_send_attempt(
     *,
     tenant_id: Optional[int] = None,
@@ -459,6 +512,9 @@ __all__ = [
     "ProductAttachmentDispatchDecision",
     "log_final_dispatch_guard",
     "log_final_product_send_attempt",
+    "has_fail_closed_product_suppression",
+    "is_structured_catalog_miss",
+    "record_fail_closed_product_suppression",
     "should_allow_product_attachment_dispatch",
     "strip_product_markers_from_reply",
     "suppress_product_attachments",

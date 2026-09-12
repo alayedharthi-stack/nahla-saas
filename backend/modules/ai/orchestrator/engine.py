@@ -218,12 +218,21 @@ class AIOrchestratorEngine:
                     raw["provider_chain_primary"] = provider_chain.providers[0]
                 else:
                     raw["provider_chain_fallback_used"] = False
-                _actual_model = str(raw.get("model") or audit_context.get("model_override") or "")
+                _requested_model = str(
+                    router_meta.get("model")
+                    or audit_context.get("model_override")
+                    or raw.get("requested_model")
+                    or ""
+                ).strip()
+                _actual_model = str(
+                    raw.get("actual_model") or ""
+                ).strip()
+                raw["requested_model"] = _requested_model
+                raw["actual_model"] = _actual_model
+                raw["escalation_reason"] = ""
                 emit_customer_chat_model_telemetry(
                     provider=provider_name,
-                    requested_model=str(
-                        router_meta.get("model") or audit_context.get("model_override") or ""
-                    ),
+                    requested_model=_requested_model,
                     actual_model=_actual_model,
                     escalation_reason="",
                     tenant_id=audit_context.get("tenant_id"),
@@ -263,7 +272,7 @@ class AIOrchestratorEngine:
         emit_customer_chat_model_telemetry(
             provider=customer_chat_provider(),
             requested_model=requested_model,
-            actual_model=requested_model or None,
+            actual_model=None,
             escalation_reason="openai_chain_exhausted",
             tenant_id=audit_context.get("tenant_id"),
             conversation_id=audit_context.get("conversation_id"),
@@ -275,6 +284,10 @@ class AIOrchestratorEngine:
             "provider": "" if block_anthropic_fallback else self._provider.provider_name,
             "model": requested_model,
             "status": "openai_chain_exhausted",
+            "requested_model": requested_model,
+            "actual_model": None,
+            "model_identity_source": "unknown",
+            "escalation_reason": "openai_chain_exhausted",
         }
         if block_anthropic_fallback:
             exhausted["anthropic_fallback_blocked"] = True
@@ -324,7 +337,9 @@ class AIOrchestratorEngine:
                 raw["provider_chain_fallback_used"] = True
                 raw["model_escalation"] = True
                 raw["requested_model"] = requested_model
-                raw["actual_model"] = str(raw.get("model") or escalation_model)
+                raw["actual_model"] = str(raw.get("actual_model") or "")
+                raw["attempted_model"] = escalation_model
+                raw["escalation_reason"] = "technical_failure"
                 emit_customer_chat_model_telemetry(
                     provider=customer_chat_provider(),
                     requested_model=requested_model,
@@ -510,6 +525,18 @@ class AIOrchestratorEngine:
         reply_text   = str(raw.get("reply_text", ""))
         provider_str = str(raw.get("provider", "unknown"))
         status       = raw.get("status", "unknown")
+        _router_meta = dict(request.prompt_overrides.get("__model_router") or {})
+        _audit_meta = self._audit_context_from_request(request)
+        requested_model = str(
+            raw.get("requested_model")
+            or _router_meta.get("model")
+            or _audit_meta.get("model_override")
+            or raw.get("model")
+            or ""
+        ).strip()
+        actual_model = str(
+            raw.get("actual_model") or ""
+        ).strip()
 
         cost_meta: Dict[str, Any] = {}
         prompt_meta_dict: Dict[str, Any] = {}
@@ -567,6 +594,11 @@ class AIOrchestratorEngine:
                 "prompt_builder": "modules.ai.prompts.builder.build_system_prompt",
                 "provider":       provider_str,
                 "model":          raw.get("model", "unknown"),
+                "requested_model": requested_model,
+                "actual_model":    actual_model or None,
+                "attempted_model": raw.get("attempted_model") or raw.get("model"),
+                "model_identity_source": raw.get("model_identity_source", "unknown"),
+                "escalation_reason": raw.get("escalation_reason", ""),
                 "cost":           cost_meta,        # {} when no reply produced
                 "prompt":         prompt_meta_dict, # {} when no reply produced
                 "provider_chain_fallback_used": bool(

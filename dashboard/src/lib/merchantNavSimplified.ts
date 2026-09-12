@@ -240,7 +240,6 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
       { to: '/settings-hub', icon: 'settings', label: tr => tr.nav.items.settings },
       { to: '/settings/security', icon: 'shield-check', label: tr => tr.nav.items.security },
       { to: '/billing', icon: 'credit-card', label: tr => tr.nav.items.billing },
-      { to: '/settings?tab=order_updates', icon: 'package', label: tr => tr.nav.items.orderUpdates },
     ],
     sections: [
       {

@@ -7,12 +7,11 @@ import {
   Eye, EyeOff, RefreshCw, UserPlus, ShieldOff, ToggleLeft, ToggleRight,
   Sparkles, BrainCircuit, ShieldCheck, Code2, ChevronRight,
   HeadphonesIcon, Send, Clock, X, ChevronDown, History,
-  AlertTriangle, Wifi, Zap, Package,
+  AlertTriangle, Wifi, Zap,
 } from 'lucide-react'
 import { useLanguage } from '../i18n/context'
 import { settingsApi, type AllSettings, type NotificationSettings, type StoreSettings } from '../api/settings'
 import StoreIdentitySettingsTab from '../components/settings/StoreIdentitySettingsTab'
-import OrderUpdatesSettingsTab from '../components/settings/OrderUpdatesSettingsTab'
 import { API_BASE } from '../api/client'
 
 
@@ -209,14 +208,13 @@ function QuickAccess() {
 
 // ── Tab IDs ──────────────────────────────────────────────────────────────────
 
-const TAB_IDS = ['store', 'team', 'notifications', 'order_updates', 'support', 'security', 'system'] as const
+const TAB_IDS = ['store', 'team', 'notifications', 'support', 'security', 'system'] as const
 type TabId = typeof TAB_IDS[number]
 
 const TAB_ICONS: Record<TabId, React.ComponentType<{ className?: string }>> = {
   store:         Store,
   team:          Users,
   notifications: Bell,
-  order_updates: Package,
   support:       HeadphonesIcon,
   security:      ShieldCheck,
   system:        RefreshCw,
@@ -226,7 +224,6 @@ const TAB_LABELS: Record<TabId, string> = {
   store:         'هوية المتجر',
   team:          'الفريق',
   notifications: 'الإشعارات',
-  order_updates: 'تحديثات الطلبات',
   support:       'الدعم والصلاحيات',
   security:      'الأمان',
   system:        'النظام',
@@ -1615,9 +1612,7 @@ export default function Settings() {
       id,
       label: id === 'store'
         ? (lang === 'ar' ? 'هوية المتجر' : 'Store Identity')
-        : id === 'order_updates'
-          ? (lang === 'ar' ? 'تحديثات الطلبات' : 'Order updates')
-          : TAB_LABELS[id] ?? t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]), // i18n-static: allow — id is SettingsTabKey
+        : TAB_LABELS[id] ?? t(tr => tr.settings.tabs[id as keyof typeof tr.settings.tabs]), // i18n-static: allow — id is SettingsTabKey
       icon: TAB_ICONS[id],
     }))
 
@@ -1737,7 +1732,6 @@ export default function Settings() {
           saveError={activeTab === 'notifications' ? saveError : null}
         />
       )}
-      {activeTab === 'order_updates' && <OrderUpdatesSettingsTab />}
       {activeTab === 'support' && !_isOwner && <SupportTab />}
       {activeTab === 'security' && !_isOwner && <SupportAccessTab />}
       {activeTab === 'system' && <SystemInfoTab />}

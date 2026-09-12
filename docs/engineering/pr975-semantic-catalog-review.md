@@ -89,3 +89,70 @@ The PR remains a draft and is not approved for merge or deployment. Run the
 opt-in live-model evaluation before requesting release approval; deterministic
 fixtures and skipped Layer 3 tests are not proof of live model quality, latency
 or cost.
+
+
+## Guard ownership hardening — 2026-09-12
+
+This update is built with main `7fcf81a7af95e41c08c2ca98d3e63255becc37b4`
+(#999 and #1004 included). Earlier test counts above describe the previous
+review tree, not this update. The complete PR still includes the read-only
+inbound interpreter described above; this is not a guard-only release.
+
+The first reproduced downstream divergence is missing/invalid/stale semantic
+verification being treated as a proven catalog conflict. That asked the model
+to recompose against synthetic availability evidence. After text was held,
+quality recomposition and silent recovery could reintroduce prose. A card-only
+turn also attempted a separate empty text send before dispatching its card.
+
+This update:
+
+- Records unresolved verification separately from a contradicted claim. Enforce
+  holds unverified text without a correction request; shadow leaves it unchanged.
+- Preserves verified model wording exactly at the guard. A grounded contradiction
+  still gets the existing one model-authored correction and fresh verification.
+- Carries `catalog_reply_withheld` and verification status across Brain exports.
+  Quality recomposition and silent recovery respect the hold; no canned substitute
+  is introduced. Existing card/button permission and delivery checks still apply.
+- Omits a standalone empty text payload while allowing independently validated
+  card/media delivery. A hold with no valid structured delivery remains suppressed.
+
+Final text ownership: verified and successfully corrected replies originate in
+Persona compose. The new guard never authors customer prose. In the four full
+webhook/provider-boundary cases, the valid/corrected candidate equals the sent
+text; unresolved/still-wrong cases send the grounded card without a separate
+text payload and never call canned recovery. Protocol title/price/CTA fields in
+cards remain structured product delivery. Provider/model outputs are fixtures;
+these tests do not measure live model comprehension.
+
+The replay fixtures now explicitly model the existing catalog denial as a denial
+and the existing PDP reply as a product reference. They exercise the real parser
+and guard instead of treating an unavailable verifier as proof of contradiction.
+All previous replay assertions remain intact. The test imports the webhook before
+patching the provider so its module-level binding does not keep the first case's
+fake recorder. No production provider, pause, handoff or dispatch gate was changed
+to resolve that test-fixture issue.
+
+Validation: 185 tests passed across guard/semantic contracts, metadata, final
+boundary and Constitution; both existing production-orchestration replays passed.
+The merchant-turn suite has 20 passes and the previously reproduced baseline
+handoff-persistence failure (`active` versus `human`). No-silent-except and
+`git diff --check` pass. Live-model evaluation remains unrun: local provider
+credentials are unavailable. False claim extraction, latency, cost and a
+customer-visible hold during verifier failure remain release-review concerns.
+
+For this hardening commit only:
+
+```text
+INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+MODEL_CHANGED=NO
+PROMPT_CHANGED=NO
+PERSONA_CHANGED=NO
+PHRASE_MAP_CHANGED=NO
+KEYWORD_ROUTER_CHANGED=NO
+CUSTOMER_REGEX_CHANGED=NO
+MERGED=NO
+DEPLOYED=NO
+```
+
+The complete PR's internal instructions/provider payload changes remain disclosed
+above; these flags must not be used to claim that all of PR #980 is prompt-neutral.

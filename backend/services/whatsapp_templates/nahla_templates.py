@@ -21,6 +21,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from core.commerce_lifecycle.cod_confirmation_assets import (
+    cod_confirmation_image_header_component,
+)
+
 
 def _order_summary_r3_components() -> List[Dict[str, Any]]:
     """Canonical r3 contract: IMAGE header, 4 BODY vars, mtjr.at button."""
@@ -60,7 +64,7 @@ SERVICE_CATALOG: Dict[str, Dict[str, str]] = {
         "color":          "blue",
     },
     "cod_confirmation": {
-        "name_ar":        "تأكيد الدفع عند الاستلام",
+        "name_ar":        "تأكيد طلب الدفع عند الاستلام",
         "description_ar": "التحقق من جدية العميل في طلبات الدفع عند الاستلام لتقليل الطلبات الوهمية",
         "icon":           "💰",
         "color":          "emerald",
@@ -364,7 +368,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "name_ar":        "تم التوصيل",
         "description_ar": "تُرسل عند وصول الطلب وتدعو العميل لتقييم تجربته",
         "category":       "UTILITY",
-        "filter_tags":    ["shipping", "orders"],
+        "filter_tags":    ["shipping", "orders", "order_updates"],
         "smart_trigger":  "order_delivered",
         "smart_label":    "يُرسل تلقائياً: عند تسليم الطلب",
         "slots":          ["customer_name", "store_name"],
@@ -576,12 +580,12 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # 12. تأكيد الدفع عند الاستلام — COD CONFIRMATION ← QUICK_REPLY x2
+    # 12. تأكيد طلب الدفع عند الاستلام — COD CONFIRMATION ← QUICK_REPLY x2
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "cod_confirmation",
         "service_key":    "cod_confirmation",
-        "name_ar":        "تأكيد الدفع عند الاستلام",
+        "name_ar":        "تأكيد طلب الدفع عند الاستلام",
         "description_ar": "يطلب من العميل تأكيد طلب الدفع عند الاستلام بلمسة واحدة",
         "category":       "UTILITY",
         "filter_tags":    ["orders"],
@@ -589,6 +593,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "smart_label":    "يُرسل تلقائياً: لطلبات الدفع عند الاستلام",
         "slots":          ["customer_name", "order_id", "store_name"],
         "components": [
+            cod_confirmation_image_header_component(),
             {
                 "type": "BODY",
                 "text": (
@@ -880,7 +885,7 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
         "name_ar":        "الطلب في الطريق",
         "description_ar": "تُرسل عند خروج الطلب للتوصيل ليستعد العميل لاستلامه",
         "category":       "UTILITY",
-        "filter_tags":    ["shipping", "orders"],
+        "filter_tags":    ["shipping", "orders", "order_updates"],
         "smart_trigger":  "order_out_for_delivery",
         "smart_label":    "يُرسل تلقائياً: عند خروج الطلب للتوصيل",
         "body_slots":   ["customer_name", "order_id"],
@@ -1389,9 +1394,9 @@ def template_preview(tpl: Dict[str, Any]) -> Dict[str, Any]:
         "trigger_delay_hours":    tpl.get("trigger_delay_hours"),
     }
     # Library cards have their own preview contract; do not drop the IMAGE
-    # component when projecting the order-confirmation definition into it.
+    # component when projecting an approved image-backed lifecycle definition.
     # Other services retain their existing preview until separately designed.
-    if service_key == "order_confirmation" and any(
+    if service_key in {"order_confirmation", "cod_confirmation"} and any(
         c.get("type") == "HEADER" and c.get("format") == "IMAGE"
         for c in tpl["components"]
     ):

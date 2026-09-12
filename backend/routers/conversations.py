@@ -291,7 +291,7 @@ def _get_or_create_conversation(
     convo = db.query(Conversation).filter(
         Conversation.tenant_id == tenant_id,
         Conversation.customer_id == customer.id,
-    ).first()
+    ).order_by(Conversation.id.desc()).first()
     if not convo:
         convo = Conversation(
             tenant_id=tenant_id,
@@ -1911,7 +1911,7 @@ async def get_conversation_messages(
         ``core.outbound_send_status``. Returns:
 
           {
-            "status":     "queued" | "sent" | "failed" | null,
+            "status":     "queued" | "sent" | "failed" | "suppressed" | null,
             "wamid":      str | null,
             "error": {
               "labelAr":       Arabic merchant-facing label,
