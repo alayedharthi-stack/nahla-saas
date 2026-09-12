@@ -1,6 +1,7 @@
 """Tenant-bound wrappers around the existing catalog domain service."""
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from agents import RunContextWrapper, function_tool
@@ -9,11 +10,32 @@ from core.store_knowledge import CatalogContextBuilder
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.output import (
     CatalogSearchResult,
+    CanonicalEvidenceFact,
     EvidenceRecord,
     ProductDetailsResult,
     ProductSnapshot,
 )
 from modules.ai.security.tenant_isolation import TenantIsolationLayer
+
+
+def _canonical_money(value: Any) -> int | float | None:
+    if value in (None, ""):
+        return None
+    raw = str(value).strip()
+    if "," in raw and "." not in raw:
+        whole, fraction = raw.rsplit(",", 1)
+        raw = f"{whole}.{fraction}" if len(fraction) <= 2 else raw.replace(",", "")
+    else:
+        raw = raw.replace(",", "")
+    try:
+        amount = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return None
+    if not amount.is_finite():
+        return None
+    if amount == amount.to_integral_value():
+        return int(amount)
+    return float(amount)
 
 
 def _product_evidence(row: dict[str, Any]) -> tuple[ProductSnapshot, EvidenceRecord]:
@@ -27,16 +49,41 @@ def _product_evidence(row: dict[str, Any]) -> tuple[ProductSnapshot, EvidenceRec
         "price": row.get("price"),
         "sale_price": row.get("sale_price"),
         "regular_price": row.get("regular_price"),
+        "currency": str(row.get("currency") or "").strip().upper() or None,
         "in_stock": row.get("in_stock"),
         "stock_quantity": row.get("stock_qty"),
         "image_url": str(row.get("image_url") or ""),
         "product_url": str(row.get("product_url") or ""),
         "orderable": bool(row.get("orderable")),
     }
+    facts: list[CanonicalEvidenceFact] = []
+
+    def add_fact(kind: str, value: Any) -> None:
+        if value in (None, ""):
+            return
+        facts.append(
+            CanonicalEvidenceFact(
+                kind=kind,
+                value=value,
+                subject_product_id=product_id,
+            )
+        )
+
+    add_fact("product_name", fields["title"])
+    add_fact("description", fields["description"])
+    add_fact("price", _canonical_money(fields["price"]))
+    add_fact("sale_price", _canonical_money(fields["sale_price"]))
+    add_fact("regular_price", _canonical_money(fields["regular_price"]))
+    add_fact("currency", fields["currency"])
+    add_fact("availability", fields["in_stock"])
+    add_fact("stock_quantity", fields["stock_quantity"])
+    add_fact("image_url", fields["image_url"])
+    add_fact("product_url", fields["product_url"])
     evidence = EvidenceRecord(
         ref=evidence_ref,
         source="catalog_product",
         source_id=str(product_id),
+        facts=facts,
         fields=fields,
         provenance={
             "service": "core.store_knowledge.CatalogContextBuilder",
@@ -58,6 +105,7 @@ def _product_evidence(row: dict[str, Any]) -> tuple[ProductSnapshot, EvidenceRec
             if row.get("regular_price") not in (None, "")
             else None
         ),
+        currency=fields["currency"],
         in_stock=row.get("in_stock"),
         stock_quantity=row.get("stock_qty"),
         image_url=fields["image_url"],

@@ -695,6 +695,10 @@ class CatalogContextBuilder:
             "price":           p.price,
             "sale_price":      meta.get("sale_price"),
             "regular_price":   meta.get("regular_price"),
+            "currency":        (
+                (default_v.currency if default_v is not None else None)
+                or meta.get("currency")
+            ),
             "category":        meta.get("category", ""),
             "brand":           meta.get("brand", ""),
             "in_stock":        in_stock_flag,

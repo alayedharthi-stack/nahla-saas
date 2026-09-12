@@ -2,17 +2,81 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
 from agents import GuardrailFunctionOutput, RunContextWrapper, input_guardrail, output_guardrail
 
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
-from modules.ai.commerce_agent_v2.output import CommerceReply, EvidenceRecord
+from modules.ai.commerce_agent_v2.output import (
+    CanonicalEvidenceFact,
+    CommerceReply,
+    EvidenceRecord,
+    FactClaim,
+)
 
 
 _LEGACY_MARKER_RE = re.compile(r"\[(?:PRODUCT|MEDIA_KEY|CALL):", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _SAR_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)\s*(?:ريال|ر\.س|SAR)\b", re.IGNORECASE)
+_NUMBER_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)(?!\d)")
+_QUANTITY_RE = re.compile(
+    r"(?<!\d)(\d+)\s*(?:قطع(?:ة)?|عبو(?:ة|ات)|حب(?:ة|ات)|وحد(?:ة|ات))\b",
+    re.IGNORECASE,
+)
+_AVAILABILITY_RE = re.compile(
+    r"غير\s+(?:متوفر|متاح)\b|(?:نافد|نفد)\b|out\s+of\s+stock\b|unavailable\b|"
+    r"(?:متوفر|متاح|موجود)\b|in\s+stock\b|available\b",
+    re.IGNORECASE,
+)
+_ARABIC_DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
+_TOKEN_RE = re.compile(r"[\w\u0600-\u06FF]+", re.UNICODE)
+_KNOWLEDGE_FILLER = frozenset(
+    {
+        "هذا",
+        "هذه",
+        "ذلك",
+        "تلك",
+        "هو",
+        "هي",
+        "من",
+        "في",
+        "على",
+        "عن",
+        "الى",
+        "مع",
+        "لدينا",
+        "عندنا",
+        "يوجد",
+        "يتوفر",
+        "تتوفر",
+        "the",
+        "and",
+        "is",
+        "are",
+        "of",
+        "from",
+    }
+)
+_NEGATION_TOKENS = frozenset({"لا", "لم", "لن", "ليس", "ليست", "غير", "بدون"})
+_SCOPE_TOKENS = frozenset(
+    {"فقط", "حصريا", "كل", "جميع", "بعض", "مختار", "only", "all", "some", "selected"}
+)
+_PRODUCT_BOUND_KINDS = frozenset(
+    {
+        "product_name",
+        "description",
+        "price",
+        "currency",
+        "sale_price",
+        "regular_price",
+        "availability",
+        "stock_quantity",
+        "product_url",
+        "image_url",
+        "product_knowledge",
+    }
+)
 
 
 def _flatten_values(value: Any) -> Iterable[str]:
@@ -28,6 +92,160 @@ def _flatten_values(value: Any) -> Iterable[str]:
 
 def _evidence_values(record: EvidenceRecord) -> set[str]:
     return {value for value in _flatten_values(record.fields) if value}
+
+
+def _normalize_text(value: Any) -> str:
+    text = _ARABIC_DIACRITICS_RE.sub("", str(value or "").strip().casefold())
+    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    text = text.replace("ى", "ي").replace("ة", "ه").replace("ـ", "")
+    return " ".join(text.split())
+
+
+def _light_token(token: str) -> str:
+    if token.startswith("ال") and len(token) > 4:
+        token = token[2:]
+    if token.startswith("و") and len(token) > 4:
+        token = token[1:]
+    for suffix in ("هما", "كم", "كن", "هم", "هن", "ها", "ه"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            return token[: -len(suffix)]
+    return token
+
+
+def _knowledge_tokens(value: str) -> set[str]:
+    return {
+        _light_token(token)
+        for token in _TOKEN_RE.findall(_normalize_text(value))
+        if token not in _KNOWLEDGE_FILLER and token not in _NEGATION_TOKENS
+    }
+
+
+def _knowledge_span_supported(record: EvidenceRecord, span: str) -> bool:
+    supporting_text = " ".join(
+        str(record.fields.get(field) or "") for field in ("title", "body")
+    ).strip()
+    normalized_span = _normalize_text(span)
+    normalized_support = _normalize_text(supporting_text)
+    if not normalized_span or not normalized_support:
+        return False
+    if normalized_span == normalized_support:
+        return True
+
+    span_negation = bool(set(_TOKEN_RE.findall(normalized_span)) & _NEGATION_TOKENS)
+    support_negation = bool(set(_TOKEN_RE.findall(normalized_support)) & _NEGATION_TOKENS)
+    if span_negation != support_negation:
+        return False
+    span_numbers = set(_NUMBER_RE.findall(normalized_span))
+    support_numbers = set(_NUMBER_RE.findall(normalized_support))
+    if not span_numbers <= support_numbers:
+        return False
+    span_tokens = _knowledge_tokens(span)
+    support_tokens = _knowledge_tokens(supporting_text)
+    body_tokens = _knowledge_tokens(str(record.fields.get("body") or ""))
+    span_scope = span_tokens & _SCOPE_TOKENS
+    body_scope = body_tokens & _SCOPE_TOKENS
+    if span_scope != body_scope:
+        return False
+    overlap = span_tokens & body_tokens
+    return (
+        len(span_tokens) >= 2
+        and len(overlap) >= 2
+        and len(overlap) / len(span_tokens) >= 0.75
+        and len(overlap) / len(body_tokens) >= 0.60
+        and span_tokens <= support_tokens
+    )
+
+
+def _decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool):
+        return None
+    raw = str(value).strip()
+    if "," in raw and "." not in raw:
+        whole, fraction = raw.rsplit(",", 1)
+        raw = f"{whole}.{fraction}" if len(fraction) <= 2 else raw.replace(",", "")
+    else:
+        raw = raw.replace(",", "")
+    try:
+        parsed = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _canonical_currency(value: Any) -> str:
+    normalized = _normalize_text(value).replace(".", "").replace(" ", "")
+    if normalized in {"sar", "sr", "رس", "ريال", "ريالسعودي"}:
+        return "SAR"
+    return str(value or "").strip().upper()
+
+
+def _fact_values_equal(kind: str, claim_value: Any, evidence_value: Any) -> bool:
+    if kind in {"price", "sale_price", "regular_price"}:
+        return _decimal(claim_value) == _decimal(evidence_value)
+    if kind == "currency":
+        return _canonical_currency(claim_value) == _canonical_currency(evidence_value)
+    if kind in {"availability", "stock_quantity"}:
+        return type(claim_value) is type(evidence_value) and claim_value == evidence_value
+    if kind in {"product_name", "description"}:
+        return _normalize_text(claim_value) == _normalize_text(evidence_value)
+    return str(claim_value).strip() == str(evidence_value).strip()
+
+
+def _matching_evidence_fact(
+    record: EvidenceRecord,
+    claim: FactClaim,
+) -> CanonicalEvidenceFact | None:
+    expected_source = {
+        "merchant_knowledge": "merchant_knowledge",
+        "product_knowledge": "product_knowledge",
+    }.get(claim.kind, "catalog_product")
+    if record.source != expected_source:
+        return None
+    if (
+        record.source == "catalog_product"
+        and claim.subject_product_id is not None
+        and record.source_id != str(claim.subject_product_id)
+    ):
+        return None
+    for fact in record.facts:
+        if fact.kind != claim.kind:
+            continue
+        if fact.subject_product_id != claim.subject_product_id:
+            continue
+        if _fact_values_equal(claim.kind, claim.value, fact.value):
+            return fact
+    return None
+
+
+def _span_expresses_claim(record: EvidenceRecord, claim: FactClaim) -> bool:
+    span = claim.text_span
+    if claim.kind in {"price", "sale_price", "regular_price"}:
+        expected = _decimal(claim.value)
+        return any(_decimal(value) == expected for value in _NUMBER_RE.findall(span))
+    if claim.kind == "currency":
+        return _canonical_currency(claim.value) in {
+            _canonical_currency(token) for token in _TOKEN_RE.findall(span)
+        }
+    if claim.kind == "availability":
+        states = {_availability_value(match.group(0)) for match in _AVAILABILITY_RE.finditer(span)}
+        return claim.value in states
+    if claim.kind == "stock_quantity":
+        return any(int(value) == claim.value for value in _QUANTITY_RE.findall(span))
+    if claim.kind in {"product_url", "image_url"}:
+        return str(claim.value).strip() in span
+    if claim.kind in {"merchant_knowledge", "product_knowledge"}:
+        return _knowledge_span_supported(record, span)
+    claim_tokens = _knowledge_tokens(str(claim.value))
+    span_tokens = _knowledge_tokens(span)
+    return bool(claim_tokens) and claim_tokens <= span_tokens
+
+
+def _availability_value(value: str) -> bool:
+    normalized = _normalize_text(value)
+    return not any(
+        term in normalized
+        for term in ("غير متوفر", "غير متاح", "نافد", "نفد", "unavailable", "out of stock")
+    )
 
 
 @input_guardrail(name="commerce_v2_trusted_read_only_scope", run_in_parallel=False)
@@ -73,10 +291,30 @@ def validate_grounded_reply(
     if missing_refs:
         errors.append("unknown_evidence_refs:" + ",".join(missing_refs))
 
+    verified_claims: list[FactClaim] = []
     for claim in reply.fact_claims:
         record = evidence.get(claim.evidence_ref)
-        if record is not None and claim.value.strip() not in _evidence_values(record):
+        if record is None:
+            continue
+        if not record.facts:
+            errors.append("evidence_without_canonical_facts")
+            continue
+        if claim.kind in _PRODUCT_BOUND_KINDS and claim.subject_product_id is None:
+            errors.append(f"missing_claim_subject_product_id:{claim.kind}")
+            continue
+        if claim.kind == "merchant_knowledge" and claim.subject_product_id is not None:
+            errors.append("merchant_claim_has_product_subject")
+            continue
+        if _matching_evidence_fact(record, claim) is None:
             errors.append(f"claim_not_in_evidence:{claim.kind}")
+            continue
+        if claim.text_span not in reply.text:
+            errors.append(f"claim_span_not_in_text:{claim.kind}")
+            continue
+        if not _span_expresses_claim(record, claim):
+            errors.append(f"claim_span_not_equivalent:{claim.kind}")
+            continue
+        verified_claims.append(claim)
 
     for product_ref in reply.product_refs:
         record = evidence.get(product_ref.evidence_ref)
@@ -89,34 +327,66 @@ def validate_grounded_reply(
 
     for media_ref in reply.media_refs:
         record = evidence.get(media_ref.evidence_ref)
-        if record is not None and str(media_ref.url) not in _evidence_values(record):
+        if record is not None and not any(
+            fact.kind == "image_url" and str(fact.value) == str(media_ref.url)
+            for fact in record.facts
+        ):
             errors.append("media_url_not_in_evidence")
     for action in reply.ui_actions:
         record = evidence.get(action.evidence_ref)
-        if record is not None and str(action.url) not in _evidence_values(record):
+        if record is not None and not any(
+            fact.kind == "product_url" and str(fact.value) == str(action.url)
+            for fact in record.facts
+        ):
             errors.append("action_url_not_in_evidence")
 
-    evidenced_urls = {
-        value
-        for record in evidence.values()
-        for value in _evidence_values(record)
-        if value.startswith(("http://", "https://"))
+    claimed_urls = {
+        str(claim.value)
+        for claim in verified_claims
+        if claim.kind in {"product_url", "image_url"}
     }
     for url in _URL_RE.findall(reply.text):
-        if url.rstrip(".,،؛") not in evidenced_urls:
-            errors.append("url_not_in_evidence")
+        if url.rstrip(".,،؛") not in claimed_urls:
+            errors.append("url_in_text_without_verified_claim")
 
-    price_values = {
-        str(record.fields.get(field)).strip().replace(",", ".")
-        for record in evidence.values()
-        if record.source == "catalog_product"
-        for field in ("price", "sale_price", "regular_price")
-        if record.fields.get(field) not in (None, "")
-    }
-    for amount in _SAR_RE.findall(reply.text):
-        normalized = amount.replace(",", ".")
-        if normalized not in price_values:
-            errors.append("price_not_in_catalog_evidence")
+    verified_prices = [
+        claim
+        for claim in verified_claims
+        if claim.kind in {"price", "sale_price", "regular_price"}
+    ]
+    for match in _SAR_RE.finditer(reply.text):
+        amount = _decimal(match.group(1))
+        rendered = match.group(0)
+        if not any(
+            _decimal(claim.value) == amount and rendered in claim.text_span
+            for claim in verified_prices
+        ):
+            errors.append("price_in_text_without_verified_claim")
+
+    verified_quantities = [
+        claim for claim in verified_claims if claim.kind == "stock_quantity"
+    ]
+    for match in _QUANTITY_RE.finditer(reply.text):
+        quantity = int(match.group(1))
+        rendered = match.group(0)
+        if not any(
+            claim.value == quantity and rendered in claim.text_span
+            for claim in verified_quantities
+        ):
+            errors.append("stock_quantity_in_text_without_verified_claim")
+
+    if not reply.safe_fallback_reason:
+        verified_availability = [
+            claim for claim in verified_claims if claim.kind == "availability"
+        ]
+        for match in _AVAILABILITY_RE.finditer(reply.text):
+            availability = _availability_value(match.group(0))
+            rendered = match.group(0)
+            if not any(
+                claim.value is availability and rendered in claim.text_span
+                for claim in verified_availability
+            ):
+                errors.append("availability_in_text_without_verified_claim")
 
     if (reply.fact_claims or reply.product_refs or reply.media_refs or reply.ui_actions) and not referenced:
         errors.append("commercial_output_without_evidence_refs")

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agents import RunConfig
+from agents import AgentOutputSchema, RunConfig
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from agents.tool_context import ToolContext
 from agents.tracing import set_trace_provider
@@ -42,7 +42,9 @@ from modules.ai.commerce_agent_v2.context import CommerceAgentContext, CommerceC
 from modules.ai.commerce_agent_v2.guardrails import contains_legacy_marker, validate_grounded_reply
 from modules.ai.commerce_agent_v2.output import (
     CatalogSearchResult,
+    CanonicalEvidenceFact,
     CommerceReply,
+    EvidenceRecord,
     FactClaim,
     KnowledgeSearchResult,
     MediaReference,
@@ -138,6 +140,7 @@ def seeded() -> Seed:
             "status": "active",
             "in_stock": True,
             "stock_qty": 8,
+            "currency": "SAR",
             "image_url": "https://cdn.example.test/a-honey.jpg",
             "product_url": "https://shop.example.test/products/a-honey",
         },
@@ -440,6 +443,30 @@ async def test_search_products_and_details_are_grounded(seeded: Seed) -> None:
     assert fields["stock_quantity"] == 8
     assert fields["product_url"] == details.product.product_url
     assert fields["image_url"] == details.product.image_url
+    facts = {fact.kind: fact for fact in details.evidence[0].facts}
+    assert facts["product_name"].value == "عسل طلح بلدي"
+    assert facts["price"].value == 150
+    assert facts["currency"].value == "SAR"
+    assert facts["availability"].value is True
+    assert facts["stock_quantity"].value == 8
+    assert facts["product_url"].value == details.product.product_url
+    assert facts["image_url"].value == details.product.image_url
+
+
+@pytest.mark.asyncio
+async def test_sale_and_regular_prices_are_numeric_canonical_facts(seeded: Seed) -> None:
+    seeded.honey_a.extra_metadata = {
+        **seeded.honey_a.extra_metadata,
+        "sale_price": "125.00",
+        "regular_price": "150,00",
+    }
+    seeded.db.commit()
+    result = CatalogSearchResult.model_validate(
+        await _invoke(search_products, _context(seeded), {"query": "عسل طلح", "limit": 5})
+    )
+    facts = {fact.kind: fact.value for fact in result.evidence[0].facts}
+    assert facts["sale_price"] == 125
+    assert facts["regular_price"] == 150
 
 
 @pytest.mark.asyncio
@@ -519,6 +546,9 @@ async def test_global_and_product_linked_knowledge_are_separated(seeded: Seed) -
     assert global_result.status == "ok"
     assert [item.section_id for item in global_result.sections] == [seeded.global_kb_a.id]
     assert not global_result.sections[0].linked_product_ids
+    assert [(fact.kind, fact.subject_product_id) for fact in global_result.evidence[0].facts] == [
+        ("merchant_knowledge", None)
+    ]
 
     await _invoke(search_products, context, {"query": "عسل طلح", "limit": 5})
     product_result = KnowledgeSearchResult.model_validate(
@@ -533,6 +563,9 @@ async def test_global_and_product_linked_knowledge_are_separated(seeded: Seed) -
     assert seeded.other_product_kb_a.id not in {
         item.section_id for item in product_result.sections
     }
+    assert [
+        (fact.kind, fact.subject_product_id) for fact in product_result.evidence[0].facts
+    ] == [("product_knowledge", seeded.honey_a.id)]
 
 
 @pytest.mark.asyncio
@@ -576,24 +609,47 @@ def test_structured_reply_validation_and_grounding(seeded: Seed) -> None:
         "ref": f"catalog:product:{seeded.honey_a.id}",
         "source": "catalog_product",
         "source_id": str(seeded.honey_a.id),
+        "facts": [
+            {
+                "kind": "product_name",
+                "value": "عسل طلح بلدي",
+                "subject_product_id": seeded.honey_a.id,
+            },
+            {
+                "kind": "price",
+                "value": 150,
+                "subject_product_id": seeded.honey_a.id,
+            },
+        ],
         "fields": {"title": "عسل طلح بلدي", "price": "150"},
         "provenance": {"service": "test"},
     }
-    from modules.ai.commerce_agent_v2.output import EvidenceRecord
-
     context.register_evidence([EvidenceRecord.model_validate(record)])
     reply = CommerceReply(
         text="عسل طلح بلدي سعره 150 ريال.",
         evidence_refs=[record["ref"]],
         fact_claims=[
-            FactClaim(kind="product_name", value="عسل طلح بلدي", evidence_ref=record["ref"]),
-            FactClaim(kind="price", value="150", evidence_ref=record["ref"]),
+            FactClaim(
+                kind="product_name",
+                value="عسل طلح بلدي",
+                evidence_ref=record["ref"],
+                subject_product_id=seeded.honey_a.id,
+                text_span="عسل طلح بلدي",
+            ),
+            FactClaim(
+                kind="price",
+                value=150,
+                evidence_ref=record["ref"],
+                subject_product_id=seeded.honey_a.id,
+                text_span="سعره 150 ريال",
+            ),
         ],
         product_refs=[ProductReference(product_id=seeded.honey_a.id, evidence_ref=record["ref"])],
     )
     assert validate_grounded_reply(context, reply) == []
     invented = reply.model_copy(update={"text": "سعره 9999 ريال."})
-    assert "price_not_in_catalog_evidence" in validate_grounded_reply(context, invented)
+    assert "claim_span_not_in_text:price" in validate_grounded_reply(context, invented)
+    assert "price_in_text_without_verified_claim" in validate_grounded_reply(context, invented)
     with pytest.raises(Exception):
         CommerceReply.model_validate({"text": "ok", "unexpected": True})
 
@@ -608,6 +664,285 @@ def test_structured_reply_validation_and_grounding(seeded: Seed) -> None:
     ) == []
 
 
+def test_canonical_catalog_claims_accept_formatting_and_natural_arabic(seeded: Seed) -> None:
+    context = _context(seeded)
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="product_name",
+                        value="عسل طلح بلدي",
+                        subject_product_id=seeded.honey_a.id,
+                    ),
+                    CanonicalEvidenceFact(
+                        kind="price", value=150.00, subject_product_id=seeded.honey_a.id
+                    ),
+                    CanonicalEvidenceFact(
+                        kind="currency", value="SAR", subject_product_id=seeded.honey_a.id
+                    ),
+                    CanonicalEvidenceFact(
+                        kind="availability", value=True, subject_product_id=seeded.honey_a.id
+                    ),
+                    CanonicalEvidenceFact(
+                        kind="stock_quantity", value=8, subject_product_id=seeded.honey_a.id
+                    ),
+                ],
+                fields={"title": "عسل طلح بلدي", "price": "150", "in_stock": True},
+            )
+        ]
+    )
+    reply = CommerceReply(
+        text="عسل طلح بلدي متوفر، وباقي منه 8 عبوات. سعره 150 ريال.",
+        evidence_refs=[ref],
+        fact_claims=[
+            FactClaim(
+                kind="product_name",
+                value="عسل طلح بلدي",
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="عسل طلح بلدي",
+            ),
+            FactClaim(
+                kind="availability",
+                value=True,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="متوفر",
+            ),
+            FactClaim(
+                kind="stock_quantity",
+                value=8,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="باقي منه 8 عبوات",
+            ),
+            FactClaim(
+                kind="price",
+                value=150,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="سعره 150 ريال",
+            ),
+            FactClaim(
+                kind="currency",
+                value="ريال",
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="150 ريال",
+            ),
+        ],
+    )
+    assert validate_grounded_reply(context, reply) == []
+
+    decimal_rendering = reply.model_copy(
+        update={
+            "text": reply.text.replace("150 ريال", "150.00 ريال"),
+            "fact_claims": [
+                claim.model_copy(
+                    update={"text_span": claim.text_span.replace("150 ريال", "150.00 ريال")}
+                )
+                for claim in reply.fact_claims
+            ],
+        }
+    )
+    assert validate_grounded_reply(context, decimal_rendering) == []
+
+
+def test_canonical_claim_types_reject_string_prices() -> None:
+    with pytest.raises(Exception, match="price must be a JSON number"):
+        FactClaim(
+            kind="price",
+            value="150",
+            evidence_ref="catalog:product:1",
+            subject_product_id=1,
+            text_span="150 ريال",
+        )
+
+
+def test_knowledge_claim_allows_supported_paraphrase_but_rejects_changed_fact(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded)
+    ref = f"kb:section:{seeded.product_kb_a.id}"
+    body = "مصدر هذا المنتج من خلايا نحل بلدي."
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="product_knowledge",
+                source_id=str(seeded.product_kb_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="product_knowledge",
+                        value=body,
+                        subject_product_id=seeded.honey_a.id,
+                    )
+                ],
+                fields={"title": "مصدر عسل الطلح", "body": body},
+            )
+        ]
+    )
+    claim = FactClaim(
+        kind="product_knowledge",
+        value=body,
+        evidence_ref=ref,
+        subject_product_id=seeded.honey_a.id,
+        text_span="هذا العسل مصدره نحل بلدي",
+    )
+    assert validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="هذا العسل مصدره نحل بلدي.",
+            evidence_refs=[ref],
+            fact_claims=[claim],
+        ),
+    ) == []
+
+    wrong = claim.model_copy(update={"text_span": "هذا العسل مستورد من نيوزيلندا"})
+    errors = validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="هذا العسل مستورد من نيوزيلندا.",
+            evidence_refs=[ref],
+            fact_claims=[wrong],
+        ),
+    )
+    assert "claim_span_not_equivalent:product_knowledge" in errors
+
+
+def test_merchant_knowledge_claim_uses_canonical_body_with_natural_paraphrase(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded)
+    ref = f"kb:section:{seeded.global_kb_a.id}"
+    body = "يتوفر تغليف هدايا بسيط للمنتجات المختارة."
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="merchant_knowledge",
+                source_id=str(seeded.global_kb_a.id),
+                facts=[CanonicalEvidenceFact(kind="merchant_knowledge", value=body)],
+                fields={"title": "تغليف الهدايا", "body": body},
+            )
+        ]
+    )
+    supported = FactClaim(
+        kind="merchant_knowledge",
+        value=body,
+        evidence_ref=ref,
+        subject_product_id=None,
+        text_span="عندنا تغليف هدايا بسيط للمنتجات المختارة",
+    )
+    assert validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="عندنا تغليف هدايا بسيط للمنتجات المختارة.",
+            evidence_refs=[ref],
+            fact_claims=[supported],
+        ),
+    ) == []
+
+    unsupported = supported.model_copy(update={"text_span": "التغليف مجاني لكل المنتجات"})
+    assert "claim_span_not_equivalent:merchant_knowledge" in validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="التغليف مجاني لكل المنتجات.",
+            evidence_refs=[ref],
+            fact_claims=[unsupported],
+        ),
+    )
+
+    dropped_scope = supported.model_copy(update={"text_span": "عندنا تغليف هدايا للمنتجات"})
+    assert "claim_span_not_equivalent:merchant_knowledge" in validate_grounded_reply(
+        context,
+        CommerceReply(
+            text="عندنا تغليف هدايا للمنتجات.",
+            evidence_refs=[ref],
+            fact_claims=[dropped_scope],
+        ),
+    )
+
+
+def test_claim_rejects_wrong_evidence_ref_and_other_product_subject(seeded: Seed) -> None:
+    context = _context(seeded)
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="price", value=150, subject_product_id=seeded.honey_a.id
+                    )
+                ],
+            )
+        ]
+    )
+    wrong_ref = CommerceReply(
+        text="سعره 150 ريال.",
+        evidence_refs=["catalog:product:missing"],
+        fact_claims=[
+            FactClaim(
+                kind="price",
+                value=150,
+                evidence_ref="catalog:product:missing",
+                subject_product_id=seeded.honey_a.id,
+                text_span="سعره 150 ريال",
+            )
+        ],
+    )
+    assert "unknown_evidence_refs:catalog:product:missing" in validate_grounded_reply(
+        context, wrong_ref
+    )
+
+    wrong_product = CommerceReply(
+        text="سعره 150 ريال.",
+        evidence_refs=[ref],
+        fact_claims=[
+            FactClaim(
+                kind="price",
+                value=150,
+                evidence_ref=ref,
+                subject_product_id=seeded.gift_a.id,
+                text_span="سعره 150 ريال",
+            )
+        ],
+    )
+    assert "claim_not_in_evidence:price" in validate_grounded_reply(context, wrong_product)
+
+
+def test_sensitive_price_in_text_requires_verified_fact_claim(seeded: Seed) -> None:
+    context = _context(seeded)
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="price", value=150, subject_product_id=seeded.honey_a.id
+                    )
+                ],
+            )
+        ]
+    )
+    errors = validate_grounded_reply(
+        context,
+        CommerceReply(text="سعره 150 ريال.", evidence_refs=[ref]),
+    )
+    assert "price_in_text_without_verified_claim" in errors
+
+
 def test_v2_output_rejects_legacy_markers() -> None:
     for marker in ("[PRODUCT:1]", "[MEDIA_KEY:x]", "[CALL:foo]"):
         assert contains_legacy_marker(marker)
@@ -616,6 +951,8 @@ def test_v2_output_rejects_legacy_markers() -> None:
 def test_structured_output_schema_uses_provider_compatible_validated_urls() -> None:
     schema_text = json.dumps(CommerceReply.model_json_schema(), sort_keys=True)
     assert '"format": "uri"' not in schema_text
+    strict_schema = AgentOutputSchema(CommerceReply, strict_json_schema=True).json_schema()
+    assert strict_schema["additionalProperties"] is False
     assert MediaReference(
         url="https://example.test/image.jpg",
         evidence_ref="catalog:product:1",
@@ -637,8 +974,27 @@ async def test_agent_sdk_runs_tool_and_returns_structured_reply(seeded: Seed) ->
         text="عسل طلح بلدي متوفر بسعر 150 ريال.",
         evidence_refs=[evidence_ref],
         fact_claims=[
-            FactClaim(kind="product_name", value="عسل طلح بلدي", evidence_ref=evidence_ref),
-            FactClaim(kind="price", value="150", evidence_ref=evidence_ref),
+            FactClaim(
+                kind="product_name",
+                value="عسل طلح بلدي",
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="عسل طلح بلدي",
+            ),
+            FactClaim(
+                kind="price",
+                value=150,
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="بسعر 150 ريال",
+            ),
+            FactClaim(
+                kind="availability",
+                value=True,
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="متوفر",
+            ),
         ],
         product_refs=[ProductReference(product_id=seeded.honey_a.id, evidence_ref=evidence_ref)],
     )
@@ -894,6 +1250,53 @@ def test_webhook_shadow_seam_cannot_replace_v1_outbound() -> None:
     assert "V1 remains the sole reply owner below" in webhook
 
 
+def _evaluate_tool_contract(
+    case: dict[str, Any],
+    *,
+    actual_tools: list[str],
+    tool_arguments: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    contract = case["tool_contract"]
+    required = set(contract["required_tools"])
+    forbidden = set(contract["forbidden_tools"])
+    evidence_sources = {row.get("source") for row in evidence}
+    required_evidence = set(contract["required_evidence_sources"])
+    signatures = [
+        json.dumps(item, sort_keys=True, separators=(",", ":")) for item in tool_arguments
+    ]
+    identical_duplicate_calls = len(signatures) != len(set(signatures))
+    checks = {
+        "required_tools_present": required <= set(actual_tools),
+        "acceptable_plan": actual_tools in contract["acceptable_plans"],
+        "forbidden_tools_absent": not (forbidden & set(actual_tools)),
+        "required_evidence_present": required_evidence <= evidence_sources,
+        "no_identical_duplicate_calls": not (
+            contract.get("forbid_identical_duplicate_calls", False)
+            and identical_duplicate_calls
+        ),
+    }
+    return {
+        **checks,
+        "passed": all(checks.values()),
+        "evidence_sources": sorted(source for source in evidence_sources if source),
+        "identical_duplicate_calls": identical_duplicate_calls,
+    }
+
+
+def _outcome_is_correct(case: dict[str, Any], result: Any) -> bool:
+    expected = case["tool_contract"]["expected_outcome"]
+    if expected == "grounded_reply":
+        return bool(
+            result.status == "completed"
+            and result.reply.evidence_refs
+            and not result.reply.safe_fallback_reason
+        )
+    if expected == "safe_fallback":
+        return bool(result.status == "completed" and result.reply.safe_fallback_reason)
+    raise AssertionError(f"unknown expected_outcome: {expected}")
+
+
 def test_replay_fixture_covers_required_real_patterns() -> None:
     path = Path(__file__).parents[1] / "evals" / "commerce_agent_v2_phase1_replay.json"
     cases = json.loads(path.read_text(encoding="utf-8"))
@@ -914,6 +1317,46 @@ def test_replay_fixture_covers_required_real_patterns() -> None:
     assert all(case["turn_mode"] in {"single", "multi"} for case in cases)
     assert all(not case.get("history") for case in cases if case["turn_mode"] == "single")
     assert all(case.get("history") for case in cases if case["turn_mode"] == "multi")
+    assert all(case["replay_plan"] in case["tool_contract"]["acceptable_plans"] for case in cases)
+    assert all(
+        set(case["tool_contract"]["required_tools"]) <= set(case["replay_plan"])
+        for case in cases
+    )
+    assert {
+        case["tool_contract"]["expected_outcome"] for case in cases
+    } == {"grounded_reply", "safe_fallback"}
+
+
+def test_tool_eval_accepts_evidence_equivalent_price_plans_and_rejects_forbidden_calls() -> None:
+    case = {
+        "tool_contract": {
+            "required_tools": ["search_products"],
+            "acceptable_plans": [
+                ["search_products"],
+                ["search_products", "get_product_details"],
+            ],
+            "forbidden_tools": ["search_product_knowledge"],
+            "required_evidence_sources": ["catalog_product"],
+        }
+    }
+    evidence = [{"source": "catalog_product"}]
+    for plan in (["search_products"], ["search_products", "get_product_details"]):
+        evaluated = _evaluate_tool_contract(
+            case,
+            actual_tools=plan,
+            tool_arguments=[{"tool": name, "arguments": {}} for name in plan],
+            evidence=evidence,
+        )
+        assert evaluated["passed"] is True
+
+    rejected = _evaluate_tool_contract(
+        case,
+        actual_tools=["search_products", "search_product_knowledge"],
+        tool_arguments=[],
+        evidence=evidence,
+    )
+    assert rejected["passed"] is False
+    assert rejected["forbidden_tools_absent"] is False
 
 
 @pytest.mark.asyncio
@@ -1075,7 +1518,6 @@ async def test_replay_executes_expected_tool_plan_through_official_sdk(
         "catalog-specific-ar": [("search_products", {"query": "عسل طلح", "limit": 5})],
         "price-followup-ar": [
             ("search_products", {"query": "عسل طلح", "limit": 5}),
-            ("get_product_details", {"product_id": seeded.honey_a.id}),
         ],
         "product-provenance-ar": [
             ("search_products", {"query": "عسل طلح", "limit": 5}),
@@ -1136,8 +1578,25 @@ async def test_replay_executes_expected_tool_plan_through_official_sdk(
     actual_tools = [
         event["tool"] for event in result.tool_trace if event.get("kind") == "tool_end"
     ]
+    tool_arguments = [
+        {"tool": event["tool"], "arguments": event.get("arguments", {})}
+        for event in result.tool_trace
+        if event.get("kind") == "tool_start"
+    ]
+    evidence = [
+        evidence_row
+        for event in result.tool_trace
+        if event.get("kind") == "tool_end"
+        for evidence_row in event.get("result", {}).get("evidence", [])
+    ]
     assert result.status == "completed"
-    assert actual_tools == case["expected_tools"]
+    assert actual_tools == case["replay_plan"]
+    assert _evaluate_tool_contract(
+        case,
+        actual_tools=actual_tools,
+        tool_arguments=tool_arguments,
+        evidence=evidence,
+    )["passed"] is True
     assert all(
         event["result"]["status"] in {"ok", "not_found", "no_evidence"}
         for event in result.tool_trace
@@ -1209,6 +1668,12 @@ async def test_live_sol_eval_reports_grounding_and_usage(
             if event.get("kind") == "tool_end"
             for evidence_row in event.get("result", {}).get("evidence", [])
         ]
+        tool_contract = _evaluate_tool_contract(
+            case,
+            actual_tools=actual_tools,
+            tool_arguments=tool_arguments,
+            evidence=evidence,
+        )
         post_validation_errors = validate_grounded_reply(context, result.reply)
         guardrail_errors = [
             error
@@ -1229,9 +1694,10 @@ async def test_live_sol_eval_reports_grounding_and_usage(
                 "turn_mode": case["turn_mode"],
                 "declared_history_count": len(case.get("history", [])),
                 "session_id": ConversationMessageSession(context).session_id,
-                "expected_tools": case["expected_tools"],
+                "tool_contract": case["tool_contract"],
                 "actual_tools": actual_tools,
-                "tool_match": actual_tools == case["expected_tools"],
+                "tool_behavior": tool_contract,
+                "outcome_correct": _outcome_is_correct(case, result),
                 "tool_arguments": tool_arguments,
                 "evidence": evidence,
                 "final_reply": result.reply.model_dump(mode="json"),
@@ -1258,7 +1724,8 @@ async def test_live_sol_eval_reports_grounding_and_usage(
         "reasoning_effort": "high",
         "case_count": len(results),
         "completed": sum(row["status"] == "completed" for row in results),
-        "exact_tool_matches": sum(row["tool_match"] for row in results),
+        "tool_behavior_matches": sum(row["tool_behavior"]["passed"] for row in results),
+        "outcome_correct": sum(row["outcome_correct"] for row in results),
         "unsupported_claim_count": sum(len(row["unsupported_claims"]) for row in results),
         "failure_count": sum(row["status"] != "completed" for row in results),
         "total_latency_ms": sum(row["latency_ms"] for row in results),
@@ -1272,7 +1739,8 @@ async def test_live_sol_eval_reports_grounding_and_usage(
     }
     summary["quality_gate_passed"] = bool(
         summary["completed"] == len(results)
-        and summary["exact_tool_matches"] == len(results)
+        and summary["tool_behavior_matches"] == len(results)
+        and summary["outcome_correct"] == len(results)
         and summary["unsupported_claim_count"] == 0
         and all(not contains_legacy_marker(row["final_reply"]["text"]) for row in results)
     )

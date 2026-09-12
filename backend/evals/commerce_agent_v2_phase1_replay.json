@@ -4,7 +4,14 @@
     "message": "وش منتجاتكم؟",
     "turn_mode": "single",
     "pattern": "catalog_browse",
-    "expected_tools": ["search_products"],
+    "replay_plan": ["search_products"],
+    "tool_contract": {
+      "required_tools": ["search_products"],
+      "acceptable_plans": [["search_products"]],
+      "forbidden_tools": ["get_product_details", "search_merchant_knowledge", "search_product_knowledge"],
+      "required_evidence_sources": ["catalog_product"],
+      "expected_outcome": "grounded_reply"
+    },
     "expected_behavior": "Return only catalog-backed products."
   },
   {
@@ -12,7 +19,14 @@
     "message": "عندكم عسل طلح؟",
     "turn_mode": "single",
     "pattern": "catalog_search",
-    "expected_tools": ["search_products"],
+    "replay_plan": ["search_products"],
+    "tool_contract": {
+      "required_tools": ["search_products"],
+      "acceptable_plans": [["search_products"]],
+      "forbidden_tools": ["get_product_details", "search_merchant_knowledge", "search_product_knowledge"],
+      "required_evidence_sources": ["catalog_product"],
+      "expected_outcome": "grounded_reply"
+    },
     "expected_behavior": "Search the tenant catalog and do not infer availability."
   },
   {
@@ -20,7 +34,14 @@
     "message": "كم سعره؟",
     "turn_mode": "multi",
     "pattern": "grounded_price_followup",
-    "expected_tools": ["search_products", "get_product_details"],
+    "replay_plan": ["search_products"],
+    "tool_contract": {
+      "required_tools": ["search_products"],
+      "acceptable_plans": [["search_products"], ["search_products", "get_product_details"]],
+      "forbidden_tools": ["search_merchant_knowledge", "search_product_knowledge"],
+      "required_evidence_sources": ["catalog_product"],
+      "expected_outcome": "grounded_reply"
+    },
     "history": [
       {"direction": "inbound", "body": "عندكم عسل طلح؟"},
       {"direction": "outbound", "body": "نعم، يوجد عسل طلح بلدي ضمن الكتالوج."}
@@ -32,7 +53,14 @@
     "message": "هل هذا العسل من نحل بلدي؟",
     "turn_mode": "multi",
     "pattern": "product_linked_kb",
-    "expected_tools": ["search_products", "search_product_knowledge"],
+    "replay_plan": ["search_products", "search_product_knowledge"],
+    "tool_contract": {
+      "required_tools": ["search_products", "search_product_knowledge"],
+      "acceptable_plans": [["search_products", "search_product_knowledge"]],
+      "forbidden_tools": ["get_product_details", "search_merchant_knowledge"],
+      "required_evidence_sources": ["catalog_product", "product_knowledge"],
+      "expected_outcome": "grounded_reply"
+    },
     "history": [
       {"direction": "inbound", "body": "أرسل لي تفاصيل عسل الطلح"},
       {"direction": "outbound", "body": "هذا هو عسل الطلح البلدي."}
@@ -44,7 +72,14 @@
     "message": "أبغى عسل هدية",
     "turn_mode": "single",
     "pattern": "recommendation",
-    "expected_tools": ["search_products"],
+    "replay_plan": ["search_products"],
+    "tool_contract": {
+      "required_tools": ["search_products"],
+      "acceptable_plans": [["search_products"]],
+      "forbidden_tools": ["get_product_details", "search_merchant_knowledge", "search_product_knowledge"],
+      "required_evidence_sources": ["catalog_product"],
+      "expected_outcome": "grounded_reply"
+    },
     "expected_behavior": "Recommend only products returned by catalog evidence."
   },
   {
@@ -52,7 +87,14 @@
     "message": "أبغى شيء أقل من 200 ريال",
     "turn_mode": "single",
     "pattern": "budget_recommendation",
-    "expected_tools": ["search_products"],
+    "replay_plan": ["search_products"],
+    "tool_contract": {
+      "required_tools": ["search_products"],
+      "acceptable_plans": [["search_products"]],
+      "forbidden_tools": ["get_product_details", "search_merchant_knowledge", "search_product_knowledge"],
+      "required_evidence_sources": ["catalog_product"],
+      "expected_outcome": "grounded_reply"
+    },
     "expected_behavior": "Compare the requested budget against catalog prices without inventing products."
   },
   {
@@ -60,7 +102,14 @@
     "message": "هل عندكم تغليف هدايا؟",
     "turn_mode": "single",
     "pattern": "global_merchant_kb",
-    "expected_tools": ["search_merchant_knowledge"],
+    "replay_plan": ["search_merchant_knowledge"],
+    "tool_contract": {
+      "required_tools": ["search_merchant_knowledge"],
+      "acceptable_plans": [["search_merchant_knowledge"]],
+      "forbidden_tools": ["search_products", "get_product_details", "search_product_knowledge"],
+      "required_evidence_sources": ["merchant_knowledge"],
+      "expected_outcome": "grounded_reply"
+    },
     "expected_behavior": "Answer from a global AI-visible merchant KB section."
   },
   {
@@ -68,7 +117,14 @@
     "message": "وش مصدر عسل الطلح؟",
     "turn_mode": "single",
     "pattern": "product_linked_kb",
-    "expected_tools": ["search_products", "search_product_knowledge"],
+    "replay_plan": ["search_products", "search_product_knowledge"],
+    "tool_contract": {
+      "required_tools": ["search_products", "search_product_knowledge"],
+      "acceptable_plans": [["search_products", "search_product_knowledge"]],
+      "forbidden_tools": ["get_product_details", "search_merchant_knowledge"],
+      "required_evidence_sources": ["catalog_product", "product_knowledge"],
+      "expected_outcome": "grounded_reply"
+    },
     "expected_behavior": "Retrieve only sections linked to the selected product."
   },
   {
@@ -76,7 +132,15 @@
     "message": "عندكم عسل مانوكا نادر؟",
     "turn_mode": "single",
     "pattern": "product_not_found",
-    "expected_tools": ["search_products"],
+    "replay_plan": ["search_products"],
+    "tool_contract": {
+      "required_tools": ["search_products"],
+      "acceptable_plans": [["search_products"], ["search_products", "search_products"]],
+      "forbidden_tools": ["get_product_details", "search_merchant_knowledge", "search_product_knowledge"],
+      "forbid_identical_duplicate_calls": true,
+      "required_evidence_sources": [],
+      "expected_outcome": "safe_fallback"
+    },
     "expected_behavior": "State that no matching product was found; do not substitute one silently."
   },
   {
@@ -84,7 +148,14 @@
     "message": "وش سنة قطف هذا العسل؟",
     "turn_mode": "multi",
     "pattern": "missing_fact_no_invention",
-    "expected_tools": ["search_products", "search_product_knowledge"],
+    "replay_plan": ["search_products", "search_product_knowledge"],
+    "tool_contract": {
+      "required_tools": ["search_products", "search_product_knowledge"],
+      "acceptable_plans": [["search_products", "search_product_knowledge"]],
+      "forbidden_tools": ["get_product_details", "search_merchant_knowledge"],
+      "required_evidence_sources": ["catalog_product"],
+      "expected_outcome": "safe_fallback"
+    },
     "history": [
       {"direction": "inbound", "body": "أرسل لي عسل الطلح"},
       {"direction": "outbound", "body": "هذا هو عسل الطلح البلدي."}

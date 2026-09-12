@@ -1,7 +1,7 @@
 """Typed tool evidence and final output contracts for Commerce Agent V2."""
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -16,12 +16,48 @@ from pydantic import (
 
 ToolStatus = Literal["ok", "not_found", "no_evidence", "denied", "error"]
 EvidenceSource = Literal["catalog_product", "merchant_knowledge", "product_knowledge"]
+FactKind = Literal[
+    "product_name",
+    "description",
+    "price",
+    "currency",
+    "sale_price",
+    "regular_price",
+    "availability",
+    "stock_quantity",
+    "product_url",
+    "image_url",
+    "merchant_knowledge",
+    "product_knowledge",
+]
+CanonicalFactValue: TypeAlias = str | float | int | bool
 _HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
 
 
 def _validated_http_url(value: str) -> str:
     """Validate URLs without emitting an unsupported ``format: uri`` schema keyword."""
     return str(_HTTP_URL_ADAPTER.validate_python(value))
+
+
+class CanonicalEvidenceFact(BaseModel):
+    """One typed fact inside an evidence record.
+
+    Monetary values are JSON numbers, availability is boolean, quantity is an
+    integer, and all other values are canonical source strings.  Product-bound
+    facts carry the trusted catalog product id so a claim cannot be validated
+    against a similarly shaped fact for another product.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: FactKind
+    value: CanonicalFactValue
+    subject_product_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_kind_value(self) -> "CanonicalEvidenceFact":
+        _validate_canonical_fact_value(self.kind, self.value)
+        return self
 
 
 class EvidenceRecord(BaseModel):
@@ -32,6 +68,7 @@ class EvidenceRecord(BaseModel):
     ref: str = Field(min_length=1, max_length=160)
     source: EvidenceSource
     source_id: str = Field(min_length=1, max_length=128)
+    facts: list[CanonicalEvidenceFact] = Field(default_factory=list)
     fields: dict[str, Any] = Field(default_factory=dict)
     provenance: dict[str, str] = Field(default_factory=dict)
 
@@ -48,6 +85,7 @@ class ProductSnapshot(BaseModel):
     price: str | None = None
     sale_price: str | None = None
     regular_price: str | None = None
+    currency: str | None = None
     in_stock: bool | None = None
     stock_quantity: int | None = None
     image_url: str = ""
@@ -94,24 +132,52 @@ class KnowledgeSearchResult(BaseModel):
     failure_reason: str | None = None
 
 
+def _validate_canonical_fact_value(kind: FactKind, value: CanonicalFactValue) -> None:
+    if kind in {"price", "sale_price", "regular_price"}:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{kind} must be a JSON number")
+        return
+    if kind == "availability":
+        if not isinstance(value, bool):
+            raise ValueError("availability must be boolean")
+        return
+    if kind == "stock_quantity":
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("stock_quantity must be a non-negative integer")
+        return
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{kind} must be a non-empty string")
+
+
 class FactClaim(BaseModel):
-    """A commercial assertion in ``text`` tied to one exact tool evidence row."""
+    """A canonical commercial fact plus its natural-language span in ``text``."""
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal[
-        "product_name",
-        "description",
-        "price",
-        "sale_price",
-        "stock",
-        "product_url",
-        "image_url",
-        "merchant_knowledge",
-        "product_knowledge",
-    ]
-    value: str = Field(min_length=1, max_length=4000)
+    kind: FactKind
+    value: CanonicalFactValue = Field(
+        description=(
+            "Canonical typed value: price fields are JSON numbers, availability "
+            "is boolean, stock_quantity is an integer, and knowledge values copy "
+            "the canonical source fact exactly."
+        )
+    )
     evidence_ref: str = Field(min_length=1, max_length=160)
+    subject_product_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Trusted product_id for every product-bound fact; null only for merchant knowledge.",
+    )
+    text_span: str = Field(
+        min_length=1,
+        max_length=2000,
+        description="Exact excerpt from CommerceReply.text that expresses this fact naturally.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_kind_value(self) -> "FactClaim":
+        _validate_canonical_fact_value(self.kind, self.value)
+        return self
 
 
 class ProductReference(BaseModel):

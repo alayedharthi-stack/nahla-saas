@@ -8,6 +8,7 @@ from modules.ai.brain.commerce.product_knowledge_or_comparison import (
 )
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.output import (
+    CanonicalEvidenceFact,
     EvidenceRecord,
     KnowledgeSearchResult,
     KnowledgeSectionSnapshot,
@@ -91,6 +92,13 @@ def _build_result(
             ref=evidence_ref,
             source=source,
             source_id=str(section_id),
+            facts=[
+                CanonicalEvidenceFact(
+                    kind=source,
+                    value=body,
+                    subject_product_id=required_product_id,
+                )
+            ],
             fields={
                 "section_id": section_id,
                 "kind": str(raw.get("kind") or getattr(record, "kind", "") or ""),
