@@ -13,6 +13,7 @@ from modules.ai.commerce_agent_v2.output import (
     KnowledgeSearchResult,
     KnowledgeSectionSnapshot,
 )
+from modules.ai.commerce_agent_v2.tools.catalog import _catalog_search_enabled
 from modules.ai.security.tenant_isolation import TenantIsolationLayer
 
 
@@ -135,7 +136,7 @@ def _build_result(
     return KnowledgeSearchResult(status="ok", sections=snapshots, evidence=evidence)
 
 
-@function_tool(timeout=8.0)
+@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
 async def search_merchant_knowledge(
     run_context: RunContextWrapper[CommerceAgentContext],
     query: str,
@@ -159,7 +160,7 @@ async def search_merchant_knowledge(
     )
 
 
-@function_tool(timeout=8.0)
+@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
 async def search_product_knowledge(
     run_context: RunContextWrapper[CommerceAgentContext],
     product_id: int,

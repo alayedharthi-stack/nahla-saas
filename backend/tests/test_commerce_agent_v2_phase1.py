@@ -600,7 +600,7 @@ async def test_catalog_search_allows_one_reformulation_then_disables_after_two_m
     )
 
     def after_two_misses(call: Any) -> ModelStep:
-        assert "search_products" not in {tool.name for tool in call.tools}
+        assert {tool.name for tool in call.tools} == set()
         return ModelStep(output=[assistant_message(final.model_dump_json())])
 
     model = ScriptedModel(

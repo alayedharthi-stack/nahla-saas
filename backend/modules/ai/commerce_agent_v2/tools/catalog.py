@@ -25,7 +25,13 @@ def _catalog_search_enabled(
     run_context: RunContextWrapper[CommerceAgentContext],
     _agent: Any,
 ) -> bool:
-    """Allow one reformulation, then remove a repeatedly empty search capability."""
+    """Keep read tools available until catalog exploration is conclusively empty.
+
+    Two consecutive misses represent the initial lookup plus one useful
+    reformulation.  The predicate is shared by every Phase-1 tool so the next
+    model turn must conclude from those results instead of moving the same
+    unsuccessful lookup to an unrelated read tool.
+    """
     return (
         run_context.context.consecutive_catalog_misses
         < _MAX_CONSECUTIVE_CATALOG_MISSES
@@ -202,7 +208,7 @@ async def search_products(
     return CatalogSearchResult(status="ok", products=snapshots, evidence=evidence)
 
 
-@function_tool(timeout=8.0)
+@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
 async def get_product_details(
     run_context: RunContextWrapper[CommerceAgentContext],
     product_id: int,
