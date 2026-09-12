@@ -25,29 +25,37 @@ grounding failures. No Agent instructions, tool selection policy, tool set, or
 guardrail behavior was changed before that rerun.
 
 Phase 1.1 then replaced literal claim/evidence comparison with a typed canonical
-grounding contract. The final Sol High run completed all ten cases, produced ten
-correct outcomes, and recorded zero unsupported claims. The eval runner ended
-normally and all 26 provider-call records were present. The overall quality gate
-remains false because the missing-product case made three distinct catalog
-searches; the evaluator correctly treats that as an unnecessary search loop.
-Grounding stabilization is therefore verified, but Phase 1 as a whole is not
-declared complete.
+grounding contract. Phase 1.2 added a run-local, deterministic exploration
+budget: an initial empty catalog lookup may be followed by one reformulation;
+after two consecutive misses, all Phase-1 read tools are hidden for the next
+model turn so it must conclude from the empty results. Any successful catalog
+search resets the budget. This changes neither the Agent instructions nor the
+four tool contracts.
+
+The final Phase 1.2 Sol High run completed all ten cases, produced ten correct
+outcomes, recorded zero unsupported claims, emitted all 26 provider-call
+records, and ended normally. The targeted `missing-product-ar` case made exactly
+two catalog searches and no unrelated tool call. The aggregate quality gate was
+still false at 9/10 because `product-provenance-ar` used the expected two tools
+but its model-generated knowledge query did not retrieve the required knowledge
+section. Phase 1.2's search-loop correction is therefore verified, but Phase 1
+as a whole is not declared complete and no merge is recommended yet.
 
 ## Aggregate before/after
 
-| Metric | Contaminated | Clean-room baseline | Phase 1.1 final | Clean → final |
-|---|---:|---:|---:|---:|
-| Cases | 10 | 10 | 10 | — |
-| Completed | 3 | 3 | 10 | +7 |
-| Failed | 7 | 7 | 0 | -7 |
-| Tool behavior matches | 6 | 7 | 9 | +2 |
-| Correct outcomes | not separately scored | not separately scored | 10 | — |
-| Unsupported claims | 9 | 9 | 0 | -9 |
-| Input + output tokens | 46,814 | 41,948 | 49,668 | +7,720 |
-| Total latency | 141,981 ms | 123,628 ms | 151,767 ms | +28,139 ms |
-| Estimated cost | $0.024615750 | $0.021360000 | $0.026470125 | +$0.005110125 |
-| Provider-call records | 0 | 26 | 26 | unchanged |
-| Eval end marker | Missing | Present | Present (`status=0`) | unchanged |
+| Metric | Contaminated | Clean-room baseline | Phase 1.1 final | Phase 1.2 final | 1.1 → 1.2 |
+|---|---:|---:|---:|---:|---:|
+| Cases | 10 | 10 | 10 | 10 | — |
+| Completed | 3 | 3 | 10 | 10 | unchanged |
+| Failed | 7 | 7 | 0 | 0 | unchanged |
+| Tool behavior matches | 6 | 7 | 9 | 9 | unchanged in aggregate |
+| Correct outcomes | not separately scored | not separately scored | 10 | 10 | unchanged |
+| Unsupported claims | 9 | 9 | 0 | 0 | unchanged |
+| Input + output tokens | 46,814 | 41,948 | 49,668 | 47,226 | -2,442 |
+| Total latency | 141,981 ms | 123,628 ms | 151,767 ms | 121,424 ms | -30,343 ms |
+| Estimated cost | $0.024615750 | $0.021360000 | $0.026470125 | $0.024039000 | -$0.002431125 |
+| Provider-call records | 0 | 26 | 26 | 26 | unchanged |
+| Eval end marker | Missing | Present | Present (`status=0`) | Present (`status=0`) | unchanged |
 
 Contaminated deployment:
 `7d8774e8-85b4-4948-8b3a-12cd52bbe09f`
@@ -64,11 +72,18 @@ Phase 1.1 final deployment:
 Phase 1.1 final GitHub commit:
 `22efa4e1ade0d692846d5476089269c0362e3372`
 
+Phase 1.2 final deployment:
+`eb4eab4e-53b3-465d-850c-2fd3dc9876a6`
+
+Phase 1.2 final GitHub commit:
+`43e6ade7f6260343b9791436e8dad209c7c1529b`
+
 The clean-room baseline and Phase 1.1 final runs both reported
 `provider_observability_passed=true`. The final run reported
-`quality_gate_passed=false` only because tool behavior was 9/10. All 26 final
-model responses had a provider response ID, request ID, per-call latency, and
-non-cumulative token usage.
+`quality_gate_passed=false` in both final runs because tool behavior was 9/10,
+although the failing case changed after the targeted search loop was fixed. All
+26 Phase 1.2 final model responses had a provider response ID, request ID,
+per-call latency, and non-cumulative token usage.
 
 ## Case-by-case comparison
 
@@ -88,6 +103,30 @@ non-cumulative token usage.
 The aggregate `3/10 completed` hides a material composition change. The
 contaminated run completed provenance, linked knowledge, and missing fact. The
 clean run completed merchant policy, missing product, and missing fact.
+
+## Phase 1.2 case comparison
+
+| Case | Phase 1.1 final | Phase 1.2 final | Finding |
+|---|---|---|---|
+| `catalog-browse-ar` | One catalog search; pass | One catalog search; pass | No regression. |
+| `catalog-specific-ar` | One catalog search; pass | One catalog search; pass | No regression. |
+| `price-followup-ar` | One catalog search; pass | One catalog search; pass | No regression. |
+| `product-provenance-ar` | Catalog + product knowledge; pass | Same tools; safe answer, but required product-knowledge evidence was not retrieved | Model-generated retrieval query varied; unrelated to catalog-miss budget. |
+| `gift-recommendation-ar` | Two catalog searches; pass | Two catalog searches; pass | Successful second search resets the miss budget. |
+| `budget-recommendation-ar` | One catalog browse; pass | One reformulation then catalog browse; pass | Successful browse resets the miss budget. |
+| `global-kb-ar` | Merchant knowledge only; pass | Merchant knowledge only; pass | Direct policy lookup remains available before any catalog exhaustion. |
+| `linked-kb-ar` | Catalog + product knowledge; pass | Same tools; pass | No regression. |
+| `missing-product-ar` | Three catalog searches; fail | Two catalog searches; pass | Third low-value search and cross-tool continuation are blocked generically. |
+| `missing-fact-ar` | Catalog + product knowledge; pass | Same tools; pass | No regression in the final run. |
+
+Two intermediate Phase 1.2 runs were retained rather than cherry-picked away.
+The first limited catalog search itself and fixed the third catalog call, but
+one run continued through merchant knowledge after the search tool disappeared.
+The strengthened version ends all Phase-1 tool exploration after the second
+consecutive catalog miss. The final run verifies that behavior. Independent
+Sol variability was also observed in `missing-fact-ar`, budget claim rendering,
+and product-knowledge retrieval; no evaluator or Phase 1.1 guardrail semantics
+were changed to conceal those observations.
 
 ## Isolation contract
 
@@ -179,9 +218,31 @@ The missing-product case permits one evidence-seeking reformulation, rejects an
 identical duplicate, and does not accept three searches merely to improve a
 score.
 
-## Local verification after Phase 1.1
+## Phase 1.2 tool-efficiency stabilization
 
-- Phase 1 suite: `54 passed, 1 skipped` (the skip is the opt-in live eval).
+The Phase 1.1 trace showed these catalog query hashes for
+`missing-product-ar`: the original `عسل مانوكا نادر`, a useful `مانوكا`
+reformulation, then the overly broad `عسل` query. The first two returned no
+products; the third discarded the distinguishing term and returned an unrelated
+generic product. No run-local state told the SDK that sufficient negative
+evidence had already been collected.
+
+Phase 1.2 records consecutive empty catalog searches only inside the trusted
+run context. The tool-availability predicate allows the initial lookup and one
+reformulation. After the second miss it hides the four existing read tools for
+the next model turn, preventing both a third broad catalog query and migration
+of the same failed lookup to merchant knowledge. A successful search clears the
+counter immediately, so valid multi-step discovery is not capped globally.
+Nothing is persisted to Conversation or Session state.
+
+The implementation is platform-general: it contains no merchant, product,
+language, or `مانوكا` special case. It adds no Agent, classifier, tool, customer
+text template, or instruction. The canonical evidence and guardrail contracts
+are unchanged.
+
+## Local verification after Phase 1.2
+
+- Phase 1 suite: `56 passed, 1 skipped` (the skip is the opt-in live eval).
 - Offline replay: `10/10` canonical scripted plans, each satisfying its tool/evidence contract.
 - V1 provider-boundary replay: `2 passed`.
 - Intelligence non-interference checks: `52 passed`.
@@ -189,9 +250,14 @@ score.
 - `pip check`: no broken requirements.
 - `git diff --check`: clean.
 
+The separately known V1 test
+`test_layer2_webhook_three_turn_replay_reaches_provider_boundary` still fails on
+the pre-existing phone/SQLite fixture collision; the failure signature is
+unchanged and the test does not exercise the V2 tool-budget path.
+
 ## Final live verification and disposition
 
-The final live run used `gpt-5.6-sol` with reasoning effort `high`, a fresh
+The final Phase 1.2 live run used `gpt-5.6-sol` with reasoning effort `high`, a fresh
 Conversation for every case, and only explicitly declared history for the three
 multi-turn cases. It emitted all summary, case, and provider-call records and
 ended with `COMMERCE_V2_EVAL_END status=0`.
@@ -203,8 +269,16 @@ availability, quantity, or knowledge paraphrases. Negative tests still reject
 changed facts, false bounds, wrong evidence refs, cross-product subjects, and
 unclaimed commercial values.
 
-The overall Phase 1 quality gate remains false at 9/10 tool behavior because of
-the three-search missing-product loop. That residual requires a separately
-reviewed Agent/tool-routing stabilization decision; it was not hidden by
-weakening the evaluator and no persona or base-instruction change was made in
-Phase 1.1.
+The Phase 1.2 target passed: the missing-product search plan is now two bounded
+catalog calls, a correct safe fallback, and no unnecessary continuation. The
+overall Phase 1 quality gate nevertheless remains false at 9/10 tool behavior
+because the final run did not retrieve product-knowledge evidence for
+`product-provenance-ar`. The response remained safe and all ten outcomes were
+correct, but the declared evidence contract was not met.
+
+Accordingly, Phase 1 is **not** marked final under the requested Definition of
+Done. No evaluator expectation was weakened, no Agent instruction or persona
+was changed, and no merge or production deployment was performed. The next
+review decision is whether retrieval-query variability is an accepted eval
+variance or a separately scoped deterministic retrieval concern; it should not
+be folded into the completed missing-product loop fix without review.
