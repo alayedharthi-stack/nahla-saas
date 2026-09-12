@@ -58,7 +58,7 @@ request ID, per-call latency, and non-cumulative token usage.
 |---|---|---|---|
 | `catalog-browse-ar` | `search_products`; failed on `stock` | Same tools and same failure | Grounding failure is real, not caused by shared history. |
 | `catalog-specific-ar` | `search_products`; failed on `stock` | Same tools and same failure | Grounding failure is real. |
-| `price-followup-ar` | Searched using leaked price wording; omitted details; failed on `stock` | Used declared `عسل طلح` history; searched `عسل طلح`; still omitted details and failed on `stock` | Isolation fixed product-query focus, but the missing `get_product_details` and grounding failure remain real. |
+| `price-followup-ar` | Searched using leaked price wording; omitted details; failed on `stock` | Used declared `عسل طلح` history; searched `عسل طلح`; still omitted details and failed on `stock` | Isolation fixed product-query focus. Because `search_products` returned the exact price evidence, omitting `get_product_details` is an acceptable plan; the grounding failure is real. |
 | `product-provenance-ar` | Expected tools; completed | Expected tools; failed on `product_knowledge` claim mapping | Tool routing is sound; claim/evidence validation remains unstable and needs contract-level investigation. |
 | `gift-recommendation-ar` | Three catalog searches; failed on `stock` | Two catalog searches plus details; failed on `stock` | The stale first search disappeared, but unnecessary repeated search remains real. |
 | `budget-recommendation-ar` | Leaked product query returned one candidate; failed on price/stock | Empty browse query returned both candidates; still failed on price/stock | Isolation fixed candidate coverage; catalog claim mapping remains broken. |
@@ -117,23 +117,54 @@ The reset creates a new latest Conversation for the same tenant/customer with:
 It preserves the customer, old conversations and messages for audit, catalog,
 merchant/product knowledge, orders, payments, and other business records.
 
-## Local verification
+## Phase 1.1 grounding-contract stabilization
 
-- Phase 1 suite: `42 passed, 1 skipped` (the skip is the opt-in live eval).
-- Offline replay: `10/10` exact scripted tool plans.
-- Related V1/governance selection: `66 passed`.
+The stabilization replaces flattened string comparison with a typed canonical
+fact contract while preserving the single Agent, four read-only tools, trusted
+tenant context, and Conversation-backed Session architecture. Agent persona and
+base instructions are unchanged.
+
+Catalog evidence now publishes product-bound canonical facts for product name,
+description, numeric price/sale/regular price, currency when the synchronized
+catalog supplies it, boolean availability, integer stock quantity, product URL,
+and image URL. Knowledge evidence publishes one source-bound canonical body fact
+and the linked product id where applicable.
+
+Each `FactClaim` carries the canonical typed value, the exact evidence ref, the
+trusted product subject when product-bound, and the exact natural-language span
+inside `CommerceReply.text`. The guardrail independently verifies:
+
+- kind, source, evidence reference, and product subject;
+- numeric price equivalence independent of display formatting;
+- boolean availability and integer quantity semantics;
+- currency and URL canonical equality;
+- deterministic knowledge paraphrase support using normalized content overlap,
+  polarity, numbers, and scope qualifiers;
+- coverage of price, quantity, availability, and URLs appearing in final text by
+  a successfully verified claim.
+
+The guardrail remains fail-closed. A correct paraphrase may pass, but an altered
+fact, invalid evidence ref, cross-product claim, missing typed evidence, or
+sensitive final-text value without a verified claim is rejected.
+
+Tool evaluation is now contract-based rather than requiring one arbitrary exact
+sequence. Every case declares required tools, acceptable efficient plans,
+forbidden unnecessary tools, required evidence sources, and expected outcome.
+The price follow-up accepts either catalog search alone or search plus details,
+because the search result already contains the exact price. The missing-product
+case permits one evidence-seeking reformulation but rejects an identical
+duplicate call.
+
+## Local verification after Phase 1.1
+
+- Phase 1 suite: `50 passed, 1 skipped` (the skip is the opt-in live eval).
+- Offline replay: `10/10` canonical scripted plans, each satisfying its tool/evidence contract.
+- V1 provider-boundary replay: `2 passed`.
+- Intelligence non-interference checks: `52 passed`.
+- Constitution compliance: `57 passed`.
 - `pip check`: no broken requirements.
 - `git diff --check`: clean.
 
-## Evidence-based next work
-
-Do not treat Phase 1 as passing. Clean-room evidence supports investigating:
-
-1. catalog and product-knowledge claim/evidence canonicalization in the output
-   guardrail contract;
-2. the missing details call in the explicit price follow-up;
-3. repeated catalog searches in gift and missing-product cases.
-
-The direct merchant-policy route is already correct in clean-room conditions,
-so no Agent routing change should be made for that case based on the
-contaminated run.
+The clean-room Sol High rerun is pending. Phase 1.1 must not be considered
+successful until that run emits its normal end marker and the ten cases are
+compared against the clean-room baseline above.
