@@ -136,7 +136,12 @@ Validation: 185 tests passed across guard/semantic contracts, metadata, final
 boundary and Constitution; both existing production-orchestration replays passed.
 The merchant-turn suite has 20 passes and the previously reproduced baseline
 handoff-persistence failure (`active` versus `human`). No-silent-except and
-`git diff --check` pass. Live-model evaluation remains unrun: local provider
+`git diff --check` pass. Default test discovery now includes a root regression
+test that runs all 130 guard/metadata/wire/replay cases in a separate process
+(the backend fixtures use their own `tests` namespace). It uses the same Python
+interpreter and fails on any child test failure; no CI workflow or protection
+change is bundled with runtime. The exact child command passed locally.
+Live-model evaluation remains unrun: local provider
 credentials are unavailable. False claim extraction, latency, cost and a
 customer-visible hold during verifier failure remain release-review concerns.
 
