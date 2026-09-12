@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1380,7 +1381,7 @@ def _outcome_is_correct(case: dict[str, Any], result: Any) -> bool:
         return bool(
             result.status == "completed"
             and result.reply.evidence_refs
-            and not result.reply.safe_fallback_reason
+            and result.reply.fact_claims
         )
     if expected == "safe_fallback":
         return bool(result.status == "completed" and result.reply.safe_fallback_reason)
@@ -1447,6 +1448,28 @@ def test_tool_eval_accepts_evidence_equivalent_price_plans_and_rejects_forbidden
     )
     assert rejected["passed"] is False
     assert rejected["forbidden_tools_absent"] is False
+
+
+def test_outcome_eval_accepts_grounded_partial_answer_with_scoped_fallback() -> None:
+    case = {"tool_contract": {"expected_outcome": "grounded_reply"}}
+    result = SimpleNamespace(
+        status="completed",
+        reply=CommerceReply(
+            text="السعر 150 ريال، لكن منطقة المصدر غير مذكورة.",
+            evidence_refs=["catalog:product:1"],
+            fact_claims=[
+                FactClaim(
+                    kind="price",
+                    value=150,
+                    evidence_ref="catalog:product:1",
+                    subject_product_id=1,
+                    text_span="150 ريال",
+                )
+            ],
+            safe_fallback_reason="منطقة المصدر غير متوفرة في الدليل.",
+        ),
+    )
+    assert _outcome_is_correct(case, result) is True
 
 
 @pytest.mark.asyncio
