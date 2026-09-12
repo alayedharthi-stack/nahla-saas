@@ -1112,7 +1112,21 @@ async def test_live_sol_eval_reports_grounding_and_usage(
         "provider_calls": provider_calls,
         "cases": results,
     }
-    print("COMMERCE_V2_LIVE_EVAL=" + json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    summary_line = {key: value for key, value in summary.items() if key not in {"cases", "provider_calls"}}
+    print(
+        "COMMERCE_V2_LIVE_EVAL_SUMMARY="
+        + json.dumps(summary_line, ensure_ascii=False, sort_keys=True)
+    )
+    for case_result in results:
+        print(
+            "COMMERCE_V2_LIVE_EVAL_CASE="
+            + json.dumps(case_result, ensure_ascii=False, sort_keys=True)
+        )
+    for provider_call in provider_calls:
+        print(
+            "COMMERCE_V2_LIVE_EVAL_PROVIDER_CALL="
+            + json.dumps(provider_call, ensure_ascii=False, sort_keys=True)
+        )
 
     assert len(provider_calls) >= len(cases)
     assert all(call["requested_model"] == model for call in provider_calls)
