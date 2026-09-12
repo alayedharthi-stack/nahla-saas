@@ -55,6 +55,7 @@ class CommerceAgentContext(BaseModel):
     _tenant_context: TenantContext = PrivateAttr()
     _allowed_product_ids: set[int] = PrivateAttr(default_factory=set)
     _evidence: dict[str, EvidenceRecord] = PrivateAttr(default_factory=dict)
+    _consecutive_catalog_misses: int = PrivateAttr(default=0)
 
     @classmethod
     def from_trusted_scope(
@@ -188,6 +189,18 @@ class CommerceAgentContext(BaseModel):
     @property
     def evidence(self) -> dict[str, EvidenceRecord]:
         return dict(self._evidence)
+
+    @property
+    def consecutive_catalog_misses(self) -> int:
+        """Run-local catalog miss count; never persisted into the Session."""
+        return self._consecutive_catalog_misses
+
+    def record_catalog_search_outcome(self, *, found: bool) -> int:
+        """Track consecutive empty searches while allowing successful exploration."""
+        self._consecutive_catalog_misses = (
+            0 if found else self._consecutive_catalog_misses + 1
+        )
+        return self._consecutive_catalog_misses
 
     def assert_scope(self) -> None:
         """Re-check trusted identities at every tool boundary."""

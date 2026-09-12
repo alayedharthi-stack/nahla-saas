@@ -59,6 +59,7 @@ from modules.ai.commerce_agent_v2.shadow import schedule_commerce_agent_v2_shado
 from modules.ai.commerce_agent_v2.shadow import _persist_shadow_result
 from modules.ai.commerce_agent_v2.tools import PHASE1_TOOLS
 from modules.ai.commerce_agent_v2.tools.catalog import get_product_details, search_products
+from modules.ai.commerce_agent_v2.tools.catalog import _catalog_search_enabled
 from modules.ai.commerce_agent_v2.tools.knowledge import (
     search_merchant_knowledge,
     search_product_knowledge,
@@ -586,6 +587,77 @@ async def test_not_found_product_and_knowledge_fail_clearly(seeded: Seed) -> Non
         "no_evidence",
         "no_matching_knowledge",
     )
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_allows_one_reformulation_then_disables_after_two_misses(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded, trace_id="bounded-catalog-misses")
+    final = CommerceReply(
+        text="لم أجد منتجًا مطابقًا ضمن نتائج الكتالوج.",
+        safe_fallback_reason="no_catalog_product_matched_after_reformulation",
+    )
+
+    def after_two_misses(call: Any) -> ModelStep:
+        assert "search_products" not in {tool.name for tool in call.tools}
+        return ModelStep(output=[assistant_message(final.model_dump_json())])
+
+    model = ScriptedModel(
+        [
+            ModelStep(
+                output=[
+                    function_call(
+                        "search_products",
+                        {"query": "عطر بإصدار محدود", "limit": 5},
+                        call_id="catalog-miss-1",
+                    )
+                ]
+            ),
+            ModelStep(
+                output=[
+                    function_call(
+                        "search_products",
+                        {"query": "إصدار محدود", "limit": 5},
+                        call_id="catalog-miss-2",
+                    )
+                ]
+            ),
+            ModelStep.respond(after_two_misses),
+        ]
+    )
+    result = await run_commerce_agent(
+        context=context,
+        user_input="هل لديكم عطر بإصدار محدود؟",
+        model=model,
+        model_name="bounded-search-eval",
+    )
+
+    assert result.status == "completed"
+    assert result.reply.safe_fallback_reason
+    assert [
+        event["tool"]
+        for event in result.tool_trace
+        if event.get("kind") == "tool_end"
+    ] == ["search_products", "search_products"]
+    assert context.consecutive_catalog_misses == 2
+    model.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_successful_catalog_search_resets_consecutive_miss_budget(seeded: Seed) -> None:
+    context = _context(seeded, trace_id="catalog-miss-reset")
+    wrapper = SimpleNamespace(context=context)
+    await _invoke(search_products, context, {"query": "منتج مفقود", "limit": 5})
+    assert context.consecutive_catalog_misses == 1
+    assert _catalog_search_enabled(wrapper, None) is True
+
+    found = CatalogSearchResult.model_validate(
+        await _invoke(search_products, context, {"query": "عسل طلح", "limit": 5})
+    )
+    assert found.status == "ok"
+    assert context.consecutive_catalog_misses == 0
+    assert _catalog_search_enabled(wrapper, None) is True
 
 
 @pytest.mark.asyncio

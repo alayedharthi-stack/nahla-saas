@@ -18,6 +18,20 @@ from modules.ai.commerce_agent_v2.output import (
 from modules.ai.security.tenant_isolation import TenantIsolationLayer
 
 
+_MAX_CONSECUTIVE_CATALOG_MISSES = 2
+
+
+def _catalog_search_enabled(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    _agent: Any,
+) -> bool:
+    """Allow one reformulation, then remove a repeatedly empty search capability."""
+    return (
+        run_context.context.consecutive_catalog_misses
+        < _MAX_CONSECUTIVE_CATALOG_MISSES
+    )
+
+
 def _canonical_money(value: Any) -> int | float | None:
     if value in (None, ""):
         return None
@@ -137,7 +151,7 @@ def _assert_catalog_rows_belong_to_tenant(
         TenantIsolationLayer.assert_belongs(row, context.tenant_context)
 
 
-@function_tool(timeout=8.0)
+@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
 async def search_products(
     run_context: RunContextWrapper[CommerceAgentContext],
     query: str,
@@ -175,10 +189,16 @@ async def search_products(
     context.authorize_products([item.product_id for item in snapshots])
     context.register_evidence(evidence)
     if not snapshots:
+        misses = context.record_catalog_search_outcome(found=False)
         return CatalogSearchResult(
             status="not_found",
-            failure_reason="no_catalog_product_matched",
+            failure_reason=(
+                "no_catalog_product_matched_after_reformulation"
+                if misses >= _MAX_CONSECUTIVE_CATALOG_MISSES
+                else "no_catalog_product_matched"
+            ),
         )
+    context.record_catalog_search_outcome(found=True)
     return CatalogSearchResult(status="ok", products=snapshots, evidence=evidence)
 
 
