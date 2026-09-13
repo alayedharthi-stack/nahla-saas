@@ -956,7 +956,10 @@ def _normalise_order(raw: Any) -> Dict:
         "external_order_number": external_order_number,
         "status":                _extract_status_string(raw.get("status"), fallback="unknown"),
         "total":                 _extract_amount_string(raw_total),
-        "currency":              _extract_cart_currency(raw_total),
+        "currency":              (
+            _extract_cart_currency(raw_total)
+            or str(raw.get("currency") or "").strip().upper()
+        ),
         "customer_name":         customer_name,
         "customer_info":         customer_info,
         "line_items":            raw.get("items", raw.get("line_items", [])),
@@ -1155,6 +1158,9 @@ def _merge_order_extra_metadata(
 ) -> Dict[str, Any]:
     """Merge Salla fidelity metadata without clobbering merchant-only fields."""
     merged = dict(existing or {})
+    currency = str(normalised.get("currency") or "").strip().upper()
+    if currency:
+        merged["currency"] = currency
     for key in ("created_at", "payment_method", "payment_status", "is_cod"):
         val = normalised.get(key)
         if val:

@@ -307,3 +307,37 @@ def test_explicit_order_number_match(db, tenant_ctx) -> None:
     assert ctx.selected_order is not None
     assert ctx.selected_reason == "explicit_order_number"
     assert ctx.selected_order.external_order_number == "SAL-A"
+
+
+def test_explicit_order_lookup_is_not_limited_to_recent_fifty(db, tenant_ctx) -> None:
+    seed_order(
+        db,
+        tenant_ctx.tenant_id,
+        source="manual",
+        external_id="manual-old-explicit",
+        external_order_number="MAN-OLD-EXPLICIT",
+        status="delivered",
+        customer_info={"phone": tenant_ctx.phone},
+    )
+    for index in range(55):
+        seed_order(
+            db,
+            tenant_ctx.tenant_id,
+            source="manual",
+            external_id=f"manual-newer-{index}",
+            external_order_number=f"MAN-NEWER-{index}",
+            status="completed",
+            customer_info={"phone": tenant_ctx.phone},
+        )
+
+    ctx = resolve_customer_order_context(
+        db,
+        tenant_id=tenant_ctx.tenant_id,
+        customer_id=tenant_ctx.customer_id,
+        phone=tenant_ctx.phone,
+        intent="track_order",
+        order_number="MAN-OLD-EXPLICIT",
+    )
+    assert ctx.selected_order is not None
+    assert ctx.selected_reason == "explicit_order_number"
+    assert ctx.selected_order.external_order_number == "MAN-OLD-EXPLICIT"

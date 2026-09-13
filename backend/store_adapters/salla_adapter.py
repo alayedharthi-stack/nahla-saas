@@ -3771,7 +3771,7 @@ class SallaAdapter(BaseStoreAdapter):
         # through to every plausible shape so we never silently store 0.0 for a
         # real order.
         total = 0.0
-        currency = "SAR"
+        currency = str(raw.get("currency") or "").strip().upper()
         for candidate in (
             amounts.get("total"),
             amounts.get("sub_total"),
@@ -3791,7 +3791,7 @@ class SallaAdapter(BaseStoreAdapter):
                 if parsed > 0:
                     total = parsed
                     if cur:
-                        currency = str(cur)
+                        currency = str(cur).strip().upper()
                     break
             else:
                 try:

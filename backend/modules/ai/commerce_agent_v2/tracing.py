@@ -30,6 +30,12 @@ def _safe_arguments(raw: Any) -> dict[str, Any]:
             safe["query_length"] = len(text)
         elif key in {"product_id", "limit"}:
             safe[key] = value
+        elif key in {"order_id", "order_number"}:
+            text = str(value or "")
+            safe[f"{key}_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            safe[f"{key}_length"] = len(text)
+        elif key == "purpose":
+            safe[key] = str(value or "")
         else:
             safe[key] = "[redacted]"
     return safe
@@ -46,6 +52,28 @@ def _safe_tool_result(result: Any) -> dict[str, Any]:
             data = {}
     else:
         data = {}
+
+    def safe_evidence(item: dict[str, Any]) -> dict[str, Any]:
+        source = str(item.get("source") or "")
+        if source.startswith("order_"):
+            source_id = str(item.get("source_id") or "")
+            return {
+                "ref_sha256": hashlib.sha256(
+                    str(item.get("ref") or "").encode("utf-8")
+                ).hexdigest(),
+                "source": source,
+                "source_id_sha256": hashlib.sha256(source_id.encode("utf-8")).hexdigest(),
+                "provenance": item.get("provenance", {}),
+            }
+        return {
+            "ref": item.get("ref"),
+            "source": source,
+            "source_id": item.get("source_id"),
+            "provenance": item.get("provenance", {}),
+        }
+
+    order = data.get("order") if isinstance(data.get("order"), dict) else None
+    shipment = data.get("shipment") if isinstance(data.get("shipment"), dict) else None
     return {
         "status": data.get("status", "unknown"),
         "failure_reason": data.get("failure_reason"),
@@ -55,17 +83,14 @@ def _safe_tool_result(result: Any) -> dict[str, Any]:
             if isinstance(item, dict) and item.get("product_id")
         ]
         + ([data["product"]["product_id"]] if isinstance(data.get("product"), dict) else []),
+        "authorized_order_present": bool(order or shipment),
         "evidence": [
-            {
-                "ref": item.get("ref"),
-                "source": item.get("source"),
-                "source_id": item.get("source_id"),
-                "provenance": item.get("provenance", {}),
-            }
+            safe_evidence(item)
             for item in data.get("evidence", [])
             if isinstance(item, dict)
         ],
-        "result_count": len(data.get("products", []) or data.get("sections", []) or []),
+        "result_count": len(data.get("products", []) or data.get("sections", []) or [])
+        or int(bool(order or shipment)),
     }
 
 

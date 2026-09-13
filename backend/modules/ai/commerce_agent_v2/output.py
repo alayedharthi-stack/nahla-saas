@@ -15,7 +15,14 @@ from pydantic import (
 
 
 ToolStatus = Literal["ok", "not_found", "no_evidence", "denied", "error"]
-EvidenceSource = Literal["catalog_product", "merchant_knowledge", "product_knowledge"]
+EvidenceSource = Literal[
+    "catalog_product",
+    "merchant_knowledge",
+    "product_knowledge",
+    "order_summary",
+    "order_details",
+    "order_shipment",
+]
 FactKind = Literal[
     "product_name",
     "description",
@@ -29,6 +36,18 @@ FactKind = Literal[
     "image_url",
     "merchant_knowledge",
     "product_knowledge",
+    "order_reference",
+    "order_status",
+    "order_status_label",
+    "order_total",
+    "order_currency",
+    "order_item_name",
+    "order_item_quantity",
+    "shipment_status",
+    "shipment_status_label",
+    "carrier",
+    "tracking_number",
+    "tracking_url",
 ]
 CanonicalFactValue: TypeAlias = str | float | int | bool
 _HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
@@ -53,6 +72,7 @@ class CanonicalEvidenceFact(BaseModel):
     kind: FactKind
     value: CanonicalFactValue
     subject_product_id: int | None = Field(default=None, gt=0)
+    subject_order_id: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _validate_kind_value(self) -> "CanonicalEvidenceFact":
@@ -132,8 +152,84 @@ class KnowledgeSearchResult(BaseModel):
     failure_reason: str | None = None
 
 
+class OrderSummarySnapshot(BaseModel):
+    """Customer-safe projection of one authorized local order."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: int = Field(gt=0)
+    order_reference: str | None = None
+    status: str
+    status_label: str
+    evidence_ref: str
+
+
+class OrderResolveResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ToolStatus
+    order: OrderSummarySnapshot | None = None
+    selection_reason: str | None = None
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    failure_reason: str | None = None
+
+
+class OrderLineItemSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    quantity: int | None = Field(default=None, ge=0)
+
+
+class OrderDetailsSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: int = Field(gt=0)
+    order_reference: str | None = None
+    total: int | float | None = None
+    currency: str | None = None
+    line_items: list[OrderLineItemSnapshot] = Field(default_factory=list)
+    evidence_ref: str
+
+
+class OrderDetailsResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ToolStatus
+    order: OrderDetailsSnapshot | None = None
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    failure_reason: str | None = None
+
+
+class OrderShipmentSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: int = Field(gt=0)
+    order_reference: str | None = None
+    shipment_status: str | None = None
+    shipment_status_label: str | None = None
+    carrier: str | None = None
+    tracking_number: str | None = None
+    tracking_url: str | None = None
+    evidence_ref: str
+
+    @field_validator("tracking_url")
+    @classmethod
+    def _validate_optional_tracking_url(cls, value: str | None) -> str | None:
+        return _validated_http_url(value) if value is not None else None
+
+
+class OrderShipmentResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ToolStatus
+    shipment: OrderShipmentSnapshot | None = None
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    failure_reason: str | None = None
+
+
 def _validate_canonical_fact_value(kind: FactKind, value: CanonicalFactValue) -> None:
-    if kind in {"price", "sale_price", "regular_price"}:
+    if kind in {"price", "sale_price", "regular_price", "order_total"}:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{kind} must be a JSON number")
         return
@@ -141,9 +237,9 @@ def _validate_canonical_fact_value(kind: FactKind, value: CanonicalFactValue) ->
         if not isinstance(value, bool):
             raise ValueError("availability must be boolean")
         return
-    if kind == "stock_quantity":
+    if kind in {"stock_quantity", "order_item_quantity"}:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError("stock_quantity must be a non-negative integer")
+            raise ValueError(f"{kind} must be a non-negative integer")
         return
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{kind} must be a non-empty string")
@@ -167,6 +263,11 @@ class FactClaim(BaseModel):
         default=None,
         gt=0,
         description="Trusted product_id for every product-bound fact; null only for merchant knowledge.",
+    )
+    subject_order_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Trusted local order_id for every order/shipment-bound fact.",
     )
     text_span: str | None = Field(
         default=None,
@@ -203,7 +304,7 @@ class MediaReference(BaseModel):
 class UIAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["open_product"]
+    kind: Literal["open_product", "track_shipment"]
     label: str = Field(min_length=1, max_length=120)
     url: str
     evidence_ref: str

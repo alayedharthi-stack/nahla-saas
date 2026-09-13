@@ -99,6 +99,25 @@ _PRODUCT_BOUND_KINDS = frozenset(
         "product_knowledge",
     }
 )
+_ORDER_BOUND_KINDS = frozenset(
+    {
+        "order_reference",
+        "order_status",
+        "order_status_label",
+        "order_total",
+        "order_currency",
+        "order_item_name",
+        "order_item_quantity",
+        "shipment_status",
+        "shipment_status_label",
+        "carrier",
+        "tracking_number",
+        "tracking_url",
+    }
+)
+_ORDER_EVIDENCE_SOURCES = frozenset(
+    {"order_summary", "order_details", "order_shipment"}
+)
 
 
 def _flatten_values(value: Any) -> Iterable[str]:
@@ -202,11 +221,11 @@ def _canonical_currency(value: Any) -> str:
 
 
 def _fact_values_equal(kind: str, claim_value: Any, evidence_value: Any) -> bool:
-    if kind in {"price", "sale_price", "regular_price"}:
+    if kind in {"price", "sale_price", "regular_price", "order_total"}:
         return _decimal(claim_value) == _decimal(evidence_value)
-    if kind == "currency":
+    if kind in {"currency", "order_currency"}:
         return _canonical_currency(claim_value) == _canonical_currency(evidence_value)
-    if kind in {"availability", "stock_quantity"}:
+    if kind in {"availability", "stock_quantity", "order_item_quantity"}:
         return type(claim_value) is type(evidence_value) and claim_value == evidence_value
     if kind in {"product_name", "description"}:
         return _normalize_text(claim_value) == _normalize_text(evidence_value)
@@ -217,16 +236,34 @@ def _matching_evidence_fact(
     record: EvidenceRecord,
     claim: FactClaim,
 ) -> CanonicalEvidenceFact | None:
-    expected_source = {
-        "merchant_knowledge": "merchant_knowledge",
-        "product_knowledge": "product_knowledge",
-    }.get(claim.kind, "catalog_product")
-    if record.source != expected_source:
+    expected_sources = {
+        "merchant_knowledge": frozenset({"merchant_knowledge"}),
+        "product_knowledge": frozenset({"product_knowledge"}),
+        "order_reference": _ORDER_EVIDENCE_SOURCES,
+        "order_status": frozenset({"order_summary"}),
+        "order_status_label": frozenset({"order_summary"}),
+        "order_total": frozenset({"order_details"}),
+        "order_currency": frozenset({"order_details"}),
+        "order_item_name": frozenset({"order_details"}),
+        "order_item_quantity": frozenset({"order_details"}),
+        "shipment_status": frozenset({"order_shipment"}),
+        "shipment_status_label": frozenset({"order_shipment"}),
+        "carrier": frozenset({"order_shipment"}),
+        "tracking_number": frozenset({"order_shipment"}),
+        "tracking_url": frozenset({"order_shipment"}),
+    }.get(claim.kind, frozenset({"catalog_product"}))
+    if record.source not in expected_sources:
         return None
     if (
         record.source == "catalog_product"
         and claim.subject_product_id is not None
         and record.source_id != str(claim.subject_product_id)
+    ):
+        return None
+    if (
+        record.source in _ORDER_EVIDENCE_SOURCES
+        and claim.subject_order_id is not None
+        and record.source_id != str(claim.subject_order_id)
     ):
         return None
     for fact in record.facts:
@@ -245,10 +282,10 @@ def _span_expresses_claim(
     reply: CommerceReply,
 ) -> bool:
     span = claim.text_span or ""
-    if claim.kind in {"price", "sale_price", "regular_price"}:
+    if claim.kind in {"price", "sale_price", "regular_price", "order_total"}:
         expected = _decimal(claim.value)
         return any(_decimal(value) == expected for value in _NUMBER_RE.findall(span))
-    if claim.kind == "currency":
+    if claim.kind in {"currency", "order_currency"}:
         return _canonical_currency(claim.value) in {
             _canonical_currency(match.group(0)) for match in _CURRENCY_RE.finditer(span)
         }
@@ -261,14 +298,27 @@ def _span_expresses_claim(
             for match in _AVAILABILITY_RE.finditer(normalized_span)
         }
         return claim.value in states
-    if claim.kind == "stock_quantity":
+    if claim.kind in {"stock_quantity", "order_item_quantity"}:
         expected = _decimal(claim.value)
         return any(_decimal(value) == expected for value in _NUMBER_RE.findall(span))
-    if claim.kind == "product_url":
+    if claim.kind in {"product_url", "tracking_url"}:
         return str(claim.value).strip() in span or any(
             action.evidence_ref == claim.evidence_ref
             and str(action.url) == str(claim.value)
             for action in reply.ui_actions
+        )
+    if claim.kind in {"order_status", "shipment_status"}:
+        if _normalize_text(claim.value) == _normalize_text(span):
+            return True
+        label_kind = (
+            "order_status_label"
+            if claim.kind == "order_status"
+            else "shipment_status_label"
+        )
+        return any(
+            fact.kind == label_kind
+            and _normalize_text(fact.value) == _normalize_text(span)
+            for fact in record.facts
         )
     if claim.kind == "image_url":
         return str(claim.value).strip() in span or any(
@@ -438,13 +488,29 @@ def validate_grounded_reply(
         if claim.kind in _PRODUCT_BOUND_KINDS and claim.subject_product_id is None:
             errors.append(f"missing_claim_subject_product_id:{claim.kind}")
             continue
+        if claim.kind in _PRODUCT_BOUND_KINDS and claim.subject_order_id is not None:
+            errors.append(f"product_claim_has_order_subject:{claim.kind}")
+            continue
+        if claim.kind in _ORDER_BOUND_KINDS and claim.subject_order_id is None:
+            errors.append(f"missing_claim_subject_order_id:{claim.kind}")
+            continue
+        if claim.kind in _ORDER_BOUND_KINDS and claim.subject_product_id is not None:
+            errors.append(f"order_claim_has_product_subject:{claim.kind}")
+            continue
         if claim.kind == "merchant_knowledge" and claim.subject_product_id is not None:
             errors.append("merchant_claim_has_product_subject")
+            continue
+        if claim.kind == "merchant_knowledge" and claim.subject_order_id is not None:
+            errors.append("merchant_claim_has_order_subject")
             continue
         if _matching_evidence_fact(record, claim) is None:
             errors.append(f"claim_not_in_evidence:{claim.kind}")
             continue
-        if claim.text_span is None and claim.kind not in {"product_url", "image_url"}:
+        if claim.text_span is None and claim.kind not in {
+            "product_url",
+            "image_url",
+            "tracking_url",
+        }:
             errors.append(f"claim_span_missing:{claim.kind}")
             continue
         if claim.text_span is not None and claim.text_span not in reply.text:
@@ -481,8 +547,9 @@ def validate_grounded_reply(
             errors.append("media_url_not_in_evidence")
     for action in reply.ui_actions:
         record = evidence.get(action.evidence_ref)
+        expected_kind = "product_url" if action.kind == "open_product" else "tracking_url"
         if record is not None and not any(
-            fact.kind == "product_url" and str(fact.value) == str(action.url)
+            fact.kind == expected_kind and str(fact.value) == str(action.url)
             for fact in record.facts
         ):
             errors.append("action_url_not_in_evidence")
@@ -490,7 +557,7 @@ def validate_grounded_reply(
     claimed_urls = {
         str(claim.value)
         for claim in verified_claims
-        if claim.kind in {"product_url", "image_url"}
+        if claim.kind in {"product_url", "image_url", "tracking_url"}
     }
     for url in _URL_RE.findall(reply.text):
         if url.rstrip(".,،؛") not in claimed_urls:
@@ -499,7 +566,7 @@ def validate_grounded_reply(
     verified_prices = [
         claim
         for claim in verified_claims
-        if claim.kind in {"price", "sale_price", "regular_price"}
+        if claim.kind in {"price", "sale_price", "regular_price", "order_total"}
     ]
     verified_upper_bounds = [
         (match.span(1), _decimal(match.group(1)))
@@ -527,7 +594,9 @@ def validate_grounded_reply(
             errors.append("price_in_text_without_verified_claim")
 
     verified_quantities = [
-        claim for claim in verified_claims if claim.kind == "stock_quantity"
+        claim
+        for claim in verified_claims
+        if claim.kind in {"stock_quantity", "order_item_quantity"}
     ]
     for match in _QUANTITY_RE.finditer(reply.text):
         if not _quantity_match_is_verified(match, verified_quantities):
@@ -564,6 +633,30 @@ def validate_grounded_reply(
         errors.append("reply_without_tool_evidence_or_safe_fallback")
     if evidence and not referenced and not reply.safe_fallback_reason:
         errors.append("tool_evidence_not_linked_to_reply")
+    referenced_order_evidence = {
+        ref
+        for ref in referenced
+        if evidence.get(ref) is not None
+        and evidence[ref].source in _ORDER_EVIDENCE_SOURCES
+    }
+    verified_order_refs = {
+        claim.evidence_ref
+        for claim in verified_claims
+        if claim.kind in _ORDER_BOUND_KINDS
+    }
+    verified_order_action_refs = {
+        action.evidence_ref
+        for action in reply.ui_actions
+        if action.kind == "track_shipment"
+        and action.evidence_ref in referenced_order_evidence
+    }
+    if (
+        referenced_order_evidence
+        and not reply.safe_fallback_reason
+        and not referenced_order_evidence
+        <= (verified_order_refs | verified_order_action_refs)
+    ):
+        errors.append("order_evidence_without_verified_claim")
     return sorted(set(errors))
 
 
