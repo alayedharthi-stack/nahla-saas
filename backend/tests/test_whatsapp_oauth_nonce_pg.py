@@ -91,8 +91,8 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert 'down_revision = "0102"' in source
     assert "down_revision = (\"0092\"" not in source
     assert "down_revision = ('0092'" not in source
-    assert APPLICATION_ALEMBIC_HEAD == "0105"
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0105"})
+    assert APPLICATION_ALEMBIC_HEAD == "0106"
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0106"})
     assert INTEGRATION_BOOTSTRAP_TARGET == "0093"
     prev = os.getcwd()
     try:
@@ -102,15 +102,18 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         rev = script.get_revision(_REVISION)
         rev_0104 = script.get_revision("0104")
         rev_0105 = script.get_revision("0105")
+        rev_0106 = script.get_revision("0106")
     finally:
         os.chdir(prev)
-    assert heads == frozenset({"0092", "0105"})
+    assert heads == frozenset({"0092", "0106"})
     assert rev.down_revision == _PARENT
     assert not isinstance(rev.down_revision, tuple)
     assert rev_0104 is not None
     assert rev_0104.down_revision == "0103"
     assert rev_0105 is not None
     assert rev_0105.down_revision == "0104"
+    assert rev_0106 is not None
+    assert rev_0106.down_revision == "0105"
 
 
 def _pg_required() -> bool:

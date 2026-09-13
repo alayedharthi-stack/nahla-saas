@@ -127,7 +127,7 @@ async def _run_shadow_copy(
     except Exception as exc:  # noqa: BLE001 — shadow can never fail the V1 turn
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: silent-ok — best-effort rollback after the shadow failure is recorded
             pass
         logger.warning(
             "[COMMERCE_V2_SHADOW_FAILED] tenant=%s conversation=%s error=%s",
