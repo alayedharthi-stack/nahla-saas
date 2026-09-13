@@ -450,6 +450,38 @@ NAHLA_MODEL_CHEAP     = os.environ.get("NAHLA_MODEL_CHEAP", "gpt-5.6-luna")
 NAHLA_MODEL_STANDARD  = os.environ.get("NAHLA_MODEL_STANDARD", "gpt-5.6-terra")
 NAHLA_MODEL_PREMIUM   = os.environ.get("NAHLA_MODEL_PREMIUM", "gpt-5.6-sol")
 NAHLA_MODEL_TINY      = os.environ.get("NAHLA_MODEL_TINY", "gpt-5.6-luna")
+
+# ── Nahlah Commerce Agent V2 (Phase 1: shadow-only, read-only) ───────────────
+# Three independent gates are intentional: the global switch, explicit shadow
+# mode, and a tenant allowlist must all pass.  The kill switch wins over every
+# other value.  This keeps the new path unreachable by default and prevents a
+# configuration typo from turning it into an outbound owner.
+COMMERCE_AGENT_V2_ENABLED = (
+    os.environ.get("COMMERCE_AGENT_V2_ENABLED", "false").lower() == "true"
+)
+COMMERCE_AGENT_V2_SHADOW_ONLY = (
+    os.environ.get("COMMERCE_AGENT_V2_SHADOW_ONLY", "true").lower() == "true"
+)
+COMMERCE_AGENT_V2_KILL_SWITCH = (
+    os.environ.get("COMMERCE_AGENT_V2_KILL_SWITCH", "false").lower() == "true"
+)
+COMMERCE_AGENT_V2_TENANT_IDS: set[int] = {
+    int(value.strip())
+    for value in os.environ.get("COMMERCE_AGENT_V2_TENANT_IDS", "").split(",")
+    if value.strip().isdigit() and int(value.strip()) > 0
+}
+COMMERCE_AGENT_V2_MODEL = (
+    os.environ.get("COMMERCE_AGENT_V2_MODEL", "gpt-5.6-sol").strip()
+    or "gpt-5.6-sol"
+)
+COMMERCE_AGENT_V2_REASONING_EFFORT = (
+    os.environ.get("COMMERCE_AGENT_V2_REASONING_EFFORT", "high").strip().lower()
+    or "high"
+)
+COMMERCE_AGENT_V2_TIMEOUT_SECONDS = max(
+    1.0,
+    float(os.environ.get("COMMERCE_AGENT_V2_TIMEOUT_SECONDS", "25")),
+)
 OPENAI_AUDIO_MODEL = os.environ.get("OPENAI_AUDIO_MODEL", "whisper-1")
 # Vision model for describing inbound WhatsApp images. Must be a
 # chat-completions endpoint that accepts ``image_url`` parts (default
