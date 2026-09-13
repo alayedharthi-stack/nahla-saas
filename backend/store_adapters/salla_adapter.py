@@ -3764,6 +3764,9 @@ class SallaAdapter(BaseStoreAdapter):
 
     def _normalize_order(self, raw: Dict[str, Any], order_input: Optional[OrderInput]) -> NormalizedOrder:
         amounts = raw.get("amounts") or {}
+        from core.salla_order_fidelity import extract_salla_payment_facts  # noqa: PLC0415
+
+        payment_facts = extract_salla_payment_facts(raw)
 
         # Salla returns `amounts.total` either as `{"amount": 100, "currency": "SAR"}`
         # or as a flat number depending on endpoint. Some endpoints (notably the
@@ -3875,6 +3878,9 @@ class SallaAdapter(BaseStoreAdapter):
             total=total,
             currency=currency,
             payment_link=payment_link,
+            payment_method=payment_facts["payment_method"] or None,
+            payment_status=payment_facts["payment_status"] or None,
+            is_cod=payment_facts["is_cod"],
             customer_name=cname,
             customer_phone=cphone,
             items=items,
