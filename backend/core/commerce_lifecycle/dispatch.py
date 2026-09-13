@@ -42,7 +42,10 @@ from core.commerce_lifecycle.ledger import (
     reserve_send_decision,
 )
 from core.commerce_lifecycle.registry import get_default_registry
-from core.commerce_lifecycle.strategies import ClosedWindowStrategy
+from core.commerce_lifecycle.strategies import (
+    ClosedWindowStrategy,
+    OpenWindowStrategy,
+)
 from core.merchant_capabilities import resolve_merchant_capabilities
 from store_integration.lifecycle_normalization import (
     build_transition_identity,
@@ -227,6 +230,7 @@ async def _execute_reserved_send(
     reserve: Any,
     evidence: OrderLifecycleEvidence,
     service_key: str,
+    open_window_strategy: OpenWindowStrategy,
     order: Any = None,
     customer_state: Optional[str] = None,
 ) -> LifecycleDispatchResult:
@@ -321,7 +325,14 @@ async def _execute_reserved_send(
     window_open, window_source = lifecycle_service_window_is_open(
         db, int(tenant_id), window_phone
     )
-    send_method = "session_message" if window_open else "approved_template"
+    template_only = (
+        open_window_strategy == OpenWindowStrategy.MERCHANT_TEMPLATE_ONLY
+    )
+    send_method = (
+        "session_message"
+        if window_open and not template_only
+        else "approved_template"
+    )
 
     # Persist path decision on the reserved ledger row before CAS→sending.
     row = (
@@ -781,6 +792,7 @@ async def dispatch_external_lifecycle_notification(
             reserve=reserve,
             evidence=evidence,
             service_key=service_key,
+            open_window_strategy=definition.open_window_strategy,
             order=order,
             customer_state=current_state,
         )
@@ -842,4 +854,3 @@ __all__ = [
     "commerce_lifecycle_send_audit_schema_ready",
     "dispatch_external_lifecycle_notification",
 ]
-

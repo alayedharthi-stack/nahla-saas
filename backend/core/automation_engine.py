@@ -1559,6 +1559,7 @@ async def _execute_action(
     vars_map = _build_template_vars(
         event, customer, config,
         template_name=template.name,
+        template_source_key=getattr(template, "nahla_source_key", None),
         store_name=_store_name_resolved,
         coupon_extras=coupon_extras,
     )
@@ -2000,6 +2001,7 @@ def _build_template_vars(
     config: Dict[str, Any],
     *,
     template_name: Optional[str] = None,
+    template_source_key: Optional[str] = None,
     store_name: Optional[str] = None,
     coupon_extras: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
@@ -2012,7 +2014,8 @@ def _build_template_vars(
       1. Explicit `var_map` on the automation config (legacy contract).
       2. Default library lookup by `template_name` — this is how the 3 core
          revenue automations get their named-slot contract for free.
-      3. Positional fallback `{{1}}=customer_name, {{2}}=checkout_url-or-coupon`
+      3. Nahla library definition by persisted ``template_source_key``.
+      4. Positional fallback `{{1}}=customer_name, {{2}}=checkout_url-or-coupon`
          to keep ad-hoc / merchant-authored templates working.
 
     Resolution order for each slot's *value*:
@@ -2038,6 +2041,24 @@ def _build_template_vars(
         try:
             from core.template_library import numeric_var_map_for  # noqa: PLC0415
             var_map = numeric_var_map_for(template_name)
+        except Exception:
+            var_map = {}
+
+    # Imported templates have unique tenant-scoped Meta names. Their persisted
+    # source key is the authoritative link to the original library slot order.
+    if not var_map and template_source_key:
+        try:
+            from services.whatsapp_templates.nahla_templates import (  # noqa: PLC0415
+                get_template_by_key,
+            )
+
+            source_definition = get_template_by_key(str(template_source_key)) or {}
+            body_slots = source_definition.get("body_slots") or []
+            var_map = {
+                f"{{{{{idx + 1}}}}}": str(slot)
+                for idx, slot in enumerate(body_slots)
+                if str(slot).strip()
+            }
         except Exception:
             var_map = {}
 
@@ -2939,7 +2960,11 @@ def _resolve_runtime_image_header_url(
     components = list(getattr(template, "components", None) or [])
     metadata = dict(getattr(template, "ai_generation_metadata", None) or {})
 
-    if resolved_service in {"order_confirmation", "cod_confirmation"}:
+    if resolved_service in {
+        "order_confirmation",
+        "cod_confirmation",
+        "order_ready",
+    }:
         from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
             resolve_lifecycle_preview_header_url,
         )
@@ -3605,6 +3630,7 @@ def _lifecycle_body_placeholder_values(
         customer_stub,
         config_stub,
         template_name=getattr(template, "name", None),
+        template_source_key=getattr(template, "nahla_source_key", None),
         store_name=store_name,
     )
 
@@ -3718,6 +3744,7 @@ def render_lifecycle_approved_body(
                 type("LifecycleCustomer", (), {"name": customer_name or "", "phone": ""})(),
                 {},
                 template_name=getattr(template, "name", None),
+                template_source_key=getattr(template, "nahla_source_key", None),
                 store_name=_resolve_store_name(db, tenant_id),
             ).keys()
         ),
@@ -4012,6 +4039,7 @@ async def send_lifecycle_whatsapp_template(
         customer_stub,
         config_stub,
         template_name=template.name,
+        template_source_key=getattr(template, "nahla_source_key", None),
         store_name=store_name,
     )
 

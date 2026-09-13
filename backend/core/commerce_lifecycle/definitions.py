@@ -230,7 +230,9 @@ def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
             intent=BusinessIntent.ORDER_PACKED,
             required_evidence=("order_number",),
             optional_evidence=("customer_name",),
-            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            # Keep this image-backed update on the approved Meta template
+            # even when the customer-service window is already open.
+            open_window_strategy=OpenWindowStrategy.MERCHANT_TEMPLATE_ONLY,
             closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
             service_key="order_ready",
             template_variable_map=name_number,

@@ -24,6 +24,9 @@ from typing import Any, Dict, List, Optional
 from core.commerce_lifecycle.cod_confirmation_assets import (
     cod_confirmation_image_header_component,
 )
+from core.commerce_lifecycle.order_ready_assets import (
+    order_ready_image_header_component,
+)
 
 
 def _order_summary_r3_components() -> List[Dict[str, Any]]:
@@ -62,6 +65,12 @@ SERVICE_CATALOG: Dict[str, Dict[str, str]] = {
         "description_ar": "إشعار العميل بتأكيد واستلام طلبه مع ملخص التفاصيل",
         "icon":           "📦",
         "color":          "blue",
+    },
+    "order_ready": {
+        "name_ar":        "تم تجهيز الطلب",
+        "description_ar": "إشعار العميل بأن طلبه أصبح جاهزاً للتسليم لشركة الشحن",
+        "icon":           "✅",
+        "color":          "amber",
     },
     "cod_confirmation": {
         "name_ar":        "تأكيد طلب الدفع عند الاستلام",
@@ -843,7 +852,48 @@ NAHLA_TEMPLATES: List[Dict[str, Any]] = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # 18. تأكيد COD قبل الشحن — COD REMINDER BEFORE SHIPPING
+    # 18. تم تجهيز الطلب — ORDER READY
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "key":            "order_ready",
+        "service_key":    "order_ready",
+        "name_ar":        "تم تجهيز الطلب",
+        "description_ar": "يُرسل عندما ينتهي تجهيز الطلب ويصبح جاهزاً للتسليم لشركة الشحن",
+        "category":       "UTILITY",
+        "filter_tags":    ["orders", "order_updates"],
+        "smart_trigger":  "order_packed",
+        "smart_label":    "يُرسل تلقائياً: عند اكتمال تجهيز الطلب",
+        "body_slots":     ["customer_name", "order_number"],
+        "button_slots":   ["order_tracking_url"],
+        "slots":          ["customer_name", "order_number", "order_tracking_url"],
+        "components": [
+            order_ready_image_header_component(),
+            {
+                "type": "BODY",
+                "text": (
+                    "خبر سار يا {{1}} 🎉\n\n"
+                    "تم تجهيز طلبك رقم #{{2}} بعناية، وأصبح جاهزاً للتسليم "
+                    "لشركة الشحن.\n\n"
+                    "سنرسل لك تفاصيل التتبع فور شحنه."
+                ),
+                "example": {"body_text": [["سارة", "45678"]]},
+            },
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL",
+                        "text": "عرض تفاصيل الطلب",
+                        "url": "https://mtjr.at/{{1}}",
+                        "example": ["https://mtjr.at/orders/45678"],
+                    },
+                ],
+            },
+        ],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # 19. تأكيد COD قبل الشحن — COD REMINDER BEFORE SHIPPING
     # ══════════════════════════════════════════════════════════════════
     {
         "key":            "cod_reminder_before_shipping",
@@ -1396,7 +1446,11 @@ def template_preview(tpl: Dict[str, Any]) -> Dict[str, Any]:
     # Library cards have their own preview contract; do not drop the IMAGE
     # component when projecting an approved image-backed lifecycle definition.
     # Other services retain their existing preview until separately designed.
-    if service_key in {"order_confirmation", "cod_confirmation"} and any(
+    if service_key in {
+        "order_confirmation",
+        "cod_confirmation",
+        "order_ready",
+    } and any(
         c.get("type") == "HEADER" and c.get("format") == "IMAGE"
         for c in tpl["components"]
     ):

@@ -167,3 +167,29 @@ class TestOrderConfirmationMetaSubmitPayload:
                     )
         assert result == "meta-cod"
         assert ensure_mock.await_args.kwargs["service_key"] == "cod_confirmation"
+
+    def test_submit_hook_prepares_order_ready_image_header(self):
+        from routers.templates import _submit_template_to_meta  # noqa: PLC0415
+
+        with patch(
+            "core.commerce_lifecycle.order_confirmation_meta_header.ensure_order_confirmation_image_header_for_meta",
+            new_callable=AsyncMock,
+            return_value=[{"type": "HEADER", "format": "IMAGE", "example": {"header_handle": ["h"]}}],
+        ) as ensure_mock:
+            with patch(
+                "routers.templates.provider_submit_template",
+                new_callable=AsyncMock,
+                return_value=({"id": "meta-ready"}, MagicMock()),
+            ):
+                with patch("routers.templates._ensure_meta_examples", side_effect=lambda c: c):
+                    result = asyncio.run(
+                        _submit_template_to_meta(
+                            db=MagicMock(), conn=MagicMock(), tenant_id=1,
+                            waba_id="waba", name="nahla_order_ready",
+                            language="ar", category="UTILITY",
+                            components=[{"type": "HEADER", "format": "IMAGE"}],
+                            service_key="order_ready",
+                        )
+                    )
+        assert result == "meta-ready"
+        assert ensure_mock.await_args.kwargs["service_key"] == "order_ready"
