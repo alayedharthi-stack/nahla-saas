@@ -488,7 +488,10 @@ class TestCodBinding:
             tenant_id=9,
             status="pending_confirmation",
             customer_info={"phone": "+966500111222"},
-            extra_metadata={"payment_method": "cod"},
+            extra_metadata={
+                "payment_method": "cod",
+                "nahla_cod_confirmation_sent": True,
+            },
             line_items=[],
             external_id=None,
         )
@@ -517,7 +520,10 @@ class TestCodBinding:
             tenant_id=9,
             status="pending_confirmation",
             customer_info={"phone": "+966500111222"},
-            extra_metadata={"payment_method": "cod"},
+            extra_metadata={
+                "payment_method": "cod",
+                "nahla_cod_confirmation_sent": True,
+            },
             line_items=[],
         )
         db = self._pending_query([order])

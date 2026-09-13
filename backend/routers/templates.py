@@ -805,7 +805,11 @@ def _saved_lifecycle_preview_header_url(
 ) -> Optional[str]:
     """Return the merchant-facing IMAGE URL for supported lifecycle templates."""
     service_key = str(getattr(t, "service_key", None) or "")
-    if db is None or service_key not in {"order_confirmation", "cod_confirmation"}:
+    if db is None or service_key not in {
+        "order_confirmation",
+        "cod_confirmation",
+        "order_ready",
+    }:
         return None
 
     components = list(
@@ -1316,7 +1320,11 @@ async def _submit_template_to_meta(
                     )
                 btn["text"] = cleaned_text
 
-    if str(service_key or "").strip() in {"order_confirmation", "cod_confirmation"}:
+    if str(service_key or "").strip() in {
+        "order_confirmation",
+        "cod_confirmation",
+        "order_ready",
+    }:
         from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
             ensure_order_confirmation_image_header_for_meta,
         )
@@ -1625,7 +1633,11 @@ async def upload_template_header_image(
             status_code=409,
             detail="يمكن تغيير الصورة في المسودة فقط قبل إرسالها إلى Meta.",
         )
-    if str(tpl.service_key or "") not in {"cod_confirmation", "order_confirmation"}:
+    if str(tpl.service_key or "") not in {
+        "cod_confirmation",
+        "order_confirmation",
+        "order_ready",
+    }:
         raise HTTPException(status_code=400, detail="template_image_header_not_supported")
 
     from services.catalog_media_storage import (  # noqa: PLC0415

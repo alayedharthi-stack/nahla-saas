@@ -15,6 +15,9 @@ from core.commerce_lifecycle.order_confirmation_assets import (
 from core.commerce_lifecycle.cod_confirmation_assets import (
     COD_CONFIRMATION_HEADER_DEFAULT_URL,
 )
+from core.commerce_lifecycle.order_ready_assets import (
+    ORDER_READY_HEADER_DEFAULT_URL,
+)
 from services.whatsapp_templates.nahla_templates import (
     get_all_templates,
     get_template_by_key,
@@ -50,6 +53,15 @@ def test_cod_confirmation_preview_uses_its_own_image():
     assert preview["preview_header_image_url"] == COD_CONFIRMATION_HEADER_DEFAULT_URL
 
 
+def test_order_ready_preview_uses_nahla_identity_image():
+    definition = get_template_by_key("order_ready")
+    preview = template_preview(definition)
+    assert preview["header_type"] == "image"
+    assert preview["preview_header_image_url"] == ORDER_READY_HEADER_DEFAULT_URL
+    assert preview["service_key"] == "order_ready"
+    assert preview["buttons"][0]["url"] == "https://mtjr.at/{{1}}"
+
+
 def test_text_only_order_confirmation_gets_no_image_fallback():
     definition = deepcopy(get_template_by_key("order_summary"))
     definition["components"] = [c for c in definition["components"] if c["type"] != "HEADER"]
@@ -60,7 +72,11 @@ def test_text_only_order_confirmation_gets_no_image_fallback():
 
 def test_other_library_services_do_not_gain_lifecycle_image():
     for definition in get_all_templates():
-        if definition.get("service_key") in {"order_confirmation", "cod_confirmation"}:
+        if definition.get("service_key") in {
+            "order_confirmation",
+            "cod_confirmation",
+            "order_ready",
+        }:
             continue
         preview = template_preview(definition)
         assert "header_type" not in preview, definition["key"]

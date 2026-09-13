@@ -132,7 +132,12 @@ async def _route_inbound(
 
 class TestRecognizedCodButtonAlwaysConsumed:
     def test_interactive_confirm_valid_pending_action_brain_zero(self):
-        order = _pending_order()
+        order = _pending_order(
+            extra_metadata={
+                "payment_method": "cod",
+                "nahla_cod_confirmation_sent": True,
+            }
+        )
         db = _pending_query([order])
         brain = AsyncMock()
         followup = AsyncMock()
@@ -347,7 +352,12 @@ class TestRecognizedCodButtonAlwaysConsumed:
         brain.assert_not_awaited()
 
     def test_valid_action_followup_exception_brain_zero(self):
-        order = _pending_order()
+        order = _pending_order(
+            extra_metadata={
+                "payment_method": "cod",
+                "nahla_cod_confirmation_sent": True,
+            }
+        )
         db = _pending_query([order])
         brain = AsyncMock()
         followup = AsyncMock(side_effect=RuntimeError("whatsapp followup failed"))

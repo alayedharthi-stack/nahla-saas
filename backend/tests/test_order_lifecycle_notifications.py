@@ -25,6 +25,8 @@ from core.automation_engine import (  # noqa: E402
     _lifecycle_session_quick_replies,
 )
 from core.commerce_lifecycle.intents import BusinessIntent  # noqa: E402
+from core.commerce_lifecycle.registry import get_default_registry  # noqa: E402
+from core.commerce_lifecycle.strategies import OpenWindowStrategy  # noqa: E402
 from core.commerce_lifecycle.order_updates import (  # noqa: E402
     LEGACY_DEFAULT_ON_KEYS,
     ORDER_UPDATE_SERVICE_KEYS,
@@ -189,6 +191,18 @@ class TestSallaMapping:
         assert normalize_salla_lifecycle_business_intent(
             "in_progress", "ready", {}
         ) == BusinessIntent.ORDER_PACKED
+
+    def test_salla_completed_is_order_ready_not_shipped(self):
+        assert normalize_salla_lifecycle_business_intent(
+            "in_progress", "completed", {}
+        ) == BusinessIntent.ORDER_PACKED
+
+    def test_order_ready_keeps_approved_image_template_in_open_window(self):
+        definition = get_default_registry().get(BusinessIntent.ORDER_PACKED)
+        assert (
+            definition.open_window_strategy
+            == OpenWindowStrategy.MERCHANT_TEMPLATE_ONLY
+        )
 
     def test_authoritative_order_created_in_progress_is_confirmed_once(self):
         created = {

@@ -42,7 +42,10 @@ from core.commerce_lifecycle.ledger import (
     reserve_send_decision,
 )
 from core.commerce_lifecycle.registry import get_default_registry
-from core.commerce_lifecycle.strategies import ClosedWindowStrategy
+from core.commerce_lifecycle.strategies import (
+    ClosedWindowStrategy,
+    OpenWindowStrategy,
+)
 from core.merchant_capabilities import resolve_merchant_capabilities
 from store_integration.lifecycle_normalization import (
     build_transition_identity,
@@ -163,16 +166,25 @@ def _stamp_last_notified_customer_state(order: Any, state: str) -> None:
         pass
 
 
-def _nahla_owns_cod_customer_confirmation(order: Any) -> bool:
-    meta = getattr(order, "extra_metadata", None) or {}
-    if not isinstance(meta, dict):
-        return False
-    return bool(
-        meta.get("nahla_cod_confirmation_sent")
-        or meta.get("cod_confirmed_at")
-        or meta.get("cod_cancelled_at")
-        or meta.get("cod_pushed_external_id")
-    )
+def _stamp_external_cod_confirmation_sent(
+    order: Any,
+    *,
+    template: Any,
+    send_method: str,
+) -> None:
+    """Make a store-origin COD prompt discoverable by the button handler."""
+    meta = dict(getattr(order, "extra_metadata", None) or {})
+    meta["nahla_cod_confirmation_sent"] = True
+    meta["nahla_cod_confirmation_origin"] = "external_store"
+    meta["nahla_cod_confirmation_send_method"] = send_method
+    meta["nahla_cod_confirmation_template_id"] = getattr(template, "id", None)
+    meta["nahla_cod_confirmation_template_name"] = getattr(template, "name", None)
+    meta["nahla_cod_confirmation_revision"] = getattr(template, "revision", None)
+    order.extra_metadata = meta
+    try:
+        flag_modified(order, "extra_metadata")
+    except Exception:  # noqa: silent-ok — SimpleNamespace orders in tests have no SA state
+        pass
 
 
 def _has_tracking_evidence(evidence: OrderLifecycleEvidence) -> bool:
@@ -227,6 +239,7 @@ async def _execute_reserved_send(
     reserve: Any,
     evidence: OrderLifecycleEvidence,
     service_key: str,
+    open_window_strategy: OpenWindowStrategy,
     order: Any = None,
     customer_state: Optional[str] = None,
 ) -> LifecycleDispatchResult:
@@ -321,7 +334,14 @@ async def _execute_reserved_send(
     window_open, window_source = lifecycle_service_window_is_open(
         db, int(tenant_id), window_phone
     )
-    send_method = "session_message" if window_open else "approved_template"
+    template_only = (
+        open_window_strategy == OpenWindowStrategy.MERCHANT_TEMPLATE_ONLY
+    )
+    send_method = (
+        "session_message"
+        if window_open and not template_only
+        else "approved_template"
+    )
 
     # Persist path decision on the reserved ledger row before CAS→sending.
     row = (
@@ -403,6 +423,12 @@ async def _execute_reserved_send(
         )
         if order is not None and customer_state:
             _stamp_last_notified_customer_state(order, customer_state)
+            if intent == BusinessIntent.COD_CONFIRMATION:
+                _stamp_external_cod_confirmation_sent(
+                    order,
+                    template=template,
+                    send_method=send_method,
+                )
             try:
                 db.commit()
             except Exception:
@@ -544,29 +570,6 @@ async def dispatch_external_lifecycle_notification(
                 duplicate=True,
                 outcome="skipped",
                 reason_code="already_notified",
-            )
-
-        # COD confirmation requests are owned exclusively by the Nahla
-        # checkout sender (pending_confirmation). StoreSync/Salla must
-        # never send a second confirm/cancel prompt.
-        if intent == BusinessIntent.COD_CONFIRMATION:
-            return LifecycleDispatchResult(
-                ledger_id=None,
-                dispatched=False,
-                duplicate=False,
-                outcome="skipped",
-                reason_code="cod_confirmation_owned_by_checkout",
-            )
-        if (
-            intent == BusinessIntent.ORDER_CONFIRMED
-            and _nahla_owns_cod_customer_confirmation(order)
-        ):
-            return LifecycleDispatchResult(
-                ledger_id=None,
-                dispatched=False,
-                duplicate=False,
-                outcome="skipped",
-                reason_code="nahla_cod_already_confirmed",
             )
 
         external_order_id = str(
@@ -781,6 +784,7 @@ async def dispatch_external_lifecycle_notification(
             reserve=reserve,
             evidence=evidence,
             service_key=service_key,
+            open_window_strategy=definition.open_window_strategy,
             order=order,
             customer_state=current_state,
         )
@@ -842,4 +846,3 @@ __all__ = [
     "commerce_lifecycle_send_audit_schema_ready",
     "dispatch_external_lifecycle_notification",
 ]
-
