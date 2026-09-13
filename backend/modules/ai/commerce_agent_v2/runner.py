@@ -66,6 +66,7 @@ async def run_commerce_agent(
     hooks = CommerceTracingHooks(model=str(observable_model_name))
     started = time.monotonic()
     trace_id = sdk_trace_id(context.inbound_trace_id)
+    context.bind_run_user_input(user_input)
     try:
         agent = build_commerce_agent(
             model=configured_model,

@@ -61,6 +61,7 @@ from modules.ai.commerce_agent_v2.tools import PHASE1_TOOLS
 from modules.ai.commerce_agent_v2.tools.catalog import get_product_details, search_products
 from modules.ai.commerce_agent_v2.tools.catalog import _catalog_search_enabled
 from modules.ai.commerce_agent_v2.tools.knowledge import (
+    _merchant_knowledge_enabled,
     search_merchant_knowledge,
     search_product_knowledge,
 )
@@ -568,6 +569,42 @@ async def test_global_and_product_linked_knowledge_are_separated(seeded: Seed) -
     assert [
         (fact.kind, fact.subject_product_id) for fact in product_result.evidence[0].facts
     ] == [("product_knowledge", seeded.honey_a.id)]
+
+
+def test_merchant_knowledge_availability_requires_relevant_global_evidence(
+    seeded: Seed,
+) -> None:
+    wrapper = SimpleNamespace(context=_context(seeded))
+
+    wrapper.context.bind_run_user_input("وش مصدر عسل الطلح؟")
+    assert _merchant_knowledge_enabled(wrapper, None) is False
+
+    wrapper.context.bind_run_user_input("وش سنة قطف هذا العسل؟")
+    assert _merchant_knowledge_enabled(wrapper, None) is False
+
+    wrapper.context.bind_run_user_input("هل عندكم تغليف هدايا؟")
+    assert _merchant_knowledge_enabled(wrapper, None) is True
+
+
+def test_merchant_knowledge_remains_available_for_product_plus_global_policy(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded)
+    context.bind_run_user_input("هل هذا المنتج يشمله التغليف المجاني؟")
+    wrapper = SimpleNamespace(context=context)
+
+    context.authorize_products([seeded.honey_a.id])
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=f"catalog:product:{seeded.honey_a.id}",
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+            )
+        ]
+    )
+
+    assert _merchant_knowledge_enabled(wrapper, None) is True
 
 
 @pytest.mark.asyncio

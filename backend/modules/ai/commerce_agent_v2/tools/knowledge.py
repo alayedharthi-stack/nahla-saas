@@ -1,6 +1,10 @@
 """Tenant-bound wrappers around the existing merchant knowledge retrieval."""
 from __future__ import annotations
 
+import re
+import unicodedata
+from typing import Any
+
 from agents import RunContextWrapper, function_tool
 
 from modules.ai.brain.commerce.product_knowledge_or_comparison import (
@@ -15,6 +19,70 @@ from modules.ai.commerce_agent_v2.output import (
 )
 from modules.ai.commerce_agent_v2.tools.catalog import _catalog_search_enabled
 from modules.ai.security.tenant_isolation import TenantIsolationLayer
+
+
+_ARABIC_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]+")
+_ROUTING_WORD_RE = re.compile(r"[^\w]+", re.UNICODE)
+
+
+def _routing_tokens(value: str) -> set[str]:
+    """Return conservative lexical topics for deterministic evidence routing."""
+    normalized = unicodedata.normalize("NFKC", str(value or "").lower())
+    normalized = _ARABIC_DIACRITICS_RE.sub("", normalized)
+    normalized = (
+        normalized.replace("أ", "ا")
+        .replace("إ", "ا")
+        .replace("آ", "ا")
+        .replace("ى", "ي")
+        .replace("ة", "ه")
+    )
+    tokens: set[str] = set()
+    for raw in _ROUTING_WORD_RE.sub(" ", normalized).split():
+        token = raw[2:] if raw.startswith("ال") and len(raw) >= 5 else raw
+        if len(token) >= 3:
+            tokens.add(token)
+    return tokens
+
+
+def _merchant_knowledge_enabled(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    _agent: Any,
+) -> bool:
+    """Expose global KB search only when the current turn has global evidence.
+
+    This is evidence-driven rather than an intent classifier.  Product-linked
+    sections are already excluded by the existing tenant-safe retrieval when
+    no product id is supplied.  A successful empty probe therefore means a
+    merchant-wide lookup cannot add evidence for this turn.  Retrieval errors
+    fail open so operational uncertainty is never mistaken for fact absence.
+    """
+    if not _catalog_search_enabled(run_context, _agent):
+        return False
+    context = run_context.context
+    cached = context.merchant_knowledge_relevance
+    if cached is not None:
+        return cached
+    query_tokens = _routing_tokens(context.run_user_input)
+    if not query_tokens:
+        return context.cache_merchant_knowledge_relevance(True)
+
+    for token in sorted(query_tokens, key=lambda item: (-len(item), item)):
+        payload = retrieve_catalog_candidate_kb_sections(
+            context.db,
+            context.tenant_id,
+            subject=token,
+            message=token,
+            limit=6,
+        )
+        if payload.get("kb_retrieval_failed"):
+            return context.cache_merchant_knowledge_relevance(True)
+        for section in payload.get("kb_sections") or []:
+            section_tokens = _routing_tokens(
+                f"{section.get('title', '')} {section.get('body', '')}"
+            )
+            if token in section_tokens:
+                return context.cache_merchant_knowledge_relevance(True)
+    return context.cache_merchant_knowledge_relevance(False)
 
 
 def _linked_products(context: CommerceAgentContext, section_ids: list[int]) -> dict[int, list[int]]:
@@ -136,7 +204,7 @@ def _build_result(
     return KnowledgeSearchResult(status="ok", sections=snapshots, evidence=evidence)
 
 
-@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
+@function_tool(timeout=8.0, is_enabled=_merchant_knowledge_enabled)
 async def search_merchant_knowledge(
     run_context: RunContextWrapper[CommerceAgentContext],
     query: str,

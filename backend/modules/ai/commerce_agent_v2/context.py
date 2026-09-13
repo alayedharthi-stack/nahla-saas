@@ -56,6 +56,8 @@ class CommerceAgentContext(BaseModel):
     _allowed_product_ids: set[int] = PrivateAttr(default_factory=set)
     _evidence: dict[str, EvidenceRecord] = PrivateAttr(default_factory=dict)
     _consecutive_catalog_misses: int = PrivateAttr(default=0)
+    _run_user_input: str = PrivateAttr(default="")
+    _merchant_knowledge_relevant: bool | None = PrivateAttr(default=None)
 
     @classmethod
     def from_trusted_scope(
@@ -201,6 +203,27 @@ class CommerceAgentContext(BaseModel):
             0 if found else self._consecutive_catalog_misses + 1
         )
         return self._consecutive_catalog_misses
+
+    def bind_run_user_input(self, user_input: str) -> None:
+        """Bind ephemeral turn text for evidence-aware tool availability.
+
+        The value is private run state: it is neither persisted into the
+        Conversation Session nor included in tracing or model-visible schemas.
+        """
+        self._run_user_input = str(user_input or "").strip()
+        self._merchant_knowledge_relevant = None
+
+    @property
+    def run_user_input(self) -> str:
+        return self._run_user_input
+
+    @property
+    def merchant_knowledge_relevance(self) -> bool | None:
+        return self._merchant_knowledge_relevant
+
+    def cache_merchant_knowledge_relevance(self, relevant: bool) -> bool:
+        self._merchant_knowledge_relevant = bool(relevant)
+        return self._merchant_knowledge_relevant
 
     def assert_scope(self) -> None:
         """Re-check trusted identities at every tool boundary."""
