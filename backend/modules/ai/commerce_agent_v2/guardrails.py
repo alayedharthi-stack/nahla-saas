@@ -33,6 +33,7 @@ _QUANTITY_RE = re.compile(
     r"(?<!\d)(\d+)\s*(?:قطع(?:ة)?|عبو(?:ة|ات)|حب(?:ة|ات)|وحد(?:ة|ات))\b",
     re.IGNORECASE,
 )
+_CLAUSE_BOUNDARY_RE = re.compile(r"[.!؟\n،؛]")
 _AVAILABILITY_RE = re.compile(
     r"غير\s+(?:متوفر|متاح|موجود|قابل)(?:ة|ه|ان|ين|ون|ات)?(?:\s+للطلب)?\b|"
     r"لا\s+يمكن\s+طلب\w*|(?:نافد|نفد)(?:ة|ه|ان|ين|ون|ات)?\b|"
@@ -325,6 +326,64 @@ def _availability_mention_is_informational(text: str, mention: re.Match[str]) ->
     )
 
 
+def _quantity_match_is_verified(
+    match: re.Match[str],
+    verified_quantities: Iterable[FactClaim],
+) -> bool:
+    quantity = int(match.group(1))
+    rendered = match.group(0)
+    return any(
+        claim.value == quantity
+        and claim.text_span is not None
+        and (rendered in claim.text_span or claim.text_span in rendered)
+        for claim in verified_quantities
+    )
+
+
+def _availability_mention_is_quantity_bound(
+    text: str,
+    mention: re.Match[str],
+    *,
+    availability: bool,
+    verified_availability: Iterable[FactClaim],
+    verified_quantities: Iterable[FactClaim],
+) -> bool:
+    """Accept a repeated stock-state word only when typed quantity facts bind it.
+
+    Natural Arabic often renders the same evidence as ``متوفر لدينا`` followed
+    by ``المتاح حاليًا 8 عبوات``. The second availability word need not repeat
+    the availability claim span when a verified quantity in the same clause and
+    a same-product availability claim jointly support it.
+    """
+    previous_boundaries = list(
+        _CLAUSE_BOUNDARY_RE.finditer(text, 0, mention.start())
+    )
+    clause_start = previous_boundaries[-1].end() if previous_boundaries else 0
+    next_boundary = _CLAUSE_BOUNDARY_RE.search(text, mention.end())
+    clause_end = next_boundary.start() if next_boundary else len(text)
+
+    for quantity_match in _QUANTITY_RE.finditer(text, clause_start, clause_end):
+        quantity = int(quantity_match.group(1))
+        rendered = quantity_match.group(0)
+        matching_quantities = [
+            claim
+            for claim in verified_quantities
+            if claim.value == quantity
+            and claim.text_span is not None
+            and (rendered in claim.text_span or claim.text_span in rendered)
+        ]
+        for quantity_claim in matching_quantities:
+            if any(
+                availability_claim.value is availability
+                and availability_claim.evidence_ref == quantity_claim.evidence_ref
+                and availability_claim.subject_product_id
+                == quantity_claim.subject_product_id
+                for availability_claim in verified_availability
+            ):
+                return True
+    return False
+
+
 @input_guardrail(name="commerce_v2_trusted_read_only_scope", run_in_parallel=False)
 async def trusted_read_only_scope_guardrail(
     run_context: RunContextWrapper[CommerceAgentContext],
@@ -471,14 +530,7 @@ def validate_grounded_reply(
         claim for claim in verified_claims if claim.kind == "stock_quantity"
     ]
     for match in _QUANTITY_RE.finditer(reply.text):
-        quantity = int(match.group(1))
-        rendered = match.group(0)
-        if not any(
-            claim.value == quantity
-            and claim.text_span is not None
-            and (rendered in claim.text_span or claim.text_span in rendered)
-            for claim in verified_quantities
-        ):
+        if not _quantity_match_is_verified(match, verified_quantities):
             errors.append("stock_quantity_in_text_without_verified_claim")
 
     if not reply.safe_fallback_reason:
@@ -495,6 +547,12 @@ def validate_grounded_reply(
                 and claim.text_span is not None
                 and rendered in claim.text_span
                 for claim in verified_availability
+            ) and not _availability_mention_is_quantity_bound(
+                reply.text,
+                match,
+                availability=availability,
+                verified_availability=verified_availability,
+                verified_quantities=verified_quantities,
             ):
                 errors.append("availability_in_text_without_verified_claim")
 

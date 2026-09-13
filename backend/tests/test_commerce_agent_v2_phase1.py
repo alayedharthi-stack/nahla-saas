@@ -840,6 +840,34 @@ def test_canonical_catalog_claims_accept_formatting_and_natural_arabic(seeded: S
     )
     assert validate_grounded_reply(context, compact_spans) == []
 
+    quantity_bound_availability = CommerceReply(
+        text=(
+            "نعم، متوفر لدينا عسل طلح بلدي. "
+            "المتاح حاليًا 8 عبوات."
+        ),
+        evidence_refs=[ref],
+        fact_claims=[
+            reply.fact_claims[0],
+            reply.fact_claims[1].model_copy(update={"text_span": "متوفر لدينا"}),
+            reply.fact_claims[2].model_copy(update={"text_span": "8 عبوات"}),
+        ],
+    )
+    assert validate_grounded_reply(context, quantity_bound_availability) == []
+
+    wrong_quantity = quantity_bound_availability.model_copy(
+        update={"text": "نعم، متوفر لدينا عسل طلح بلدي. المتاح حاليًا 9 عبوات."}
+    )
+    wrong_quantity_errors = validate_grounded_reply(context, wrong_quantity)
+    assert "stock_quantity_in_text_without_verified_claim" in wrong_quantity_errors
+    assert "availability_in_text_without_verified_claim" in wrong_quantity_errors
+
+    negative_availability = quantity_bound_availability.model_copy(
+        update={"text": "نعم، متوفر لدينا عسل طلح بلدي. غير متاح حاليًا 8 عبوات."}
+    )
+    assert "availability_in_text_without_verified_claim" in validate_grounded_reply(
+        context, negative_availability
+    )
+
     plural_availability = compact_spans.model_copy(
         update={
             "text": compact_spans.text.replace("متوفرة", "جاهزة للطلب"),
@@ -922,6 +950,63 @@ def test_description_claim_accepts_supported_shorter_natural_span(seeded: Seed) 
     )
     assert "claim_span_not_equivalent:description" in validate_grounded_reply(
         context, unsupported
+    )
+
+
+def test_quantity_bound_availability_requires_same_product_evidence(seeded: Seed) -> None:
+    context = _context(seeded)
+    honey_ref = f"catalog:product:{seeded.honey_a.id}"
+    gift_ref = f"catalog:product:{seeded.gift_a.id}"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=honey_ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="availability",
+                        value=True,
+                        subject_product_id=seeded.honey_a.id,
+                    )
+                ],
+            ),
+            EvidenceRecord(
+                ref=gift_ref,
+                source="catalog_product",
+                source_id=str(seeded.gift_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="stock_quantity",
+                        value=8,
+                        subject_product_id=seeded.gift_a.id,
+                    )
+                ],
+            ),
+        ]
+    )
+    reply = CommerceReply(
+        text="عسل الطلح متوفر لدينا. المتاح حاليًا 8 عبوات.",
+        evidence_refs=[honey_ref, gift_ref],
+        fact_claims=[
+            FactClaim(
+                kind="availability",
+                value=True,
+                evidence_ref=honey_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="متوفر لدينا",
+            ),
+            FactClaim(
+                kind="stock_quantity",
+                value=8,
+                evidence_ref=gift_ref,
+                subject_product_id=seeded.gift_a.id,
+                text_span="8 عبوات",
+            ),
+        ],
+    )
+    assert "availability_in_text_without_verified_claim" in validate_grounded_reply(
+        context, reply
     )
 
 
