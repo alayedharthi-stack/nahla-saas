@@ -318,6 +318,15 @@ class CommerceReply(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1, max_length=6000)
+    response_mode: Literal["grounded", "social"] = Field(
+        default="grounded",
+        description=(
+            "Use social only for a short, genuinely non-commercial social reply "
+            "that contains no store, product, price, availability, order, shipment, "
+            "location, recommendation, URL, or other factual claim. A greeting joined "
+            "to any commercial or factual request remains grounded."
+        ),
+    )
     evidence_refs: list[str] = Field(default_factory=list)
     fact_claims: list[FactClaim] = Field(default_factory=list)
     product_refs: list[ProductReference] = Field(default_factory=list)
