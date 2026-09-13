@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from core.automation_engine import (
     _execute_action,
+    _execute_interactive_step,
     _resolve_dynamic_url_button_suffix,
 )
 from core.send_governor import check as governor_check
@@ -115,7 +116,7 @@ def test_order_confirmation_still_respects_unsubscribe():
     assert decision.reason_code == "blocked_by_unsubscribe"
 
 
-def test_production_order_event_sends_non_empty_meta_button_parameter():
+def test_open_window_order_event_uses_meta_template_with_image_and_button():
     customer = SimpleNamespace(
         id=65,
         tenant_id=1,
@@ -186,6 +187,7 @@ def test_production_order_event_sends_non_empty_meta_button_parameter():
         return_value=({"messages": [{"id": "wamid.order.1"}]}, object())
     )
 
+    interactive_send = AsyncMock()
     with (
         patch("core.acceptance_execution_context.deny_external_egress"),
         patch("core.billing.has_billing_access", return_value=True),
@@ -195,7 +197,7 @@ def test_production_order_event_sends_non_empty_meta_button_parameter():
                 allowed=True, reason="", used_total=0, limit=100
             ),
         ),
-        patch("core.wa_usage.has_open_service_window", return_value=False),
+        patch("core.wa_usage.has_open_service_window", return_value=True),
         patch(
             "core.commerce_lifecycle.canary_guard.evaluate_and_audit",
             return_value=SimpleNamespace(allowed=True, reason=""),
@@ -221,13 +223,20 @@ def test_production_order_event_sends_non_empty_meta_button_parameter():
             "services.whatsapp_platform.service.provider_send_message",
             new=provider_send,
         ),
+        patch(
+            "core.automation_engine._execute_interactive_step",
+            new=interactive_send,
+        ),
         patch("routers.conversations.record_outbound_message"),
     ):
         ok, info = asyncio.run(_execute_action(db, 1, event, automation, {}))
 
     assert ok is True
     assert info["wa_message_id"] == "wamid.order.1"
+    interactive_send.assert_not_awaited()
     sent_payload = provider_send.await_args.kwargs["payload"]
+    assert sent_payload["type"] == "template"
+    assert sent_payload["template"]["name"] == template.name
     button = next(
         component
         for component in sent_payload["template"]["components"]
@@ -244,3 +253,204 @@ def test_production_order_event_sends_non_empty_meta_button_parameter():
     assert header["parameters"] == [
         {"type": "image", "image": {"link": merchant_header_url}}
     ]
+
+
+def test_cart_interactive_renderer_rejects_order_notification_service():
+    ok, info = asyncio.run(
+        _execute_interactive_step(
+            MagicMock(),
+            tenant_id=20,
+            event=SimpleNamespace(
+                id=901,
+                payload={"order_id": 901, "order_number": "ORD-901"},
+            ),
+            customer=SimpleNamespace(name="نورة عبدالله"),
+            wa_conn=SimpleNamespace(phone_number_id="phone-id"),
+            to_phone="+966500111222",
+            config={},
+            active_step={},
+            automation=SimpleNamespace(
+                id=77,
+                automation_type="order_notifications",
+            ),
+        )
+    )
+
+    assert ok is False
+    assert info["error_code"] == "interactive_owner_mismatch"
+
+
+def test_two_consecutive_orders_each_send_their_own_confirmation_template():
+    customer = SimpleNamespace(
+        id=90,
+        tenant_id=20,
+        name="نورة عبدالله",
+        phone="+966500111222",
+    )
+    connection = SimpleNamespace(phone_number_id="phone-id", status="connected")
+    template = SimpleNamespace(
+        id=501,
+        tenant_id=20,
+        name="nahla_order_confirmation_generic_a1b2c3",
+        language="ar",
+        service_key="order_confirmation",
+        status="APPROVED",
+        ai_generation_metadata={},
+        components=[
+            {"type": "HEADER", "format": "IMAGE"},
+            {"type": "BODY", "text": "{{1}} {{2}} {{3}} {{4}}"},
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL",
+                        "text": "عرض تفاصيل الطلب",
+                        "url": "https://mtjr.at/{{1}}",
+                    }
+                ],
+            },
+        ],
+    )
+    settings = SimpleNamespace(
+        extra_metadata={
+            "order_updates": {
+                "order_confirmation": {
+                    "runtime": {
+                        "header_image_url": "https://cdn.example/generic-order.jpg"
+                    }
+                }
+            }
+        }
+    )
+    automation = SimpleNamespace(
+        id=77,
+        automation_type="order_notifications",
+        template_id=None,
+    )
+    events = [
+        SimpleNamespace(
+            id=1001,
+            customer_id=customer.id,
+            event_type="order_notifications",
+            payload={
+                "external_id": "ORD-1001",
+                "order_id": 1001,
+                "order_number": "ORD-1001",
+                "total": 149,
+            },
+        ),
+        SimpleNamespace(
+            id=1002,
+            customer_id=customer.id,
+            event_type="order_notifications",
+            payload={
+                "external_id": "ORD-1002",
+                "order_id": 1002,
+                "order_number": "ORD-1002",
+                "total": 279,
+            },
+        ),
+    ]
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.side_effect = [
+        customer,
+        connection,
+        settings,
+        customer,
+        connection,
+        settings,
+    ]
+    provider_send = AsyncMock(
+        side_effect=[
+            ({"messages": [{"id": "wamid.order.1001"}]}, object()),
+            ({"messages": [{"id": "wamid.order.1002"}]}, object()),
+        ]
+    )
+    interactive_send = AsyncMock()
+
+    with (
+        patch("core.acceptance_execution_context.deny_external_egress"),
+        patch("core.billing.has_billing_access", return_value=True),
+        patch(
+            "core.wa_usage.check_limit",
+            return_value=SimpleNamespace(
+                allowed=True, reason="", used_total=0, limit=100
+            ),
+        ),
+        patch("core.wa_usage.has_open_service_window", return_value=True),
+        patch(
+            "core.commerce_lifecycle.canary_guard.evaluate_and_audit",
+            return_value=SimpleNamespace(allowed=True, reason=""),
+        ),
+        patch(
+            "core.commerce_lifecycle.canary_guard.lifecycle_dispatch_owns_legacy_send",
+            return_value=False,
+        ),
+        patch(
+            "core.commerce_lifecycle.order_updates.evaluate_order_update_delivery",
+            return_value=(True, ""),
+        ),
+        patch(
+            "core.service_template_resolver.resolve_template_for_send",
+            return_value=template,
+        ),
+        patch(
+            "core.automation_engine._resolve_auto_coupon",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "core.automation_engine._resolve_store_name",
+            return_value="متجر تجريبي عام",
+        ),
+        patch(
+            "services.whatsapp_platform.service.provider_send_message",
+            new=provider_send,
+        ),
+        patch(
+            "core.automation_engine._execute_interactive_step",
+            new=interactive_send,
+        ),
+        patch("routers.conversations.record_outbound_message"),
+    ):
+        results = [
+            asyncio.run(_execute_action(db, 20, event, automation, {}))
+            for event in events
+        ]
+
+    assert [ok for ok, _info in results] == [True, True]
+    assert [info["wa_message_id"] for _ok, info in results] == [
+        "wamid.order.1001",
+        "wamid.order.1002",
+    ]
+    interactive_send.assert_not_awaited()
+    assert provider_send.await_count == 2
+
+    sent_payloads = [call.kwargs["payload"] for call in provider_send.await_args_list]
+    assert [payload["type"] for payload in sent_payloads] == ["template", "template"]
+    assert [payload["template"]["name"] for payload in sent_payloads] == [
+        template.name,
+        template.name,
+    ]
+
+    body_values = [
+        next(
+            component["parameters"]
+            for component in payload["template"]["components"]
+            if component.get("type") == "body"
+        )
+        for payload in sent_payloads
+    ]
+    assert [params[1]["text"] for params in body_values] == [
+        "ORD-1001",
+        "ORD-1002",
+    ]
+
+    button_values = [
+        next(
+            component["parameters"][0]["text"]
+            for component in payload["template"]["components"]
+            if component.get("sub_type") == "url"
+        )
+        for payload in sent_payloads
+    ]
+    assert button_values == ["orders/ORD-1001", "orders/ORD-1002"]

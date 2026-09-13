@@ -1145,9 +1145,12 @@ async def _execute_action(
     # automation keeps the legacy direct-to-template path. That boundary
     # is what lets us roll this out without churning unrelated flows.
     conversion_decision = None
-    is_cart_recovery = (
-        getattr(automation, "automation_type", None) == "abandoned_cart"
-    )
+    # Service ownership is the routing authority.  Automation type aliases
+    # such as ``cart_abandoned`` and ``abandoned_cart`` both resolve to the
+    # same cart-recovery service, while order notifications resolve to the
+    # transactional order-confirmation service.
+    is_cart_recovery = owned_service_key == "cart_recovery"
+    is_order_confirmation = owned_service_key == "order_confirmation"
     if is_cart_recovery:
         # ── P0 fast-path pre-send guard ──────────────────────────────────
         # If the order webhook (or a manual cancel) has already stamped
@@ -1245,12 +1248,18 @@ async def _execute_action(
          or config.get("ai_recovery_enabled"))
     )
 
-    # Cart recovery: always use template mode — no interactive/AI.
-    # Templates work regardless of service window state.
-    if is_cart_recovery:
+    # Cart recovery and order confirmations are template-owned services.
+    # In particular, an open customer-service window must never divert an
+    # order confirmation into the cart-recovery interactive renderer.
+    if is_cart_recovery or is_order_confirmation:
         from services.delivery_policy import DeliveryDecision  # noqa: PLC0415
+        _template_only_reason = (
+            "cart_recovery_template_only"
+            if is_cart_recovery
+            else "order_confirmation_template_only"
+        )
         decision = DeliveryDecision(
-            mode="template", reason="cart_recovery_template_only",
+            mode="template", reason=_template_only_reason,
             primary="template", fallback="template",
             used_fallback=False, window_open=window_open,
             ai_eligible=False,
@@ -1302,6 +1311,32 @@ async def _execute_action(
             active_step=active_step, automation_id=getattr(automation, "id", None),
         )
 
+    if delivery_mode == "interactive" and not is_cart_recovery:
+        # ``_execute_interactive_step`` is a cart-recovery renderer: its
+        # fallback body, buttons, IDs, coupon handling, and response actions
+        # all belong to that service.  A non-cart automation reaching it would
+        # leak abandoned-cart copy into an unrelated notification.  Fail over
+        # to the approved Meta template at this ownership boundary.
+        from services.delivery_policy import DeliveryDecision  # noqa: PLC0415
+        logger.warning(
+            "[AutoEngine] interactive route rejected for non-cart service "
+            "tenant=%s event=%s automation=%s service=%s; using template",
+            tenant_id,
+            getattr(event, "id", None),
+            getattr(automation, "id", None),
+            owned_service_key or "unknown",
+        )
+        decision = DeliveryDecision(
+            mode="template",
+            reason="interactive_reserved_for_cart_recovery",
+            primary=decision.primary,
+            fallback="template",
+            used_fallback=True,
+            window_open=window_open,
+            ai_eligible=ai_eligible,
+        )
+        delivery_mode = decision.mode
+
     if delivery_mode == "interactive":
         return await _execute_interactive_step(
             db, tenant_id=tenant_id, event=event, customer=customer,
@@ -1320,10 +1355,9 @@ async def _execute_action(
     #   3. Automation-wide template_id FK (legacy).
     #   4. Automation-wide template_name from config (legacy).
     #
-    # Path 1 respects the single-active invariant and the session-window
-    # rule: templates are only needed when the 24h window is CLOSED.
-    # (When the window is open the code path above already branched to
-    #  interactive/AI mode via resolve_delivery_mode.)
+    # Path 1 respects the single-active invariant.  Template-owned services
+    # (including order confirmation) stay on this path regardless of the
+    # customer-service-window state.
 
     template: Optional[Any] = None
 
@@ -3033,6 +3067,27 @@ async def _execute_interactive_step(
     interactive instead — the primary visual is one big "Use the
     discount now" button that opens the cart with the code attached.
     """
+    # This renderer is intentionally private to cart recovery.  Keep the
+    # ownership check inside the function as a second line of defence so a
+    # future caller cannot accidentally send cart copy/buttons for another
+    # service even if it bypasses the policy branch above.
+    if _derive_service_key(automation, active_step) != "cart_recovery":
+        logger.error(
+            "[AutoEngine] blocked non-cart interactive renderer call "
+            "tenant=%s event=%s automation=%s type=%s",
+            tenant_id,
+            getattr(event, "id", None),
+            getattr(automation, "id", None),
+            getattr(automation, "automation_type", None),
+        )
+        return False, {
+            "error": "interactive_owner_mismatch",
+            "error_code": "interactive_owner_mismatch",
+            "error_label": "مسار الرسالة التفاعلية لا يطابق خدمة الأتمتة",
+            "delivery_mode": "interactive",
+            "to": to_phone,
+        }
+
     from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
 
     deny_external_egress(
