@@ -8,6 +8,7 @@ Salla is source of truth for imported orders — never substitute catalog prices
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,9 +24,11 @@ SALLA_DEFAULT_TZ = "Asia/Riyadh"
 _COD_PAYMENT_METHODS = frozenset({
     "cod",
     "cash_on_delivery",
+    "cashondelivery",
     "cod_payment",
     "cash",
-    "الدفع عند الاستلام",
+    "الدفع_عند_الاستلام",
+    "عند_الاستلام",
 })
 _PAYMENT_STATE_VALUES = frozenset({
     "waiting",
@@ -36,6 +39,9 @@ _PAYMENT_STATE_VALUES = frozenset({
     "pending_payment",
     "awaiting_payment",
     "waiting_payment",
+    "بانتظار_الدفع",
+    "بإنتظار_الدفع",
+    "في_انتظار_الدفع",
     "paid",
     "authorized",
     "failed",
@@ -50,10 +56,73 @@ def _payment_scalar(value: Any) -> str:
             value.get("slug")
             or value.get("code")
             or value.get("method")
+            or value.get("type")
             or value.get("name")
+            or value.get("title")
+            or value.get("label")
             or ""
         )
     return str(value or "").strip().lower()
+
+
+def _payment_key(value: Any) -> str:
+    """Canonical comparison key for provider codes and human labels."""
+    text = _payment_scalar(value)
+    return re.sub(r"[\s\-/]+", "_", text).strip("_")
+
+
+def _is_cod_value(value: Any) -> bool:
+    key = _payment_key(value)
+    return (
+        key in _COD_PAYMENT_METHODS
+        or "الدفع_عند_الاستلام" in key
+        or "الدفع_عند_الإستلام" in key
+    )
+
+
+def _payment_action_values(raw: Dict[str, Any]) -> List[Any]:
+    actions = raw.get("payment_actions")
+    if not isinstance(actions, dict):
+        return []
+    values: List[Any] = []
+    for action in actions.values():
+        if not isinstance(action, dict):
+            continue
+        for key in (
+            "payment_method",
+            "payment_method_slug",
+            "payment_method_code",
+            "payment_method_label",
+            "method",
+            "gateway",
+        ):
+            if action.get(key) not in (None, ""):
+                values.append(action.get(key))
+    return values
+
+
+def _singleton_accepted_payment_method(raw: Dict[str, Any]) -> str:
+    """Return one unambiguous accepted method; never guess from a mixed list."""
+    accepted = raw.get("accepted_payment_methods")
+    if not isinstance(accepted, (list, tuple, set)):
+        return ""
+    methods = {
+        _payment_key(item): _payment_scalar(item)
+        for item in accepted
+        if _payment_key(item) and _payment_key(item) not in _PAYMENT_STATE_VALUES
+    }
+    return next(iter(methods.values())) if len(methods) == 1 else ""
+
+
+def _has_positive_cod_fee(raw: Dict[str, Any]) -> bool:
+    amounts = raw.get("amounts")
+    if not isinstance(amounts, dict) or "cash_on_delivery" not in amounts:
+        return False
+    amount = extract_salla_money_amount(amounts.get("cash_on_delivery"))
+    try:
+        return float(amount or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def extract_salla_payment_facts(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -64,28 +133,49 @@ def extract_salla_payment_facts(raw: Dict[str, Any]) -> Dict[str, Any]:
     that state as the method loses COD evidence and can confirm too early.
     """
     payment = raw.get("payment") if isinstance(raw.get("payment"), dict) else {}
-    top_level_method = _payment_scalar(raw.get("payment_method"))
-    nested_method = _payment_scalar(payment.get("method"))
+    explicit_values: List[Any] = [
+        raw.get("payment_method"),
+        raw.get("payment_method_slug"),
+        raw.get("payment_method_code"),
+        raw.get("payment_method_label"),
+        payment.get("method"),
+        payment.get("payment_method"),
+        payment.get("slug"),
+        payment.get("code"),
+        payment.get("type"),
+        payment.get("name"),
+        payment.get("label"),
+        payment.get("gateway"),
+        *_payment_action_values(raw),
+    ]
+    explicit_methods = [_payment_scalar(value) for value in explicit_values]
+    explicit_methods = [method for method in explicit_methods if method]
+    singleton_accepted = _singleton_accepted_payment_method(raw)
 
     payment_method = next(
         (
             candidate
-            for candidate in (top_level_method, nested_method)
-            if candidate and candidate not in _PAYMENT_STATE_VALUES
+            for candidate in explicit_methods
+            if _payment_key(candidate) not in _PAYMENT_STATE_VALUES
         ),
-        top_level_method or nested_method,
+        singleton_accepted or (explicit_methods[0] if explicit_methods else ""),
     )
-    is_cod = payment_method in _COD_PAYMENT_METHODS
+    is_cod = (
+        any(_is_cod_value(value) for value in explicit_values)
+        or _is_cod_value(singleton_accepted)
+        or _has_positive_cod_fee(raw)
+    )
     if is_cod:
         payment_method = "cod"
 
-    payment_status = _payment_scalar(
+    payment_status = _payment_key(
         payment.get("status") or raw.get("payment_status")
     )
     if not payment_status:
-        for candidate in (nested_method, top_level_method):
-            if candidate in _PAYMENT_STATE_VALUES:
-                payment_status = candidate
+        for candidate in explicit_methods:
+            key = _payment_key(candidate)
+            if key in _PAYMENT_STATE_VALUES:
+                payment_status = key
                 break
 
     return {
