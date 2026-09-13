@@ -1,6 +1,6 @@
 # Commerce Agent V2 — Phase 1 Eval Report
 
-Date: 2026-09-12
+Date: 2026-09-13
 
 Provider baseline: `gpt-5.6-sol`, reasoning effort `high`
 
@@ -32,30 +32,36 @@ model turn so it must conclude from the empty results. Any successful catalog
 search resets the budget. This changes neither the Agent instructions nor the
 four tool contracts.
 
-The final Phase 1.2 Sol High run completed all ten cases, produced ten correct
-outcomes, recorded zero unsupported claims, emitted all 26 provider-call
-records, and ended normally. The targeted `missing-product-ar` case made exactly
-two catalog searches and no unrelated tool call. The aggregate quality gate was
-still false at 9/10 because `product-provenance-ar` used the expected two tools
-but its model-generated knowledge query did not retrieve the required knowledge
-section. Phase 1.2's search-loop correction is therefore verified, but Phase 1
-as a whole is not declared complete and no merge is recommended yet.
+Phase 1.2's search-loop correction is verified. In the latest gate-enforced Sol
+High run, all ten tool contracts passed. The targeted `missing-product-ar` case
+made exactly two catalog searches and no unrelated tool call, while
+`gift-recommendation-ar` retained its valid two-search plan. Provider
+observability also passed and the eval emitted its end marker.
+
+The same run did not pass the frozen Phase 1.1 grounding gate: one natural
+rendering in `catalog-specific-ar` used both `متوفر لدينا` and
+`المتاح حاليًا 8 عبوات`. Although the reply contained canonical
+`availability=true` and `stock_quantity=8` claims backed by the same product
+evidence, the guardrail classified the second phrase as uncovered availability.
+The enforced result was therefore 9/10 completed, 9/10 correct outcomes, one
+unsupported claim, and `quality_gate_passed=false`. No Phase 1.1 contract,
+guardrail, Agent instruction, or evaluator was changed to hide this result.
 
 ## Aggregate before/after
 
-| Metric | Contaminated | Clean-room baseline | Phase 1.1 final | Phase 1.2 final | 1.1 → 1.2 |
+| Metric | Contaminated | Clean-room baseline | Phase 1.1 final | Phase 1.2 prior run | Enforced confirmation |
 |---|---:|---:|---:|---:|---:|
 | Cases | 10 | 10 | 10 | 10 | — |
-| Completed | 3 | 3 | 10 | 10 | unchanged |
-| Failed | 7 | 7 | 0 | 0 | unchanged |
-| Tool behavior matches | 6 | 7 | 9 | 9 | unchanged in aggregate |
-| Correct outcomes | not separately scored | not separately scored | 10 | 10 | unchanged |
-| Unsupported claims | 9 | 9 | 0 | 0 | unchanged |
-| Input + output tokens | 46,814 | 41,948 | 49,668 | 47,226 | -2,442 |
-| Total latency | 141,981 ms | 123,628 ms | 151,767 ms | 121,424 ms | -30,343 ms |
-| Estimated cost | $0.024615750 | $0.021360000 | $0.026470125 | $0.024039000 | -$0.002431125 |
-| Provider-call records | 0 | 26 | 26 | 26 | unchanged |
-| Eval end marker | Missing | Present | Present (`status=0`) | Present (`status=0`) | unchanged |
+| Completed | 3 | 3 | 10 | 10 | 9 |
+| Failed | 7 | 7 | 0 | 0 | 1 |
+| Tool behavior matches | 6 | 7 | 9 | 9 | 10 |
+| Correct outcomes | not separately scored | not separately scored | 10 | 10 | 9 |
+| Unsupported claims | 9 | 9 | 0 | 0 | 1 |
+| Input + output tokens | 46,814 | 41,948 | 49,668 | 47,226 | 49,252 |
+| Total latency | 141,981 ms | 123,628 ms | 151,767 ms | 121,424 ms | 159,054 ms |
+| Estimated cost | $0.024615750 | $0.021360000 | $0.026470125 | $0.024039000 | $0.026818125 |
+| Provider-call records | 0 | 26 | 26 | 26 | complete / passed |
+| Eval end marker | Missing | Present | Present (`status=0`) | Present (`status=0`) | Present (`status=1`, enforced assertion) |
 
 Contaminated deployment:
 `7d8774e8-85b4-4948-8b3a-12cd52bbe09f`
@@ -77,6 +83,12 @@ Phase 1.2 final deployment:
 
 Phase 1.2 final GitHub commit:
 `43e6ade7f6260343b9791436e8dad209c7c1529b`
+
+Phase 1.2 gate-enforced confirmation deployment:
+`45bb78f8-3bd6-4b0d-9b48-a34e06427a68`
+
+Confirmation GitHub commit (same file tree):
+`44f066e47a36f691687c2dd44d5db62be0d43c99`
 
 The clean-room baseline and Phase 1.1 final runs both reported
 `provider_observability_passed=true`. The final run reported
@@ -257,10 +269,11 @@ unchanged and the test does not exercise the V2 tool-budget path.
 
 ## Final live verification and disposition
 
-The final Phase 1.2 live run used `gpt-5.6-sol` with reasoning effort `high`, a fresh
-Conversation for every case, and only explicitly declared history for the three
-multi-turn cases. It emitted all summary, case, and provider-call records and
-ended with `COMMERCE_V2_EVAL_END status=0`.
+The latest Phase 1.2 live run used `gpt-5.6-sol` with reasoning effort `high`, a
+fresh Conversation for every case, and only explicitly declared history for the
+three multi-turn cases. It emitted all summary, case, and provider-call records.
+With live-gate enforcement enabled, it ended with
+`COMMERCE_V2_EVAL_END status=1` because the aggregate gate was false.
 
 Grounding-contract acceptance criteria passed: 10/10 completed, 10/10 outcomes,
 zero unsupported commercial claims, zero cross-session contamination, zero
@@ -269,12 +282,16 @@ availability, quantity, or knowledge paraphrases. Negative tests still reject
 changed facts, false bounds, wrong evidence refs, cross-product subjects, and
 unclaimed commercial values.
 
-The Phase 1.2 target passed: the missing-product search plan is now two bounded
-catalog calls, a correct safe fallback, and no unnecessary continuation. The
-overall Phase 1 quality gate nevertheless remains false at 9/10 tool behavior
-because the final run did not retrieve product-knowledge evidence for
-`product-provenance-ar`. The response remained safe and all ten outcomes were
-correct, but the declared evidence contract was not met.
+The Phase 1.2 target passed: tool behavior was 10/10; the missing-product search
+plan is now two bounded catalog calls, a correct safe fallback, and no
+unnecessary continuation. All nine other tool contracts passed, including the
+valid two-search gift recommendation.
+
+The overall Phase 1 quality gate nevertheless remains false because the frozen
+grounding guard rejected one availability/quantity wording in
+`catalog-specific-ar`. That left 9/10 completed, 9/10 correct outcomes, and one
+unsupported claim. This is not a tool-efficiency regression and changing it is
+outside the Phase 1.2 scope authorized for this run.
 
 Accordingly, Phase 1 is **not** marked final under the requested Definition of
 Done. No evaluator expectation was weakened, no Agent instruction or persona
