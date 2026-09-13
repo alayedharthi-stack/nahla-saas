@@ -265,23 +265,11 @@ def _fetch_tenant_orders_for_customer(
     except Exception:  # noqa: BLE001
         return []
 
-    keys = list(_phone_lookup_keys(phone))
-    clauses: List[Any] = []
-    if customer_id:
-        try:
-            cid = int(customer_id)
-        except (TypeError, ValueError):
-            cid = 0
-        if cid:
-            clauses.append(Order.customer_id == cid)
-    if keys:
-        clauses.append(
-            or_(
-                Order.customer_info["phone"].as_string().in_(keys),
-                Order.customer_info["mobile"].as_string().in_(keys),
-                Order.customer_info["shipping_phone"].as_string().in_(keys),
-            )
-        )
+    clauses = _customer_order_identity_clauses(
+        Order,
+        phone=phone,
+        customer_id=customer_id,
+    )
     if not clauses:
         return []
     return (
@@ -290,6 +278,73 @@ def _fetch_tenant_orders_for_customer(
         .order_by(Order.id.desc())
         .limit(max(int(limit or 50), 10))
         .all()
+    )
+
+
+def _customer_order_identity_clauses(
+    order_model: Any,
+    *,
+    phone: str,
+    customer_id: Optional[int],
+) -> List[Any]:
+    keys = list(_phone_lookup_keys(phone))
+    clauses: List[Any] = []
+    if customer_id:
+        try:
+            cid = int(customer_id)
+        except (TypeError, ValueError):
+            cid = 0
+        if cid:
+            clauses.append(order_model.customer_id == cid)
+    if keys:
+        clauses.append(
+            or_(
+                order_model.customer_info["phone"].as_string().in_(keys),
+                order_model.customer_info["mobile"].as_string().in_(keys),
+                order_model.customer_info["shipping_phone"].as_string().in_(keys),
+            )
+        )
+    return clauses
+
+
+def _fetch_explicit_tenant_order_for_customer(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone: str,
+    customer_id: Optional[int],
+    order_number: Optional[str],
+) -> Optional[Any]:
+    """Find an exact customer-scoped reference without a recent-order window."""
+    needle = str(order_number or "").strip().lstrip("#")
+    if db is None or not needle:
+        return None
+    try:
+        from models import Order  # noqa: PLC0415
+    except Exception:  # noqa: silent-ok — optional model import; no resolver scope exists
+        return None
+    identity_clauses = _customer_order_identity_clauses(
+        Order,
+        phone=phone,
+        customer_id=customer_id,
+    )
+    if not identity_clauses:
+        return None
+    references: List[Any] = [
+        Order.external_id == needle,
+        Order.external_order_number.in_((needle, f"#{needle}")),
+    ]
+    if needle.isdigit():
+        references.append(Order.id == int(needle))
+    return (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == int(tenant_id),
+            or_(*identity_clauses),
+            or_(*references),
+        )
+        .order_by(Order.id.desc())
+        .first()
     )
 
 
@@ -469,11 +524,18 @@ def resolve_customer_order_context(
         phone=resolved_phone,
         customer_id=customer_id,
     )
+    explicit_direct_row = _fetch_explicit_tenant_order_for_customer(
+        db,
+        tenant_id=int(tenant_id),
+        phone=resolved_phone,
+        customer_id=customer_id,
+        order_number=order_number,
+    )
 
     # Merge draft row into customer set (conversation may be only link).
     merged_rows: List[Any] = []
     seen_ids: Set[int] = set()
-    for row in [draft_row, *customer_rows]:
+    for row in [draft_row, explicit_direct_row, *customer_rows]:
         if row is None:
             continue
         oid = int(getattr(row, "id", 0) or 0)

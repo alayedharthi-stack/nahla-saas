@@ -18,13 +18,15 @@ class CommerceContextError(RuntimeError):
 
 
 class CommerceCapabilities(BaseModel):
-    """Phase-1 capabilities. No mutation or outbound capability exists."""
+    """Read-only Commerce Agent capabilities. No mutation or outbound capability exists."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     read_catalog: bool = True
     read_merchant_knowledge: bool = True
     read_product_knowledge: bool = True
+    read_orders: bool = True
+    read_shipments: bool = True
     write_commerce: bool = False
     outbound_send: bool = False
 
@@ -54,6 +56,7 @@ class CommerceAgentContext(BaseModel):
     _db: Any = PrivateAttr()
     _tenant_context: TenantContext = PrivateAttr()
     _allowed_product_ids: set[int] = PrivateAttr(default_factory=set)
+    _allowed_order_ids: set[int] = PrivateAttr(default_factory=set)
     _evidence: dict[str, EvidenceRecord] = PrivateAttr(default_factory=dict)
     _consecutive_catalog_misses: int = PrivateAttr(default=0)
     _run_user_input: str = PrivateAttr(default="")
@@ -288,6 +291,14 @@ class CommerceAgentContext(BaseModel):
     def require_authorized_product(self, product_id: int) -> None:
         if int(product_id) not in self._allowed_product_ids:
             raise TenantIsolationViolation("product_id_not_discovered_in_this_run")
+
+    def authorize_orders(self, order_ids: list[int]) -> None:
+        """Authorize only customer-scoped orders discovered in this trusted run."""
+        self._allowed_order_ids.update(int(value) for value in order_ids if int(value) > 0)
+
+    def require_authorized_order(self, order_id: int) -> None:
+        if int(order_id) not in self._allowed_order_ids:
+            raise TenantIsolationViolation("order_id_not_discovered_in_this_run")
 
     def register_evidence(self, records: list[EvidenceRecord]) -> None:
         for record in records:

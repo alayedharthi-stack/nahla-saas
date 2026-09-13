@@ -1,0 +1,136 @@
+[
+  {
+    "id": "latest-order-status-ar",
+    "message": "وين طلبي؟",
+    "turn_mode": "single",
+    "identity": "customer_with_orders",
+    "replay_plan": ["resolve_customer_order"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order"]],
+      "required_evidence_sources": ["order_summary"],
+      "expected_outcome": "grounded_reply"
+    },
+    "expected_fact_kinds": ["order_reference", "order_status_label"]
+  },
+  {
+    "id": "explicit-order-status-ar",
+    "message": "وش حالة الطلب ORD-1001؟",
+    "turn_mode": "single",
+    "identity": "customer_with_orders",
+    "replay_plan": ["resolve_customer_order"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order"]],
+      "required_evidence_sources": ["order_summary"],
+      "expected_outcome": "grounded_reply"
+    },
+    "expected_fact_kinds": ["order_reference", "order_status_label"]
+  },
+  {
+    "id": "order-total-ar",
+    "message": "كم قيمة طلبي؟",
+    "turn_mode": "single",
+    "identity": "customer_with_orders",
+    "replay_plan": ["resolve_customer_order", "get_order_details"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order", "get_order_details"]],
+      "required_evidence_sources": ["order_summary", "order_details"],
+      "expected_outcome": "grounded_reply"
+    },
+    "expected_fact_kinds": ["order_total", "order_currency"]
+  },
+  {
+    "id": "order-items-ar",
+    "message": "وش الأشياء اللي طلبتها؟",
+    "turn_mode": "single",
+    "identity": "customer_with_orders",
+    "replay_plan": ["resolve_customer_order", "get_order_details"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order", "get_order_details"]],
+      "required_evidence_sources": ["order_summary", "order_details"],
+      "expected_outcome": "grounded_reply"
+    },
+    "expected_fact_kinds": ["order_item_name", "order_item_quantity"]
+  },
+  {
+    "id": "shipment-status-ar",
+    "message": "وش حالة شحنة الطلب ORD-1001؟",
+    "turn_mode": "single",
+    "identity": "customer_with_orders",
+    "replay_plan": ["resolve_customer_order", "get_order_shipment"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order", "get_order_shipment"]],
+      "required_evidence_sources": ["order_summary", "order_shipment"],
+      "expected_outcome": "grounded_reply"
+    },
+    "expected_fact_kinds": ["shipment_status_label"]
+  },
+  {
+    "id": "tracking-number-and-url-ar",
+    "message": "أرسل رقم ورابط تتبع الطلب ORD-1001",
+    "turn_mode": "single",
+    "identity": "customer_with_orders",
+    "replay_plan": ["resolve_customer_order", "get_order_shipment"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order", "get_order_shipment"]],
+      "required_evidence_sources": ["order_summary", "order_shipment"],
+      "expected_outcome": "grounded_reply"
+    },
+    "expected_fact_kinds": ["tracking_number", "tracking_url"]
+  },
+  {
+    "id": "carrier-followup-ar",
+    "message": "طيب وش شركة الشحن؟",
+    "turn_mode": "multi",
+    "identity": "customer_with_orders",
+    "history": [
+      {"direction": "inbound", "body": "وين طلبي رقم ORD-1001؟"},
+      {"direction": "outbound", "body": "طلبك ORD-1001 تم شحنه."}
+    ],
+    "replay_plan": ["resolve_customer_order", "get_order_shipment"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order", "get_order_shipment"]],
+      "required_evidence_sources": ["order_summary", "order_shipment"],
+      "expected_outcome": "grounded_reply"
+    },
+    "expected_fact_kinds": ["carrier"]
+  },
+  {
+    "id": "no-shipment-yet-ar",
+    "message": "وش رقم تتبع الطلب ORD-2002؟",
+    "turn_mode": "single",
+    "identity": "customer_with_orders",
+    "replay_plan": ["resolve_customer_order", "get_order_shipment"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order", "get_order_shipment"]],
+      "required_evidence_sources": ["order_summary"],
+      "expected_outcome": "safe_fallback"
+    },
+    "forbidden_fact_kinds": ["carrier", "tracking_number", "tracking_url", "shipment_status"]
+  },
+  {
+    "id": "explicit-order-not-found-ar",
+    "message": "وش صار على الطلب رقم ORD-9999؟",
+    "turn_mode": "single",
+    "identity": "customer_with_orders",
+    "replay_plan": ["resolve_customer_order"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order"]],
+      "required_evidence_sources": [],
+      "expected_outcome": "safe_fallback"
+    },
+    "forbidden_fact_kinds": ["order_reference", "order_status", "order_status_label"]
+  },
+  {
+    "id": "no-orders-ar",
+    "message": "وين طلبي؟",
+    "turn_mode": "single",
+    "identity": "customer_without_orders",
+    "replay_plan": ["resolve_customer_order"],
+    "tool_contract": {
+      "acceptable_plans": [["resolve_customer_order"]],
+      "required_evidence_sources": [],
+      "expected_outcome": "safe_fallback"
+    },
+    "forbidden_fact_kinds": ["order_reference", "order_status", "order_total", "tracking_number"]
+  }
+]

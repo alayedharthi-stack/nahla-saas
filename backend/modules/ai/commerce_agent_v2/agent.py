@@ -1,4 +1,4 @@
-"""Single Commerce Agent definition for the Phase-1 vertical slice."""
+"""Single Commerce Agent definition for the read-only V2 vertical slices."""
 from __future__ import annotations
 
 from typing import Any
@@ -11,7 +11,7 @@ from modules.ai.commerce_agent_v2.guardrails import (
     trusted_read_only_scope_guardrail,
 )
 from modules.ai.commerce_agent_v2.output import CommerceReply
-from modules.ai.commerce_agent_v2.tools import PHASE1_TOOLS
+from modules.ai.commerce_agent_v2.tools import COMMERCE_AGENT_TOOLS
 
 
 COMMERCE_AGENT_INSTRUCTIONS = """
@@ -35,6 +35,21 @@ COMMERCE_AGENT_INSTRUCTIONS = """
 - لا تنفذ إرسالًا أو كتابة أو طلبًا أو دفعًا أو إلغاءً أو تحويلًا لموظف. هذه المرحلة
   للقراءة والتقييم في shadow mode فقط.
 
+قواعد الطلبات والشحن:
+- عند سؤال العميل عن طلبه استخدم resolve_customer_order أولًا. مرّر رقم الطلب فقط
+  عندما ذكره العميل صراحة في الرسالة أو في سياق المحادثة المعزول. لا تمرّر tenant_id
+  أو customer_id أو رقم الهاتف؛ الهوية تأتي من السياق الموثوق وحده.
+- استخدم get_order_details للقيمة أو محتويات الطلب، وget_order_shipment لحالة الشحنة
+  أو شركة الشحن أو رقم ورابط التتبع. لا تستخدم order_id إلا بعد أن تعيده
+  resolve_customer_order في التشغيل الحالي.
+- لا تخلط حقائق طلبين. اربط كل FactClaim للطلبات والشحن بـsubject_order_id نفسه
+  وبـevidence_ref الذي أعادته الأداة.
+- order_id داخلي للتفويض بين الأدوات وليس رقم الطلب المعروض للعميل. لا تعرضه كرقم
+  طلب ما لم يوجد order_reference موثق.
+- عند عدم وجود الطلب المحدد لا تنتقل إلى طلب آخر. وعند غياب الشحنة أو التتبع أو
+  الرابط أو الناقل اذكر فقط أن المعلومة المطلوبة غير متوفرة واضبط
+  safe_fallback_reason دون تخمين.
+
 أعد CommerceReply المنظم فقط. text هو الرد الطبيعي المقترح، وبقية الحقول تربطه
 بالدليل والمنتج والوسائط وواجهة المستخدم دون أي أوامر نصية داخل الرد.
 """.strip()
@@ -45,7 +60,7 @@ def build_commerce_agent(
     model: str | Any,
     reasoning_effort: str = "high",
 ) -> Agent[CommerceAgentContext]:
-    """Build exactly one agent; Phase 1 has no classifiers or handoffs."""
+    """Build exactly one agent; V2 has no classifiers or handoffs."""
     return Agent[CommerceAgentContext](
         name="Nahlah Commerce Agent V2",
         instructions=COMMERCE_AGENT_INSTRUCTIONS,
@@ -54,7 +69,7 @@ def build_commerce_agent(
             reasoning={"effort": reasoning_effort},
             parallel_tool_calls=False,
         ),
-        tools=list(PHASE1_TOOLS),
+        tools=list(COMMERCE_AGENT_TOOLS),
         handoffs=[],
         input_guardrails=[trusted_read_only_scope_guardrail],
         output_guardrails=[grounded_output_guardrail],

@@ -337,6 +337,9 @@ async def test_tool_schemas_hide_tenant_and_registry_is_read_only() -> None:
         "get_product_details",
         "search_merchant_knowledge",
         "search_product_knowledge",
+        "resolve_customer_order",
+        "get_order_details",
+        "get_order_shipment",
     ]
     assert not agent.handoffs
     for tool in PHASE1_TOOLS:
