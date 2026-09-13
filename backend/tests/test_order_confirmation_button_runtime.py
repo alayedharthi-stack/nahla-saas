@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,7 @@ from core.automation_engine import (
     _execute_action,
     _resolve_dynamic_url_button_suffix,
 )
+from core.send_governor import check as governor_check
 
 
 def _resolve(template_url: str, payload: dict) -> str:
@@ -57,6 +59,60 @@ def test_unresolvable_dynamic_button_never_returns_whitespace():
 
     assert suffix == ""
     assert not suffix.isspace()
+
+
+def test_new_order_confirmation_bypasses_customer_frequency_limits():
+    """A distinct order must receive confirmation despite an earlier order."""
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+        id=65,
+        tenant_id=1,
+        extra_metadata={},
+    )
+
+    with (
+        patch("services.unsubscribe.is_silenced", return_value=False),
+        patch(
+            "core.send_governor._last_sent_for_service",
+            return_value=datetime(2026, 9, 13, 7, 55),
+        ) as last_service,
+        patch("core.send_governor._last_sent_any_service") as last_any,
+        patch("core.send_governor._count_sent") as count_sent,
+    ):
+        decision = governor_check(
+            db,
+            tenant_id=1,
+            customer_id=65,
+            automation_type="order_notifications",
+            order_id=744953925,
+        )
+
+    assert decision.allowed is True
+    assert decision.reason_code == "allowed"
+    last_service.assert_not_called()
+    last_any.assert_not_called()
+    count_sent.assert_not_called()
+
+
+def test_order_confirmation_still_respects_unsubscribe():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+        id=65,
+        tenant_id=1,
+        extra_metadata={"is_unsubscribed": True},
+    )
+
+    with patch("services.unsubscribe.is_silenced", return_value=True):
+        decision = governor_check(
+            db,
+            tenant_id=1,
+            customer_id=65,
+            automation_type="order_notifications",
+            order_id=744953925,
+        )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "blocked_by_unsubscribe"
 
 
 def test_production_order_event_sends_non_empty_meta_button_parameter():
