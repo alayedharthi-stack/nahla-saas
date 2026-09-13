@@ -39,15 +39,23 @@ quantity claims have the same evidence ref, product subject, value, and state.
 Wrong quantities, opposite availability states, and cross-product bindings
 remain rejected.
 
-The post-fix Sol High run completed all ten cases with ten correct outcomes and
-zero unsupported claims. The false-positive case passed. Provider observability
-passed with 27 provider-call records, and the eval end marker was emitted. The
-aggregate quality gate nevertheless remained false at 8/10 tool behavior
-because Sol added an unnecessary merchant-knowledge lookup in `linked-kb-ar`
-and `missing-fact-ar`. Both the targeted `missing-product-ar` and the valid
-two-search `gift-recommendation-ar` passed their tool contracts. No Agent,
-persona, tool, session, tenant, or evaluator change was made for the new routing
-variance.
+The remaining knowledge-routing variance was then corrected at tool
+availability. `search_merchant_knowledge` is visible only when the current turn
+has a tenant-scoped, AI-visible global knowledge candidate with conservative
+lexical topic overlap. Product-linked sections do not qualify. Retrieval errors
+fail open, so an operational failure is never treated as evidence absence. The
+decision is cached only in private run state and is not persisted, traced as raw
+text, or exposed to the model.
+
+The final Sol High run completed all ten cases with ten correct outcomes, ten
+matching tool behaviors, and zero unsupported claims. Provider observability
+passed with 26 provider-call records. The eval emitted
+`COMMERCE_V2_EVAL_END status=0`, and `quality_gate_passed=true`. Direct global
+policy lookup in `global-kb-ar` remained unchanged, while tests also prove that
+merchant knowledge stays available when one turn genuinely combines a product
+reference with a global policy such as gift wrapping. Phase 1 therefore meets
+its Definition of Done and is complete pending review; it has not been merged
+or deployed to production.
 
 ## Historical aggregate before narrow false-positive fix
 
@@ -101,7 +109,16 @@ Post-fix full-eval deployment:
 Post-fix eval source commit (same code tree):
 `324427ae5f5b70430050664206aa16fac66597ed`
 
-## Post-fix full-eval result
+Knowledge-routing fix GitHub commit:
+`b7fbc98e8b7cbe4cd3c3de332e6d35d659e7ed33`
+
+Final Phase 1 live-eval deployment:
+`75b9f397-1c39-4f16-99d0-3745fbe098ef`
+
+Final eval source commit (same code tree):
+`6c581251fb036a7daf8a00242977096871bb31fa`
+
+## Final Phase 1 full-eval result
 
 | Metric | Result |
 |---|---:|
@@ -109,21 +126,21 @@ Post-fix eval source commit (same code tree):
 | Completed | 10 |
 | Correct outcomes | 10 |
 | Unsupported claims | 0 |
-| Tool behavior matches | 8 |
+| Tool behavior matches | 10 |
 | Provider observability | Passed |
-| Provider-call records | 27 |
-| Input + output tokens | 50,612 |
-| Total latency | 136,543 ms |
-| Estimated cost | $0.026460750 |
-| Eval end marker | Present (`status=1`, enforced quality-gate assertion) |
-| Quality gate | False |
+| Provider-call records | 26 |
+| Input tokens | 40,742 |
+| Output tokens | 6,332 |
+| Input + output tokens | 47,074 |
+| Total latency | 169,256 ms |
+| Estimated cost | $0.024776250 |
+| Eval end marker | Present (`status=0`) |
+| Quality gate | **True** |
 
-The clean-room baseline and Phase 1.1 final runs both reported
-`provider_observability_passed=true`. The final run reported
-`quality_gate_passed=false` in both final runs because tool behavior was 9/10,
-although the failing case changed after the targeted search loop was fixed. All
-26 Phase 1.2 final model responses had a provider response ID, request ID,
-per-call latency, and non-cumulative token usage.
+The clean-room baseline, Phase 1.1, and final Phase 1.2 runs all reported
+`provider_observability_passed=true`. All 26 final model responses had a
+provider response ID, request ID, per-call latency, and non-cumulative token
+usage.
 
 ## Case-by-case comparison
 
@@ -297,9 +314,50 @@ the accepted natural phrasing plus wrong quantity, opposite availability, and
 cross-product evidence rejection. The canonical evidence and FactClaim schemas
 are unchanged.
 
-## Local verification after Phase 1.2
+## Phase 1.2 knowledge-tool routing efficiency
 
-- Phase 1 suite: `57 passed, 1 skipped` (the skip is the opt-in live eval).
+The preceding full trace showed two successful but wasteful global-knowledge
+calls:
+
+- `linked-kb-ar` called `search_merchant_knowledge` first with
+  `مصدر عسل الطلح`. It returned no merchant evidence because the matching
+  source fact was correctly product-linked. Sol then used the required catalog
+  and product-knowledge tools.
+- `missing-fact-ar` used catalog and product knowledge first, found no harvest
+  year, then broadened to merchant knowledge. That final call also returned no
+  evidence and did not change the correct safe fallback.
+
+The general cause was that merchant knowledge shared the catalog-miss
+availability predicate and otherwise remained visible for every turn. Nothing
+in runtime availability established that a global merchant fact relevant to the
+turn existed, so Sol could use the tool as a speculative first lookup or a
+last-chance fallback.
+
+The correction binds the original turn text to private, ephemeral run context
+and performs a conservative evidence probe through the existing tenant-safe KB
+retrieval. The probe considers only global, AI-visible sections; product-linked
+sections are already excluded by the existing retrieval contract. It compares
+normalized topic tokens instead of matching one hardcoded phrase. If no global
+section can add relevant evidence, only `search_merchant_knowledge` is hidden.
+If relevant global evidence exists, the tool remains available before and after
+product lookup. An operational retrieval error fails open.
+
+This is not an absolute “merchant after product” ban. Regression tests prove:
+
+- `وش مصدر عسل الطلح؟` does not expose global merchant lookup when only linked
+  product evidence exists;
+- `وش سنة قطف هذا العسل؟` does not broaden to an irrelevant global lookup;
+- `هل عندكم تغليف هدايا؟` keeps direct merchant-knowledge access;
+- `هل هذا المنتج يشمله التغليف المجاني؟` keeps merchant knowledge available
+  alongside product evidence because a relevant global wrapping policy exists.
+
+No Agent instructions, persona, tool signature, grounding contract, FactClaim,
+guardrail, Session, tenant, clean-room, evaluator, or customer-facing text was
+changed.
+
+## Final local verification
+
+- Phase 1 suite: `59 passed, 1 skipped` (the skip is the opt-in live eval).
 - Offline replay: `10/10` canonical scripted plans, each satisfying its tool/evidence contract.
 - V1 provider-boundary replay: `2 passed`.
 - Intelligence non-interference checks: `52 passed`.
@@ -314,11 +372,11 @@ unchanged and the test does not exercise the V2 tool-budget path.
 
 ## Final live verification and disposition
 
-The post-fix live run used `gpt-5.6-sol` with reasoning effort `high`, a
+The final live run used `gpt-5.6-sol` with reasoning effort `high`, a
 fresh Conversation for every case, and only explicitly declared history for the
 three multi-turn cases. It emitted all summary, case, and provider-call records.
 With live-gate enforcement enabled, it ended with
-`COMMERCE_V2_EVAL_END status=1` because the aggregate gate was false.
+`COMMERCE_V2_EVAL_END status=0` because the aggregate gate passed.
 
 Grounding-contract acceptance criteria passed: 10/10 completed, 10/10 outcomes,
 zero unsupported commercial claims, zero cross-session contamination, zero
@@ -327,21 +385,24 @@ availability, quantity, or knowledge paraphrases. Negative tests still reject
 changed facts, false bounds, wrong evidence refs, cross-product subjects, and
 unclaimed commercial values.
 
-The narrow grounding fix passed its target: 10/10 completed, 10/10 correct
-outcomes, and zero unsupported claims. The missing-product plan remained two
-bounded catalog calls with a safe fallback, and the gift recommendation retained
-its acceptable two-search plan.
+The final case plans were:
 
-The overall Phase 1 quality gate nevertheless remains false at 8/10 tool
-behavior. `linked-kb-ar` called merchant knowledge before the required catalog
-and product-knowledge tools; `missing-fact-ar` called merchant knowledge after
-product knowledge returned no evidence. Both final outcomes were correct and
-safe, but the unnecessary calls violate their frozen tool contracts. No rerun
-was used to select a luckier sample, and those routing changes were not folded
-into the separately authorized false-positive correction.
+| Case | Final tool plan | Result |
+|---|---|---|
+| `catalog-browse-ar` | `search_products` | Pass |
+| `catalog-specific-ar` | `search_products` | Pass |
+| `price-followup-ar` | `search_products` | Pass |
+| `product-provenance-ar` | `search_products → search_product_knowledge` | Pass |
+| `gift-recommendation-ar` | `search_products → search_products` | Pass |
+| `budget-recommendation-ar` | `search_products → search_products` | Pass |
+| `global-kb-ar` | `search_merchant_knowledge` | Pass |
+| `linked-kb-ar` | `search_products → search_product_knowledge` | Pass |
+| `missing-product-ar` | `search_products → search_products` | Pass |
+| `missing-fact-ar` | `search_products → search_product_knowledge` | Pass |
 
-Accordingly, Phase 1 is **not** marked final under the requested Definition of
-Done. No evaluator expectation was weakened, no Agent instruction or persona
-was changed, and no merge or production deployment was performed. Further work
-would require a separately authorized tool-routing stabilization rather than a
-grounding change.
+Phase 1 is **complete pending review**: 10/10 completed, 10/10 correct outcomes,
+10/10 tool behavior, zero unsupported claims, provider observability passed,
+and `quality_gate_passed=true`. `global-kb-ar` had no regression, and the mixed
+product-plus-policy availability regression test passed. No evaluator
+expectation was weakened, no run was cherry-picked, and no merge or production
+deployment was performed.
