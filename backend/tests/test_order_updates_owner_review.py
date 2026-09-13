@@ -281,7 +281,7 @@ class TestCodSingleOwner:
             tenant_id=9,
             external_id="salla-771",
             external_order_number="S-771",
-            status="payment_pending",
+            status="in_progress",
             customer_info={"name": "نورة", "phone": "+966500111222"},
             customer_name="نورة",
             extra_metadata={"payment_method": "cod"},
@@ -440,7 +440,7 @@ class TestCodSingleOwner:
             tenant_id=9,
             external_id="salla-77",
             external_order_number="S-77",
-            status="payment_pending",
+            status="in_progress",
             customer_info={"name": "نورة", "phone": "+966500111222"},
             extra_metadata={
                 "payment_method": "cod",
@@ -495,7 +495,7 @@ class TestCodSingleOwner:
             id=78,
             tenant_id=9,
             external_id="salla-78",
-            status="payment_pending",
+            status="in_progress",
             customer_info={"name": "نورة", "phone": "+966500111222"},
             extra_metadata={
                 "payment_method": "cod",
@@ -539,7 +539,7 @@ class TestCodSingleOwner:
             )
         assert decision == "confirm_failed"
         assert affected is order
-        assert order.status == "payment_pending"
+        assert order.status == "in_progress"
         assert "cod_confirmed_at" not in order.extra_metadata
         assert order.extra_metadata["cod_confirm_store_update_failed_at"]
 

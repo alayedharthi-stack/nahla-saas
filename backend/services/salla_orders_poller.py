@@ -461,29 +461,36 @@ def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
         pm     = str(meta.get("payment_method") or "").lower()
         status = str(order.status or "").lower()
         ext_id = order.external_id
+        from store_adapters.salla_lifecycle import (  # noqa: PLC0415
+            salla_cod_requires_customer_confirmation,
+        )
+        cod_awaiting_customer = salla_cod_requires_customer_confirmation(
+            status, meta
+        )
 
-        emit_automation_event(
-            db, tenant_id,
-            AutomationTrigger.ORDER_NOTIFICATIONS.value,
-            payload={
-                "external_id":           ext_id,
-                "order_id":              order.id,
-                "order_internal_id":     order.id,
-                "status":                status,
-                "total":                 order.total,
-                "order_number":          order.external_order_number or ext_id,
-                "external_order_number": order.external_order_number,
-                "checkout_url":          order.checkout_url or "",
-                "payment_url":           order.checkout_url or "",
-                "payment_method":        pm,
-                "source":                "salla_orders_poller",
-            },
-            commit=False,
-        )
-        logger.info(
-            "[Salla Orders Poller] ORDER_NOTIFICATIONS emitted tenant_id=%s order_id=%s",
-            tenant_id, order.id,
-        )
+        if not cod_awaiting_customer:
+            emit_automation_event(
+                db, tenant_id,
+                AutomationTrigger.ORDER_NOTIFICATIONS.value,
+                payload={
+                    "external_id":           ext_id,
+                    "order_id":              order.id,
+                    "order_internal_id":     order.id,
+                    "status":                status,
+                    "total":                 order.total,
+                    "order_number":          order.external_order_number or ext_id,
+                    "external_order_number": order.external_order_number,
+                    "checkout_url":          order.checkout_url or "",
+                    "payment_url":           order.checkout_url or "",
+                    "payment_method":        pm,
+                    "source":                "salla_orders_poller",
+                },
+                commit=False,
+            )
+            logger.info(
+                "[Salla Orders Poller] ORDER_NOTIFICATIONS emitted tenant_id=%s order_id=%s",
+                tenant_id, order.id,
+            )
 
         cod_methods = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
         is_cod = bool(pm and any(pm == m or m in pm for m in cod_methods))

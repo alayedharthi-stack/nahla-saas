@@ -318,7 +318,7 @@ class TestSallaMapping:
             },
         ) == BusinessIntent.ORDER_PREPARING
 
-    def test_cod_order_created_in_progress_is_order_confirmed_not_cod_prompt(self):
+    def test_cod_order_created_in_progress_waits_for_customer_confirmation(self):
         created = {
             "lifecycle_observation": "live_webhook",
             "lifecycle_source_event": "order.created",
@@ -326,10 +326,7 @@ class TestSallaMapping:
         }
         assert normalize_salla_lifecycle_business_intent(
             None, "in_progress", created
-        ) == BusinessIntent.ORDER_CONFIRMED
-        assert normalize_salla_lifecycle_business_intent(
-            None, "in_progress", created
-        ) != BusinessIntent.COD_CONFIRMATION
+        ) == BusinessIntent.COD_CONFIRMATION
 
     def test_out_for_delivery_and_delivered_and_cancelled_refunded(self):
         assert normalize_salla_lifecycle_business_intent(

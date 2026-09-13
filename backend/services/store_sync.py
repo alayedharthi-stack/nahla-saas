@@ -914,6 +914,7 @@ def _normalise_order(raw: Any) -> Dict:
     from core.salla_order_fidelity import (  # noqa: PLC0415
         apply_salla_order_normalisation,
         extract_salla_grand_total,
+        extract_salla_payment_facts,
         looks_like_salla_order,
     )
 
@@ -948,14 +949,7 @@ def _normalise_order(raw: Any) -> Dict:
     if customer_name and isinstance(customer_info, dict) and not customer_info.get("name"):
         customer_info["name"] = customer_name
 
-    # Extract payment method so COD orders can be detected later.
-    # Salla sends it under payment.method (webhook) or payment_method (some endpoints).
-    _payment_block = raw.get("payment") or {}
-    payment_method = str(
-        (_payment_block.get("method") if isinstance(_payment_block, dict) else None)
-        or raw.get("payment_method")
-        or ""
-    ).strip().lower()
+    payment_facts = extract_salla_payment_facts(raw)
 
     result = {
         "external_id":           external_id,
@@ -970,7 +964,9 @@ def _normalise_order(raw: Any) -> Dict:
         "is_abandoned":          raw.get("is_abandoned", raw.get("abandoned", False)),
         "source":                str(raw.get("source") or "").strip().lower() or None,
         "created_at":            order_dt.isoformat() if order_dt else raw.get("created_at"),
-        "payment_method":        payment_method,
+        "payment_method":        payment_facts["payment_method"],
+        "payment_status":        payment_facts["payment_status"],
+        "is_cod":                payment_facts["is_cod"],
     }
     return apply_salla_order_normalisation(raw, result)
 
@@ -1159,7 +1155,7 @@ def _merge_order_extra_metadata(
 ) -> Dict[str, Any]:
     """Merge Salla fidelity metadata without clobbering merchant-only fields."""
     merged = dict(existing or {})
-    for key in ("created_at", "payment_method"):
+    for key in ("created_at", "payment_method", "payment_status", "is_cod"):
         val = normalised.get(key)
         if val:
             merged[key] = val
@@ -1175,6 +1171,8 @@ def _merge_order_extra_metadata(
         "salla_timezone",
         "salla_amounts",
         "payment_method",
+        "payment_status",
+        "is_cod",
         "shipping_method",
         "tracking_number",
     ):
@@ -2382,26 +2380,33 @@ class StoreSyncService:
 
                         _pm     = str(normalised.get("payment_method") or "").lower()
                         _status = str(normalised_status or "").lower()
-
-                        emit_automation_event(
-                            self.db,
-                            self.tenant_id,
-                            AutomationTrigger.ORDER_NOTIFICATIONS.value,
-                            payload={
-                                "external_id":           ext_id,
-                                "order_id":              new_row.id,
-                                "order_internal_id":     new_row.id,
-                                "status":                _status,
-                                "total":                 normalised.get("total"),
-                                "order_number":          normalised.get("external_order_number") or ext_id,
-                                "external_order_number": normalised.get("external_order_number"),
-                                "checkout_url":          normalised.get("checkout_url") or "",
-                                "payment_url":           normalised.get("checkout_url") or "",
-                                "payment_method":        _pm,
-                                "source":                f"store_sync.api_poll.{triggered_by}",
-                            },
-                            commit=False,
+                        from store_adapters.salla_lifecycle import (  # noqa: PLC0415
+                            salla_cod_requires_customer_confirmation,
                         )
+                        _cod_awaiting_customer = salla_cod_requires_customer_confirmation(
+                            _status, normalised
+                        )
+
+                        if not _cod_awaiting_customer:
+                            emit_automation_event(
+                                self.db,
+                                self.tenant_id,
+                                AutomationTrigger.ORDER_NOTIFICATIONS.value,
+                                payload={
+                                    "external_id":           ext_id,
+                                    "order_id":              new_row.id,
+                                    "order_internal_id":     new_row.id,
+                                    "status":                _status,
+                                    "total":                 normalised.get("total"),
+                                    "order_number":          normalised.get("external_order_number") or ext_id,
+                                    "external_order_number": normalised.get("external_order_number"),
+                                    "checkout_url":          normalised.get("checkout_url") or "",
+                                    "payment_url":           normalised.get("checkout_url") or "",
+                                    "payment_method":        _pm,
+                                    "source":                f"store_sync.api_poll.{triggered_by}",
+                                },
+                                commit=False,
+                            )
 
                         _COD_METHODS = {"cod", "cash_on_delivery", "cash", "الدفع عند الاستلام"}
                         _is_cod = bool(
@@ -4298,39 +4303,50 @@ class StoreSyncService:
                 from core.automation_triggers import AutomationTrigger    # noqa: PLC0415
                 _payment_method = str(normalised.get("payment_method") or "").lower()
                 _order_status   = str(normalised.get("status") or "").lower()
+                from store_adapters.salla_lifecycle import (  # noqa: PLC0415
+                    salla_cod_requires_customer_confirmation,
+                )
+                _cod_awaiting_customer = salla_cod_requires_customer_confirmation(
+                    _order_status, normalised
+                )
 
                 # ── order_notifications ──────────────────────────────────────
-                # Fire for every new order regardless of payment method or status.
-                # This is the universal order-confirmation trigger — the
-                # order_notifications SmartAutomation sends the merchant's
-                # chosen confirmation template (order summary, COD confirmation,
-                # etc.) to the customer as soon as their order lands in Nahla.
+                # This is the universal final order-confirmation trigger. A COD
+                # order still awaiting the customer's decision is deliberately
+                # excluded; its dedicated confirmation prompt owns that stage.
                 # The engine deduplicates on (event_id, automation_id) so even
                 # if a future webhook update re-emits, only one execution fires.
-                emit_automation_event(
-                    self.db,
-                    self.tenant_id,
-                    AutomationTrigger.ORDER_NOTIFICATIONS.value,
-                    customer_id=customer.id if customer else None,
-                    payload={
-                        "external_id":           ext_id,
-                        "order_id":              order_row.id,
-                        "order_internal_id":     order_row.id,
-                        "status":                _order_status,
-                        "total":                 normalised.get("total"),
-                        "order_number":          normalised.get("external_order_number") or ext_id,
-                        "external_order_number": normalised.get("external_order_number"),
-                        "checkout_url":          normalised.get("checkout_url") or "",
-                        "payment_url":           normalised.get("checkout_url") or "",
-                        "payment_method":        _payment_method,
-                        "source":                "store_sync.order_webhook",
-                    },
-                    commit=True,
-                )
-                logger.info(
-                    "[StoreSync] order_notifications event emitted tenant=%s order=%s status=%s payment=%s",
-                    self.tenant_id, ext_id, _order_status, _payment_method or "unknown",
-                )
+                if not _cod_awaiting_customer:
+                    emit_automation_event(
+                        self.db,
+                        self.tenant_id,
+                        AutomationTrigger.ORDER_NOTIFICATIONS.value,
+                        customer_id=customer.id if customer else None,
+                        payload={
+                            "external_id":           ext_id,
+                            "order_id":              order_row.id,
+                            "order_internal_id":     order_row.id,
+                            "status":                _order_status,
+                            "total":                 normalised.get("total"),
+                            "order_number":          normalised.get("external_order_number") or ext_id,
+                            "external_order_number": normalised.get("external_order_number"),
+                            "checkout_url":          normalised.get("checkout_url") or "",
+                            "payment_url":           normalised.get("checkout_url") or "",
+                            "payment_method":        _payment_method,
+                            "source":                "store_sync.order_webhook",
+                        },
+                        commit=True,
+                    )
+                    logger.info(
+                        "[StoreSync] order_notifications event emitted tenant=%s order=%s status=%s payment=%s",
+                        self.tenant_id, ext_id, _order_status, _payment_method or "unknown",
+                    )
+                else:
+                    logger.info(
+                        "[StoreSync] order_notifications withheld awaiting COD customer confirmation "
+                        "tenant=%s order=%s status=%s",
+                        self.tenant_id, ext_id, _order_status,
+                    )
 
                 # ── order_created (legacy / backward compat) ─────────────────
                 # Keep emitting order_created so any custom automations wired
