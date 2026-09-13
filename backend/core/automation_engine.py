@@ -47,6 +47,20 @@ POLL_INTERVAL_SECONDS = 60
 # Max events processed per tenant per cycle
 _BATCH_SIZE = 100
 
+# Named URL slots used by Meta dynamic-button templates.  Keep this shared by
+# both the legacy automation sender and the lifecycle sender so their payloads
+# cannot drift.
+_DYNAMIC_URL_SLOT_PRECEDENCE = (
+    "order_tracking_url",
+    "checkout_url",
+    "cart_url",
+    "tracking_url",
+    "payment_url",
+    "product_url",
+    "reorder_url",
+    "store_url",
+)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -61,6 +75,41 @@ def _naive_utc(dt: Optional[datetime]) -> datetime:
 
 def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _is_automation_effectively_enabled(
+    db: Session, tenant_id: int, automation: Any
+) -> bool:
+    """Resolve the canonical enablement gate for a matching automation.
+
+    ``order_notifications`` is owned by the Order Updates settings screen.
+    Older tenants can have a stale disabled SmartAutomation row even while
+    both canonical switches are enabled.  Read canonical consent at runtime
+    so existing tenants recover without requiring them to toggle a setting.
+    """
+    if str(getattr(automation, "automation_type", "") or "") != "order_notifications":
+        return bool(getattr(automation, "enabled", False))
+
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        REASON_SETTINGS_UNAVAILABLE,
+        evaluate_order_update_delivery,
+    )
+
+    allowed, reason = evaluate_order_update_delivery(
+        db, int(tenant_id), "order_confirmation"
+    )
+    if reason != REASON_SETTINGS_UNAVAILABLE and bool(automation.enabled) != allowed:
+        # Self-heal stale rows.  The surrounding event transaction owns the
+        # flush/commit, so delivery and repair remain atomic.
+        automation.enabled = allowed
+        automation.updated_at = datetime.now(timezone.utc)
+        logger.info(
+            "[AutoEngine] synced order_notifications enabled=%s tenant=%s automation=%s",
+            allowed,
+            tenant_id,
+            getattr(automation, "id", None),
+        )
+    return allowed
 
 
 # ── Public: event emitter helper ─────────────────────────────────────────────
@@ -438,7 +487,10 @@ async def _process_event(
         )
         .all()
     )
-    automations: List[Any] = [a for a in all_matches if a.enabled]
+    automations: List[Any] = [
+        a for a in all_matches
+        if _is_automation_effectively_enabled(db, tenant_id, a)
+    ]
 
     if not automations:
         # Previously this branch called `logger.debug(...)` and silently set
@@ -1093,9 +1145,12 @@ async def _execute_action(
     # automation keeps the legacy direct-to-template path. That boundary
     # is what lets us roll this out without churning unrelated flows.
     conversion_decision = None
-    is_cart_recovery = (
-        getattr(automation, "automation_type", None) == "abandoned_cart"
-    )
+    # Service ownership is the routing authority.  Automation type aliases
+    # such as ``cart_abandoned`` and ``abandoned_cart`` both resolve to the
+    # same cart-recovery service, while order notifications resolve to the
+    # transactional order-confirmation service.
+    is_cart_recovery = owned_service_key == "cart_recovery"
+    is_order_confirmation = owned_service_key == "order_confirmation"
     if is_cart_recovery:
         # ── P0 fast-path pre-send guard ──────────────────────────────────
         # If the order webhook (or a manual cancel) has already stamped
@@ -1193,12 +1248,18 @@ async def _execute_action(
          or config.get("ai_recovery_enabled"))
     )
 
-    # Cart recovery: always use template mode — no interactive/AI.
-    # Templates work regardless of service window state.
-    if is_cart_recovery:
+    # Cart recovery and order confirmations are template-owned services.
+    # In particular, an open customer-service window must never divert an
+    # order confirmation into the cart-recovery interactive renderer.
+    if is_cart_recovery or is_order_confirmation:
         from services.delivery_policy import DeliveryDecision  # noqa: PLC0415
+        _template_only_reason = (
+            "cart_recovery_template_only"
+            if is_cart_recovery
+            else "order_confirmation_template_only"
+        )
         decision = DeliveryDecision(
-            mode="template", reason="cart_recovery_template_only",
+            mode="template", reason=_template_only_reason,
             primary="template", fallback="template",
             used_fallback=False, window_open=window_open,
             ai_eligible=False,
@@ -1250,6 +1311,32 @@ async def _execute_action(
             active_step=active_step, automation_id=getattr(automation, "id", None),
         )
 
+    if delivery_mode == "interactive" and not is_cart_recovery:
+        # ``_execute_interactive_step`` is a cart-recovery renderer: its
+        # fallback body, buttons, IDs, coupon handling, and response actions
+        # all belong to that service.  A non-cart automation reaching it would
+        # leak abandoned-cart copy into an unrelated notification.  Fail over
+        # to the approved Meta template at this ownership boundary.
+        from services.delivery_policy import DeliveryDecision  # noqa: PLC0415
+        logger.warning(
+            "[AutoEngine] interactive route rejected for non-cart service "
+            "tenant=%s event=%s automation=%s service=%s; using template",
+            tenant_id,
+            getattr(event, "id", None),
+            getattr(automation, "id", None),
+            owned_service_key or "unknown",
+        )
+        decision = DeliveryDecision(
+            mode="template",
+            reason="interactive_reserved_for_cart_recovery",
+            primary=decision.primary,
+            fallback="template",
+            used_fallback=True,
+            window_open=window_open,
+            ai_eligible=ai_eligible,
+        )
+        delivery_mode = decision.mode
+
     if delivery_mode == "interactive":
         return await _execute_interactive_step(
             db, tenant_id=tenant_id, event=event, customer=customer,
@@ -1268,10 +1355,9 @@ async def _execute_action(
     #   3. Automation-wide template_id FK (legacy).
     #   4. Automation-wide template_name from config (legacy).
     #
-    # Path 1 respects the single-active invariant and the session-window
-    # rule: templates are only needed when the 24h window is CLOSED.
-    # (When the window is open the code path above already branched to
-    #  interactive/AI mode via resolve_delivery_mode.)
+    # Path 1 respects the single-active invariant.  Template-owned services
+    # (including order confirmation) stay on this path regardless of the
+    # customer-service-window state.
 
     template: Optional[Any] = None
 
@@ -1490,6 +1576,7 @@ async def _execute_action(
 
     _body_ph_count = 0
     _header_ph_count = 0
+    _header_param_count = 0
     _header_format = ""
     _button_ph_count = 0  # number of BUTTON components Meta expects (URL+COPY_CODE)
     for _tcomp in (template.components or []):
@@ -1500,6 +1587,9 @@ async def _execute_action(
             _header_format = str(_tcomp.get("format", "")).upper()
             if _header_format == "TEXT":
                 _header_ph_count = _ph_count(_tcomp.get("text"))
+                _header_param_count = _header_ph_count
+            elif _header_format == "IMAGE":
+                _header_param_count = 1
         elif _ttype == "BUTTONS":
             for _btn in (_tcomp.get("buttons") or []):
                 _btype = str(_btn.get("type", "")).upper()
@@ -1602,6 +1692,32 @@ async def _execute_action(
                 for v in _hdr_values
             ],
         })
+    elif _header_format == "IMAGE":
+        _header_image_url = _resolve_runtime_image_header_url(
+            db,
+            tenant_id,
+            template,
+            service_key=svc_key,
+        )
+        if not _header_image_url:
+            logger.error(
+                "[WA TEMPLATE BUILD] IMAGE header unresolved "
+                "template=%s tenant=%s event=%s",
+                template.name, tenant_id, getattr(event, "id", None),
+            )
+            return False, {
+                "error": "missing_template_header_image",
+                "error_code": "missing_template_header_image",
+                "error_label": "تعذر تحميل صورة رأس القالب",
+                "template": template.name,
+                "to": to_phone,
+            }
+        components.append({
+            "type": "header",
+            "parameters": [
+                {"type": "image", "image": {"link": _header_image_url}}
+            ],
+        })
 
     if body_params:
         components.append({"type": "body", "parameters": body_params})
@@ -1611,10 +1727,6 @@ async def _execute_action(
     #   • Dynamic URL buttons (``{{1}}`` in the URL) — suffix text
     #   • COPY_CODE buttons — coupon_code value
     # Missing either causes Meta error 132000 / template_param_mismatch.
-    _URL_SLOT_PRECEDENCE = (
-        "checkout_url", "cart_url", "tracking_url", "payment_url",
-        "product_url", "reorder_url", "store_url",
-    )
     # Greeting-name policy (May 2026): use Customer.name verbatim and
     # only swap in the static fallback when the stored value is empty.
     # Bad names get cleaned once via the bulk "تنظيف أسماء العملاء"
@@ -1666,52 +1778,30 @@ async def _execute_action(
             if "{{1}}" not in btn_url_tpl:
                 continue
             _has_dynamic_url_btn = True
-            btn_suffix = ""
-            for url_slot in _URL_SLOT_PRECEDENCE:
-                resolved = _resolve_slot_value(
-                    slot=url_slot,
-                    customer_name=_customer_name_for_btn,
-                    store_name=_store_name_for_btn,
-                    payload=_payload_for_btn,
-                    config=config,
-                    coupon_extras=coupon_extras,
-                )
-                if resolved:
-                    btn_suffix = _extract_button_url_suffix(btn_url_tpl, resolved)
-                    if btn_suffix:
-                        break
+            btn_suffix = _resolve_dynamic_url_button_suffix(
+                btn_url_tpl,
+                customer_name=_customer_name_for_btn,
+                store_name=_store_name_for_btn,
+                payload=_payload_for_btn,
+                config=config,
+                coupon_extras=coupon_extras,
+            )
             if not btn_suffix:
-                # ── CRITICAL FIX: never omit the button component ──────────
-                # If no URL was found in the event payload, try a chain of
-                # safe fallbacks so we ALWAYS emit the button param component.
-                # Skipping it entirely causes template_param_mismatch (Meta
-                # error 132000) because the approved template declares {{1}}
-                # in the button URL but we send 0 button-param components.
-                _btn_fallback_url = str(
-                    _payload_for_btn.get("payment_url")
-                    or _payload_for_btn.get("checkout_url")
-                    or _payload_for_btn.get("cart_url")
-                    or _payload_for_btn.get("tracking_url")
-                    or _payload_for_btn.get("store_url")
-                    or config.get("store_url")
-                    or ""
+                # A whitespace value is rejected by Meta as an empty mandatory
+                # text parameter.  Fail locally with an actionable error rather
+                # than making a provider call that is guaranteed to return 400.
+                logger.error(
+                    "[WA TEMPLATE BUILD] Dynamic URL button unresolved "
+                    "template=%s tenant=%s event=%s",
+                    template.name, tenant_id, getattr(event, "id", None),
                 )
-                if _btn_fallback_url:
-                    btn_suffix = _extract_button_url_suffix(btn_url_tpl, _btn_fallback_url)
-                if not btn_suffix:
-                    # Last resort: use a single space so Meta accepts the
-                    # call. The button URL suffix will be empty/blank but the
-                    # parameter COUNT will be correct and the send won't fail
-                    # with 132000. A real URL should be populated in the event
-                    # payload by the store adapter or order enrichment step.
-                    btn_suffix = " "
-                logger.warning(
-                    "[WA TEMPLATE BUILD] Dynamic URL button on template=%s — "
-                    "primary URL slots empty; using fallback suffix=%r "
-                    "(tenant=%s). Populate payment_url/checkout_url in the "
-                    "order record to get the real link.",
-                    template.name, btn_suffix, tenant_id,
-                )
+                return False, {
+                    "error": "missing_dynamic_button_value",
+                    "error_code": "missing_dynamic_button_value",
+                    "error_label": "تعذر إنشاء رابط زر القالب من بيانات الطلب",
+                    "template": template.name,
+                    "to": to_phone,
+                }
 
             if btn_suffix:
                 _btn_suffix_resolved = True
@@ -1755,14 +1845,14 @@ async def _execute_action(
         "component=body expected=%d sent=%d | "
         "component=buttons expected=%d sent=%d",
         template.name, template.language or "ar", _svc_key_log,
-        _header_ph_count, _sent_header_params,
+        _header_param_count, _sent_header_params,
         _body_ph_count, _sent_body_params,
         _button_ph_count, _sent_button_params,
     )
 
     if (
         _sent_body_params   != _body_ph_count
-        or _sent_header_params != _header_ph_count
+        or _sent_header_params != _header_param_count
         or _sent_button_params  != _button_ph_count
     ):
         logger.error(
@@ -1773,7 +1863,7 @@ async def _execute_action(
             "buttons: expected=%d sent=%d | "
             "body_values=%r",
             template.name, _svc_key_log,
-            _header_ph_count, _sent_header_params,
+            _header_param_count, _sent_header_params,
             _body_ph_count, _sent_body_params,
             _button_ph_count, _sent_button_params,
             [str(v)[:40] for v in _var_values],
@@ -1815,7 +1905,7 @@ async def _execute_action(
                 "sent(body=%d header=%d buttons=%d)",
                 tenant_id, event.id, automation.id, template.name,
                 code, label_ar, raw_meta,
-                _body_ph_count, _header_ph_count, _button_ph_count,
+                _body_ph_count, _header_param_count, _button_ph_count,
                 _sent_body_params, _sent_header_params, _sent_button_params,
             )
             return False, {
@@ -1829,7 +1919,7 @@ async def _execute_action(
                 "param_counts": {
                     "expected": {
                         "body":    _body_ph_count,
-                        "header":  _header_ph_count,
+                        "header":  _header_param_count,
                         "buttons": _button_ph_count,
                     },
                     "sent": {
@@ -2075,6 +2165,14 @@ def _resolve_slot_value(
             or payload.get("shipping_tracking_url")
             or ""
         )
+    if slot == "order_tracking_url":
+        return str(
+            payload.get("order_tracking_url")
+            or payload.get("tracking_url")
+            or payload.get("tracking_link")
+            or payload.get("shipping_tracking_url")
+            or ""
+        )
     if slot in ("order_total", "total"):
         return str(payload.get("total") or payload.get("order_total") or payload.get("cart_total") or "")
     if slot == "reorder_url":
@@ -2268,6 +2366,7 @@ _AUTOMATION_TYPE_TO_SERVICE_KEY: Dict[str, str] = {
     "abandoned_order_draft":   "wa_draft_reminder",
     "post_delivery_review":    "post_delivery",
     "cod_confirmation":        "cod_confirmation",
+    "order_notifications":     "order_confirmation",
     "order_confirmation":      "order_confirmation",
     "shipping_update":         "shipping_update",
     "predictive_reorder":      "predictive_reorder",
@@ -2766,6 +2865,109 @@ def _extract_button_url_suffix(button_url_template: str, full_url: str) -> str:
         return full_url
 
 
+def _resolve_dynamic_url_button_suffix(
+    button_url_template: str,
+    *,
+    customer_name: str,
+    store_name: Optional[str],
+    payload: Dict[str, Any],
+    config: Dict[str, Any],
+    coupon_extras: Dict[str, str],
+) -> str:
+    """Resolve a non-empty Meta dynamic URL-button text parameter.
+
+    The canonical order-confirmation templates are approved with either
+    ``https://mtjr.at/{{1}}`` (whose approved example is ``orders/45678``)
+    or a fixed ``.../orders/{{1}}`` prefix.  New-order webhooks always carry
+    an order reference even when the commerce platform supplies no checkout
+    or tracking URL, so derive the approved suffix from that reference.
+    """
+    for url_slot in _DYNAMIC_URL_SLOT_PRECEDENCE:
+        resolved = _resolve_slot_value(
+            slot=url_slot,
+            customer_name=customer_name,
+            store_name=store_name,
+            payload=payload,
+            config=config,
+            coupon_extras=coupon_extras,
+        ).strip()
+        if not resolved:
+            continue
+        suffix = _extract_button_url_suffix(button_url_template, resolved).strip()
+        if suffix:
+            return suffix
+
+    order_reference = str(
+        payload.get("order_number")
+        or payload.get("external_order_number")
+        or payload.get("external_id")
+        or payload.get("order_id")
+        or ""
+    ).strip()
+    if not order_reference:
+        return ""
+
+    from urllib.parse import quote  # noqa: PLC0415
+
+    encoded_reference = quote(order_reference, safe="")
+    if button_url_template == "https://mtjr.at/{{1}}":
+        return f"orders/{encoded_reference}"
+
+    placeholder_pos = button_url_template.find("{{1}}")
+    fixed_prefix = button_url_template[:placeholder_pos].rstrip("/")
+    if placeholder_pos >= 0 and fixed_prefix.endswith("/orders"):
+        return encoded_reference
+    return ""
+
+
+def _resolve_runtime_image_header_url(
+    db: Session,
+    tenant_id: int,
+    template: Any,
+    *,
+    service_key: Optional[str] = None,
+) -> str:
+    """Resolve the public image URL required by a Meta IMAGE header.
+
+    Lifecycle confirmation images can be replaced by the merchant before Meta
+    submission.  The runtime resolver follows the same precedence as the
+    dashboard preview so the image the merchant reviewed is the image sent.
+    """
+    resolved_service = str(
+        service_key or getattr(template, "service_key", None) or ""
+    ).strip()
+    components = list(getattr(template, "components", None) or [])
+    metadata = dict(getattr(template, "ai_generation_metadata", None) or {})
+
+    if resolved_service in {"order_confirmation", "cod_confirmation"}:
+        from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
+            resolve_lifecycle_preview_header_url,
+        )
+
+        return str(
+            resolve_lifecycle_preview_header_url(
+                db,
+                int(tenant_id),
+                components,
+                metadata,
+                service_key=resolved_service,
+            )
+            or ""
+        ).strip()
+
+    for component in components:
+        if (
+            str((component or {}).get("type") or "").upper() == "HEADER"
+            and str((component or {}).get("format") or "").upper() == "IMAGE"
+        ):
+            example = dict((component or {}).get("example") or {})
+            url = str(example.get("header_url") or "").strip()
+            if url:
+                return url
+
+    return str(metadata.get("merchant_header_image_url") or "").strip()
+
+
 def _write_execution(
     db: Session,
     event_id: int,
@@ -2865,6 +3067,27 @@ async def _execute_interactive_step(
     interactive instead — the primary visual is one big "Use the
     discount now" button that opens the cart with the code attached.
     """
+    # This renderer is intentionally private to cart recovery.  Keep the
+    # ownership check inside the function as a second line of defence so a
+    # future caller cannot accidentally send cart copy/buttons for another
+    # service even if it bypasses the policy branch above.
+    if _derive_service_key(automation, active_step) != "cart_recovery":
+        logger.error(
+            "[AutoEngine] blocked non-cart interactive renderer call "
+            "tenant=%s event=%s automation=%s type=%s",
+            tenant_id,
+            getattr(event, "id", None),
+            getattr(automation, "id", None),
+            getattr(automation, "automation_type", None),
+        )
+        return False, {
+            "error": "interactive_owner_mismatch",
+            "error_code": "interactive_owner_mismatch",
+            "error_label": "مسار الرسالة التفاعلية لا يطابق خدمة الأتمتة",
+            "delivery_mode": "interactive",
+            "to": to_phone,
+        }
+
     from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
 
     deny_external_egress(
@@ -3867,14 +4090,34 @@ async def send_lifecycle_whatsapp_template(
                 for v in _hdr_values
             ],
         })
+    elif _header_format == "IMAGE":
+        _header_image_url = _resolve_runtime_image_header_url(
+            db,
+            tenant_id,
+            template,
+            service_key=service_key,
+        )
+        if not _header_image_url:
+            logger.error(
+                "[LifecycleSend] IMAGE header unresolved template=%s tenant=%s",
+                template.name, tenant_id,
+            )
+            return "failed", {
+                "error_code": "missing_template_header_image",
+                "template": template.name,
+                "service_key": service_key,
+                "send_method": "template",
+            }
+        components.append({
+            "type": "header",
+            "parameters": [
+                {"type": "image", "image": {"link": _header_image_url}}
+            ],
+        })
 
     if body_params:
         components.append({"type": "body", "parameters": body_params})
 
-    _URL_SLOT_PRECEDENCE = (
-        "checkout_url", "cart_url", "tracking_url", "payment_url",
-        "product_url", "reorder_url", "store_url",
-    )
     _customer_name_for_btn = display_name_passthrough_or_fallback(customer_name)
     _store_name_for_btn = store_name
     _payload_for_btn: Dict[str, Any] = dict(payload or {})
@@ -3898,17 +4141,31 @@ async def send_lifecycle_whatsapp_template(
                     ],
                 })
             elif btn_type == "URL" and "{{" in str(btn.get("url", "") or ""):
-                _full_url = ""
-                for slot in _URL_SLOT_PRECEDENCE:
-                    _full_url = str(_payload_for_btn.get(slot) or "").strip()
-                    if _full_url:
-                        break
-                _suffix = _extract_button_url_suffix(str(btn.get("url") or ""), _full_url)
+                _suffix = _resolve_dynamic_url_button_suffix(
+                    str(btn.get("url") or ""),
+                    customer_name=_customer_name_for_btn,
+                    store_name=_store_name_for_btn,
+                    payload=_payload_for_btn,
+                    config=config_stub,
+                    coupon_extras={},
+                )
+                if not _suffix:
+                    logger.error(
+                        "[LifecycleSend] Dynamic URL button unresolved "
+                        "template=%s tenant=%s",
+                        template.name, tenant_id,
+                    )
+                    return "failed", {
+                        "error_code": "missing_dynamic_button_value",
+                        "template": template.name,
+                        "service_key": service_key,
+                        "send_method": "template",
+                    }
                 components.append({
                     "type": "button",
                     "sub_type": "url",
                     "index": str(btn_idx),
-                    "parameters": [{"type": "text", "text": _suffix or " "}],
+                    "parameters": [{"type": "text", "text": _suffix}],
                 })
             elif btn_type == "QUICK_REPLY":
                 title = str(btn.get("text") or "").strip()

@@ -13,6 +13,7 @@ import logging
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -330,6 +331,51 @@ def set_order_update_flags(
     if commit:
         db.commit()
     return get_order_update_flags(db, tenant_id)
+
+
+def sync_order_confirmation_automation(
+    db: Session,
+    tenant_id: int,
+    *,
+    commit: bool = False,
+) -> bool:
+    """Keep the legacy SmartAutomation gate aligned with canonical settings.
+
+    Order-update consent is owned by ``TenantSettings.order_updates``.  The
+    automation row predates that settings surface, but the event engine still
+    consults it.  Synchronising it on every settings write prevents the two
+    independently stored switches from drifting again.
+    """
+    from core.automations_seed import ensure_order_notifications_automation  # noqa: PLC0415
+    from models import SmartAutomation  # noqa: PLC0415
+
+    truth = load_order_update_settings_truth(db, tenant_id)
+    allowed, _reason = evaluate_order_update_delivery_from_truth(
+        truth, "order_confirmation"
+    )
+    if not truth.available:
+        # A failed settings read is not consent and must not rewrite persisted
+        # automation state.  The runtime gate will still fail closed.
+        return False
+
+    ensure_order_notifications_automation(db, int(tenant_id))
+    rows = (
+        db.query(SmartAutomation)
+        .filter(
+            SmartAutomation.tenant_id == int(tenant_id),
+            SmartAutomation.automation_type == "order_notifications",
+        )
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        if bool(row.enabled) != allowed:
+            row.enabled = allowed
+            row.updated_at = now
+    db.flush()
+    if commit:
+        db.commit()
+    return allowed
 
 
 def is_order_update_enabled(db: Session, tenant_id: int, service_key: str) -> bool:
@@ -693,5 +739,6 @@ __all__ = [
     "resolve_active_and_pending",
     "resolve_lifecycle_template_for_send",
     "set_order_update_flags",
+    "sync_order_confirmation_automation",
     "variables_for",
 ]

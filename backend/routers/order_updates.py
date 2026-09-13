@@ -18,6 +18,7 @@ from core.commerce_lifecycle.order_updates import (
     promote_approved_revision,
     resolve_active_and_pending,
     set_order_update_flags,
+    sync_order_confirmation_automation,
 )
 from core.database import get_db
 
@@ -196,7 +197,12 @@ def put_settings(
                 if key in bucket:
                     _consume(key, bucket[key])
 
-    set_order_update_flags(db, tid, updates, master_enabled=master, commit=True)
+    # Write both representations in one transaction.  TenantSettings remains
+    # the canonical merchant-consent source; the SmartAutomation bit is kept
+    # only for compatibility with the event engine and older dashboard paths.
+    set_order_update_flags(db, tid, updates, master_enabled=master, commit=False)
+    sync_order_confirmation_automation(db, tid, commit=False)
+    db.commit()
     return get_settings(db=db, user=user)
 
 

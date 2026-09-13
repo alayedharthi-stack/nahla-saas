@@ -152,6 +152,15 @@ _COOLDOWN_HOURS: Dict[str, float] = {
     "vip_upgrade":           336,    # 14 يوم
 }
 
+# One confirmation belongs to one concrete order, not to a marketing cadence.
+# The automation engine already deduplicates the same event/automation pair,
+# while ``order_id`` proves this is an order-scoped send.  Such confirmations
+# must therefore not be suppressed because the same customer placed another
+# order recently.  Unsubscribe is still evaluated before this exemption.
+_ORDER_SCOPED_TRANSACTIONAL_TYPES: FrozenSet[str] = frozenset({
+    "order_notifications",
+})
+
 # حدود الإرسال العالمية للعميل
 _LIMIT_PER_6H  = 1   # رسالة واحدة كل 6 ساعات
 _LIMIT_PER_24H = 2   # حد أقصى 2/يوم
@@ -331,6 +340,22 @@ def check(
             )
     except Exception as exc:
         logger.warning("[Governor] unsubscribe check error: %s", exc)
+
+    # A new order requires its own transactional confirmation even when the
+    # customer received a confirmation for another order recently.  Keep this
+    # fail-closed when no order identity is present so malformed/manual events
+    # still receive the normal priority, cooldown, and frequency checks.
+    if automation_type in _ORDER_SCOPED_TRANSACTIONAL_TYPES and order_id is not None:
+        logger.info(
+            "[Governor] ALLOW order-scoped transactional — tenant=%s customer=%s "
+            "type=%s order_id=%s",
+            tenant_id, customer_id, automation_type, order_id,
+        )
+        return GovDecision(
+            allowed=True,
+            reason_code="allowed",
+            label_ar="مسموح بالإرسال",
+        )
 
     # ── 2. فحص الأولوية ────────────────────────────────────────────────
     _this_priority = _priority(automation_type)
