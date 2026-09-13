@@ -1486,6 +1486,39 @@ async def test_failed_output_guardrail_is_visible_in_run_result(seeded: Seed) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("user_input", "reply_text"),
+    [
+        ("السلام عليكم", "وعليكم السلام ورحمة الله وبركاته."),
+        ("كيف حالكم", "بخير ولله الحمد، حياك الله."),
+        ("مرحبا", "يا مرحبا، حياك الله."),
+        ("صباح الخير", "صباح النور والسرور."),
+    ],
+)
+async def test_evidence_free_social_reply_completes_without_safe_fallback(
+    seeded: Seed,
+    user_input: str,
+    reply_text: str,
+) -> None:
+    expected = CommerceReply(text=reply_text, response_mode="social")
+    model = ScriptedModel([[assistant_message(expected.model_dump_json())]])
+
+    result = await run_commerce_agent(
+        context=_context(seeded, trace_id=f"social:{user_input}"),
+        user_input=user_input,
+        model=model,
+        model_name="scripted-social-regression",
+        execution_mode="outbound",
+    )
+
+    assert result.status == "completed"
+    assert result.reply == expected
+    assert result.reply.safe_fallback_reason is None
+    assert not any(event.get("kind") == "tool_start" for event in result.tool_trace)
+    model.assert_complete()
+
+
+@pytest.mark.asyncio
 async def test_tool_timeout_returns_safe_structured_fallback(seeded: Seed, monkeypatch) -> None:
     async def slow_tool(_context, _arguments):
         await asyncio.sleep(0.05)

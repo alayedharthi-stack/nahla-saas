@@ -118,6 +118,31 @@ _ORDER_BOUND_KINDS = frozenset(
 _ORDER_EVIDENCE_SOURCES = frozenset(
     {"order_summary", "order_details", "order_shipment"}
 )
+_EVIDENCE_FREE_FACT_TOKENS = frozenset(
+    {
+        "منتج",
+        "منتجات",
+        "المنتج",
+        "المنتجات",
+        "طلبك",
+        "الطلب",
+        "شحنه",
+        "شحن",
+        "الشحن",
+        "الناقل",
+        "التتبع",
+        "product",
+        "products",
+        "order",
+        "shipment",
+        "carrier",
+        "tracking",
+    }
+)
+_STORE_POSSESSION_TOKENS = frozenset({"عندنا", "لدينا", "نبيع", "نوفر"})
+_STORE_LOCATION_SUBJECT_TOKENS = frozenset(
+    {"نحن", "متجرنا", "موقعنا", "فرعنا", "مقرنا"}
+)
 
 
 def _flatten_values(value: Any) -> Iterable[str]:
@@ -159,6 +184,26 @@ def _knowledge_tokens(value: str) -> set[str]:
         for token in _TOKEN_RE.findall(_normalize_text(value))
         if token not in _KNOWLEDGE_FILLER and token not in _NEGATION_TOKENS
     }
+
+
+def _contains_evidence_free_factual_assertion(value: str) -> bool:
+    """Detect store/commerce assertions that social mode must never carry.
+
+    This is an output truth guard, not an inbound intent route. It deliberately
+    operates only after the model has proposed evidence-free customer text.
+    """
+    tokens = _TOKEN_RE.findall(_normalize_text(value))
+    if set(tokens) & _EVIDENCE_FREE_FACT_TOKENS:
+        return True
+    if any(token in _STORE_POSSESSION_TOKENS for token in tokens[:-1]):
+        return True
+    for index, token in enumerate(tokens[:-1]):
+        if token not in _STORE_LOCATION_SUBJECT_TOKENS:
+            continue
+        tail = tokens[index + 1 : index + 4]
+        if "في" in tail:
+            return True
+    return False
 
 
 def _knowledge_span_supported(record: EvidenceRecord, span: str) -> bool:
@@ -464,6 +509,16 @@ def validate_grounded_reply(
 
     evidence = context.evidence
     referenced = set(reply.evidence_refs)
+    structured_commerce = bool(
+        reply.fact_claims or reply.product_refs or reply.media_refs or reply.ui_actions
+    )
+    if reply.response_mode == "social":
+        if evidence:
+            errors.append("social_reply_with_tool_evidence")
+        if referenced or structured_commerce:
+            errors.append("social_reply_with_commercial_structure")
+        if reply.safe_fallback_reason:
+            errors.append("social_reply_with_safe_fallback_reason")
     nested_refs = {
         *(claim.evidence_ref for claim in reply.fact_claims),
         *(item.evidence_ref for item in reply.product_refs),
@@ -602,34 +657,43 @@ def validate_grounded_reply(
         if not _quantity_match_is_verified(match, verified_quantities):
             errors.append("stock_quantity_in_text_without_verified_claim")
 
-    if not reply.safe_fallback_reason:
-        verified_availability = [
-            claim for claim in verified_claims if claim.kind == "availability"
-        ]
-        for match in _AVAILABILITY_RE.finditer(reply.text):
-            if _availability_mention_is_informational(reply.text, match):
-                continue
-            availability = _availability_value(match.group(0))
-            rendered = match.group(0)
-            if not any(
-                claim.value is availability
-                and claim.text_span is not None
-                and rendered in claim.text_span
-                for claim in verified_availability
-            ) and not _availability_mention_is_quantity_bound(
-                reply.text,
-                match,
-                availability=availability,
-                verified_availability=verified_availability,
-                verified_quantities=verified_quantities,
-            ):
-                errors.append("availability_in_text_without_verified_claim")
+    verified_availability = [
+        claim for claim in verified_claims if claim.kind == "availability"
+    ]
+    for match in _AVAILABILITY_RE.finditer(reply.text):
+        if _availability_mention_is_informational(reply.text, match):
+            continue
+        availability = _availability_value(match.group(0))
+        rendered = match.group(0)
+        if not any(
+            claim.value is availability
+            and claim.text_span is not None
+            and rendered in claim.text_span
+            for claim in verified_availability
+        ) and not _availability_mention_is_quantity_bound(
+            reply.text,
+            match,
+            availability=availability,
+            verified_availability=verified_availability,
+            verified_quantities=verified_quantities,
+        ):
+            errors.append("availability_in_text_without_verified_claim")
 
-    if (reply.fact_claims or reply.product_refs or reply.media_refs or reply.ui_actions) and not referenced:
+    if structured_commerce and not referenced:
         errors.append("commercial_output_without_evidence_refs")
     if not evidence and referenced:
         errors.append("references_without_tool_evidence")
-    if not evidence and not reply.safe_fallback_reason:
+    if (
+        not evidence
+        and (reply.response_mode == "social" or reply.safe_fallback_reason)
+        and _contains_evidence_free_factual_assertion(reply.text)
+    ):
+        errors.append("evidence_free_commercial_or_factual_claim")
+    if (
+        not evidence
+        and reply.response_mode != "social"
+        and not reply.safe_fallback_reason
+    ):
         errors.append("reply_without_tool_evidence_or_safe_fallback")
     if evidence and not referenced and not reply.safe_fallback_reason:
         errors.append("tool_evidence_not_linked_to_reply")
