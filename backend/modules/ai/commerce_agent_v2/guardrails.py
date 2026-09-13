@@ -307,6 +307,19 @@ def _span_expresses_claim(
             and str(action.url) == str(claim.value)
             for action in reply.ui_actions
         )
+    if claim.kind in {"order_status", "shipment_status"}:
+        if _normalize_text(claim.value) == _normalize_text(span):
+            return True
+        label_kind = (
+            "order_status_label"
+            if claim.kind == "order_status"
+            else "shipment_status_label"
+        )
+        return any(
+            fact.kind == label_kind
+            and _normalize_text(fact.value) == _normalize_text(span)
+            for fact in record.facts
+        )
     if claim.kind == "image_url":
         return str(claim.value).strip() in span or any(
             media.evidence_ref == claim.evidence_ref

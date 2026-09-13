@@ -650,6 +650,35 @@ async def test_order_and_shipment_claims_reject_altered_values_and_subjects(
     )
 
 
+@pytest.mark.asyncio
+async def test_raw_shipment_status_accepts_its_canonical_arabic_label_span(
+    phase2_seed: Phase2Seed,
+) -> None:
+    context = _context(phase2_seed)
+    resolved = await _invoke(
+        resolve_customer_order,
+        context,
+        {"order_number": "ORD-1001", "purpose": "shipment"},
+    )
+    order_id = resolved["order"]["order_id"]
+    await _invoke(get_order_shipment, context, {"order_id": order_id})
+    reply = CommerceReply(
+        text="الشحنة في الطريق.",
+        evidence_refs=[f"order:shipment:{order_id}"],
+        fact_claims=[
+            FactClaim(
+                kind="shipment_status",
+                value="in_transit",
+                evidence_ref=f"order:shipment:{order_id}",
+                subject_order_id=order_id,
+                text_span="في الطريق",
+            )
+        ],
+    )
+
+    assert validate_grounded_reply(context, reply) == []
+
+
 def test_order_facts_without_current_run_evidence_are_rejected(
     phase2_seed: Phase2Seed,
 ) -> None:
