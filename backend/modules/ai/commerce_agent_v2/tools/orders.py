@@ -92,6 +92,21 @@ def _order_metadata(order: Any) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _persisted_order_currency(order: Any) -> str | None:
+    """Read currency only from the synchronized local order evidence."""
+    meta = _order_metadata(order)
+    salla_amounts = (
+        meta.get("salla_amounts")
+        if isinstance(meta.get("salla_amounts"), dict)
+        else {}
+    )
+    for value in (meta.get("currency"), salla_amounts.get("currency")):
+        currency = str(value or "").strip().upper()
+        if len(currency) == 3 and currency.isascii() and currency.isalpha():
+            return currency
+    return None
+
+
 def _metadata_shipment_facts(order: Any) -> dict[str, str]:
     """Conservative fallback for adapter-synced shipment facts on ``orders``."""
     meta = _order_metadata(order)
@@ -327,7 +342,7 @@ async def get_order_details(
     snapshot = _snapshot_from_order(order)
     reference = snapshot.display_reference or None
     total = _canonical_money(snapshot.total)
-    currency = "SAR" if total is not None else None
+    currency = _persisted_order_currency(order)
     items = _line_item_snapshots(order)
     evidence_ref = f"order:details:{snapshot.order_id}"
     facts: list[CanonicalEvidenceFact] = []
@@ -340,19 +355,20 @@ async def get_order_details(
             )
         )
     if total is not None:
-        facts.extend(
-            [
-                CanonicalEvidenceFact(
-                    kind="order_total",
-                    value=total,
-                    subject_order_id=snapshot.order_id,
-                ),
-                CanonicalEvidenceFact(
-                    kind="order_currency",
-                    value=currency,
-                    subject_order_id=snapshot.order_id,
-                ),
-            ]
+        facts.append(
+            CanonicalEvidenceFact(
+                kind="order_total",
+                value=total,
+                subject_order_id=snapshot.order_id,
+            )
+        )
+    if currency is not None:
+        facts.append(
+            CanonicalEvidenceFact(
+                kind="order_currency",
+                value=currency,
+                subject_order_id=snapshot.order_id,
+            )
         )
     for item in items:
         facts.append(

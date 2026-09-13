@@ -125,8 +125,6 @@ def extract_salla_amounts_breakdown(raw: Dict[str, Any]) -> Dict[str, str]:
         out["currency"] = str(total_block["currency"])
     elif raw.get("currency"):
         out["currency"] = str(raw["currency"])
-    else:
-        out.setdefault("currency", "SAR")
     return out
 
 

@@ -44,6 +44,7 @@ from modules.ai.commerce_agent_v2.tools.orders import (
     resolve_customer_order,
 )
 from modules.ai.orchestrator.ai_usage_pricing import compute_usage_cost_usd
+from services.store_sync import _merge_order_extra_metadata, _normalise_order
 
 
 set_trace_provider(DefaultTraceProvider())
@@ -145,7 +146,10 @@ def phase2_seed() -> Phase2Seed:
             {"name": "قميص قطني أزرق", "quantity": 2},
             {"name": "حزام جلدي بني", "quantity": 1},
         ],
-        extra_metadata={"created_at": "2026-09-10T09:00:00+03:00"},
+        extra_metadata={
+            "created_at": "2026-09-10T09:00:00+03:00",
+            "currency": "SAR",
+        },
     )
     open_order = Order(
         tenant_id=tenant_a.id,
@@ -161,7 +165,10 @@ def phase2_seed() -> Phase2Seed:
             {"name": "عطر ورد 100ml", "quantity": 1},
             {"name": "تغليف هدية", "quantity": 2},
         ],
-        extra_metadata={"created_at": "2026-09-12T11:00:00+03:00"},
+        extra_metadata={
+            "created_at": "2026-09-12T11:00:00+03:00",
+            "currency": "SAR",
+        },
     )
     foreign_customer_order = Order(
         tenant_id=tenant_a.id,
@@ -400,6 +407,94 @@ async def test_order_details_and_shipment_return_typed_canonical_evidence(
     assert shipment["shipment"]["tracking_url"] == (
         "https://track.example.test/SMSA-778899"
     )
+
+
+@pytest.mark.asyncio
+async def test_order_currency_requires_persisted_evidence(
+    phase2_seed: Phase2Seed,
+) -> None:
+    context = _context(phase2_seed)
+
+    phase2_seed.open_order.extra_metadata = {
+        **dict(phase2_seed.open_order.extra_metadata or {}),
+        "currency": "usd",
+    }
+    phase2_seed.db.commit()
+    resolved = await _invoke(
+        resolve_customer_order,
+        context,
+        {"order_number": "ORD-2002", "purpose": "status"},
+    )
+    order_id = resolved["order"]["order_id"]
+    evidenced = await _invoke(get_order_details, context, {"order_id": order_id})
+    assert evidenced["order"]["currency"] == "USD"
+    assert any(
+        fact["kind"] == "order_currency" and fact["value"] == "USD"
+        for fact in evidenced["evidence"][0]["facts"]
+    )
+
+    no_currency_order = Order(
+        tenant_id=phase2_seed.tenant_a.id,
+        customer_id=phase2_seed.customer_a.id,
+        external_id="currency-missing-order",
+        external_order_number="ORD-NO-CURRENCY",
+        status="processing",
+        total="330",
+        source="salla",
+        customer_name=phase2_seed.customer_a.name,
+        customer_info={"phone": phase2_seed.customer_a.normalized_phone},
+        line_items=[{"name": "منتج بلا عملة مثبتة", "quantity": 1}],
+        extra_metadata={"created_at": "2026-09-12T12:00:00+03:00"},
+    )
+    phase2_seed.db.add(no_currency_order)
+    phase2_seed.db.commit()
+    missing_resolved = await _invoke(
+        resolve_customer_order,
+        context,
+        {"order_number": "ORD-NO-CURRENCY", "purpose": "status"},
+    )
+    missing = await _invoke(
+        get_order_details,
+        context,
+        {"order_id": missing_resolved["order"]["order_id"]},
+    )
+    assert missing["order"]["total"] == 330
+    assert missing["order"]["currency"] is None
+    assert missing["evidence"][0]["fields"]["currency"] is None
+    assert not any(
+        fact["kind"] == "order_currency"
+        for fact in missing["evidence"][0]["facts"]
+    )
+
+
+def test_order_sync_persists_evidenced_non_sar_currency() -> None:
+    normalised = _normalise_order(
+        {
+            "id": "usd-order",
+            "source": "salla",
+            "status": "processing",
+            "total": 25,
+            "currency": "usd",
+            "items": [],
+        }
+    )
+    assert normalised["currency"] == "USD"
+    assert _merge_order_extra_metadata(None, normalised)["currency"] == "USD"
+
+
+def test_order_sync_does_not_persist_invented_currency() -> None:
+    normalised = _normalise_order(
+        {
+            "id": "currency-missing",
+            "source": "salla",
+            "status": "processing",
+            "amounts": {"total": {"amount": 25}},
+            "items": [],
+        }
+    )
+    assert normalised["currency"] == ""
+    assert "currency" not in normalised["salla_metadata"]["salla_amounts"]
+    assert "currency" not in _merge_order_extra_metadata(None, normalised)
 
 
 @pytest.mark.asyncio
