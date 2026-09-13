@@ -97,6 +97,12 @@ class NormalizedOrder(BaseModel):
     total: float
     currency: str = "SAR"
     payment_link: Optional[str] = None
+    # Payment method and state are distinct in Salla.  In particular,
+    # ``waiting`` is a state, while COD evidence can live in a label or in the
+    # single accepted method.  Preserve the resolved facts across poll syncs.
+    payment_method: Optional[str] = None
+    payment_status: Optional[str] = None
+    is_cod: bool = False
     customer_name: str
     customer_phone: str
     items: List[OrderItem] = []
