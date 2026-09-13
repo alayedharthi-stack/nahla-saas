@@ -548,6 +548,29 @@ async def _process_event(
     return sent
 
 
+def _is_initial_cod_confirmation_order_update(
+    automation_type: str,
+    event: Any,
+) -> bool:
+    """Distinguish the transactional COD prompt from Growth reminders.
+
+    The seeded ``cod_confirmation`` automation owns both the immediate
+    order-update prompt and later recovery reminders.  Only the latter belong
+    to the Growth autopilot entitlement; the initial prompt is part of the
+    Starter order-notification contract.
+    """
+    if str(automation_type or "").strip() != "cod_confirmation":
+        return False
+    if str(getattr(event, "event_type", "") or "").strip() != "order_cod_pending":
+        return False
+    payload = getattr(event, "payload", None) or {}
+    return (
+        isinstance(payload, dict)
+        and str(payload.get("message_type") or "").strip()
+        == "initial_confirmation"
+    )
+
+
 async def _try_execute(
     db: Session, tenant_id: int, event: Any, automation: Any, now: datetime
 ) -> str:
@@ -615,6 +638,8 @@ async def _try_execute(
 
     _atype = getattr(automation, "automation_type", "") or ""
     _required_feature = _AUTOMATION_FEATURE_MAP.get(_atype)
+    if _is_initial_cod_confirmation_order_update(_atype, event):
+        _required_feature = None
 
     if _required_feature:
         try:
