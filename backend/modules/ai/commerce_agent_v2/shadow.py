@@ -49,7 +49,13 @@ def _redact_value(value: Any) -> Any:
     return value
 
 
-def _persist_shadow_result(db: Any, context: CommerceAgentContext, result: CommerceAgentRunResult) -> None:
+def persist_commerce_agent_result(
+    db: Any,
+    context: CommerceAgentContext,
+    result: CommerceAgentRunResult,
+    *,
+    usage_reason: str = "commerce_agent_v2_shadow",
+) -> None:
     from models import CommerceAgentV2ShadowRun
     from modules.ai.orchestrator.ai_usage_ledger import (
         TOKEN_SOURCE_ACTUAL,
@@ -79,7 +85,7 @@ def _persist_shadow_result(db: Any, context: CommerceAgentContext, result: Comme
         conversation_id=context.conversation_id,
         provider="openai",
         model=result.model,
-        reason="commerce_agent_v2_shadow",
+        reason=usage_reason,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
         cache_read_tokens=0,
@@ -88,6 +94,15 @@ def _persist_shadow_result(db: Any, context: CommerceAgentContext, result: Comme
         request_id=result.sdk_trace_id,
     )
     db.commit()
+
+
+def _persist_shadow_result(
+    db: Any,
+    context: CommerceAgentContext,
+    result: CommerceAgentRunResult,
+) -> None:
+    """Backward-compatible Phase 1 persistence seam."""
+    persist_commerce_agent_result(db, context, result)
 
 
 async def _run_shadow_copy(
@@ -115,7 +130,7 @@ async def _run_shadow_copy(
             inbound_trace_id=inbound_trace_id,
         )
         result = await run_commerce_agent(context=context, user_input=user_input)
-        _persist_shadow_result(db, context, result)
+        persist_commerce_agent_result(db, context, result)
         logger.info(
             "[COMMERCE_V2_SHADOW] tenant=%s conversation=%s status=%s trace=%s latency_ms=%s",
             tenant_id,

@@ -13,10 +13,10 @@ from modules.ai.security.tenant_isolation import TenantIsolationLayer
 class ConversationMessageSession:
     """Read-through session keyed by ``tenant_id + conversation_id``.
 
-    V1 remains the canonical writer of customer and merchant-visible messages.
-    SDK additions are kept only for this in-flight run; Phase 1 never writes a
-    second assistant message into the live transcript. The next V2 shadow run
-    reconstructs history from the canonical MessageEvent rows written by V1.
+    The active outbound owner remains the canonical writer of customer-visible
+    messages. SDK additions are kept only for this in-flight run; the shadow
+    path never writes a second assistant message into the live transcript. The
+    next V2 run reconstructs history from canonical MessageEvent rows.
     """
 
     session_settings = SessionSettings(limit=30)
@@ -60,7 +60,9 @@ class ConversationMessageSession:
             # already-persisted webhook row so it is not sent twice.
             if str(metadata.get("wa_message_id") or "") == self._context.inbound_trace_id:
                 continue
-            body = str(getattr(row, "body", "") or "").strip()
+            body = self._context.redact_unexposed_customer_identity(
+                str(getattr(row, "body", "") or "")
+            ).strip()
             if not body:
                 continue
             direction = str(getattr(row, "direction", "") or "").lower()

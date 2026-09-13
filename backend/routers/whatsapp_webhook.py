@@ -7873,6 +7873,70 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
 
+        # ── Commerce Agent V2 tenant-scoped outbound owner ───────────────
+        # This seam intentionally precedes OrderFlowV2, checkout routing,
+        # MerchantBrain, legacy compose, and all legacy response delivery.
+        # Once the explicit tenant gate passes, this turn returns here even
+        # when V2 falls back or delivery fails; ownership never silently
+        # transfers to V1.
+        from modules.ai.commerce_agent_v2.ownership import (  # noqa: PLC0415
+            outbound_enabled_for_tenant as _v2_outbound_enabled,
+        )
+
+        if not _skip and _v2_outbound_enabled(int(tenant_id)):
+            try:
+                _v2_owner = await _run_and_deliver_commerce_v2_owner(
+                    db=db,
+                    tenant_id=int(tenant_id),
+                    conversation=convo,
+                    customer_phone=to,
+                    connection=wa_conn_hist,
+                    phone_id=phone_id,
+                    inbound_trace_id=str(wa_msg_id or f"conversation-{convo.id}"),
+                    user_input=text or "",
+                )
+            except Exception as _v2_owner_exc:  # noqa: BLE001 — selected tenant stays V2-owned
+                logger.exception(
+                    "[COMMERCE_V2_OWNER_FATAL] tenant=%s conversation=%s error=%s "
+                    "v1_bypassed=true silent_v1_fallback=false",
+                    tenant_id,
+                    getattr(convo, "id", None),
+                    type(_v2_owner_exc).__name__,
+                )
+                _v2_owner = {
+                    "status": "failed",
+                    "model": "",
+                    "text_sent": False,
+                    "presentations_sent": 0,
+                    "unsupported_presentations": 0,
+                }
+            try:
+                logger.info(
+                    "[COMMERCE_V2_OWNER] tenant=%s conversation=%s status=%s "
+                    "model=%s text_sent=%s presentations_sent=%s "
+                    "unsupported_presentations=%s v1_bypassed=true silent_v1_fallback=false",
+                    tenant_id,
+                    getattr(convo, "id", None),
+                    _v2_owner.get("status"),
+                    _v2_owner.get("model"),
+                    _v2_owner.get("text_sent"),
+                    _v2_owner.get("presentations_sent"),
+                    _v2_owner.get("unsupported_presentations"),
+                )
+                _persona_ownership.mark_bypass(
+                    _POReason.PRE_BRAIN_FAST_PATH,
+                    owner="commerce_agent_v2_outbound",
+                )
+                _sync_persona_observability()
+            except Exception as _v2_observe_exc:  # noqa: BLE001 — observability cannot release ownership
+                logger.warning(
+                    "[COMMERCE_V2_OWNER_OBSERVABILITY_FAILED] tenant=%s error=%s "
+                    "v1_bypassed=true silent_v1_fallback=false",
+                    tenant_id,
+                    type(_v2_observe_exc).__name__,
+                )
+            return
+
         # ── OrderFlowV2 deterministic checkout owner ─────────────────────
         _of2_result = None
         _of2_catalog_error = False
@@ -16291,6 +16355,215 @@ async def _try_send_catalog_product(
         tenant_id, attachment.get("id"), result.reason, result.error,
     )
     return False
+
+
+async def _run_and_deliver_commerce_v2_owner(
+    *,
+    db,
+    tenant_id: int,
+    conversation,
+    customer_phone: str,
+    connection,
+    phone_id: str,
+    inbound_trace_id: str,
+    user_input: str,
+) -> Dict[str, Any]:
+    """Run and deliver one V2-owned turn without any V1 fallback path."""
+    from modules.ai.commerce_agent_v2.context import CommerceAgentContext  # noqa: PLC0415
+    from modules.ai.commerce_agent_v2.delivery import (  # noqa: PLC0415
+        build_commerce_delivery_plan,
+    )
+    from modules.ai.commerce_agent_v2.runner import (  # noqa: PLC0415
+        run_commerce_agent,
+        safe_fallback_reply,
+    )
+    from modules.ai.commerce_agent_v2.shadow import (  # noqa: PLC0415
+        persist_commerce_agent_result,
+    )
+
+    result = None
+    try:
+        context = CommerceAgentContext.from_trusted_scope(
+            db=db,
+            tenant_id=int(tenant_id),
+            conversation_id=int(conversation.id),
+            customer_id=(
+                int(conversation.customer_id)
+                if getattr(conversation, "customer_id", None) is not None
+                else None
+            ),
+            normalized_customer_phone=normalize_phone(customer_phone),
+            connection_id=str(getattr(connection, "id", "") or ""),
+            inbound_trace_id=str(inbound_trace_id),
+        )
+        result = await run_commerce_agent(
+            context=context,
+            user_input=user_input,
+            execution_mode="outbound",
+        )
+        persist_commerce_agent_result(
+            db,
+            context,
+            result,
+            usage_reason="commerce_agent_v2_outbound",
+        )
+        reply = result.reply
+        status = result.status
+        model = result.model
+        plan = build_commerce_delivery_plan(reply, context.evidence)
+    except Exception as exc:  # noqa: BLE001 — fail closed to V2; never transfer to V1
+        logger.exception(
+            "[COMMERCE_V2_OWNER_FAILED] tenant=%s conversation=%s error=%s "
+            "v1_bypassed=true silent_v1_fallback=false",
+            tenant_id,
+            getattr(conversation, "id", None),
+            type(exc).__name__,
+        )
+        reply = safe_fallback_reply(f"owner_runtime_error:{type(exc).__name__}")
+        status = "failed"
+        model = ""
+        plan = build_commerce_delivery_plan(reply, {})
+
+    text_sent = False
+    presentations_sent = 0
+    unsupported_presentations = 0
+    presented_urls: set[str] = set()
+    for action in plan:
+        payload = action.payload
+        if action.kind == "text":
+            text_sent = await _send_whatsapp_message(
+                phone_id=phone_id,
+                to=customer_phone,
+                text=str(payload.get("text") or ""),
+                _tenant_id=tenant_id,
+                _db=db,
+                _inbound_message_id=inbound_trace_id,
+                _blocked_path="commerce_agent_v2_outbound_text",
+            )
+            continue
+        if action.kind == "unsupported":
+            unsupported_presentations += 1
+            logger.warning(
+                "[COMMERCE_V2_PRESENTATION_UNSUPPORTED] tenant=%s conversation=%s "
+                "capability=%s reason=%s",
+                tenant_id,
+                getattr(conversation, "id", None),
+                payload.get("capability"),
+                payload.get("reason"),
+            )
+            continue
+
+        delivered = False
+        if action.kind == "product":
+            delivered = await _try_send_catalog_product(
+                db=db,
+                connection=connection,
+                tenant_id=tenant_id,
+                phone_id=phone_id,
+                to=customer_phone,
+                attachment=payload,
+                block_commerce_escalation=False,
+                positive_commerce_intent=True,
+                delivery_audit=None,
+            )
+            image_url = str(payload.get("file_url") or "").strip()
+            product_url = str(payload.get("product_url") or "").strip()
+            if not delivered and image_url and product_url:
+                delivered = await _send_cta_url(
+                    phone_id=phone_id,
+                    to=customer_phone,
+                    body_text=str(payload.get("caption") or payload.get("title") or ""),
+                    btn_label="عرض المنتج",
+                    btn_url=product_url,
+                    header_image_url=image_url,
+                    _tenant_id=tenant_id,
+                    _db=db,
+                )
+            elif not delivered and image_url:
+                delivered = await _send_media_message(
+                    phone_id,
+                    customer_phone,
+                    "image",
+                    image_url,
+                    _tenant_id=tenant_id,
+                    _db=db,
+                )
+            elif not delivered and product_url:
+                delivered = await _send_cta_url(
+                    phone_id=phone_id,
+                    to=customer_phone,
+                    body_text=str(payload.get("caption") or payload.get("title") or ""),
+                    btn_label="عرض المنتج",
+                    btn_url=product_url,
+                    _tenant_id=tenant_id,
+                    _db=db,
+                )
+            presented_urls.update(value for value in (image_url, product_url) if value)
+        elif action.kind == "image":
+            media_url = str(payload.get("url") or "").strip()
+            if media_url not in presented_urls:
+                delivered = await _send_media_message(
+                    phone_id,
+                    customer_phone,
+                    "image",
+                    media_url,
+                    _tenant_id=tenant_id,
+                    _db=db,
+                )
+                presented_urls.add(media_url)
+        elif action.kind == "ui_action":
+            action_url = str(payload.get("url") or "").strip()
+            if action_url not in presented_urls:
+                delivered = await _send_cta_url(
+                    phone_id=phone_id,
+                    to=customer_phone,
+                    body_text=str(payload.get("label") or ""),
+                    btn_label=str(payload.get("label") or "")[:20],
+                    btn_url=action_url,
+                    _tenant_id=tenant_id,
+                    _db=db,
+                )
+                presented_urls.add(action_url)
+
+        if delivered:
+            presentations_sent += 1
+        else:
+            unsupported_presentations += 1
+            logger.warning(
+                "[COMMERCE_V2_PRESENTATION_UNSUPPORTED] tenant=%s conversation=%s "
+                "capability=%s reason=existing_delivery_path_unavailable",
+                tenant_id,
+                getattr(conversation, "id", None),
+                action.kind,
+            )
+
+    if text_sent:
+        StateManager.save_message(
+            db,
+            customer_phone,
+            reply.text,
+            "outbound",
+            conversation_id=conversation.id,
+            tenant_id=tenant_id,
+            extra_metadata={
+                "reply_owner": "commerce_agent_v2",
+                "sdk_trace_id": getattr(result, "sdk_trace_id", ""),
+                "v2_status": status,
+                "v1_bypassed": True,
+                "silent_v1_fallback": False,
+                "presentation_count": presentations_sent,
+                "unsupported_presentation_count": unsupported_presentations,
+            },
+        )
+        db.commit()
+
+    return {
+        "status": status,
+        "model": model,
+        "text_sent": text_sent,
+        "presentations_sent": presentations_sent,
+        "unsupported_presentations": unsupported_presentations,
+    }
 
 
 async def _send_whatsapp_message(
