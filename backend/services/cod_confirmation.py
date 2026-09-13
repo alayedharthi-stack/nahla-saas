@@ -78,6 +78,10 @@ _STORE_PENDING_CONFIRMATION_STATUSES = frozenset({
     "pending_payment",
     "waiting_payment",
     "awaiting_payment",
+    # Salla creates storefront COD orders as unpaid + in_progress. This state
+    # is eligible only when the order also carries the server-side COD prompt
+    # stamp checked below; ordinary in-progress orders remain ineligible.
+    "in_progress",
 })
 
 COD_INBOUND_CONSUMED = "consumed"
