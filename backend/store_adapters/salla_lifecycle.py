@@ -75,7 +75,25 @@ def _payment_method(normalized_order: Mapping[str, Any]) -> str:
 
 
 def _is_cod(normalized_order: Mapping[str, Any]) -> bool:
+    if normalized_order.get("is_cod") is True:
+        return True
     return _payment_method(normalized_order) in _COD_METHODS
+
+
+def salla_cod_requires_customer_confirmation(
+    raw_status: Any,
+    normalized_order: Mapping[str, Any],
+) -> bool:
+    """True while a Salla COD order still awaits the customer's decision."""
+    if not _is_cod(normalized_order):
+        return False
+    if normalized_order.get("cod_customer_confirmed"):
+        return False
+    status = normalize_status_slug(raw_status)
+    # Salla storefront COD orders are observed as unpaid ``in_progress``.
+    # Other preparing states can represent genuine merchant fulfilment and
+    # must not be reinterpreted as a customer-confirmation request.
+    return status in (_PAYMENT_PENDING_STATUSES | {"in_progress"})
 
 
 def customer_relevant_state(raw_status: Any) -> str:
@@ -147,6 +165,8 @@ def _first_seen_acceptance_intent(
         # Salla often creates already-accepted orders as in_progress.
         # Only the authoritative order.created webhook may confirm that once.
         if _is_authoritative_order_created(normalized_order):
+            if salla_cod_requires_customer_confirmation(curr, normalized_order):
+                return BusinessIntent.COD_CONFIRMATION
             return BusinessIntent.ORDER_CONFIRMED
         return None
     if curr in _READY_STATUSES:
@@ -195,6 +215,8 @@ def normalize_salla_lifecycle_business_intent(
         # Poller/StoreSync may have inserted the row first with the same
         # preparing status. The later order.created webhook is still the
         # one confirmation, and ledger identity remains semantic.
+        if salla_cod_requires_customer_confirmation(curr, normalized_order):
+            return BusinessIntent.COD_CONFIRMATION
         return BusinessIntent.ORDER_CONFIRMED
 
     if curr in _CANCELLED_STATUSES and prev not in _CANCELLED_STATUSES:
@@ -249,4 +271,5 @@ __all__ = [
     "customer_relevant_state",
     "normalize_salla_lifecycle_business_intent",
     "normalize_salla_lifecycle_customer_state",
+    "salla_cod_requires_customer_confirmation",
 ]

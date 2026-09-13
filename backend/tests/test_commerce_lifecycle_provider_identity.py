@@ -21,7 +21,7 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
         sys.path.insert(0, str(_p))
 
 from core.commerce_lifecycle.intents import BusinessIntent  # noqa: E402
-from models import CommerceLifecycleNotificationLedger, Order  # noqa: E402
+from models import AutomationEvent, CommerceLifecycleNotificationLedger, Order  # noqa: E402
 from services.store_sync import (  # noqa: E402
     StoreSyncService,
     _attach_lifecycle_observation,
@@ -155,6 +155,50 @@ class TestProviderIdentityHelpers:
 
 
 class TestStoreSyncDispatcherProviderIdentity:
+    @patch("services.outcome_tracker.record_order_outcome")
+    @patch("services.offer_attribution_service.attribute_order_to_decision")
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    def test_live_in_progress_cod_never_emits_final_confirmation_event(
+        self,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_send,
+        _mock_attr,
+        _mock_outcome,
+    ):
+        db, _engine = make_scenario_db()
+        _ensure_webhook_dedupe_index(db)
+        tenant = seed_tenant(db, name="متجر تجريبي عام")
+        store_id = "STORE-COD-WAIT-8800"
+        _seed_salla_integration(db, tenant.id, store_id)
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+        mock_send.return_value = ("sent", {"wa_message_id": "wamid.cod.wait"})
+
+        _dispatch_order_created(
+            db,
+            tenant_id=tenant.id,
+            store_id=store_id,
+            source="merchant-dashboard",
+            status_slug="in_progress",
+            payment_method="cod",
+            external_event_id="salla-wh-evt-cod-wait",
+            external_id=8801000,
+        )
+
+        order = db.query(Order).filter_by(tenant_id=tenant.id).one()
+        ledger = db.query(CommerceLifecycleNotificationLedger).filter_by(
+            tenant_id=tenant.id, order_id=order.id
+        ).one()
+        event_types = {
+            row.event_type
+            for row in db.query(AutomationEvent).filter_by(tenant_id=tenant.id).all()
+        }
+        assert ledger.business_intent == BusinessIntent.COD_CONFIRMATION.value
+        assert "order_notifications" not in event_types
+
     @patch("services.outcome_tracker.record_order_outcome")
     @patch("services.offer_attribution_service.attribute_order_to_decision")
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)

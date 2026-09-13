@@ -20,6 +20,80 @@ except ImportError:  # pragma: no cover
 
 SALLA_DEFAULT_TZ = "Asia/Riyadh"
 
+_COD_PAYMENT_METHODS = frozenset({
+    "cod",
+    "cash_on_delivery",
+    "cod_payment",
+    "cash",
+    "الدفع عند الاستلام",
+})
+_PAYMENT_STATE_VALUES = frozenset({
+    "waiting",
+    "pending",
+    "unpaid",
+    "not_paid",
+    "payment_pending",
+    "pending_payment",
+    "awaiting_payment",
+    "waiting_payment",
+    "paid",
+    "authorized",
+    "failed",
+    "cancelled",
+    "refunded",
+})
+
+
+def _payment_scalar(value: Any) -> str:
+    if isinstance(value, dict):
+        value = (
+            value.get("slug")
+            or value.get("code")
+            or value.get("method")
+            or value.get("name")
+            or ""
+        )
+    return str(value or "").strip().lower()
+
+
+def extract_salla_payment_facts(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Separate Salla's selected payment method from its payment state.
+
+    Some ``order.created`` payloads expose the selected method at the order
+    level while ``payment.method`` contains the state ``waiting``. Treating
+    that state as the method loses COD evidence and can confirm too early.
+    """
+    payment = raw.get("payment") if isinstance(raw.get("payment"), dict) else {}
+    top_level_method = _payment_scalar(raw.get("payment_method"))
+    nested_method = _payment_scalar(payment.get("method"))
+
+    payment_method = next(
+        (
+            candidate
+            for candidate in (top_level_method, nested_method)
+            if candidate and candidate not in _PAYMENT_STATE_VALUES
+        ),
+        top_level_method or nested_method,
+    )
+    is_cod = payment_method in _COD_PAYMENT_METHODS
+    if is_cod:
+        payment_method = "cod"
+
+    payment_status = _payment_scalar(
+        payment.get("status") or raw.get("payment_status")
+    )
+    if not payment_status:
+        for candidate in (nested_method, top_level_method):
+            if candidate in _PAYMENT_STATE_VALUES:
+                payment_status = candidate
+                break
+
+    return {
+        "payment_method": payment_method,
+        "payment_status": payment_status,
+        "is_cod": is_cod,
+    }
+
 
 def _riyadh_tz() -> timezone:
     if ZoneInfo is not None:
@@ -357,12 +431,12 @@ def enrich_salla_customer_info(raw: Dict[str, Any], customer_info: Dict[str, Any
         if ship_cost:
             out["shipping_cost"] = ship_cost
 
-    payment = raw.get("payment") if isinstance(raw.get("payment"), dict) else {}
-    if payment:
-        if payment.get("method"):
-            out["payment_method"] = str(payment.get("method")).lower()
-        if payment.get("status"):
-            out["payment_status"] = payment.get("status")
+    payment_facts = extract_salla_payment_facts(raw)
+    for key in ("payment_method", "payment_status"):
+        if payment_facts.get(key):
+            out[key] = payment_facts[key]
+    if payment_facts.get("is_cod"):
+        out["is_cod"] = True
 
     receiver = raw.get("receiver") if isinstance(raw.get("receiver"), dict) else {}
     if receiver and not out.get("name"):
@@ -393,9 +467,12 @@ def build_salla_order_metadata(raw: Dict[str, Any]) -> Dict[str, Any]:
         meta["created_at"] = _to_utc_iso(utc_dt)
     if amounts:
         meta["salla_amounts"] = amounts
-    payment = raw.get("payment") if isinstance(raw.get("payment"), dict) else {}
-    if payment.get("method"):
-        meta["payment_method"] = str(payment.get("method")).lower()
+    payment_facts = extract_salla_payment_facts(raw)
+    for key in ("payment_method", "payment_status"):
+        if payment_facts.get(key):
+            meta[key] = payment_facts[key]
+    if payment_facts.get("is_cod"):
+        meta["is_cod"] = True
     ship = raw.get("shipping") if isinstance(raw.get("shipping"), dict) else {}
     if ship.get("company"):
         company = ship.get("company")
@@ -451,6 +528,7 @@ __all__ = [
     "extract_salla_amounts_breakdown",
     "extract_salla_grand_total",
     "extract_salla_money_amount",
+    "extract_salla_payment_facts",
     "looks_like_salla_order",
     "normalize_salla_line_items",
     "parse_salla_order_datetime",
