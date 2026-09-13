@@ -2392,12 +2392,32 @@ class StoreSyncService:
                         _cod_awaiting_customer = salla_cod_requires_customer_confirmation(
                             _status, normalised
                         )
+                        _lifecycle_owned = _lifecycle_dispatch_owns_tenant(
+                            self.tenant_id
+                        )
+                        _event_customer = None
+                        if not _lifecycle_owned:
+                            # Legacy automations address Customer rows.  The
+                            # external-order identity contract deliberately
+                            # leaves Order.customer_id NULL, so resolve the
+                            # event recipient before emitting instead of
+                            # creating a guaranteed no_customer_id failure.
+                            _event_customer = (
+                                self._customer_intelligence.upsert_customer_from_order(
+                                    normalised,
+                                    source="order_poll",
+                                    commit=False,
+                                )
+                            )
 
-                        if not _cod_awaiting_customer:
+                        if not _lifecycle_owned and not _cod_awaiting_customer:
                             emit_automation_event(
                                 self.db,
                                 self.tenant_id,
                                 AutomationTrigger.ORDER_NOTIFICATIONS.value,
+                                customer_id=(
+                                    _event_customer.id if _event_customer else None
+                                ),
                                 payload={
                                     "external_id":           ext_id,
                                     "order_id":              new_row.id,
@@ -2427,11 +2447,14 @@ class StoreSyncService:
                                 or nahla_owns_cod_customer_confirmation(new_row)
                             ):
                                 _is_cod = False
-                        if _is_cod:
+                        if _is_cod and not _lifecycle_owned:
                             emit_automation_event(
                                 self.db,
                                 self.tenant_id,
                                 AutomationTrigger.ORDER_COD_PENDING.value,
+                                customer_id=(
+                                    _event_customer.id if _event_customer else None
+                                ),
                                 payload={
                                     "external_id":           ext_id,
                                     "order_id":              new_row.id,
@@ -2452,17 +2475,37 @@ class StoreSyncService:
                         # fired and never double-emits for this order.
                         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
                         _meta = dict(new_row.extra_metadata or {})
-                        _meta["notifications_emitted"]    = True
-                        _meta["notifications_emitted_at"] = datetime.now(timezone.utc).isoformat()
-                        _meta["notifications_emitted_by"] = f"sync_orders.{triggered_by}"
+                        if _lifecycle_owned:
+                            _meta["legacy_notifications_suppressed"] = True
+                            _meta["legacy_notifications_suppressed_at"] = (
+                                datetime.now(timezone.utc).isoformat()
+                            )
+                            _meta["legacy_notifications_suppressed_by"] = (
+                                "lifecycle_dispatch_owner"
+                            )
+                        else:
+                            _meta["notifications_emitted"] = True
+                            _meta["notifications_emitted_at"] = (
+                                datetime.now(timezone.utc).isoformat()
+                            )
+                            _meta["notifications_emitted_by"] = (
+                                f"sync_orders.{triggered_by}"
+                            )
                         new_row.extra_metadata = _meta
                         flag_modified(new_row, "extra_metadata")
 
                         self.db.commit()
-                        logger.info(
-                            "[StoreSync/poll] automation events emitted tenant=%s order=%s pm=%s",
-                            self.tenant_id, ext_id, _pm or "unknown",
-                        )
+                        if _lifecycle_owned:
+                            logger.info(
+                                "[StoreSync/poll] legacy automation withheld for lifecycle owner "
+                                "tenant=%s order=%s pm=%s",
+                                self.tenant_id, ext_id, _pm or "unknown",
+                            )
+                        else:
+                            logger.info(
+                                "[StoreSync/poll] automation events emitted tenant=%s order=%s pm=%s",
+                                self.tenant_id, ext_id, _pm or "unknown",
+                            )
                     except Exception as _ae:
                         logger.warning(
                             "[StoreSync/poll] automation emit failed tenant=%s order=%s: %s",

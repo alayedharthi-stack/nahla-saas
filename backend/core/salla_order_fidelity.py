@@ -81,11 +81,16 @@ def _is_cod_value(value: Any) -> bool:
 
 
 def _payment_action_values(raw: Dict[str, Any]) -> List[Any]:
-    actions = raw.get("payment_actions")
-    if not isinstance(actions, dict):
+    payment = raw.get("payment") if isinstance(raw.get("payment"), dict) else {}
+    actions = raw.get("payment_actions") or payment.get("actions")
+    if isinstance(actions, dict):
+        action_rows = actions.values()
+    elif isinstance(actions, (list, tuple)):
+        action_rows = actions
+    else:
         return []
     values: List[Any] = []
-    for action in actions.values():
+    for action in action_rows:
         if not isinstance(action, dict):
             continue
         for key in (
@@ -103,7 +108,12 @@ def _payment_action_values(raw: Dict[str, Any]) -> List[Any]:
 
 def _singleton_accepted_payment_method(raw: Dict[str, Any]) -> str:
     """Return one unambiguous accepted method; never guess from a mixed list."""
-    accepted = raw.get("accepted_payment_methods")
+    payment = raw.get("payment") if isinstance(raw.get("payment"), dict) else {}
+    accepted = (
+        raw.get("accepted_payment_methods")
+        or payment.get("accepted_payment_methods")
+        or payment.get("accepted_methods")
+    )
     if not isinstance(accepted, (list, tuple, set)):
         return ""
     methods = {
@@ -112,6 +122,49 @@ def _singleton_accepted_payment_method(raw: Dict[str, Any]) -> str:
         if _payment_key(item) and _payment_key(item) not in _PAYMENT_STATE_VALUES
     }
     return next(iter(methods.values())) if len(methods) == 1 else ""
+
+
+def _accepted_payment_values(raw: Dict[str, Any]) -> List[Any]:
+    payment = raw.get("payment") if isinstance(raw.get("payment"), dict) else {}
+    accepted = (
+        raw.get("accepted_payment_methods")
+        or payment.get("accepted_payment_methods")
+        or payment.get("accepted_methods")
+    )
+    if not isinstance(accepted, (list, tuple, set)):
+        return []
+    return list(accepted)
+
+
+def _status_key(raw: Dict[str, Any]) -> str:
+    status = raw.get("status")
+    if isinstance(status, dict):
+        status = status.get("slug") or status.get("code") or status.get("name")
+    return _payment_key(status)
+
+
+def _mixed_accepted_cod_is_selected(
+    raw: Dict[str, Any],
+    *,
+    explicit_methods: List[str],
+) -> bool:
+    """Recognise Salla's storefront COD waiting shape.
+
+    Salla's list/order-created representations can keep ``payment_method`` at
+    the state ``waiting`` and expose the selected COD option only inside the
+    accepted-methods collection.  A mixed collection is not sufficient by
+    itself: require the provider's specific unpaid ``in_progress`` creation
+    state as corroborating evidence.  Paid and review-state orders therefore
+    cannot be reclassified as COD merely because the store supports it.
+    """
+    accepted = _accepted_payment_values(raw)
+    if not accepted or not any(_is_cod_value(value) for value in accepted):
+        return False
+    has_waiting_state = any(
+        _payment_key(method) in _PAYMENT_STATE_VALUES
+        for method in explicit_methods
+    )
+    return has_waiting_state and _status_key(raw) == "in_progress"
 
 
 def _has_positive_cod_fee(raw: Dict[str, Any]) -> bool:
@@ -163,6 +216,10 @@ def extract_salla_payment_facts(raw: Dict[str, Any]) -> Dict[str, Any]:
     is_cod = (
         any(_is_cod_value(value) for value in explicit_values)
         or _is_cod_value(singleton_accepted)
+        or _mixed_accepted_cod_is_selected(
+            raw,
+            explicit_methods=explicit_methods,
+        )
         or _has_positive_cod_fee(raw)
     )
     if is_cod:

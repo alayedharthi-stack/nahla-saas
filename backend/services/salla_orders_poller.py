@@ -450,7 +450,51 @@ def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
     meta = dict(order.extra_metadata or {})
     if meta.get("notifications_emitted"):
         return False
+    if meta.get("legacy_notifications_suppressed"):
+        return False
     if order.is_abandoned:
+        return False
+
+    # A canary tenant's external lifecycle webhook is the sole send owner.
+    # Poll imports are snapshots rather than authoritative transitions; the
+    # later order.created webhook carries the richer payment evidence and
+    # recipient identity.  Emitting legacy automation here races that webhook
+    # and previously produced a no_customer_id failure (or a wrong final
+    # confirmation) before COD could be identified.
+    from core.commerce_lifecycle.canary_guard import (  # noqa: PLC0415
+        commerce_lifecycle_dispatch_tenant_permitted,
+    )
+    if commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id)):
+        try:
+            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+            meta["legacy_notifications_suppressed"] = True
+            meta["legacy_notifications_suppressed_at"] = (
+                datetime.now(timezone.utc).isoformat()
+            )
+            meta["legacy_notifications_suppressed_by"] = (
+                "lifecycle_dispatch_owner"
+            )
+            order.extra_metadata = meta
+            flag_modified(order, "extra_metadata")
+            db.commit()
+            logger.info(
+                "[Salla Orders Poller] legacy emit withheld for lifecycle owner "
+                "tenant_id=%s order_id=%s",
+                tenant_id,
+                order.id,
+            )
+        except Exception as exc:
+            logger.error(
+                "[Salla Orders Poller] lifecycle-owner stamp failed "
+                "tenant_id=%s error_class=%s",
+                tenant_id,
+                type(exc).__name__,
+            )
+            try:
+                db.rollback()
+            except Exception:  # noqa: silent-ok — rollback after stamp failure is best effort
+                pass
         return False
 
     try:
