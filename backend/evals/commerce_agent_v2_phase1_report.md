@@ -32,22 +32,24 @@ model turn so it must conclude from the empty results. Any successful catalog
 search resets the budget. This changes neither the Agent instructions nor the
 four tool contracts.
 
-Phase 1.2's search-loop correction is verified. In the latest gate-enforced Sol
-High run, all ten tool contracts passed. The targeted `missing-product-ar` case
-made exactly two catalog searches and no unrelated tool call, while
-`gift-recommendation-ar` retained its valid two-search plan. Provider
-observability also passed and the eval emitted its end marker.
+Phase 1.2's search-loop correction is verified. A narrow follow-up also fixed
+the remaining Phase 1.1 false positive: a repeated availability word inside a
+same-clause quantity rendering is accepted only when verified availability and
+quantity claims have the same evidence ref, product subject, value, and state.
+Wrong quantities, opposite availability states, and cross-product bindings
+remain rejected.
 
-The same run did not pass the frozen Phase 1.1 grounding gate: one natural
-rendering in `catalog-specific-ar` used both `متوفر لدينا` and
-`المتاح حاليًا 8 عبوات`. Although the reply contained canonical
-`availability=true` and `stock_quantity=8` claims backed by the same product
-evidence, the guardrail classified the second phrase as uncovered availability.
-The enforced result was therefore 9/10 completed, 9/10 correct outcomes, one
-unsupported claim, and `quality_gate_passed=false`. No Phase 1.1 contract,
-guardrail, Agent instruction, or evaluator was changed to hide this result.
+The post-fix Sol High run completed all ten cases with ten correct outcomes and
+zero unsupported claims. The false-positive case passed. Provider observability
+passed with 27 provider-call records, and the eval end marker was emitted. The
+aggregate quality gate nevertheless remained false at 8/10 tool behavior
+because Sol added an unnecessary merchant-knowledge lookup in `linked-kb-ar`
+and `missing-fact-ar`. Both the targeted `missing-product-ar` and the valid
+two-search `gift-recommendation-ar` passed their tool contracts. No Agent,
+persona, tool, session, tenant, or evaluator change was made for the new routing
+variance.
 
-## Aggregate before/after
+## Historical aggregate before narrow false-positive fix
 
 | Metric | Contaminated | Clean-room baseline | Phase 1.1 final | Phase 1.2 prior run | Enforced confirmation |
 |---|---:|---:|---:|---:|---:|
@@ -89,6 +91,32 @@ Phase 1.2 gate-enforced confirmation deployment:
 
 Confirmation GitHub commit (same file tree):
 `44f066e47a36f691687c2dd44d5db62be0d43c99`
+
+Narrow false-positive fix GitHub commit:
+`737954708b5413d10996756ac730fed87d4baa6c`
+
+Post-fix full-eval deployment:
+`74ae6fbf-f675-493c-8548-8920e5b9ac62`
+
+Post-fix eval source commit (same code tree):
+`324427ae5f5b70430050664206aa16fac66597ed`
+
+## Post-fix full-eval result
+
+| Metric | Result |
+|---|---:|
+| Cases | 10 |
+| Completed | 10 |
+| Correct outcomes | 10 |
+| Unsupported claims | 0 |
+| Tool behavior matches | 8 |
+| Provider observability | Passed |
+| Provider-call records | 27 |
+| Input + output tokens | 50,612 |
+| Total latency | 136,543 ms |
+| Estimated cost | $0.026460750 |
+| Eval end marker | Present (`status=1`, enforced quality-gate assertion) |
+| Quality gate | False |
 
 The clean-room baseline and Phase 1.1 final runs both reported
 `provider_observability_passed=true`. The final run reported
@@ -252,9 +280,26 @@ language, or `مانوكا` special case. It adds no Agent, classifier, tool, cu
 text template, or instruction. The canonical evidence and guardrail contracts
 are unchanged.
 
+## Narrow Phase 1.1 false-positive correction
+
+The failing `catalog-specific-ar` reply contained a verified
+`availability=true` claim rendered as `متوفر لدينا` and a verified
+`stock_quantity=8` claim rendered as `8 عبوات`. Its text also naturally said
+`المتاح حاليًا 8 عبوات`. The final text-coverage pass treated that second word
+as a new unclaimed availability assertion even though the typed facts jointly
+supported the phrase.
+
+The correction applies only to this joint rendering shape. An unmatched
+availability mention may be supported by a quantity phrase in the same clause
+only when both already-verified claims share the exact evidence ref and product
+subject, the quantity matches, and the availability state matches. Tests cover
+the accepted natural phrasing plus wrong quantity, opposite availability, and
+cross-product evidence rejection. The canonical evidence and FactClaim schemas
+are unchanged.
+
 ## Local verification after Phase 1.2
 
-- Phase 1 suite: `56 passed, 1 skipped` (the skip is the opt-in live eval).
+- Phase 1 suite: `57 passed, 1 skipped` (the skip is the opt-in live eval).
 - Offline replay: `10/10` canonical scripted plans, each satisfying its tool/evidence contract.
 - V1 provider-boundary replay: `2 passed`.
 - Intelligence non-interference checks: `52 passed`.
@@ -269,7 +314,7 @@ unchanged and the test does not exercise the V2 tool-budget path.
 
 ## Final live verification and disposition
 
-The latest Phase 1.2 live run used `gpt-5.6-sol` with reasoning effort `high`, a
+The post-fix live run used `gpt-5.6-sol` with reasoning effort `high`, a
 fresh Conversation for every case, and only explicitly declared history for the
 three multi-turn cases. It emitted all summary, case, and provider-call records.
 With live-gate enforcement enabled, it ended with
@@ -282,20 +327,21 @@ availability, quantity, or knowledge paraphrases. Negative tests still reject
 changed facts, false bounds, wrong evidence refs, cross-product subjects, and
 unclaimed commercial values.
 
-The Phase 1.2 target passed: tool behavior was 10/10; the missing-product search
-plan is now two bounded catalog calls, a correct safe fallback, and no
-unnecessary continuation. All nine other tool contracts passed, including the
-valid two-search gift recommendation.
+The narrow grounding fix passed its target: 10/10 completed, 10/10 correct
+outcomes, and zero unsupported claims. The missing-product plan remained two
+bounded catalog calls with a safe fallback, and the gift recommendation retained
+its acceptable two-search plan.
 
-The overall Phase 1 quality gate nevertheless remains false because the frozen
-grounding guard rejected one availability/quantity wording in
-`catalog-specific-ar`. That left 9/10 completed, 9/10 correct outcomes, and one
-unsupported claim. This is not a tool-efficiency regression and changing it is
-outside the Phase 1.2 scope authorized for this run.
+The overall Phase 1 quality gate nevertheless remains false at 8/10 tool
+behavior. `linked-kb-ar` called merchant knowledge before the required catalog
+and product-knowledge tools; `missing-fact-ar` called merchant knowledge after
+product knowledge returned no evidence. Both final outcomes were correct and
+safe, but the unnecessary calls violate their frozen tool contracts. No rerun
+was used to select a luckier sample, and those routing changes were not folded
+into the separately authorized false-positive correction.
 
 Accordingly, Phase 1 is **not** marked final under the requested Definition of
 Done. No evaluator expectation was weakened, no Agent instruction or persona
-was changed, and no merge or production deployment was performed. The next
-review decision is whether retrieval-query variability is an accepted eval
-variance or a separately scoped deterministic retrieval concern; it should not
-be folded into the completed missing-product loop fix without review.
+was changed, and no merge or production deployment was performed. Further work
+would require a separately authorized tool-routing stabilization rather than a
+grounding change.
