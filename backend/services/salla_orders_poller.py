@@ -450,6 +450,11 @@ def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
     meta = dict(order.extra_metadata or {})
     if meta.get("notifications_emitted"):
         return False
+    # The webhook already emitted the initial COD prompt.  This stamp closes
+    # the narrow race where the poller's pre-sync snapshot missed the row but
+    # the webhook inserted it before the poller calculated ``new_ids``.
+    if meta.get("cod_webhook_triggered"):
+        return False
     if meta.get("legacy_notifications_suppressed"):
         return False
     if order.is_abandoned:
