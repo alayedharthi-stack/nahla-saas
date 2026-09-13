@@ -493,7 +493,7 @@ def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
             )
             try:
                 db.rollback()
-            except Exception:
+            except Exception:  # noqa: silent-ok — rollback after stamp failure is best effort
                 pass
         return False
 
