@@ -158,7 +158,7 @@ def _first_seen_acceptance_intent(
         return BusinessIntent.ORDER_CONFIRMED
     if curr in _PAYMENT_PENDING_STATUSES:
         if _is_cod(normalized_order):
-            return None
+            return BusinessIntent.COD_CONFIRMATION
         return BusinessIntent.PAYMENT_NEEDED
     return None
 
@@ -233,10 +233,12 @@ def normalize_salla_lifecycle_business_intent(
         return BusinessIntent.PAYMENT_CONFIRMED
     if curr in _PAYMENT_PENDING_STATUSES and prev not in _PAYMENT_PENDING_STATUSES:
         if _is_cod(normalized_order):
-            return None
+            return BusinessIntent.COD_CONFIRMATION
         return BusinessIntent.PAYMENT_NEEDED
     if curr in _CONFIRMATION_STATUSES and prev not in _CONFIRMATION_STATUSES:
-        if prev in _PAYMENT_PENDING_STATUSES and not _is_cod(normalized_order):
+        if prev in _PAYMENT_PENDING_STATUSES:
+            return BusinessIntent.ORDER_CONFIRMED
+        if normalized_order.get("cod_customer_confirmed") and _is_cod(normalized_order):
             return BusinessIntent.ORDER_CONFIRMED
         return None
 

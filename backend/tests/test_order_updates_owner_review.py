@@ -51,6 +51,7 @@ from routers.order_updates import (  # noqa: E402
 from services.cod_confirmation import (  # noqa: E402
     CANONICAL_SERVICE_KEY,
     handle_cod_reply,
+    send_order_confirmation_after_cod,
     send_cod_confirmation_template,
 )
 from store_adapters.salla_lifecycle import (  # noqa: E402
@@ -90,6 +91,11 @@ def _cod_template(**kwargs):
         service_key="cod_confirmation",
         category="UTILITY",
         components=[
+            {
+                "type": "HEADER",
+                "format": "IMAGE",
+                "example": {"header_url": "https://cdn.nahla.ai/cod-confirmation.jpg"},
+            },
             {"type": "BODY", "text": "مرحبا {{1}} طلب #{{2}}"},
             {
                 "type": "BUTTONS",
@@ -243,20 +249,20 @@ class TestPaymentPendingNoFallback:
 
 
 class TestCodSingleOwner:
-    def test_salla_first_seen_cod_is_not_customer_confirm_prompt(self):
+    def test_salla_cod_pending_then_customer_confirmation_maps_both_events(self):
+        assert normalize_salla_lifecycle_business_intent(
+            None, "payment_pending", {"payment_method": "cod"}
+        ) == BusinessIntent.COD_CONFIRMATION
         assert normalize_salla_lifecycle_business_intent(
             None, "under_review", {"payment_method": "cod"}
         ) == BusinessIntent.ORDER_CONFIRMED
         assert normalize_salla_lifecycle_business_intent(
             "payment_pending", "under_review", {"payment_method": "cod"}
-        ) is None
+        ) == BusinessIntent.ORDER_CONFIRMED
 
-    def test_legacy_hard_named_template_is_not_send_owner(self):
-        src = inspect.getsource(send_cod_confirmation_template)
-        assert "cod_order_confirmation_ar" not in src
-        assert "resolve_lifecycle_template_for_send" in src
-
-    def test_one_checkout_one_confirmation_then_salla_push_does_not_resend(self, monkeypatch):
+    def test_salla_origin_cod_prompt_uses_approved_image_template_and_stamps_order(
+        self, monkeypatch
+    ):
         monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
         monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST", "9")
         monkeypatch.setenv(
@@ -271,9 +277,109 @@ class TestCodSingleOwner:
         db.add(_cod_template(tenant_id=9))
         set_order_update_flags(db, 9, {"cod_confirmation": True}, commit=True)
         order = SimpleNamespace(
+            id=771,
+            tenant_id=9,
+            external_id="salla-771",
+            external_order_number="S-771",
+            status="payment_pending",
+            customer_info={"name": "نورة", "phone": "+966500111222"},
+            customer_name="نورة",
+            extra_metadata={"payment_method": "cod"},
+            checkout_url=None,
+        )
+        session_send = AsyncMock()
+        template_send = AsyncMock(
+            return_value=("sent", {"wa_message_id": "wamid.salla.cod.771"})
+        )
+        with patch(
+            "core.automation_engine.send_lifecycle_whatsapp_session_body",
+            session_send,
+        ), patch(
+            "core.automation_engine.send_lifecycle_whatsapp_template",
+            template_send,
+        ), patch(
+            "core.commerce_lifecycle.canary_guard.evaluate_and_audit",
+            return_value=SimpleNamespace(allowed=True, reason="permitted"),
+        ), patch(
+            "core.commerce_lifecycle.window.lifecycle_service_window_is_open",
+            return_value=(True, "service_window"),
+        ), patch(
+            "core.merchant_capabilities.resolve_merchant_capabilities",
+            return_value=SimpleNamespace(to_dict=lambda: {}),
+        ):
+            result = asyncio.run(
+                dispatch_external_lifecycle_notification(
+                    db,
+                    tenant_id=9,
+                    order=order,
+                    provider="salla",
+                    raw_previous_status=None,
+                    raw_current_status="payment_pending",
+                    normalized_order={
+                        "external_id": "salla-771",
+                        "external_order_number": "S-771",
+                        "status": "payment_pending",
+                        "payment_method": "cod",
+                    },
+                    raw_payload={"event_id": "evt-salla-cod-771"},
+                )
+            )
+        assert result.dispatched is True
+        session_send.assert_not_awaited()
+        template_send.assert_awaited_once()
+        sent_template = template_send.await_args.args[3]
+        assert sent_template.components[0]["format"] == "IMAGE"
+        assert order.extra_metadata["nahla_cod_confirmation_sent"] is True
+        assert order.extra_metadata["nahla_cod_confirmation_origin"] == "external_store"
+        assert order.extra_metadata["nahla_cod_confirmation_send_method"] == "approved_template"
+
+    def test_legacy_hard_named_template_is_not_send_owner(self):
+        src = inspect.getsource(send_cod_confirmation_template)
+        assert "cod_order_confirmation_ar" not in src
+        assert "resolve_lifecycle_template_for_send" in src
+
+    def test_cod_prompt_then_proven_salla_acceptance_sends_order_confirmation(self, monkeypatch):
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST", "9")
+        monkeypatch.setenv(
+            "COMMERCE_LIFECYCLE_DISPATCH_RECIPIENT_ALLOWLIST", "+966500111222"
+        )
+        db, _ = _make_db(
+            TenantSettings,
+            WhatsAppTemplate,
+            CommerceLifecycleNotificationLedger,
+            WaConversationWindow,
+        )
+        db.add(_cod_template(tenant_id=9))
+        db.add(
+            WhatsAppTemplate(
+                tenant_id=9,
+                name="nahla_order_confirmation_live",
+                language="ar",
+                category="UTILITY",
+                status="APPROVED",
+                components=[{"type": "BODY", "text": "مرحبا {{1}} طلبك #{{2}} مؤكد"}],
+                service_key="order_confirmation",
+                is_active=True,
+                is_hidden=False,
+                revision=3,
+            )
+        )
+        set_order_update_flags(
+            db,
+            9,
+            {"cod_confirmation": True, "order_confirmation": True},
+            commit=True,
+        )
+        order = SimpleNamespace(
             id=8801,
             external_id=None,
             extra_metadata={"payment_method": "cod"},
+            customer_info={"name": "أحمد سالم", "phone": "+966500111222"},
+            customer_name="أحمد سالم",
+            status="pending_confirmation",
+            external_order_number="8801",
+            checkout_url=None,
         )
         session_send = AsyncMock(return_value=("sent", {"wa_message_id": "wamid.cod.1"}))
         template_send = AsyncMock(return_value=("sent", {"wa_message_id": "wamid.cod.1"}))
@@ -319,26 +425,123 @@ class TestCodSingleOwner:
             return_value=SimpleNamespace(to_dict=lambda: {}),
         ):
             result = asyncio.run(
-                dispatch_external_lifecycle_notification(
+                send_order_confirmation_after_cod(db, tenant_id=9, order=order)
+            )
+        assert result["sent"] is True
+        assert result["error"] is None
+        dispatch_send.assert_awaited_once()
+        sent_template = dispatch_send.await_args.args[3]
+        assert sent_template.service_key == "order_confirmation"
+        assert db.query(CommerceLifecycleNotificationLedger).count() == 1
+
+    def test_salla_origin_confirm_updates_provider_before_local_state(self):
+        order = SimpleNamespace(
+            id=77,
+            tenant_id=9,
+            external_id="salla-77",
+            external_order_number="S-77",
+            status="payment_pending",
+            customer_info={"name": "نورة", "phone": "+966500111222"},
+            extra_metadata={
+                "payment_method": "cod",
+                "nahla_cod_confirmation_sent": True,
+            },
+            line_items=[],
+        )
+
+        class _Query:
+            def filter(self, *a, **k):
+                return self
+
+            def order_by(self, *a, **k):
+                return self
+
+            def limit(self, *a, **k):
+                return self
+
+            def all(self):
+                return [order]
+
+            def first(self):
+                return order
+
+        db = MagicMock()
+        db.query = lambda *_a, **_k: _Query()
+        update = AsyncMock(return_value=True)
+        with patch(
+            "store_integration.order_service.update_order_status", update
+        ), patch(
+            "observability.event_logger.log_event", lambda *a, **k: None
+        ), patch(
+            "services.cod_confirmation.flag_modified", lambda *a, **k: None
+        ):
+            decision, affected = asyncio.run(
+                handle_cod_reply(
                     db,
                     tenant_id=9,
-                    order=order,
-                    provider="salla",
-                    raw_previous_status=None,
-                    raw_current_status="under_review",
-                    normalized_order={
-                        "external_id": "salla-ord-8801",
-                        "status": "under_review",
-                        "external_order_number": "8801",
-                        "payment_method": "cod",
-                    },
-                    raw_payload={"event_id": "evt-salla-cod", "updated_at": "2026-09-06T05:01:00Z"},
+                    customer_phone="+966500111222",
+                    text="تأكيد الطلب ✅",
+                    button_payload="nahla_cod_confirm:77",
                 )
             )
-        assert result.dispatched is False
-        assert result.reason_code == "nahla_cod_already_confirmed"
-        dispatch_send.assert_not_awaited()
-        assert db.query(CommerceLifecycleNotificationLedger).count() == 0
+        assert decision == "confirm"
+        assert affected is order
+        update.assert_awaited_once_with(9, "salla-77", "under_review")
+        assert order.status == "under_review"
+        assert order.extra_metadata["cod_confirmed_at"]
+
+    def test_salla_origin_confirm_failure_keeps_order_pending(self):
+        order = SimpleNamespace(
+            id=78,
+            tenant_id=9,
+            external_id="salla-78",
+            status="payment_pending",
+            customer_info={"name": "نورة", "phone": "+966500111222"},
+            extra_metadata={
+                "payment_method": "cod",
+                "nahla_cod_confirmation_sent": True,
+            },
+            line_items=[],
+        )
+
+        class _Query:
+            def filter(self, *a, **k):
+                return self
+
+            def order_by(self, *a, **k):
+                return self
+
+            def limit(self, *a, **k):
+                return self
+
+            def all(self):
+                return [order]
+
+            def first(self):
+                return order
+
+        db = MagicMock()
+        db.query = lambda *_a, **_k: _Query()
+        update = AsyncMock(return_value=False)
+        with patch(
+            "store_integration.order_service.update_order_status", update
+        ), patch(
+            "services.cod_confirmation.flag_modified", lambda *a, **k: None
+        ):
+            decision, affected = asyncio.run(
+                handle_cod_reply(
+                    db,
+                    tenant_id=9,
+                    customer_phone="+966500111222",
+                    text="تأكيد الطلب ✅",
+                    button_payload="nahla_cod_confirm:78",
+                )
+            )
+        assert decision == "confirm_failed"
+        assert affected is order
+        assert order.status == "payment_pending"
+        assert "cod_confirmed_at" not in order.extra_metadata
+        assert order.extra_metadata["cod_confirm_store_update_failed_at"]
 
     def test_cancel_does_not_push_and_does_not_duplicate(self):
         db, _ = _make_db(TenantSettings)
@@ -462,11 +665,12 @@ class TestCodSingleOwner:
                     total_amount="90",
                 )
             )
-        assert open_result["send_method"] == "session_message"
+        assert open_result["send_method"] == "approved_template"
         assert closed_result["send_method"] == "approved_template"
         assert open_result["template_id"] == closed_result["template_id"] == tpl.id
         assert captured[0][1] == captured[1][1] == "cod_confirmation"
         assert captured[0][2].id == captured[1][2].id == tpl.id
+        assert [kind for kind, *_ in captured] == ["template", "template"]
 
 
 class TestDispatchSettingsUnavailable:

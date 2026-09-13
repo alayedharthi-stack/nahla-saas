@@ -223,6 +223,40 @@ async def get_order(tenant_id: int, order_id: str) -> Optional[NormalizedOrder]:
         return None
 
 
+async def update_order_status(
+    tenant_id: int,
+    order_id: str,
+    status_slug: str,
+) -> bool:
+    """Update an existing external order when the active adapter supports it."""
+    adapter = get_adapter(tenant_id)
+    if not adapter:
+        logger.error(
+            "[OrderService] update_order_status blocked — no adapter tenant=%s",
+            tenant_id,
+        )
+        return False
+    updater = getattr(adapter, "update_order_status", None)
+    if updater is None:
+        logger.error(
+            "[OrderService] update_order_status unsupported tenant=%s platform=%s",
+            tenant_id,
+            getattr(adapter, "platform", "unknown"),
+        )
+        return False
+    try:
+        return bool(await updater(str(order_id), str(status_slug)))
+    except Exception as exc:
+        logger.error(
+            "[OrderService] update_order_status failed tenant=%s order=%s slug=%s error=%s",
+            tenant_id,
+            order_id,
+            status_slug,
+            exc,
+        )
+        return False
+
+
 async def get_default_shipping_company_id(tenant_id: int, city: str = "") -> Optional[int]:
     """Return the first available Salla shipping company/zone ID for a tenant.
 
