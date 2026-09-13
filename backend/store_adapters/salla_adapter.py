@@ -3655,6 +3655,31 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_order", exc)
             raise
 
+    async def update_order_status(self, order_id: str, status_slug: str) -> bool:
+        """Update one Salla order using the provider's predefined status slug."""
+        self._require_auth("update_order_status")
+        oid = str(order_id or "").strip()
+        slug = str(status_slug or "").strip().lower()
+        if not oid or not slug:
+            raise ValueError("order_id and status_slug are required")
+        data = await self._post(
+            f"/orders/{oid}/status",
+            {
+                "slug": slug,
+                # Nahla owns the WhatsApp lifecycle message for this transition.
+                "send_status_sms": False,
+            },
+        )
+        success = bool((data or {}).get("success", True))
+        logger.info(
+            "[SallaAdapter] order status updated tenant=%s order=%s slug=%s success=%s",
+            self._tenant_id,
+            oid,
+            slug,
+            success,
+        )
+        return success
+
     async def get_orders(self, updated_since: Optional[str] = None) -> List[NormalizedOrder]:
         extra: Optional[Dict[str, Any]] = None
         if updated_since:

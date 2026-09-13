@@ -18,8 +18,7 @@ WhatsApp webhook:
 
     Customer-facing send is owned exclusively here. It uses the canonical
     order-updates `service_key=cod_confirmation` active APPROVED revision:
-      OPEN 24h  → same revision as interactive/session buttons
-      CLOSED 24h → same revision as Meta template
+      OPEN/CLOSED 24h → the same approved Meta image template
     Buttons stay deterministic: "تأكيد الطلب ✅" / "إلغاء الطلب ❌".
 
     StoreSync / Salla first observation of `under_review` MUST NOT send
@@ -30,12 +29,13 @@ WhatsApp webhook:
     or replies with the literal button text. Looks up the most-recent
     `pending_confirmation` Order on this tenant for this normalised
     phone, then either:
-      • confirm  → pushes the order to the store via
-                   store_integration.order_service.create_order, sets the
-                   local status to `under_review` (Salla's slug for
-                   "بإنتظار المراجعة"), and saves the returned external
-                   order id.
-      • cancel   → sets the local status to `cancelled`.
+      • confirm  → creates a missing Salla order or updates an existing
+                   Salla-origin order to `under_review` (Salla's slug for
+                   "بإنتظار المراجعة"). Only after provider success is
+                   the local status changed and the normal order-confirmation
+                   template dispatched.
+      • cancel   → updates an existing Salla order to `cancelled` first,
+                   then mirrors the proven state locally.
     Recognized button payloads (`nahla_cod_confirm` / `nahla_cod_cancel`)
     are always consumed by the webhook even when no pending order exists.
     Unrecognized buttons fall through to generic merchant routing.
@@ -72,6 +72,13 @@ STATUS_PENDING_CUSTOMER  = "pending_confirmation"
 STATUS_PENDING_MERCHANT  = "under_review"
 STATUS_CANCELLED         = "cancelled"
 CANONICAL_SERVICE_KEY    = "cod_confirmation"
+
+_STORE_PENDING_CONFIRMATION_STATUSES = frozenset({
+    "payment_pending",
+    "pending_payment",
+    "waiting_payment",
+    "awaiting_payment",
+})
 
 COD_INBOUND_CONSUMED = "consumed"
 COD_INBOUND_PASSTHROUGH = "passthrough"
@@ -394,9 +401,7 @@ async def send_cod_confirmation_template(
         evaluate_order_update_delivery,
         resolve_lifecycle_template_for_send,
     )
-    from core.commerce_lifecycle.window import lifecycle_service_window_is_open  # noqa: PLC0415
     from core.automation_engine import (  # noqa: PLC0415
-        send_lifecycle_whatsapp_session_body,
         send_lifecycle_whatsapp_template,
     )
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
@@ -436,10 +441,7 @@ async def send_cod_confirmation_template(
         return {"sent": False, "error": "no_approved_template"}
 
     to = normalize_phone(customer_phone) or customer_phone
-    window_open, window_source = lifecycle_service_window_is_open(
-        db, int(tenant_id), to
-    )
-    send_method = "session_message" if window_open else "approved_template"
+    send_method = "approved_template"
     payload: Dict[str, Any] = {
         "order_number": str(
             getattr(order, "external_order_number", None)
@@ -461,14 +463,9 @@ async def send_cod_confirmation_template(
         canary_sender_path="cod_confirmation",
     )
     try:
-        if send_method == "session_message":
-            outcome, info = await send_lifecycle_whatsapp_session_body(
-                db, int(tenant_id), to, template, payload, **last_mile_kwargs
-            )
-        else:
-            outcome, info = await send_lifecycle_whatsapp_template(
-                db, int(tenant_id), to, template, payload, **last_mile_kwargs
-            )
+        outcome, info = await send_lifecycle_whatsapp_template(
+            db, int(tenant_id), to, template, payload, **last_mile_kwargs
+        )
     except Exception as exc:
         logger.error(
             "[COD] tenant=%s order=%s canonical send failed: %s",
@@ -495,7 +492,6 @@ async def send_cod_confirmation_template(
             "template_name": getattr(template, "name", None),
             "service_key": CANONICAL_SERVICE_KEY,
             "send_method": send_method,
-            "window_source": window_source,
             "canary_blocked": bool((info or {}).get("canary_blocked")),
         }
 
@@ -525,7 +521,6 @@ async def send_cod_confirmation_template(
         "revision": getattr(template, "revision", None),
         "service_key": CANONICAL_SERVICE_KEY,
         "send_method": send_method,
-        "window_source": window_source,
         "buttons": list(_COD_BUTTON_TITLES),
     }
 
@@ -533,20 +528,32 @@ async def send_cod_confirmation_template(
 def find_pending_cod_orders(
     db, *, tenant_id: int, customer_phone: str
 ) -> list:
-    """Return pending_confirmation orders for this tenant + normalised phone."""
+    """Return local or store-origin COD orders awaiting customer confirmation."""
     from models import Order  # noqa: PLC0415
 
+    pending_statuses = tuple(
+        {STATUS_PENDING_CUSTOMER, *_STORE_PENDING_CONFIRMATION_STATUSES}
+    )
     candidates = (
         db.query(Order)
         .filter(
             Order.tenant_id == tenant_id,
-            Order.status    == STATUS_PENDING_CUSTOMER,
+            Order.status.in_(pending_statuses),
         )
         .order_by(Order.id.desc())
         .limit(50)
         .all()
     )
-    return [o for o in candidates if _order_phone_matches(o, customer_phone)]
+    matches = []
+    for candidate in candidates:
+        meta = dict(getattr(candidate, "extra_metadata", None) or {})
+        payment_method = str(meta.get("payment_method") or "").strip().lower()
+        is_cod = payment_method in {"cod", "cash_on_delivery", "cod_payment", "cash"}
+        if not is_cod or not meta.get("nahla_cod_confirmation_sent"):
+            continue
+        if _order_phone_matches(candidate, customer_phone):
+            matches.append(candidate)
+    return matches
 
 
 def find_pending_cod_order(
@@ -571,7 +578,7 @@ def _load_bound_pending_cod_order(
     customer_phone: str,
     order_id: int,
 ) -> Optional[Any]:
-    """Server-side bind: tenant + pending status + phone must all match."""
+    """Server-side bind: tenant + pending COD status + phone must all match."""
     from models import Order  # noqa: PLC0415
 
     order = (
@@ -579,11 +586,19 @@ def _load_bound_pending_cod_order(
         .filter(
             Order.id == int(order_id),
             Order.tenant_id == int(tenant_id),
-            Order.status == STATUS_PENDING_CUSTOMER,
+            Order.status.in_(
+                tuple({STATUS_PENDING_CUSTOMER, *_STORE_PENDING_CONFIRMATION_STATUSES})
+            ),
         )
         .first()
     )
     if order is None:
+        return None
+    meta = dict(getattr(order, "extra_metadata", None) or {})
+    payment_method = str(meta.get("payment_method") or "").strip().lower()
+    if payment_method not in {"cod", "cash_on_delivery", "cod_payment", "cash"}:
+        return None
+    if not meta.get("nahla_cod_confirmation_sent"):
         return None
     if not _order_phone_matches(order, customer_phone):
         return None
@@ -600,14 +615,15 @@ async def handle_cod_reply(
 ) -> Tuple[Optional[str], Optional[Any]]:
     """
     Process a customer's COD reply. Returns (decision, order) where
-    decision is 'confirm' | 'cancel' | None and order is the affected
+    decision is 'confirm' | 'cancel' | 'confirm_failed' | 'cancel_failed'
+    | None and order is the affected
     Order row (or None when there was no pending order to match).
 
     Button ids ``nahla_cod_confirm`` / ``nahla_cod_cancel`` (optionally
     ``:order_id``) bind first. A client-supplied order id is never trusted
-    unless the row is still ``pending_confirmation`` for this tenant and
-    phone. Text fallback binds only when exactly one pending COD order
-    exists for that customer.
+    unless the row is still in a local/store pending-confirmation state for
+    this tenant and phone. Text fallback binds only when exactly one pending
+    COD order exists for that customer.
     """
     payload_action, payload_oid = parse_cod_button_payload(button_payload or "")
     text_action, text_oid = parse_cod_button_payload(text)
@@ -632,7 +648,25 @@ async def handle_cod_reply(
 
     from observability.event_logger import log_event  # noqa: PLC0415
 
+    previous_status = str(getattr(order, "status", None) or "").strip().lower()
+    external_id = str(getattr(order, "external_id", None) or "").strip()
+
     if decision == "cancel":
+        if external_id:
+            from store_integration.order_service import update_order_status  # noqa: PLC0415
+
+            cancelled_in_store = await update_order_status(
+                int(tenant_id), external_id, STATUS_CANCELLED
+            )
+            if not cancelled_in_store:
+                meta = dict(order.extra_metadata or {})
+                meta["cod_cancel_store_update_failed_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
+                order.extra_metadata = meta
+                flag_modified(order, "extra_metadata")
+                db.commit()
+                return "cancel_failed", order
         order.status = STATUS_CANCELLED
         meta = dict(order.extra_metadata or {})
         meta["cod_cancelled_at"] = datetime.now(timezone.utc).isoformat()
@@ -648,38 +682,118 @@ async def handle_cod_reply(
         db.commit()
         return decision, order
 
-    # decision == "confirm"
-    order.status = STATUS_PENDING_MERCHANT
+    # decision == "confirm".  Provider mutation is the evidence boundary:
+    # never claim confirmation until the order exists in Salla under_review.
     meta = dict(order.extra_metadata or {})
+    meta["cod_confirm_requested_at"] = datetime.now(timezone.utc).isoformat()
+    meta["cod_previous_status"] = previous_status
+    order.extra_metadata = meta
+    flag_modified(order, "extra_metadata")
+
+    if external_id:
+        from store_integration.order_service import update_order_status  # noqa: PLC0415
+
+        updated = await update_order_status(
+            int(tenant_id), external_id, STATUS_PENDING_MERCHANT
+        )
+        pushed_external_id = external_id if updated else None
+    else:
+        pushed_external_id = await _push_cod_to_store(db, tenant_id, order)
+
+    if not pushed_external_id:
+        meta["cod_confirm_store_update_failed_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+        order.extra_metadata = meta
+        flag_modified(order, "extra_metadata")
+        db.commit()
+        return "confirm_failed", order
+
+    order.status = STATUS_PENDING_MERCHANT
+    order.external_id = pushed_external_id
     meta["cod_confirmed_at"] = datetime.now(timezone.utc).isoformat()
+    meta["cod_pushed_external_id"] = pushed_external_id
+    meta.pop("cod_confirm_store_update_failed_at", None)
     order.extra_metadata = meta
     flag_modified(order, "extra_metadata")
     log_event(
         db, tenant_id, category="order", event_type="order.cod.confirmed",
-        summary=f"COD order #{order.id} confirmed by customer — pushing to store",
+        summary=f"COD order #{order.id} confirmed by customer in store",
         severity="info",
-        payload={"order_id": order.id, "reply_text": text[:120]},
+        payload={
+            "order_id": order.id,
+            "external_id": pushed_external_id,
+            "previous_status": previous_status,
+            "current_status": STATUS_PENDING_MERCHANT,
+        },
         reference_id=str(order.id),
     )
 
-    # Push to the store adapter. Best-effort. The order is already in
-    # under_review locally so the merchant sees it even if the push fails.
-    pushed_external_id = await _push_cod_to_store(db, tenant_id, order)
-    if pushed_external_id:
-        order.external_id = pushed_external_id
-        meta["cod_pushed_external_id"] = pushed_external_id
-        order.extra_metadata = meta
-        flag_modified(order, "extra_metadata")
-        log_event(
-            db, tenant_id, category="order", event_type="order.cod.pushed_to_store",
-            summary=f"COD order #{order.id} pushed to store as {pushed_external_id}",
-            severity="info",
-            payload={"order_id": order.id, "external_id": pushed_external_id},
-            reference_id=str(order.id),
-        )
-
     db.commit()
     return decision, order
+
+
+async def send_order_confirmation_after_cod(
+    db,
+    *,
+    tenant_id: int,
+    order: Any,
+) -> Dict[str, Any]:
+    """Dispatch the canonical order confirmation after proven COD acceptance."""
+    meta = dict(getattr(order, "extra_metadata", None) or {})
+    external_id = str(
+        getattr(order, "external_id", None)
+        or meta.get("cod_pushed_external_id")
+        or ""
+    ).strip()
+    if not external_id or not meta.get("cod_confirmed_at"):
+        return {"sent": False, "error": "cod_store_confirmation_unproven"}
+
+    from core.commerce_lifecycle.dispatch import (  # noqa: PLC0415
+        dispatch_external_lifecycle_notification,
+    )
+
+    info = dict(getattr(order, "customer_info", None) or {})
+    previous_status = str(
+        meta.get("cod_previous_status") or STATUS_PENDING_CUSTOMER
+    )
+    result = await dispatch_external_lifecycle_notification(
+        db,
+        tenant_id=int(tenant_id),
+        order=order,
+        provider="salla",
+        raw_previous_status=previous_status,
+        raw_current_status=STATUS_PENDING_MERCHANT,
+        normalized_order={
+            "external_id": external_id,
+            "external_order_number": str(
+                getattr(order, "external_order_number", None)
+                or external_id
+            ),
+            "status": STATUS_PENDING_MERCHANT,
+            "payment_method": "cod",
+            "customer_name": str(
+                getattr(order, "customer_name", None)
+                or info.get("name")
+                or ""
+            ),
+            "customer_phone": str(info.get("phone") or info.get("mobile") or ""),
+            "cod_customer_confirmed": True,
+            "lifecycle_observation": "cod_customer_confirmation",
+            "lifecycle_source_event": "order.cod.confirmed",
+        },
+        raw_payload={
+            "event": "order.cod.confirmed",
+            "external_id": external_id,
+        },
+    )
+    return {
+        "sent": bool(result.dispatched),
+        "duplicate": bool(result.duplicate),
+        "error": result.reason_code,
+        "provider_message_id": result.provider_message_id,
+        "ledger_id": result.ledger_id,
+    }
 
 
 async def _push_cod_to_store(db, tenant_id: int, order: Any) -> Optional[str]:

@@ -5885,25 +5885,46 @@ async def _send_cod_followup_message(
     _tenant_id: Optional[int] = None, _db=None,
 ) -> None:
     """
-    Reply to the customer after their COD button tap is processed. Kept
-    plain text (no template) because we're inside the 24-hour customer
-    care window — the customer just messaged us, so a session message is
-    Meta-policy compliant and does not require a pre-approved template.
+    Complete the customer-visible COD outcome after the button is processed.
+
+    Confirmation uses the canonical approved order-confirmation template;
+    it is emitted only after Salla creation/status mutation succeeded.  Cancel
+    keeps the existing in-window acknowledgement.  Failed provider mutations
+    make no success claim.
     """
     if decision == "confirm":
-        body = (
-            f"شكراً لك ✅\n"
-            f"تم تأكيد طلبك #{order.id}.\n"
-            f"سيتم تجهيزه والتواصل معك قريباً لتأكيد التوصيل."
+        from services.cod_confirmation import (  # noqa: PLC0415
+            send_order_confirmation_after_cod,
         )
-    else:
+        result = await send_order_confirmation_after_cod(
+            _db,
+            tenant_id=int(_tenant_id),
+            order=order,
+        )
+        logger.info(
+            "[COD] post-confirmation order template tenant=%s order=%s sent=%s duplicate=%s error=%s",
+            _tenant_id,
+            getattr(order, "id", None),
+            result.get("sent"),
+            result.get("duplicate"),
+            result.get("error"),
+        )
+        return
+    if decision == "cancel":
         body = (
             f"تم إلغاء طلبك #{order.id} بنجاح.\n"
             f"إذا كان هناك أي خطأ يمكنك إعادة الطلب في أي وقت."
         )
-    await _send_whatsapp_message(
-        phone_id=phone_id, to=to, text=body,
-        _tenant_id=_tenant_id, _db=_db,
+        await _send_whatsapp_message(
+            phone_id=phone_id, to=to, text=body,
+            _tenant_id=_tenant_id, _db=_db,
+        )
+        return
+    logger.error(
+        "[COD] no success followup after provider mutation failure tenant=%s order=%s decision=%s",
+        _tenant_id,
+        getattr(order, "id", None),
+        decision,
     )
 
 
