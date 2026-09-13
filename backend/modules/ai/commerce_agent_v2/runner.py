@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from agents import (
     InputGuardrailTripwireTriggered,
@@ -41,7 +41,7 @@ class CommerceAgentRunResult:
     failure_reason: str = ""
 
 
-def _fallback(reason: str) -> CommerceReply:
+def safe_fallback_reply(reason: str) -> CommerceReply:
     return CommerceReply(
         text="لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن.",
         safe_fallback_reason=reason[:240],
@@ -56,6 +56,7 @@ async def run_commerce_agent(
     model_name: str | None = None,
     reasoning_effort: str | None = None,
     timeout_seconds: float | None = None,
+    execution_mode: Literal["shadow", "outbound"] = "shadow",
 ) -> CommerceAgentRunResult:
     """Run one read-only turn with the official SDK and structured output."""
     configured_model = model if model is not None else COMMERCE_AGENT_V2_MODEL
@@ -81,14 +82,18 @@ async def run_commerce_agent(
                 hooks=hooks,
                 max_turns=6,
                 run_config=RunConfig(
-                    workflow_name="Nahlah Commerce Agent V2 Shadow",
+                    workflow_name=(
+                        "Nahlah Commerce Agent V2 Outbound"
+                        if execution_mode == "outbound"
+                        else "Nahlah Commerce Agent V2 Shadow"
+                    ),
                     trace_id=trace_id,
                     group_id=f"tenant:{context.tenant_id}:conversation:{context.conversation_id}",
                     trace_metadata={
                         "tenant_id": str(context.tenant_id),
                         "conversation_id": str(context.conversation_id),
                         "inbound_trace_hash": trace_id.removeprefix("trace_"),
-                        "mode": "shadow_read_only",
+                        "mode": f"{execution_mode}_read_only",
                     },
                     trace_include_sensitive_data=False,
                 ),
@@ -136,7 +141,7 @@ async def run_commerce_agent(
         reason = f"{type(exc).__name__}"
     return CommerceAgentRunResult(
         status="failed",
-        reply=_fallback(reason),
+        reply=safe_fallback_reply(reason),
         model=str(observable_model_name),
         session_id=session.session_id,
         sdk_trace_id=trace_id,

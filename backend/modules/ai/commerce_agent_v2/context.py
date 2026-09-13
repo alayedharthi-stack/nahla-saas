@@ -61,6 +61,7 @@ class CommerceAgentContext(BaseModel):
     _consecutive_catalog_misses: int = PrivateAttr(default=0)
     _run_user_input: str = PrivateAttr(default="")
     _merchant_knowledge_relevant: bool | None = PrivateAttr(default=None)
+    _verified_customer_name: str = PrivateAttr(default="")
 
     @classmethod
     def from_trusted_scope(
@@ -109,6 +110,7 @@ class CommerceAgentContext(BaseModel):
             int(customer_id) if customer_id is not None else conversation_customer_id
         )
 
+        verified_customer_name = ""
         if resolved_customer_id is not None:
             customer = (
                 db.query(Customer)
@@ -126,6 +128,7 @@ class CommerceAgentContext(BaseModel):
             )
             if not stored_phone or stored_phone != canonical_phone:
                 raise CommerceContextError("customer_phone_not_in_identity_scope")
+            verified_customer_name = str(getattr(customer, "name", "") or "").strip()
 
         connection = (
             db.query(WhatsAppConnection)
@@ -181,6 +184,7 @@ class CommerceAgentContext(BaseModel):
             customer_id=resolved_customer_id,
             request_id=inbound_trace_id,
         )
+        instance._verified_customer_name = verified_customer_name
         return instance
 
     @property
@@ -194,6 +198,13 @@ class CommerceAgentContext(BaseModel):
     @property
     def evidence(self) -> dict[str, EvidenceRecord]:
         return dict(self._evidence)
+
+    def redact_unexposed_customer_identity(self, text: str) -> str:
+        """Remove the stored customer name from model history until a name tool exists."""
+        value = str(text or "")
+        if self._verified_customer_name:
+            value = value.replace(self._verified_customer_name, "[redacted-customer-name]")
+        return value
 
     @property
     def consecutive_catalog_misses(self) -> int:

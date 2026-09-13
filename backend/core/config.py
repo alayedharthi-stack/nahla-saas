@@ -451,11 +451,10 @@ NAHLA_MODEL_STANDARD  = os.environ.get("NAHLA_MODEL_STANDARD", "gpt-5.6-terra")
 NAHLA_MODEL_PREMIUM   = os.environ.get("NAHLA_MODEL_PREMIUM", "gpt-5.6-sol")
 NAHLA_MODEL_TINY      = os.environ.get("NAHLA_MODEL_TINY", "gpt-5.6-luna")
 
-# ── Nahlah Commerce Agent V2 (Phase 1: shadow-only, read-only) ───────────────
-# Three independent gates are intentional: the global switch, explicit shadow
-# mode, and a tenant allowlist must all pass.  The kill switch wins over every
-# other value.  This keeps the new path unreachable by default and prevents a
-# configuration typo from turning it into an outbound owner.
+# ── Nahlah Commerce Agent V2 (read-only shadow / tenant canary) ──────────────
+# The global switch, mode, and tenant allowlists are independent. The kill
+# switch wins over every other value. Outbound additionally requires the
+# dedicated canary allowlist, keeping the new owner unreachable by default.
 COMMERCE_AGENT_V2_ENABLED = (
     os.environ.get("COMMERCE_AGENT_V2_ENABLED", "false").lower() == "true"
 )
@@ -468,6 +467,14 @@ COMMERCE_AGENT_V2_KILL_SWITCH = (
 COMMERCE_AGENT_V2_TENANT_IDS: set[int] = {
     int(value.strip())
     for value in os.environ.get("COMMERCE_AGENT_V2_TENANT_IDS", "").split(",")
+    if value.strip().isdigit() and int(value.strip()) > 0
+}
+# Explicit outbound canary allowlist. A tenant must be present in both this
+# list and COMMERCE_AGENT_V2_TENANT_IDS, while shadow-only must be disabled,
+# before V2 can own a customer-facing turn.
+COMMERCE_AGENT_V2_OUTBOUND_TENANT_IDS: set[int] = {
+    int(value.strip())
+    for value in os.environ.get("COMMERCE_AGENT_V2_OUTBOUND_TENANT_IDS", "").split(",")
     if value.strip().isdigit() and int(value.strip()) > 0
 }
 COMMERCE_AGENT_V2_MODEL = (
