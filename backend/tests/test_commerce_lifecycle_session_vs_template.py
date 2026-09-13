@@ -236,6 +236,71 @@ class TestOpenClosedWindowDispatch:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
+    def test_open_window_order_ready_keeps_approved_image_template(
+        self,
+        mock_caps,
+        mock_resolve_tpl,
+        mock_template_send,
+        mock_session_send,
+    ):
+        mock_caps.return_value = _merchant_caps()
+        mock_resolve_tpl.return_value = _approved_template()
+        mock_template_send.return_value = (
+            "sent",
+            {"wa_message_id": "wamid.ready.template.1"},
+        )
+
+        db, _ = _make_db(
+            CommerceLifecycleNotificationLedger,
+            WaConversationWindow,
+            TenantSettings,
+        )
+        db.add(
+            WaConversationWindow(
+                tenant_id=20,
+                customer_phone="+966500111222",
+                window_start=datetime.utcnow(),
+                last_customer_inbound_at=datetime.utcnow(),
+                category="service",
+            )
+        )
+        db.commit()
+
+        kwargs = _dispatch_kwargs(db, _generic_order(status="completed"))
+        kwargs.update(
+            raw_previous_status="in_progress",
+            raw_current_status="completed",
+            normalized_order={
+                "external_id": "salla-ord-8801",
+                "status": "completed",
+                "external_order_number": "ORD-8801",
+            },
+            raw_payload={
+                "event_id": "evt-ready-open-window",
+                "updated_at": "2026-09-13T10:00:00Z",
+            },
+        )
+
+        with patch(
+            "core.commerce_lifecycle.order_updates.evaluate_order_update_delivery",
+            return_value=(True, ""),
+        ):
+            result = _run_async(dispatch_external_lifecycle_notification(**kwargs))
+
+        assert result.dispatched is True
+        mock_template_send.assert_awaited_once()
+        mock_session_send.assert_not_awaited()
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        assert row.template_service_key == "order_ready"
+        assert row.send_method == "approved_template"
+        assert (row.dispatch_decision_json or {}).get("send_method") == (
+            "approved_template"
+        )
+
+    @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
+    @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
+    @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
+    @patch("core.merchant_capabilities.resolve_merchant_capabilities")
     def test_closed_window_sends_approved_template_only(
         self,
         mock_caps,

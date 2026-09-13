@@ -1,8 +1,7 @@
-"""
-Meta submit preparation for order_confirmation IMAGE HEADER components.
+"""Meta submit preparation for supported lifecycle IMAGE HEADER components.
 
-Uploads the platform header image and replaces ``header_url`` with a valid
-``header_handle`` in the outbound Meta template payload.
+Uploads the service-owned platform header image and replaces ``header_url``
+with a valid ``header_handle`` in the outbound Meta template payload.
 """
 from __future__ import annotations
 
@@ -20,6 +19,10 @@ from core.commerce_lifecycle.cod_confirmation_assets import (
     COD_CONFIRMATION_HEADER_ASSET_KEY,
     cod_confirmation_header_public_url,
 )
+from core.commerce_lifecycle.order_ready_assets import (
+    ORDER_READY_HEADER_ASSET_KEY,
+    order_ready_header_public_url,
+)
 from core.commerce_lifecycle.order_confirmation_header_image_fetch import (
     HeaderImageFetchError,
     fetch_header_image_bytes_secure,
@@ -30,6 +33,22 @@ from core.config import META_APP_ID, META_GRAPH_API_VERSION
 logger = logging.getLogger("nahla.commerce_lifecycle.order_confirmation_meta_header")
 
 GRAPH = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+
+
+def _platform_header_url(service_key: str) -> str:
+    if service_key == "cod_confirmation":
+        return cod_confirmation_header_public_url()
+    if service_key == "order_ready":
+        return order_ready_header_public_url()
+    return order_confirmation_header_public_url()
+
+
+def _platform_header_asset_key(service_key: str) -> str:
+    if service_key == "cod_confirmation":
+        return COD_CONFIRMATION_HEADER_ASSET_KEY
+    if service_key == "order_ready":
+        return ORDER_READY_HEADER_ASSET_KEY
+    return ORDER_CONFIRMATION_HEADER_ASSET_KEY
 
 
 class HeaderImageUploader(Protocol):
@@ -85,11 +104,7 @@ def resolve_lifecycle_preview_header_url(
             int(tenant_id),
             service_key=service_key,
         ),
-        platform_default_url=(
-            cod_confirmation_header_public_url()
-            if service_key == "cod_confirmation"
-            else order_confirmation_header_public_url()
-        ),
+        platform_default_url=_platform_header_url(service_key),
     )
 
 
@@ -275,6 +290,7 @@ async def ensure_order_confirmation_image_header_for_meta(
         components,
         meta,
         tenant_runtime_url=tenant_runtime,
+        platform_default_url=_platform_header_url(service_key),
     )
     try:
         image_bytes, mime_type = await fetch_header_image_bytes_secure(source_url)
@@ -294,11 +310,7 @@ async def ensure_order_confirmation_image_header_for_meta(
     )
     logger.info(
         "[order_confirmation_meta_header] uploaded header asset_key=%s bytes=%d",
-        (
-            COD_CONFIRMATION_HEADER_ASSET_KEY
-            if service_key == "cod_confirmation"
-            else ORDER_CONFIRMATION_HEADER_ASSET_KEY
-        ),
+        _platform_header_asset_key(service_key),
         len(image_bytes),
     )
     return prepare_order_confirmation_meta_submit_components(

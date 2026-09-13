@@ -87,8 +87,10 @@ _DEFAULT_BODIES: Dict[str, str] = {
         "جاري تجهيز طلبك رقم #{{2}}."
     ),
     "order_ready": (
-        "مرحباً {{1}}\n\n"
-        "تم تجهيز طلبك رقم #{{2}}."
+        "خبر سار يا {{1}} 🎉\n\n"
+        "تم تجهيز طلبك رقم #{{2}} بعناية، وأصبح جاهزاً للتسليم "
+        "لشركة الشحن.\n\n"
+        "سنرسل لك تفاصيل التتبع فور شحنه."
     ),
     "shipping_tracking": (
         "خبر سار يا {{1}} 🚚\n\n"
@@ -538,6 +540,7 @@ def resolve_active_and_pending(
     if str(header_type).lower() == "image" and service_key in {
         "order_confirmation",
         "cod_confirmation",
+        "order_ready",
     }:
         from core.commerce_lifecycle.order_confirmation_meta_header import (  # noqa: PLC0415
             resolve_lifecycle_preview_header_url,

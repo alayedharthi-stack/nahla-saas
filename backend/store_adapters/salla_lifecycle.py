@@ -44,6 +44,10 @@ _READY_STATUSES = frozenset({
     "ready",
     "ready_for_pickup",
     "packed",
+    # Salla's merchant action «تنفيذ» advances the order to ``completed``.
+    # Fulfilment is complete but shipment evidence does not exist yet, so the
+    # customer-safe projection is "ready", not "shipped".
+    "completed",
 })
 _COD_METHODS = frozenset({
     "cod",

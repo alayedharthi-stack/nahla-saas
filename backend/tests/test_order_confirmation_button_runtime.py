@@ -10,6 +10,10 @@ from core.automation_engine import (
     _execute_action,
     _execute_interactive_step,
     _resolve_dynamic_url_button_suffix,
+    send_lifecycle_whatsapp_template,
+)
+from core.commerce_lifecycle.order_ready_assets import (
+    ORDER_READY_HEADER_DEFAULT_URL,
 )
 from core.send_governor import check as governor_check
 
@@ -128,6 +132,7 @@ def test_open_window_order_event_uses_meta_template_with_image_and_button():
         id=438,
         tenant_id=1,
         name="nahla_order_confirmation_r3_dc8a88",
+        nahla_source_key="order_summary",
         language="ar",
         service_key="order_confirmation",
         status="APPROVED",
@@ -237,6 +242,17 @@ def test_open_window_order_event_uses_meta_template_with_image_and_button():
     sent_payload = provider_send.await_args.kwargs["payload"]
     assert sent_payload["type"] == "template"
     assert sent_payload["template"]["name"] == template.name
+    body = next(
+        component
+        for component in sent_payload["template"]["components"]
+        if component.get("type") == "body"
+    )
+    assert body["parameters"] == [
+        {"type": "text", "text": "هشام الحارثي"},
+        {"type": "text", "text": "2118127694"},
+        {"type": "text", "text": "174"},
+        {"type": "text", "text": "متجر تجريبي"},
+    ]
     button = next(
         component
         for component in sent_payload["template"]["components"]
@@ -252,6 +268,95 @@ def test_open_window_order_event_uses_meta_template_with_image_and_button():
     )
     assert header["parameters"] == [
         {"type": "image", "image": {"link": merchant_header_url}}
+    ]
+
+
+def test_order_ready_runtime_payload_contains_image_body_and_order_button():
+    connection = SimpleNamespace(phone_number_id="phone-id", status="connected")
+    template = SimpleNamespace(
+        id=512,
+        tenant_id=1,
+        name="nahla_order_ready_a1b2c3",
+        nahla_source_key="order_ready",
+        language="ar",
+        service_key="order_ready",
+        status="APPROVED",
+        ai_generation_metadata={},
+        components=[
+            {"type": "HEADER", "format": "IMAGE"},
+            {
+                "type": "BODY",
+                "text": "خبر سار يا {{1}}، تم تجهيز طلبك رقم #{{2}}.",
+            },
+            {
+                "type": "BUTTONS",
+                "buttons": [
+                    {
+                        "type": "URL",
+                        "text": "عرض تفاصيل الطلب",
+                        "url": "https://mtjr.at/{{1}}",
+                    }
+                ],
+            },
+        ],
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = connection
+    provider_send = AsyncMock(
+        return_value=({"messages": [{"id": "wamid.ready.1"}]}, object())
+    )
+
+    with (
+        patch("core.acceptance_execution_context.deny_external_egress"),
+        patch("core.billing.has_billing_access", return_value=True),
+        patch(
+            "core.commerce_lifecycle.canary_guard.evaluate_and_audit",
+            return_value=SimpleNamespace(allowed=True, reason=""),
+        ),
+        patch("core.automation_engine._resolve_store_name", return_value="متجر تجريبي"),
+        patch(
+            "core.automation_engine._resolve_runtime_image_header_url",
+            return_value=ORDER_READY_HEADER_DEFAULT_URL,
+        ),
+        patch(
+            "services.whatsapp_platform.service.provider_send_message",
+            new=provider_send,
+        ),
+        patch("routers.conversations.record_outbound_message"),
+    ):
+        outcome, info = asyncio.run(
+            send_lifecycle_whatsapp_template(
+                db,
+                1,
+                "+966549815590",
+                template,
+                {
+                    "order_number": "285544647",
+                    "external_order_number": "285544647",
+                },
+                customer_name="هشام الحارثي",
+                service_key="order_ready",
+            )
+        )
+
+    assert outcome == "sent"
+    assert info["wa_message_id"] == "wamid.ready.1"
+    sent_payload = provider_send.await_args.kwargs["payload"]
+    components = sent_payload["template"]["components"]
+    header = next(component for component in components if component["type"] == "header")
+    body = next(component for component in components if component["type"] == "body")
+    button = next(
+        component for component in components if component.get("sub_type") == "url"
+    )
+    assert header["parameters"] == [
+        {"type": "image", "image": {"link": ORDER_READY_HEADER_DEFAULT_URL}}
+    ]
+    assert body["parameters"] == [
+        {"type": "text", "text": "هشام الحارثي"},
+        {"type": "text", "text": "285544647"},
+    ]
+    assert button["parameters"] == [
+        {"type": "text", "text": "orders/285544647"}
     ]
 
 
@@ -292,6 +397,7 @@ def test_two_consecutive_orders_each_send_their_own_confirmation_template():
         id=501,
         tenant_id=20,
         name="nahla_order_confirmation_generic_a1b2c3",
+        nahla_source_key="order_summary",
         language="ar",
         service_key="order_confirmation",
         status="APPROVED",
