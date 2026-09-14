@@ -55,6 +55,17 @@ _COD_METHODS = frozenset({
     "cod_payment",
     "cash",
 })
+_UNRESOLVED_PAYMENT_METHODS = frozenset({
+    "",
+    "waiting",
+    "pending",
+    "unpaid",
+    "not_paid",
+    "payment_pending",
+    "pending_payment",
+    "awaiting_payment",
+    "waiting_payment",
+})
 _POLL_OBSERVATIONS = frozenset({
     "poll",
     "poll_import",
@@ -94,6 +105,30 @@ def salla_cod_requires_customer_confirmation(
     # Other preparing states can represent genuine merchant fulfilment and
     # must not be reinterpreted as a customer-confirmation request.
     return status in (_PAYMENT_PENDING_STATUSES | {"in_progress"})
+
+
+def salla_payment_fidelity_pending(
+    raw_status: Any,
+    normalized_order: Mapping[str, Any],
+) -> bool:
+    """True when an unpaid in-progress order has no proven payment method.
+
+    Salla's orders-list representation can expose only the payment state
+    ``waiting``.  The later ``order.created`` webhook carries the selected
+    method evidence.  Until that richer observation arrives, neither COD nor
+    non-COD owns the final-confirmation send.
+    """
+    status = normalize_status_slug(raw_status)
+    if status != "in_progress" or _is_cod(normalized_order):
+        return False
+    method = _payment_method(normalized_order)
+    payment_status = normalize_status_slug(
+        normalized_order.get("payment_status")
+    )
+    waiting_states = _UNRESOLVED_PAYMENT_METHODS - {""}
+    waiting = method in waiting_states or payment_status in waiting_states
+    method_is_proven = method not in _UNRESOLVED_PAYMENT_METHODS
+    return waiting and not method_is_proven
 
 
 def customer_relevant_state(raw_status: Any) -> str:
@@ -272,4 +307,5 @@ __all__ = [
     "normalize_salla_lifecycle_business_intent",
     "normalize_salla_lifecycle_customer_state",
     "salla_cod_requires_customer_confirmation",
+    "salla_payment_fidelity_pending",
 ]
