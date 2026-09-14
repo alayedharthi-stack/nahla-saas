@@ -4349,7 +4349,7 @@ async def _dispatch_message(
                 else:
                     _owned_btn_payload = _btn_payload
                     _cod_correlation = "payload"
-                    if not is_owned_cod_button_payload(_owned_btn_payload):
+                    if not is_owned_cod_button_payload(_btn_payload):
                         _context_wamid = str(
                             (msg.get("context") or {}).get("id") or ""
                         ).strip()
