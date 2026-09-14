@@ -15,6 +15,11 @@ from modules.ai.commerce_agent_v2.output import (
     EvidenceRecord,
     FactClaim,
 )
+from modules.ai.commerce_agent_v2.url_grounding import (
+    canonical_http_url,
+    canonical_http_url_equal,
+    url_fingerprint,
+)
 
 
 _LEGACY_MARKER_RE = re.compile(r"\[(?:PRODUCT|MEDIA_KEY|CALL):", re.IGNORECASE)
@@ -118,6 +123,7 @@ _ORDER_BOUND_KINDS = frozenset(
 _ORDER_EVIDENCE_SOURCES = frozenset(
     {"order_summary", "order_details", "order_shipment"}
 )
+_URL_FACT_KINDS = frozenset({"product_url", "image_url", "tracking_url"})
 _EVIDENCE_FREE_FACT_TOKENS = frozenset(
     {
         "منتج",
@@ -274,14 +280,13 @@ def _fact_values_equal(kind: str, claim_value: Any, evidence_value: Any) -> bool
         return type(claim_value) is type(evidence_value) and claim_value == evidence_value
     if kind in {"product_name", "description"}:
         return _normalize_text(claim_value) == _normalize_text(evidence_value)
+    if kind in _URL_FACT_KINDS:
+        return canonical_http_url_equal(claim_value, evidence_value)
     return str(claim_value).strip() == str(evidence_value).strip()
 
 
-def _matching_evidence_fact(
-    record: EvidenceRecord,
-    claim: FactClaim,
-) -> CanonicalEvidenceFact | None:
-    expected_sources = {
+def _expected_evidence_sources(kind: str) -> frozenset[str]:
+    return {
         "merchant_knowledge": frozenset({"merchant_knowledge"}),
         "product_knowledge": frozenset({"product_knowledge"}),
         "order_reference": _ORDER_EVIDENCE_SOURCES,
@@ -296,25 +301,41 @@ def _matching_evidence_fact(
         "carrier": frozenset({"order_shipment"}),
         "tracking_number": frozenset({"order_shipment"}),
         "tracking_url": frozenset({"order_shipment"}),
-    }.get(claim.kind, frozenset({"catalog_product"}))
-    if record.source not in expected_sources:
-        return None
+    }.get(kind, frozenset({"catalog_product"}))
+
+
+def _fact_subject_binding_matches(
+    record: EvidenceRecord,
+    claim: FactClaim,
+    fact: CanonicalEvidenceFact,
+) -> bool:
+    if record.source not in _expected_evidence_sources(claim.kind):
+        return False
     if (
         record.source == "catalog_product"
         and claim.subject_product_id is not None
         and record.source_id != str(claim.subject_product_id)
     ):
-        return None
+        return False
     if (
         record.source in _ORDER_EVIDENCE_SOURCES
         and claim.subject_order_id is not None
         and record.source_id != str(claim.subject_order_id)
     ):
-        return None
+        return False
+    return bool(
+        fact.kind == claim.kind
+        and fact.subject_product_id == claim.subject_product_id
+        and fact.subject_order_id == claim.subject_order_id
+    )
+
+
+def _matching_evidence_fact(
+    record: EvidenceRecord,
+    claim: FactClaim,
+) -> CanonicalEvidenceFact | None:
     for fact in record.facts:
-        if fact.kind != claim.kind:
-            continue
-        if fact.subject_product_id != claim.subject_product_id:
+        if not _fact_subject_binding_matches(record, claim, fact):
             continue
         if _fact_values_equal(claim.kind, claim.value, fact.value):
             return fact
@@ -347,9 +368,12 @@ def _span_expresses_claim(
         expected = _decimal(claim.value)
         return any(_decimal(value) == expected for value in _NUMBER_RE.findall(span))
     if claim.kind in {"product_url", "tracking_url"}:
-        return str(claim.value).strip() in span or any(
+        return any(
+            canonical_http_url_equal(url.rstrip(".,،؛"), claim.value)
+            for url in _URL_RE.findall(span)
+        ) or any(
             action.evidence_ref == claim.evidence_ref
-            and str(action.url) == str(claim.value)
+            and canonical_http_url_equal(action.url, claim.value)
             for action in reply.ui_actions
         )
     if claim.kind in {"order_status", "shipment_status"}:
@@ -366,9 +390,12 @@ def _span_expresses_claim(
             for fact in record.facts
         )
     if claim.kind == "image_url":
-        return str(claim.value).strip() in span or any(
+        return any(
+            canonical_http_url_equal(url.rstrip(".,،؛"), claim.value)
+            for url in _URL_RE.findall(span)
+        ) or any(
             media.evidence_ref == claim.evidence_ref
-            and str(media.url) == str(claim.value)
+            and canonical_http_url_equal(media.url, claim.value)
             for media in reply.media_refs
         )
     if claim.kind in {"merchant_knowledge", "product_knowledge"}:
@@ -595,27 +622,54 @@ def validate_grounded_reply(
 
     for media_ref in reply.media_refs:
         record = evidence.get(media_ref.evidence_ref)
-        if record is not None and not any(
-            fact.kind == "image_url" and str(fact.value) == str(media_ref.url)
-            for fact in record.facts
+        evidence_url_matches = bool(
+            record is not None
+            and any(
+                fact.kind == "image_url"
+                and canonical_http_url_equal(fact.value, media_ref.url)
+                for fact in record.facts
+            )
+        )
+        verified_subject_matches = any(
+            claim.kind == "image_url"
+            and claim.evidence_ref == media_ref.evidence_ref
+            and canonical_http_url_equal(claim.value, media_ref.url)
+            for claim in verified_claims
+        )
+        if record is not None and not (
+            evidence_url_matches and verified_subject_matches
         ):
             errors.append("media_url_not_in_evidence")
     for action in reply.ui_actions:
         record = evidence.get(action.evidence_ref)
         expected_kind = "product_url" if action.kind == "open_product" else "tracking_url"
-        if record is not None and not any(
-            fact.kind == expected_kind and str(fact.value) == str(action.url)
-            for fact in record.facts
+        evidence_url_matches = bool(
+            record is not None
+            and any(
+                fact.kind == expected_kind
+                and canonical_http_url_equal(fact.value, action.url)
+                for fact in record.facts
+            )
+        )
+        verified_subject_matches = any(
+            claim.kind == expected_kind
+            and claim.evidence_ref == action.evidence_ref
+            and canonical_http_url_equal(claim.value, action.url)
+            for claim in verified_claims
+        )
+        if record is not None and not (
+            evidence_url_matches and verified_subject_matches
         ):
             errors.append("action_url_not_in_evidence")
 
     claimed_urls = {
-        str(claim.value)
+        canonical_http_url(claim.value)
         for claim in verified_claims
-        if claim.kind in {"product_url", "image_url", "tracking_url"}
+        if claim.kind in _URL_FACT_KINDS
+        and canonical_http_url(claim.value) is not None
     }
     for url in _URL_RE.findall(reply.text):
-        if url.rstrip(".,،؛") not in claimed_urls:
+        if canonical_http_url(url.rstrip(".,،؛")) not in claimed_urls:
             errors.append("url_in_text_without_verified_claim")
 
     verified_prices = [
@@ -724,6 +778,205 @@ def validate_grounded_reply(
     return sorted(set(errors))
 
 
+def _url_comparison_diagnostic(
+    *,
+    candidate_url: object,
+    evidence_url: object,
+    comparison_stage: str,
+    claim_kind: str,
+    evidence_ref: str,
+    subject_product_id: int | None,
+    subject_order_id: int | None,
+    action_kind: str | None,
+    evidence_ref_exists: bool,
+    subject_binding_matches: bool,
+) -> dict[str, Any]:
+    candidate = candidate_url if isinstance(candidate_url, str) else None
+    evidence = evidence_url if isinstance(evidence_url, str) else None
+    candidate_canonical = canonical_http_url(candidate)
+    evidence_canonical = canonical_http_url(evidence)
+    return {
+        "comparison_stage": comparison_stage,
+        "claim_kind": claim_kind,
+        "evidence_ref": evidence_ref,
+        "subject_product_id": subject_product_id,
+        "subject_order_id": subject_order_id,
+        "action_kind": action_kind,
+        "evidence_ref_exists": evidence_ref_exists,
+        "subject_binding_matches": subject_binding_matches,
+        "raw_url_sha256": url_fingerprint(candidate),
+        "canonical_url_sha256": url_fingerprint(candidate_canonical),
+        "evidence_raw_url_sha256": url_fingerprint(evidence),
+        "evidence_canonical_url_sha256": url_fingerprint(evidence_canonical),
+        "canonical_equal": canonical_http_url_equal(candidate, evidence),
+    }
+
+
+def _safe_rejected_output_diagnostic(
+    context: CommerceAgentContext,
+    reply: CommerceReply,
+    errors: list[str],
+) -> dict[str, Any]:
+    """Summarize a rejected URL contract without storing message or URL data."""
+    evidence = context.evidence
+    comparisons: list[dict[str, Any]] = []
+
+    for claim in reply.fact_claims:
+        if claim.kind not in _URL_FACT_KINDS:
+            continue
+        record = evidence.get(claim.evidence_ref)
+        candidate_facts = (
+            [fact for fact in record.facts if fact.kind == claim.kind]
+            if record is not None
+            else []
+        )
+        if not candidate_facts:
+            candidate_facts = [None]
+        for fact in candidate_facts:
+            comparisons.append(
+                _url_comparison_diagnostic(
+                    candidate_url=claim.value,
+                    evidence_url=fact.value if fact is not None else None,
+                    comparison_stage="fact_claim_to_evidence",
+                    claim_kind=claim.kind,
+                    evidence_ref=claim.evidence_ref,
+                    subject_product_id=claim.subject_product_id,
+                    subject_order_id=claim.subject_order_id,
+                    action_kind=None,
+                    evidence_ref_exists=record is not None,
+                    subject_binding_matches=bool(
+                        record is not None
+                        and fact is not None
+                        and _fact_subject_binding_matches(record, claim, fact)
+                    ),
+                )
+            )
+
+        representations: Iterable[tuple[str, str, object]]
+        if claim.kind == "image_url":
+            representations = (
+                ("fact_claim_to_media_reference", "image", media.url)
+                for media in reply.media_refs
+                if media.evidence_ref == claim.evidence_ref
+            )
+        else:
+            expected_action = (
+                "open_product" if claim.kind == "product_url" else "track_shipment"
+            )
+            representations = (
+                ("fact_claim_to_ui_action", action.kind, action.url)
+                for action in reply.ui_actions
+                if action.evidence_ref == claim.evidence_ref
+                and action.kind == expected_action
+            )
+        for stage, action_kind, represented_url in representations:
+            comparisons.append(
+                _url_comparison_diagnostic(
+                    candidate_url=represented_url,
+                    evidence_url=claim.value,
+                    comparison_stage=stage,
+                    claim_kind=claim.kind,
+                    evidence_ref=claim.evidence_ref,
+                    subject_product_id=claim.subject_product_id,
+                    subject_order_id=claim.subject_order_id,
+                    action_kind=action_kind,
+                    evidence_ref_exists=record is not None,
+                    subject_binding_matches=any(
+                        _fact_subject_binding_matches(record, claim, fact)
+                        for fact in candidate_facts
+                        if record is not None and fact is not None
+                    ),
+                )
+            )
+
+    for action in reply.ui_actions:
+        expected_kind = "product_url" if action.kind == "open_product" else "tracking_url"
+        record = evidence.get(action.evidence_ref)
+        facts = (
+            [fact for fact in record.facts if fact.kind == expected_kind]
+            if record is not None
+            else []
+        ) or [None]
+        linked_claim = next(
+            (
+                claim
+                for claim in reply.fact_claims
+                if claim.evidence_ref == action.evidence_ref and claim.kind == expected_kind
+            ),
+            None,
+        )
+        for fact in facts:
+            comparisons.append(
+                _url_comparison_diagnostic(
+                    candidate_url=action.url,
+                    evidence_url=fact.value if fact is not None else None,
+                    comparison_stage="ui_action_to_evidence",
+                    claim_kind=expected_kind,
+                    evidence_ref=action.evidence_ref,
+                    subject_product_id=(
+                        linked_claim.subject_product_id if linked_claim is not None else None
+                    ),
+                    subject_order_id=(
+                        linked_claim.subject_order_id if linked_claim is not None else None
+                    ),
+                    action_kind=action.kind,
+                    evidence_ref_exists=record is not None,
+                    subject_binding_matches=bool(
+                        record is not None
+                        and fact is not None
+                        and linked_claim is not None
+                        and _fact_subject_binding_matches(record, linked_claim, fact)
+                    ),
+                )
+            )
+
+    for media in reply.media_refs:
+        record = evidence.get(media.evidence_ref)
+        facts = (
+            [fact for fact in record.facts if fact.kind == "image_url"]
+            if record is not None
+            else []
+        ) or [None]
+        linked_claim = next(
+            (
+                claim
+                for claim in reply.fact_claims
+                if claim.evidence_ref == media.evidence_ref and claim.kind == "image_url"
+            ),
+            None,
+        )
+        for fact in facts:
+            comparisons.append(
+                _url_comparison_diagnostic(
+                    candidate_url=media.url,
+                    evidence_url=fact.value if fact is not None else None,
+                    comparison_stage="media_reference_to_evidence",
+                    claim_kind="image_url",
+                    evidence_ref=media.evidence_ref,
+                    subject_product_id=(
+                        linked_claim.subject_product_id if linked_claim is not None else None
+                    ),
+                    subject_order_id=None,
+                    action_kind="image",
+                    evidence_ref_exists=record is not None,
+                    subject_binding_matches=bool(
+                        record is not None
+                        and fact is not None
+                        and linked_claim is not None
+                        and _fact_subject_binding_matches(record, linked_claim, fact)
+                    ),
+                )
+            )
+
+    return {
+        "artifact": "rejected_model_commerce_reply",
+        "customer_delivered": False,
+        "customer_fallback_artifact": "safe_fallback_reply",
+        "guardrail_error_codes": list(errors),
+        "url_comparisons": comparisons[:64],
+    }
+
+
 @output_guardrail(name="commerce_v2_grounded_structured_output")
 async def grounded_output_guardrail(
     run_context: RunContextWrapper[CommerceAgentContext],
@@ -736,6 +989,14 @@ async def grounded_output_guardrail(
         else ["malformed_commerce_reply"]
     )
     output_info: dict[str, Any] = {"passed": not errors, "errors": errors}
+    if errors and isinstance(output, CommerceReply):
+        diagnostic = _safe_rejected_output_diagnostic(
+            run_context.context,
+            output,
+            errors,
+        )
+        if diagnostic["url_comparisons"]:
+            output_info["rejected_output_diagnostic"] = diagnostic
     if (
         errors
         and isinstance(output, CommerceReply)
