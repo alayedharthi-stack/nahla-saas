@@ -221,6 +221,8 @@ def resolve_owned_cod_button_payload_from_context(
         )
         if order is None:
             continue
+        if int(getattr(order, "tenant_id", 0) or 0) != int(tenant_id):
+            continue
         event_customer_id = getattr(event, "customer_id", None)
         order_customer_id = getattr(order, "customer_id", None)
         if (
