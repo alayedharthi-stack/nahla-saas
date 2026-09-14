@@ -637,8 +637,9 @@ async def _try_execute(
     }
 
     _atype = getattr(automation, "automation_type", "") or ""
+    _is_initial_cod = _is_initial_cod_confirmation_order_update(_atype, event)
     _required_feature = _AUTOMATION_FEATURE_MAP.get(_atype)
-    if _is_initial_cod_confirmation_order_update(_atype, event):
+    if _is_initial_cod:
         _required_feature = None
 
     if _required_feature:
@@ -661,7 +662,9 @@ async def _try_execute(
 
     # ── Delay check ───────────────────────────────────────────────────────────
     config: Dict[str, Any] = automation.config or {}
-    delay_minutes: int = _resolve_delay(config, event=event)
+    # The seed's first delay belongs to the first recovery reminder, not to the
+    # transactional confirmation prompt emitted with the order webhook.
+    delay_minutes: int = 0 if _is_initial_cod else _resolve_delay(config, event=event)
     event_age_minutes = (now - _naive_utc(event.created_at)).total_seconds() / 60.0
     if event_age_minutes < delay_minutes:
         remaining = delay_minutes - event_age_minutes

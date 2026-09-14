@@ -324,6 +324,38 @@ def test_safety_poller_defers_to_lifecycle_webhook_owner(monkeypatch):
         engine.dispose()
 
 
+def test_safety_poller_does_not_duplicate_webhook_cod_prompt():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        tenant = Tenant(name="Generic Store", is_active=True)
+        db.add(tenant)
+        db.flush()
+        order = Order(
+            tenant_id=tenant.id,
+            external_id="7003",
+            external_order_number="REF-7003",
+            status="in_progress",
+            total="174",
+            customer_info={"mobile": "966500000000"},
+            is_abandoned=False,
+            extra_metadata={
+                "payment_method": "cod",
+                "is_cod": True,
+                "cod_webhook_triggered": True,
+            },
+        )
+        db.add(order)
+        db.commit()
+
+        assert _emit_for_order(db, tenant.id, order) is False
+        assert db.query(AutomationEvent).filter_by(tenant_id=tenant.id).count() == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_generic_non_cod_in_progress_order_keeps_existing_confirmation_behavior():
     normalized = _live_created({
         "payment_method": "credit_card",
