@@ -4043,6 +4043,9 @@ async def _dispatch_message(
                 br      = interactive.get("button_reply", {}) or {}
                 btn_id  = br.get("id", "")
                 btn_txt = br.get("title", "") or btn_id
+                context_wamid = str(
+                    (msg.get("context") or {}).get("id") or ""
+                ).strip()
 
                 # COD confirmation flow runs for every tenant (it's a merchant-
                 # facing template, not the Nahla SaaS sales bot). Try it FIRST so
@@ -4070,6 +4073,7 @@ async def _dispatch_message(
                                 customer_phone=sender,
                                 text=btn_txt,
                                 button_payload=btn_id,
+                                context_wamid=context_wamid,
                                 followup_send=_cod_followup,
                             )
                         except Exception as exc:
@@ -4338,6 +4342,9 @@ async def _dispatch_message(
             # Treat it exactly like a text message so the Brain receives it.
             if _wa_text and msg_type == "button" and not _is_platform_tenant(db, resolved_tenant_id):
                 _btn_payload = str((msg.get("button") or {}).get("payload") or "")
+                _context_wamid = str(
+                    (msg.get("context") or {}).get("id") or ""
+                ).strip()
                 try:
                     from services.cod_confirmation import (  # noqa: PLC0415
                         consume_owned_cod_button_inbound,
@@ -4351,9 +4358,6 @@ async def _dispatch_message(
                         _owned_btn_payload = _btn_payload
                         _cod_correlation = "payload"
                     else:
-                        _context_wamid = str(
-                            (msg.get("context") or {}).get("id") or ""
-                        ).strip()
                         _owned_btn_payload = (
                             resolve_owned_cod_button_payload_from_context(
                                 db,
@@ -4387,6 +4391,7 @@ async def _dispatch_message(
                                 customer_phone=sender,
                                 text=_wa_text,
                                 button_payload=_owned_btn_payload,
+                                context_wamid=_context_wamid,
                                 followup_send=_cod_tpl_followup,
                             )
                         except Exception as exc:
