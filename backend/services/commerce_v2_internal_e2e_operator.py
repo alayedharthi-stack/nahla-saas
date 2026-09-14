@@ -18,6 +18,7 @@ from services.commerce_v2_internal_e2e import (
     InternalE2ETurnRequest,
     assert_internal_e2e_operator_scope,
     provision_internal_e2e_fixtures,
+    reset_internal_e2e_customer,
     submit_internal_customer_turn,
 )
 from services.commerce_v2_whatsapp_e2e_contract import load_corpus, render_controlled_test_data
@@ -110,6 +111,14 @@ def create_batch(
 ) -> dict[str, Any]:
     from models import MessageEvent
     assert_internal_e2e_operator_scope(OPERATOR_TENANT_ID, env=env)
+    fixtures = provision_internal_e2e_fixtures(db, tenant_id=OPERATOR_TENANT_ID, env=env)
+    for alias in "ABC":
+        reset_internal_e2e_customer(
+            db,
+            tenant_id=OPERATOR_TENANT_ID,
+            synthetic_customer_alias=alias,
+            env=env,
+        )
     fixtures = provision_internal_e2e_fixtures(db, tenant_id=OPERATOR_TENANT_ID, env=env)
     rows = approved_corpus(seed=seed, order_number=fixtures["C"].order_number)
     batch_id = str(uuid.uuid4())

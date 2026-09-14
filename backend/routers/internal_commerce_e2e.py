@@ -80,6 +80,10 @@ def provision(body: ProvisionBody, db: Session = Depends(get_db)) -> dict:
             )
             for alias in dict.fromkeys(body.reset_aliases)
         }
+        if resets:
+            fixtures = provision_internal_e2e_fixtures(
+                db, tenant_id=OPERATOR_TENANT_ID
+            )
         return {
             "tenant_id": OPERATOR_TENANT_ID,
             "fixtures": {alias: vars(item) for alias, item in fixtures.items()},

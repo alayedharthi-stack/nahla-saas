@@ -15,7 +15,8 @@ Work uses the existing authenticated admin API and does not need database
 credentials or shell access. Every route is protected by `require_admin`; the
 tenant is the server-side constant `1`, aliases are typed `A|B|C`, request
 bodies reject unknown fields, and batch execution always loads the checked-in
-180-turn corpus:
+180-turn corpus. A batch resets only A/B/C and then restores B's approved long
+history seed before its first turn:
 
 ```text
 GET  /admin/internal-e2e/status

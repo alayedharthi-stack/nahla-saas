@@ -50,6 +50,7 @@ from services.commerce_v2_internal_e2e import (
     reset_internal_e2e_customer,
     submit_internal_customer_turn,
 )
+from services.commerce_v2_internal_e2e_operator import create_batch
 
 
 @pytest.fixture()
@@ -284,6 +285,32 @@ def test_provisions_three_unmistakable_identities_and_isolated_order(
     }
     assert directions == {INTERNAL_E2E_INBOUND, INTERNAL_E2E_OUTBOUND}
     assert db.query(MessageEvent).filter(MessageEvent.direction == "inbound").count() == 0
+
+
+def test_approved_batch_starts_from_clean_a_b_c_fixtures(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    fixtures = provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+    db.add(
+        MessageEvent(
+            tenant_id=1, conversation_id=fixtures["A"].conversation_id,
+            direction=INTERNAL_E2E_INBOUND, body="old turn",
+            extra_metadata={**internal_e2e_metadata(1, "A"), "internal_message_id": "old"},
+        )
+    )
+    db.commit()
+    batch = create_batch(db, seed=260914, concurrency_waves=True, env=enabled_env)
+    assert batch["corpus_id"] == "commerce_v2_phase_2_6_180_v1"
+    assert batch["turns_expected"] == 180
+    assert batch["external_egress_count"] == 0
+    assert db.query(MessageEvent).filter(
+        MessageEvent.conversation_id == fixtures["A"].conversation_id,
+        MessageEvent.direction.in_((INTERNAL_E2E_INBOUND, INTERNAL_E2E_OUTBOUND)),
+    ).count() == 0
+    assert db.query(MessageEvent).filter(
+        MessageEvent.conversation_id == fixtures["B"].conversation_id,
+        MessageEvent.event_type == "internal_e2e_seed_history",
+    ).count() == 8
 
 
 def test_internal_context_rejects_alias_and_whatsapp_confusion(
