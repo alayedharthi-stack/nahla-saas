@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agents import Agent, ModelSettings
+from agents import Agent, ModelRetrySettings, ModelSettings
 
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.guardrails import (
@@ -65,6 +65,9 @@ def build_commerce_agent(
     *,
     model: str | Any,
     reasoning_effort: str = "high",
+    model_timeout_seconds: float = 75.0,
+    retry_settings: ModelRetrySettings | None = None,
+    service_tier: str = "auto",
 ) -> Agent[CommerceAgentContext]:
     """Build exactly one agent; V2 has no classifiers or handoffs."""
     return Agent[CommerceAgentContext](
@@ -74,6 +77,14 @@ def build_commerce_agent(
         model_settings=ModelSettings(
             reasoning={"effort": reasoning_effort},
             parallel_tool_calls=False,
+            timeout=float(model_timeout_seconds),
+            retry=retry_settings,
+            include_usage=True,
+            preserve_raw_usage=True,
+            # Agents SDK 0.22.2 exposes provider-specific Responses fields
+            # through extra_body. "auto" preserves standard processing;
+            # "fast" is an explicit per-request experiment only.
+            extra_body={"service_tier": service_tier},
         ),
         tools=list(COMMERCE_AGENT_TOOLS),
         handoffs=[],

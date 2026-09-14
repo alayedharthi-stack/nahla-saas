@@ -88,7 +88,7 @@ def persist_commerce_agent_result(
         reason=usage_reason,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
-        cache_read_tokens=0,
+        cache_read_tokens=result.cached_input_tokens,
         cache_write_tokens=0,
         token_source=TOKEN_SOURCE_ACTUAL,
         request_id=result.sdk_trace_id,

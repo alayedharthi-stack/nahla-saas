@@ -1,0 +1,235 @@
+{
+  "contract_version": "commerce_v2_real_whatsapp_e2e_v1",
+  "tenant_id": 1,
+  "description": "180 Work-operated real WhatsApp turns; three controlled accounts; read-only commerce only.",
+  "accounts": [
+    {
+      "alias": "A",
+      "segments": [
+        {
+          "category": "social",
+          "repeat": 12,
+          "steps": [{
+            "variants": ["السلام عليكم", "هلا والله", "مساء الخير", "صباح النور", "كيف حالكم؟", "يعطيكم العافية", "مرحبا", "أهلين", "يا هلا", "شلونكم؟", "عساكم بخير", "حياكم الله"],
+            "expected_tools": [],
+            "expected_outcome": "social_reply"
+          }]
+        },
+        {
+          "category": "catalog_browse",
+          "repeat": 10,
+          "steps": [{
+            "variants": ["وش المنتجات المتوفرة عندكم؟", "أبغى أشوف منتجات المتجر", "إيش عندكم للبيع؟", "اعرض لي الموجود", "ممكن أتصفح المنتجات؟", "وش الخيارات المتاحة؟", "عطني فكرة عن منتجاتكم", "إيش أقدر أطلب منكم؟", "ورني الكتالوج", "وش عندكم حالياً؟"],
+            "expected_tools": ["search_products"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "specific_product",
+          "repeat": 10,
+          "steps": [{
+            "variants": ["أبغى تفاصيل أول منتج عندكم", "وش مواصفات المنتج الأول؟", "كلمني عن أحد المنتجات المتوفرة", "اختر لي منتجاً واشرحه", "وش تفاصيل هذا المنتج؟", "أحتاج معلومات عن المنتج الظاهر أولاً", "هل تقدر توضح لي أحد منتجاتكم؟", "عطني وصفاً لمنتج متوفر", "أبغى معلومات دقيقة عن منتج من الكتالوج", "وش المنتج اللي تنصح أبدأ أشوفه؟"],
+            "expected_tools": ["search_products", "get_product_details"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "price_availability",
+          "repeat": 10,
+          "steps": [{
+            "variants": ["كم سعر أول منتج وهل هو متوفر؟", "أبغى منتج متاح مع سعره", "وش أسعار الموجود؟", "هل المنتج الأول متوفر وكم قيمته؟", "عطني السعر والتوفر لمنتج مناسب", "هل فيه منتج متوفر الآن وكم سعره؟", "أحتاج السعر وحالة المخزون", "كم قيمة المنتج اللي عرضته؟", "هل أقدر أطلبه الآن وكم سعره؟", "وش المتوفر ضمن الأسعار الحالية؟"],
+            "expected_tools": ["search_products"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "product_media",
+          "repeat": 6,
+          "steps": [{
+            "variants": ["أرسل رابط منتج متوفر", "هل فيه صورة ورابط للمنتج؟", "أبغى رابط أول منتج", "ورني صورة المنتج إذا موجودة", "هل أقدر أشوف صفحة المنتج؟", "عطني رابطاً موثوقاً للمنتج"],
+            "expected_tools": ["search_products"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "recommendation",
+          "repeat": 12,
+          "steps": [{
+            "variants": ["رشح لي منتجاً مناسباً", "وش تنصحني أشتري؟", "أبغى خياراً جيداً من المتوفر", "قارن لي بين خيارين متاحين", "ميزانيتي محدودة، وش الأنسب؟", "اختر لي أفضل قيمة", "وش الخيار الاقتصادي؟", "أحتاج توصية من المنتجات الموجودة", "ساعدني أختار بين المنتجات", "أبغى شيئاً مناسباً كهدية", "رشح لي خياراً بسعر معقول", "وش الفرق بين أول منتجين؟"],
+            "expected_tools": ["search_products"],
+            "expected_outcome": "grounded_reply"
+          }]
+        }
+      ]
+    },
+    {
+      "alias": "B",
+      "segments": [
+        {
+          "category": "merchant_knowledge",
+          "repeat": 10,
+          "steps": [{
+            "variants": ["عرفني على المتجر", "وش المعلومات اللي عندكم عن المتجر؟", "هل عندكم سياسة أو معلومات عامة؟", "أبغى أعرف أكثر عنكم", "وش يميز متجركم؟", "هل توجد معلومات موثوقة عن المتجر؟", "من أنتم وماذا تقدمون؟", "عطني نبذة عن النشاط", "هل عندكم إجابة من معلومات التاجر؟", "وش المعروف عن هذا المتجر؟"],
+            "expected_tools": ["search_merchant_knowledge"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "product_knowledge",
+          "repeat": 5,
+          "steps": [
+            {
+              "variants": ["اعرض لي منتجاً متوفراً", "اختر منتجاً من الكتالوج", "أبغى أشوف أول منتج", "ورني أحد المنتجات", "عطني منتجاً موجوداً الآن"],
+              "expected_tools": ["search_products"],
+              "expected_outcome": "grounded_reply"
+            },
+            {
+              "variants": ["هل عندكم معلومات إضافية عنه؟", "وش المعرفة المسجلة عن هذا المنتج؟", "أبغى تفاصيل موثوقة أكثر عنه", "هل توجد ملاحظات خاصة بالمنتج؟", "اشرح لي المنتج من قاعدة المعرفة"],
+              "expected_tools": ["search_products", "search_product_knowledge"],
+              "expected_outcome": "grounded_reply"
+            }
+          ]
+        },
+        {
+          "category": "mixed_social_commerce",
+          "repeat": 6,
+          "steps": [{
+            "variants": ["السلام عليكم، وش المنتجات الموجودة؟", "هلا، ممكن ترشح لي منتجاً؟", "مساء الخير، كم أسعار المتوفر؟", "كيف حالكم؟ أبغى أشوف الكتالوج", "يعطيكم العافية، وش تنصحون به؟", "صباح الخير، هل عندكم منتجات متاحة؟"],
+            "expected_tools": ["search_products"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "pronoun_followup",
+          "repeat": 6,
+          "steps": [
+            {
+              "variants": ["اعرض لي منتجاً مناسباً", "أبغى أول منتج متوفر", "رشح لي شيئاً من الموجود", "ورني خياراً من الكتالوج", "اختر لي منتجاً", "عطني أحد المنتجات"],
+              "expected_tools": ["search_products"],
+              "expected_outcome": "grounded_reply"
+            },
+            {
+              "variants": ["كم سعره؟", "وهل هو متوفر؟", "أرسل رابطه", "هل له صورة؟", "وش تفاصيله؟", "هل تنصحني فيه؟"],
+              "expected_tools": ["search_products"],
+              "expected_outcome": "grounded_reply"
+            }
+          ]
+        },
+        {
+          "category": "product_switching",
+          "repeat": 4,
+          "steps": [
+            {
+              "variants": ["أبغى تفاصيل أول منتج", "اعرض لي خياراً متوفراً", "وش أول شيء عندكم؟", "رشح لي منتجاً أول"],
+              "expected_tools": ["search_products"],
+              "expected_outcome": "grounded_reply"
+            },
+            {
+              "variants": ["طيب غيره وش عندكم؟", "خلنا نشوف منتجاً ثانياً", "أبغى أغير لخيار آخر", "قارن هذا بمنتج مختلف"],
+              "expected_tools": ["search_products"],
+              "expected_outcome": "grounded_reply"
+            }
+          ]
+        },
+        {
+          "category": "missing_ambiguous_unsupported",
+          "repeat": 8,
+          "steps": [{
+            "variants": ["هل عندكم منتج باسم غير موجود 999؟", "أبغى معلومة غير مسجلة عن بلد التصنيع", "هل تضمنون نتيجة غير مذكورة؟", "أحتاج شيئاً لكن ما أدري وش هو", "عندكم المنتج اللي في بالي؟", "وش أفضل شيء بدون ما أحدد احتياجي؟", "هل هذا المنتج يحقق ادعاء غير موجود؟", "أعطني حقيقة غير مكتوبة عن أحد المنتجات"],
+            "expected_tools": ["search_products"],
+            "expected_outcome": "safe_missing_fact"
+          }]
+        },
+        {
+          "category": "long_multiturn",
+          "repeat": 1,
+          "steps": [
+            {"variants": ["السلام عليكم، أبغى أتصفح المنتجات"], "expected_tools": ["search_products"], "expected_outcome": "grounded_reply"},
+            {"variants": ["اختر لي واحداً منها"], "expected_tools": ["search_products"], "expected_outcome": "grounded_reply"},
+            {"variants": ["كم سعره وهل هو متوفر؟"], "expected_tools": ["search_products"], "expected_outcome": "grounded_reply"},
+            {"variants": ["طيب هل عندكم معلومات إضافية عنه؟"], "expected_tools": ["search_products", "search_product_knowledge"], "expected_outcome": "grounded_reply"},
+            {"variants": ["خلنا ننتقل لخيار آخر"], "expected_tools": ["search_products"], "expected_outcome": "grounded_reply"},
+            {"variants": ["قارن بين الخيارين من المعلومات المتاحة"], "expected_tools": ["search_products"], "expected_outcome": "grounded_reply"}
+          ]
+        }
+      ]
+    },
+    {
+      "alias": "C",
+      "segments": [
+        {
+          "category": "latest_order",
+          "repeat": 10,
+          "steps": [{
+            "variants": ["وش حالة آخر طلب لي؟", "وين وصل طلبي الأخير؟", "أبغى أعرف حالة أحدث طلب", "هل طلبي الأخير ما زال قيد التنفيذ؟", "شيك على آخر طلب", "عطني تحديث آخر طلب", "وش صار على طلبي؟", "أحتاج حالة الطلب الأحدث", "هل عندي طلب حديث؟", "تابع لي آخر طلب مسجل"],
+            "expected_tools": ["resolve_customer_order"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "explicit_order_number",
+          "repeat": 10,
+          "steps": [{
+            "variants": ["ما حالة الطلب رقم {TEST_ORDER_NUMBER}؟", "شيك على طلبي {TEST_ORDER_NUMBER}", "أبغى تفاصيل حالة رقم {TEST_ORDER_NUMBER}", "وين وصل الطلب {TEST_ORDER_NUMBER}؟", "هل الطلب {TEST_ORDER_NUMBER} موجود؟", "تحديث الطلب رقم {TEST_ORDER_NUMBER}", "راجع لي رقم {TEST_ORDER_NUMBER}", "وش صار على {TEST_ORDER_NUMBER}؟", "حالة طلب سلة رقم {TEST_ORDER_NUMBER}", "ممكن تبحث عن الطلب {TEST_ORDER_NUMBER}؟"],
+            "expected_tools": ["resolve_customer_order"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "order_items",
+          "repeat": 8,
+          "steps": [{
+            "variants": ["وش محتويات آخر طلب؟", "إيش المنتجات في طلبي الأخير؟", "عدد لي عناصر الطلب", "وش طلبت في آخر مرة؟", "أبغى تفاصيل أصناف الطلب", "ما هي عناصر طلبي؟", "اعرض محتويات الطلب الأخير", "وش الموجود داخل الطلب؟"],
+            "expected_tools": ["resolve_customer_order", "get_order_details"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "order_total",
+          "repeat": 8,
+          "steps": [{
+            "variants": ["كم إجمالي آخر طلب؟", "وش قيمة طلبي؟", "أبغى المجموع النهائي للطلب", "كم كان إجمالي الطلب الأخير؟", "عطني قيمة الطلب المسجلة", "وش المبلغ في طلبي؟", "كم حساب الطلب؟", "اذكر إجمالي طلبي الأخير"],
+            "expected_tools": ["resolve_customer_order", "get_order_details"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "shipment_status",
+          "repeat": 8,
+          "steps": [{
+            "variants": ["وش حالة شحنة طلبي؟", "هل تم شحن الطلب؟", "وين وصلت الشحنة؟", "أبغى تحديث الشحن", "هل الشحنة في الطريق؟", "شيك على حالة شحنتي", "وش آخر وضع للشحنة؟", "هل توجد شحنة للطلب الأخير؟"],
+            "expected_tools": ["resolve_customer_order", "get_order_shipment"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "carrier",
+          "repeat": 6,
+          "steps": [{
+            "variants": ["مين شركة الشحن؟", "وش اسم الناقل لطلبي؟", "أي شركة تشحن الطلب؟", "أبغى أعرف شركة التوصيل", "من الناقل المسجل؟", "مع أي شركة شحنتوا طلبي؟"],
+            "expected_tools": ["resolve_customer_order", "get_order_shipment"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "tracking",
+          "repeat": 6,
+          "steps": [{
+            "variants": ["عطني رقم التتبع", "أرسل رابط تتبع الشحنة", "وش رقم تتبع طلبي؟", "هل يوجد رابط للتتبع؟", "أحتاج رقم ورابط التتبع", "كيف أتابع الشحنة؟"],
+            "expected_tools": ["resolve_customer_order", "get_order_shipment"],
+            "expected_outcome": "grounded_reply"
+          }]
+        },
+        {
+          "category": "missing_order_shipment",
+          "repeat": 4,
+          "steps": [{
+            "variants": ["ابحث عن الطلب غير الموجود TEST-MISSING-999", "وش تتبع طلب غير مسجل؟", "عطني شركة شحن لطلب ما له شحنة", "هل يوجد رابط تتبع إذا لم يكن مسجلاً؟"],
+            "expected_tools": ["resolve_customer_order"],
+            "expected_outcome": "safe_missing_fact"
+          }]
+        }
+      ]
+    }
+  ]
+}
