@@ -71,6 +71,8 @@ class CommerceAgentContext(BaseModel):
     _run_user_input: str = PrivateAttr(default="")
     _merchant_knowledge_relevant: bool | None = PrivateAttr(default=None)
     _verified_customer_name: str = PrivateAttr(default="")
+    _session_history_provenance: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    _session_history_query_count: int = PrivateAttr(default=0)
 
     @classmethod
     def from_trusted_scope(
@@ -238,6 +240,53 @@ class CommerceAgentContext(BaseModel):
     @property
     def evidence(self) -> dict[str, EvidenceRecord]:
         return dict(self._evidence)
+
+    @property
+    def authorized_product_ids(self) -> set[int]:
+        """Trusted product ids discovered by tools during this run."""
+        return set(self._allowed_product_ids)
+
+    @property
+    def authorized_order_ids(self) -> set[int]:
+        """Trusted order ids discovered by tools during this run."""
+        return set(self._allowed_order_ids)
+
+    @property
+    def session_history_provenance(self) -> list[dict[str, Any]]:
+        """Non-content provenance recorded by the canonical Session adapter."""
+        return [dict(item) for item in self._session_history_provenance]
+
+    @property
+    def session_history_query_count(self) -> int:
+        return self._session_history_query_count
+
+    def begin_session_history_query(self) -> None:
+        self._session_history_query_count += 1
+
+    def record_session_history_row(
+        self,
+        *,
+        message_id: int,
+        tenant_id: int,
+        conversation_id: int,
+        direction: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Record identity provenance only; message bodies never enter safety proof."""
+        self._session_history_provenance.append(
+            {
+                "message_id": int(message_id),
+                "tenant_id": int(tenant_id),
+                "conversation_id": int(conversation_id),
+                "direction": str(direction),
+                "synthetic_customer_alias": metadata.get("synthetic_customer_alias"),
+                "identity": metadata.get("identity"),
+                "metadata_tenant_id": metadata.get("tenant_id"),
+                "channel": metadata.get("channel"),
+                "synthetic": metadata.get("synthetic"),
+                "test_only": metadata.get("test_only"),
+            }
+        )
 
     def redact_unexposed_customer_identity(self, text: str) -> str:
         """Remove the stored customer name from model history until a name tool exists."""

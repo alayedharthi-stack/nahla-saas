@@ -2271,7 +2271,11 @@ class StoreSyncService:
             return 0
 
         _since = updated_since  # explicit override takes priority
-        has_local_orders = self.db.query(Order).filter(Order.tenant_id == self.tenant_id).first() is not None
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        has_local_orders = any(
+            not is_internal_e2e_order(row)
+            for row in self.db.query(Order).filter(Order.tenant_id == self.tenant_id).all()
+        )
         if _since is None and incremental and has_local_orders:
             _since = self._last_sync_timestamp()
 
@@ -2338,6 +2342,8 @@ class StoreSyncService:
                 .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
                 .first()
             )
+            if existing is not None and is_internal_e2e_order(existing):
+                raise RuntimeError("internal_e2e_order_forbidden:store_sync")
             if existing:
                 prev_status = existing.status
                 existing.status                = normalised_status
@@ -4271,6 +4277,9 @@ class StoreSyncService:
             .filter_by(tenant_id=self.tenant_id, external_id=ext_id)
             .first()
         )
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        if order_row is not None and is_internal_e2e_order(order_row):
+            raise RuntimeError("internal_e2e_order_forbidden:store_webhook")
         adapter = self._get_adapter()
         order_channel_source = _extract_order_channel_source(normalised)
         webhook_source = (
@@ -4781,8 +4790,11 @@ class StoreSyncService:
             .first()
         )
         if snap:
-            snap.order_count              = (
-                self.db.query(Order).filter_by(tenant_id=self.tenant_id).count()
+            snap.order_count = sum(
+                not is_internal_e2e_order(row)
+                for row in self.db.query(Order)
+                .filter_by(tenant_id=self.tenant_id)
+                .all()
             )
             snap.last_incremental_sync_at = datetime.now(timezone.utc)
             snap.updated_at               = datetime.now(timezone.utc)
@@ -4919,8 +4931,10 @@ class StoreSyncService:
         product_count  = (
             self.db.query(Product).filter_by(tenant_id=self.tenant_id).count()
         )
-        order_count    = (
-            self.db.query(Order).filter_by(tenant_id=self.tenant_id).count()
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        order_count = sum(
+            not is_internal_e2e_order(row)
+            for row in self.db.query(Order).filter_by(tenant_id=self.tenant_id).all()
         )
         customer_count = (
             self.db.query(Customer).filter_by(tenant_id=self.tenant_id).count()

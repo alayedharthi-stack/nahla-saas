@@ -884,6 +884,9 @@ class CustomerIntelligenceService:
         phone_index: Dict[str, list[Order]] = {}
         name_index: Dict[str, list[Order]] = {}
         for order in orders:
+            from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+            if is_internal_e2e_order(order):
+                continue
             phone = extract_order_customer_phone(order)
             if phone:
                 phone_index.setdefault(phone, []).append(order)

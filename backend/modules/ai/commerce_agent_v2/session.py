@@ -30,6 +30,7 @@ class ConversationMessageSession:
         from models import Conversation, MessageEvent
 
         self._context.assert_scope()
+        self._context.begin_session_history_query()
         db = self._context.db
         conversation = (
             db.query(Conversation)
@@ -73,6 +74,29 @@ class ConversationMessageSession:
         for row in rows:
             TenantIsolationLayer.assert_belongs(row, self._context.tenant_context)
             metadata = dict(getattr(row, "extra_metadata", None) or {})
+            if self._context.channel == "internal_e2e":
+                from modules.ai.commerce_agent_v2.internal_e2e_identity import (
+                    metadata_matches_internal_e2e_identity,
+                )
+
+                if self._context.synthetic_customer_alias is None or not (
+                    str(getattr(row, "direction", "") or "") in directions
+                    and metadata_matches_internal_e2e_identity(
+                        metadata,
+                        tenant_id=self._context.tenant_id,
+                        alias=self._context.synthetic_customer_alias,
+                    )
+                ):
+                    raise TenantIsolationViolation(
+                        "internal_e2e_session_history_provenance_invalid"
+                    )
+                self._context.record_session_history_row(
+                    message_id=int(row.id),
+                    tenant_id=int(row.tenant_id),
+                    conversation_id=int(row.conversation_id),
+                    direction=str(row.direction),
+                    metadata=metadata,
+                )
             # The SDK receives the current turn as Runner input. Exclude the
             # already-persisted webhook row so it is not sent twice.
             persisted_inbound_id = str(

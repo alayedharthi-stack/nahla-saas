@@ -78,6 +78,13 @@ def score_turn(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> dict[s
             blockers.append(f"{key}_unproven")
         elif int(value) != 0:
             blockers.append(key)
+        if internal_e2e:
+            proofs = actual.get("safety_proofs")
+            proof = proofs.get(key) if isinstance(proofs, Mapping) else None
+            if not isinstance(proof, Mapping) or proof.get("proven") is not True:
+                blockers.append(f"{key}_unproven")
+            elif proof.get("value") != value:
+                blockers.append(f"{key}_proof_mismatch")
     return {
         "case_id": expected.get("case_id"),
         "passed": not blockers,
@@ -188,7 +195,18 @@ def score_batch(
         case_id for case_id, count in Counter(evidence_ids).items() if count > 1
     )
     safety_proven = exact_case_set and not duplicate_evidence_ids and all(
-        row.get(key) is not None for row in actual.values() for key in SAFETY_KEYS
+        row.get(key) is not None
+        and (
+            row.get("execution_mode") != "INTERNAL_E2E"
+            or (
+                isinstance(row.get("safety_proofs"), Mapping)
+                and isinstance(row["safety_proofs"].get(key), Mapping)
+                and row["safety_proofs"][key].get("proven") is True
+                and row["safety_proofs"][key].get("value") == row.get(key)
+            )
+        )
+        for row in actual.values()
+        for key in SAFETY_KEYS
     )
     hard_gates_passed = (
         common_rate >= 0.99

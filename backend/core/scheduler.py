@@ -750,6 +750,7 @@ async def _send_daily_reports() -> None:
                     float(o.total or 0)
                     for o in day_orders
                     if o.status not in ("cancelled", "refunded")
+                    and str(getattr(o, "source", "") or "") != "internal_e2e"
                 )
 
                 await send_email(
@@ -760,7 +761,10 @@ async def _send_daily_reports() -> None:
                     variables={
                         "merchant_name":    merchant.username or "",
                         "report_date":      yesterday.strftime("%A، %d %B %Y"),
-                        "orders_count":     len(day_orders),
+                        "orders_count":     sum(
+                            str(getattr(o, "source", "") or "") != "internal_e2e"
+                            for o in day_orders
+                        ),
                         "conversations_count": 0,   # extend later via ConversationMessage query
                         "revenue":          f"{revenue:,.0f}",
                         "recovered_carts":  0,

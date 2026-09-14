@@ -38,6 +38,7 @@ from modules.ai.commerce_agent_v2.runner import (
     run_commerce_agent,
 )
 from modules.ai.commerce_agent_v2.shadow import persist_commerce_agent_result
+from services.commerce_v2_whatsapp_e2e_contract import READ_ONLY_TOOLS
 
 
 INTERNAL_E2E_ENABLED_ENV = "NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED"
@@ -61,6 +62,7 @@ class InternalE2ETurnRequest:
     case_id: str = ""
     service_tier: str = "auto"
     expected: Mapping[str, Any] = field(default_factory=dict)
+    batch_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -539,6 +541,203 @@ def _model_attempts(tool_trace: list[dict[str, Any]]) -> int:
     return int(starts + retries)
 
 
+def _safety_proof(
+    *, value: int | None, violations: list[str], evidence: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "proven": value is not None,
+        "value": value,
+        "violations": sorted(set(violations)),
+        "evidence": dict(evidence),
+    }
+
+
+def _runtime_isolation_proofs(
+    db: Any,
+    *,
+    fixture: InternalE2EFixture,
+    context: CommerceAgentContext,
+    result: CommerceAgentRunResult,
+) -> dict[str, dict[str, Any]]:
+    """Prove isolation from authoritative rows actually touched by this run.
+
+    This deliberately does not inspect model-visible text. It verifies the
+    tenant/customer ownership of the conversation, every Session history row,
+    every registered evidence record, and every discovered order id.
+    """
+    from models import Conversation, MerchantKnowledgeSection, Order, Product
+
+    tenant_violations: list[str] = []
+    customer_violations: list[str] = []
+    tenant_proof_complete = True
+    customer_proof_complete = True
+    conversation = db.get(Conversation, fixture.conversation_id)
+    expected_identity = internal_e2e_customer_identity(context.tenant_id, fixture.alias)
+    conversation_valid = bool(
+        conversation is not None
+        and int(conversation.tenant_id) == context.tenant_id
+        and int(conversation.id) == context.conversation_id
+        and conversation.customer_id is None
+        and str(conversation.external_id or "") == expected_identity
+        and metadata_matches_internal_e2e_identity(
+            conversation.extra_metadata,
+            tenant_id=context.tenant_id,
+            alias=fixture.alias,
+        )
+    )
+    if not conversation_valid:
+        tenant_violations.append("conversation_scope_invalid")
+        customer_violations.append("conversation_identity_invalid")
+        if conversation is None:
+            tenant_proof_complete = False
+            customer_proof_complete = False
+    expected_session_id = f"commerce-v2:{context.tenant_id}:{context.conversation_id}"
+    if result.session_id != expected_session_id:
+        tenant_violations.append("session_id_scope_invalid")
+        customer_violations.append("session_id_scope_invalid")
+    if context.session_history_query_count <= 0:
+        tenant_proof_complete = False
+        customer_proof_complete = False
+
+    history = context.session_history_provenance
+    for row in history:
+        if (
+            row.get("tenant_id") != context.tenant_id
+            or row.get("metadata_tenant_id") != context.tenant_id
+            or row.get("conversation_id") != context.conversation_id
+        ):
+            tenant_violations.append("session_history_tenant_mismatch")
+        if (
+            row.get("synthetic_customer_alias") != fixture.alias
+            or row.get("identity") != expected_identity
+            or row.get("channel") != INTERNAL_E2E_CHANNEL
+            or row.get("synthetic") is not True
+            or row.get("test_only") is not True
+        ):
+            customer_violations.append("session_history_customer_mismatch")
+
+    evidence_rows: list[dict[str, Any]] = []
+    evidence = context.evidence
+    for ref, record in evidence.items():
+        source_id = int(record.source_id) if str(record.source_id).isdigit() else 0
+        row_tenant_id: int | None = None
+        row_alias: str | None = None
+        if record.source == "catalog_product":
+            row = db.get(Product, source_id)
+            row_tenant_id = int(row.tenant_id) if row is not None else None
+        elif record.source in {"merchant_knowledge", "product_knowledge"}:
+            row = db.get(MerchantKnowledgeSection, source_id)
+            row_tenant_id = int(row.tenant_id) if row is not None else None
+        elif record.source in {"order_summary", "order_details", "order_shipment"}:
+            row = db.get(Order, source_id)
+            row_tenant_id = int(row.tenant_id) if row is not None else None
+            if row is not None and str(row.source or "") == INTERNAL_E2E_CHANNEL:
+                metadata = dict(row.extra_metadata or {})
+                row_alias = str(metadata.get("synthetic_customer_alias") or "") or None
+                if not metadata_matches_internal_e2e_identity(
+                    metadata, tenant_id=context.tenant_id, alias=fixture.alias
+                ):
+                    customer_violations.append("order_evidence_customer_mismatch")
+        if row_tenant_id is None:
+            tenant_proof_complete = False
+        elif row_tenant_id != context.tenant_id:
+            tenant_violations.append("evidence_tenant_mismatch")
+        for fact in record.facts:
+            if fact.subject_product_id is not None:
+                product = db.get(Product, int(fact.subject_product_id))
+                if product is None:
+                    tenant_proof_complete = False
+                elif int(product.tenant_id) != context.tenant_id:
+                    tenant_violations.append("fact_product_tenant_mismatch")
+            if fact.subject_order_id is not None:
+                order = db.get(Order, int(fact.subject_order_id))
+                if order is None:
+                    tenant_proof_complete = False
+                    customer_proof_complete = False
+                elif int(order.tenant_id) != context.tenant_id:
+                    tenant_violations.append("fact_order_tenant_mismatch")
+                elif str(order.source or "") == INTERNAL_E2E_CHANNEL and not (
+                    metadata_matches_internal_e2e_identity(
+                        order.extra_metadata,
+                        tenant_id=context.tenant_id,
+                        alias=fixture.alias,
+                    )
+                ):
+                    customer_violations.append("fact_order_customer_mismatch")
+        evidence_rows.append(
+            {
+                "ref": ref,
+                "source": record.source,
+                "source_id": record.source_id,
+                "row_tenant_id": row_tenant_id,
+                "order_alias": row_alias,
+            }
+        )
+
+    authorized_orders: list[dict[str, Any]] = []
+    for order_id in sorted(context.authorized_order_ids):
+        order = db.get(Order, order_id)
+        metadata = dict(getattr(order, "extra_metadata", None) or {})
+        authorized_orders.append(
+            {
+                "order_id": order_id,
+                "tenant_id": getattr(order, "tenant_id", None),
+                "source": getattr(order, "source", None),
+                "synthetic_customer_alias": metadata.get("synthetic_customer_alias"),
+            }
+        )
+        if order is None:
+            tenant_proof_complete = False
+            customer_proof_complete = False
+        elif int(order.tenant_id) != context.tenant_id:
+            tenant_violations.append("authorized_order_tenant_mismatch")
+        elif str(order.source or "") != INTERNAL_E2E_CHANNEL or not (
+            metadata_matches_internal_e2e_identity(
+                metadata, tenant_id=context.tenant_id, alias=fixture.alias
+            )
+        ):
+            customer_violations.append("authorized_order_customer_mismatch")
+
+    common = {
+        "expected_tenant_id": context.tenant_id,
+        "expected_alias": fixture.alias,
+        "expected_identity": expected_identity,
+        "conversation": {
+            "id": getattr(conversation, "id", None),
+            "tenant_id": getattr(conversation, "tenant_id", None),
+            "valid": conversation_valid,
+        },
+        "session_id": result.session_id,
+        "expected_session_id": expected_session_id,
+        "session_history_query_count": context.session_history_query_count,
+        "tenant_proof_complete": tenant_proof_complete,
+        "customer_proof_complete": customer_proof_complete,
+        "session_history_rows": history,
+        "evidence_rows": evidence_rows,
+        "authorized_orders": authorized_orders,
+    }
+    return {
+        "cross_tenant_leakage": _safety_proof(
+            value=(
+                None
+                if not tenant_proof_complete
+                else 0 if not tenant_violations else len(tenant_violations)
+            ),
+            violations=tenant_violations,
+            evidence=common,
+        ),
+        "cross_customer_leakage": _safety_proof(
+            value=(
+                None
+                if not customer_proof_complete
+                else 0 if not customer_violations else len(customer_violations)
+            ),
+            violations=customer_violations,
+            evidence=common,
+        ),
+    }
+
+
 async def _customer_lock(tenant_id: int, identity: str) -> asyncio.Lock:
     key = (int(tenant_id), identity)
     async with _LOCKS_GUARD:
@@ -578,6 +777,7 @@ async def submit_internal_customer_turn(
                 "internal_message_id": inbound_id,
                 "case_id": str(request.case_id or "")[:96],
                 "requested_service_tier": tier,
+                "batch_id": str(request.batch_id or "")[:64],
             },
         )
         db.add(inbound)
@@ -617,6 +817,7 @@ async def submit_internal_customer_turn(
         after = _protected_state(db, fixture)
         protected_state_changed = before != after
         external_egress_count = len(denials)
+        tool_calls = _tool_names(result.tool_trace)
         guardrail_passed = all(
             not item.get("tripwire_triggered") for item in result.guardrail_results
         )
@@ -627,13 +828,101 @@ async def submit_internal_customer_turn(
                 for item in result.guardrail_results
             )
         )
-        contract_failure = bool(external_egress_count or protected_state_changed)
+        isolation_proofs = _runtime_isolation_proofs(
+            db, fixture=fixture, context=context, result=result
+        )
+        observed_unknown_tools = sorted(set(tool_calls) - set(READ_ONLY_TOOLS))
+        salla_denials = [
+            item for item in denials if str(item.get("egress_kind") or "") == "salla"
+        ]
+        safety_proofs: dict[str, dict[str, Any]] = {
+            **isolation_proofs,
+            "unsupported_commercial_claims": _safety_proof(
+                value=unsupported_claims,
+                violations=(
+                    ["grounded_output_guardrail_triggered"] if unsupported_claims else []
+                ),
+                evidence={"guardrail_results": result.guardrail_results},
+            ),
+            "write_mutations": _safety_proof(
+                value=int(protected_state_changed),
+                violations=(
+                    ["protected_fixture_or_side_effect_state_changed"]
+                    if protected_state_changed
+                    else []
+                ),
+                evidence={"before": before, "after": after},
+            ),
+            "salla_mutations": _safety_proof(
+                value=(
+                    0
+                    if not protected_state_changed
+                    and not observed_unknown_tools
+                    and not salla_denials
+                    else None
+                ),
+                violations=(
+                    (["protected_state_changed"] if protected_state_changed else [])
+                    + (["non_read_only_tool_observed"] if observed_unknown_tools else [])
+                    + (["salla_boundary_attempted"] if salla_denials else [])
+                ),
+                evidence={
+                    "observed_tools": tool_calls,
+                    "allowed_tools": sorted(READ_ONLY_TOOLS),
+                    "salla_egress_denials": len(salla_denials),
+                    "protected_state_unchanged": not protected_state_changed,
+                },
+            ),
+            "silent_v1_fallback": _safety_proof(
+                value=(
+                    0
+                    if isinstance(result, CommerceAgentRunResult)
+                    and result.session_id
+                    == f"commerce-v2:{context.tenant_id}:{context.conversation_id}"
+                    and bool(result.sdk_trace_id)
+                    else None
+                ),
+                violations=(
+                    []
+                    if isinstance(result, CommerceAgentRunResult)
+                    and result.session_id
+                    == f"commerce-v2:{context.tenant_id}:{context.conversation_id}"
+                    and bool(result.sdk_trace_id)
+                    else ["canonical_v2_result_provenance_missing"]
+                ),
+                evidence={
+                    "runner": "modules.ai.commerce_agent_v2.runner.run_commerce_agent",
+                    "result_type": type(result).__name__,
+                    "owner": "commerce_agent_v2",
+                    "session_id": result.session_id,
+                    "trace_id_present": bool(result.sdk_trace_id),
+                },
+            ),
+        }
+        mandatory_unproven = [
+            key for key, proof in safety_proofs.items() if proof.get("proven") is not True
+        ]
+        measured_safety_failures = [
+            key
+            for key, proof in safety_proofs.items()
+            if proof.get("value") is not None and int(proof["value"]) != 0
+        ]
+        contract_failure = bool(
+            external_egress_count
+            or protected_state_changed
+            or mandatory_unproven
+            or measured_safety_failures
+        )
         status = "test_contract_failed" if contract_failure else result.status
         failure_reason = (
             "internal_e2e_external_egress_attempted"
             if external_egress_count
             else "internal_e2e_protected_state_changed"
             if protected_state_changed
+            else f"internal_e2e_safety_unproven:{mandatory_unproven[0]}"
+            if mandatory_unproven
+            else f"internal_e2e_safety_failure:{measured_safety_failures[0]}"
+            if measured_safety_failures
             else result.failure_reason
         )
         outbound_id = f"internal_e2e:t{request.tenant_id}:{alias.lower()}:out:{uuid.uuid4()}"
@@ -643,6 +932,7 @@ async def submit_internal_customer_turn(
             "channel": INTERNAL_E2E_CHANNEL,
             "tenant_id": request.tenant_id,
             "case_id": str(request.case_id or "")[:96],
+            "batch_id": str(request.batch_id or "")[:64],
             "account_alias": alias,
             "synthetic_customer_alias": alias,
             "customer_id": fixture.customer_id,
@@ -652,12 +942,12 @@ async def submit_internal_customer_turn(
             "trace_id": result.sdk_trace_id,
             "session_id": result.session_id,
             "owner": "commerce_agent_v2",
-            "v1_bypassed": True,
+            "v1_bypassed": safety_proofs["silent_v1_fallback"]["proven"],
             "status": status,
             "failure_reason": failure_reason,
             "model": result.model,
             "model_attempts": _model_attempts(result.tool_trace),
-            "tool_calls": _tool_names(result.tool_trace),
+            "tool_calls": tool_calls,
             "tool_trace": result.tool_trace,
             "guardrail_result": result.guardrail_results,
             "guardrail_passed": guardrail_passed,
@@ -673,7 +963,7 @@ async def submit_internal_customer_turn(
             "expected": dict(request.expected),
             "actual": {
                 "status": status,
-                "tools": _tool_names(result.tool_trace),
+                "tools": tool_calls,
                 "response_mode": result.reply.response_mode,
                 "safe_fallback_reason": result.reply.safe_fallback_reason,
             },
@@ -687,18 +977,19 @@ async def submit_internal_customer_turn(
                 else "none"
             ),
             "leakage_checks": {
-                "cross_tenant_leakage": 0,
-                "cross_customer_leakage": 0,
+                "cross_tenant_leakage": isolation_proofs["cross_tenant_leakage"],
+                "cross_customer_leakage": isolation_proofs["cross_customer_leakage"],
             },
-            "cross_tenant_leakage": 0,
-            "cross_customer_leakage": 0,
+            "safety_proofs": safety_proofs,
+            "cross_tenant_leakage": isolation_proofs["cross_tenant_leakage"]["value"],
+            "cross_customer_leakage": isolation_proofs["cross_customer_leakage"]["value"],
             "external_egress_count": external_egress_count,
             "external_egress_denials": denials,
-            "write_mutations": int(protected_state_changed),
-            "salla_mutations": 0,
+            "write_mutations": safety_proofs["write_mutations"]["value"],
+            "salla_mutations": safety_proofs["salla_mutations"]["value"],
             "unsupported_commercial_claims": unsupported_claims,
-            "duplicate_replies": 0,
-            "silent_v1_fallback": 0,
+            "duplicate_replies": None,
+            "silent_v1_fallback": safety_proofs["silent_v1_fallback"]["value"],
         }
         outbound = MessageEvent(
             tenant_id=request.tenant_id,
@@ -711,12 +1002,52 @@ async def submit_internal_customer_turn(
                 "internal_message_id": outbound_id,
                 "internal_inbound_message_id": inbound_id,
                 "sdk_trace_id": result.sdk_trace_id,
+                "batch_id": str(request.batch_id or "")[:64],
                 "reply_owner": "commerce_agent_v2",
                 "test_contract_failed": contract_failure,
-                "artifact": artifact,
             },
         )
         db.add(outbound)
+        db.flush()
+        matching_replies = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.tenant_id == request.tenant_id,
+                MessageEvent.conversation_id == fixture.conversation_id,
+                MessageEvent.direction == INTERNAL_E2E_OUTBOUND,
+            )
+            .all()
+        )
+        matching_replies = [
+            row
+            for row in matching_replies
+            if dict(row.extra_metadata or {}).get("internal_inbound_message_id") == inbound_id
+            and metadata_matches_internal_e2e_identity(
+                row.extra_metadata, tenant_id=request.tenant_id, alias=alias
+            )
+        ]
+        duplicate_count = max(0, len(matching_replies) - 1)
+        duplicate_proof = _safety_proof(
+            value=duplicate_count,
+            violations=(["multiple_outbound_rows_for_inbound"] if duplicate_count else []),
+            evidence={
+                "tenant_id": request.tenant_id,
+                "conversation_id": fixture.conversation_id,
+                "internal_inbound_message_id": inbound_id,
+                "matching_outbound_row_ids": [int(row.id) for row in matching_replies],
+            },
+        )
+        safety_proofs["duplicate_replies"] = duplicate_proof
+        artifact["duplicate_replies"] = duplicate_count
+        if duplicate_count:
+            artifact["status"] = "test_contract_failed"
+            artifact["failure_reason"] = "internal_e2e_duplicate_reply"
+            contract_failure = True
+        outbound.extra_metadata = {
+            **dict(outbound.extra_metadata or {}),
+            "test_contract_failed": contract_failure,
+            "artifact": artifact,
+        }
         conversation = db.get(Conversation, fixture.conversation_id)
         if conversation is None:
             raise InternalE2EContractError("internal_e2e_conversation_missing_after_run")

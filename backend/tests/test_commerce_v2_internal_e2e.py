@@ -15,10 +15,23 @@ from sqlalchemy.orm import sessionmaker
 
 from core.acceptance_execution_context import deny_external_egress
 from core.wa_usage import count_messages_in_window
-from database.models import Base, Conversation, MessageEvent, Order, Product, Tenant, TenantSettings
+from database.models import (
+    AutomationEvent,
+    Base,
+    CampaignSendLog,
+    Conversation,
+    MessageEvent,
+    Order,
+    OrderShipment,
+    PaymentSession,
+    Product,
+    SmartAutomation,
+    Tenant,
+    TenantSettings,
+)
 from evals.commerce_agent_v2_whatsapp.scorer import score_turn
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext, CommerceContextError
-from modules.ai.commerce_agent_v2.output import CommerceReply
+from modules.ai.commerce_agent_v2.output import CommerceReply, EvidenceRecord
 from modules.ai.commerce_agent_v2.internal_e2e_identity import internal_e2e_metadata
 from modules.ai.commerce_agent_v2.runner import CommerceAgentRunResult
 from modules.ai.commerce_agent_v2.session import ConversationMessageSession
@@ -198,11 +211,56 @@ def test_internal_scorer_requires_internal_ids_and_zero_external_egress() -> Non
         "write_mutations": 0,
         "salla_mutations": 0,
     }
+    actual["safety_proofs"] = {
+        key: {"proven": True, "value": actual[key], "violations": [], "evidence": {}}
+        for key in (
+            "unsupported_commercial_claims",
+            "cross_tenant_leakage",
+            "cross_customer_leakage",
+            "duplicate_replies",
+            "silent_v1_fallback",
+            "write_mutations",
+            "salla_mutations",
+        )
+    }
     assert score_turn(expected, actual)["passed"] is True
     actual["external_egress_count"] = 1
     failed = score_turn(expected, actual)
     assert failed["passed"] is False
     assert "external_egress" in failed["blockers"]
+
+
+def test_internal_scorer_rejects_unproven_and_proven_isolation_leakage() -> None:
+    expected = {"case_id": "A-002", "expected_outcome": "grounded_reply"}
+    actual = {
+        "execution_mode": "INTERNAL_E2E", "tenant_id": 1,
+        "owner": "commerce_agent_v2", "v1_bypassed": True, "status": "completed",
+        "internal_inbound_message_id": "internal_e2e:t1:a:in:fixture",
+        "internal_outbound_message_id": "internal_e2e:t1:a:out:fixture",
+        "trace_id": "trace", "guardrail_passed": True, "tool_calls": [],
+        "fallback_type": "none", "external_egress_count": 0,
+        **{key: 0 for key in (
+            "unsupported_commercial_claims", "cross_tenant_leakage",
+            "cross_customer_leakage", "duplicate_replies", "silent_v1_fallback",
+            "write_mutations", "salla_mutations",
+        )},
+    }
+    actual["safety_proofs"] = {
+        key: {"proven": True, "value": 0, "violations": [], "evidence": {}}
+        for key in (
+            "unsupported_commercial_claims", "cross_tenant_leakage",
+            "cross_customer_leakage", "duplicate_replies", "silent_v1_fallback",
+            "write_mutations", "salla_mutations",
+        )
+    }
+    actual["safety_proofs"]["cross_tenant_leakage"]["proven"] = False
+    assert "cross_tenant_leakage_unproven" in score_turn(expected, actual)["blockers"]
+    actual["safety_proofs"]["cross_tenant_leakage"] = {
+        "proven": True, "value": 1, "violations": ["evidence_tenant_mismatch"],
+        "evidence": {"row_tenant_id": 2},
+    }
+    actual["cross_tenant_leakage"] = 1
+    assert "cross_tenant_leakage" in score_turn(expected, actual)["blockers"]
 
 
 def test_provisions_three_unmistakable_identities_and_isolated_order(
@@ -283,7 +341,10 @@ async def test_a_b_c_sessions_do_not_read_each_others_history(
                 direction=INTERNAL_E2E_INBOUND,
                 body=secret,
                 event_type="internal_e2e_customer_turn",
-                extra_metadata={"internal_message_id": f"seed-{alias}"},
+                extra_metadata={
+                    **internal_e2e_metadata(1, alias),
+                    "internal_message_id": f"seed-{alias}",
+                },
             )
         )
     db.commit()
@@ -354,6 +415,7 @@ async def test_submit_persists_internal_ids_structured_reply_bundle_and_usage(
     runner_arguments: dict[str, Any] = {}
 
     async def fake_run(*, context: CommerceAgentContext, user_input: str, **kwargs: Any):
+        await ConversationMessageSession(context).get_items()
         runner_arguments.update(kwargs)
         return _fake_result(context, text=f"رد على: {user_input}")
 
@@ -373,6 +435,13 @@ async def test_submit_persists_internal_ids_structured_reply_bundle_and_usage(
     assert artifact["owner"] == "commerce_agent_v2"
     assert artifact["external_egress_count"] == 0
     assert artifact["write_mutations"] == 0
+    assert artifact["cross_tenant_leakage"] == 0
+    assert artifact["cross_customer_leakage"] == 0
+    assert artifact["safety_proofs"]["cross_tenant_leakage"]["proven"] is True
+    assert artifact["safety_proofs"]["cross_customer_leakage"]["proven"] is True
+    assert artifact["safety_proofs"]["duplicate_replies"]["evidence"][
+        "matching_outbound_row_ids"
+    ]
     assert artifact["internal_inbound_message_id"].startswith("internal_e2e:")
     assert artifact["internal_outbound_message_id"].startswith("internal_e2e:")
     assert artifact["structured_reply"]["text"] == "رد على: السلام عليكم"
@@ -392,6 +461,90 @@ async def test_submit_persists_internal_ids_structured_reply_bundle_and_usage(
     assert conversation.last_read_at is not None
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     assert count_messages_in_window(db, 1, now - timedelta(hours=1), now) == 0
+
+
+@pytest.mark.asyncio
+async def test_turn_artifact_measures_tenant_and_customer_provenance_violations(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    fixtures = provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+    db.add(Tenant(id=2, name="other tenant", is_active=True))
+    foreign_product = Product(
+        tenant_id=2, external_id="FOREIGN", title="foreign", price="1",
+        in_stock=True, catalog_status="active", extra_metadata={"status": "active"},
+    )
+    b_order = Order(
+        tenant_id=1, external_id=f"{fixtures['B'].identity}:order:canary",
+        external_order_number="IE2E-B-CANARY", status="draft", total="1",
+        customer_info={"phone": fixtures["B"].identity}, line_items=[],
+        source="internal_e2e", is_abandoned=False,
+        extra_metadata=internal_e2e_metadata(1, "B"),
+    )
+    db.add_all([foreign_product, b_order])
+    db.commit()
+
+    async def poisoned_provenance(*, context: CommerceAgentContext, **_: Any):
+        await ConversationMessageSession(context).get_items()
+        context.register_evidence(
+            [
+                EvidenceRecord(
+                    ref="catalog:foreign-canary",
+                    source="catalog_product",
+                    source_id=str(foreign_product.id),
+                )
+            ]
+        )
+        context.authorize_orders([b_order.id])
+        return _fake_result(context)
+
+    artifact = await submit_internal_customer_turn(
+        db,
+        InternalE2ETurnRequest(
+            tenant_id=1, synthetic_customer_alias="A", text="prove isolation",
+            case_id="A-PROOF-CANARY",
+        ),
+        env=enabled_env,
+        run_agent=poisoned_provenance,
+    )
+    assert artifact["status"] == "test_contract_failed"
+    assert artifact["cross_tenant_leakage"] > 0
+    assert artifact["cross_customer_leakage"] > 0
+    assert artifact["safety_proofs"]["cross_tenant_leakage"]["proven"] is True
+    assert artifact["safety_proofs"]["cross_customer_leakage"]["proven"] is True
+    scored = score_turn(
+        {"case_id": "A-PROOF-CANARY", "expected_outcome": "grounded_reply"},
+        artifact,
+    )
+    assert "cross_tenant_leakage" in scored["blockers"]
+    assert "cross_customer_leakage" in scored["blockers"]
+
+
+@pytest.mark.asyncio
+async def test_turn_artifact_marks_isolation_unproven_when_session_not_observed(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+
+    async def bypassed_session(*, context: CommerceAgentContext, **_: Any):
+        return _fake_result(context)
+
+    artifact = await submit_internal_customer_turn(
+        db,
+        InternalE2ETurnRequest(
+            tenant_id=1, synthetic_customer_alias="A", text="unproven",
+            case_id="A-UNPROVEN",
+        ),
+        env=enabled_env,
+        run_agent=bypassed_session,
+    )
+    assert artifact["status"] == "test_contract_failed"
+    assert artifact["cross_tenant_leakage"] is None
+    assert artifact["cross_customer_leakage"] is None
+    scored = score_turn(
+        {"case_id": "A-UNPROVEN", "expected_outcome": "grounded_reply"}, artifact
+    )
+    assert "cross_tenant_leakage_unproven" in scored["blockers"]
+    assert "cross_customer_leakage_unproven" in scored["blockers"]
 
 
 @pytest.mark.asyncio
@@ -451,6 +604,7 @@ async def test_concurrency_overlaps_a_b_c_but_serializes_same_customer(
         if active == 3:
             release.set()
         await asyncio.wait_for(release.wait(), timeout=1)
+        await ConversationMessageSession(context).get_items()
         active -= 1
         return _fake_result(context)
 
@@ -508,3 +662,67 @@ async def test_external_sender_boundary_attempt_is_recorded_as_contract_failure(
     assert artifact["status"] == "test_contract_failed"
     assert artifact["external_egress_count"] == 1
     assert artifact["failure_reason"] == "internal_e2e_external_egress_attempted"
+
+
+def test_persisted_internal_order_is_ineligible_after_execution_context(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    from core.automation_emitters import (
+        scan_cod_confirmations,
+        scan_post_delivery_review_requests,
+        scan_unpaid_orders,
+    )
+    from core.order_shipment_service import create_order_shipment
+    from services.cod_confirmation import find_pending_cod_orders
+    from services.salla_orders_poller import _emit_for_order
+    from store_integration.payment_service import generate_payment_link
+
+    fixture = provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)["C"]
+    order = db.get(Order, fixture.order_id)
+    order.status = "pending_confirmation"
+    order.extra_metadata = {
+        **dict(order.extra_metadata or {}),
+        "payment_method": "cod",
+        "nahla_cod_confirmation_sent": True,
+        "created_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+    }
+    db.add_all(
+        [
+            SmartAutomation(
+                tenant_id=1, automation_type="unpaid_order_reminder", name="test",
+                enabled=True, engine="recovery",
+                config={"steps": [{"delay_minutes": 1}]},
+            ),
+            SmartAutomation(
+                tenant_id=1, automation_type="cod_confirmation", name="test cod",
+                enabled=True, engine="recovery",
+                config={"steps": [{"delay_minutes": 1}], "cancel_after_minutes": 2},
+            ),
+            SmartAutomation(
+                tenant_id=1, automation_type="post_delivery_review", name="test review",
+                enabled=True, engine="experience", config={"delay_hours": 1},
+            ),
+        ]
+    )
+    db.commit()
+    assert scan_unpaid_orders(db, 1) == 0
+    assert scan_cod_confirmations(db, 1) == 0
+    assert _emit_for_order(db, 1, order) is False
+    assert find_pending_cod_orders(db, tenant_id=1, customer_phone=fixture.identity) == []
+    with pytest.raises(ValueError, match="internal_e2e_order_forbidden"):
+        create_order_shipment(db, tenant_id=1, order=order, verified_by="test")
+    with pytest.raises(ValueError, match="internal_e2e_order_forbidden"):
+        asyncio.run(generate_payment_link(1, str(order.external_id), 249.0))
+    order.status = "delivered"
+    order.extra_metadata = {
+        **dict(order.extra_metadata or {}),
+        "delivered_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+    }
+    db.commit()
+    assert scan_post_delivery_review_requests(db, 1) == 0
+    db.refresh(order)
+    assert "review_request_sent" not in dict(order.extra_metadata or {})
+    assert db.query(AutomationEvent).count() == 0
+    assert db.query(PaymentSession).count() == 0
+    assert db.query(CampaignSendLog).count() == 0
+    assert db.query(OrderShipment).filter(OrderShipment.order_id == order.id).count() == 1

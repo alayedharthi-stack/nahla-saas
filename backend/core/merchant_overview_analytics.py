@@ -279,6 +279,9 @@ def compute_overview_kpis(
     window_orders: List[Any] = []
 
     for order in orders:
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        if is_internal_e2e_order(order):
+            continue
         if not _is_countable_order(order):
             continue
         created = order_created_at(order)

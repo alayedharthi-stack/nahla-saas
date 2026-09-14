@@ -175,6 +175,9 @@ def scan_unpaid_orders(db: Session, tenant_id: int, *, now: Optional[datetime] =
 
     emitted = 0
     for order in orders:
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        if is_internal_e2e_order(order):
+            continue
         if not is_pending_payment_status(order.status):
             logger.debug(
                 "[Emitter:unpaid] tenant=%s order=%s skipped — status=%r not in pending-payment set",
@@ -351,6 +354,9 @@ def scan_abandoned_order_drafts(
 
     emitted = 0
     for order in orders:
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        if is_internal_e2e_order(order):
+            continue
         if not is_nahla_wa_order(order):
             continue
 
@@ -490,6 +496,9 @@ def scan_post_delivery_review_requests(
 
     emitted = 0
     for order in orders:
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        if is_internal_e2e_order(order):
+            continue
         if not is_order_eligible_for_review_request(
             order, now=now, delay_hours=delay_hours,
         ):
@@ -887,6 +896,8 @@ def scan_cod_confirmations(
         o for o in candidate_orders
         if is_pending_confirmation_status(o.status)
     ]
+    from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+    pending_orders = [o for o in pending_orders if not is_internal_e2e_order(o)]
     if not pending_orders:
         return 0
 
@@ -1061,6 +1072,9 @@ def _customer_has_completed_order_since(
         .all()
     )
     for o in orders:
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        if is_internal_e2e_order(o):
+            continue
         if o.status in _PENDING_PAYMENT_STATUSES:
             continue
         if o.status in {"cancelled", "refunded", "pending_confirmation"}:
