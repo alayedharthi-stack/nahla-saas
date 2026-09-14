@@ -1780,6 +1780,34 @@ async def _execute_action(
         for btn_idx, btn in enumerate(comp.get("buttons", [])):
             btn_type = str(btn.get("type", "")).upper()
 
+            # COD initial-confirmation quick replies must carry a deterministic,
+            # order-bound payload. Without this runtime component Meta returns
+            # only the template's default payload and the inbound tap cannot be
+            # safely distinguished from an arbitrary conversational button.
+            if (
+                btn_type == "QUICK_REPLY"
+                and str(getattr(event, "event_type", "")) == "order_cod_pending"
+            ):
+                title = str(btn.get("text") or "").strip()
+                order_id = str(
+                    _payload_for_btn.get("order_internal_id")
+                    or _payload_for_btn.get("order_id")
+                    or ""
+                ).strip()
+                cod_payload = _lifecycle_quick_reply_id(
+                    title, btn_idx, order_id=order_id
+                )
+                if cod_payload.startswith("nahla_cod_"):
+                    components.append({
+                        "type": "button",
+                        "sub_type": "quick_reply",
+                        "index": str(btn_idx),
+                        "parameters": [
+                            {"type": "payload", "payload": cod_payload[:128]}
+                        ],
+                    })
+                continue
+
             # ── COPY_CODE button ──────────────────────────────────────────
             # Meta requires: {"type":"button","sub_type":"copy_code",
             #                 "index":"N","parameters":[{"type":"coupon_code",
