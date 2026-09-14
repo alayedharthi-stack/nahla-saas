@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,11 +17,13 @@ for _path in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from core.automation_engine import _lifecycle_quick_reply_id  # noqa: E402
+from core.automation_engine import _lifecycle_quick_reply_id, _try_execute  # noqa: E402
+from routers.whatsapp_webhook import _send_cod_followup_message  # noqa: E402
 from services.cod_confirmation import (  # noqa: E402
     COD_INBOUND_CONSUMED,
     consume_owned_cod_button_inbound,
     resolve_owned_cod_button_payload_from_context,
+    stamp_initial_cod_automation_send_success,
 )
 
 
@@ -29,9 +32,9 @@ def _run(coro):
 
 
 class _Query:
-    def __init__(self, db, *, pairs=False):
+    def __init__(self, db, *, evidence=False):
         self.db = db
-        self.pairs = pairs
+        self.evidence = evidence
         self.filters = []
 
     def join(self, *args, **kwargs):
@@ -48,10 +51,10 @@ class _Query:
         return self
 
     def all(self):
-        return self.db.pairs if self.pairs else []
+        return self.db.evidence if self.evidence else []
 
     def first(self):
-        if self.pairs:
+        if self.evidence:
             return None
         pending_filter = any("orders.status IN" in str(expr) for expr in self.filters)
         if pending_filter and self.db.order.status not in {
@@ -70,20 +73,48 @@ class _DB:
     def __init__(self, order, *, context_wamid="wamid.cod.prompt"):
         self.order = order
         self.execution = SimpleNamespace(
-            action_taken={"wa_message_id": context_wamid},
+            id=195,
+            tenant_id=order.tenant_id,
+            automation_id=34,
+            event_id=25919,
+            customer_id=order.customer_id,
+            status="sent",
+            action_taken={
+                "wa_message_id": context_wamid,
+                "to": order.customer_info["phone"],
+            },
         )
         self.event = SimpleNamespace(
+            id=25919,
+            tenant_id=order.tenant_id,
+            event_type="order_cod_pending",
+            processed=True,
             customer_id=order.customer_id,
+            automation_id=34,
             payload={
                 "order_id": order.id,
                 "order_internal_id": order.id,
+                "external_id": order.external_id,
+                "payment_method": "cod",
+                "message_type": "initial_confirmation",
             },
         )
-        self.pairs = [(self.execution, self.event)]
+        self.automation = SimpleNamespace(
+            id=34,
+            tenant_id=order.tenant_id,
+            automation_type="cod_confirmation",
+        )
+        self.evidence = [(self.execution, self.event, self.automation)]
         self.commits = 0
 
     def query(self, *entities):
-        return _Query(self, pairs=len(entities) == 2)
+        return _Query(self, evidence=len(entities) == 3)
+
+    def add(self, _row):
+        return None
+
+    def flush(self):
+        return None
 
     def commit(self):
         self.commits += 1
@@ -212,6 +243,7 @@ def test_confirm_is_transactional_and_replay_is_idempotent(monkeypatch):
             customer_phone="966555906901",
             text="تأكيد الطلب",
             button_payload=payload,
+            context_wamid="wamid.cod.prompt",
             followup_send=final_confirmation,
         )
     )
@@ -229,12 +261,291 @@ def test_confirm_is_transactional_and_replay_is_idempotent(monkeypatch):
             customer_phone="966555906901",
             text="تأكيد الطلب",
             button_payload=replay_payload,
+            context_wamid="wamid.cod.prompt",
             followup_send=final_confirmation,
         )
     )
     assert replay == COD_INBOUND_CONSUMED
     update.assert_awaited_once()
     final_confirmation.assert_awaited_once()
+
+
+def test_stale_order_uses_only_fully_correlated_sent_cod_evidence(monkeypatch):
+    order = _order()
+    order.customer_id = None  # production A1 external-order rows are unlinked
+    order.extra_metadata = {"payment_method": "waiting", "is_cod": True}
+    db = _DB(order)
+    db.event.customer_id = 69
+    db.execution.customer_id = 69
+    update = AsyncMock(return_value=True)
+    final_confirmation = AsyncMock()
+
+    monkeypatch.setattr(
+        "store_integration.order_service.update_order_status", update
+    )
+    monkeypatch.setattr(
+        "observability.event_logger.log_event", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "services.cod_confirmation.flag_modified", lambda *args, **kwargs: None
+    )
+
+    result = _run(consume_owned_cod_button_inbound(
+        db,
+        tenant_id=1,
+        customer_phone="966555906901",
+        text="تأكيد الطلب",
+        button_payload="nahla_cod_confirm:155",
+        context_wamid="wamid.cod.prompt",
+        followup_send=final_confirmation,
+    ))
+
+    assert result == COD_INBOUND_CONSUMED
+    assert order.status == "under_review"
+    update.assert_awaited_once_with(1, "472240005", "under_review")
+    final_confirmation.assert_awaited_once_with("confirm", order)
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        ("event", "tenant_id", 2),
+        ("event", "customer_id", 70),
+        ("event_payload", "external_id", "foreign-order"),
+        ("event_payload", "payment_method", "waiting"),
+        ("event_payload", "message_type", "reminder"),
+        ("execution", "status", "failed"),
+        ("execution", "customer_id", 70),
+        ("execution_action", "wa_message_id", "wamid.other"),
+        ("automation", "automation_type", "order_notifications"),
+        ("order_info", "phone", "+966500000999"),
+    ],
+)
+def test_stale_order_rejects_incomplete_or_mismatched_evidence(
+    monkeypatch, target, field, value
+):
+    order = _order()
+    order.customer_id = None
+    order.extra_metadata = {"payment_method": "waiting", "is_cod": True}
+    db = _DB(order)
+    db.event.customer_id = 69
+    db.execution.customer_id = 69
+    containers = {
+        "event": db.event,
+        "event_payload": db.event.payload,
+        "execution": db.execution,
+        "execution_action": db.execution.action_taken,
+        "automation": db.automation,
+        "order_info": order.customer_info,
+    }
+    container = containers[target]
+    if isinstance(container, dict):
+        container[field] = value
+    else:
+        setattr(container, field, value)
+    update = AsyncMock(return_value=True)
+    final_confirmation = AsyncMock()
+    monkeypatch.setattr(
+        "store_integration.order_service.update_order_status", update
+    )
+
+    result = _run(consume_owned_cod_button_inbound(
+        db,
+        tenant_id=1,
+        customer_phone="966555906901",
+        text="تأكيد الطلب",
+        button_payload="nahla_cod_confirm:155",
+        context_wamid="wamid.cod.prompt",
+        followup_send=final_confirmation,
+    ))
+
+    assert result == COD_INBOUND_CONSUMED
+    assert order.status == "in_progress"
+    update.assert_not_awaited()
+    final_confirmation.assert_not_awaited()
+
+
+@pytest.mark.parametrize("context_wamid", ["", "wamid.unrelated"])
+def test_stale_order_rejects_missing_event_execution_correlation(
+    monkeypatch, context_wamid
+):
+    order = _order()
+    order.customer_id = None
+    order.extra_metadata = {"payment_method": "waiting", "is_cod": True}
+    db = _DB(order)
+    db.event.customer_id = 69
+    db.execution.customer_id = 69
+    if context_wamid == "wamid.unrelated":
+        db.evidence = []
+    update = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "store_integration.order_service.update_order_status", update
+    )
+
+    result = _run(consume_owned_cod_button_inbound(
+        db,
+        tenant_id=1,
+        customer_phone="966555906901",
+        text="تأكيد الطلب",
+        button_payload="nahla_cod_confirm:155",
+        context_wamid=context_wamid,
+    ))
+
+    assert result == COD_INBOUND_CONSUMED
+    assert order.status == "in_progress"
+    update.assert_not_awaited()
+
+
+def test_successful_initial_automation_send_stamps_bound_order(monkeypatch):
+    order = _order()
+    order.extra_metadata = {"payment_method": "waiting", "is_cod": True}
+    db = _DB(order)
+    monkeypatch.setattr(
+        "services.cod_confirmation.flag_modified", lambda *args, **kwargs: None
+    )
+
+    stamped = stamp_initial_cod_automation_send_success(
+        db,
+        tenant_id=1,
+        event=db.event,
+        automation=db.automation,
+        action_info=db.execution.action_taken,
+        execution_id=195,
+    )
+
+    assert stamped is True
+    assert order.extra_metadata["payment_method"] == "cod"
+    assert order.extra_metadata["nahla_cod_confirmation_sent"] is True
+    assert order.extra_metadata["nahla_cod_confirmation_sent_at"]
+    assert order.extra_metadata["nahla_cod_confirmation_wamid"] == "wamid.cod.prompt"
+    assert order.extra_metadata["nahla_cod_confirmation_execution_id"] == 195
+
+
+def test_failed_initial_automation_send_does_not_stamp_bound_order(monkeypatch):
+    order = _order()
+    order.extra_metadata = {"payment_method": "cod", "is_cod": True}
+    db = _DB(order)
+    monkeypatch.setattr(
+        "services.cod_confirmation.flag_modified", lambda *args, **kwargs: None
+    )
+
+    stamped = stamp_initial_cod_automation_send_success(
+        db,
+        tenant_id=1,
+        event=db.event,
+        automation=db.automation,
+        action_info={"error": "provider_rejected"},
+        execution_id=195,
+    )
+
+    assert stamped is False
+    assert "nahla_cod_confirmation_sent" not in order.extra_metadata
+
+
+@pytest.mark.parametrize("provider_success", [True, False])
+def test_automation_engine_stamps_only_after_provider_success(
+    monkeypatch, provider_success
+):
+    class _EmptyQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    db = SimpleNamespace(query=lambda *args: _EmptyQuery())
+    event = SimpleNamespace(
+        id=25919,
+        tenant_id=1,
+        event_type="order_cod_pending",
+        customer_id=None,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        payload={
+            "order_id": 155,
+            "order_internal_id": 155,
+            "external_id": "472240005",
+            "payment_method": "cod",
+            "message_type": "initial_confirmation",
+        },
+    )
+    automation = SimpleNamespace(
+        id=34,
+        tenant_id=1,
+        automation_type="cod_confirmation",
+        config={},
+        stats_triggered=0,
+        stats_sent=0,
+        updated_at=None,
+    )
+    action_info = (
+        {"wa_message_id": "wamid.cod.prompt", "to": "+966555906901"}
+        if provider_success
+        else {"error": "provider_rejected"}
+    )
+    stamp = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        "core.automation_engine._execute_action",
+        AsyncMock(return_value=(provider_success, action_info)),
+    )
+    monkeypatch.setattr("core.automation_engine._write_execution", lambda *a, **k: 195)
+    monkeypatch.setattr(
+        "services.cod_confirmation.stamp_initial_cod_automation_send_success",
+        stamp,
+    )
+
+    result = _run(
+        _try_execute(
+            db,
+            1,
+            event,
+            automation,
+            datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+    )
+
+    assert result == ("sent" if provider_success else "failed")
+    assert stamp.call_count == (1 if provider_success else 0)
+
+
+def test_confirm_followup_uses_canonical_final_order_template_once(monkeypatch):
+    canonical_final = AsyncMock(return_value={"sent": True, "duplicate": False})
+    monkeypatch.setattr(
+        "services.cod_confirmation.send_order_confirmation_after_cod",
+        canonical_final,
+    )
+    order = _order()
+    order.status = "under_review"
+    order.extra_metadata["cod_confirmed_at"] = "2026-09-14T11:02:26+00:00"
+
+    _run(_send_cod_followup_message(
+        phone_id="phone-id",
+        to="+966555906901",
+        decision="confirm",
+        order=order,
+        _tenant_id=1,
+        _db=SimpleNamespace(),
+    ))
+
+    canonical_final.assert_awaited_once()
+
+
+def test_failed_salla_confirmation_sends_no_final_template(monkeypatch):
+    canonical_final = AsyncMock()
+    monkeypatch.setattr(
+        "services.cod_confirmation.send_order_confirmation_after_cod",
+        canonical_final,
+    )
+
+    _run(_send_cod_followup_message(
+        phone_id="phone-id",
+        to="+966555906901",
+        decision="confirm_failed",
+        order=_order(),
+        _tenant_id=1,
+        _db=SimpleNamespace(),
+    ))
+
+    canonical_final.assert_not_awaited()
 
 
 def test_cancel_is_separate_transactional_path(monkeypatch):

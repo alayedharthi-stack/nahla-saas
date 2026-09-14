@@ -1157,7 +1157,22 @@ def _merge_order_extra_metadata(
     normalised: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Merge Salla fidelity metadata without clobbering merchant-only fields."""
-    merged = dict(existing or {})
+    existing_meta = dict(existing or {})
+    merged = dict(existing_meta)
+    cod_methods = {"cod", "cash_on_delivery", "cod_payment", "cash"}
+    unresolved_methods = {
+        "", "waiting", "pending", "unpaid", "not_paid",
+        "payment_pending", "pending_payment", "awaiting_payment",
+        "waiting_payment", "unknown",
+    }
+    existing_method = str(existing_meta.get("payment_method") or "").strip().lower()
+    cod_was_proven = bool(
+        existing_method in cod_methods
+        or (
+            existing_meta.get("cod_webhook_triggered")
+            and existing_meta.get("is_cod") is True
+        )
+    )
     currency = str(normalised.get("currency") or "").strip().upper()
     if currency:
         merged["currency"] = currency
@@ -1184,6 +1199,19 @@ def _merge_order_extra_metadata(
     ):
         if salla_meta.get(key) is not None:
             merged[key] = salla_meta[key]
+
+    # COD ownership is monotonic.  Salla's richer order.created webhook can
+    # prove COD while later list/poller snapshots expose only the payment state
+    # ``waiting``.  Never let that lower-fidelity observation erase an already
+    # proven transactional identity; absent prior proof, waiting remains
+    # unresolved and is never promoted to COD.
+    incoming_methods = {
+        str(normalised.get("payment_method") or "").strip().lower(),
+        str(salla_meta.get("payment_method") or "").strip().lower(),
+    }
+    if cod_was_proven and incoming_methods.issubset(unresolved_methods | cod_methods):
+        merged["payment_method"] = "cod"
+        merged["is_cod"] = True
     return merged
 
 

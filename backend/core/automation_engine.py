@@ -851,6 +851,41 @@ async def _try_execute(
         error_message=error_message,
     )
 
+    if success and _is_initial_cod:
+        try:
+            from services.cod_confirmation import (  # noqa: PLC0415
+                stamp_initial_cod_automation_send_success,
+            )
+
+            stamped = stamp_initial_cod_automation_send_success(
+                db,
+                tenant_id=tenant_id,
+                event=event,
+                automation=automation,
+                action_info=action_info,
+                execution_id=_exec_id,
+            )
+            if not stamped:
+                logger.error(
+                    "[AutoEngine] initial COD send evidence not stamped "
+                    "tenant=%s event=%s automation=%s execution=%s",
+                    tenant_id,
+                    event.id,
+                    automation.id,
+                    _exec_id,
+                )
+        except Exception:
+            # The provider send has already succeeded and its execution record
+            # must remain truthful even if the denormalized Order stamp fails.
+            logger.exception(
+                "[AutoEngine] initial COD send evidence stamp failed "
+                "tenant=%s event=%s automation=%s execution=%s",
+                tenant_id,
+                event.id,
+                automation.id,
+                _exec_id,
+            )
+
     if success:
         automation.stats_triggered = (automation.stats_triggered or 0) + 1
         automation.stats_sent = (automation.stats_sent or 0) + 1

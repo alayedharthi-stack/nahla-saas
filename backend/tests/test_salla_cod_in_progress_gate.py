@@ -527,6 +527,74 @@ def test_poller_first_defers_ambiguous_payment_then_webhook_claims_cod_once():
         engine.dispose()
 
 
+def test_webhook_proven_cod_is_not_downgraded_by_waiting_poller_snapshot():
+    db, engine, tenant, customer = _race_db()
+    try:
+        webhook_service = StoreSyncService(db, tenant.id)
+        _stub_customer_intelligence(webhook_service, customer)
+        with patch(
+            "services.store_sync._lifecycle_dispatch_owns_tenant",
+            return_value=False,
+        ), patch(
+            "services.store_sync._handle_external_lifecycle_transition_best_effort",
+            new_callable=AsyncMock,
+        ):
+            _run(webhook_service.handle_order_webhook(
+                _cod_created_payload("cod-then-waiting", "REF-COD-THEN-WAITING"),
+                webhook_event_type="order.created",
+            ))
+
+        order = db.query(Order).filter_by(
+            tenant_id=tenant.id, external_id="cod-then-waiting"
+        ).one()
+        assert order.extra_metadata["payment_method"] == "cod"
+
+        adapter = MagicMock()
+        adapter.platform = "salla"
+        adapter.get_orders = AsyncMock(return_value=[NormalizedOrder(
+            id="cod-then-waiting",
+            reference_id="REF-COD-THEN-WAITING",
+            status="in_progress",
+            total=174,
+            currency="SAR",
+            payment_method="waiting",
+            payment_status="waiting",
+            is_cod=False,
+            customer_name="Customer",
+            customer_phone="+966500000001",
+            source="salla",
+        )])
+        poller_service = StoreSyncService(db, tenant.id, adapter=adapter)
+        with patch(
+            "services.store_sync._handle_external_lifecycle_transition_best_effort",
+            new_callable=AsyncMock,
+        ):
+            assert _run(poller_service.sync_orders(
+                triggered_by="salla_orders_poller"
+            )) == 1
+
+        db.refresh(order)
+        assert order.extra_metadata["payment_method"] == "cod"
+        assert order.extra_metadata["is_cod"] is True
+        assert order.extra_metadata["cod_webhook_triggered"] is True
+        assert db.query(AutomationEvent).filter_by(
+            event_type="order_cod_pending"
+        ).count() == 1
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_waiting_non_cod_order_is_not_promoted_without_prior_cod_proof():
+    from services.store_sync import _merge_order_extra_metadata
+
+    merged = _merge_order_extra_metadata(
+        {"payment_method": "credit_card", "is_cod": False},
+        {"payment_method": "waiting", "payment_status": "waiting"},
+    )
+    assert (merged["payment_method"], merged["is_cod"]) == ("waiting", False)
+
+
 def test_paid_non_cod_poller_order_keeps_single_final_confirmation_event():
     db, engine, tenant, customer = _race_db()
     try:
