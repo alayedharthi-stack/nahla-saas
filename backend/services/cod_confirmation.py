@@ -185,11 +185,10 @@ def resolve_owned_cod_button_payload_from_context(
         .filter(
             AutomationExecution.tenant_id == int(tenant_id),
             AutomationExecution.status == "sent",
+            AutomationExecution.action_taken["wa_message_id"].astext == context_id,
             AutomationEvent.tenant_id == int(tenant_id),
             AutomationEvent.event_type == "order_cod_pending",
         )
-        .order_by(AutomationExecution.executed_at.desc())
-        .limit(200)
         .all()
     )
     for execution, event in candidates:
