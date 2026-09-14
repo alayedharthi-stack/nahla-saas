@@ -15343,6 +15343,7 @@ async def _post_wa(
     _allow_manual: bool = False,
     _blocked_path: str = "post_wa",
     _treat_dedup_as_success: bool = True,
+    _result_sink: Optional[Dict[str, Any]] = None,
 ) -> bool:
     from core.outbound_wire_audit import observe_wire_payload  # noqa: PLC0415
 
@@ -15568,6 +15569,15 @@ async def _post_wa(
 
         if _dedup_res is not None and _dedup_res.skip:
             if _dedup_res.reason == "already_sent":
+                if _result_sink is not None:
+                    _result_sink.update(
+                        {
+                            "classification": "ok",
+                            "wamid": _dedup_res.wamid,
+                            "duration_ms": 0,
+                            "duplicate_suppressed": True,
+                        }
+                    )
                 # Re-stamp the most recent queued row for this
                 # recipient with the prior wamid so the dashboard
                 # surfaces the "delivered" state even though we
@@ -15652,6 +15662,15 @@ async def _post_wa(
                 )
                 _wamid = (resp_data or {}).get("_nahla_wamid")
                 _duration = (resp_data or {}).get("_nahla_duration_ms")
+                if _result_sink is not None:
+                    _result_sink.update(
+                        {
+                            "classification": _classification,
+                            "wamid": _wamid,
+                            "duration_ms": _duration,
+                            "duplicate_suppressed": False,
+                        }
+                    )
                 _stamped_id = stamp_outbound_send_status(
                     _db,
                     tenant_id=_tenant_id,
@@ -16358,6 +16377,22 @@ async def _try_send_catalog_product(
 
 
 async def _run_and_deliver_commerce_v2_owner(
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Correlate the real WhatsApp boundary with SDK-owned runtime spans."""
+    from modules.ai.commerce_agent_v2.tracing import (  # noqa: PLC0415
+        whatsapp_turn_trace,
+    )
+
+    with whatsapp_turn_trace(
+        tenant_id=int(kwargs["tenant_id"]),
+        conversation_id=int(kwargs["conversation"].id),
+        inbound_wamid=str(kwargs["inbound_trace_id"]),
+    ):
+        return await _run_and_deliver_commerce_v2_owner_impl(**kwargs)
+
+
+async def _run_and_deliver_commerce_v2_owner_impl(
     *,
     db,
     tenant_id: int,
@@ -16379,6 +16414,9 @@ async def _run_and_deliver_commerce_v2_owner(
     )
     from modules.ai.commerce_agent_v2.shadow import (  # noqa: PLC0415
         persist_commerce_agent_result,
+    )
+    from modules.ai.commerce_agent_v2.tracing import (  # noqa: PLC0415
+        commerce_delivery_span,
     )
 
     result = None
@@ -16428,18 +16466,25 @@ async def _run_and_deliver_commerce_v2_owner(
     presentations_sent = 0
     unsupported_presentations = 0
     presented_urls: set[str] = set()
+    delivery_receipt: Dict[str, Any] = {}
     for action in plan:
         payload = action.payload
         if action.kind == "text":
-            text_sent = await _send_whatsapp_message(
-                phone_id=phone_id,
-                to=customer_phone,
-                text=str(payload.get("text") or ""),
-                _tenant_id=tenant_id,
-                _db=db,
-                _inbound_message_id=inbound_trace_id,
-                _blocked_path="commerce_agent_v2_outbound_text",
-            )
+            with commerce_delivery_span(
+                tenant_id=tenant_id,
+                conversation_id=int(conversation.id),
+                action_kind="text",
+            ):
+                text_sent = await _send_whatsapp_message(
+                    phone_id=phone_id,
+                    to=customer_phone,
+                    text=str(payload.get("text") or ""),
+                    _tenant_id=tenant_id,
+                    _db=db,
+                    _inbound_message_id=inbound_trace_id,
+                    _blocked_path="commerce_agent_v2_outbound_text",
+                    _result_sink=delivery_receipt,
+                )
             continue
         if action.kind == "unsupported":
             unsupported_presentations += 1
@@ -16553,6 +16598,10 @@ async def _run_and_deliver_commerce_v2_owner(
                 "silent_v1_fallback": False,
                 "presentation_count": presentations_sent,
                 "unsupported_presentation_count": unsupported_presentations,
+                "outbound_provider_wamid": delivery_receipt.get("wamid"),
+                "outbound_provider_duration_ms": delivery_receipt.get("duration_ms"),
+                "outbound_provider_classification": delivery_receipt.get("classification"),
+                "delivery_failure_reason": None if text_sent else "delivery_failed",
             },
         )
         db.commit()
@@ -16563,6 +16612,8 @@ async def _run_and_deliver_commerce_v2_owner(
         "text_sent": text_sent,
         "presentations_sent": presentations_sent,
         "unsupported_presentations": unsupported_presentations,
+        "failure_reason": "" if text_sent else "delivery_failed",
+        "outbound_provider_wamid": delivery_receipt.get("wamid"),
     }
 
 
@@ -16572,6 +16623,7 @@ async def _send_whatsapp_message(
     _allow_manual: bool = False,
     _blocked_path: str = "send_whatsapp_message",
     _inbound_message_id: Optional[str] = None,
+    _result_sink: Optional[Dict[str, Any]] = None,
 ) -> bool:
     payload = {
         "messaging_product": "whatsapp", "to": to, "type": "text",
@@ -16581,7 +16633,7 @@ async def _send_whatsapp_message(
     if inbound_id:
         payload["_nahla_inbound_id"] = inbound_id
     return await _post_wa(phone_id, payload, _tenant_id=_tenant_id, _store_name=_store_name, _db=_db,
-       _allow_manual=_allow_manual, _blocked_path=_blocked_path)
+       _allow_manual=_allow_manual, _blocked_path=_blocked_path, _result_sink=_result_sink)
 
 
 async def _send_interactive_reply(

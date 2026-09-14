@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from agents import RunContextWrapper, function_tool
+from agents import RunContextWrapper
 
 from core.local_order_resolver import (
     _order_matches_phone,
@@ -19,6 +19,7 @@ from core.order_shipment_service import (
 )
 from core.order_status_label import order_status_label_ar
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
+from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import (
     CanonicalEvidenceFact,
     EvidenceRecord,
@@ -250,7 +251,7 @@ def _summary_evidence(order: Any) -> tuple[OrderSummarySnapshot, EvidenceRecord]
     )
 
 
-@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
+@commerce_read_tool("resolve_customer_order", is_enabled=_catalog_search_enabled)
 async def resolve_customer_order(
     run_context: RunContextWrapper[CommerceAgentContext],
     order_number: str = "",
@@ -326,7 +327,7 @@ def _line_item_snapshots(order: Any) -> list[OrderLineItemSnapshot]:
     return results
 
 
-@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
+@commerce_read_tool("get_order_details", is_enabled=_catalog_search_enabled)
 async def get_order_details(
     run_context: RunContextWrapper[CommerceAgentContext],
     order_id: int,
@@ -529,7 +530,7 @@ def _shipment_snapshot(
     )
 
 
-@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
+@commerce_read_tool("get_order_shipment", is_enabled=_catalog_search_enabled)
 async def get_order_shipment(
     run_context: RunContextWrapper[CommerceAgentContext],
     order_id: int,

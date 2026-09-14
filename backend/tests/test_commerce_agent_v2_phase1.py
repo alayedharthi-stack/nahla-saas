@@ -17,7 +17,7 @@ from agents.tool_context import ToolContext
 from agents.tracing import set_trace_provider
 from agents.tracing.provider import DefaultTraceProvider
 from agents.usage import Usage
-from sqlalchemy import JSON, create_engine
+from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
@@ -377,8 +377,9 @@ async def test_every_tool_rechecks_conversation_tenant_scope(
     context.authorize_products([seeded.honey_a.id])
     context.conversation_id = seeded.conversation_b.id
     result = await _invoke(tool, context, arguments)
-    assert isinstance(result, str)
-    assert "error" in result.lower()
+    assert result["status"] == "error"
+    assert result["failure_reason"].startswith(f"tool_error:{tool.name}:")
+    assert "TenantIsolationViolation" in result["failure_reason"]
 
 
 def test_trusted_context_rejects_cross_tenant_conversation_and_connection(seeded: Seed) -> None:
@@ -539,8 +540,10 @@ async def test_undiscovered_product_id_is_denied(seeded: Seed) -> None:
         _context(seeded),
         {"product_id": seeded.honey_a.id},
     )
-    assert isinstance(result, str)
-    assert "error" in result.lower()
+    assert result["status"] == "error"
+    assert result["failure_reason"] == (
+        "tool_error:get_product_details:TenantIsolationViolation"
+    )
 
 
 @pytest.mark.asyncio
@@ -714,6 +717,25 @@ async def test_session_isolated_by_tenant_and_conversation(seeded: Seed) -> None
     assert "كم سعر الطلح؟" not in text  # current input is added once by Runner
     assert "سر محادثة ثانية" not in text
     assert "سر متجر باء" not in text
+
+
+@pytest.mark.asyncio
+async def test_session_history_window_is_applied_in_sql(seeded: Seed) -> None:
+    statements: list[str] = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if "message_events" in statement.lower():
+            statements.append(statement.lower())
+
+    engine = seeded.db.get_bind()
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        await ConversationMessageSession(_context(seeded)).get_items(limit=2)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert statements
+    assert "limit" in statements[-1]
 
 
 def test_structured_reply_validation_and_grounding(seeded: Seed) -> None:
@@ -1451,7 +1473,23 @@ async def test_provider_timeout_and_malformed_output_fail_safe(seeded: Seed) -> 
         timeout_seconds=0.01,
     )
     assert timed_out.status == "failed"
-    assert timed_out.failure_reason == "provider_or_tool_timeout"
+    assert timed_out.failure_reason == "run_deadline_exceeded"
+
+    model_timed_out = await run_commerce_agent(
+        context=_context(seeded, trace_id="model-timeout"),
+        user_input="test",
+        model=ScriptedModel([ModelStep.respond(slow)]),
+        model_name="slow-provider",
+        model_timeout_seconds=0.01,
+        run_deadline_seconds=1,
+        execution_mode="outbound",
+    )
+    assert model_timed_out.status == "failed"
+    assert model_timed_out.failure_reason == "model_timeout:attempt_1"
+    assert not any(
+        event.get("kind") == "model_retry_decision" and event.get("retry") is True
+        for event in model_timed_out.tool_trace
+    )
 
     malformed = await run_commerce_agent(
         context=_context(seeded, trace_id="malformed"),
@@ -1464,6 +1502,65 @@ async def test_provider_timeout_and_malformed_output_fail_safe(seeded: Seed) -> 
 
 
 @pytest.mark.asyncio
+async def test_cached_input_usage_is_exposed_without_prompt_changes(seeded: Seed) -> None:
+    reply = CommerceReply(text="حياك الله.", response_mode="social")
+    usage = Usage(
+        requests=1,
+        input_tokens=40,
+        input_tokens_details={"cached_tokens": 30, "cache_write_tokens": 0},
+        output_tokens=5,
+        total_tokens=45,
+    )
+    result = await run_commerce_agent(
+        context=_context(seeded, trace_id="cached-input"),
+        user_input="مرحبا",
+        model=ScriptedModel([ModelStep(output=[assistant_message(reply.model_dump_json())], usage=usage)]),
+        model_name="cached-usage-eval",
+    )
+
+    assert result.status == "completed"
+    assert result.cached_input_tokens == 30
+    summary = next(event for event in result.tool_trace if event["kind"] == "usage_summary")
+    assert summary["cache_percentage"] == 75.0
+
+
+@pytest.mark.asyncio
+async def test_transient_model_error_is_retried_once_by_runner(seeded: Seed) -> None:
+    class TransientProviderError(RuntimeError):
+        status_code = 429
+
+    reply = CommerceReply(text="حياك الله.", response_mode="social")
+    model = ScriptedModel(
+        [
+            ModelStep(error=TransientProviderError("sensitive provider detail")),
+            ModelStep(output=[assistant_message(reply.model_dump_json())]),
+        ]
+    )
+    result = await run_commerce_agent(
+        context=_context(seeded, trace_id="retry-429"),
+        user_input="مرحبا",
+        model=model,
+        model_name="retry-eval",
+        execution_mode="outbound",
+    )
+
+    assert result.status == "completed"
+    assert sum(event.get("kind") == "model_start" for event in result.tool_trace) == 1
+    retry = next(
+        event for event in result.tool_trace if event.get("kind") == "model_retry_decision"
+    )
+    assert retry["retry"] is True
+    assert retry["status_code"] == 429
+    assert retry["latency_ms"] >= 0
+    completed_attempt = next(
+        event for event in result.tool_trace if event.get("kind") == "model_end"
+    )
+    assert completed_attempt["model_attempt"] == 2
+    assert "sensitive provider detail" not in json.dumps(result.tool_trace)
+    model.assert_complete()
+
+
+@pytest.mark.asyncio
 async def test_failed_output_guardrail_is_visible_in_run_result(seeded: Seed) -> None:
     result = await run_commerce_agent(
         context=_context(seeded, trace_id="guardrail-failure"),
@@ -1472,7 +1569,9 @@ async def test_failed_output_guardrail_is_visible_in_run_result(seeded: Seed) ->
         model_name="guardrail-eval",
     )
     assert result.status == "failed"
-    assert result.failure_reason == "OutputGuardrailTripwireTriggered"
+    assert result.failure_reason == (
+        "output_guardrail_tripwire:reply_without_tool_evidence_or_safe_fallback"
+    )
     assert result.guardrail_results == [
         {
             "name": "commerce_v2_grounded_structured_output",
@@ -1551,6 +1650,12 @@ async def test_tool_timeout_returns_safe_structured_fallback(seeded: Seed, monke
     )
     assert result.status == "completed"
     assert result.reply.safe_fallback_reason == "tool_timeout"
+    assert any(
+        event.get("kind") == "tool_timeout"
+        and event.get("failure_reason") == "tool_timeout:search_products"
+        for event in result.tool_trace
+    )
+    assert sum(event.get("kind") == "tool_start" for event in result.tool_trace) == 1
     model.assert_complete()
 
 
@@ -1561,8 +1666,8 @@ async def test_malformed_domain_tool_result_is_a_safe_tool_error(seeded: Seed, m
         lambda *_args, **_kwargs: [{"bad": "shape"}],
     )
     raw = await _invoke(search_products, _context(seeded), {"query": "x", "limit": 2})
-    assert isinstance(raw, str)
-    assert "error" in raw.lower()
+    assert raw["status"] == "error"
+    assert raw["failure_reason"] == "tool_error:search_products:AttributeError"
 
 
 def test_shadow_disabled_cannot_schedule_or_send(seeded: Seed, monkeypatch) -> None:
@@ -1645,6 +1750,72 @@ def test_shadow_result_is_persisted_separately_and_usage_is_linked(seeded: Seed)
     assert "test@example.test" not in row.structured_output["safe_fallback_reason"]
     assert usage.request_id == row.sdk_trace_id
     assert usage.total_cost_usd is not None
+
+
+def test_real_whatsapp_observer_correlates_exact_persisted_turn(seeded: Seed) -> None:
+    from models import MessageEvent
+    from modules.ai.commerce_agent_v2.runner import CommerceAgentRunResult
+    from modules.ai.commerce_agent_v2.tracing import sdk_trace_id
+    from services.commerce_v2_whatsapp_e2e_observer import observe_persisted_turn
+
+    trace_id = sdk_trace_id("wamid-current")
+    context = _context(seeded)
+    result = CommerceAgentRunResult(
+        status="completed",
+        reply=CommerceReply(text="نتيجة موثوقة", response_mode="social"),
+        model="gpt-5.6-sol",
+        session_id=f"commerce-v2:{seeded.tenant_a.id}:{seeded.conversation_a.id}",
+        sdk_trace_id=trace_id,
+        latency_ms=120,
+        input_tokens=40,
+        output_tokens=5,
+        total_tokens=45,
+        cached_input_tokens=20,
+        requested_service_tier="fast",
+        tool_trace=[
+            {"kind": "model_start", "model_turn": 1, "model_attempt": 1},
+            {"kind": "model_end", "model_turn": 1, "model_attempt": 1, "latency_ms": 100},
+            {
+                "kind": "usage_summary",
+                "input_tokens": 40,
+                "cached_input_tokens": 20,
+                "requested_service_tier": "fast",
+            },
+        ],
+        guardrail_results=[{"name": "grounding", "tripwire_triggered": False}],
+    )
+    _persist_shadow_result(seeded.db, context, result)
+    seeded.db.add(
+        MessageEvent(
+            tenant_id=seeded.tenant_a.id,
+            conversation_id=seeded.conversation_a.id,
+            direction="outbound",
+            body="نتيجة موثوقة",
+            extra_metadata={
+                "reply_owner": "commerce_agent_v2",
+                "sdk_trace_id": trace_id,
+                "v1_bypassed": True,
+                "outbound_provider_wamid": "wamid.outbound.test",
+                "outbound_provider_duration_ms": 20,
+            },
+        )
+    )
+    seeded.db.commit()
+
+    observed = observe_persisted_turn(
+        seeded.db,
+        account_alias="A",
+        case_id="A-001",
+        inbound_wamid="wamid-current",
+    )
+
+    assert observed["trace_id"] == trace_id
+    assert observed["outbound_wamids"] == ["wamid.outbound.test"]
+    assert observed["owner"] == "commerce_agent_v2"
+    assert observed["model_attempts"] == 1
+    assert observed["first_model_latency_ms"] == 100
+    assert observed["cached_input_tokens"] == 20
+    assert observed["cost_usd"] == pytest.approx(observed["base_cost_usd"] * 2)
 
 
 def test_shadow_module_has_no_outbound_or_write_tool_imports() -> None:

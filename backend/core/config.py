@@ -485,10 +485,29 @@ COMMERCE_AGENT_V2_REASONING_EFFORT = (
     os.environ.get("COMMERCE_AGENT_V2_REASONING_EFFORT", "high").strip().lower()
     or "high"
 )
-COMMERCE_AGENT_V2_TIMEOUT_SECONDS = max(
+COMMERCE_AGENT_V2_MODEL_TIMEOUT_SECONDS = max(
     1.0,
-    float(os.environ.get("COMMERCE_AGENT_V2_TIMEOUT_SECONDS", "25")),
+    float(os.environ.get("COMMERCE_AGENT_V2_MODEL_TIMEOUT_SECONDS", "75")),
 )
+COMMERCE_AGENT_V2_RUN_DEADLINE_SECONDS = max(
+    COMMERCE_AGENT_V2_MODEL_TIMEOUT_SECONDS,
+    float(os.environ.get("COMMERCE_AGENT_V2_RUN_DEADLINE_SECONDS", "180")),
+)
+COMMERCE_AGENT_V2_MAX_MODEL_RETRIES = min(
+    1,
+    max(0, int(os.environ.get("COMMERCE_AGENT_V2_MAX_MODEL_RETRIES", "1"))),
+)
+_commerce_v2_service_tier = (
+    os.environ.get("COMMERCE_AGENT_V2_SERVICE_TIER", "auto").strip().lower()
+    or "auto"
+)
+if _commerce_v2_service_tier not in {"auto", "fast"}:
+    _cfg_logger.warning(
+        "Unsupported COMMERCE_AGENT_V2_SERVICE_TIER=%s; using auto",
+        _commerce_v2_service_tier,
+    )
+    _commerce_v2_service_tier = "auto"
+COMMERCE_AGENT_V2_SERVICE_TIER = _commerce_v2_service_tier
 OPENAI_AUDIO_MODEL = os.environ.get("OPENAI_AUDIO_MODEL", "whisper-1")
 # Vision model for describing inbound WhatsApp images. Must be a
 # chat-completions endpoint that accepts ``image_url`` parts (default

@@ -5,12 +5,13 @@ import re
 import unicodedata
 from typing import Any
 
-from agents import RunContextWrapper, function_tool
+from agents import RunContextWrapper
 
 from modules.ai.brain.commerce.product_knowledge_or_comparison import (
     retrieve_catalog_candidate_kb_sections,
 )
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
+from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import (
     CanonicalEvidenceFact,
     EvidenceRecord,
@@ -204,7 +205,7 @@ def _build_result(
     return KnowledgeSearchResult(status="ok", sections=snapshots, evidence=evidence)
 
 
-@function_tool(timeout=8.0, is_enabled=_merchant_knowledge_enabled)
+@commerce_read_tool("search_merchant_knowledge", is_enabled=_merchant_knowledge_enabled)
 async def search_merchant_knowledge(
     run_context: RunContextWrapper[CommerceAgentContext],
     query: str,
@@ -228,7 +229,7 @@ async def search_merchant_knowledge(
     )
 
 
-@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
+@commerce_read_tool("search_product_knowledge", is_enabled=_catalog_search_enabled)
 async def search_product_knowledge(
     run_context: RunContextWrapper[CommerceAgentContext],
     product_id: int,

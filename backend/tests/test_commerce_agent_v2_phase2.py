@@ -608,8 +608,10 @@ async def test_cross_tenant_cross_customer_and_guessed_order_numbers_fail_closed
         context,
         {"order_id": phase2_seed.foreign_customer_order.id},
     )
-    assert isinstance(guessed_internal_id, str)
-    assert "error" in guessed_internal_id.lower()
+    assert guessed_internal_id["status"] == "error"
+    assert guessed_internal_id["failure_reason"] == (
+        "tool_error:get_order_details:TenantIsolationViolation"
+    )
 
     spoofed = Order(
         tenant_id=phase2_seed.tenant_a.id,
@@ -628,8 +630,11 @@ async def test_cross_tenant_cross_customer_and_guessed_order_numbers_fail_closed
         context,
         {"order_number": "ORD-SPOOFED-PHONE", "purpose": "status"},
     )
-    assert isinstance(spoof_attempt, str)
-    assert "error" in spoof_attempt.lower()
+    assert spoof_attempt == {
+        "status": "error",
+        "failure_reason": "tool_error:resolve_customer_order:TenantIsolationViolation",
+        "retryable": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -648,8 +653,10 @@ async def test_authorized_order_id_cannot_be_swapped_between_tools(
             context,
             {"order_id": phase2_seed.shipped_order.id},
         )
-        assert isinstance(result, str)
-        assert "error" in result.lower()
+        assert result["status"] == "error"
+        assert result["failure_reason"] == (
+            f"tool_error:{tool.name}:TenantIsolationViolation"
+        )
 
 
 @pytest.mark.asyncio

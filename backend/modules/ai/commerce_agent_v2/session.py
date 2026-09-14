@@ -42,16 +42,28 @@ class ConversationMessageSession:
         if conversation is None:
             return []
         TenantIsolationLayer.assert_belongs(conversation, self._context.tenant_context)
-        rows = (
+        resolved_limit = limit if limit is not None else self.session_settings.limit
+        if resolved_limit is not None and int(resolved_limit) <= 0:
+            return []
+        # Fetch newest rows first so PostgreSQL applies the bounded history
+        # window. One extra row allows the already-persisted current inbound
+        # WAMID to be excluded without shrinking normal history by one.
+        query = (
             db.query(MessageEvent)
             .filter(
                 MessageEvent.conversation_id == self._context.conversation_id,
                 MessageEvent.tenant_id == self._context.tenant_id,
                 MessageEvent.direction.in_(("in", "inbound", "out", "outbound")),
             )
-            .order_by(MessageEvent.created_at.asc(), MessageEvent.id.asc())
-            .all()
+            .order_by(MessageEvent.created_at.desc(), MessageEvent.id.desc())
         )
+        if resolved_limit is not None:
+            canonical_budget = max(
+                0,
+                int(resolved_limit) - len(self._ephemeral_items),
+            )
+            query = query.limit(canonical_budget + 1)
+        rows = list(reversed(query.all()))
         canonical: list[dict[str, str]] = []
         for row in rows:
             TenantIsolationLayer.assert_belongs(row, self._context.tenant_context)
@@ -73,7 +85,6 @@ class ConversationMessageSession:
                 }
             )
         combined = canonical + deepcopy(self._ephemeral_items)
-        resolved_limit = limit if limit is not None else self.session_settings.limit
         if resolved_limit is not None:
             combined = combined[-max(0, int(resolved_limit)) :]
         return combined

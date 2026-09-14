@@ -4,10 +4,11 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from agents import RunContextWrapper, function_tool
+from agents import RunContextWrapper
 
 from core.store_knowledge import CatalogContextBuilder
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
+from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import (
     CatalogSearchResult,
     CanonicalEvidenceFact,
@@ -157,7 +158,7 @@ def _assert_catalog_rows_belong_to_tenant(
         TenantIsolationLayer.assert_belongs(row, context.tenant_context)
 
 
-@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
+@commerce_read_tool("search_products", is_enabled=_catalog_search_enabled)
 async def search_products(
     run_context: RunContextWrapper[CommerceAgentContext],
     query: str,
@@ -208,7 +209,7 @@ async def search_products(
     return CatalogSearchResult(status="ok", products=snapshots, evidence=evidence)
 
 
-@function_tool(timeout=8.0, is_enabled=_catalog_search_enabled)
+@commerce_read_tool("get_product_details", is_enabled=_catalog_search_enabled)
 async def get_product_details(
     run_context: RunContextWrapper[CommerceAgentContext],
     product_id: int,
