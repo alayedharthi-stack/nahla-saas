@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 from typing import Any, Iterable
 
 from agents import GuardrailFunctionOutput, RunContextWrapper, input_guardrail, output_guardrail
@@ -38,19 +40,56 @@ _QUANTITY_RE = re.compile(
     r"(?<!\d)(\d+)\s*(?:قطع(?:ة)?|عبو(?:ة|ات)|حب(?:ة|ات)|وحد(?:ة|ات))\b",
     re.IGNORECASE,
 )
-_CLAUSE_BOUNDARY_RE = re.compile(r"[.!؟\n،؛]")
+_CLAUSE_BOUNDARY_RE = re.compile(r"[.!؟\n،؛]|\s+(?:لكن|ولكن|but|however)\s+", re.IGNORECASE)
+_STRONG_STOCK_RE = re.compile(
+    r"في\s+(?:ال)?مخزون\b|"
+    r"(?:نافد|نفد)(?:ة|ه|ان|ين|ون|ات)?(?:\s+(?:ال)?مخزون)?\b|"
+    r"غير\s+(?:متوفر|متاح|قابل)(?:ة|ه|ان|ين|ون|ات)?\s+للطلب\b|"
+    r"(?:متوفر|متاح|قابل|جاهز)(?:ة|ه|ان|ين|ون|ات)?\s+للطلب\b|"
+    r"(?:لا\s+)?يمكن\s+طلب\w*|"
+    r"out\s+of\s+stock\b|in\s+stock\b|"
+    r"(?:not\s+)?available\s+to\s+order\b|"
+    r"(?:can(?:not|'t)?|cannot)\s+be\s+ordered\b",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_AVAILABILITY_RE = re.compile(
+    r"غير\s+(?:متوفر|متاح|موجود|قابل)(?:ة|ه|ان|ين|ون|ات)?\b|"
+    r"unavailable\b|not\s+available\b|"
+    r"(?:متوفر|متاح|موجود)(?:ة|ه|ان|ين|ون|ات)?\b|available\b",
+    re.IGNORECASE,
+)
 _AVAILABILITY_RE = re.compile(
-    r"غير\s+(?:متوفر|متاح|موجود|قابل)(?:ة|ه|ان|ين|ون|ات)?(?:\s+للطلب)?\b|"
-    r"لا\s+يمكن\s+طلب\w*|(?:نافد|نفد)(?:ة|ه|ان|ين|ون|ات)?\b|"
-    r"out\s+of\s+stock\b|unavailable\b|"
-    r"(?:متوفر|متاح|موجود)(?:ة|ه|ان|ين|ون|ات)?\b|"
-    r"(?:قابل|جاهز)(?:ة|ه|ان|ين|ون|ات)?\s+للطلب\b|يمكن\s+طلب\w*|"
-    r"in\s+stock\b|available\b",
+    rf"(?:{_STRONG_STOCK_RE.pattern})|(?:{_AMBIGUOUS_AVAILABILITY_RE.pattern})",
     re.IGNORECASE,
 )
 _INFORMATIONAL_AVAILABILITY_RE = re.compile(
     r"(?:المعلومات?|البيانات)\s+(?:ال)?(?:متوفر|متاح)(?:ة|ه|ات)?\b|"
     r"(?:ال)?(?:متوفر|متاح)(?:ة|ه|ات)?\s+لدينا\s+(?:ان|أن|من)\b",
+    re.IGNORECASE,
+)
+_TRACKING_SCOPE_RE = re.compile(
+    r"(?:رقم|رابط|بيانات|معلومات|تفاصيل)?\s*(?:ال)?تتبع\b|"
+    r"\btracking(?:\s+(?:number|link|url|data|details|information))?\b",
+    re.IGNORECASE,
+)
+_SHIPMENT_SCOPE_RE = re.compile(
+    r"(?:ال)?شحن(?:ة|ه)?\b|(?:ال)?ناقل\b|شركة\s+(?:ال)?شحن\b|"
+    r"\bshipment\b|\bcarrier\b|\bcourier\b",
+    re.IGNORECASE,
+)
+_ORDER_SCOPE_RE = re.compile(
+    r"(?:ال)?طلب(?:ك|كم|ها|ه)?\b|\border(?:'s|s)?\b",
+    re.IGNORECASE,
+)
+_INFORMATION_SCOPE_RE = re.compile(
+    r"(?:ال)?معلومات?\b|(?:ال)?بيانات\b|(?:ال)?تفاصيل\b|"
+    r"\binformation\b|\bdata\b|\bdetails\b",
+    re.IGNORECASE,
+)
+_PRODUCT_SCOPE_RE = re.compile(
+    r"(?:ال)?منتج(?:ات|ان|ين|ون|ك|كم|ها|ه)?\b|"
+    r"(?:ال)?سلع(?:ة|ه|ات)?\b|(?:ال)?صنف(?:ك|كم|ها|ه)?\b|"
+    r"\bproducts?\b|\bitems?\b|\bsku\b",
     re.IGNORECASE,
 )
 _ARABIC_DIACRITICS_RE = re.compile(r"[\u064B-\u065F\u0670\u06D6-\u06ED]")
@@ -149,6 +188,16 @@ _STORE_POSSESSION_TOKENS = frozenset({"عندنا", "لدينا", "نبيع", "�
 _STORE_LOCATION_SUBJECT_TOKENS = frozenset(
     {"نحن", "متجرنا", "موقعنا", "فرعنا", "مقرنا"}
 )
+
+
+@dataclass(frozen=True)
+class _AvailabilityMention:
+    match: re.Match[str]
+    clause_start: int
+    clause_end: int
+    scope: str
+    availability: bool
+    strong_stock_expression: bool
 
 
 def _flatten_values(value: Any) -> Iterable[str]:
@@ -343,6 +392,7 @@ def _matching_evidence_fact(
 
 
 def _span_expresses_claim(
+    context: CommerceAgentContext,
     record: EvidenceRecord,
     claim: FactClaim,
     reply: CommerceReply,
@@ -356,13 +406,23 @@ def _span_expresses_claim(
             _canonical_currency(match.group(0)) for match in _CURRENCY_RE.finditer(span)
         }
     if claim.kind == "availability":
-        normalized_span = _normalize_text(span)
-        if _INFORMATIONAL_AVAILABILITY_RE.search(normalized_span):
-            return False
-        states = {
-            _availability_value(match.group(0))
-            for match in _AVAILABILITY_RE.finditer(normalized_span)
-        }
+        states: set[bool] = set()
+        search_start = 0
+        while True:
+            span_start = reply.text.find(span, search_start)
+            if span_start < 0:
+                break
+            span_end = span_start + len(span)
+            for match in _AVAILABILITY_RE.finditer(reply.text, span_start, span_end):
+                mention = _availability_semantic_scope(
+                    context,
+                    reply,
+                    match,
+                    [claim],
+                )
+                if mention.scope in {"PRODUCT", "UNKNOWN"}:
+                    states.add(mention.availability)
+            search_start = span_end
         return claim.value in states
     if claim.kind in {"stock_quantity", "order_item_quantity"}:
         expected = _decimal(claim.value)
@@ -432,6 +492,9 @@ def _availability_value(value: str) -> bool:
             "غير موجود",
             "غير قابل",
             "لا يمكن طلب",
+            "cannot be ordered",
+            "can't be ordered",
+            "not available",
             "نافد",
             "نفد",
             "unavailable",
@@ -440,11 +503,201 @@ def _availability_value(value: str) -> bool:
     )
 
 
-def _availability_mention_is_informational(text: str, mention: re.Match[str]) -> bool:
-    """Exclude lexical availability words that qualify information, not stock."""
-    return any(
+def _clause_bounds(text: str, mention: re.Match[str]) -> tuple[int, int]:
+    previous_boundaries = list(_CLAUSE_BOUNDARY_RE.finditer(text, 0, mention.start()))
+    clause_start = previous_boundaries[-1].end() if previous_boundaries else 0
+    next_boundary = _CLAUSE_BOUNDARY_RE.search(text, mention.end())
+    clause_end = next_boundary.start() if next_boundary else len(text)
+    return clause_start, clause_end
+
+
+def _spans_overlap(start: int, end: int, span_start: int, span_end: int) -> bool:
+    return start < span_end and span_start < end
+
+
+def _clause_has_verified_kind(
+    reply: CommerceReply,
+    verified_claims: Iterable[FactClaim],
+    *,
+    clause_start: int,
+    clause_end: int,
+    kinds: frozenset[str],
+) -> bool:
+    for claim in verified_claims:
+        if claim.kind not in kinds or not claim.text_span:
+            continue
+        search_start = 0
+        while True:
+            span_start = reply.text.find(claim.text_span, search_start)
+            if span_start < 0:
+                break
+            span_end = span_start + len(claim.text_span)
+            if _spans_overlap(clause_start, clause_end, span_start, span_end):
+                return True
+            search_start = span_end
+    return False
+
+
+def _clause_mentions_referenced_product(
+    context: CommerceAgentContext,
+    reply: CommerceReply,
+    clause: str,
+) -> bool:
+    normalized_clause = _normalize_text(clause)
+    clause_tokens = _knowledge_tokens(clause)
+    for evidence_ref in reply.evidence_refs:
+        record = context.evidence.get(evidence_ref)
+        if record is None or record.source not in {"catalog_product", "product_knowledge"}:
+            continue
+        for fact in record.facts:
+            if fact.kind != "product_name":
+                continue
+            normalized_name = _normalize_text(fact.value)
+            name_tokens = _knowledge_tokens(str(fact.value))
+            if normalized_name and normalized_name in normalized_clause:
+                return True
+            if len(name_tokens) >= 2 and name_tokens <= clause_tokens:
+                return True
+    return False
+
+
+def _scope_signal_distance(
+    mention_start: int,
+    mention_end: int,
+    signal: re.Match[str],
+) -> int:
+    if signal.end() <= mention_start:
+        return mention_start - signal.end()
+    if signal.start() >= mention_end:
+        return signal.start() - mention_end
+    return 0
+
+
+def _nearest_explicit_scope(
+    clause: str,
+    *,
+    mention_start: int,
+    mention_end: int,
+    strong_stock_expression: bool,
+) -> str | None:
+    candidates: list[tuple[int, int, str]] = []
+    scope_patterns = (
+        ("TRACKING", _TRACKING_SCOPE_RE),
+        ("SHIPMENT", _SHIPMENT_SCOPE_RE),
+        ("ORDER", _ORDER_SCOPE_RE),
+        ("INFORMATION", _INFORMATION_SCOPE_RE),
+        ("PRODUCT", _PRODUCT_SCOPE_RE),
+    )
+    priority = {
+        "TRACKING": 0,
+        "SHIPMENT": 1,
+        "ORDER": 2,
+        "INFORMATION": 3,
+        "PRODUCT": 4,
+    }
+    for scope, pattern in scope_patterns:
+        for signal in pattern.finditer(clause):
+            if (
+                scope == "ORDER"
+                and strong_stock_expression
+                and _spans_overlap(
+                    mention_start,
+                    mention_end,
+                    signal.start(),
+                    signal.end(),
+                )
+            ):
+                # The noun in ``متاح للطلب`` means orderability, not a
+                # customer order. Other order signals in the clause remain.
+                continue
+            candidates.append(
+                (
+                    _scope_signal_distance(mention_start, mention_end, signal),
+                    priority[scope],
+                    scope,
+                )
+            )
+    return min(candidates)[2] if candidates else None
+
+
+def _availability_semantic_scope(
+    context: CommerceAgentContext,
+    reply: CommerceReply,
+    mention: re.Match[str],
+    verified_claims: Iterable[FactClaim],
+) -> _AvailabilityMention:
+    clause_start, clause_end = _clause_bounds(reply.text, mention)
+    clause = reply.text[clause_start:clause_end]
+    rendered = mention.group(0)
+    strong_stock_expression = bool(_STRONG_STOCK_RE.fullmatch(rendered))
+    local_start = mention.start() - clause_start
+    local_end = mention.end() - clause_start
+    explicit_scope = _nearest_explicit_scope(
+        clause,
+        mention_start=local_start,
+        mention_end=local_end,
+        strong_stock_expression=strong_stock_expression,
+    )
+
+    if any(
         candidate.start() <= mention.start() < candidate.end()
-        for candidate in _INFORMATIONAL_AVAILABILITY_RE.finditer(text)
+        for candidate in _INFORMATIONAL_AVAILABILITY_RE.finditer(reply.text)
+    ):
+        scope = "INFORMATION"
+    elif explicit_scope is not None:
+        scope = explicit_scope
+    elif strong_stock_expression:
+        scope = "PRODUCT"
+    elif _clause_has_verified_kind(
+        reply,
+        verified_claims,
+        clause_start=clause_start,
+        clause_end=clause_end,
+        kinds=_PRODUCT_BOUND_KINDS,
+    ) or _clause_mentions_referenced_product(context, reply, clause):
+        scope = "PRODUCT"
+    elif _clause_has_verified_kind(
+        reply,
+        verified_claims,
+        clause_start=clause_start,
+        clause_end=clause_end,
+        kinds=frozenset({"merchant_knowledge"}),
+    ):
+        scope = "INFORMATION"
+    else:
+        scope = "UNKNOWN"
+
+    return _AvailabilityMention(
+        match=mention,
+        clause_start=clause_start,
+        clause_end=clause_end,
+        scope=scope,
+        availability=_availability_value(rendered),
+        strong_stock_expression=strong_stock_expression,
+    )
+
+
+def _availability_mention_is_verified(
+    text: str,
+    mention: _AvailabilityMention,
+    *,
+    verified_availability: Iterable[FactClaim],
+    verified_quantities: Iterable[FactClaim],
+) -> bool:
+    if mention.scope in {"ORDER", "SHIPMENT", "TRACKING", "INFORMATION"}:
+        return True
+    rendered = mention.match.group(0)
+    return any(
+        claim.value is mention.availability
+        and claim.text_span is not None
+        and rendered in claim.text_span
+        for claim in verified_availability
+    ) or _availability_mention_is_quantity_bound(
+        text,
+        mention.match,
+        availability=mention.availability,
+        verified_availability=verified_availability,
+        verified_quantities=verified_quantities,
     )
 
 
@@ -526,40 +779,13 @@ async def trusted_read_only_scope_guardrail(
     )
 
 
-def validate_grounded_reply(
+def _verify_fact_claims(
     context: CommerceAgentContext,
     reply: CommerceReply,
-) -> list[str]:
+) -> tuple[list[str], list[FactClaim]]:
     errors: list[str] = []
-    if _LEGACY_MARKER_RE.search(reply.text):
-        errors.append("legacy_marker_in_text")
-
-    evidence = context.evidence
-    referenced = set(reply.evidence_refs)
-    structured_commerce = bool(
-        reply.fact_claims or reply.product_refs or reply.media_refs or reply.ui_actions
-    )
-    if reply.response_mode == "social":
-        if evidence:
-            errors.append("social_reply_with_tool_evidence")
-        if referenced or structured_commerce:
-            errors.append("social_reply_with_commercial_structure")
-        if reply.safe_fallback_reason:
-            errors.append("social_reply_with_safe_fallback_reason")
-    nested_refs = {
-        *(claim.evidence_ref for claim in reply.fact_claims),
-        *(item.evidence_ref for item in reply.product_refs),
-        *(item.evidence_ref for item in reply.media_refs),
-        *(item.evidence_ref for item in reply.ui_actions),
-    }
-    undeclared_nested_refs = sorted(nested_refs - referenced)
-    if undeclared_nested_refs:
-        errors.append("nested_refs_missing_from_evidence_refs:" + ",".join(undeclared_nested_refs))
-    missing_refs = sorted(ref for ref in referenced if ref not in evidence)
-    if missing_refs:
-        errors.append("unknown_evidence_refs:" + ",".join(missing_refs))
-
     verified_claims: list[FactClaim] = []
+    evidence = context.evidence
     for claim in reply.fact_claims:
         record = evidence.get(claim.evidence_ref)
         if record is None:
@@ -598,10 +824,48 @@ def validate_grounded_reply(
         if claim.text_span is not None and claim.text_span not in reply.text:
             errors.append(f"claim_span_not_in_text:{claim.kind}")
             continue
-        if not _span_expresses_claim(record, claim, reply):
+        if not _span_expresses_claim(context, record, claim, reply):
             errors.append(f"claim_span_not_equivalent:{claim.kind}")
             continue
         verified_claims.append(claim)
+    return errors, verified_claims
+
+
+def validate_grounded_reply(
+    context: CommerceAgentContext,
+    reply: CommerceReply,
+) -> list[str]:
+    errors: list[str] = []
+    if _LEGACY_MARKER_RE.search(reply.text):
+        errors.append("legacy_marker_in_text")
+
+    evidence = context.evidence
+    referenced = set(reply.evidence_refs)
+    structured_commerce = bool(
+        reply.fact_claims or reply.product_refs or reply.media_refs or reply.ui_actions
+    )
+    if reply.response_mode == "social":
+        if evidence:
+            errors.append("social_reply_with_tool_evidence")
+        if referenced or structured_commerce:
+            errors.append("social_reply_with_commercial_structure")
+        if reply.safe_fallback_reason:
+            errors.append("social_reply_with_safe_fallback_reason")
+    nested_refs = {
+        *(claim.evidence_ref for claim in reply.fact_claims),
+        *(item.evidence_ref for item in reply.product_refs),
+        *(item.evidence_ref for item in reply.media_refs),
+        *(item.evidence_ref for item in reply.ui_actions),
+    }
+    undeclared_nested_refs = sorted(nested_refs - referenced)
+    if undeclared_nested_refs:
+        errors.append("nested_refs_missing_from_evidence_refs:" + ",".join(undeclared_nested_refs))
+    missing_refs = sorted(ref for ref in referenced if ref not in evidence)
+    if missing_refs:
+        errors.append("unknown_evidence_refs:" + ",".join(missing_refs))
+
+    claim_errors, verified_claims = _verify_fact_claims(context, reply)
+    errors.extend(claim_errors)
 
     for product_ref in reply.product_refs:
         record = evidence.get(product_ref.evidence_ref)
@@ -715,19 +979,15 @@ def validate_grounded_reply(
         claim for claim in verified_claims if claim.kind == "availability"
     ]
     for match in _AVAILABILITY_RE.finditer(reply.text):
-        if _availability_mention_is_informational(reply.text, match):
-            continue
-        availability = _availability_value(match.group(0))
-        rendered = match.group(0)
-        if not any(
-            claim.value is availability
-            and claim.text_span is not None
-            and rendered in claim.text_span
-            for claim in verified_availability
-        ) and not _availability_mention_is_quantity_bound(
-            reply.text,
+        mention = _availability_semantic_scope(
+            context,
+            reply,
             match,
-            availability=availability,
+            verified_claims,
+        )
+        if not _availability_mention_is_verified(
+            reply.text,
+            mention,
             verified_availability=verified_availability,
             verified_quantities=verified_quantities,
         ):
@@ -812,12 +1072,87 @@ def _url_comparison_diagnostic(
     }
 
 
+def _availability_rejection_diagnostics(
+    context: CommerceAgentContext,
+    reply: CommerceReply,
+) -> list[dict[str, Any]]:
+    _, verified_claims = _verify_fact_claims(context, reply)
+    verified_availability = [
+        claim for claim in verified_claims if claim.kind == "availability"
+    ]
+    verified_quantities = [
+        claim
+        for claim in verified_claims
+        if claim.kind in {"stock_quantity", "order_item_quantity"}
+    ]
+    referenced_records = [
+        context.evidence[ref]
+        for ref in reply.evidence_refs
+        if ref in context.evidence
+    ]
+    evidence_source_types = sorted({record.source for record in referenced_records})
+    referenced_claim_kinds = sorted({claim.kind for claim in reply.fact_claims})
+    verified_claim_kinds = sorted({claim.kind for claim in verified_claims})
+    product_subject_present = bool(
+        reply.product_refs
+        or any(claim.subject_product_id is not None for claim in reply.fact_claims)
+        or any(
+            fact.subject_product_id is not None
+            for record in referenced_records
+            for fact in record.facts
+        )
+    )
+    order_subject_present = bool(
+        any(claim.subject_order_id is not None for claim in reply.fact_claims)
+        or any(
+            fact.subject_order_id is not None
+            for record in referenced_records
+            for fact in record.facts
+        )
+    )
+
+    diagnostics: list[dict[str, Any]] = []
+    for match in _AVAILABILITY_RE.finditer(reply.text):
+        mention = _availability_semantic_scope(
+            context,
+            reply,
+            match,
+            verified_claims,
+        )
+        if _availability_mention_is_verified(
+            reply.text,
+            mention,
+            verified_availability=verified_availability,
+            verified_quantities=verified_quantities,
+        ):
+            continue
+        normalized_clause = _normalize_text(
+            reply.text[mention.clause_start : mention.clause_end]
+        )
+        diagnostics.append(
+            {
+                "detector_type": "product_availability_semantic_scope",
+                "matched_normalized_lexeme": _normalize_text(match.group(0)),
+                "semantic_scope": mention.scope,
+                "strong_stock_expression": mention.strong_stock_expression,
+                "referenced_evidence_source_types": evidence_source_types,
+                "referenced_claim_kinds": referenced_claim_kinds,
+                "verified_claim_kinds": verified_claim_kinds,
+                "product_subject_present": product_subject_present,
+                "order_subject_present": order_subject_present,
+                "clause_sha256": sha256(normalized_clause.encode("utf-8")).hexdigest(),
+                "guardrail_code": "availability_in_text_without_verified_claim",
+            }
+        )
+    return diagnostics[:32]
+
+
 def _safe_rejected_output_diagnostic(
     context: CommerceAgentContext,
     reply: CommerceReply,
     errors: list[str],
 ) -> dict[str, Any]:
-    """Summarize a rejected URL contract without storing message or URL data."""
+    """Summarize rejected contracts without storing customer-visible content."""
     evidence = context.evidence
     comparisons: list[dict[str, Any]] = []
 
@@ -968,12 +1303,18 @@ def _safe_rejected_output_diagnostic(
                 )
             )
 
+    availability_diagnostics = (
+        _availability_rejection_diagnostics(context, reply)
+        if "availability_in_text_without_verified_claim" in errors
+        else []
+    )
     return {
         "artifact": "rejected_model_commerce_reply",
         "customer_delivered": False,
         "customer_fallback_artifact": "safe_fallback_reply",
         "guardrail_error_codes": list(errors),
         "url_comparisons": comparisons[:64],
+        "lexical_commercial_diagnostics": availability_diagnostics,
     }
 
 
@@ -995,7 +1336,10 @@ async def grounded_output_guardrail(
             output,
             errors,
         )
-        if diagnostic["url_comparisons"]:
+        if (
+            diagnostic["url_comparisons"]
+            or diagnostic["lexical_commercial_diagnostics"]
+        ):
             output_info["rejected_output_diagnostic"] = diagnostic
     if (
         errors

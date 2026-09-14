@@ -1732,6 +1732,73 @@ async def test_rejected_url_output_preserves_safe_diagnostic_and_customer_fallba
 
 
 @pytest.mark.asyncio
+async def test_rejected_availability_output_preserves_safe_semantic_diagnostic(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded, trace_id="rejected-availability-diagnostic")
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="availability",
+                        value=True,
+                        subject_product_id=seeded.honey_a.id,
+                    )
+                ],
+            )
+        ]
+    )
+    rejected = CommerceReply(
+        text="هذا المنتج غير متوفر.",
+        evidence_refs=[ref],
+    )
+
+    result = await run_commerce_agent(
+        context=context,
+        user_input="هل المنتج متوفر؟",
+        model=ScriptedModel([[assistant_message(rejected.model_dump_json())]]),
+        model_name="guardrail-availability-diagnostic",
+    )
+
+    assert result.status == "failed"
+    assert result.failure_reason == (
+        "output_guardrail_tripwire:availability_in_text_without_verified_claim"
+    )
+    assert result.reply.safe_fallback_reason == result.failure_reason
+    output_info = result.guardrail_results[0]["output_info"]
+    diagnostic = output_info["rejected_output_diagnostic"]
+    lexical = diagnostic["lexical_commercial_diagnostics"]
+    assert diagnostic["customer_delivered"] is False
+    assert len(lexical) == 1
+    assert lexical[0]["semantic_scope"] == "PRODUCT"
+    assert lexical[0]["matched_normalized_lexeme"] == "غير متوفر"
+    assert lexical[0]["referenced_evidence_source_types"] == ["catalog_product"]
+    assert lexical[0]["product_subject_present"] is True
+    persisted_shape = json.dumps(result.guardrail_results, ensure_ascii=False)
+    assert rejected.text not in persisted_shape
+    assert seeded.customer_a.normalized_phone not in persisted_shape
+
+    from models import CommerceAgentV2ShadowRun
+
+    _persist_shadow_result(seeded.db, context, result)
+    row = (
+        seeded.db.query(CommerceAgentV2ShadowRun)
+        .filter(CommerceAgentV2ShadowRun.sdk_trace_id == result.sdk_trace_id)
+        .one()
+    )
+    stored_diagnostic = row.guardrail_results[0]["output_info"][
+        "rejected_output_diagnostic"
+    ]
+    assert stored_diagnostic == diagnostic
+    assert row.structured_output["safe_fallback_reason"] == result.failure_reason
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("user_input", "reply_text"),
     [
