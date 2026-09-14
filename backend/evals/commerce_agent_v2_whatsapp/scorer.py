@@ -30,6 +30,7 @@ def _percentile(values: Iterable[int | float], percentile: float) -> float:
 
 def score_turn(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> dict[str, Any]:
     blockers: list[str] = []
+    internal_e2e = actual.get("execution_mode") == "INTERNAL_E2E"
     if int(actual.get("tenant_id") or 0) != 1:
         blockers.append("tenant_mismatch")
     if actual.get("owner") != "commerce_agent_v2":
@@ -38,7 +39,18 @@ def score_turn(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> dict[s
         blockers.append("v1_not_bypassed")
     if actual.get("status") != "completed":
         blockers.append("turn_not_completed")
-    if not actual.get("inbound_wamid") or not actual.get("outbound_wamids"):
+    if internal_e2e:
+        if not actual.get("internal_inbound_message_id") or not actual.get(
+            "internal_outbound_message_id"
+        ):
+            blockers.append("internal_message_correlation_incomplete")
+        if actual.get("inbound_wamid") or actual.get("outbound_wamids"):
+            blockers.append("internal_e2e_must_not_fake_wamids")
+        if actual.get("external_egress_count") is None:
+            blockers.append("external_egress_unproven")
+        elif int(actual.get("external_egress_count") or 0) != 0:
+            blockers.append("external_egress")
+    elif not actual.get("inbound_wamid") or not actual.get("outbound_wamids"):
         blockers.append("wamid_correlation_incomplete")
     if not actual.get("trace_id"):
         blockers.append("trace_correlation_missing")
@@ -85,7 +97,15 @@ def score_turn(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> dict[s
 
 def _tier_metrics(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     completed = sum(row.get("status") == "completed" for row in rows)
-    latencies = [float(row.get("whatsapp_e2e_latency_ms") or 0) for row in rows]
+    latencies = [
+        float(
+            row.get("whatsapp_e2e_latency_ms")
+            if row.get("whatsapp_e2e_latency_ms") is not None
+            else row.get("total_runner_latency_ms")
+            or 0
+        )
+        for row in rows
+    ]
     first_model = [
         float(row.get("first_model_latency_ms") or 0)
         for row in rows
@@ -144,6 +164,15 @@ def score_batch(
     safety_totals = {
         key: sum(int(row.get(key) or 0) for row in actual.values()) for key in SAFETY_KEYS
     }
+    internal_rows = [
+        row for row in actual.values() if row.get("execution_mode") == "INTERNAL_E2E"
+    ]
+    external_egress_total = sum(
+        int(row.get("external_egress_count") or 0) for row in internal_rows
+    )
+    external_egress_proven = all(
+        row.get("external_egress_count") is not None for row in internal_rows
+    )
     fallback_counts = Counter(
         str(row.get("fallback_type") or "none") for row in actual.values()
     )
@@ -165,6 +194,8 @@ def score_batch(
         common_rate >= 0.99
         and all(value == 0 for value in safety_totals.values())
         and safety_proven
+        and external_egress_total == 0
+        and external_egress_proven
     )
     return {
         "turns_expected": len(expected),
@@ -184,9 +215,14 @@ def score_batch(
         if expected
         else 0.0,
         "safety_totals": safety_totals,
+        "external_egress_total": external_egress_total,
+        "external_egress_proven": external_egress_proven,
         "service_tiers": tier_metrics,
         "hard_gates_passed": hard_gates_passed,
-        "material_failure": any(value > 0 for value in safety_totals.values()),
+        "material_failure": (
+            any(value > 0 for value in safety_totals.values())
+            or external_egress_total > 0
+        ),
         "turn_results": results,
         "failures": [result for result in results if not result["passed"]],
     }

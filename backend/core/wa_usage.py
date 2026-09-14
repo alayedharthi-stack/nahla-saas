@@ -546,6 +546,9 @@ def count_messages_in_window(
         .filter(
             MessageEvent.tenant_id == tenant_id,
             MessageEvent.created_at >= start_naive,
+            MessageEvent.direction.notin_(
+                ("internal_e2e_inbound", "internal_e2e_outbound")
+            ),
         )
     )
     if window_end is not None:

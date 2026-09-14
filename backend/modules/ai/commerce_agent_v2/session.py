@@ -48,12 +48,17 @@ class ConversationMessageSession:
         # Fetch newest rows first so PostgreSQL applies the bounded history
         # window. One extra row allows the already-persisted current inbound
         # WAMID to be excluded without shrinking normal history by one.
+        directions = (
+            ("internal_e2e_inbound", "internal_e2e_outbound")
+            if self._context.channel == "internal_e2e"
+            else ("in", "inbound", "out", "outbound")
+        )
         query = (
             db.query(MessageEvent)
             .filter(
                 MessageEvent.conversation_id == self._context.conversation_id,
                 MessageEvent.tenant_id == self._context.tenant_id,
-                MessageEvent.direction.in_(("in", "inbound", "out", "outbound")),
+                MessageEvent.direction.in_(directions),
             )
             .order_by(MessageEvent.created_at.desc(), MessageEvent.id.desc())
         )
@@ -70,7 +75,12 @@ class ConversationMessageSession:
             metadata = dict(getattr(row, "extra_metadata", None) or {})
             # The SDK receives the current turn as Runner input. Exclude the
             # already-persisted webhook row so it is not sent twice.
-            if str(metadata.get("wa_message_id") or "") == self._context.inbound_trace_id:
+            persisted_inbound_id = str(
+                metadata.get("wa_message_id")
+                or metadata.get("internal_message_id")
+                or ""
+            )
+            if persisted_inbound_id == self._context.inbound_trace_id:
                 continue
             body = self._context.redact_unexposed_customer_identity(
                 str(getattr(row, "body", "") or "")
@@ -78,9 +88,10 @@ class ConversationMessageSession:
             if not body:
                 continue
             direction = str(getattr(row, "direction", "") or "").lower()
+            inbound_directions = {"in", "inbound", "internal_e2e_inbound"}
             canonical.append(
                 {
-                    "role": "user" if direction in {"in", "inbound"} else "assistant",
+                    "role": "user" if direction in inbound_directions else "assistant",
                     "content": body,
                 }
             )

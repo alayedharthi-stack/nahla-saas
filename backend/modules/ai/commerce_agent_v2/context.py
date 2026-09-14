@@ -5,6 +5,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from modules.ai.commerce_agent_v2.internal_e2e_identity import (
+    INTERNAL_E2E_CHANNEL,
+    INTERNAL_E2E_CONNECTION_ID,
+    InternalE2EAlias,
+    internal_e2e_customer_identity,
+    metadata_matches_internal_e2e_identity,
+    normalize_internal_e2e_alias,
+)
 from modules.ai.commerce_agent_v2.output import EvidenceRecord
 from modules.ai.security.tenant_isolation import (
     TenantContext,
@@ -46,7 +54,8 @@ class CommerceAgentContext(BaseModel):
     conversation_id: int = Field(gt=0)
     customer_id: int | None = Field(default=None, gt=0)
     normalized_customer_phone: str = Field(min_length=1)
-    channel: Literal["whatsapp"] = "whatsapp"
+    channel: Literal["whatsapp", "internal_e2e"] = "whatsapp"
+    synthetic_customer_alias: InternalE2EAlias | None = None
     connection_id: str = Field(min_length=1)
     inbound_trace_id: str = Field(min_length=1, max_length=256)
     locale: str = "ar-SA"
@@ -74,14 +83,29 @@ class CommerceAgentContext(BaseModel):
         normalized_customer_phone: str,
         connection_id: str,
         inbound_trace_id: str,
-        channel: Literal["whatsapp"] = "whatsapp",
+        channel: Literal["whatsapp", "internal_e2e"] = "whatsapp",
+        synthetic_customer_alias: InternalE2EAlias | None = None,
     ) -> "CommerceAgentContext":
         from models import Conversation, Customer, Tenant, TenantSettings, WhatsAppConnection
         from utils.phone_utils import normalize_phone_compat
 
-        canonical_phone = normalize_phone_compat(normalized_customer_phone)
-        if not canonical_phone:
-            raise CommerceContextError("invalid_customer_phone")
+        internal_alias: InternalE2EAlias | None = None
+        if channel == INTERNAL_E2E_CHANNEL:
+            try:
+                internal_alias = normalize_internal_e2e_alias(synthetic_customer_alias)
+                canonical_phone = internal_e2e_customer_identity(tenant_id, internal_alias)
+            except (TypeError, ValueError) as exc:
+                raise CommerceContextError("internal_e2e_identity_invalid") from exc
+            if str(normalized_customer_phone or "") != canonical_phone:
+                raise CommerceContextError("internal_e2e_identity_mismatch")
+            if str(connection_id or "") != INTERNAL_E2E_CONNECTION_ID:
+                raise CommerceContextError("internal_e2e_connection_invalid")
+        else:
+            if synthetic_customer_alias is not None:
+                raise CommerceContextError("synthetic_alias_forbidden_for_whatsapp")
+            canonical_phone = normalize_phone_compat(normalized_customer_phone)
+            if not canonical_phone:
+                raise CommerceContextError("invalid_customer_phone")
 
         tenant_ctx = TenantIsolationLayer.make_context(
             tenant_id,
@@ -100,6 +124,17 @@ class CommerceAgentContext(BaseModel):
         if conversation is None:
             raise CommerceContextError("conversation_not_in_tenant_scope")
         TenantIsolationLayer.assert_belongs(conversation, tenant_ctx)
+        if internal_alias is not None and (
+            str(getattr(conversation, "external_id", "") or "") != canonical_phone
+            or not metadata_matches_internal_e2e_identity(
+                getattr(conversation, "extra_metadata", None),
+                tenant_id=tenant_ctx.tenant_id,
+                alias=internal_alias,
+            )
+        ):
+            raise CommerceContextError("conversation_not_internal_e2e_scoped")
+        if internal_alias is not None and conversation.customer_id is not None:
+            raise CommerceContextError("internal_e2e_customer_row_forbidden")
 
         conversation_customer_id = (
             int(conversation.customer_id) if conversation.customer_id is not None else None
@@ -130,19 +165,21 @@ class CommerceAgentContext(BaseModel):
                 raise CommerceContextError("customer_phone_not_in_identity_scope")
             verified_customer_name = str(getattr(customer, "name", "") or "").strip()
 
-        connection = (
-            db.query(WhatsAppConnection)
-            .filter(
-                WhatsAppConnection.id == int(connection_id),
-                WhatsAppConnection.tenant_id == tenant_ctx.tenant_id,
+        connection = None
+        if internal_alias is None:
+            connection = (
+                db.query(WhatsAppConnection)
+                .filter(
+                    WhatsAppConnection.id == int(connection_id),
+                    WhatsAppConnection.tenant_id == tenant_ctx.tenant_id,
+                )
+                .one_or_none()
+                if str(connection_id).isdigit()
+                else None
             )
-            .one_or_none()
-            if str(connection_id).isdigit()
-            else None
-        )
-        if connection is None:
-            raise CommerceContextError("connection_not_in_tenant_scope")
-        TenantIsolationLayer.assert_belongs(connection, tenant_ctx)
+            if connection is None:
+                raise CommerceContextError("connection_not_in_tenant_scope")
+            TenantIsolationLayer.assert_belongs(connection, tenant_ctx)
 
         tenant = (
             db.query(Tenant)
@@ -168,7 +205,10 @@ class CommerceAgentContext(BaseModel):
             customer_id=resolved_customer_id,
             normalized_customer_phone=canonical_phone,
             channel=channel,
-            connection_id=str(connection.id),
+            synthetic_customer_alias=internal_alias,
+            connection_id=(
+                INTERNAL_E2E_CONNECTION_ID if internal_alias is not None else str(connection.id)
+            ),
             inbound_trace_id=str(inbound_trace_id),
             locale=str(ai_settings.get("locale") or settings_meta.get("locale") or "ar-SA"),
             timezone=str(
@@ -267,6 +307,27 @@ class CommerceAgentContext(BaseModel):
             int(conversation.customer_id) if conversation.customer_id is not None else None
         ) != self.customer_id:
             raise TenantIsolationViolation("conversation customer scope is no longer valid")
+        if self.channel == INTERNAL_E2E_CHANNEL:
+            if self.synthetic_customer_alias is None:
+                raise TenantIsolationViolation("internal E2E alias is no longer valid")
+            expected_identity = internal_e2e_customer_identity(
+                self.tenant_id, self.synthetic_customer_alias
+            )
+            if (
+                self.connection_id != INTERNAL_E2E_CONNECTION_ID
+                or self.normalized_customer_phone != expected_identity
+                or str(getattr(conversation, "external_id", "") or "") != expected_identity
+                or not metadata_matches_internal_e2e_identity(
+                    getattr(conversation, "extra_metadata", None),
+                    tenant_id=self.tenant_id,
+                    alias=self.synthetic_customer_alias,
+                )
+            ):
+                raise TenantIsolationViolation("internal E2E conversation scope is no longer valid")
+            if conversation.customer_id is not None or self.customer_id is not None:
+                raise TenantIsolationViolation("internal E2E customer row is forbidden")
+        elif self.synthetic_customer_alias is not None:
+            raise TenantIsolationViolation("synthetic alias is forbidden for WhatsApp")
         if self.customer_id is not None:
             customer = (
                 self._db.query(Customer)
@@ -280,21 +341,23 @@ class CommerceAgentContext(BaseModel):
                 raise TenantIsolationViolation("customer scope is no longer valid")
             TenantIsolationLayer.assert_belongs(customer, self._tenant_context)
             stored_phone = normalize_phone_compat(
-                getattr(customer, "normalized_phone", None) or getattr(customer, "phone", None)
+                getattr(customer, "normalized_phone", None)
+                or getattr(customer, "phone", None)
             )
             if stored_phone != self.normalized_customer_phone:
                 raise TenantIsolationViolation("customer phone scope is no longer valid")
-        connection = (
-            self._db.query(WhatsAppConnection)
-            .filter(
-                WhatsAppConnection.id == int(self.connection_id),
-                WhatsAppConnection.tenant_id == self.tenant_id,
+        if self.channel == "whatsapp":
+            connection = (
+                self._db.query(WhatsAppConnection)
+                .filter(
+                    WhatsAppConnection.id == int(self.connection_id),
+                    WhatsAppConnection.tenant_id == self.tenant_id,
+                )
+                .one_or_none()
             )
-            .one_or_none()
-        )
-        if connection is None:
-            raise TenantIsolationViolation("connection scope is no longer valid")
-        TenantIsolationLayer.assert_belongs(connection, self._tenant_context)
+            if connection is None:
+                raise TenantIsolationViolation("connection scope is no longer valid")
+            TenantIsolationLayer.assert_belongs(connection, self._tenant_context)
 
     def authorize_products(self, product_ids: list[int]) -> None:
         self._allowed_product_ids.update(int(value) for value in product_ids if int(value) > 0)
