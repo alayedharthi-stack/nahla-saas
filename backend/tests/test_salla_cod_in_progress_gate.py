@@ -20,7 +20,7 @@ for _path in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 
 from core.commerce_lifecycle.intents import BusinessIntent  # noqa: E402
 from core.salla_order_fidelity import extract_salla_payment_facts  # noqa: E402
-from database.models import AutomationEvent, Base, Order, Tenant  # noqa: E402
+from database.models import AutomationEvent, Base, Customer, Order, Tenant  # noqa: E402
 from services.store_sync import StoreSyncService  # noqa: E402
 from services.store_sync import _normalise_order  # noqa: E402
 from services.salla_orders_poller import _emit_for_order  # noqa: E402
@@ -29,6 +29,7 @@ from store_integration.models import NormalizedOrder  # noqa: E402
 from store_adapters.salla_lifecycle import (  # noqa: E402
     normalize_salla_lifecycle_business_intent,
     salla_cod_requires_customer_confirmation,
+    salla_payment_fidelity_pending,
 )
 
 
@@ -367,6 +368,225 @@ def test_generic_non_cod_in_progress_order_keeps_existing_confirmation_behavior(
     assert normalize_salla_lifecycle_business_intent(
         None, "in_progress", normalized
     ) == BusinessIntent.ORDER_CONFIRMED
+
+
+def _race_db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    tenant = Tenant(name="Race Store", is_active=True)
+    db.add(tenant)
+    db.flush()
+    customer = Customer(
+        tenant_id=tenant.id,
+        phone="+966500000001",
+        normalized_phone="966500000001",
+        name="Customer",
+    )
+    db.add(customer)
+    db.commit()
+    return db, engine, tenant, customer
+
+
+def _cod_created_payload(external_id: str, reference_id: str) -> dict:
+    return {
+        "id": external_id,
+        "reference_id": reference_id,
+        "status": {"slug": "in_progress"},
+        "payment_method": "waiting",
+        "accepted_payment_methods": ["cod"],
+        "is_pending_payment": True,
+        "customer": {"name": "Customer", "mobile": "+966500000001"},
+        "amounts": {
+            "total": {"amount": 174, "currency": "SAR"},
+            "cash_on_delivery": {"amount": 0, "currency": "SAR"},
+        },
+        "items": [],
+    }
+
+
+def _stub_customer_intelligence(service, customer):
+    service._customer_intelligence.upsert_customer_from_order = MagicMock(
+        return_value=customer
+    )
+    service._customer_intelligence.recompute_profile_for_customer = MagicMock()
+
+
+def test_webhook_first_then_poller_emits_one_cod_prompt_and_no_final_confirmation():
+    db, engine, tenant, customer = _race_db()
+    try:
+        service = StoreSyncService(db, tenant.id)
+        _stub_customer_intelligence(service, customer)
+        payload = _cod_created_payload("race-webhook-first", "REF-WEBHOOK-FIRST")
+
+        with patch(
+            "services.store_sync._lifecycle_dispatch_owns_tenant",
+            return_value=False,
+        ), patch(
+            "services.store_sync._handle_external_lifecycle_transition_best_effort",
+            new_callable=AsyncMock,
+        ):
+            _run(service.handle_order_webhook(
+                payload, webhook_event_type="order.created"
+            ))
+            # A duplicate webhook and the safety poller must both defer to the
+            # persisted webhook ownership stamp.
+            _run(service.handle_order_webhook(
+                payload, webhook_event_type="order.created"
+            ))
+
+        order = db.query(Order).filter_by(
+            tenant_id=tenant.id, external_id="race-webhook-first"
+        ).one()
+        assert _emit_for_order(db, tenant.id, order) is False
+        event_types = [
+            row.event_type
+            for row in db.query(AutomationEvent).filter_by(tenant_id=tenant.id)
+        ]
+        assert event_types.count("order_cod_pending") == 1
+        assert event_types.count("order_notifications") == 0
+        cod_event = db.query(AutomationEvent).filter_by(
+            tenant_id=tenant.id, event_type="order_cod_pending"
+        ).one()
+        assert cod_event.customer_id == customer.id
+        assert cod_event.payload["message_type"] == "initial_confirmation"
+        assert order.extra_metadata["cod_webhook_triggered"] is True
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_poller_first_defers_ambiguous_payment_then_webhook_claims_cod_once():
+    db, engine, tenant, customer = _race_db()
+    try:
+        adapter = MagicMock()
+        adapter.platform = "salla"
+        adapter.get_orders = AsyncMock(return_value=[NormalizedOrder(
+            id="race-poller-first",
+            reference_id="REF-POLLER-FIRST",
+            status="in_progress",
+            total=174,
+            currency="SAR",
+            payment_method="waiting",
+            payment_status="waiting",
+            is_cod=False,
+            customer_name="Customer",
+            customer_phone="+966500000001",
+            source="salla",
+        )])
+        service = StoreSyncService(db, tenant.id, adapter=adapter)
+        _stub_customer_intelligence(service, customer)
+
+        with patch(
+            "services.store_sync._lifecycle_dispatch_owns_tenant",
+            return_value=False,
+        ), patch(
+            "services.store_sync._handle_external_lifecycle_transition_best_effort",
+            new_callable=AsyncMock,
+        ):
+            assert _run(service.sync_orders(
+                triggered_by="salla_orders_poller"
+            )) == 1
+
+            order = db.query(Order).filter_by(
+                tenant_id=tenant.id, external_id="race-poller-first"
+            ).one()
+            assert order.extra_metadata[
+                "notifications_withheld_payment_fidelity"
+            ] is True
+            assert order.extra_metadata.get("notifications_emitted") is not True
+            assert db.query(AutomationEvent).count() == 0
+            assert _emit_for_order(db, tenant.id, order) is False
+
+            payload = _cod_created_payload(
+                "race-poller-first", "REF-POLLER-FIRST"
+            )
+            _run(service.handle_order_webhook(
+                payload, webhook_event_type="order.created"
+            ))
+            _run(service.handle_order_webhook(
+                payload, webhook_event_type="order.created"
+            ))
+
+        db.refresh(order)
+        event_types = [row.event_type for row in db.query(AutomationEvent).all()]
+        assert event_types.count("order_cod_pending") == 1
+        assert event_types.count("order_notifications") == 0
+        cod_event = db.query(AutomationEvent).filter_by(
+            event_type="order_cod_pending"
+        ).one()
+        assert cod_event.customer_id == customer.id
+        assert cod_event.payload["message_type"] == "initial_confirmation"
+        assert order.extra_metadata["cod_webhook_triggered"] is True
+        assert order.extra_metadata.get(
+            "notifications_withheld_payment_fidelity"
+        ) is not True
+        assert _emit_for_order(db, tenant.id, order) is False
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_paid_non_cod_poller_order_keeps_single_final_confirmation_event():
+    db, engine, tenant, customer = _race_db()
+    try:
+        adapter = MagicMock()
+        adapter.platform = "salla"
+        adapter.get_orders = AsyncMock(return_value=[NormalizedOrder(
+            id="paid-card-order",
+            reference_id="REF-PAID-CARD",
+            status="in_progress",
+            total=174,
+            currency="SAR",
+            payment_method="credit_card",
+            payment_status="paid",
+            is_cod=False,
+            customer_name="Customer",
+            customer_phone="+966500000001",
+            source="salla",
+        )])
+        service = StoreSyncService(db, tenant.id, adapter=adapter)
+        _stub_customer_intelligence(service, customer)
+
+        with patch(
+            "services.store_sync._lifecycle_dispatch_owns_tenant",
+            return_value=False,
+        ), patch(
+            "services.store_sync._handle_external_lifecycle_transition_best_effort",
+            new_callable=AsyncMock,
+        ):
+            assert _run(service.sync_orders(
+                triggered_by="salla_orders_poller"
+            )) == 1
+
+        order = db.query(Order).filter_by(
+            tenant_id=tenant.id, external_id="paid-card-order"
+        ).one()
+        assert _emit_for_order(db, tenant.id, order) is False
+        events = db.query(AutomationEvent).all()
+        assert [event.event_type for event in events] == ["order_notifications"]
+        assert events[0].customer_id == customer.id
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_unpaid_in_progress_waiting_method_requires_payment_fidelity():
+    ambiguous = {
+        "payment_method": "waiting",
+        "payment_status": "waiting",
+        "is_cod": False,
+    }
+    assert salla_payment_fidelity_pending("in_progress", ambiguous) is True
+    assert salla_payment_fidelity_pending(
+        "in_progress", {**ambiguous, "payment_method": "bank"}
+    ) is False
+    assert salla_payment_fidelity_pending(
+        "in_progress", {**ambiguous, "is_cod": True}
+    ) is False
+    assert salla_payment_fidelity_pending(
+        "in_progress", {"payment_method": "", "payment_status": "paid"}
+    ) is False
 
 
 def test_cod_under_review_is_no_longer_awaiting_customer_confirmation():

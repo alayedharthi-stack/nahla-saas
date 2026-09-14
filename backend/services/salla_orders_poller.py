@@ -455,6 +455,8 @@ def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
     # the webhook inserted it before the poller calculated ``new_ids``.
     if meta.get("cod_webhook_triggered"):
         return False
+    if meta.get("notifications_withheld_payment_fidelity"):
+        return False
     if meta.get("legacy_notifications_suppressed"):
         return False
     if order.is_abandoned:
@@ -512,10 +514,30 @@ def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
         ext_id = order.external_id
         from store_adapters.salla_lifecycle import (  # noqa: PLC0415
             salla_cod_requires_customer_confirmation,
+            salla_payment_fidelity_pending,
         )
         cod_awaiting_customer = salla_cod_requires_customer_confirmation(
             status, meta
         )
+        payment_fidelity_pending = salla_payment_fidelity_pending(status, meta)
+
+        if payment_fidelity_pending:
+            meta["notifications_withheld_payment_fidelity"] = True
+            meta["notifications_withheld_payment_fidelity_at"] = (
+                datetime.now(timezone.utc).isoformat()
+            )
+            meta["notifications_withheld_payment_fidelity_by"] = (
+                "salla_orders_poller"
+            )
+            order.extra_metadata = meta
+            flag_modified(order, "extra_metadata")
+            db.commit()
+            logger.info(
+                "[Salla Orders Poller] ORDER_NOTIFICATIONS withheld awaiting payment fidelity "
+                "tenant_id=%s order_id=%s status=%s pm=%s",
+                tenant_id, order.id, status, pm or "unknown",
+            )
+            return False
 
         if not cod_awaiting_customer:
             emit_automation_event(

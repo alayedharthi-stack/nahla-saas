@@ -2388,8 +2388,12 @@ class StoreSyncService:
                         _status = str(normalised_status or "").lower()
                         from store_adapters.salla_lifecycle import (  # noqa: PLC0415
                             salla_cod_requires_customer_confirmation,
+                            salla_payment_fidelity_pending,
                         )
                         _cod_awaiting_customer = salla_cod_requires_customer_confirmation(
+                            _status, normalised
+                        )
+                        _payment_fidelity_pending = salla_payment_fidelity_pending(
                             _status, normalised
                         )
                         _lifecycle_owned = _lifecycle_dispatch_owns_tenant(
@@ -2410,7 +2414,11 @@ class StoreSyncService:
                                 )
                             )
 
-                        if not _lifecycle_owned and not _cod_awaiting_customer:
+                        if (
+                            not _lifecycle_owned
+                            and not _cod_awaiting_customer
+                            and not _payment_fidelity_pending
+                        ):
                             emit_automation_event(
                                 self.db,
                                 self.tenant_id,
@@ -2483,6 +2491,14 @@ class StoreSyncService:
                             _meta["legacy_notifications_suppressed_by"] = (
                                 "lifecycle_dispatch_owner"
                             )
+                        elif _payment_fidelity_pending:
+                            _meta["notifications_withheld_payment_fidelity"] = True
+                            _meta["notifications_withheld_payment_fidelity_at"] = (
+                                datetime.now(timezone.utc).isoformat()
+                            )
+                            _meta["notifications_withheld_payment_fidelity_by"] = (
+                                f"sync_orders.{triggered_by}"
+                            )
                         else:
                             _meta["notifications_emitted"] = True
                             _meta["notifications_emitted_at"] = (
@@ -2500,6 +2516,12 @@ class StoreSyncService:
                                 "[StoreSync/poll] legacy automation withheld for lifecycle owner "
                                 "tenant=%s order=%s pm=%s",
                                 self.tenant_id, ext_id, _pm or "unknown",
+                            )
+                        elif _payment_fidelity_pending:
+                            logger.info(
+                                "[StoreSync/poll] order_notifications withheld awaiting payment fidelity "
+                                "tenant=%s order=%s status=%s pm=%s",
+                                self.tenant_id, ext_id, _status, _pm or "unknown",
                             )
                         else:
                             logger.info(
@@ -4319,6 +4341,15 @@ class StoreSyncService:
             status=normalised["status"],
         )
 
+        notification_meta = dict(order_row.extra_metadata or {})
+        poller_fidelity_handoff = bool(
+            webhook_event_type == "order.created"
+            and notification_meta.get("notifications_withheld_payment_fidelity")
+            and not notification_meta.get("notifications_emitted")
+            and not notification_meta.get("cod_webhook_triggered")
+        )
+        emit_initial_order_events = is_new or poller_fidelity_handoff
+
         customer = None
         if integration_resolution is not None:
             self._apply_a1_external_identity(
@@ -4346,7 +4377,17 @@ class StoreSyncService:
                     emit_event=True,
                 )
 
-        if is_new:
+        if emit_initial_order_events and customer is None:
+            # A1 keeps Order.customer_id unlinked unless provider identity is
+            # proven, but legacy automations still need their Customer target.
+            # Resolve the recipient without changing the order identity link.
+            customer = self._customer_intelligence.upsert_customer_from_order(
+                normalised,
+                source="order_webhook_automation",
+                commit=False,
+            )
+
+        if emit_initial_order_events:
             try:
                 from core.automation_engine import emit_automation_event  # noqa: PLC0415
                 from core.automation_triggers import AutomationTrigger    # noqa: PLC0415
@@ -4354,8 +4395,12 @@ class StoreSyncService:
                 _order_status   = str(normalised.get("status") or "").lower()
                 from store_adapters.salla_lifecycle import (  # noqa: PLC0415
                     salla_cod_requires_customer_confirmation,
+                    salla_payment_fidelity_pending,
                 )
                 _cod_awaiting_customer = salla_cod_requires_customer_confirmation(
+                    _order_status, normalised
+                )
+                _payment_fidelity_pending = salla_payment_fidelity_pending(
                     _order_status, normalised
                 )
 
@@ -4365,7 +4410,7 @@ class StoreSyncService:
                 # excluded; its dedicated confirmation prompt owns that stage.
                 # The engine deduplicates on (event_id, automation_id) so even
                 # if a future webhook update re-emits, only one execution fires.
-                if not _cod_awaiting_customer:
+                if not _cod_awaiting_customer and not _payment_fidelity_pending:
                     emit_automation_event(
                         self.db,
                         self.tenant_id,
@@ -4390,34 +4435,42 @@ class StoreSyncService:
                         "[StoreSync] order_notifications event emitted tenant=%s order=%s status=%s payment=%s",
                         self.tenant_id, ext_id, _order_status, _payment_method or "unknown",
                     )
-                else:
+                elif _cod_awaiting_customer:
                     logger.info(
                         "[StoreSync] order_notifications withheld awaiting COD customer confirmation "
                         "tenant=%s order=%s status=%s",
                         self.tenant_id, ext_id, _order_status,
                     )
+                else:
+                    logger.info(
+                        "[StoreSync] order_notifications withheld awaiting payment fidelity "
+                        "tenant=%s order=%s status=%s payment=%s",
+                        self.tenant_id, ext_id, _order_status,
+                        _payment_method or "unknown",
+                    )
 
                 # ── order_created (legacy / backward compat) ─────────────────
                 # Keep emitting order_created so any custom automations wired
                 # to that event string continue to work.
-                emit_automation_event(
-                    self.db,
-                    self.tenant_id,
-                    "order_created",
-                    customer_id=customer.id if customer else None,
-                    payload={
-                        "external_id":           ext_id,
-                        "order_id":              order_row.id,
-                        "status":                _order_status,
-                        "total":                 normalised.get("total"),
-                        "order_number":          normalised.get("external_order_number") or ext_id,
-                        "external_order_number": normalised.get("external_order_number"),
-                        "checkout_url":          normalised.get("checkout_url") or "",
-                        "payment_url":           normalised.get("checkout_url") or "",
-                        "payment_method":        _payment_method,
-                    },
-                    commit=True,
-                )
+                if not _payment_fidelity_pending:
+                    emit_automation_event(
+                        self.db,
+                        self.tenant_id,
+                        "order_created",
+                        customer_id=customer.id if customer else None,
+                        payload={
+                            "external_id":           ext_id,
+                            "order_id":              order_row.id,
+                            "status":                _order_status,
+                            "total":                 normalised.get("total"),
+                            "order_number":          normalised.get("external_order_number") or ext_id,
+                            "external_order_number": normalised.get("external_order_number"),
+                            "checkout_url":          normalised.get("checkout_url") or "",
+                            "payment_url":           normalised.get("checkout_url") or "",
+                            "payment_method":        _payment_method,
+                        },
+                        commit=True,
+                    )
 
                 # ── COD-specific: also emit order_cod_pending ─────────────────
                 # When the payment method is COD AND the order has arrived in a
@@ -4448,6 +4501,7 @@ class StoreSyncService:
                     or nahla_owns_cod_customer_confirmation(order_row)
                 ):
                     _is_cod = False
+                cod_event_emitted = False
                 if _is_cod and not meta.get("cod_webhook_triggered"):
                     emit_automation_event(
                         self.db,
@@ -4472,13 +4526,47 @@ class StoreSyncService:
                         commit=False,
                     )
                     meta["cod_webhook_triggered"] = True
-                    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-                    order_row.extra_metadata = meta
-                    flag_modified(order_row, "extra_metadata")
-                    self.db.commit()
+                    cod_event_emitted = True
                     logger.info(
                         "[StoreSync] order_cod_pending event emitted tenant=%s order=%s",
                         self.tenant_id, ext_id,
+                    )
+
+                if _payment_fidelity_pending:
+                    meta["notifications_withheld_payment_fidelity"] = True
+                    meta["notifications_withheld_payment_fidelity_at"] = (
+                        datetime.now(timezone.utc).isoformat()
+                    )
+                    meta["notifications_withheld_payment_fidelity_by"] = (
+                        "store_sync.order_webhook"
+                    )
+                else:
+                    if meta.pop("notifications_withheld_payment_fidelity", None):
+                        meta["notifications_payment_fidelity_resolved_at"] = (
+                            datetime.now(timezone.utc).isoformat()
+                        )
+                        meta["notifications_payment_fidelity_resolved_by"] = (
+                            "store_sync.order_webhook"
+                        )
+                    if not _cod_awaiting_customer:
+                        meta["notifications_emitted"] = True
+                        meta["notifications_emitted_at"] = (
+                            datetime.now(timezone.utc).isoformat()
+                        )
+                        meta["notifications_emitted_by"] = (
+                            "store_sync.order_webhook"
+                        )
+
+                from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+                order_row.extra_metadata = meta
+                flag_modified(order_row, "extra_metadata")
+                self.db.commit()
+
+                if poller_fidelity_handoff:
+                    logger.info(
+                        "[StoreSync] poller payment-fidelity handoff claimed "
+                        "tenant=%s order=%s cod_event_emitted=%s",
+                        self.tenant_id, ext_id, cod_event_emitted,
                     )
 
             except Exception as exc:
