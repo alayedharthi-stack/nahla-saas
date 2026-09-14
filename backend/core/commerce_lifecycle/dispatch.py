@@ -71,21 +71,41 @@ _SEND_AUDIT_0094_COLUMNS: frozenset[str] = frozenset({
     "send_method",
 })
 
-def commerce_lifecycle_send_audit_schema_ready(db: Session) -> bool:
-    """True when migration 0094/0095 send-audit columns are present on the ledger table."""
+def commerce_lifecycle_send_audit_schema_status(db: Session) -> Dict[str, Any]:
+    """Inspect the connected database for the exact send-audit contract."""
+    required = sorted(_SEND_AUDIT_0094_COLUMNS)
     try:
         bind = db.get_bind()
         insp = sa_inspect(bind)
         table_names = set(insp.get_table_names())
-        if "commerce_lifecycle_notification_ledger" not in table_names:
-            return False
-        columns = {
-            col["name"]
-            for col in insp.get_columns("commerce_lifecycle_notification_ledger")
-        }
-        return _SEND_AUDIT_0094_COLUMNS.issubset(columns)
+        table_present = "commerce_lifecycle_notification_ledger" in table_names
+        present = (
+            {
+                str(col["name"])
+                for col in insp.get_columns("commerce_lifecycle_notification_ledger")
+            }
+            if table_present
+            else set()
+        )
     except Exception:
-        return False
+        logger.exception("[LifecycleDispatch] send-audit schema inspection failed")
+        table_present = False
+        present = set()
+
+    required_present = sorted(set(required).intersection(present))
+    missing = sorted(set(required).difference(present))
+    return {
+        "schema_ready": bool(table_present and not missing),
+        "ledger_table_present": bool(table_present),
+        "required_columns": required,
+        "required_columns_present": required_present,
+        "missing_columns": missing,
+    }
+
+
+def commerce_lifecycle_send_audit_schema_ready(db: Session) -> bool:
+    """True when migration 0094/0095 send-audit columns are present on the ledger table."""
+    return bool(commerce_lifecycle_send_audit_schema_status(db)["schema_ready"])
 
 # Merchant order-update intents with dedicated Meta/session templates.
 _DISPATCHABLE_INTENTS: frozenset[BusinessIntent] = frozenset({
@@ -844,5 +864,6 @@ __all__ = [
     "commerce_lifecycle_dispatch_tenant_permitted",
     "commerce_lifecycle_dispatch_recipient_permitted",
     "commerce_lifecycle_send_audit_schema_ready",
+    "commerce_lifecycle_send_audit_schema_status",
     "dispatch_external_lifecycle_notification",
 ]
