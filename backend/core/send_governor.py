@@ -11,7 +11,7 @@ Global Send Governor — طبقة مركزية تُقرر قبل كل إرسال
 
 Public API
 ──────────
-  check(db, tenant_id, customer_id, automation_type) → GovDecision
+  check(db, tenant_id, customer_id, automation_type, ...) → GovDecision
       استدعِها قبل _try_execute في automation_engine.
       تُعيد GovDecision مع reason_code + label_ar + suggestion_ar.
 
@@ -283,6 +283,7 @@ def check(
     automation_type: str,
     *,
     order_id: Optional[int] = None,
+    initial_cod_confirmation: bool = False,
 ) -> GovDecision:
     """
     📜 قرار Governor: هل نرسل لهذا العميل من هذه الخدمة الآن؟
@@ -345,7 +346,16 @@ def check(
     # customer received a confirmation for another order recently.  Keep this
     # fail-closed when no order identity is present so malformed/manual events
     # still receive the normal priority, cooldown, and frequency checks.
-    if automation_type in _ORDER_SCOPED_TRANSACTIONAL_TYPES and order_id is not None:
+    if (
+        order_id is not None
+        and (
+            automation_type in _ORDER_SCOPED_TRANSACTIONAL_TYPES
+            or (
+                automation_type == "cod_confirmation"
+                and initial_cod_confirmation
+            )
+        )
+    ):
         logger.info(
             "[Governor] ALLOW order-scoped transactional — tenant=%s customer=%s "
             "type=%s order_id=%s",

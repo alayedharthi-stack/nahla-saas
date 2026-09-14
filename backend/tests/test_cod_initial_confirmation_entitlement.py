@@ -11,7 +11,15 @@ from core.automation_engine import (
     _is_initial_cod_confirmation_order_update,
     _try_execute,
 )
-from models import AutomationEvent, AutomationExecution, Base, SmartAutomation
+from core.send_governor import check as governor_check
+from core.send_governor import record_sent
+from models import (
+    AutomationEvent,
+    AutomationExecution,
+    Base,
+    GovernorSendLog,
+    SmartAutomation,
+)
 
 
 def _event(*, event_type="order_cod_pending", message_type=None):
@@ -107,6 +115,8 @@ def test_starter_initial_cod_bypasses_reminder_delay_and_executes_once():
             db,
             message_type="initial_confirmation",
         )
+        record_sent(db, 1, event.customer_id, "abandoned_cart")
+        db.commit()
         starter = SimpleNamespace(plan_slug="starter", has_feature=lambda _: False)
         sender = AsyncMock(return_value=(True, {"template": "nahla_cod_confirmation"}))
 
@@ -132,6 +142,99 @@ def test_starter_initial_cod_bypasses_reminder_delay_and_executes_once():
         assert execution.status == "sent"
         assert execution.event_id == event.id
         assert execution.automation_id == automation.id
+        assert db.query(GovernorSendLog).filter_by(
+            tenant_id=1,
+            customer_id=event.customer_id,
+        ).count() == 2
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_initial_cod_exemption_requires_order_identity_and_bypasses_limits():
+    db, engine = _make_db()
+    try:
+        record_sent(db, 1, 6001, "abandoned_cart")
+        record_sent(db, 1, 6001, "customer_winback")
+        db.commit()
+
+        allowed = governor_check(
+            db,
+            tenant_id=1,
+            customer_id=6001,
+            automation_type="cod_confirmation",
+            order_id=7001,
+            initial_cod_confirmation=True,
+        )
+        missing_order = governor_check(
+            db,
+            tenant_id=1,
+            customer_id=6001,
+            automation_type="cod_confirmation",
+            initial_cod_confirmation=True,
+        )
+        marketing = governor_check(
+            db,
+            tenant_id=1,
+            customer_id=6001,
+            automation_type="new_product_alert",
+            order_id=7001,
+            initial_cod_confirmation=True,
+        )
+        with patch(
+            "core.send_governor._last_sent_any_service",
+            return_value=None,
+        ):
+            missing_order_daily = governor_check(
+                db,
+                tenant_id=1,
+                customer_id=6001,
+                automation_type="cod_confirmation",
+                initial_cod_confirmation=True,
+            )
+
+        assert allowed.allowed is True
+        assert allowed.reason_code == "allowed"
+        assert missing_order.allowed is False
+        assert missing_order.reason_code == "blocked_by_6h_limit"
+        assert marketing.allowed is False
+        assert marketing.reason_code == "blocked_by_6h_limit"
+        assert missing_order_daily.allowed is False
+        assert missing_order_daily.reason_code == "blocked_by_daily_limit"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_growth_cod_reminder_inside_governor_window_remains_delayed():
+    db, engine = _make_db()
+    try:
+        automation, event = _stored_cod_event(
+            db,
+            message_type="reminder",
+            step_idx=1,
+        )
+        record_sent(db, 1, event.customer_id, "abandoned_cart")
+        db.commit()
+        growth = SimpleNamespace(plan_slug="growth", has_feature=lambda _: True)
+        sender = AsyncMock(return_value=(True, {}))
+
+        with patch(
+            "core.plan_entitlements.get_entitlements",
+            return_value=growth,
+        ) as get_entitlements, patch(
+            "core.automation_engine._execute_action",
+            new=sender,
+        ):
+            result = asyncio.run(
+                _try_execute(db, 1, event, automation, event.created_at)
+            )
+
+        assert result == "delay"
+        get_entitlements.assert_called_once_with(db, 1)
+        sender.assert_not_awaited()
+        assert db.query(AutomationExecution).count() == 0
+        assert event.processed is False
     finally:
         db.close()
         engine.dispose()
