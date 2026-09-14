@@ -4342,24 +4342,50 @@ async def _dispatch_message(
                     from services.cod_confirmation import (  # noqa: PLC0415
                         consume_owned_cod_button_inbound,
                         is_owned_cod_button_payload,
+                        resolve_owned_cod_button_payload_from_context,
                     )
                 except Exception as exc:
                     logger.error("[Webhook] COD template-button import failed: %s", exc)
                 else:
-                    if is_owned_cod_button_payload(_btn_payload):
+                    _owned_btn_payload = _btn_payload
+                    _cod_correlation = "payload"
+                    if not is_owned_cod_button_payload(_owned_btn_payload):
+                        _context_wamid = str(
+                            (msg.get("context") or {}).get("id") or ""
+                        ).strip()
+                        _owned_btn_payload = (
+                            resolve_owned_cod_button_payload_from_context(
+                                db,
+                                tenant_id=resolved_tenant_id,
+                                customer_phone=sender,
+                                button_text=_wa_text,
+                                context_wamid=_context_wamid,
+                            )
+                            or ""
+                        )
+                        _cod_correlation = "context_wamid"
+                    if is_owned_cod_button_payload(_owned_btn_payload):
                         async def _cod_tpl_followup(decision, order):
                             await _send_cod_followup_message(
                                 phone_id=used_pid, to=sender,
                                 decision=decision, order=order,
                                 _tenant_id=resolved_tenant_id, _db=db,
                             )
+                        logger.info(
+                            "[COD_BUTTON_ROUTE] consumed tenant=%s sender=%s "
+                            "correlation=%s context_wamid=%s",
+                            resolved_tenant_id,
+                            sender,
+                            _cod_correlation,
+                            str((msg.get("context") or {}).get("id") or "-")[-24:],
+                        )
                         try:
                             await consume_owned_cod_button_inbound(
                                 db,
                                 tenant_id=resolved_tenant_id,
                                 customer_phone=sender,
                                 text=_wa_text,
-                                button_payload=_btn_payload,
+                                button_payload=_owned_btn_payload,
                                 followup_send=_cod_tpl_followup,
                             )
                         except Exception as exc:
