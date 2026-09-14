@@ -770,6 +770,7 @@ async def _try_execute(
                 db, tenant_id, event.customer_id,
                 automation.automation_type,
                 order_id=_order_id,
+                initial_cod_confirmation=_is_initial_cod,
             )
 
             if _gov.decision_type != _GDT.ALLOW_SEND:
