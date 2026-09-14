@@ -1132,6 +1132,60 @@ def test_structured_ui_and_media_can_render_verified_urls_without_raw_text_url(
     assert validate_grounded_reply(context, reply) == []
 
 
+def test_unicode_product_url_representation_is_grounded_after_canonicalization(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded)
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    raw_product_url = (
+        "https://demostore.salla.sa/dev-cgcaqkpx5wgewsyv/"
+        "فستان/p398551325"
+    )
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="product_url",
+                        value=raw_product_url,
+                        subject_product_id=seeded.honey_a.id,
+                    )
+                ],
+            )
+        ]
+    )
+    reply = CommerceReply(
+        text="تقدر تفتح صفحة المنتج.",
+        evidence_refs=[ref],
+        fact_claims=[
+            FactClaim(
+                kind="product_url",
+                value=raw_product_url,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span=None,
+            )
+        ],
+        ui_actions=[
+            UIAction(
+                kind="open_product",
+                label="عرض المنتج",
+                url=raw_product_url,
+                evidence_ref=ref,
+            )
+        ],
+    )
+
+    assert str(reply.ui_actions[0].url) == (
+        "https://demostore.salla.sa/dev-cgcaqkpx5wgewsyv/"
+        "%D9%81%D8%B3%D8%AA%D8%A7%D9%86/p398551325"
+    )
+    assert validate_grounded_reply(context, reply) == []
+
+
 def test_canonical_claim_types_reject_string_prices() -> None:
     with pytest.raises(Exception, match="price must be a JSON number"):
         FactClaim(
@@ -1582,6 +1636,99 @@ async def test_failed_output_guardrail_is_visible_in_run_result(seeded: Seed) ->
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_rejected_url_output_preserves_safe_diagnostic_and_customer_fallback(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded, trace_id="rejected-url-diagnostic")
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    evidence_url = "https://shop.example.test/products/a-honey"
+    invented_url = "https://shop.example.test/products/invented"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="product_url",
+                        value=evidence_url,
+                        subject_product_id=seeded.honey_a.id,
+                    )
+                ],
+            )
+        ]
+    )
+    rejected = CommerceReply(
+        text="افتح صفحة المنتج من الزر.",
+        evidence_refs=[ref],
+        fact_claims=[
+            FactClaim(
+                kind="product_url",
+                value=evidence_url,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span=None,
+            )
+        ],
+        ui_actions=[
+            UIAction(
+                kind="open_product",
+                label="عرض المنتج",
+                url=invented_url,
+                evidence_ref=ref,
+            )
+        ],
+    )
+
+    result = await run_commerce_agent(
+        context=context,
+        user_input="أرسل رابط المنتج",
+        model=ScriptedModel([[assistant_message(rejected.model_dump_json())]]),
+        model_name="guardrail-url-diagnostic",
+    )
+
+    assert result.status == "failed"
+    assert result.failure_reason == "output_guardrail_tripwire:action_url_not_in_evidence"
+    assert result.reply.safe_fallback_reason == result.failure_reason
+    assert result.reply.text == "لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن."
+    output_info = result.guardrail_results[0]["output_info"]
+    diagnostic = output_info["rejected_output_diagnostic"]
+    assert diagnostic["artifact"] == "rejected_model_commerce_reply"
+    assert diagnostic["customer_delivered"] is False
+    assert diagnostic["customer_fallback_artifact"] == "safe_fallback_reply"
+    assert "action_url_not_in_evidence" in diagnostic["guardrail_error_codes"]
+    action_comparison = next(
+        item
+        for item in diagnostic["url_comparisons"]
+        if item["comparison_stage"] == "ui_action_to_evidence"
+    )
+    assert action_comparison["canonical_equal"] is False
+    assert action_comparison["evidence_ref_exists"] is True
+    assert action_comparison["subject_binding_matches"] is True
+    persisted_shape = json.dumps(result.guardrail_results, ensure_ascii=False)
+    assert evidence_url not in persisted_shape
+    assert invented_url not in persisted_shape
+    assert rejected.text not in persisted_shape
+
+    from models import CommerceAgentV2ShadowRun
+
+    _persist_shadow_result(seeded.db, context, result)
+    row = (
+        seeded.db.query(CommerceAgentV2ShadowRun)
+        .filter(CommerceAgentV2ShadowRun.sdk_trace_id == result.sdk_trace_id)
+        .one()
+    )
+    assert row.structured_output["text"] == result.reply.text
+    assert row.structured_output["safe_fallback_reason"] == result.failure_reason
+    stored_diagnostic = row.guardrail_results[0]["output_info"][
+        "rejected_output_diagnostic"
+    ]
+    assert stored_diagnostic == diagnostic
+    assert stored_diagnostic["artifact"] == "rejected_model_commerce_reply"
 
 
 @pytest.mark.asyncio
