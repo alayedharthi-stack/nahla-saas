@@ -151,6 +151,99 @@ def is_owned_cod_button_payload(raw: Optional[str]) -> bool:
     return action is not None
 
 
+def resolve_owned_cod_button_payload_from_context(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    button_text: str,
+    context_wamid: Optional[str],
+) -> Optional[str]:
+    """Recover a COD action only from a correlated outbound COD prompt.
+
+    Meta template quick replies can arrive as type=button with a template
+    default payload instead of Nahla's deterministic payload when the outbound
+    template component omitted the runtime payload. The visible Arabic title
+    is never sufficient: ownership requires reply context.id to match a sent
+    order_cod_pending automation execution, and the event's order must match
+    tenant, customer, phone, COD metadata, and the sent-prompt stamp.
+
+    The order need not still be pending here so a replay remains owned and is
+    consumed before Brain; handle_cod_reply enforces pending state before any
+    provider or local mutation.
+    """
+    context_id = str(context_wamid or "").strip()
+    action = classify_cod_reply(button_text)
+    if not context_id or action not in {"confirm", "cancel"}:
+        return None
+
+    from models import AutomationEvent, AutomationExecution, Order  # noqa: PLC0415
+
+    candidates = (
+        db.query(AutomationExecution, AutomationEvent)
+        .join(AutomationEvent, AutomationExecution.event_id == AutomationEvent.id)
+        .filter(
+            AutomationExecution.tenant_id == int(tenant_id),
+            AutomationExecution.status == "sent",
+            AutomationEvent.tenant_id == int(tenant_id),
+            AutomationEvent.event_type == "order_cod_pending",
+        )
+        .order_by(AutomationExecution.executed_at.desc())
+        .limit(200)
+        .all()
+    )
+    for execution, event in candidates:
+        action_taken = getattr(execution, "action_taken", None) or {}
+        if not isinstance(action_taken, dict):
+            continue
+        if str(action_taken.get("wa_message_id") or "").strip() != context_id:
+            continue
+
+        event_payload = getattr(event, "payload", None) or {}
+        if not isinstance(event_payload, dict):
+            continue
+        raw_order_id = (
+            event_payload.get("order_internal_id")
+            or event_payload.get("order_id")
+        )
+        try:
+            order_id = int(raw_order_id)
+        except (TypeError, ValueError):
+            continue
+
+        order = (
+            db.query(Order)
+            .filter(
+                Order.id == order_id,
+                Order.tenant_id == int(tenant_id),
+            )
+            .first()
+        )
+        if order is None:
+            continue
+        event_customer_id = getattr(event, "customer_id", None)
+        order_customer_id = getattr(order, "customer_id", None)
+        if (
+            event_customer_id is not None
+            and order_customer_id is not None
+            and int(event_customer_id) != int(order_customer_id)
+        ):
+            continue
+        meta = getattr(order, "extra_metadata", None) or {}
+        if not isinstance(meta, dict):
+            continue
+        payment_method = str(meta.get("payment_method") or "").strip().lower()
+        if payment_method not in {"cod", "cash_on_delivery", "cod_payment", "cash"}:
+            continue
+        if not meta.get("nahla_cod_confirmation_sent"):
+            continue
+        if not _order_phone_matches(order, customer_phone):
+            continue
+        return f"nahla_cod_{action}:{order_id}"
+
+    return None
+
+
 async def intercept_cod_button_inbound(
     db,
     *,
