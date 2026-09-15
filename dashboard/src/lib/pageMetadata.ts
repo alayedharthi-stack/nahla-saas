@@ -71,6 +71,7 @@ const PAGE_META: Record<string, PageMetaSelector> = {
   '/admin/coexistence':          tr => tr.adminPages.coexistence,
   '/admin/tools':                tr => tr.adminPages.tools,
   '/admin/ai-quality':           tr => tr.adminPages.aiQuality,
+  '/admin/internal-e2e':         _tr => ({ title: 'INTERNAL_E2E Operator', subtitle: 'Controlled Tenant 1 A/B/C smoke console' }),
 }
 
 export function resolvePageMetaSelector(pathname: string): PageMetaSelector | undefined {
