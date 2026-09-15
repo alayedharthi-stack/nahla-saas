@@ -202,6 +202,9 @@ def create_order_shipment(
     Raises ``ValueError`` with reason_key when blocked.
     """
     from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+    from core.internal_e2e_safety import assert_external_order_eligible  # noqa: PLC0415
+
+    assert_external_order_eligible(order, operation="create_order_shipment")
 
     deny_external_egress(
         egress_kind="shipping",
@@ -270,6 +273,9 @@ def generate_shipment_label(
     Placeholder label generation — stores metadata only (no external PDF).
     """
     from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+    from core.internal_e2e_safety import assert_external_order_eligible  # noqa: PLC0415
+
+    assert_external_order_eligible(order, operation="generate_shipment_label")
 
     deny_external_egress(
         egress_kind="shipping",

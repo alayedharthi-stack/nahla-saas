@@ -325,9 +325,9 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
     from models import Order  # noqa: PLC0415
     from store_integration.registry import adapter_for_integration  # noqa: PLC0415
 
-    pre_ids = {
-        oid for (oid,) in db.query(Order.id).filter(Order.tenant_id == tenant_id).all()
-    }
+    from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+    pre_rows = db.query(Order).filter(Order.tenant_id == tenant_id).all()
+    pre_ids = {int(row.id) for row in pre_rows if not is_internal_e2e_order(row)}
 
     from services.store_sync import StoreSyncService  # noqa: PLC0415
 
@@ -409,6 +409,7 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
         .filter(Order.tenant_id == tenant_id)
         .all()
     )
+    post_rows = [row for row in post_rows if not is_internal_e2e_order(row)]
     post_ids = {o.id for o in post_rows}
     new_ids = post_ids - pre_ids
 
@@ -447,6 +448,9 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
 
 def _emit_for_order(db: Session, tenant_id: int, order: Any) -> bool:
     """Emit ORDER_NOTIFICATIONS (and ORDER_COD_PENDING when COD) exactly once."""
+    from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+    if is_internal_e2e_order(order):
+        return False
     meta = dict(order.extra_metadata or {})
     if meta.get("notifications_emitted"):
         return False

@@ -455,6 +455,7 @@ from routers.product_interests import router as _product_interests_router    # n
 # Read-only endpoints; no send-behaviour side effects.
 from routers.delivery_quality   import router as _delivery_quality_router    # noqa: E402
 from routers.operations_center  import router as _operations_center_router   # noqa: E402
+from routers.internal_commerce_e2e import router as _internal_commerce_e2e_router  # noqa: E402
 
 # TEMPORARY: token-gated public debug router. Safe to delete once the
 # abandoned-cart investigation is closed. See routers/debug_public.py.
@@ -484,6 +485,7 @@ app.include_router(_order_updates_router)
 app.include_router(_campaigns_router)
 app.include_router(_delivery_quality_router)
 app.include_router(_operations_center_router)
+app.include_router(_internal_commerce_e2e_router)
 app.include_router(_campaign_wizard_router)
 app.include_router(_automations_router)
 app.include_router(_analytics_router)

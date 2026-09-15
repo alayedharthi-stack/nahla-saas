@@ -51,6 +51,13 @@ async def generate_payment_link(
     Returns a real Moyasar link, store adapter link, or placeholder — in that priority.
     """
     from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+    from core.internal_e2e_safety import (  # noqa: PLC0415
+        assert_external_order_reference_eligible,
+    )
+
+    assert_external_order_reference_eligible(
+        order_id, operation="generate_payment_link"
+    )
 
     deny_external_egress(
         egress_kind="financial",

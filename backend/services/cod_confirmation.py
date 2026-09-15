@@ -713,6 +713,9 @@ def stamp_initial_cod_automation_send_success(
 
 def nahla_owns_cod_customer_confirmation(order: Any) -> bool:
     """True when Nahla checkout already requested or resolved COD confirm."""
+    from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+    if is_internal_e2e_order(order):
+        return False
     meta = getattr(order, "extra_metadata", None) or {}
     if not isinstance(meta, dict):
         return False
@@ -914,6 +917,9 @@ def find_pending_cod_orders(
     )
     matches = []
     for candidate in candidates:
+        from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+        if is_internal_e2e_order(candidate):
+            continue
         meta = dict(getattr(candidate, "extra_metadata", None) or {})
         payment_method = str(meta.get("payment_method") or "").strip().lower()
         is_cod = payment_method in {"cod", "cash_on_delivery", "cod_payment", "cash"}
@@ -966,6 +972,12 @@ def _load_bound_pending_cod_order(
             "order_not_found_or_status_not_pending",
             tenant_id=tenant_id,
             order_id=order_id,
+        )
+        return None
+    from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+    if is_internal_e2e_order(order):
+        _log_cod_evidence_rejection(
+            "internal_e2e_order_forbidden", tenant_id=tenant_id, order_id=order_id
         )
         return None
     if not _order_phone_matches(order, customer_phone):

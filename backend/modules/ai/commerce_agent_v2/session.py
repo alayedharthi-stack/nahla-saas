@@ -30,6 +30,7 @@ class ConversationMessageSession:
         from models import Conversation, MessageEvent
 
         self._context.assert_scope()
+        self._context.begin_session_history_query()
         db = self._context.db
         conversation = (
             db.query(Conversation)
@@ -48,12 +49,17 @@ class ConversationMessageSession:
         # Fetch newest rows first so PostgreSQL applies the bounded history
         # window. One extra row allows the already-persisted current inbound
         # WAMID to be excluded without shrinking normal history by one.
+        directions = (
+            ("internal_e2e_inbound", "internal_e2e_outbound")
+            if self._context.channel == "internal_e2e"
+            else ("in", "inbound", "out", "outbound")
+        )
         query = (
             db.query(MessageEvent)
             .filter(
                 MessageEvent.conversation_id == self._context.conversation_id,
                 MessageEvent.tenant_id == self._context.tenant_id,
-                MessageEvent.direction.in_(("in", "inbound", "out", "outbound")),
+                MessageEvent.direction.in_(directions),
             )
             .order_by(MessageEvent.created_at.desc(), MessageEvent.id.desc())
         )
@@ -68,9 +74,37 @@ class ConversationMessageSession:
         for row in rows:
             TenantIsolationLayer.assert_belongs(row, self._context.tenant_context)
             metadata = dict(getattr(row, "extra_metadata", None) or {})
+            if self._context.channel == "internal_e2e":
+                from modules.ai.commerce_agent_v2.internal_e2e_identity import (
+                    metadata_matches_internal_e2e_identity,
+                )
+
+                if self._context.synthetic_customer_alias is None or not (
+                    str(getattr(row, "direction", "") or "") in directions
+                    and metadata_matches_internal_e2e_identity(
+                        metadata,
+                        tenant_id=self._context.tenant_id,
+                        alias=self._context.synthetic_customer_alias,
+                    )
+                ):
+                    raise TenantIsolationViolation(
+                        "internal_e2e_session_history_provenance_invalid"
+                    )
+                self._context.record_session_history_row(
+                    message_id=int(row.id),
+                    tenant_id=int(row.tenant_id),
+                    conversation_id=int(row.conversation_id),
+                    direction=str(row.direction),
+                    metadata=metadata,
+                )
             # The SDK receives the current turn as Runner input. Exclude the
             # already-persisted webhook row so it is not sent twice.
-            if str(metadata.get("wa_message_id") or "") == self._context.inbound_trace_id:
+            persisted_inbound_id = str(
+                metadata.get("wa_message_id")
+                or metadata.get("internal_message_id")
+                or ""
+            )
+            if persisted_inbound_id == self._context.inbound_trace_id:
                 continue
             body = self._context.redact_unexposed_customer_identity(
                 str(getattr(row, "body", "") or "")
@@ -78,9 +112,10 @@ class ConversationMessageSession:
             if not body:
                 continue
             direction = str(getattr(row, "direction", "") or "").lower()
+            inbound_directions = {"in", "inbound", "internal_e2e_inbound"}
             canonical.append(
                 {
-                    "role": "user" if direction in {"in", "inbound"} else "assistant",
+                    "role": "user" if direction in inbound_directions else "assistant",
                     "content": body,
                 }
             )
