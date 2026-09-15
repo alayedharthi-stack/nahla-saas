@@ -391,6 +391,34 @@ def _matching_evidence_fact(
     return None
 
 
+def _action_url_has_bound_evidence(record: EvidenceRecord | None, action: Any) -> bool:
+    """Validate an action directly against its canonical, subject-bound evidence.
+
+    UI actions already carry an evidence reference. Requiring a second, duplicate
+    URL ``FactClaim`` made otherwise valid catalog actions fail closed whenever
+    the model emitted the action without repeating the URL claim. The record
+    source and canonical fact subject remain mandatory here, so the action cannot
+    borrow the same URL from another product or order.
+    """
+    if record is None:
+        return False
+    expected_kind = "product_url" if action.kind == "open_product" else "tracking_url"
+    expected_source = "catalog_product" if action.kind == "open_product" else "order_shipment"
+    if record.source != expected_source:
+        return False
+    for fact in record.facts:
+        if fact.kind != expected_kind or not canonical_http_url_equal(fact.value, action.url):
+            continue
+        subject_id = (
+            fact.subject_product_id
+            if action.kind == "open_product"
+            else fact.subject_order_id
+        )
+        if subject_id is not None and record.source_id == str(subject_id):
+            return True
+    return False
+
+
 def _span_expresses_claim(
     context: CommerceAgentContext,
     record: EvidenceRecord,
@@ -907,23 +935,21 @@ def validate_grounded_reply(
     for action in reply.ui_actions:
         record = evidence.get(action.evidence_ref)
         expected_kind = "product_url" if action.kind == "open_product" else "tracking_url"
-        evidence_url_matches = bool(
-            record is not None
-            and any(
-                fact.kind == expected_kind
-                and canonical_http_url_equal(fact.value, action.url)
-                for fact in record.facts
+        linked_claims = [
+            claim
+            for claim in reply.fact_claims
+            if claim.kind == expected_kind and claim.evidence_ref == action.evidence_ref
+        ]
+        action_is_grounded = (
+            any(
+                claim in verified_claims
+                and canonical_http_url_equal(claim.value, action.url)
+                for claim in linked_claims
             )
+            if linked_claims
+            else _action_url_has_bound_evidence(record, action)
         )
-        verified_subject_matches = any(
-            claim.kind == expected_kind
-            and claim.evidence_ref == action.evidence_ref
-            and canonical_http_url_equal(claim.value, action.url)
-            for claim in verified_claims
-        )
-        if record is not None and not (
-            evidence_url_matches and verified_subject_matches
-        ):
+        if record is not None and not action_is_grounded:
             errors.append("action_url_not_in_evidence")
 
     claimed_urls = {

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from modules.ai.commerce_agent_v2.output import CommerceReply, EvidenceRecord
+from modules.ai.commerce_agent_v2.url_grounding import canonical_http_url_equal
 
 
 DeliveryKind = Literal["text", "product", "image", "ui_action", "unsupported"]
@@ -85,11 +86,26 @@ def build_commerce_delivery_plan(
 
     for ui_action in reply.ui_actions:
         record = evidence.get(ui_action.evidence_ref)
+        expected_kind = "product_url" if ui_action.kind == "open_product" else "tracking_url"
+        expected_source = "catalog_product" if ui_action.kind == "open_product" else "order_shipment"
         supported = bool(
             record
+            and record.source == expected_source
             and any(
-                fact.kind in {"product_url", "tracking_url"}
-                and str(fact.value) == str(ui_action.url)
+                fact.kind == expected_kind
+                and canonical_http_url_equal(fact.value, ui_action.url)
+                and (
+                    fact.subject_product_id
+                    if ui_action.kind == "open_product"
+                    else fact.subject_order_id
+                )
+                is not None
+                and record.source_id
+                == str(
+                    fact.subject_product_id
+                    if ui_action.kind == "open_product"
+                    else fact.subject_order_id
+                )
                 for fact in record.facts
             )
         )
