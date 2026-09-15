@@ -11,8 +11,9 @@ import { featureRealityApi, type DashboardConversation, type DashboardMessage, t
 import { customersApi } from '../api/customers'
 import { handoffApi } from '../api/handoff'
 import { getTenantId } from '../auth'
-import InboundMediaPreview from '../components/inbound/InboundMediaPreview'
 import EditCustomerNameModal from '../components/conversations/EditCustomerNameModal'
+import CustomerOrdersDrawer from '../components/conversations/CustomerOrdersDrawer'
+import MessagePresentationCard from '../components/conversations/MessagePresentationCard'
 import CampaignExcludeControl from '../components/customers/CampaignExcludeControl'
 import ConversationFiltersMobileMenu from '../components/conversations/ConversationFiltersMobileMenu'
 import {
@@ -44,6 +45,12 @@ import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD, resolveOutboundSendError } from '../i18n/uiOnly'
 import { useMobileChatFullscreen } from '../context/MobileChatFullscreenContext'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import {
+  isConversationNearBottom,
+  pinConversationToLatestAfterLayout,
+  preservedHistoryScrollTop,
+  shouldAutoScrollForNewMessage,
+} from '../lib/conversationScroll'
 
 const LIST_PAGE_LIMIT = 60
 const LIST_POLL_MS = 5_000
@@ -94,8 +101,6 @@ const SENDER_TYPE_STYLES: Record<MessageEventType, { icon: React.ReactNode; cls:
 interface Conversation extends DashboardConversation {
   messages: DashboardMessage[]
 }
-
-const SCROLL_NEAR_BOTTOM_PX = 80
 
 function _normalizePhoneDigits(phone: string): string {
   return (phone || '').replace(/\D/g, '')
@@ -191,6 +196,8 @@ export default function Conversations() {
   const headerMenuRef = useRef<HTMLDivElement | null>(null)
   const [mobileFilterMenuOpen, setMobileFilterMenuOpen] = useState(false)
   const [aiPausedPopoverOpen, setAiPausedPopoverOpen] = useState(false)
+  const [customerOrdersOpen, setCustomerOrdersOpen] = useState(false)
+  const [newMessagesBelow, setNewMessagesBelow] = useState(false)
   const aiPausedPopoverRef = useRef<HTMLDivElement | null>(null)
 
   const isMobileViewport = useMediaQuery('(max-width: 767px)')
@@ -200,12 +207,14 @@ export default function Conversations() {
   const [mobileView, setMobileView] = useState<'list' | 'chat'>('list')
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContentRef = useRef<HTMLDivElement>(null)
   const textareaRef    = useRef<HTMLTextAreaElement>(null)
   const isNearBottomRef = useRef(true)
   const pauseAutoScrollRef = useRef(false)
   const prevMessageCountRef = useRef(0)
   const prevLastMessageIdRef = useRef<number | string | null>(null)
   const selectedPhoneForScrollRef = useRef<string | null>(null)
+  const layoutScrollCleanupRef = useRef<(() => void) | null>(null)
 
   const listCtrlRef         = useRef<AbortController | null>(null)
   const msgsCtrlRef         = useRef<AbortController | null>(null)
@@ -598,6 +607,7 @@ export default function Conversations() {
     setLoadingOlderMessages(true)
     const scrollEl = messagesScrollRef.current
     const prevHeight = scrollEl?.scrollHeight ?? 0
+    const prevTop = scrollEl?.scrollTop ?? 0
     try {
       const { messages: older, has_more } = await featureRealityApi.conversationMessages(phone, {
         limit: MESSAGE_PAGE_LIMIT,
@@ -618,7 +628,11 @@ export default function Conversations() {
       saveConversationMessagesCache(getTenantId(), phone, merged, has_more)
       requestAnimationFrame(() => {
         if (scrollEl) {
-          scrollEl.scrollTop = scrollEl.scrollHeight - prevHeight
+          scrollEl.scrollTop = preservedHistoryScrollTop({
+            previousScrollTop: prevTop,
+            previousScrollHeight: prevHeight,
+            nextScrollHeight: scrollEl.scrollHeight,
+          })
         }
       })
     } catch (err: unknown) {
@@ -691,24 +705,18 @@ export default function Conversations() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter])
 
-  const isScrollNearBottom = (el: HTMLElement) =>
-    el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_NEAR_BOTTOM_PX
-
   const syncScrollAnchors = (el: HTMLElement) => {
-    const nearBottom = isScrollNearBottom(el)
+    const nearBottom = isConversationNearBottom(el)
     isNearBottomRef.current = nearBottom
-    if (nearBottom) pauseAutoScrollRef.current = false
+    if (nearBottom) {
+      pauseAutoScrollRef.current = false
+      setNewMessagesBelow(false)
+    }
     return nearBottom
   }
 
   const markUserScrolling = () => {
     pauseAutoScrollRef.current = true
-  }
-
-  const mayAutoScrollToBottom = () => {
-    const el = messagesScrollRef.current
-    if (el) syncScrollAnchors(el)
-    return !pauseAutoScrollRef.current && isNearBottomRef.current
   }
 
   const scrollMessagesToBottom = (behavior: ScrollBehavior = 'smooth') => {
@@ -720,6 +728,7 @@ export default function Conversations() {
     }
     isNearBottomRef.current = true
     pauseAutoScrollRef.current = false
+    setNewMessagesBelow(false)
   }
 
   // Close filter sheet when entering chat view (mobile).
@@ -753,7 +762,8 @@ export default function Conversations() {
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [aiPausedPopoverOpen])
 
-  // Scroll to bottom once when opening a conversation.
+  // Opening/switching conversations intentionally pins to the latest message.
+  // The short ResizeObserver window absorbs late image/card layout changes.
   useEffect(() => {
     if (!selected) return
     const phoneChanged = selectedPhoneForScrollRef.current !== selected.phone
@@ -761,9 +771,23 @@ export default function Conversations() {
     selectedPhoneForScrollRef.current = selected.phone
     isNearBottomRef.current = true
     pauseAutoScrollRef.current = false
+    setNewMessagesBelow(false)
     prevMessageCountRef.current = 0
     prevLastMessageIdRef.current = null
-    requestAnimationFrame(() => scrollMessagesToBottom('auto'))
+    layoutScrollCleanupRef.current?.()
+    requestAnimationFrame(() => {
+      const viewport = messagesScrollRef.current
+      if (!viewport) return
+      layoutScrollCleanupRef.current = pinConversationToLatestAfterLayout(
+        viewport,
+        messagesContentRef.current,
+        { settleMs: 2_000 },
+      )
+    })
+    return () => {
+      layoutScrollCleanupRef.current?.()
+      layoutScrollCleanupRef.current = null
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.phone])
 
@@ -782,17 +806,21 @@ export default function Conversations() {
     if (count === 0) return
 
     if (prevCount === 0 && count > 0) {
-      if (mayAutoScrollToBottom()) {
-        requestAnimationFrame(() => scrollMessagesToBottom('auto'))
-      }
+      requestAnimationFrame(() => scrollMessagesToBottom('auto'))
       return
     }
 
     const appendedAtEnd = lastId != null && lastId !== prevLastId && count >= prevCount
     if (!appendedAtEnd) return
 
-    if (mayAutoScrollToBottom()) {
+    const shouldScroll = shouldAutoScrollForNewMessage({
+      wasNearBottom: isNearBottomRef.current,
+      operatorPausedAutoScroll: pauseAutoScrollRef.current,
+    })
+    if (shouldScroll) {
       requestAnimationFrame(() => scrollMessagesToBottom('smooth'))
+    } else {
+      setNewMessagesBelow(true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.messages])
@@ -816,6 +844,8 @@ export default function Conversations() {
     setSelected(withMessages)
     setHasMoreMessages(Boolean(cached?.hasMore))
     setLoadingMessages(!cached?.messages?.length)
+    setCustomerOrdersOpen(false)
+    setNewMessagesBelow(false)
     setMobileFilterMenuOpen(false)
     setMobileView('chat')
     loadMessagesForOpenChat(c.phone)
@@ -834,6 +864,7 @@ export default function Conversations() {
 
   const goBackToList = () => {
     setAiPausedPopoverOpen(false)
+    setCustomerOrdersOpen(false)
     setMobileView('list')
   }
 
@@ -1552,7 +1583,10 @@ export default function Conversations() {
         ) : (
           <>
             {/* Chat header — fixed row; messages scroll independently below */}
-            <div className="shrink-0 z-10 flex items-center gap-2 px-3 md:px-5 py-2.5 md:py-3 border-b border-slate-100 bg-white shadow-sm min-w-0">
+            <div
+              data-sticky-customer-header
+              className="sticky top-0 shrink-0 z-20 flex items-center gap-2 px-3 md:px-5 py-2.5 md:py-3 border-b border-slate-100 bg-white shadow-sm min-w-0"
+            >
               {/* Back → conversation list (mobile only) */}
               <button
                 onClick={goBackToList}
@@ -1588,11 +1622,11 @@ export default function Conversations() {
                       className="w-3.5 h-3.5 shrink-0 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hidden md:block"
                     />
                   </span>
-                  <span className={`text-xs text-slate-400 flex items-center gap-1 truncate w-full mt-0.5 ${
-                    conversationHasDisplayName(selected, phonesMatch) ? 'md:mt-0' : 'md:hidden'
-                  }`}>
-                    <Phone className="w-3 h-3 shrink-0 md:hidden" />
+                  <span className="text-xs text-slate-400 flex items-center gap-1 truncate w-full mt-0.5">
+                    <Phone className="w-3 h-3 shrink-0" />
                     <span className="truncate">{selected.phone}</span>
+                    <span className="mx-1 text-slate-300" aria-hidden="true">•</span>
+                    <span className="shrink-0">WhatsApp</span>
                   </span>
                 </button>
 
@@ -1639,6 +1673,17 @@ export default function Conversations() {
 
               {/* Desktop: pause/resume + menu. Mobile: menu only (AI toggle in reply bar). */}
               <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  data-customer-orders-trigger
+                  className="h-9 inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 md:px-3 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 hover:bg-slate-100"
+                  onClick={() => setCustomerOrdersOpen(true)}
+                  aria-label={cp.actions.customerOrders}
+                  title={cp.actions.customerOrders}
+                >
+                  <ShoppingCart className="w-4 h-4 text-brand-600" />
+                  <span className="hidden lg:inline">{cp.actions.customerOrders}</span>
+                </button>
                 {!_isBlocked(selected) && (aiToggleKind(selected) === 'resume' ? (
                     <button
                       className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50"
@@ -1823,6 +1868,16 @@ export default function Conversations() {
               dir={dir}
             />
 
+            <CustomerOrdersDrawer
+              open={customerOrdersOpen}
+              onClose={() => setCustomerOrdersOpen(false)}
+              phone={selected.phone}
+              customerId={selected.customerId ?? null}
+              customerLabel={selected.customer || selected.phone}
+              labels={cp.customerOrders}
+              dir={dir}
+            />
+
             {/* AI paused banner — desktop only; mobile uses header badge */}
             {isAiPaused(selected) && (
               <div className="hidden md:flex items-center gap-2.5 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-sm text-amber-700 shrink-0">
@@ -1870,6 +1925,7 @@ export default function Conversations() {
                   }
                 }}
               >
+              <div ref={messagesContentRef} data-conversation-message-content>
               {loadingOlderMessages && (
                 <div className="flex items-center justify-center py-2 gap-2 text-xs text-slate-400">
                   <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-500" />
@@ -1919,153 +1975,38 @@ export default function Conversations() {
                           </span>
                         )}
 
-                        {/* Bubble + WhatsApp-style Buttons */}
+                        {/* Canonical customer-visible structure; legacy rows fall back to stored text/media only. */}
                         {(() => {
-                          const sep = '━━━━━'
-                          const hasButtons = m.body.includes(sep)
-                          const textPart = hasButtons ? m.body.split(sep)[0].trimEnd() : m.body
-                          const btnLines = hasButtons
-                            ? m.body.split(sep).slice(1).join('').trim().split('\n').filter(Boolean)
-                            : []
-
-                          const parseBtn = (raw: string) => {
-                            const t = raw.trim()
-                            if (t.startsWith('📋')) return { icon: '📋', label: t.replace(/^📋\s*/, ''), type: 'copy' as const }
-                            if (t.startsWith('🔗')) return { icon: '🔗', label: t.replace(/^🔗\s*/, ''), type: 'url' as const }
-                            if (t.startsWith('↩️')) return { icon: '↩️', label: t.replace(/^↩️\s*/, ''), type: 'reply' as const }
-                            return { icon: '', label: t, type: 'reply' as const }
-                          }
-
-                          // Media preview: render the audio player / image
-                          // preview INSTEAD of the textual bubble.
-                          //
-                          // Originally this only fired for inbound customer
-                          // media (``!isOut && m.media``). May 2026 P1 fix:
-                          // also fire for OUTBOUND merchant-mobile echoes
-                          // (Coexistence ``smb_message_echo``) so an image
-                          // the merchant sent from his mobile WhatsApp app
-                          // appears as a real image instead of the literal
-                          // ``[merchant_image]`` placeholder.
-                          //
-                          // The backend's ``_build_media_block`` only
-                          // returns a non-null ``media`` when a real
-                          // storage URL exists (it reads
-                          // ``extra_metadata.normalized_inbound``), so
-                          // relaxing the guard here cannot accidentally
-                          // render a media bubble for unrelated outbound
-                          // text.
-                          const mediaPreview = m.media || null
-
+                          const presentations = m.responseBundle?.presentations?.length
+                            ? m.responseBundle.presentations
+                            : [{
+                                version: 'message_presentation_v1' as const,
+                                kind: 'text' as const,
+                                body: m.body,
+                                text_direction: 'auto' as const,
+                                actions: [],
+                              }]
                           return (
-                            <>
-                              {mediaPreview ? (
-                                <div className={`
-                                  relative px-3 py-2 text-sm leading-relaxed shadow-sm
-                                  ${isOut
-                                    ? 'bg-amber-50 text-slate-800 rounded-2xl rounded-ee-sm border border-amber-100'
-                                    : 'bg-white text-slate-800 rounded-2xl rounded-es-sm border border-slate-100'}
-                                `}>
-                                  <InboundMediaPreview media={mediaPreview} />
-                                </div>
-                              ) : (
-                                (() => {
-                                  // ── Bubble theming by send status ──────────────
-                                  // Outbound bubbles MUST look different from the
-                                  // "delivered" state when the message never made
-                                  // it (or hasn't been confirmed yet). The merchant
-                                  // should be able to glance at the chat and see
-                                  // failures at a distance.
-                                  //
-                                  //   • sent / null (historical) → full brand
-                                  //   • queued                   → 70% opacity +
-                                  //                                  dashed border
-                                  //                                  + clock cue
-                                  //   • failed                   → red-tinted
-                                  //                                  background +
-                                  //                                  red border +
-                                  //                                  serif italic
-                                  //                                  underline-style
-                                  //                                  to read as
-                                  //                                  "draft, not
-                                  //                                  delivered"
-                                  let outboundTheme = 'bg-brand-500 text-white'
-                                  if (isOut) {
-                                    if (m.sendStatus === 'queued') {
-                                      outboundTheme =
-                                        'bg-brand-400/70 text-white/95 border border-dashed border-white/40'
-                                    } else if (m.sendStatus === 'failed') {
-                                      outboundTheme =
-                                        'bg-red-50 text-red-900 border border-red-300 ring-1 ring-red-100'
-                                    } else if (m.sendStatus === 'suppressed') {
-                                      outboundTheme =
-                                        'bg-slate-100 text-slate-600 border border-slate-300 border-dashed'
-                                    }
-                                  }
-                                  const radiusOut = btnLines.length
-                                    ? 'rounded-t-2xl rounded-ee-sm'
-                                    : 'rounded-2xl rounded-ee-sm'
-                                  const radiusIn = btnLines.length
-                                    ? 'rounded-t-2xl rounded-es-sm'
-                                    : 'rounded-2xl rounded-es-sm border border-slate-100'
-                                  return (
-                                    <div className={`
-                                      relative px-3.5 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words
-                                      shadow-sm
-                                      ${isOut
-                                        ? `${outboundTheme} ${radiusOut}`
-                                        : `bg-white text-slate-800 ${radiusIn}`
-                                      }
-                                    `}>
-                                      {textPart}
-                                      {/* "DRAFT" overlay watermark for failed
-                                          messages — makes the bubble feel like
-                                          something that did NOT leave the
-                                          merchant's outbox. */}
-                                      {isOut && (m.sendStatus === 'failed' || m.sendStatus === 'suppressed') && (
-                                        <span className="absolute -top-2 start-2 px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-red-500 text-white shadow-sm">
-                                          {cp.delivery.notSent}
-                                        </span>
-                                      )}
-                                    </div>
-                                  )
-                                })()
+                            <div
+                              className={`w-full space-y-1 ${
+                                isOut && m.sendStatus === 'queued' ? 'opacity-75' : ''
+                              } ${isOut && (m.sendStatus === 'failed' || m.sendStatus === 'suppressed') ? 'ring-1 ring-red-200 rounded-2xl' : ''}`}
+                            >
+                              {presentations.map((presentation, presentationIndex) => (
+                                <MessagePresentationCard
+                                  key={`${m.id}-presentation-${presentationIndex}`}
+                                  presentation={presentation}
+                                  isOutbound={isOut}
+                                  legacyMedia={presentationIndex === 0 ? m.media : null}
+                                  labels={cp.presentation}
+                                />
+                              ))}
+                              {isOut && (m.sendStatus === 'failed' || m.sendStatus === 'suppressed') && (
+                                <span className="inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-red-500 text-white shadow-sm">
+                                  {cp.delivery.notSent}
+                                </span>
                               )}
-                              {btnLines.length > 0 && (
-                                <div className="flex flex-col gap-[3px] mt-[3px] w-full">
-                                  {btnLines.map((line, bi) => {
-                                    const btn = parseBtn(line)
-                                    return (
-                                      <div
-                                        key={bi}
-                                        className="
-                                          flex items-center justify-center gap-2 py-2 px-3
-                                          bg-white rounded-lg shadow-sm border border-slate-100
-                                          text-[13px] font-medium text-[#00a884]
-                                          cursor-default select-none
-                                        "
-                                      >
-                                        {btn.type === 'url' && (
-                                          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                                          </svg>
-                                        )}
-                                        {btn.type === 'copy' && (
-                                          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                          </svg>
-                                        )}
-                                        {btn.type === 'reply' && (
-                                          <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
-                                          </svg>
-                                        )}
-                                        <span>{btn.label}</span>
-                                      </div>
-                                    )
-                                  })}
-                                </div>
-                              )}
-                            </>
+                            </div>
                           )
                         })()}
 
@@ -2165,6 +2106,20 @@ export default function Conversations() {
                                     aria-label={cp.delivery.suppressed}
                                   />
                                 )
+                              case 'delivered':
+                                return (
+                                  <CheckCheck
+                                    className="w-3.5 h-3.5 text-brand-500"
+                                    aria-label={cp.delivery.delivered}
+                                  />
+                                )
+                              case 'read':
+                                return (
+                                  <CheckCheck
+                                    className="w-3.5 h-3.5 text-sky-500"
+                                    aria-label={cp.delivery.read}
+                                  />
+                                )
                               case 'sent': {
                                 const hasWamid = typeof m.wamid === 'string'
                                   && m.wamid.trim().length > 0
@@ -2205,6 +2160,18 @@ export default function Conversations() {
               })}
               <div ref={messagesEndRef} />
               </div>
+              </div>
+              {newMessagesBelow && (
+                <button
+                  type="button"
+                  data-new-messages-affordance
+                  className="absolute z-10 bottom-3 start-1/2 -translate-x-1/2 inline-flex items-center gap-2 rounded-full bg-brand-600 px-4 py-2 text-xs font-semibold text-white shadow-lg hover:bg-brand-700"
+                  onClick={() => scrollMessagesToBottom('smooth')}
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  {cp.newMessages}
+                </button>
+              )}
             </div>
 
             {/* Composer — pinned bottom on mobile */}

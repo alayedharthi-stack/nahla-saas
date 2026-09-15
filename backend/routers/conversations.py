@@ -742,14 +742,27 @@ def record_outbound_message(
         }
         if extra:
             meta.update(extra)
-        db.add(MessageEvent(
+        event = MessageEvent(
             conversation_id=convo.id,
             tenant_id=tenant_id,
             direction="outbound",
             body=safe_body,
             event_type=event_type,
             extra_metadata=meta,
-        ))
+        )
+        # Plain shared logging paths get a canonical text bundle immediately.
+        # Template rows deliberately retain their existing name/body/order
+        # references: the messages API batch-projects those persisted facts,
+        # while a bound wire attempt replaces them with the exact payload.
+        if not meta.get("template_name"):
+            from core.message_presentation import response_bundle_for_message_event  # noqa: PLC0415
+
+            meta["response_bundle"] = response_bundle_for_message_event(
+                event,
+                db=None,
+            )
+            event.extra_metadata = meta
+        db.add(event)
         db.flush()
     except Exception as exc:
         # ── Surface psycopg2 details (May 2026 #19) ─────────────────
@@ -1884,6 +1897,47 @@ async def get_conversation_messages(
         .all()
     )
 
+    # Batch legacy presentation dependencies once for the page.  Canonical
+    # rows already carry ``response_bundle`` and need no enrichment; older
+    # template rows may reference a template/order by id and are projected
+    # without introducing a query per message.
+    from models import Order, WhatsAppTemplate  # noqa: PLC0415
+
+    template_names = {
+        str((row.extra_metadata or {}).get("template_name") or "").strip()
+        for row in me_rows
+        if not (row.extra_metadata or {}).get("response_bundle")
+        and str((row.extra_metadata or {}).get("template_name") or "").strip()
+    }
+    order_ids = {
+        int((row.extra_metadata or {}).get("order_id"))
+        for row in me_rows
+        if not (row.extra_metadata or {}).get("response_bundle")
+        and str((row.extra_metadata or {}).get("order_id") or "").isdigit()
+    }
+    template_lookup = {
+        str(template.name): template
+        for template in (
+            db.query(WhatsAppTemplate)
+            .filter(
+                WhatsAppTemplate.tenant_id == tenant_id,
+                WhatsAppTemplate.name.in_(template_names),
+            )
+            .order_by(WhatsAppTemplate.updated_at.asc(), WhatsAppTemplate.id.asc())
+            .all()
+            if template_names else []
+        )
+    }
+    order_lookup = {
+        int(order.id): order
+        for order in (
+            db.query(Order)
+            .filter(Order.tenant_id == tenant_id, Order.id.in_(order_ids))
+            .all()
+            if order_ids else []
+        )
+    }
+
     def _event_type_label(r) -> str:
         et = (r.event_type or "").lower()
         meta = r.extra_metadata or {}
@@ -1911,7 +1965,8 @@ async def get_conversation_messages(
         ``core.outbound_send_status``. Returns:
 
           {
-            "status":     "queued" | "sent" | "failed" | "suppressed" | null,
+            "status":     "queued" | "sent" | "delivered" | "read" |
+                          "failed" | "suppressed" | null,
             "wamid":      str | null,
             "error": {
               "labelAr":       Arabic merchant-facing label,
@@ -1935,13 +1990,30 @@ async def get_conversation_messages(
         if direction != "out":
             return {}
         ps = (meta or {}).get("provider_send")
-        if not isinstance(ps, dict):
+        has_delivery_receipt = bool(
+            (meta or {}).get("delivery_status")
+            or (meta or {}).get("_status_delivered")
+            or (meta or {}).get("_status_read")
+            or (meta or {}).get("_status_failed")
+        )
+        if not isinstance(ps, dict) and not has_delivery_receipt:
             return {"sendStatus": None}
-        status = ps.get("status")
+        if not isinstance(ps, dict):
+            ps = {}
+        status = str((meta or {}).get("delivery_status") or "").strip().lower()
+        if not status:
+            if (meta or {}).get("_status_read"):
+                status = "read"
+            elif (meta or {}).get("_status_delivered"):
+                status = "delivered"
+            elif (meta or {}).get("_status_failed"):
+                status = "failed"
+            else:
+                status = ps.get("status")
         err = ps.get("error") if isinstance(ps.get("error"), dict) else None
         out: Dict[str, Any] = {
             "sendStatus": status,
-            "wamid":      ps.get("wamid"),
+            "wamid":      ps.get("wamid") or (meta or {}).get("wa_message_id"),
         }
         if err:
             out["sendError"] = {
@@ -1954,23 +2026,30 @@ async def get_conversation_messages(
             }
         return out
 
-    messages: List[Dict[str, Any]] = [
-        {
+    from core.message_presentation import response_bundle_for_message_event  # noqa: PLC0415
+
+    messages: List[Dict[str, Any]] = []
+    for r in me_rows:
+        direction = "out" if (r.direction or "").lower() == "outbound" else "in"
+        media = _media_block(r.id, r.extra_metadata or {})
+        messages.append({
             "id": str(r.id),
-            "direction": "out" if (r.direction or "").lower() == "outbound" else "in",
+            "direction": direction,
             "body": r.body or "",
             "time": r.created_at.isoformat() if r.created_at else "",
             "isAI": bool((r.extra_metadata or {}).get("is_ai")),
             "eventType": _event_type_label(r),
-            "media": _media_block(r.id, r.extra_metadata or {}),
-            "_ts": r.created_at,
-            **_send_status_block(
-                r.extra_metadata or {},
-                "out" if (r.direction or "").lower() == "outbound" else "in",
+            "media": media,
+            "responseBundle": response_bundle_for_message_event(
+                r,
+                db=db,
+                media_block=media,
+                template_lookup=template_lookup,
+                order_lookup=order_lookup,
             ),
-        }
-        for r in me_rows
-    ]
+            "_ts": r.created_at,
+            **_send_status_block(r.extra_metadata or {}, direction),
+        })
 
     me_times = {r.created_at for r in me_rows if r.created_at}
 
@@ -2005,6 +2084,111 @@ async def get_conversation_messages(
         m.pop("_ts", None)
 
     return {"messages": messages, "has_more": len(me_rows) >= limit}
+
+
+@router.get("/customer-orders/{customer_phone}")
+async def get_conversation_customer_orders(
+    customer_phone: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    customer_id: Optional[int] = None,
+    limit: int = 10,
+):
+    """Read-only order summary for the selected conversation customer.
+
+    Identity matching is delegated to the canonical customer commerce ledger,
+    which applies tenant + customer identity filters in SQL before LIMIT.  No
+    order mutation capability is exposed by this endpoint.
+    """
+    tenant_id = resolve_tenant_id(request)
+    get_or_create_tenant(db, tenant_id)
+    safe_limit = max(1, min(int(limit or 10), 20))
+
+    if customer_id is not None:
+        linked_customer = (
+            db.query(Customer)
+            .filter(Customer.tenant_id == tenant_id, Customer.id == int(customer_id))
+            .first()
+        )
+        requested_phone = normalize_phone(customer_phone) or customer_phone
+        linked_phone = normalize_phone(getattr(linked_customer, "phone", None)) if linked_customer else ""
+        if linked_customer is None or linked_phone != requested_phone:
+            raise HTTPException(status_code=404, detail="conversation_customer_not_found")
+
+    from core.customer_commerce_ledger import list_customer_order_rows  # noqa: PLC0415
+    from models import OrderShipment  # noqa: PLC0415
+    from routers.orders import _serialise_order  # noqa: PLC0415
+
+    rows = list_customer_order_rows(
+        db,
+        tenant_id=tenant_id,
+        customer_id=customer_id,
+        phone=customer_phone,
+        include_abandoned=False,
+        include_cancelled=True,
+        limit=safe_limit,
+    )
+    order_ids = [int(row.id) for row in rows]
+    latest_shipments: Dict[int, Any] = {}
+    if order_ids:
+        shipment_rows = (
+            db.query(OrderShipment)
+            .filter(
+                OrderShipment.tenant_id == tenant_id,
+                OrderShipment.order_id.in_(order_ids),
+            )
+            .order_by(OrderShipment.order_id.asc(), OrderShipment.id.desc())
+            .all()
+        )
+        for shipment in shipment_rows:
+            latest_shipments.setdefault(int(shipment.order_id), shipment)
+
+    orders: List[Dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        serialised = _serialise_order(
+            row,
+            customer_lookup={},
+            now=now,
+            detailed=True,
+            vip_phones=set(),
+            unread_phones=set(),
+            db=db,
+            tenant_id=tenant_id,
+        )
+        line_items = serialised.get("line_items") or []
+        item_count = 0
+        for item in line_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_count += max(1, int(item.get("quantity") or 1))
+            except (TypeError, ValueError):
+                item_count += 1
+        shipment = latest_shipments.get(int(row.id))
+        shipment_meta = dict(getattr(shipment, "extra_metadata", None) or {}) if shipment else {}
+        orders.append({
+            "id": str(row.id),
+            "reference": serialised.get("order_number") or serialised.get("id"),
+            "date": serialised.get("display_created_at") or serialised.get("createdAt"),
+            "status": serialised.get("raw_status") or serialised.get("status"),
+            "statusLabel": serialised.get("status_label_ar") or serialised.get("status_label"),
+            "total": serialised.get("amount_sar"),
+            "formattedTotal": serialised.get("amount"),
+            "currency": serialised.get("currency") or "SAR",
+            "itemCount": item_count,
+            "itemSummary": serialised.get("items"),
+            "source": serialised.get("source"),
+            "shipment": {
+                "status": getattr(shipment, "status", None),
+                "carrier": getattr(shipment, "provider", None),
+                "trackingNumber": getattr(shipment, "tracking_number", None),
+                "trackingUrl": shipment_meta.get("tracking_url") or getattr(shipment, "label_url", None),
+            } if shipment else None,
+            "lineItems": line_items,
+        })
+
+    return {"orders": orders, "count": len(orders), "readOnly": True}
 
 
 @router.get("/{conversation_id:int}/media-debug")

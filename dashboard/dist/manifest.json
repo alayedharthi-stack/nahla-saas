@@ -1,7 +1,7 @@
 {
-  "name": "نحلة — طيار المبيعات الآلي",
-  "short_name": "نحلة",
-  "description": "مساعد مبيعات ذكي لمتجرك عبر واتساب",
+  "name": "Nahlah AI",
+  "short_name": "Nahlah AI",
+  "description": "AI-powered WhatsApp sales platform for merchants",
   "start_url": "/overview",
   "display": "standalone",
   "background_color": "#0f172a",
