@@ -777,9 +777,6 @@ def test_cod_template_startup_gap_recovers_on_later_poll_once(monkeypatch):
             "core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send",
             side_effect=_resolve_template,
         ), patch(
-            "core.service_template_resolver.resolve_template_for_send",
-            side_effect=_resolve_template,
-        ), patch(
             "core.automation_engine.send_lifecycle_whatsapp_template",
             provider_send,
         ), patch(
@@ -944,7 +941,21 @@ def test_cod_initial_recovery_repairs_approved_template_outside_strict_slot(
             is_active=False,
             is_hidden=True,
         )
-        db.add_all([order, approved])
+        reminder = WhatsAppTemplate(
+            tenant_id=tenant.id,
+            name="nahla_cod_reminder_before_shipping_e29c",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=[],
+            service_key="cod_confirmation",
+            nahla_source_key="cod_reminder_before_shipping",
+            step_number=None,
+            revision=1,
+            is_active=False,
+            is_hidden=False,
+        )
+        db.add_all([order, approved, reminder])
         db.commit()
 
         dispatch_result = MagicMock(
@@ -972,6 +983,8 @@ def test_cod_initial_recovery_repairs_approved_template_outside_strict_slot(
         assert approved.step_number is None
         assert approved.is_active is True
         assert approved.is_hidden is False
+        db.refresh(reminder)
+        assert reminder.is_active is False
         dispatch.assert_awaited_once()
     finally:
         db.close()
