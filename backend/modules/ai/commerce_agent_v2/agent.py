@@ -74,6 +74,7 @@ def build_commerce_agent(
     model_timeout_seconds: float = 75.0,
     retry_settings: ModelRetrySettings | None = None,
     service_tier: str = "auto",
+    require_tool_call: bool = False,
 ) -> Agent[CommerceAgentContext]:
     """Build exactly one agent; V2 has no classifiers or handoffs."""
     return Agent[CommerceAgentContext](
@@ -87,6 +88,7 @@ def build_commerce_agent(
             retry=retry_settings,
             include_usage=True,
             preserve_raw_usage=True,
+            tool_choice="required" if require_tool_call else None,
             # Agents SDK 0.22.2 exposes provider-specific Responses fields
             # through extra_body. "auto" preserves standard processing;
             # "fast" is an explicit per-request experiment only.
