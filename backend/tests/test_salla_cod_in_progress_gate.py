@@ -27,6 +27,7 @@ from database.models import (  # noqa: E402
     Customer,
     Order,
     Tenant,
+    WhatsAppTemplate,
 )
 from core.merchant_capabilities import MerchantCapabilities  # noqa: E402
 from services.store_sync import StoreSyncService  # noqa: E402
@@ -776,6 +777,9 @@ def test_cod_template_startup_gap_recovers_on_later_poll_once(monkeypatch):
             "core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send",
             side_effect=_resolve_template,
         ), patch(
+            "core.service_template_resolver.resolve_template_for_send",
+            side_effect=_resolve_template,
+        ), patch(
             "core.automation_engine.send_lifecycle_whatsapp_template",
             provider_send,
         ), patch(
@@ -893,6 +897,82 @@ def test_cod_initial_recovery_ignores_non_cod_confirmed_and_sent(monkeypatch):
         ]
         assert reasons == ["cod_not_proven", "status_not_pending", "already_sent_stamp"]
         assert db.query(CommerceLifecycleNotificationLedger).count() == 0
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_cod_initial_recovery_repairs_approved_template_outside_strict_slot(
+    monkeypatch,
+):
+    """Recovery re-binds the approved COD template before strict dispatch."""
+    from core.commerce_lifecycle.cod_initial_recovery import (  # noqa: PLC0415
+        reconcile_missing_initial_cod_confirmation,
+    )
+
+    db, engine, tenant, customer = _race_db()
+    try:
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
+        monkeypatch.setenv(
+            "COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST", str(tenant.id)
+        )
+        order = Order(
+            tenant_id=tenant.id,
+            customer_id=customer.id,
+            external_id="rebind-cod",
+            external_order_number="REF-REBIND-COD",
+            status="in_progress",
+            customer_info={"mobile": customer.phone},
+            is_abandoned=False,
+            extra_metadata={
+                "payment_method": "cod",
+                "payment_status": "waiting",
+                "is_cod": True,
+                "cod_webhook_triggered": True,
+            },
+        )
+        approved = WhatsAppTemplate(
+            tenant_id=tenant.id,
+            name="nahla_cod_confirmation_r3_3275d1",
+            language="ar",
+            category="UTILITY",
+            status="APPROVED",
+            components=[],
+            service_key="cod_confirmation",
+            step_number=1,
+            revision=3,
+            is_active=False,
+            is_hidden=True,
+        )
+        db.add_all([order, approved])
+        db.commit()
+
+        dispatch_result = MagicMock(
+            dispatched=True,
+            duplicate=False,
+            reason_code=None,
+            outcome="sent",
+            ledger_id=812,
+        )
+        dispatch = AsyncMock(return_value=dispatch_result)
+        with patch(
+            "core.commerce_lifecycle.dispatch.dispatch_external_lifecycle_notification",
+            dispatch,
+        ):
+            result = _run(reconcile_missing_initial_cod_confirmation(
+                db,
+                tenant_id=tenant.id,
+                order=order,
+            ))
+
+        assert result.attempted is True
+        assert result.sent is True
+        assert result.ledger_id == 812
+        db.refresh(approved)
+        assert approved.step_number is None
+        assert approved.is_active is True
+        assert approved.is_hidden is False
+        dispatch.assert_awaited_once()
     finally:
         db.close()
         engine.dispose()
