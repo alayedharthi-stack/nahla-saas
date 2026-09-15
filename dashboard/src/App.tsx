@@ -51,6 +51,7 @@ import AdminAiQuality from './pages/AdminAiQuality'
 import AdminTenantIntegrity from './pages/AdminTenantIntegrity'
 import AdminSallaActivations from './pages/AdminSallaActivations'
 import AdminSallaTokenStatus from './pages/AdminSallaTokenStatus'
+import AdminInternalE2E from './pages/AdminInternalE2E'
 import SallaOAuthSuccess from './pages/SallaOAuthSuccess'
 import SallaOAuthError from './pages/SallaOAuthError'
 import SallaCallback from './pages/SallaCallback'
@@ -253,6 +254,7 @@ export default function App() {
             <Route path="admin/salla-activations" element={<AdminSallaActivations />} />
             <Route path="admin/salla/integrations/token-status" element={<AdminSallaTokenStatus />} />
             <Route path="admin/salla/diagnose/:tenantId" element={<AdminSallaTokenStatus />} />
+            <Route path="admin/internal-e2e" element={<AdminInternalE2E />} />
             <Route path="billing"            element={<Billing />} />
             <Route path="widgets"            element={<MerchantWidgets />} />
             <Route path="help/whatsapp-manual-setup" element={<WhatsAppManualSetup />} />
