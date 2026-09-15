@@ -137,6 +137,7 @@ _REEVALUABLE_BLOCK_ERROR_CODES: FrozenSet[str] = frozenset({
 })
 
 _MAX_SEND_ATTEMPTS = 2
+_MAX_INITIAL_COD_TEMPLATE_SEND_ATTEMPTS = 3
 _MAX_RECLAIM_COUNT = 5
 _DEFAULT_STALE_SEND_SECONDS = 300
 
@@ -558,6 +559,20 @@ def _row_is_stale(row: Any, *, now: Optional[datetime] = None) -> bool:
     return activity <= current - timedelta(seconds=threshold)
 
 
+def _failed_retry_limit(row: Any) -> int:
+    if (
+        str(getattr(row, "business_intent", None) or "").strip()
+        == BusinessIntent.COD_CONFIRMATION.value
+        and str(getattr(row, "send_error_code", None) or "").strip()
+        == "template_not_approved"
+    ):
+        # One additional bounded recovery attempt is permitted only for an
+        # order-scoped initial COD send whose template identity was rejected
+        # before a successful provider message ID existed.
+        return _MAX_INITIAL_COD_TEMPLATE_SEND_ATTEMPTS
+    return _MAX_SEND_ATTEMPTS
+
+
 def _failed_retry_allowed(row: Any) -> bool:
     if str(row.send_state or "").strip() != _SEND_STATE_FAILED:
         return False
@@ -566,7 +581,7 @@ def _failed_retry_allowed(row: Any) -> bool:
     if str(row.send_state or "").strip() == _SEND_STATE_AMBIGUOUS:
         return False
     attempt_count = int(getattr(row, "send_attempt_count", 0) or 0)
-    return attempt_count < _MAX_SEND_ATTEMPTS
+    return attempt_count < _failed_retry_limit(row)
 
 
 def _blocked_reevaluation_allowed(row: Any) -> bool:
@@ -633,6 +648,7 @@ def try_conditional_retry_failed_send_row(
     *,
     tenant_id: int,
     ledger_id: int,
+    max_attempts: int = _MAX_SEND_ATTEMPTS,
     now: Optional[datetime] = None,
 ) -> bool:
     """Allow one bounded automatic retry for failed rows without a WAMID."""
@@ -648,7 +664,7 @@ def try_conditional_retry_failed_send_row(
             table.tenant_id == int(tenant_id),
             table.send_state == _SEND_STATE_FAILED,
             table.provider_message_id.is_(None),
-            table.send_attempt_count < _MAX_SEND_ATTEMPTS,
+            table.send_attempt_count < int(max_attempts),
         )
         .update(
             {
@@ -817,10 +833,12 @@ def _resolve_existing_send_reservation(
         )
 
     if existing_state == _SEND_STATE_FAILED:
+        retry_limit = _failed_retry_limit(existing)
         if _failed_retry_allowed(existing) and try_conditional_retry_failed_send_row(
             db,
             tenant_id=tenant_id,
             ledger_id=int(existing.id),
+            max_attempts=retry_limit,
         ):
             db.refresh(existing)
             if commit:
