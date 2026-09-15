@@ -526,6 +526,32 @@ async def test_empty_search_bounds_general_browse_evidence(
 
 
 @pytest.mark.asyncio
+async def test_grounding_retry_empty_specific_search_returns_one_bound_product(
+    seeded: Seed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context(seeded)
+    context.activate_grounding_retry()
+    monkeypatch.setattr(
+        CatalogContextBuilder,
+        "search_products",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            products=[], catalog_fact_products=[]
+        ),
+    )
+
+    result = CatalogSearchResult.model_validate(
+        await _invoke(search_products, context, {"query": "هذا", "limit": 5})
+    )
+
+    assert result.status == "ok"
+    assert len(result.products) == 1
+    assert len(result.evidence) == 1
+    assert result.products[0].product_id in context.authorized_product_ids
+    assert result.evidence[0].ref in context.evidence
+
+
+@pytest.mark.asyncio
 async def test_search_returns_non_orderable_product_as_catalog_fact(seeded: Seed) -> None:
     unavailable = Product(
         tenant_id=seeded.tenant_a.id,

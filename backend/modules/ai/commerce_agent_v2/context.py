@@ -73,6 +73,7 @@ class CommerceAgentContext(BaseModel):
     _verified_customer_name: str = PrivateAttr(default="")
     _session_history_provenance: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _session_history_query_count: int = PrivateAttr(default=0)
+    _grounding_retry_active: bool = PrivateAttr(default=False)
 
     @classmethod
     def from_trusted_scope(
@@ -315,6 +316,14 @@ class CommerceAgentContext(BaseModel):
         """
         self._run_user_input = str(user_input or "").strip()
         self._merchant_knowledge_relevant = None
+
+    @property
+    def grounding_retry_active(self) -> bool:
+        return self._grounding_retry_active
+
+    def activate_grounding_retry(self) -> None:
+        """Mark the single fail-closed re-grounding attempt for read tools."""
+        self._grounding_retry_active = True
 
     @property
     def run_user_input(self) -> str:
