@@ -356,6 +356,12 @@ def test_product_followups_require_current_turn_catalog_regrounding() -> None:
     assert "إذا كان المرجع ملتبسًا" in COMMERCE_AGENT_INSTRUCTIONS
 
 
+def test_successful_catalog_search_must_not_be_marked_as_fallback() -> None:
+    assert "إذا أعادت search_products منتجًا واحدًا أو أكثر" in COMMERCE_AGENT_INSTRUCTIONS
+    assert "لا تضبط safe_fallback_reason" in COMMERCE_AGENT_INSTRUCTIONS
+    assert "نقص حقول اختيارية" in COMMERCE_AGENT_INSTRUCTIONS
+
+
 def test_agents_sdk_is_pinned_in_both_runtime_requirement_files() -> None:
     root = Path(__file__).parents[2]
     for relative_path in ("requirements.txt", "backend/requirements.txt"):
