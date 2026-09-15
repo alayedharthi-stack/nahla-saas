@@ -224,8 +224,44 @@ def record_wire_attempt(*, tenant_id: Any, payload: dict, operation: str,
                 logger.warning("[OUTBOUND_WIRE_AUDIT] bound row missing tenant=%s row=%s", tenant_id, ctx.row_id)
                 return
             extra = dict(row.extra_metadata or {})
+            had_wire_attempts = bool(extra.get("wire_attempts"))
             extra["wire_attempts"] = list(ctx.attempts)
             extra.update(meta)
+            # Persist the exact customer-visible structure alongside the
+            # audit transcript.  This is presentation-only and never mutates
+            # the provider payload or delivery decision.  One assistant turn
+            # may emit text plus several product/media cards, so the contract
+            # is a ResponseBundle rather than a single bubble.
+            try:
+                from core.message_presentation import (  # noqa: PLC0415
+                    append_wire_presentation,
+                    presentation_from_provider_payload,
+                )
+
+                presentation = presentation_from_provider_payload(
+                    payload,
+                    db=ctx.db,
+                    tenant_id=ctx.tenant_id,
+                )
+                bundle = append_wire_presentation(
+                    extra.get("response_bundle") if had_wire_attempts else None,
+                    presentation,
+                    delivery={
+                        "state": "sent" if classification == "ok" else "failed",
+                        "wamid": wamid,
+                        "error": None,
+                    },
+                )
+                if bundle:
+                    extra["response_bundle"] = bundle
+            except Exception:
+                # Presentation audit must never alter the provider result.
+                # Legacy body/wire_attempts remain available to the dashboard.
+                logger.exception(
+                    "[MESSAGE_PRESENTATION] persistence failed tenant=%s row=%s",
+                    tenant_id,
+                    ctx.row_id,
+                )
             row.extra_metadata = extra
             # Preserve all accepted parts, not just the last title/caption.
             # A failed later attempt must not replace an already sent reply.

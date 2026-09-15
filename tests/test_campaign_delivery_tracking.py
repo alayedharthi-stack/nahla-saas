@@ -376,3 +376,58 @@ def _seed_extra_sent(db, *, campaign_id, wamid, phone):
     )
     db.add(log); db.commit()
     return log
+
+
+def test_non_campaign_receipt_matches_provider_send_wamid_and_updates_dashboard_state():
+    """Manual/AI sends use provider_send.wamid rather than the legacy key."""
+    from models import Conversation, Customer, MessageEvent, Tenant
+    from routers import whatsapp_webhook as wh
+
+    db, _ = _make_db()
+    tenant = Tenant(id=91, name="receipt-tenant")
+    db.add(tenant)
+    db.commit()
+    customer = Customer(
+        tenant_id=tenant.id,
+        name="Receipt Customer",
+        phone="+966500009191",
+        normalized_phone="+966500009191",
+    )
+    db.add(customer)
+    db.commit()
+    conversation = Conversation(
+        tenant_id=tenant.id,
+        customer_id=customer.id,
+        status="active",
+        extra_metadata={"phone": customer.phone},
+    )
+    db.add(conversation)
+    db.commit()
+    event = MessageEvent(
+        tenant_id=tenant.id,
+        conversation_id=conversation.id,
+        direction="outbound",
+        body="Your update",
+        event_type="manual_reply",
+        extra_metadata={
+            "phone": customer.phone,
+            "provider_send": {"status": "sent", "wamid": "wamid.NONCAMPAIGN"},
+        },
+    )
+    db.add(event)
+    db.commit()
+    event_id = event.id
+
+    original = wh.get_db
+    _patch_get_db(wh, db)
+    try:
+        _run_status(wh, {"id": "wamid.NONCAMPAIGN", "status": "read"})
+        _run_status(wh, {"id": "wamid.NONCAMPAIGN", "status": "delivered"})
+    finally:
+        wh.get_db = original
+
+    db.expire_all()
+    stored = db.query(MessageEvent).filter(MessageEvent.id == event_id).one()
+    assert stored.extra_metadata["delivery_status"] == "read"
+    assert stored.extra_metadata["_status_read"] is True
+    assert stored.extra_metadata["_status_delivered"] is True

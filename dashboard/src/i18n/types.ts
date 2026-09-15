@@ -768,6 +768,7 @@ export interface Translations {
       excluding: string
       reEnable: string
       reEnabling: string
+      customerOrders: string
     }
     banners: {
       humanSupervision: string
@@ -795,6 +796,8 @@ export interface Translations {
       suppressed: string
       awaitingWamid: string
       sent: string
+      delivered: string
+      read: string
     }
     replyPlaceholder: string
     aiHandlingHint: string
@@ -804,6 +807,37 @@ export interface Translations {
       menuButtonLabel: string
     }
     scrollToBottom: string
+    newMessages: string
+    presentation: {
+      template: string
+      lifecycle: string
+      product: string
+      available: string
+      unavailable: string
+      mediaUnavailable: string
+      openProduct: string
+      openCatalog: string
+      openMedia: string
+    }
+    customerOrders: {
+      title: string
+      readOnly: string
+      close: string
+      loading: string
+      empty: string
+      loadError: string
+      retry: string
+      order: string
+      date: string
+      status: string
+      total: string
+      items: string
+      shipment: string
+      carrier: string
+      tracking: string
+      openTracking: string
+      details: string
+    }
     aiPausedBadge: string
     errors: {
       refreshFailed: string

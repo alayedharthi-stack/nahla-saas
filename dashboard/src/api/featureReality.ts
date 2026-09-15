@@ -576,7 +576,7 @@ export type DashboardMessageMedia =
 //                 status surface). Render the previous unconditional
 //                 double-check so old conversations don't suddenly
 //                 show red ×s.
-export type OutboundSendStatus = 'queued' | 'sent' | 'failed' | 'suppressed' | null
+export type OutboundSendStatus = 'queued' | 'sent' | 'delivered' | 'read' | 'failed' | 'suppressed' | null
 
 export interface OutboundSendError {
   labelAr: string
@@ -587,6 +587,105 @@ export interface OutboundSendError {
   isRecoverable?: boolean
 }
 
+export type MessagePresentationKind =
+  | 'text'
+  | 'media'
+  | 'product'
+  | 'template'
+  | 'order_lifecycle'
+  | 'interactive'
+
+export type MessagePresentationActionKind =
+  | 'quick_reply'
+  | 'url'
+  | 'open_product'
+  | 'open_catalog'
+  | 'tracking'
+  | 'copy_code'
+  | 'phone'
+
+export interface MessagePresentationAction {
+  kind: MessagePresentationActionKind
+  label: string
+  url?: string | null
+  payload?: string | null
+}
+
+export interface MessagePresentationMedia {
+  kind: 'image' | 'video' | 'audio' | 'document'
+  url?: string | null
+  mime_type?: string | null
+  caption?: string | null
+  filename?: string | null
+  load_state?: string | null
+  error?: string | null
+}
+
+export interface MessagePresentationProduct {
+  id?: string | null
+  retailer_id?: string | null
+  name?: string | null
+  image_url?: string | null
+  price?: string | null
+  currency?: string | null
+  availability?: boolean | null
+  url?: string | null
+}
+
+export interface MessagePresentation {
+  version: 'message_presentation_v1'
+  kind: MessagePresentationKind
+  body: string
+  text_direction?: 'auto' | 'rtl' | 'ltr'
+  media?: MessagePresentationMedia | null
+  product?: MessagePresentationProduct | null
+  template?: {
+    name?: string | null
+    category?: string | null
+    language?: string | null
+    service_key?: string | null
+    footer?: string | null
+  } | null
+  order?: {
+    id?: string | null
+    reference?: string | null
+    status?: string | null
+    lifecycle?: string | null
+  } | null
+  actions: MessagePresentationAction[]
+}
+
+export interface MessageResponseBundle {
+  version: 'response_bundle_v1'
+  presentations: MessagePresentation[]
+  delivery: {
+    state: Exclude<OutboundSendStatus, null> | 'unknown'
+    wamid?: string | null
+    error?: Record<string, unknown> | null
+  }
+}
+
+export interface ConversationCustomerOrder {
+  id: string
+  reference: string
+  date?: string | null
+  status?: string | null
+  statusLabel?: string | null
+  total?: number | null
+  formattedTotal?: string | null
+  currency?: string | null
+  itemCount: number
+  itemSummary?: string | null
+  source?: string | null
+  shipment?: {
+    status?: string | null
+    carrier?: string | null
+    trackingNumber?: string | null
+    trackingUrl?: string | null
+  } | null
+  lineItems: OrderDetailLineItem[]
+}
+
 export interface DashboardMessage {
   id: string
   direction: 'in' | 'out'
@@ -595,6 +694,8 @@ export interface DashboardMessage {
   isAI?: boolean
   eventType?: MessageEventType
   media?: DashboardMessageMedia | null
+  /** Canonical customer-visible structures persisted by the wire/presentation layer. */
+  responseBundle?: MessageResponseBundle | null
   /** Wire-layer outcome of the Meta/360dialog POST. Outbound rows only. */
   sendStatus?: OutboundSendStatus
   /** Arabic error label + Meta code metadata when sendStatus === 'failed'. */
@@ -850,6 +951,18 @@ export const featureRealityApi = {
     return apiCall(
       `/conversations/messages/${encodeURIComponent(phone)}${suffix}`,
       { signal: opts?.signal, timeoutMs: CONVERSATIONS_MESSAGES_TIMEOUT_MS },
+    )
+  },
+  conversationCustomerOrders(
+    phone: string,
+    opts?: { customerId?: number | null; limit?: number },
+  ): Promise<{ orders: ConversationCustomerOrder[]; count: number; readOnly: true }> {
+    const q = new URLSearchParams()
+    if (opts?.customerId != null) q.set('customer_id', String(opts.customerId))
+    if (opts?.limit != null) q.set('limit', String(opts.limit))
+    const qs = q.toString()
+    return apiCall(
+      `/conversations/customer-orders/${encodeURIComponent(phone)}${qs ? `?${qs}` : ''}`,
     )
   },
   /** Re-run the inbound-media pipeline (download + AI) for a single

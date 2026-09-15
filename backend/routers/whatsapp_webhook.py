@@ -1250,8 +1250,9 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
          this is where the campaign dispatcher writes the wamid
          when Meta accepts a template send. It's the authoritative
          row for delivery analytics.
-      2. ``MessageEvent`` keyed by ``extra_metadata.wa_message_id``
-         (legacy) — kept so that pre-migration rows and one-off
+      2. ``MessageEvent`` keyed by legacy ``extra_metadata.wa_message_id``
+         or canonical ``extra_metadata.provider_send.wamid`` — kept so
+         that pre-migration rows and one-off
          non-campaign sends (e.g. ``/conversations/reply``) still
          update the aggregate ``Campaign.*_count`` counters.
 
@@ -1323,9 +1324,14 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
         # the entire transaction (logged as `[StatusWebhook] error
         # processing status: ... null value in column "tenant_id" of
         # relation "message_delivery_events"`).
+        from sqlalchemy import or_  # noqa: PLC0415
+
         evt_row = (
             db.query(MessageEvent)
-            .filter(MessageEvent.extra_metadata["wa_message_id"].astext == wamid)
+            .filter(or_(
+                MessageEvent.extra_metadata["wa_message_id"].astext == wamid,
+                MessageEvent.extra_metadata["provider_send"]["wamid"].astext == wamid,
+            ))
             .first()
         )
         resolved_tenant_id: Optional[int] = None
@@ -1425,7 +1431,10 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
             if campaign_id and not meta.get(already_key):
                 campaign = (
                     db.query(Campaign)
-                    .filter(Campaign.id == int(campaign_id))
+                    .filter(
+                        Campaign.id == int(campaign_id),
+                        Campaign.tenant_id == evt_row.tenant_id,
+                    )
                     .first()
                 )
                 if campaign:
@@ -1442,9 +1451,22 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
                     # — the original send was real; we just track the
                     # post-hoc failure on the send-log row for the
                     # delivery_summary breakdown.
-                meta[already_key] = True
-                evt_row.extra_metadata = meta
-                flag_modified(evt_row, "extra_metadata")
+            # Every matched outbound row carries its latest receipt for the
+            # conversation renderer, including non-campaign/manual/AI sends.
+            # Idempotent receipt flags preserve the existing campaign counter
+            # guards; read implies delivered even when Meta coalesces events.
+            meta[already_key] = True
+            if st == "read":
+                meta["_status_delivered"] = True
+            current_delivery = str(meta.get("delivery_status") or "").lower()
+            if current_delivery != "read" or st == "read":
+                meta["delivery_status"] = st
+            if st == "failed":
+                meta["delivery_error"] = _sanitize_status_webhook_errors(
+                    status.get("errors"),
+                )
+            evt_row.extra_metadata = meta
+            flag_modified(evt_row, "extra_metadata")
         if log_touched or evt_row is not None:
             db.commit()
             logger.info(
