@@ -54,6 +54,18 @@ def test_operator_endpoint_requires_existing_admin_auth(api: tuple[TestClient, A
     assert response.status_code in {401, 403}
 
 
+def test_lifecycle_m2m_token_does_not_authorize_internal_e2e_operator(
+    api: tuple[TestClient, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _app = api
+    monkeypatch.setenv("NAHLA_LIFECYCLE_OPS_TOKEN", "lifecycle-ops-only-test-token")
+    response = client.get(
+        "/admin/internal-e2e/status",
+        headers={"Authorization": "Bearer lifecycle-ops-only-test-token"},
+    )
+    assert response.status_code in {401, 403}
+
+
 def test_operator_status_is_fixed_to_tenant_one(api: tuple[TestClient, Any]) -> None:
     client, app = api
     app.dependency_overrides[require_admin] = lambda: {"role": "admin"}
