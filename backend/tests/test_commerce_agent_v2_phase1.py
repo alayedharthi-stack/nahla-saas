@@ -349,6 +349,13 @@ async def test_tool_schemas_hide_tenant_and_registry_is_read_only() -> None:
     assert "عسل طلح" not in COMMERCE_AGENT_INSTRUCTIONS
 
 
+def test_product_followups_require_current_turn_catalog_regrounding() -> None:
+    assert "سؤال متابعة" in COMMERCE_AGENT_INSTRUCTIONS
+    assert "بضمير أو ترتيب" in COMMERCE_AGENT_INSTRUCTIONS
+    assert "أعد search_products باسمه في التشغيل" in COMMERCE_AGENT_INSTRUCTIONS
+    assert "إذا كان المرجع ملتبسًا" in COMMERCE_AGENT_INSTRUCTIONS
+
+
 def test_agents_sdk_is_pinned_in_both_runtime_requirement_files() -> None:
     root = Path(__file__).parents[2]
     for relative_path in ("requirements.txt", "backend/requirements.txt"):
