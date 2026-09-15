@@ -876,6 +876,23 @@ def _verify_fact_claims(
             errors.append(f"claim_span_not_in_text:{claim.kind}")
             continue
         if not _span_expresses_claim(context, record, claim, reply):
+            card_fact_is_evidence_bound = bool(
+                record.source == "catalog_product"
+                and claim.kind in {"availability", "stock_quantity"}
+                and any(
+                    product_ref.evidence_ref == claim.evidence_ref
+                    and product_ref.product_id == claim.subject_product_id
+                    for product_ref in reply.product_refs
+                )
+            )
+            if card_fact_is_evidence_bound:
+                # Catalog cards render these fields from canonical evidence, not
+                # from the model's span. Keep the exact evidence-bound claim so
+                # structured presentation can proceed. The independent text
+                # scanners below still reject any visible availability/quantity
+                # wording unless this span itself expresses the value.
+                verified_claims.append(claim)
+                continue
             errors.append(f"claim_span_not_equivalent:{claim.kind}")
             continue
         verified_claims.append(claim)
