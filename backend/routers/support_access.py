@@ -48,6 +48,8 @@ Merchant routes (JWT required — scoped to own tenant):
 
 Admin routes (role=admin required):
   GET  /admin/support-access                         — list tenants with active grants (minimal)
+  GET  /admin/support-access/targets                 — tenant-aware request targets (safe metadata)
+  POST /admin/support-access/requests                — create a PENDING tenant-scoped request
   POST /admin/impersonate/{tenant_id}                — issue support JWT (blocked if no grant)
   GET  /admin/support-access/audit                   — full AuditLog for support events
   GET  /admin/support-requests                       — list ALL merchant-initiated requests (NEW)
@@ -57,10 +59,10 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -86,6 +88,7 @@ _MAX_TTL_MERCHANT = 48           # merchant can approve up to 48 h in a request
 _MAX_TTL_HOURS    = 8            # backward-compat: merchant self-enable cap
 _VALID_TTL_HOURS  = (1, 2, 4, 8)     # for merchant self-enable
 _VALID_TTL_ALL    = (1, 2, 4, 8, 24, 48)  # for admin requests / merchant approval
+_TENANT_APPROVER_ROLES = frozenset({"merchant", "merchant_admin", "merchant_user"})
 
 
 # ── Access Request Helpers ──────────────────────────────────────────────────────
@@ -152,6 +155,58 @@ def _is_active(sa: dict) -> bool:
 def _session_version(sa: dict) -> int:
     """Return the current revocation counter (0 if not set)."""
     return int(sa.get("session_version", 0))
+
+
+def _resolve_tenant_approval_recipient(
+    db: Session,
+    tenant_id: int,
+) -> Optional[Any]:
+    """Resolve the authenticated tenant account that must approve access.
+
+    Support access is targeted at a Tenant, but approval remains bound to a
+    real, active merchant-side account.  The legacy admin merchant listing is
+    intentionally not involved: it only represents ``role=merchant`` users
+    and is not a canonical tenant directory.
+    """
+    from models import User  # noqa: PLC0415
+
+    candidates = (
+        db.query(User)
+        .filter(
+            User.tenant_id == tenant_id,
+            User.is_active.is_(True),
+            User.role.in_(tuple(_TENANT_APPROVER_ROLES)),
+        )
+        .all()
+    )
+    priority = {"merchant": 0, "merchant_admin": 1, "merchant_user": 2}
+    candidates.sort(key=lambda user: (priority.get(str(user.role), 99), int(user.id)))
+    return candidates[0] if candidates else None
+
+
+def _support_target_status(settings) -> tuple[str, Optional[dict]]:
+    """Return a safe admin-facing request/grant state for one tenant."""
+    if settings is None:
+        return "NONE", None
+
+    requests = _get_requests(settings)
+    latest = requests[-1] if requests else None
+    sa = _get_sa(settings)
+    if _is_active(sa):
+        return "APPROVED", latest
+    if latest and latest.get("status") == "pending":
+        return "PENDING", latest
+    if latest and latest.get("status") == "approved":
+        return ("REVOKED" if sa.get("revoked_at") else "EXPIRED"), latest
+    if latest and latest.get("status") in {"resolved", "cancelled"}:
+        return "REVOKED", latest
+    if latest and latest.get("status") == "rejected":
+        return "REJECTED", latest
+    if sa.get("revoked_at"):
+        return "REVOKED", latest
+    if sa.get("enabled") and not _is_active(sa):
+        return "EXPIRED", latest
+    return "NONE", latest
 
 
 # ── Merchant routes ─────────────────────────────────────────────────────────────
@@ -747,7 +802,7 @@ async def admin_impersonate(
     - has exp = min(4h, remaining grant time) — never exceeds 4 hours
     - is logged with its fingerprint (first 16 hex chars of SHA-256)
     """
-    from models import Tenant, TenantSettings, User  # noqa: PLC0415
+    from models import Tenant, TenantSettings  # noqa: PLC0415
 
     ip = get_client_ip(request)
 
@@ -777,8 +832,10 @@ async def admin_impersonate(
             ),
         )
 
-    # 2. Fetch merchant user and tenant
-    merchant = db.query(User).filter_by(tenant_id=tenant_id, is_active=True).first()
+    # 2. Resolve the same legitimate merchant-side account used for approval.
+    # Never bind a support token to an arbitrary active tenant user (for
+    # example, the platform admin account conventionally attached to Tenant 1).
+    merchant = _resolve_tenant_approval_recipient(db, tenant_id)
     tenant   = db.query(Tenant).filter_by(id=tenant_id).first()
     if not merchant or not tenant:
         raise HTTPException(status_code=404, detail="لم يُعثر على حساب التاجر")
@@ -842,6 +899,194 @@ class RequestAccessIn(BaseModel):
                            description="المدة المطلوبة بالساعات (1-48)")
 
 
+class TenantSupportRequestIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: int = Field(..., ge=1, description="Canonical tenant identifier")
+    purpose: str = Field(..., min_length=5, max_length=300,
+                         description="Purpose shown to the tenant approver")
+    duration_hours: int = Field(default=4, ge=1, le=_MAX_TTL_MERCHANT)
+
+
+def _create_pending_support_request(
+    *,
+    tenant_id: int,
+    purpose: str,
+    duration_hours: int,
+    request: Request,
+    db: Session,
+    admin: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Create a tenant-targeted request without creating a support grant."""
+    from models import Tenant  # noqa: PLC0415
+
+    if admin.get("impersonation"):
+        raise HTTPException(status_code=403, detail="Platform Admin session required")
+    if duration_hours not in _VALID_TTL_ALL:
+        raise HTTPException(
+            status_code=400,
+            detail=f"المدة المقبولة: {_VALID_TTL_ALL} ساعة",
+        )
+
+    tenant = db.query(Tenant).filter_by(id=tenant_id, is_active=True).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="لم يُعثر على المتجر")
+
+    approval_recipient = _resolve_tenant_approval_recipient(db, tenant_id)
+    if approval_recipient is None:
+        raise HTTPException(
+            status_code=409,
+            detail="لا يوجد حساب تاجر نشط ومؤهل للموافقة على طلب الدعم.",
+        )
+
+    settings = get_or_create_settings(db, tenant_id)
+    db.commit()
+    requests = _get_requests(settings)
+    if any(row.get("status") == "pending" for row in requests):
+        raise HTTPException(
+            status_code=409,
+            detail="يوجد طلب وصول معلّق بالفعل — انتظر موافقة التاجر.",
+        )
+    if _is_active(_get_sa(settings)):
+        raise HTTPException(
+            status_code=409,
+            detail="التاجر منح الوصول مسبقاً — يمكنك الدخول مباشرة.",
+        )
+
+    req_id = str(uuid.uuid4())[:8]
+    now = datetime.now(timezone.utc)
+    clean_purpose = purpose.strip()
+    ip = get_client_ip(request)
+    new_req = {
+        "id": req_id,
+        "requested_by": admin.get("sub"),
+        "requested_by_user_id": admin.get("user_id"),
+        "requested_at": now.isoformat(),
+        "status": "pending",
+        "initiated_by": "admin",
+        "store_name": tenant.name,
+        "reason": clean_purpose,
+        "ttl_hours": duration_hours,
+        "approval_user_id": approval_recipient.id,
+        "merchant_email": approval_recipient.email,
+    }
+    requests.append(new_req)
+    _put_requests(db, settings, requests)
+
+    _audit.info(
+        "ACCESS_REQUEST_SENT admin=%s → tenant=%d req_id=%s reason=%r ttl=%dh",
+        admin.get("sub"), tenant_id, req_id, clean_purpose[:60], duration_hours,
+    )
+    _write_audit_log(
+        db,
+        tenant_id=tenant_id,
+        action="support_access_requested",
+        details={
+            "req_id": req_id,
+            "reason": clean_purpose[:300],
+            "ttl_hours": duration_hours,
+            "actor": admin.get("sub"),
+            "ip": ip,
+        },
+    )
+    _store_notification(
+        db,
+        tenant_id=tenant_id,
+        req_id=req_id,
+        reason=clean_purpose,
+        actor=admin.get("sub"),
+        ttl_hours=duration_hours,
+    )
+    _send_access_request_email(
+        merchant_email=approval_recipient.email,
+        store_name=tenant.name,
+        actor=admin.get("sub", "فريق نحلة"),
+        reason=clean_purpose,
+        ttl_hours=duration_hours,
+    )
+
+    return {
+        "request_id": req_id,
+        "status": "pending",
+        "tenant_id": tenant_id,
+        "duration_hours": duration_hours,
+        "message": f"تم إرسال طلب الوصول إلى {tenant.name}. في انتظار موافقة التاجر.",
+    }
+
+
+@router.get("/admin/support-access/targets")
+async def admin_list_support_targets(
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    """List active tenants independently of the merchant-user admin listing."""
+    from models import Tenant, TenantSettings, User  # noqa: PLC0415
+
+    if admin.get("impersonation"):
+        raise HTTPException(status_code=403, detail="Platform Admin session required")
+
+    settings_by_tenant = {
+        row.tenant_id: row for row in db.query(TenantSettings).all()
+    }
+    approvers_by_tenant: Dict[int, Any] = {}
+    candidate_users = (
+        db.query(User)
+        .filter(
+            User.is_active.is_(True),
+            User.role.in_(tuple(_TENANT_APPROVER_ROLES)),
+        )
+        .order_by(User.id.asc())
+        .all()
+    )
+    priority = {"merchant": 0, "merchant_admin": 1, "merchant_user": 2}
+    for user in candidate_users:
+        current = approvers_by_tenant.get(user.tenant_id)
+        if current is None or priority.get(str(user.role), 99) < priority.get(str(current.role), 99):
+            approvers_by_tenant[user.tenant_id] = user
+
+    targets = []
+    for tenant in (
+        db.query(Tenant)
+        .filter(Tenant.is_active.is_(True))
+        .order_by(Tenant.id.asc())
+        .limit(2000)
+        .all()
+    ):
+        recipient = approvers_by_tenant.get(tenant.id)
+        status, latest = _support_target_status(settings_by_tenant.get(tenant.id))
+        targets.append({
+            "tenant_id": tenant.id,
+            "tenant_name": tenant.name,
+            "status": status,
+            "can_request": recipient is not None and status not in {"PENDING", "APPROVED"},
+            "approval_recipient_available": recipient is not None,
+            "request_reference": latest.get("id") if latest else None,
+            "requested_at": latest.get("requested_at") if latest else None,
+            "duration_hours": latest.get("ttl_hours") if latest else None,
+        })
+
+    _audit.info("ADMIN_LIST_SUPPORT_TARGETS admin=%s count=%d", admin.get("sub"), len(targets))
+    return {"count": len(targets), "targets": targets}
+
+
+@router.post("/admin/support-access/requests")
+async def admin_create_tenant_support_request(
+    body: TenantSupportRequestIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Create a PENDING support request for a canonical Tenant target."""
+    return _create_pending_support_request(
+        tenant_id=body.tenant_id,
+        purpose=body.purpose,
+        duration_hours=body.duration_hours,
+        request=request,
+        db=db,
+        admin=admin,
+    )
+
+
 @router.post("/admin/request-access/{tenant_id}")
 async def admin_request_access(
     tenant_id: int,
@@ -860,86 +1105,14 @@ async def admin_request_access(
     A notification is stored in extra_metadata; the merchant must approve before
     admin can enter.  On approval, support_access is enabled with merchant's chosen TTL.
     """
-    from models import Tenant, User  # noqa: PLC0415
-
-    # Validate TTL
-    if body.ttl_hours not in _VALID_TTL_ALL:
-        raise HTTPException(
-            status_code=400,
-            detail=f"المدة المقبولة: {_VALID_TTL_ALL} ساعة",
-        )
-
-    tenant   = db.query(Tenant).filter_by(id=tenant_id, is_active=True).first()
-    merchant = db.query(User).filter_by(tenant_id=tenant_id, is_active=True).first()
-    if not tenant or not merchant:
-        raise HTTPException(status_code=404, detail="لم يُعثر على المتجر")
-
-    settings = get_or_create_settings(db, tenant_id)
-    db.commit()
-    requests = _get_requests(settings)
-
-    # Block if already has a pending request
-    pending = [r for r in requests if r.get("status") == "pending"]
-    if pending:
-        raise HTTPException(
-            status_code=409,
-            detail="يوجد طلب وصول معلّق بالفعل — انتظر موافقة التاجر.",
-        )
-
-    # Block if already has active access
-    sa = _get_sa(settings)
-    if _is_active(sa):
-        raise HTTPException(
-            status_code=409,
-            detail="التاجر منح الوصول مسبقاً — يمكنك الدخول مباشرة.",
-        )
-
-    req_id  = str(uuid.uuid4())[:8]
-    now     = datetime.now(timezone.utc)
-    new_req = {
-        "id":            req_id,
-        "requested_by":  admin.get("sub"),
-        "requested_at":  now.isoformat(),
-        "status":        "pending",
-        "store_name":    tenant.name,
-        "reason":        body.reason.strip(),
-        "ttl_hours":     body.ttl_hours,
-        "merchant_email": merchant.email,
-    }
-    requests.append(new_req)
-    _put_requests(db, settings, requests)
-
-    _audit.info(
-        "ACCESS_REQUEST_SENT admin=%s → tenant=%d req_id=%s reason=%r ttl=%dh",
-        admin.get("sub"), tenant_id, req_id, body.reason[:60], body.ttl_hours,
+    return _create_pending_support_request(
+        tenant_id=tenant_id,
+        purpose=body.reason,
+        duration_hours=body.ttl_hours,
+        request=request,
+        db=db,
+        admin=admin,
     )
-
-    # ── Write to AuditLog DB ────────────────────────────────────────────────
-    _write_audit_log(db, tenant_id=tenant_id, action="support_access_requested",
-                     details={
-                         "req_id": req_id, "reason": body.reason[:300],
-                         "ttl_hours": body.ttl_hours, "actor": admin.get("sub"),
-                     })
-
-    # ── In-platform notification ────────────────────────────────────────────
-    _store_notification(db, tenant_id=tenant_id, req_id=req_id,
-                        reason=body.reason, actor=admin.get("sub"),
-                        ttl_hours=body.ttl_hours)
-
-    # ── Email to merchant ───────────────────────────────────────────────────
-    _send_access_request_email(
-        merchant_email=merchant.email,
-        store_name=tenant.name,
-        actor=admin.get("sub", "فريق نحلة"),
-        reason=body.reason,
-        ttl_hours=body.ttl_hours,
-    )
-
-    return {
-        "request_id": req_id,
-        "status":     "pending",
-        "message":    f"تم إرسال طلب الوصول إلى {tenant.name}. في انتظار موافقة التاجر.",
-    }
 
 
 @router.get("/merchant/access-requests")
@@ -982,7 +1155,29 @@ async def merchant_respond_access_request(
     user:    Dict[str, Any]  = Depends(get_current_user),
 ):
     """Merchant approves or rejects a pending admin access request."""
+    from models import User  # noqa: PLC0415
+
+    if user.get("impersonation") or user.get("role") == "support_impersonation":
+        raise HTTPException(status_code=403, detail="Merchant approval required")
+
     tenant_id = resolve_tenant_id(request)
+    caller_query = db.query(User).filter(
+        User.tenant_id == tenant_id,
+        User.is_active.is_(True),
+        User.role.in_(tuple(_TENANT_APPROVER_ROLES)),
+    )
+    caller_user_id = user.get("user_id")
+    if caller_user_id is not None:
+        try:
+            caller_query = caller_query.filter(User.id == int(caller_user_id))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=403, detail="Merchant approval required")
+    else:
+        caller_query = caller_query.filter(User.email == str(user.get("sub") or ""))
+    caller = caller_query.first()
+    if caller is None:
+        raise HTTPException(status_code=403, detail="Merchant approval required")
+
     settings  = get_or_create_settings(db, tenant_id)
     db.commit()
     requests  = _get_requests(settings)
@@ -990,6 +1185,24 @@ async def merchant_respond_access_request(
     target = next((r for r in requests if r.get("id") == req_id and r.get("status") == "pending"), None)
     if not target:
         raise HTTPException(status_code=404, detail="الطلب غير موجود أو تمت معالجته مسبقاً")
+
+    approval_user_id = target.get("approval_user_id")
+    if approval_user_id is not None:
+        try:
+            approval_recipient_matches = int(approval_user_id) == int(caller.id)
+        except (TypeError, ValueError):
+            approval_recipient_matches = False
+        if not approval_recipient_matches:
+            raise HTTPException(status_code=403, detail="This request belongs to another tenant approver")
+
+    requested_by_user_id = target.get("requested_by_user_id")
+    if requested_by_user_id is not None:
+        try:
+            requester_matches = int(requested_by_user_id) == int(caller.id)
+        except (TypeError, ValueError):
+            requester_matches = True
+        if requester_matches:
+            raise HTTPException(status_code=403, detail="Requester cannot approve their own support request")
 
     now = datetime.now(timezone.utc)
     target["status"]       = "approved" if body.approve else "rejected"

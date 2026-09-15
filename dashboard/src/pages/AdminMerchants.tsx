@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { adminApi } from '../api/admin'
+import { supportAccessApi } from '../api/supportAccess'
 import { API_BASE } from '../api/client'
 import { useDashboardPoll } from '../lib/dashboardPolling'
 import { getToken, startImpersonation } from '../auth'
@@ -10,6 +11,7 @@ import {
   Loader2, ExternalLink, Wifi, WifiOff,
   ShieldCheck, Eye, EyeOff, Trash2, Shield, AlertTriangle,
 } from 'lucide-react'
+import SupportAccessTargetsPanel from '../components/admin/SupportAccessTargetsPanel'
 
 // ── Request Access Modal ───────────────────────────────────────────────────────
 
@@ -52,19 +54,14 @@ function RequestAccessModal({
     if (!merchant.tenant_id) { setError('هذا التاجر لا يملك متجراً'); return }
     setBusy(true); setError('')
     try {
-      const res = await fetch(`${API_BASE}/admin/request-access/${merchant.tenant_id}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${getToken()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason.trim(), ttl_hours: ttl }),
+      await supportAccessApi.request({
+        tenant_id: merchant.tenant_id,
+        purpose: reason.trim(),
+        duration_hours: ttl,
       })
-      const data = await res.json()
-      if (res.status === 409 && data.detail?.includes('منح الوصول مسبقاً')) {
-        onSent(); return
-      }
-      if (!res.ok) { setError(data.detail || 'فشل إرسال الطلب'); return }
       onSent()
-    } catch {
-      setError('خطأ في الاتصال بالخادم')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'خطأ في الاتصال بالخادم')
     } finally {
       setBusy(false)
     }
@@ -698,6 +695,8 @@ export default function AdminMerchants() {
 
   return (
     <div className="p-6 space-y-5" dir="rtl">
+
+      <SupportAccessTargetsPanel />
 
       {/* ── Merchant Help Requests Banner ──────────────────────────────── */}
       {visibleHelp.length > 0 && (
