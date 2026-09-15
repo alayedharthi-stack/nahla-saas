@@ -526,12 +526,11 @@ async def test_empty_search_bounds_general_browse_evidence(
 
 
 @pytest.mark.asyncio
-async def test_grounding_retry_empty_specific_search_returns_one_bound_product(
+async def test_failed_specific_search_never_substitutes_top_product(
     seeded: Seed,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context(seeded)
-    context.activate_grounding_retry()
     monkeypatch.setattr(
         CatalogContextBuilder,
         "search_products",
@@ -539,16 +538,274 @@ async def test_grounding_retry_empty_specific_search_returns_one_bound_product(
             products=[], catalog_fact_products=[]
         ),
     )
+    monkeypatch.setattr(
+        CatalogContextBuilder,
+        "get_top_products",
+        lambda *_args, **_kwargs: pytest.fail(
+            "specific search must never substitute an arbitrary top product"
+        ),
+    )
 
     result = CatalogSearchResult.model_validate(
         await _invoke(search_products, context, {"query": "هذا", "limit": 5})
     )
 
-    assert result.status == "ok"
-    assert len(result.products) == 1
-    assert len(result.evidence) == 1
-    assert result.products[0].product_id in context.authorized_product_ids
-    assert result.evidence[0].ref in context.evidence
+    assert result.status == "not_found"
+    assert result.failure_reason == "no_catalog_product_matched"
+    assert result.products == []
+    assert result.evidence == []
+    assert context.authorized_product_ids == set()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_product_reference_clarifies_without_commercial_claim(
+    seeded: Seed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conversation = Conversation(
+        tenant_id=seeded.tenant_a.id,
+        customer_id=seeded.customer_a.id,
+        status="active",
+    )
+    seeded.db.add(conversation)
+    seeded.db.flush()
+    seeded.db.add_all(
+        [
+            MessageEvent(
+                tenant_id=seeded.tenant_a.id,
+                conversation_id=conversation.id,
+                direction="inbound",
+                body="وش المنتجات الموجودة عندكم؟",
+            ),
+            MessageEvent(
+                tenant_id=seeded.tenant_a.id,
+                conversation_id=conversation.id,
+                direction="outbound",
+                body="1. عسل طلح بلدي\n2. باقة هدية طبيعية",
+                extra_metadata={
+                    "artifact": {
+                        "structured_reply": {
+                            "product_refs": [
+                                {"product_id": seeded.honey_a.id},
+                                {"product_id": seeded.gift_a.id},
+                            ]
+                        }
+                    }
+                },
+            ),
+        ]
+    )
+    seeded.db.commit()
+    clarification = CommerceReply(
+        text="أي واحد تقصد؟ اذكر اسمه أو ترتيبه.",
+        safe_fallback_reason="ambiguous_product_reference",
+    )
+    model = ScriptedModel(
+        [
+            [
+                function_call(
+                    "search_products",
+                    {"query": "عسل طلح بلدي", "limit": 5},
+                    call_id="ambiguous-arbitrary-search",
+                )
+            ],
+            [assistant_message(clarification.model_dump_json())],
+        ]
+    )
+
+    context = _context(
+        seeded,
+        trace_id="ambiguous-product-reference",
+        conversation=conversation,
+    )
+    monkeypatch.setattr(
+        CatalogContextBuilder,
+        "search_products",
+        lambda *_args, **_kwargs: pytest.fail(
+            "ambiguous reference must not authorize a catalog lookup"
+        ),
+    )
+    result = await run_commerce_agent(
+        context=context,
+        user_input="كم سعر هذا؟",
+        model=model,
+        model_name="ambiguous-product-reference-eval",
+        execution_mode="outbound",
+    )
+
+    assert result.status == "completed", result.failure_reason
+    assert result.reply.safe_fallback_reason == "ambiguous_product_reference"
+    assert result.reply.fact_claims == []
+    assert result.reply.product_refs == []
+    assert [
+        event["tool"]
+        for event in result.tool_trace
+        if event.get("kind") == "tool_end"
+    ] == ["search_products"]
+    assert context.authorized_product_ids == set()
+    model.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_explicit_first_ordinal_regrounds_price_and_availability(
+    seeded: Seed,
+) -> None:
+    conversation = Conversation(
+        tenant_id=seeded.tenant_a.id,
+        customer_id=seeded.customer_a.id,
+        status="active",
+    )
+    seeded.db.add(conversation)
+    seeded.db.flush()
+    seeded.db.add(
+        MessageEvent(
+            tenant_id=seeded.tenant_a.id,
+            conversation_id=conversation.id,
+            direction="outbound",
+            body="1. عسل طلح بلدي\n2. باقة هدية طبيعية",
+            extra_metadata={
+                "artifact": {
+                    "structured_reply": {
+                        "product_refs": [
+                            {"product_id": seeded.honey_a.id},
+                            {"product_id": seeded.gift_a.id},
+                        ]
+                    }
+                }
+            },
+        )
+    )
+    seeded.db.commit()
+    evidence_ref = f"catalog:product:{seeded.honey_a.id}"
+    grounded = CommerceReply(
+        text="عسل طلح بلدي سعره 150 ريال وهو متوفر.",
+        evidence_refs=[evidence_ref],
+        fact_claims=[
+            FactClaim(
+                kind="product_name",
+                value="عسل طلح بلدي",
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="عسل طلح بلدي",
+            ),
+            FactClaim(
+                kind="price",
+                value=150,
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="سعره 150 ريال",
+            ),
+            FactClaim(
+                kind="availability",
+                value=True,
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="متوفر",
+            ),
+        ],
+        product_refs=[
+            ProductReference(
+                product_id=seeded.honey_a.id,
+                evidence_ref=evidence_ref,
+            )
+        ],
+    )
+    model = ScriptedModel(
+        [
+            [
+                function_call(
+                    "search_products",
+                    {"query": "عسل طلح بلدي", "limit": 5},
+                    call_id="ordinal-first-search",
+                )
+            ],
+            [assistant_message(grounded.model_dump_json())],
+        ]
+    )
+
+    result = await run_commerce_agent(
+        context=_context(
+            seeded,
+            trace_id="explicit-first-ordinal",
+            conversation=conversation,
+        ),
+        user_input="أقصد الأول، كم سعره وهل هو متوفر؟",
+        model=model,
+        model_name="explicit-first-ordinal-eval",
+        execution_mode="outbound",
+    )
+
+    assert result.status == "completed"
+    assert result.reply == grounded
+    assert [
+        event["tool"]
+        for event in result.tool_trace
+        if event.get("kind") == "tool_end"
+    ] == ["search_products"]
+    assert seeded.honey_a.id in result.reply.product_refs[0].model_dump().values()
+    model.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_named_product_uses_normal_search_and_grounded_answer(
+    seeded: Seed,
+) -> None:
+    evidence_ref = f"catalog:product:{seeded.honey_a.id}"
+    grounded = CommerceReply(
+        text="سعر عسل طلح بلدي 150 ريال.",
+        evidence_refs=[evidence_ref],
+        fact_claims=[
+            FactClaim(
+                kind="product_name",
+                value="عسل طلح بلدي",
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="عسل طلح بلدي",
+            ),
+            FactClaim(
+                kind="price",
+                value=150,
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="150 ريال",
+            ),
+        ],
+        product_refs=[
+            ProductReference(
+                product_id=seeded.honey_a.id,
+                evidence_ref=evidence_ref,
+            )
+        ],
+    )
+    model = ScriptedModel(
+        [
+            [
+                function_call(
+                    "search_products",
+                    {"query": "عسل طلح بلدي", "limit": 5},
+                    call_id="named-product-search",
+                )
+            ],
+            [assistant_message(grounded.model_dump_json())],
+        ]
+    )
+
+    result = await run_commerce_agent(
+        context=_context(seeded, trace_id="named-product"),
+        user_input="كم سعر عسل طلح بلدي؟",
+        model=model,
+        model_name="named-product-eval",
+        execution_mode="outbound",
+    )
+
+    assert result.status == "completed"
+    assert result.reply == grounded
+    assert [
+        event["tool"]
+        for event in result.tool_trace
+        if event.get("kind") == "tool_end"
+    ] == ["search_products"]
+    model.assert_complete()
 
 
 @pytest.mark.asyncio
