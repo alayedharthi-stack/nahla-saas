@@ -101,6 +101,18 @@ def _is_retryable_evidence_free_output(item: Any) -> bool:
     return bool(factual_errors.intersection(str(error) for error in errors))
 
 
+def _grounding_retry_input(user_input: str) -> str:
+    """Attach trusted, run-local remediation after a no-tool factual rejection."""
+    return (
+        f"{str(user_input or '').strip()}\n\n"
+        "تعليمة تصحيح داخلية: المحاولة السابقة ذكرت حقيقة بلا دليل. "
+        "استخرج اسم المنتج أو ترتيبه من سياق المحادثة المعزول، ثم استخدم "
+        "أداة القراءة المناسبة بهذا الاسم في التشغيل الحالي. لا تستخدم بحثًا "
+        "عامًا فارغًا إلا إذا طلب العميل تصفحًا عامًا. إذا ظل المرجع ملتبسًا "
+        "بعد الأداة فاطلب توضيحًا ولا تذكر أي حقيقة تجارية."
+    )
+
+
 def _cached_tokens(usage: Any) -> int:
     details = getattr(usage, "input_tokens_details", None)
     return int(getattr(details, "cached_tokens", 0) or 0)
@@ -168,7 +180,11 @@ async def run_commerce_agent(
                 try:
                     run = await Runner.run(
                         agent,
-                        str(user_input or ""),
+                        (
+                            _grounding_retry_input(user_input)
+                            if grounding_retry_used
+                            else str(user_input or "")
+                        ),
                         context=context,
                         session=session,
                         hooks=hooks,

@@ -1725,6 +1725,10 @@ async def test_evidence_free_factual_output_retries_once_with_required_tool(
     assert sum(event.get("kind") == "grounding_retry" for event in result.tool_trace) == 1
     assert sum(event.get("kind") == "tool_start" for event in result.tool_trace) == 1
     assert result.guardrail_results[-1]["tripwire_triggered"] is False
+    retry_input = json.dumps(model.calls[1].input, ensure_ascii=False)
+    assert "تعليمة تصحيح داخلية" in retry_input
+    assert "لا تستخدم بحثًا عامًا فارغًا" in retry_input
+    assert model.calls[1].model_settings.tool_choice == "required"
     model.assert_complete()
 
 
