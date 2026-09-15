@@ -248,7 +248,12 @@ def _contains_evidence_free_factual_assertion(value: str) -> bool:
     operates only after the model has proposed evidence-free customer text.
     """
     tokens = _TOKEN_RE.findall(_normalize_text(value))
-    if set(tokens) & _EVIDENCE_FREE_FACT_TOKENS:
+    # A bare commerce-domain noun inside a question is not itself a factual
+    # assertion (for example: "أي منتج تقصد؟"). Price, quantity, availability,
+    # and URL questions remain governed by their dedicated scanners.
+    if set(tokens) & _EVIDENCE_FREE_FACT_TOKENS and not (
+        "?" in value or "؟" in value
+    ):
         return True
     if any(token in _STORE_POSSESSION_TOKENS for token in tokens[:-1]):
         return True
