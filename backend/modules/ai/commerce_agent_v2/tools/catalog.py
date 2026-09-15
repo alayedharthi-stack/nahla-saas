@@ -187,6 +187,14 @@ async def search_products(
             *list(domain_result.products or []),
             *list(domain_result.catalog_fact_products or []),
         ]
+        if not rows and context.grounding_retry_active:
+            # A retry has already proven that the first model output asserted a
+            # factual value without evidence. If its history-derived name does
+            # not match the synced catalog, expose one canonical current-tenant
+            # product rather than letting the retry invent or repeat stale facts.
+            # The output guardrail still requires every returned claim to bind
+            # to this exact record.
+            rows = list(catalog.get_top_products(limit=1) or [])
     else:
         # General browsing otherwise sends ten full product/evidence records
         # into the compose turn. Live Phase 2.7A evidence showed that payload

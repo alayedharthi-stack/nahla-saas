@@ -221,6 +221,7 @@ async def run_commerce_agent(
                         and _is_retryable_evidence_free_output(exc.guardrail_result)
                     ):
                         grounding_retry_used = True
+                        context.activate_grounding_retry()
                         session = ConversationMessageSession(context)
                         hooks.events.append(
                             {
