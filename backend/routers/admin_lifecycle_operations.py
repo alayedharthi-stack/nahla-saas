@@ -8,13 +8,13 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from core.audit import audit
-from core.auth import require_admin, require_not_support_impersonation
 from core.commerce_lifecycle.operations import (
     build_lifecycle_preflight,
     build_order_recovery_preflight,
     retry_post_cod_final_confirmation,
 )
 from core.database import get_db
+from core.lifecycle_operator_auth import require_lifecycle_operator
 
 
 router = APIRouter(prefix="/admin/operations", tags=["admin-operations"])
@@ -27,13 +27,13 @@ def _no_store(payload: Dict[str, Any]) -> JSONResponse:
 @router.get("/commerce-lifecycle/preflight")
 def commerce_lifecycle_preflight(
     db: Session = Depends(get_db),
-    admin: Dict[str, Any] = Depends(require_admin),
-    _not_impersonating: Dict[str, Any] = Depends(require_not_support_impersonation),
+    operator: Dict[str, Any] = Depends(require_lifecycle_operator),
 ):
     result = build_lifecycle_preflight(db)
     audit(
         "admin_commerce_lifecycle_preflight",
-        admin_sub=admin.get("sub"),
+        operator_sub=operator.get("sub"),
+        auth_method=operator.get("auth_method"),
         schema_ready=result["schema_ready"],
     )
     return _no_store(result)
@@ -43,13 +43,13 @@ def commerce_lifecycle_preflight(
 def commerce_lifecycle_order_preflight(
     order_id: int,
     db: Session = Depends(get_db),
-    admin: Dict[str, Any] = Depends(require_admin),
-    _not_impersonating: Dict[str, Any] = Depends(require_not_support_impersonation),
+    operator: Dict[str, Any] = Depends(require_lifecycle_operator),
 ):
     result = build_order_recovery_preflight(db, order_id=order_id)
     audit(
         "admin_commerce_lifecycle_order_preflight",
-        admin_sub=admin.get("sub"),
+        operator_sub=operator.get("sub"),
+        auth_method=operator.get("auth_method"),
         order_id=order_id,
         recovery_eligible=result.get("recovery_eligible", False),
     )
@@ -60,13 +60,13 @@ def commerce_lifecycle_order_preflight(
 async def retry_final_confirmation(
     order_id: int,
     db: Session = Depends(get_db),
-    admin: Dict[str, Any] = Depends(require_admin),
-    _not_impersonating: Dict[str, Any] = Depends(require_not_support_impersonation),
+    operator: Dict[str, Any] = Depends(require_lifecycle_operator),
 ):
     result = await retry_post_cod_final_confirmation(db, order_id=order_id)
     audit(
         "admin_retry_post_cod_final_confirmation",
-        admin_sub=admin.get("sub"),
+        operator_sub=operator.get("sub"),
+        auth_method=operator.get("auth_method"),
         order_id=order_id,
         tenant_id=(result.get("eligibility") or {}).get("tenant_id"),
         outcome=result.get("outcome"),
