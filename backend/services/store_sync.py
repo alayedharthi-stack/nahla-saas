@@ -2372,6 +2372,36 @@ class StoreSyncService:
                     ),
                     raw_payload=raw if isinstance(raw, dict) else None,
                 )
+                if _lifecycle_dispatch_owns_tenant(self.tenant_id):
+                    try:
+                        from core.commerce_lifecycle.cod_initial_recovery import (  # noqa: PLC0415
+                            reconcile_missing_initial_cod_confirmation,
+                        )
+
+                        recovery = await reconcile_missing_initial_cod_confirmation(
+                            self.db,
+                            tenant_id=self.tenant_id,
+                            order=existing,
+                            provider=str(getattr(adapter, "platform", None) or "salla"),
+                        )
+                        if recovery.attempted or recovery.reason_code == "no_approved_template":
+                            logger.info(
+                                "[StoreSync/CODRecovery] tenant=%s order=%s "
+                                "attempted=%s sent=%s duplicate=%s reason_code=%s ledger=%s",
+                                self.tenant_id,
+                                existing.id,
+                                recovery.attempted,
+                                recovery.sent,
+                                recovery.duplicate,
+                                recovery.reason_code,
+                                recovery.ledger_id,
+                            )
+                    except Exception:
+                        logger.exception(
+                            "[StoreSync/CODRecovery] failed tenant=%s order=%s",
+                            self.tenant_id,
+                            existing.id,
+                        )
                 if self._integration_connection_id is not None:
                     from services.salla_integration_resolver import (  # noqa: PLC0415
                         ResolvedSallaIntegration,
