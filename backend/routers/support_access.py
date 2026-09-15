@@ -70,6 +70,7 @@ from core.auth import (
     create_support_token,
     get_client_ip,
     get_current_user,
+    is_platform_admin_role,
     require_admin,
     token_fingerprint,
 )
@@ -182,6 +183,57 @@ def _resolve_tenant_approval_recipient(
     priority = {"merchant": 0, "merchant_admin": 1, "merchant_user": 2}
     candidates.sort(key=lambda user: (priority.get(str(user.role), 99), int(user.id)))
     return candidates[0] if candidates else None
+
+
+def _resolve_support_actor_user_id(
+    db: Session,
+    admin: Dict[str, Any],
+) -> int:
+    """Resolve the live platform actor represented by an admin JWT.
+
+    Environment-admin sessions issued by the legacy login fallback may omit
+    ``user_id`` even when the same admin has a real ``User`` row. A support
+    token minted with ``actor_user_id=0`` then fails the mandatory per-request
+    actor revalidation in ``require_admin``. Resolve that legacy session by
+    its signed subject, while remaining fail-closed for missing, inactive, or
+    non-platform actors.
+    """
+    from models import User  # noqa: PLC0415
+
+    raw_user_id = admin.get("user_id")
+    try:
+        actor_user_id = int(raw_user_id)
+    except (TypeError, ValueError):
+        actor_user_id = 0
+
+    actor_sub = str(admin.get("sub") or "").strip().lower()
+    if not actor_sub:
+        raise HTTPException(status_code=403, detail="platform_admin_actor_required")
+
+    actor = None
+    if actor_user_id > 0:
+        actor = (
+            db.query(User)
+            .filter(User.id == actor_user_id, User.is_active == True)  # noqa: E712
+            .one_or_none()
+        )
+        if actor is not None and str(actor.email or "").strip().lower() != actor_sub:
+            actor = None
+    else:
+        actor = (
+            db.query(User)
+            .filter(User.email == actor_sub, User.is_active == True)  # noqa: E712
+            .one_or_none()
+        )
+
+    if actor is None or not is_platform_admin_role(actor.role):
+        _audit.warning(
+            "IMPERSONATE_BLOCKED_ACTOR_UNRESOLVED actor=%s claimed_user_id=%r",
+            actor_sub,
+            raw_user_id,
+        )
+        raise HTTPException(status_code=403, detail="platform_admin_actor_required")
+    return int(actor.id)
 
 
 def _support_target_status(settings) -> tuple[str, Optional[dict]]:
@@ -856,12 +908,13 @@ async def admin_impersonate(
     sv = _session_version(sa)
 
     # 5. Issue the support token
+    actor_user_id = _resolve_support_actor_user_id(db, admin)
     support_token = create_support_token(
         merchant_email=merchant.email,
         merchant_user_id=merchant.id,
         tenant_id=tenant_id,
         actor_email=admin.get("sub", ""),
-        actor_user_id=int(admin.get("user_id") or 0),
+        actor_user_id=actor_user_id,
         session_version=sv,
         ttl_hours=ttl_hours,
     )

@@ -324,6 +324,67 @@ def test_end_support_session_still_revokes_active_grant(support_app):
     assert tenant_one["can_request"] is True
 
 
+def test_impersonation_resolves_legacy_env_admin_without_user_id(support_app):
+    ctx = support_app
+    created = ctx["client"].post(
+        "/admin/support-access/requests",
+        headers=_admin_headers(ctx),
+        json=_request_body(),
+    )
+    request_id = created.json()["request_id"]
+    approved = ctx["client"].post(
+        f"/merchant/access-requests/{request_id}/respond",
+        headers={"Authorization": f"Bearer {_token(ctx['tenant_one_approver'])}"},
+        json={"approve": True, "ttl_hours": 4},
+    )
+    assert approved.status_code == 200
+
+    legacy_admin_token = create_token(
+        email=ctx["admin"].email,
+        role="admin",
+        tenant_id=1,
+    )
+    entered = ctx["client"].post(
+        "/admin/impersonate/1",
+        headers={"Authorization": f"Bearer {legacy_admin_token}"},
+    )
+
+    assert entered.status_code == 200
+    support_claims = decode_token(entered.json()["access_token"])
+    assert support_claims is not None
+    assert support_claims["role"] == "support_impersonation"
+    assert support_claims["actor_user_id"] == ctx["admin"].id
+
+
+def test_impersonation_fails_closed_when_legacy_actor_is_not_platform_admin(support_app):
+    ctx = support_app
+    created = ctx["client"].post(
+        "/admin/support-access/requests",
+        headers=_admin_headers(ctx),
+        json=_request_body(),
+    )
+    request_id = created.json()["request_id"]
+    approved = ctx["client"].post(
+        f"/merchant/access-requests/{request_id}/respond",
+        headers={"Authorization": f"Bearer {_token(ctx['tenant_one_approver'])}"},
+        json={"approve": True, "ttl_hours": 4},
+    )
+    assert approved.status_code == 200
+
+    unresolved_admin_token = create_token(
+        email="missing-platform-actor@example.com",
+        role="admin",
+        tenant_id=1,
+    )
+    entered = ctx["client"].post(
+        "/admin/impersonate/1",
+        headers={"Authorization": f"Bearer {unresolved_admin_token}"},
+    )
+
+    assert entered.status_code == 403
+    assert entered.json()["detail"] == "platform_admin_actor_required"
+
+
 def test_browser_cannot_supply_unknown_tenant_or_direct_grant_fields(support_app):
     ctx = support_app
     missing = ctx["client"].post(
