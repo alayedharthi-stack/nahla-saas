@@ -217,6 +217,58 @@ def test_image_url_media_accepts_canonical_equivalence() -> None:
     assert validate_grounded_reply(context, reply) == []
 
 
+def test_image_media_accepts_direct_subject_bound_catalog_evidence() -> None:
+    ref = "catalog:product:17"
+    image_url = "https://cdn.example.com/images/product-17.jpg"
+    context = _context_with_evidence(
+        EvidenceRecord(
+            ref=ref,
+            source="catalog_product",
+            source_id="17",
+            facts=[
+                CanonicalEvidenceFact(
+                    kind="image_url",
+                    value=image_url,
+                    subject_product_id=17,
+                )
+            ],
+        )
+    )
+    reply = CommerceReply(
+        text="هذه صورة المنتج.",
+        evidence_refs=[ref],
+        media_refs=[MediaReference(url=image_url, evidence_ref=ref)],
+    )
+
+    assert validate_grounded_reply(context, reply) == []
+
+
+def test_image_media_rejects_mismatched_catalog_subject() -> None:
+    ref = "catalog:product:17"
+    image_url = "https://cdn.example.com/images/product-18.jpg"
+    context = _context_with_evidence(
+        EvidenceRecord(
+            ref=ref,
+            source="catalog_product",
+            source_id="17",
+            facts=[
+                CanonicalEvidenceFact(
+                    kind="image_url",
+                    value=image_url,
+                    subject_product_id=18,
+                )
+            ],
+        )
+    )
+    reply = CommerceReply(
+        text="هذه صورة المنتج.",
+        evidence_refs=[ref],
+        media_refs=[MediaReference(url=image_url, evidence_ref=ref)],
+    )
+
+    assert "media_url_not_in_evidence" in validate_grounded_reply(context, reply)
+
+
 def test_tracking_url_action_accepts_canonical_equivalence() -> None:
     ref = "order:shipment:701"
     raw_url = "https://carrier.example.com/تتبع/ABC123"

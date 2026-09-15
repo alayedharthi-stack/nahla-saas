@@ -419,6 +419,29 @@ def _action_url_has_bound_evidence(record: EvidenceRecord | None, action: Any) -
     return False
 
 
+def _media_url_has_bound_evidence(
+    record: EvidenceRecord | None,
+    media_ref: Any,
+) -> bool:
+    """Validate catalog media directly against its subject-bound evidence.
+
+    ``MediaReference`` intentionally carries only the URL and evidence reference.
+    Requiring the model to repeat an image-only ``FactClaim`` makes an otherwise
+    exact catalog image fail closed.  The canonical evidence record remains the
+    authority: it must be a catalog product, the URL must match exactly after
+    canonicalization, and the fact's product subject must match the record.
+    """
+    if record is None or record.source != "catalog_product":
+        return False
+    return any(
+        fact.kind == "image_url"
+        and canonical_http_url_equal(fact.value, media_ref.url)
+        and fact.subject_product_id is not None
+        and record.source_id == str(fact.subject_product_id)
+        for fact in record.facts
+    )
+
+
 def _span_expresses_claim(
     context: CommerceAgentContext,
     record: EvidenceRecord,
@@ -914,22 +937,15 @@ def validate_grounded_reply(
 
     for media_ref in reply.media_refs:
         record = evidence.get(media_ref.evidence_ref)
-        evidence_url_matches = bool(
-            record is not None
-            and any(
-                fact.kind == "image_url"
-                and canonical_http_url_equal(fact.value, media_ref.url)
-                for fact in record.facts
-            )
-        )
-        verified_subject_matches = any(
+        linked_claim_is_verified = any(
             claim.kind == "image_url"
             and claim.evidence_ref == media_ref.evidence_ref
             and canonical_http_url_equal(claim.value, media_ref.url)
             for claim in verified_claims
         )
         if record is not None and not (
-            evidence_url_matches and verified_subject_matches
+            linked_claim_is_verified
+            or _media_url_has_bound_evidence(record, media_ref)
         ):
             errors.append("media_url_not_in_evidence")
     for action in reply.ui_actions:
