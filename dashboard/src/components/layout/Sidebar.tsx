@@ -33,6 +33,7 @@ import {
   Gauge,
   Package,
   ShieldCheck,
+  FlaskConical,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useLanguage } from '../../i18n/context'
@@ -113,6 +114,7 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
       { to: '/admin/tools',            icon: Wrench,       label: tr => tr.nav.adminItems.tools           },
       { to: '/admin/catalog',          icon: Package,      label: tr => tr.nav.adminItems.catalog         },
       { to: '/admin/ai-quality',       icon: ShieldCheck,  label: tr => tr.nav.adminItems.aiQuality       },
+      { to: '/admin/internal-e2e',     icon: FlaskConical, label: () => 'INTERNAL_E2E'                    },
     ],
   },
   {

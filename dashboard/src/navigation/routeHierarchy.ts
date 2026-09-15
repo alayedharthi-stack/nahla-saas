@@ -84,6 +84,7 @@ const EXACT_CHILD: Record<string, string> = {
   '/admin/catalog': '/admin',
   '/admin/salla-activations': '/admin',
   '/admin/salla/integrations/token-status': '/admin',
+  '/admin/internal-e2e': '/admin',
 }
 
 const DEEP_CHILD = new Set<string>([
