@@ -2,12 +2,15 @@
 // All dashboard API modules import apiCall from here so the auth token
 // is automatically attached to every request.
 
-import { getToken, getTenantId, logout, getApiBase } from '../auth'
+import { getToken, getTenantId, logout, getApiBase, getPlatformAdminSessionToken } from '../auth'
 
 const DEFAULT_FETCH_TIMEOUT_MS = 25_000
 
 /** Optional `timeoutMs` is stripped before `fetch` (not a standard RequestInit field). */
-export type ApiCallOptions = RequestInit & { timeoutMs?: number }
+export type ApiCallOptions = RequestInit & {
+  timeoutMs?: number
+  authScope?: 'current' | 'platform-admin'
+}
 
 /** Combines timeout + caller AbortSignal (either abort aborts the request). */
 function combinedAbortSignals(timeoutMs: number, userSignal?: AbortSignal | null): AbortSignal {
@@ -87,7 +90,9 @@ function classifyNetworkError(error: unknown, timeoutMsForAbortMessage: number =
 }
 
 export async function apiCall<T>(path: string, options?: ApiCallOptions): Promise<T> {
-  const token    = getToken()
+  const token    = options?.authScope === 'platform-admin'
+    ? getPlatformAdminSessionToken()
+    : getToken()
   const tenantId = getTenantId()
   const base     = getApiBase()
   const url      = `${base}${path}`
@@ -97,7 +102,13 @@ export async function apiCall<T>(path: string, options?: ApiCallOptions): Promis
 
   let res: Response
   try {
-    const { signal: _omit, timeoutMs: __omitT, headers: optHeaders, ...rest } = options ?? {}
+    const {
+      signal: _omit,
+      timeoutMs: __omitT,
+      authScope: __omitAuthScope,
+      headers: optHeaders,
+      ...rest
+    } = options ?? {}
     res = await fetch(url, {
       cache: 'no-store',
       mode: 'cors',

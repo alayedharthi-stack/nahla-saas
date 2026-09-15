@@ -9,6 +9,7 @@ import {
   installSessionRefreshLoop,
   isAuthenticated,
   isImpersonating,
+  isImpersonatingSupport,
   isPlatformStaffRole,
   logout,
 } from '../auth'
@@ -86,7 +87,10 @@ export default function ProtectedRoute({ children }: { children: ReactNode }) {
   const wantsAdmin  =
     location.pathname === '/admin' || location.pathname.startsWith('/admin/')
 
-  if (wantsAdmin && !isOwner) {
+  const isSupportOperatorRoute =
+    location.pathname === '/admin/internal-e2e' && isImpersonatingSupport()
+
+  if (wantsAdmin && !isOwner && !isSupportOperatorRoute) {
     return <Navigate to="/overview" replace />
   }
 

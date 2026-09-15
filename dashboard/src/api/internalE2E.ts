@@ -50,17 +50,24 @@ export interface InternalE2EResult {
 }
 
 export const internalE2EApi = {
-  status: () => apiCall<InternalE2EStatus>('/admin/internal-e2e/status'),
+  status: () => apiCall<InternalE2EStatus>('/admin/internal-e2e/status', {
+    authScope: 'platform-admin',
+  }),
   provision: () => apiCall('/admin/internal-e2e/fixtures/provision', {
     method: 'POST',
+    authScope: 'platform-admin',
     body: JSON.stringify({ reset_aliases: [] }),
     timeoutMs: 60_000,
   }),
   reset: (alias: InternalE2EAlias) =>
-    apiCall(`/admin/internal-e2e/fixtures/${alias}/reset`, { method: 'POST' }),
+    apiCall(`/admin/internal-e2e/fixtures/${alias}/reset`, {
+      method: 'POST',
+      authScope: 'platform-admin',
+    }),
   submitTurn: (input: { alias: InternalE2EAlias; text: string; caseId: string }) =>
     apiCall<InternalE2EResult>('/admin/internal-e2e/turns', {
       method: 'POST',
+      authScope: 'platform-admin',
       body: JSON.stringify({
         alias: input.alias,
         text: input.text,
@@ -73,6 +80,8 @@ export const internalE2EApi = {
     const query = new URLSearchParams()
     if (lookup.internalMessageId) query.set('internal_message_id', lookup.internalMessageId)
     if (lookup.traceId) query.set('trace_id', lookup.traceId)
-    return apiCall<InternalE2EResult>(`/admin/internal-e2e/results?${query.toString()}`)
+    return apiCall<InternalE2EResult>(`/admin/internal-e2e/results?${query.toString()}`, {
+      authScope: 'platform-admin',
+    })
   },
 }
