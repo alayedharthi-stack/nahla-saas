@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.auth import create_token, require_admin, require_not_support_impersonation
+from core.auth import create_token
 from core.commerce_lifecycle.dispatch import commerce_lifecycle_send_audit_schema_status
 from core.commerce_lifecycle.operations import (
     build_lifecycle_preflight,
@@ -126,15 +126,14 @@ def _route_dependency_names(path: str, method: str) -> set[str]:
     return set()
 
 
-def test_operator_routes_require_admin_and_block_support_impersonation():
+def test_operator_routes_use_narrow_lifecycle_operator_dependency():
     for path, method in (
         ("/admin/operations/commerce-lifecycle/preflight", "GET"),
         ("/admin/operations/commerce-lifecycle/orders/{order_id}/preflight", "GET"),
         ("/admin/operations/orders/{order_id}/retry-final-confirmation", "POST"),
     ):
         deps = _route_dependency_names(path, method)
-        assert "require_admin" in deps
-        assert "require_not_support_impersonation" in deps
+        assert deps == {"get_db", "require_lifecycle_operator"}
 
 
 def test_unauthenticated_and_merchant_requests_are_rejected():
