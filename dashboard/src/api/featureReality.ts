@@ -454,6 +454,13 @@ export interface DashboardConversation {
   customerId?: number | null
   /** Manual merchant opt-out from marketing campaigns only. */
   marketingOptOutManual?: boolean
+  /** Explicit test-only identity; never populated for real-channel rows. */
+  synthetic?: boolean
+  syntheticAlias?: 'A' | 'B' | 'C'
+  syntheticConversationId?: number
+  syntheticIdentifier?: string
+  channelLabel?: 'INTERNAL_E2E'
+  readOnly?: boolean
 }
 
 export type MessageEventType = 'customer' | 'ai' | 'campaign' | 'automation' | 'cod' | 'manual' | 'system'
@@ -951,6 +958,34 @@ export const featureRealityApi = {
     return apiCall(
       `/conversations/messages/${encodeURIComponent(phone)}${suffix}`,
       { signal: opts?.signal, timeoutMs: CONVERSATIONS_MESSAGES_TIMEOUT_MS },
+    )
+  },
+  internalE2EConversation(
+    conversationId: number,
+    opts?: { signal?: AbortSignal; limit?: number; beforeId?: number },
+  ): Promise<{
+    conversation: DashboardConversation
+    messages: DashboardMessage[]
+    has_more?: boolean
+  }> {
+    const q = new URLSearchParams()
+    if (opts?.limit != null) q.set('limit', String(opts.limit))
+    if (opts?.beforeId != null) q.set('before_id', String(opts.beforeId))
+    const qs = q.toString()
+    return apiCall(
+      `/conversations/internal-e2e/${encodeURIComponent(String(conversationId))}${qs ? `?${qs}` : ''}`,
+      { signal: opts?.signal, timeoutMs: CONVERSATIONS_MESSAGES_TIMEOUT_MS },
+    )
+  },
+  internalE2EConversationOrders(
+    conversationId: number,
+    opts?: { limit?: number },
+  ): Promise<{ orders: ConversationCustomerOrder[]; count: number; readOnly: true }> {
+    const q = new URLSearchParams()
+    if (opts?.limit != null) q.set('limit', String(opts.limit))
+    const qs = q.toString()
+    return apiCall(
+      `/conversations/internal-e2e/${encodeURIComponent(String(conversationId))}/customer-orders${qs ? `?${qs}` : ''}`,
     )
   },
   conversationCustomerOrders(
