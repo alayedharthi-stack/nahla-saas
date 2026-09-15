@@ -280,6 +280,54 @@ class TestFailedRetrySqlite:
         assert row.send_state == "failed"
         assert row.send_attempt_count == 2
 
+    def test_initial_cod_template_rejection_allows_one_bounded_third_attempt(self):
+        db, _ = _make_sqlite_db()
+        kwargs = _reserve_kwargs(
+            business_intent=BusinessIntent.COD_CONFIRMATION,
+            template_service_key="cod_confirmation",
+        )
+        for _attempt in range(2):
+            reserve = reserve_send_decision(db, commit=True, **kwargs)
+            assert reserve.duplicate is False
+            mark_send_sending(
+                db,
+                ledger_id=reserve.ledger_id,
+                tenant_id=_GENERIC_TENANT_ID,
+                commit=True,
+            )
+            finalize_send_outcome(
+                db,
+                ledger_id=reserve.ledger_id,
+                tenant_id=_GENERIC_TENANT_ID,
+                outcome=SendLedgerOutcome.FAILED,
+                send_error_code="template_not_approved",
+                commit=True,
+            )
+
+        third = reserve_send_decision(db, commit=True, **kwargs)
+        assert third.duplicate is False
+        assert third.recovered is True
+        mark_send_sending(
+            db,
+            ledger_id=third.ledger_id,
+            tenant_id=_GENERIC_TENANT_ID,
+            commit=True,
+        )
+        finalize_send_outcome(
+            db,
+            ledger_id=third.ledger_id,
+            tenant_id=_GENERIC_TENANT_ID,
+            outcome=SendLedgerOutcome.FAILED,
+            send_error_code="template_not_approved",
+            commit=True,
+        )
+
+        exhausted = reserve_send_decision(db, commit=True, **kwargs)
+        assert exhausted.duplicate is True
+        row = db.query(CommerceLifecycleNotificationLedger).one()
+        assert row.send_attempt_count == 3
+        assert row.provider_message_id is None
+
 
 try:
     from tests.order_customer_identity_postgres_fixtures import (  # noqa: E402
