@@ -2081,6 +2081,75 @@ async def test_evidence_free_factual_output_retries_once_with_required_tool(
     model.assert_complete()
 
 
+def test_tool_grounded_output_with_missing_fact_claim_retries_once(
+    seeded: Seed,
+) -> None:
+    evidence_ref = f"catalog:product:{seeded.honey_a.id}"
+    rejected = CommerceReply(
+        text="عسل طلح بلدي متوفر.",
+        evidence_refs=[evidence_ref],
+        product_refs=[
+            ProductReference(product_id=seeded.honey_a.id, evidence_ref=evidence_ref)
+        ],
+    )
+    grounded = CommerceReply(
+        text="عسل طلح بلدي متوفر.",
+        evidence_refs=[evidence_ref],
+        fact_claims=[
+            FactClaim(
+                kind="availability",
+                value=True,
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="متوفر",
+            )
+        ],
+        product_refs=[
+            ProductReference(product_id=seeded.honey_a.id, evidence_ref=evidence_ref)
+        ],
+    )
+    model = ScriptedModel(
+        [
+            [
+                function_call(
+                    "search_products",
+                    {"query": "عسل طلح بلدي", "limit": 5},
+                    call_id="call-initial-search",
+                )
+            ],
+            [assistant_message(rejected.model_dump_json())],
+            [
+                function_call(
+                    "search_products",
+                    {"query": "عسل طلح بلدي", "limit": 5},
+                    call_id="call-corrective-search",
+                )
+            ],
+            [assistant_message(grounded.model_dump_json())],
+        ]
+    )
+
+    result = asyncio.run(
+        run_commerce_agent(
+            context=_context(seeded, trace_id="tool-grounding-retry"),
+            user_input="هل عسل طلح بلدي متوفر؟",
+            model=model,
+            model_name="tool-grounding-retry-eval",
+            execution_mode="outbound",
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.reply == grounded
+    assert sum(event.get("kind") == "grounding_retry" for event in result.tool_trace) == 1
+    assert sum(event.get("kind") == "tool_start" for event in result.tool_trace) == 2
+    assert result.guardrail_results[-1]["tripwire_triggered"] is False
+    retry_input = json.dumps(model.calls[2].input, ensure_ascii=False)
+    assert "تعليمة تصحيح داخلية" in retry_input
+    assert model.calls[2].model_settings.tool_choice == "required"
+    model.assert_complete()
+
+
 @pytest.mark.asyncio
 async def test_rejected_url_output_preserves_safe_diagnostic_and_customer_fallback(
     seeded: Seed,
