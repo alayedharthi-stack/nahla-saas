@@ -260,6 +260,25 @@ class TestSupportImpersonationPath:
             out = _call_require_admin(self._support_payload(actor_user_id="1"))
         assert out["impersonation"] is True
 
+    def test_legacy_zero_actor_id_revalidates_signed_actor_email(self):
+        """Already-issued legacy tokens may carry the old zero sentinel."""
+        from core import auth as core_auth
+        with (
+            patch.object(
+                core_auth,
+                "_actor_is_still_platform_admin",
+                return_value=False,
+            ),
+            patch.object(
+                core_auth,
+                "_legacy_support_actor_is_still_platform_admin",
+                return_value=True,
+            ) as revalidate,
+        ):
+            out = _call_require_admin(self._support_payload(actor_user_id=0))
+        assert out["actor_sub"] == "admin@nahla"
+        revalidate.assert_called_once_with(0, "admin@nahla")
+
 
 # ──────────────────────────────────────────────────────────────────────
 # _actor_is_still_platform_admin — DB revalidation helper
@@ -274,6 +293,52 @@ class TestActorRevalidation:
     def test_non_numeric_string_returns_false(self):
         from core.auth import _actor_is_still_platform_admin
         assert _actor_is_still_platform_admin("not-a-number") is False
+
+    def test_legacy_zero_without_actor_email_returns_false(self):
+        from core.auth import _legacy_support_actor_is_still_platform_admin
+        assert _legacy_support_actor_is_still_platform_admin(0, None) is False
+
+    def test_legacy_zero_resolves_active_admin_by_signed_email(self, monkeypatch):
+        from core import auth as core_auth
+
+        class _FakeUser:
+            role = "platform_admin"
+            is_active = True
+
+        class _FakeQuery:
+            def filter(self, *_a, **_k): return self
+            def first(self): return _FakeUser()
+
+        class _FakeDB:
+            def query(self, *_a, **_k): return _FakeQuery()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        monkeypatch.setattr("core.database.SessionLocal", lambda: _FakeDB())
+        assert core_auth._legacy_support_actor_is_still_platform_admin(
+            0, "admin@nahla"
+        ) is True
+
+    def test_legacy_zero_non_admin_email_fails_closed(self, monkeypatch):
+        from core import auth as core_auth
+
+        class _FakeUser:
+            role = "merchant"
+            is_active = True
+
+        class _FakeQuery:
+            def filter(self, *_a, **_k): return self
+            def first(self): return _FakeUser()
+
+        class _FakeDB:
+            def query(self, *_a, **_k): return _FakeQuery()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        monkeypatch.setattr("core.database.SessionLocal", lambda: _FakeDB())
+        assert core_auth._legacy_support_actor_is_still_platform_admin(
+            0, "merchant@example.test"
+        ) is False
 
     def test_active_admin_user_returns_true(self, monkeypatch):
         """Patch the DB call to return an active admin User."""

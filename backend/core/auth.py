@@ -309,8 +309,8 @@ def _actor_is_still_platform_admin(actor_user_id: Optional[int]) -> bool:
     admin loses access immediately, without waiting for the JWT to
     expire.
 
-    Returns False on any error (DB down, user not found, role
-    mismatch, inactive flag). Fail-closed by design.
+    Returns False on any error (DB down, user not found, role mismatch,
+    inactive flag). Fail-closed by design.
     """
     if actor_user_id is None:
         return False
@@ -341,6 +341,48 @@ def _actor_is_still_platform_admin(actor_user_id: Optional[int]) -> bool:
         _support_audit.warning(
             "ADMIN_REVALIDATE_DB_FAILED actor_user_id=%s err=%s",
             actor_uid, exc,
+        )
+        return False
+
+
+def _legacy_support_actor_is_still_platform_admin(
+    actor_user_id: Optional[int],
+    actor_sub: Optional[str],
+) -> bool:
+    """Revalidate an already-issued support token carrying the old zero id.
+
+    Only the exact legacy ``actor_user_id=0`` sentinel can use the signed
+    ``actor_sub`` email. Missing, malformed, and non-zero ids fail closed and
+    never fall back to email.
+    """
+    try:
+        actor_uid = int(actor_user_id) if actor_user_id is not None else None
+    except (TypeError, ValueError):
+        return False
+    actor_email = str(actor_sub or "").strip().lower()
+    if actor_uid != 0 or not actor_email:
+        return False
+
+    try:
+        from core.database import SessionLocal  # noqa: PLC0415
+        from database.models import User  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        _support_audit.warning(
+            "ADMIN_LEGACY_REVALIDATE_IMPORT_FAILED actor_sub=%s err=%s",
+            actor_email, exc,
+        )
+        return False
+
+    try:
+        with SessionLocal() as db:
+            actor = db.query(User).filter(User.email == actor_email).first()
+        if actor is None or not getattr(actor, "is_active", True):
+            return False
+        return is_platform_admin_role(getattr(actor, "role", None))
+    except Exception as exc:  # noqa: BLE001
+        _support_audit.warning(
+            "ADMIN_LEGACY_REVALIDATE_DB_FAILED actor_sub=%s err=%s",
+            actor_email, exc,
         )
         return False
 
@@ -403,7 +445,13 @@ def require_admin(
     if is_support:
         actor_user_id = user.get("actor_user_id")
         actor_sub = user.get("actor_sub")
-        if _actor_is_still_platform_admin(actor_user_id):
+        actor_is_admin = _actor_is_still_platform_admin(actor_user_id)
+        if not actor_is_admin:
+            actor_is_admin = _legacy_support_actor_is_still_platform_admin(
+                actor_user_id,
+                actor_sub,
+            )
+        if actor_is_admin:
             # Audit on the SUPPORT channel too — the merchant's
             # session audit log needs every admin-only endpoint
             # that was hit during impersonation.
