@@ -16,6 +16,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from core.config import (
+    ADMIN_EMAIL,
     JWT_ALGORITHM,
     JWT_EXPIRE_H,
     JWT_REFRESH_GRACE_DAYS,
@@ -294,6 +295,16 @@ def is_platform_admin_role(role: Any) -> bool:
     return str(role or "").strip() in PLATFORM_ADMIN_ROLES
 
 
+def is_configured_env_admin_identity(email: Any) -> bool:
+    """Match the signed actor identity to the configured environment admin."""
+    candidate = str(email or "").strip().lower()
+    configured = str(ADMIN_EMAIL or "").strip().lower()
+    return bool(candidate and configured) and _secrets.compare_digest(
+        candidate,
+        configured,
+    )
+
+
 def _actor_is_still_platform_admin(actor_user_id: Optional[int]) -> bool:
     """Verify that the user behind a support-impersonation token is
     *currently* a platform admin in the database.
@@ -362,6 +373,12 @@ def _legacy_support_actor_is_still_platform_admin(
     actor_email = str(actor_sub or "").strip().lower()
     if actor_uid != 0 or not actor_email:
         return False
+
+    # Environment-admin login is itself config-backed and can legitimately
+    # exist without a materialized User row. The signed actor identity must
+    # still match the current config exactly; rotating ADMIN_EMAIL revokes it.
+    if is_configured_env_admin_identity(actor_email):
+        return True
 
     try:
         from core.database import SessionLocal  # noqa: PLC0415

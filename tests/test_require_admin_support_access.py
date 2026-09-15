@@ -298,6 +298,26 @@ class TestActorRevalidation:
         from core.auth import _legacy_support_actor_is_still_platform_admin
         assert _legacy_support_actor_is_still_platform_admin(0, None) is False
 
+    def test_legacy_zero_accepts_current_configured_env_admin(self, monkeypatch):
+        from core import auth as core_auth
+
+        monkeypatch.setattr(core_auth, "ADMIN_EMAIL", "env-admin@nahla.test")
+        assert core_auth._legacy_support_actor_is_still_platform_admin(
+            0, "ENV-ADMIN@NAHLA.TEST"
+        ) is True
+
+    def test_legacy_zero_rejects_nonmatching_env_identity(self, monkeypatch):
+        from core import auth as core_auth
+
+        monkeypatch.setattr(core_auth, "ADMIN_EMAIL", "env-admin@nahla.test")
+        monkeypatch.setattr(
+            "core.database.SessionLocal",
+            lambda: (_ for _ in ()).throw(RuntimeError("no database actor")),
+        )
+        assert core_auth._legacy_support_actor_is_still_platform_admin(
+            0, "other-admin@nahla.test"
+        ) is False
+
     def test_legacy_zero_resolves_active_admin_by_signed_email(self, monkeypatch):
         from core import auth as core_auth
 
