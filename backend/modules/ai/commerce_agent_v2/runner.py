@@ -84,7 +84,7 @@ def _guardrail_code(item: Any) -> str:
 
 
 def _is_retryable_evidence_free_output(item: Any) -> bool:
-    """Retry only no-tool outputs that assert an unverified factual value."""
+    """Retry outputs that assert a factual value without a verified claim."""
     info = item.output.output_info
     if not isinstance(info, dict):
         return False
@@ -176,7 +176,6 @@ async def run_commerce_agent(
                     service_tier=requested_service_tier,
                     require_tool_call=grounding_retry_used,
                 )
-                attempt_event_offset = len(hooks.events)
                 try:
                     run = await Runner.run(
                         agent,
@@ -211,13 +210,8 @@ async def run_commerce_agent(
                     )
                     break
                 except OutputGuardrailTripwireTriggered as exc:
-                    attempt_events = hooks.events[attempt_event_offset:]
-                    tool_started = any(
-                        event.get("kind") == "tool_start" for event in attempt_events
-                    )
                     if (
                         not grounding_retry_used
-                        and not tool_started
                         and _is_retryable_evidence_free_output(exc.guardrail_result)
                     ):
                         grounding_retry_used = True
