@@ -1336,6 +1336,72 @@ def test_description_claim_accepts_supported_shorter_natural_span(seeded: Seed) 
     )
 
 
+def test_evidence_bound_card_stock_facts_do_not_require_visible_text_claims(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded)
+    ref = f"catalog:product:{seeded.honey_a.id}"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=ref,
+                source="catalog_product",
+                source_id=str(seeded.honey_a.id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="availability",
+                        value=True,
+                        subject_product_id=seeded.honey_a.id,
+                    ),
+                    CanonicalEvidenceFact(
+                        kind="stock_quantity",
+                        value=8,
+                        subject_product_id=seeded.honey_a.id,
+                    ),
+                ],
+                fields={"title": "عسل طلح بلدي", "in_stock": True, "stock_quantity": 8},
+            )
+        ]
+    )
+    hidden_card_facts = CommerceReply(
+        text="تفضل، من منتجاتنا عسل طلح بلدي.",
+        evidence_refs=[ref],
+        fact_claims=[
+            FactClaim(
+                kind="availability",
+                value=True,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="عسل طلح بلدي",
+            ),
+            FactClaim(
+                kind="stock_quantity",
+                value=8,
+                evidence_ref=ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="عسل طلح بلدي",
+            ),
+        ],
+        product_refs=[
+            ProductReference(product_id=seeded.honey_a.id, evidence_ref=ref)
+        ],
+    )
+
+    assert validate_grounded_reply(context, hidden_card_facts) == []
+
+    without_bound_card = hidden_card_facts.model_copy(update={"product_refs": []})
+    unbound_errors = validate_grounded_reply(context, without_bound_card)
+    assert "claim_span_not_equivalent:availability" in unbound_errors
+    assert "claim_span_not_equivalent:stock_quantity" in unbound_errors
+
+    visible_unbound_facts = hidden_card_facts.model_copy(
+        update={"text": "عسل طلح بلدي متوفر، والكمية 8 عبوات."}
+    )
+    errors = validate_grounded_reply(context, visible_unbound_facts)
+    assert "availability_in_text_without_verified_claim" in errors
+    assert "stock_quantity_in_text_without_verified_claim" in errors
+
+
 def test_quantity_bound_availability_requires_same_product_evidence(seeded: Seed) -> None:
     context = _context(seeded)
     honey_ref = f"catalog:product:{seeded.honey_a.id}"
