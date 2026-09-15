@@ -31,6 +31,7 @@ export default function CustomerOrdersDrawer({
   open,
   onClose,
   phone,
+  syntheticConversationId,
   customerId,
   customerLabel,
   labels,
@@ -39,6 +40,7 @@ export default function CustomerOrdersDrawer({
   open: boolean
   onClose: () => void
   phone: string
+  syntheticConversationId?: number | null
   customerId?: number | null
   customerLabel: string
   labels: CustomerOrdersLabels
@@ -51,13 +53,15 @@ export default function CustomerOrdersDrawer({
   const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
-    if (!open || !phone) return
+    if (!open || (!phone && !syntheticConversationId)) return
     let cancelled = false
     setLoading(true)
     setError(null)
     setExpanded(null)
-    featureRealityApi
-      .conversationCustomerOrders(phone, { customerId, limit: 10 })
+    const request = syntheticConversationId
+      ? featureRealityApi.internalE2EConversationOrders(syntheticConversationId, { limit: 10 })
+      : featureRealityApi.conversationCustomerOrders(phone, { customerId, limit: 10 })
+    request
       .then((result) => {
         if (!cancelled) setOrders(result.orders || [])
       })
@@ -71,7 +75,7 @@ export default function CustomerOrdersDrawer({
         if (!cancelled) setLoading(false)
       })
     return () => { cancelled = true }
-  }, [open, phone, customerId, reloadKey, labels.loadError])
+  }, [open, phone, syntheticConversationId, customerId, reloadKey, labels.loadError])
 
   useEffect(() => {
     if (!open) return

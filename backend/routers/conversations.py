@@ -28,6 +28,7 @@ from services.manual_segments import (
     marketing_opt_out_manual_sql_truthy,
 )
 from services.customer_intelligence import CustomerIntelligenceService, normalize_phone
+from core.auth import require_admin
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
 
@@ -198,6 +199,185 @@ class MarkReadIn(BaseModel):
 class BlocklistIn(BaseModel):
     phone: str
     customer_phone: str | None = None  # optional: also pause that conversation
+
+
+def _internal_e2e_support_scope(admin: Dict[str, Any]) -> int:
+    """Return the tenant from a genuine active support-impersonation session.
+
+    ``require_admin`` performs the normal token, actor revalidation, expiry and
+    session-revocation checks. This narrower gate deliberately excludes a plain
+    platform-admin token: synthetic conversation inspection still requires the
+    merchant-approved tenant support session.
+    """
+    if not (
+        admin.get("role") == "support_impersonation"
+        and admin.get("impersonation") is True
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="active_tenant_support_session_required",
+        )
+    try:
+        tenant_id = int(admin.get("tenant_id"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="active_tenant_support_session_required",
+        ) from exc
+    if tenant_id <= 0:
+        raise HTTPException(
+            status_code=403,
+            detail="active_tenant_support_session_required",
+        )
+    return tenant_id
+
+
+def _internal_e2e_conversation_for_support(
+    db: Session,
+    *,
+    tenant_id: int,
+    conversation_id: int,
+) -> tuple[Conversation, str, str]:
+    """Resolve one synthetic conversation without phone/customer fallback."""
+    from modules.ai.commerce_agent_v2.internal_e2e_identity import (  # noqa: PLC0415
+        internal_e2e_customer_identity,
+        metadata_matches_internal_e2e_identity,
+        parse_internal_e2e_customer_identity,
+    )
+
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.id == int(conversation_id),
+            Conversation.tenant_id == int(tenant_id),
+        )
+        .one_or_none()
+    )
+    if conversation is None or conversation.customer_id is not None:
+        raise HTTPException(status_code=404, detail="synthetic_conversation_not_found")
+    try:
+        identity_tenant_id, alias = parse_internal_e2e_customer_identity(
+            conversation.external_id
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="synthetic_conversation_not_found",
+        ) from exc
+    identity = internal_e2e_customer_identity(tenant_id, alias)
+    if not (
+        identity_tenant_id == tenant_id
+        and conversation.external_id == identity
+        and metadata_matches_internal_e2e_identity(
+            conversation.extra_metadata,
+            tenant_id=tenant_id,
+            alias=alias,
+        )
+    ):
+        raise HTTPException(status_code=404, detail="synthetic_conversation_not_found")
+    return conversation, alias, identity
+
+
+def _internal_e2e_presentation_bundle(row: MessageEvent) -> Dict[str, Any]:
+    """Project the persisted INTERNAL_E2E delivery artifact for dashboard display.
+
+    The harness deliberately never writes a provider payload or WAMID. Its
+    persisted delivery plan is nevertheless the authoritative description of
+    the synthetic text/product/image/actions produced by Commerce V2, so the
+    dashboard can render that plan without inventing another source of truth.
+    """
+    from core.message_presentation import (  # noqa: PLC0415
+        normalise_response_bundle,
+        response_bundle_for_message_event,
+    )
+
+    fallback = response_bundle_for_message_event(row)
+    metadata = dict(row.extra_metadata or {})
+    artifact = metadata.get("artifact")
+    artifact = artifact if isinstance(artifact, dict) else {}
+    delivery_plan = artifact.get("presentation_bundle")
+    delivery_plan = delivery_plan if isinstance(delivery_plan, dict) else {}
+    actions = delivery_plan.get("actions")
+    if not isinstance(actions, list):
+        return fallback
+
+    presentations: List[Dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        kind = str(action.get("kind") or "").strip().lower()
+        payload = action.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if kind == "text":
+            body = str(payload.get("text") or "")
+            if body:
+                presentations.append(
+                    {"kind": "text", "body": body, "text_direction": "auto"}
+                )
+        elif kind == "product":
+            product_url = str(payload.get("product_url") or "").strip()
+            product_actions = (
+                [
+                    {
+                        "kind": "open_product",
+                        "label": "open_product",
+                        "url": product_url,
+                    }
+                ]
+                if product_url
+                else []
+            )
+            presentations.append(
+                {
+                    "kind": "product",
+                    "body": "",
+                    "text_direction": "auto",
+                    "product": {
+                        "id": payload.get("id"),
+                        "retailer_id": payload.get("external_id"),
+                        "name": payload.get("title"),
+                        "image_url": payload.get("file_url"),
+                        "price": payload.get("price"),
+                        "currency": payload.get("currency"),
+                        "url": product_url,
+                    },
+                    "actions": product_actions,
+                }
+            )
+        elif kind == "image":
+            presentations.append(
+                {
+                    "kind": "media",
+                    "body": "",
+                    "text_direction": "auto",
+                    "media": {
+                        "kind": "image",
+                        "url": payload.get("url"),
+                    },
+                }
+            )
+        elif kind == "ui_action":
+            presentations.append(
+                {
+                    "kind": "interactive",
+                    "body": "",
+                    "text_direction": "auto",
+                    "actions": [
+                        {
+                            "kind": payload.get("kind"),
+                            "label": payload.get("label"),
+                            "url": payload.get("url"),
+                        }
+                    ],
+                }
+            )
+
+    projected = normalise_response_bundle(
+        {"presentations": presentations},
+        delivery={"state": "unknown", "wamid": None, "error": None},
+    )
+    return projected or fallback
 
 
 def _get_or_create_customer(
@@ -1854,6 +2034,228 @@ async def list_conversations(
             if safe_offset == 0 else {}
         ),
     }
+
+
+@router.get("/internal-e2e/{conversation_id:int}")
+async def get_internal_e2e_conversation(
+    conversation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 30,
+    before_id: Optional[int] = None,
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Read one test-only transcript by canonical conversation id.
+
+    This endpoint is intentionally absent from the ordinary inbox and cannot
+    resolve phones, Customers, provider identities, or arbitrary conversation
+    ids. A merchant-approved support-impersonation session supplies the only
+    accepted tenant scope.
+    """
+    from modules.ai.commerce_agent_v2.internal_e2e_identity import (  # noqa: PLC0415
+        metadata_matches_internal_e2e_identity,
+    )
+
+    tenant_id = _internal_e2e_support_scope(admin)
+    conversation, alias, _identity = _internal_e2e_conversation_for_support(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+    )
+    safe_limit = max(1, min(int(limit or 30), 100))
+    query = db.query(MessageEvent).filter(
+        MessageEvent.tenant_id == tenant_id,
+        MessageEvent.conversation_id == int(conversation.id),
+        MessageEvent.direction.in_(("internal_e2e_inbound", "internal_e2e_outbound")),
+    )
+    if before_id is not None:
+        query = query.filter(MessageEvent.id < int(before_id))
+    rows = (
+        query.order_by(MessageEvent.created_at.desc(), MessageEvent.id.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    for row in rows:
+        if not metadata_matches_internal_e2e_identity(
+            row.extra_metadata,
+            tenant_id=tenant_id,
+            alias=alias,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="synthetic_conversation_message_identity_invalid",
+            )
+    rows.reverse()
+    messages = []
+    for row in rows:
+        outbound = row.direction == "internal_e2e_outbound"
+        messages.append(
+            {
+                "id": str(row.id),
+                "direction": "out" if outbound else "in",
+                "body": row.body or "",
+                "time": row.created_at.isoformat() if row.created_at else "",
+                "isAI": outbound,
+                "eventType": "ai" if outbound else "customer",
+                "media": None,
+                "responseBundle": _internal_e2e_presentation_bundle(row),
+                "sendStatus": None,
+                "wamid": None,
+            }
+        )
+    newest = rows[-1] if rows else None
+    display_label = f"INTERNAL_E2E · Customer {alias}"
+    return {
+        "conversation": {
+            "id": str(conversation.id),
+            "customer": display_label,
+            "phone": "",
+            "lastMsg": newest.body if newest is not None else "",
+            "time": (
+                newest.created_at.isoformat()
+                if newest is not None and newest.created_at
+                else ""
+            ),
+            "isAI": True,
+            "status": "active",
+            "unread": 0,
+            "lastMsgType": (
+                "ai"
+                if newest is not None
+                and newest.direction == "internal_e2e_outbound"
+                else "customer"
+            ),
+            "customerId": None,
+            "synthetic": True,
+            "syntheticAlias": alias,
+            "syntheticConversationId": int(conversation.id),
+            "syntheticIdentifier": display_label,
+            "channelLabel": "INTERNAL_E2E",
+            "readOnly": True,
+        },
+        "messages": messages,
+        "has_more": len(rows) >= safe_limit,
+    }
+
+
+@router.get("/internal-e2e/{conversation_id:int}/customer-orders")
+async def get_internal_e2e_conversation_orders(
+    conversation_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = 10,
+    admin: Dict[str, Any] = Depends(require_admin),
+):
+    """Return only the isolated read-only order fixture bound to A/B/C."""
+    from models import Order, OrderShipment  # noqa: PLC0415
+    from modules.ai.commerce_agent_v2.internal_e2e_identity import (  # noqa: PLC0415
+        metadata_matches_internal_e2e_identity,
+    )
+
+    tenant_id = _internal_e2e_support_scope(admin)
+    _conversation, alias, identity = _internal_e2e_conversation_for_support(
+        db,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+    )
+    safe_limit = max(1, min(int(limit or 10), 20))
+    rows = (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == tenant_id,
+            Order.customer_id.is_(None),
+            Order.source == "internal_e2e",
+            Order.customer_info["phone"].as_string() == identity,
+        )
+        .order_by(Order.id.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    orders: List[Dict[str, Any]] = []
+    for row in rows:
+        if not metadata_matches_internal_e2e_identity(
+            row.extra_metadata,
+            tenant_id=tenant_id,
+            alias=alias,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="synthetic_order_identity_invalid",
+            )
+        shipment = (
+            db.query(OrderShipment)
+            .filter(
+                OrderShipment.tenant_id == tenant_id,
+                OrderShipment.order_id == int(row.id),
+            )
+            .order_by(OrderShipment.id.desc())
+            .first()
+        )
+        if shipment is not None and not metadata_matches_internal_e2e_identity(
+            shipment.extra_metadata,
+            tenant_id=tenant_id,
+            alias=alias,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="synthetic_shipment_identity_invalid",
+            )
+        line_items = [item for item in list(row.line_items or []) if isinstance(item, dict)]
+        item_count = sum(
+            max(1, int(item.get("quantity") or 1))
+            for item in line_items
+        )
+        shipment_meta = dict(shipment.extra_metadata or {}) if shipment else {}
+        order_meta = dict(row.extra_metadata or {})
+        order_date = next(
+            (
+                str(order_meta.get(key))
+                for key in (
+                    "created_at",
+                    "draft_created_at",
+                    "display_created_at",
+                    "source_message_created_at",
+                )
+                if order_meta.get(key)
+            ),
+            None,
+        )
+        total = None
+        try:
+            total = float(row.total) if row.total is not None else None
+        except (TypeError, ValueError):
+            total = None
+        orders.append(
+            {
+                "id": str(row.id),
+                "reference": row.external_order_number or row.external_id or str(row.id),
+                "date": order_date,
+                "status": row.status,
+                "statusLabel": row.status,
+                "total": total,
+                "formattedTotal": f"{row.total} SAR" if row.total is not None else None,
+                "currency": "SAR",
+                "itemCount": item_count,
+                "itemSummary": ", ".join(
+                    str(item.get("name") or item.get("title") or "")
+                    for item in line_items
+                    if item.get("name") or item.get("title")
+                ),
+                "source": "internal_e2e",
+                "shipment": (
+                    {
+                        "status": shipment.status,
+                        "carrier": shipment.provider,
+                        "trackingNumber": shipment.tracking_number,
+                        "trackingUrl": shipment_meta.get("tracking_url"),
+                    }
+                    if shipment is not None
+                    else None
+                ),
+                "lineItems": line_items,
+            }
+        )
+    return {"orders": orders, "count": len(orders), "readOnly": True}
 
 
 @router.get("/messages/{customer_phone}")

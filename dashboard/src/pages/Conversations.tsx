@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams, useNavigate } from 'react-router-dom'
 import {
-  Bot, User, Send, Phone, Search, MoreVertical,
+  Bot, User, Send, Phone, Search, MoreVertical, FlaskConical,
   UserCheck, ArrowLeft, ArrowRight, Check, CheckCheck, Clock, AlertCircle,
   Megaphone, Zap, ShoppingCart, PackageCheck, MessageSquare, AlertTriangle, BellOff,
   Pause, Play, Ban, FileText, RotateCcw, CheckCircle2, X, Loader2, Pencil,
@@ -171,17 +171,24 @@ export default function Conversations() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const requestedPhone = searchParams.get('phone')?.trim() || null
+  const requestedSyntheticConversationId = (() => {
+    const raw = searchParams.get('synthetic_conversation_id')?.trim() || ''
+    return /^[1-9]\d*$/.test(raw) ? Number(raw) : null
+  })()
 
   const [selected, setSelected]     = useState<Conversation | null>(null)
   const [filter, setFilter]         = useState<ConversationFilter>('all')
   const [handoffActiveTotal, setHandoffActiveTotal] = useState<number | null>(null)
   const [reply, setReply]           = useState('')
   const [conversations, setConversations] = useState<Conversation[]>(() => {
+    if (requestedSyntheticConversationId) return []
     const cached = loadConversationListCache(getTenantId())
     return cached.map((row) => ({ ...row, messages: [] as DashboardMessage[] }))
   })
   const [listBootstrapping, setListBootstrapping] = useState(
-    () => loadConversationListCache(getTenantId()).length === 0,
+    () => requestedSyntheticConversationId
+      ? true
+      : loadConversationListCache(getTenantId()).length === 0,
   )
   const [searchQuery, setSearchQuery] = useState('')
   const [actionToast, setActionToast] = useState<string | null>(null)
@@ -598,6 +605,47 @@ export default function Conversations() {
     }
   }
 
+  const loadSyntheticConversation = async (
+    conversationId: number,
+    opts?: { silent?: boolean; signal?: AbortSignal },
+  ) => {
+    let signal: AbortSignal
+    if (opts?.signal) {
+      signal = opts.signal
+    } else {
+      msgsCtrlRef.current?.abort()
+      const ac = new AbortController()
+      msgsCtrlRef.current = ac
+      signal = ac.signal
+    }
+    if (!opts?.silent) setLoadingMessages(true)
+    const t0 = performance.now()
+    try {
+      const page = await featureRealityApi.internalE2EConversation(conversationId, {
+        signal,
+        limit: MESSAGE_PAGE_LIMIT,
+      })
+      setHasMoreMessages(Boolean(page.has_more))
+      setConversations([{ ...page.conversation, messages: page.messages }])
+      setSelected((previous) => {
+        const messages = opts?.silent && previous?.syntheticConversationId === conversationId
+          ? mergeMessagesPreserveOrder(previous.messages, page.messages)
+          : page.messages
+        return { ...page.conversation, messages }
+      })
+      setListBootstrapping(false)
+    } catch (err: unknown) {
+      if (signal.aborted) return
+      logFetchFail(`/conversations/internal-e2e/${conversationId}`, t0, err, null)
+      setConversations([])
+      setSelected(null)
+      setListBootstrapping(false)
+      setListStaleBanner(cp.errors.refreshFailed)
+    } finally {
+      if (!signal.aborted && !opts?.silent) setLoadingMessages(false)
+    }
+  }
+
   const loadOlderMessages = async (phone: string) => {
     const current = selected?.phone === phone ? selected.messages : conversations.find((c) => c.phone === phone)?.messages
     if (!current?.length || loadingOlderMessages || !hasMoreMessages) return
@@ -609,10 +657,16 @@ export default function Conversations() {
     const prevHeight = scrollEl?.scrollHeight ?? 0
     const prevTop = scrollEl?.scrollTop ?? 0
     try {
-      const { messages: older, has_more } = await featureRealityApi.conversationMessages(phone, {
-        limit: MESSAGE_PAGE_LIMIT,
-        beforeId: oldestId,
-      })
+      const page = selected?.synthetic && selected.syntheticConversationId
+        ? await featureRealityApi.internalE2EConversation(selected.syntheticConversationId, {
+            limit: MESSAGE_PAGE_LIMIT,
+            beforeId: oldestId,
+          })
+        : await featureRealityApi.conversationMessages(phone, {
+            limit: MESSAGE_PAGE_LIMIT,
+            beforeId: oldestId,
+          })
+      const { messages: older, has_more } = page
       if (!older.length) {
         setHasMoreMessages(false)
         return
@@ -625,7 +679,9 @@ export default function Conversations() {
       setSelected((prevSel) =>
         prevSel && prevSel.phone === phone ? { ...prevSel, messages: merged } : prevSel,
       )
-      saveConversationMessagesCache(getTenantId(), phone, merged, has_more)
+      if (!selected?.synthetic) {
+        saveConversationMessagesCache(getTenantId(), phone, merged, has_more)
+      }
       requestAnimationFrame(() => {
         if (scrollEl) {
           scrollEl.scrollTop = preservedHistoryScrollTop({
@@ -650,6 +706,7 @@ export default function Conversations() {
   useDashboardPoll({
     pollKey: `GET:/conversations?limit=${LIST_PAGE_LIMIT}&offset=0`,
     intervalMs: LIST_POLL_MS,
+    enabled: !requestedSyntheticConversationId,
     leading: false,
     run: async (signal) => {
       if (listBusyRef.current) return
@@ -658,18 +715,30 @@ export default function Conversations() {
   })
 
   useDashboardPoll({
-    pollKey: selected ? `GET:/conversations/messages/${selected.phone}` : 'GET:/conversations/messages/_idle',
+    pollKey: selected?.syntheticConversationId
+      ? `GET:/conversations/internal-e2e/${selected.syntheticConversationId}`
+      : selected
+        ? `GET:/conversations/messages/${selected.phone}`
+        : 'GET:/conversations/messages/_idle',
     intervalMs: MESSAGE_POLL_MS,
-    enabled: Boolean(selected?.phone),
+    enabled: Boolean(selected?.phone || selected?.syntheticConversationId),
     leading: false,
     run: async (signal) => {
-      if (!selected?.phone) return
-      await loadMessagesForOpenChat(selected.phone, { silent: true, signal })
+      if (selected?.syntheticConversationId) {
+        await loadSyntheticConversation(selected.syntheticConversationId, { silent: true, signal })
+      } else if (selected?.phone) {
+        await loadMessagesForOpenChat(selected.phone, { silent: true, signal })
+      }
     },
   })
 
   useEffect(() => {
     const run = async () => {
+      if (requestedSyntheticConversationId) {
+        setMobileView('chat')
+        await loadSyntheticConversation(requestedSyntheticConversationId)
+        return
+      }
       await replaceFirstPageFromServer()
       if (requestedPhone) {
         setMobileView('chat')
@@ -684,7 +753,7 @@ export default function Conversations() {
       msgsCtrlRef.current?.abort()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requestedPhone])
+  }, [requestedPhone, requestedSyntheticConversationId])
 
   // ── Filter change → refetch first page narrowed server-side ──────────────
   // When the merchant switches tabs (e.g. "كل" → "طلب موظف") we
@@ -697,13 +766,16 @@ export default function Conversations() {
   const filterChangedOnceRef = useRef(false)
   useEffect(() => {
     filterRef.current = filter
+    // A synthetic deep-link is intentionally a single-conversation view. Never
+    // widen it back to the merchant inbox merely because a list filter changed.
+    if (requestedSyntheticConversationId) return
     if (!filterChangedOnceRef.current) {
       filterChangedOnceRef.current = true
       return
     }
     void replaceFirstPageFromServer()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter])
+  }, [filter, requestedSyntheticConversationId])
 
   const syncScrollAnchors = (el: HTMLElement) => {
     const nearBottom = isConversationNearBottom(el)
@@ -766,9 +838,12 @@ export default function Conversations() {
   // The short ResizeObserver window absorbs late image/card layout changes.
   useEffect(() => {
     if (!selected) return
-    const phoneChanged = selectedPhoneForScrollRef.current !== selected.phone
+    const selectedKey = selected.syntheticConversationId
+      ? `internal-e2e:${selected.syntheticConversationId}`
+      : selected.phone
+    const phoneChanged = selectedPhoneForScrollRef.current !== selectedKey
     if (!phoneChanged) return
-    selectedPhoneForScrollRef.current = selected.phone
+    selectedPhoneForScrollRef.current = selectedKey
     isNearBottomRef.current = true
     pauseAutoScrollRef.current = false
     setNewMessagesBelow(false)
@@ -789,7 +864,7 @@ export default function Conversations() {
       layoutScrollCleanupRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.phone])
+  }, [selected?.phone, selected?.syntheticConversationId])
 
   // Auto-scroll only when a new message arrives at the bottom and the user allows it.
   useEffect(() => {
@@ -834,6 +909,17 @@ export default function Conversations() {
   }
 
   const selectConversation = (c: Conversation) => {
+    if (c.synthetic && c.syntheticConversationId) {
+      setSelected({ ...c, messages: c.messages ?? [] })
+      setHasMoreMessages(false)
+      setLoadingMessages(true)
+      setCustomerOrdersOpen(false)
+      setNewMessagesBelow(false)
+      setMobileFilterMenuOpen(false)
+      setMobileView('chat')
+      void loadSyntheticConversation(c.syntheticConversationId)
+      return
+    }
     const cached = loadConversationMessagesCache(getTenantId(), c.phone)
     // Always reset the visible thread on phone change. Re-hydrate from
     // per-phone cache only — never carry the prior customer's messages.
@@ -869,7 +955,7 @@ export default function Conversations() {
   }
 
   const handleReply = async () => {
-    if (!selected || !reply.trim()) return
+    if (!selected || selected.readOnly || selected.synthetic || !reply.trim()) return
     try {
       await featureRealityApi.replyToConversation({
         customer_phone: selected.phone,
@@ -1607,26 +1693,42 @@ export default function Conversations() {
               <div className="flex-1 min-w-0 overflow-hidden">
                 <button
                   type="button"
-                  onClick={openEditCustomerName}
-                  className="group flex min-w-0 w-full flex-col items-start text-start rounded-md -mx-1 px-1 py-0.5 hover:bg-slate-50 transition-colors"
-                  title={cp.editCustomerName.title}
+                  onClick={selected.synthetic ? undefined : openEditCustomerName}
+                  disabled={selected.synthetic}
+                  className={`group flex min-w-0 w-full flex-col items-start text-start rounded-md -mx-1 px-1 py-0.5 transition-colors ${selected.synthetic ? '' : 'hover:bg-slate-50'}`}
+                  title={selected.synthetic ? selected.syntheticIdentifier : cp.editCustomerName.title}
                 >
                   <span className="flex items-center gap-1.5 min-w-0 w-full">
                     <span className="text-sm font-semibold text-slate-900 truncate flex-1 min-w-0">
-                      {conversationHasDisplayName(selected, phonesMatch)
+                      {selected.synthetic
+                        ? selected.customer
+                        : conversationHasDisplayName(selected, phonesMatch)
                         ? selected.customer
                         : selected.phone}
                     </span>
-                    <Pencil
-                      aria-hidden="true"
-                      className="w-3.5 h-3.5 shrink-0 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hidden md:block"
-                    />
+                    {!selected.synthetic && (
+                      <Pencil
+                        aria-hidden="true"
+                        className="w-3.5 h-3.5 shrink-0 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity hidden md:block"
+                      />
+                    )}
                   </span>
                   <span className="text-xs text-slate-400 flex items-center gap-1 truncate w-full mt-0.5">
-                    <Phone className="w-3 h-3 shrink-0" />
-                    <span className="truncate">{selected.phone}</span>
-                    <span className="mx-1 text-slate-300" aria-hidden="true">•</span>
-                    <span className="shrink-0">WhatsApp</span>
+                    {selected.synthetic ? (
+                      <>
+                        <FlaskConical className="w-3 h-3 shrink-0" />
+                        <span className="truncate">Synthetic alias {selected.syntheticAlias}</span>
+                        <span className="mx-1 text-slate-300" aria-hidden="true">•</span>
+                        <span className="shrink-0">INTERNAL_E2E</span>
+                      </>
+                    ) : (
+                      <>
+                        <Phone className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{selected.phone}</span>
+                        <span className="mx-1 text-slate-300" aria-hidden="true">•</span>
+                        <span className="shrink-0">WhatsApp</span>
+                      </>
+                    )}
                   </span>
                 </button>
 
@@ -1684,7 +1786,7 @@ export default function Conversations() {
                   <ShoppingCart className="w-4 h-4 text-brand-600" />
                   <span className="hidden lg:inline">{cp.actions.customerOrders}</span>
                 </button>
-                {!_isBlocked(selected) && (aiToggleKind(selected) === 'resume' ? (
+                {!selected.synthetic && !_isBlocked(selected) && (aiToggleKind(selected) === 'resume' ? (
                     <button
                       className="hidden md:flex items-center justify-center gap-1.5 btn-secondary text-xs py-1.5 px-3 text-emerald-600 border-emerald-200 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50"
                       onClick={resumeIntelligenceForSelected}
@@ -1708,7 +1810,7 @@ export default function Conversations() {
                     </button>
                   ))}
 
-                <div className="relative" ref={headerMenuRef}>
+                {!selected.synthetic && <div className="relative" ref={headerMenuRef}>
                   <button
                     type="button"
                     className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-slate-100 text-slate-500 active:bg-slate-200"
@@ -1796,11 +1898,11 @@ export default function Conversations() {
                       </div>
                     )
                   })()}
-                </div>
+                </div>}
               </div>
             </div>
 
-            {selected && (
+            {selected && !selected.synthetic && (
               <CampaignExcludeControl
                 key={selected.phone}
                 customerId={selected.customerId ?? undefined}
@@ -1872,6 +1974,7 @@ export default function Conversations() {
               open={customerOrdersOpen}
               onClose={() => setCustomerOrdersOpen(false)}
               phone={selected.phone}
+              syntheticConversationId={selected.syntheticConversationId ?? null}
               customerId={selected.customerId ?? null}
               customerLabel={selected.customer || selected.phone}
               labels={cp.customerOrders}
@@ -2062,7 +2165,12 @@ export default function Conversations() {
                           <span className="text-xs text-slate-400">
                             {formatRiyadhTime(m.time)}
                           </span>
-                          {isOut && (() => {
+                          {isOut && selected.synthetic ? (
+                            <FlaskConical
+                              className="w-3.5 h-3.5 text-indigo-400"
+                              aria-label="INTERNAL_E2E"
+                            />
+                          ) : isOut && (() => {
                             // ── Per-status icon (replaces the unconditional ✔✔) ──
                             //
                             // STRICT safeguard: a ✔✔ ("delivered to WhatsApp
@@ -2175,6 +2283,7 @@ export default function Conversations() {
             </div>
 
             {/* Composer — pinned bottom on mobile */}
+            {!selected.synthetic && (
             <div className="shrink-0 bg-white border-t border-slate-100 pb-safe-bottom">
             {/* Reply bar — mobile: زر الذكاء الأساسي فقط (باقي الإجراءات في ⋮) */}
             <div className="sm:hidden flex items-center gap-2 px-3 py-2">
@@ -2251,6 +2360,7 @@ export default function Conversations() {
               )}
             </div>
             </div>
+            )}
           </>
         )}
       </div>

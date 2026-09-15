@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
-import { AlertOctagon, FlaskConical, Loader2, RefreshCw, RotateCcw, Search, Send } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { AlertOctagon, ExternalLink, FlaskConical, Loader2, RefreshCw, RotateCcw, Search, Send } from 'lucide-react'
 import {
   INTERNAL_E2E_ALIASES,
   internalE2EApi,
@@ -8,6 +9,7 @@ import {
   type InternalE2EStatus,
 } from '../api/internalE2E'
 import { internalE2EStopReasons } from '../lib/internalE2ESafety'
+import { isImpersonatingSupport } from '../auth'
 
 type Busy = 'status' | 'provision' | 'reset' | 'turn' | 'lookup' | null
 type LookupKind = 'trace' | 'message'
@@ -117,6 +119,7 @@ export default function AdminInternalE2E() {
   const enabled = status?.enabled === true
   const controlsLocked = !enabled || stopReasons.length > 0 || busy !== null
   const fixtureCount = Object.values(status?.fixtures ?? {}).filter(item => item?.provisioned).length
+  const supportInspectionActive = isImpersonatingSupport()
 
   const refreshStatus = useCallback(async () => {
     setBusy('status')
@@ -242,6 +245,36 @@ export default function AdminInternalE2E() {
               </span>
             ))}
           </div>
+          {fixtureCount > 0 && (
+            <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-3" data-synthetic-conversation-links>
+              {INTERNAL_E2E_ALIASES.map(item => {
+                const fixture = status.fixtures[item]
+                const conversationId = fixture?.conversation_id
+                if (!fixture?.provisioned || !conversationId) return null
+                const label = `INTERNAL_E2E · Customer ${item}`
+                return supportInspectionActive ? (
+                  <Link
+                    key={item}
+                    to={`/conversations?synthetic_conversation_id=${conversationId}`}
+                    data-synthetic-conversation-link={item}
+                    className="inline-flex items-center justify-between gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100"
+                  >
+                    <span>{label}</span>
+                    <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+                  </Link>
+                ) : (
+                  <span
+                    key={item}
+                    title="An active tenant support session is required for transcript inspection."
+                    className="inline-flex cursor-not-allowed items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-400"
+                  >
+                    <span>{label}</span>
+                    <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+                  </span>
+                )
+              })}
+            </div>
+          )}
         </section>
       )}
 
