@@ -356,6 +356,48 @@ def test_impersonation_resolves_legacy_env_admin_without_user_id(support_app):
     assert support_claims["actor_user_id"] == ctx["admin"].id
 
 
+def test_impersonation_allows_configured_env_admin_without_user_row(
+    support_app,
+    monkeypatch,
+):
+    ctx = support_app
+    created = ctx["client"].post(
+        "/admin/support-access/requests",
+        headers=_admin_headers(ctx),
+        json=_request_body(),
+    )
+    request_id = created.json()["request_id"]
+    approved = ctx["client"].post(
+        f"/merchant/access-requests/{request_id}/respond",
+        headers={"Authorization": f"Bearer {_token(ctx['tenant_one_approver'])}"},
+        json={"approve": True, "ttl_hours": 4},
+    )
+    assert approved.status_code == 200
+
+    actor_email = ctx["admin"].email
+    ctx["db"].delete(ctx["admin"])
+    ctx["db"].commit()
+    monkeypatch.setattr(
+        "routers.support_access.is_configured_env_admin_identity",
+        lambda email: email == actor_email,
+    )
+    legacy_admin_token = create_token(
+        email=actor_email,
+        role="admin",
+        tenant_id=1,
+    )
+    entered = ctx["client"].post(
+        "/admin/impersonate/1",
+        headers={"Authorization": f"Bearer {legacy_admin_token}"},
+    )
+
+    assert entered.status_code == 200
+    support_claims = decode_token(entered.json()["access_token"])
+    assert support_claims is not None
+    assert support_claims["actor_user_id"] == 0
+    assert support_claims["actor_sub"] == actor_email
+
+
 def test_impersonation_fails_closed_when_legacy_actor_is_not_platform_admin(support_app):
     ctx = support_app
     created = ctx["client"].post(

@@ -70,6 +70,7 @@ from core.auth import (
     create_support_token,
     get_client_ip,
     get_current_user,
+    is_configured_env_admin_identity,
     is_platform_admin_role,
     require_admin,
     token_fingerprint,
@@ -225,6 +226,17 @@ def _resolve_support_actor_user_id(
             .filter(User.email == actor_sub, User.is_active == True)  # noqa: E712
             .one_or_none()
         )
+
+    if actor is None and actor_user_id == 0:
+        if (
+            is_platform_admin_role(admin.get("role"))
+            and is_configured_env_admin_identity(actor_sub)
+        ):
+            _audit.info(
+                "IMPERSONATE_ENV_ACTOR_RESOLVED actor=%s",
+                actor_sub,
+            )
+            return 0
 
     if actor is None or not is_platform_admin_role(actor.role):
         _audit.warning(
