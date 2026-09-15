@@ -1677,6 +1677,58 @@ async def test_failed_output_guardrail_is_visible_in_run_result(seeded: Seed) ->
 
 
 @pytest.mark.asyncio
+async def test_evidence_free_factual_output_retries_once_with_required_tool(
+    seeded: Seed,
+) -> None:
+    evidence_ref = f"catalog:product:{seeded.honey_a.id}"
+    rejected = CommerceReply(text="سعره 150 ريال.")
+    grounded = CommerceReply(
+        text="سعره 150 ريال.",
+        evidence_refs=[evidence_ref],
+        fact_claims=[
+            FactClaim(
+                kind="price",
+                value=150,
+                evidence_ref=evidence_ref,
+                subject_product_id=seeded.honey_a.id,
+                text_span="150 ريال",
+            )
+        ],
+        product_refs=[
+            ProductReference(product_id=seeded.honey_a.id, evidence_ref=evidence_ref)
+        ],
+    )
+    model = ScriptedModel(
+        [
+            [assistant_message(rejected.model_dump_json())],
+            [
+                function_call(
+                    "search_products",
+                    {"query": "عسل طلح بلدي", "limit": 5},
+                    call_id="call-reground",
+                )
+            ],
+            [assistant_message(grounded.model_dump_json())],
+        ]
+    )
+
+    result = await run_commerce_agent(
+        context=_context(seeded, trace_id="grounding-retry"),
+        user_input="كم سعر هذا؟",
+        model=model,
+        model_name="grounding-retry-eval",
+        execution_mode="outbound",
+    )
+
+    assert result.status == "completed"
+    assert result.reply == grounded
+    assert sum(event.get("kind") == "grounding_retry" for event in result.tool_trace) == 1
+    assert sum(event.get("kind") == "tool_start" for event in result.tool_trace) == 1
+    assert result.guardrail_results[-1]["tripwire_triggered"] is False
+    model.assert_complete()
+
+
+@pytest.mark.asyncio
 async def test_rejected_url_output_preserves_safe_diagnostic_and_customer_fallback(
     seeded: Seed,
 ) -> None:

@@ -83,6 +83,24 @@ def _guardrail_code(item: Any) -> str:
     return "blocked"
 
 
+def _is_retryable_evidence_free_output(item: Any) -> bool:
+    """Retry only no-tool outputs that assert an unverified factual value."""
+    info = item.output.output_info
+    if not isinstance(info, dict):
+        return False
+    errors = info.get("errors")
+    if not isinstance(errors, list):
+        return False
+    factual_errors = {
+        "evidence_free_commercial_or_factual_claim",
+        "availability_in_text_without_verified_claim",
+        "price_in_text_without_verified_claim",
+        "stock_quantity_in_text_without_verified_claim",
+        "url_in_text_without_verified_claim",
+    }
+    return bool(factual_errors.intersection(str(error) for error in errors))
+
+
 def _cached_tokens(usage: Any) -> int:
     details = getattr(usage, "input_tokens_details", None)
     return int(getattr(details, "cached_tokens", 0) or 0)
@@ -119,20 +137,6 @@ async def run_commerce_agent(
     trace_id = sdk_trace_id(context.inbound_trace_id)
     context.bind_run_user_input(user_input)
     try:
-        agent = build_commerce_agent(
-            model=configured_model,
-            reasoning_effort=reasoning_effort or COMMERCE_AGENT_V2_REASONING_EFFORT,
-            model_timeout_seconds=float(
-                model_timeout_seconds or COMMERCE_AGENT_V2_MODEL_TIMEOUT_SECONDS
-            ),
-            retry_settings=build_model_retry_settings(
-                execution_mode=execution_mode,
-                max_retries=COMMERCE_AGENT_V2_MAX_MODEL_RETRIES,
-                observer=hooks.record_retry_decision,
-                retry_model_timeouts=retry_model_timeouts,
-            ),
-            service_tier=requested_service_tier,
-        )
         # ``timeout_seconds`` remains as a compatibility alias for older evals;
         # it controls only the run-wide deadline, never a provider attempt.
         deadline = float(
@@ -141,33 +145,76 @@ async def run_commerce_agent(
             or COMMERCE_AGENT_V2_RUN_DEADLINE_SECONDS
         )
         async with asyncio.timeout(deadline):
-            run = await Runner.run(
-                agent,
-                str(user_input or ""),
-                context=context,
-                session=session,
-                hooks=hooks,
-                max_turns=6,
-                run_config=RunConfig(
-                    workflow_name=(
-                        "Nahlah Commerce Agent V2 Outbound"
-                        if execution_mode == "outbound"
-                        else "Nahlah Commerce Agent V2 Shadow"
+            grounding_retry_used = False
+            while True:
+                agent = build_commerce_agent(
+                    model=configured_model,
+                    reasoning_effort=(
+                        reasoning_effort or COMMERCE_AGENT_V2_REASONING_EFFORT
                     ),
-                    trace_id=trace_id,
-                    group_id=(
-                        f"tenant:{context.tenant_id}:conversation:{context.conversation_id}"
+                    model_timeout_seconds=float(
+                        model_timeout_seconds or COMMERCE_AGENT_V2_MODEL_TIMEOUT_SECONDS
                     ),
-                    trace_metadata={
-                        "tenant_id": str(context.tenant_id),
-                        "conversation_id": str(context.conversation_id),
-                        "inbound_trace_hash": trace_id.removeprefix("trace_"),
-                        "mode": f"{execution_mode}_read_only",
-                        "requested_service_tier": requested_service_tier,
-                    },
-                    trace_include_sensitive_data=False,
-                ),
-            )
+                    retry_settings=build_model_retry_settings(
+                        execution_mode=execution_mode,
+                        max_retries=COMMERCE_AGENT_V2_MAX_MODEL_RETRIES,
+                        observer=hooks.record_retry_decision,
+                        retry_model_timeouts=retry_model_timeouts,
+                    ),
+                    service_tier=requested_service_tier,
+                    require_tool_call=grounding_retry_used,
+                )
+                attempt_event_offset = len(hooks.events)
+                try:
+                    run = await Runner.run(
+                        agent,
+                        str(user_input or ""),
+                        context=context,
+                        session=session,
+                        hooks=hooks,
+                        max_turns=6,
+                        run_config=RunConfig(
+                            workflow_name=(
+                                "Nahlah Commerce Agent V2 Outbound"
+                                if execution_mode == "outbound"
+                                else "Nahlah Commerce Agent V2 Shadow"
+                            ),
+                            trace_id=trace_id,
+                            group_id=(
+                                f"tenant:{context.tenant_id}:conversation:{context.conversation_id}"
+                            ),
+                            trace_metadata={
+                                "tenant_id": str(context.tenant_id),
+                                "conversation_id": str(context.conversation_id),
+                                "inbound_trace_hash": trace_id.removeprefix("trace_"),
+                                "mode": f"{execution_mode}_read_only",
+                                "requested_service_tier": requested_service_tier,
+                            },
+                            trace_include_sensitive_data=False,
+                        ),
+                    )
+                    break
+                except OutputGuardrailTripwireTriggered as exc:
+                    attempt_events = hooks.events[attempt_event_offset:]
+                    tool_started = any(
+                        event.get("kind") == "tool_start" for event in attempt_events
+                    )
+                    if (
+                        not grounding_retry_used
+                        and not tool_started
+                        and _is_retryable_evidence_free_output(exc.guardrail_result)
+                    ):
+                        grounding_retry_used = True
+                        session = ConversationMessageSession(context)
+                        hooks.events.append(
+                            {
+                                "kind": "grounding_retry",
+                                "reason": "evidence_free_commercial_or_factual_claim",
+                                "tool_choice": "required",
+                            }
+                        )
+                        continue
+                    raise
         output = run.final_output_as(CommerceReply, raise_if_incorrect_type=True)
         usage = run.context_wrapper.usage
         guardrails = [
