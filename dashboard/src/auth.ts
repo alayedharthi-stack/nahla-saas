@@ -804,6 +804,26 @@ export function getImpersonation(): (ImpersonationInfo & { adminToken: string })
   return raw ? JSON.parse(raw) : null
 }
 
+/** Return the already-authenticated platform token without exposing it to UI code.
+ *
+ * During a support impersonation the active token is deliberately merchant-scoped,
+ * while the original platform token remains sealed in the existing impersonation
+ * session record. This accessor is fail-closed: only a real support-impersonation
+ * JWT may reach the saved token, and that saved token must itself carry a platform
+ * staff role. Backend ``require_admin`` remains the final authority.
+ */
+export function getPlatformAdminSessionToken(): string | null {
+  const current = getToken()
+  if (isPlatformStaffRole(getRole())) return current || null
+  if (!isImpersonatingSupport()) return null
+
+  const saved = getImpersonation()?.adminToken?.trim() || ''
+  if (!saved) return null
+  const claims = _decodeJwtPayload(saved)
+  const role = typeof claims.role === 'string' ? claims.role : ''
+  return isPlatformStaffRole(role) ? saved : null
+}
+
 export function isImpersonating(): boolean {
   return !!localStorage.getItem(IMPERSONATE_KEY)
 }
