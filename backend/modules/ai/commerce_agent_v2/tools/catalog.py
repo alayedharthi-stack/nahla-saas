@@ -1,6 +1,7 @@
 """Tenant-bound wrappers around the existing catalog domain service."""
 from __future__ import annotations
 
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -23,6 +24,100 @@ _GENERAL_BROWSE_EVIDENCE_LIMIT = 5
 
 
 _MAX_CONSECUTIVE_CATALOG_MISSES = 2
+
+_WEAK_PRODUCT_REFERENCE_RE = re.compile(
+    r"(?:^|\s)(?:هذا|هذه|هذي|ذا|هو|هي|this|that|it)(?=\s|$|[؟?،,.])",
+    re.IGNORECASE,
+)
+_EXPLICIT_PRODUCT_ORDINAL_RE = re.compile(
+    r"(?:^|\s)(?:الاول|الأول|الاولى|الأولى|الثاني|الثانية|الثانيه|"
+    r"الثالث|الثالثة|الثالثه|first|second|third|1st|2nd|3rd)(?=\s|$|[؟?،,.])",
+    re.IGNORECASE,
+)
+_WEAK_QUERY_VALUES = frozenset(
+    {"هذا", "هذه", "هذي", "ذا", "هو", "هي", "this", "that", "it"}
+)
+
+
+def _normalise_reference_text(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    return " ".join(
+        text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").split()
+    )
+
+
+def _persisted_product_ids(metadata: dict[str, Any]) -> set[int]:
+    """Read product identities already persisted by trusted response contracts."""
+    product_ids: set[int] = set()
+
+    artifact = metadata.get("artifact")
+    if isinstance(artifact, dict):
+        structured = artifact.get("structured_reply")
+        if isinstance(structured, dict):
+            for item in structured.get("product_refs") or []:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    product_ids.add(int(item.get("product_id")))
+                except (TypeError, ValueError):
+                    continue
+        presentation = artifact.get("presentation_bundle")
+        if isinstance(presentation, dict):
+            for item in presentation.get("actions") or []:
+                if not isinstance(item, dict) or item.get("kind") != "product":
+                    continue
+                payload = item.get("payload")
+                try:
+                    product_ids.add(int(payload.get("id")))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+
+    bundle = metadata.get("response_bundle")
+    if isinstance(bundle, dict):
+        for item in bundle.get("presentations") or []:
+            product = item.get("product") if isinstance(item, dict) else None
+            try:
+                product_ids.add(int(product.get("id")))
+            except (AttributeError, TypeError, ValueError):
+                continue
+    return {product_id for product_id in product_ids if product_id > 0}
+
+
+def _ambiguous_reference_has_multiple_candidates(
+    context: CommerceAgentContext,
+    *,
+    query: str,
+) -> bool:
+    """Fail closed when a weak reference follows a structured multi-product reply."""
+    user_input = _normalise_reference_text(context.run_user_input)
+    if not _WEAK_PRODUCT_REFERENCE_RE.search(user_input):
+        return False
+    if _EXPLICIT_PRODUCT_ORDINAL_RE.search(user_input):
+        return False
+
+    normalised_query = _normalise_reference_text(query)
+    if (
+        normalised_query
+        and normalised_query not in _WEAK_QUERY_VALUES
+        and normalised_query in user_input
+    ):
+        return False
+
+    from models import MessageEvent  # noqa: PLC0415
+
+    previous_outbound = (
+        context.db.query(MessageEvent)
+        .filter(
+            MessageEvent.tenant_id == context.tenant_id,
+            MessageEvent.conversation_id == context.conversation_id,
+            MessageEvent.direction.in_(("out", "outbound", "internal_e2e_outbound")),
+        )
+        .order_by(MessageEvent.created_at.desc(), MessageEvent.id.desc())
+        .first()
+    )
+    if previous_outbound is None:
+        return False
+    return len(_persisted_product_ids(dict(previous_outbound.extra_metadata or {}))) > 1
 
 
 def _catalog_search_enabled(
@@ -177,6 +272,15 @@ async def search_products(
     bounded_limit = max(1, min(int(limit), 10))
     catalog = CatalogContextBuilder(context.db, context.tenant_id)
     clean_query = str(query or "").strip()
+    if clean_query and _ambiguous_reference_has_multiple_candidates(
+        context,
+        query=clean_query,
+    ):
+        context.record_catalog_search_outcome(found=False)
+        return CatalogSearchResult(
+            status="not_found",
+            failure_reason="ambiguous_product_reference_requires_clarification",
+        )
     if clean_query:
         domain_result = catalog.search_products(
             clean_query,
@@ -187,14 +291,6 @@ async def search_products(
             *list(domain_result.products or []),
             *list(domain_result.catalog_fact_products or []),
         ]
-        if not rows and context.grounding_retry_active:
-            # A retry has already proven that the first model output asserted a
-            # factual value without evidence. If its history-derived name does
-            # not match the synced catalog, expose one canonical current-tenant
-            # product rather than letting the retry invent or repeat stale facts.
-            # The output guardrail still requires every returned claim to bind
-            # to this exact record.
-            rows = list(catalog.get_top_products(limit=1) or [])
     else:
         # General browsing otherwise sends ten full product/evidence records
         # into the compose turn. Live Phase 2.7A evidence showed that payload
