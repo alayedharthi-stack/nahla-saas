@@ -17,6 +17,10 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from core.auth import JWT_AVAILABLE, PLATFORM_ADMIN_ROLES, decode_token
+from core.lifecycle_operator_auth import (
+    LIFECYCLE_OPS_TOKEN_HEADER,
+    is_lifecycle_operator_path,
+)
 from core.audit import audit
 from core.config import API_SECRET_KEY
 
@@ -583,6 +587,16 @@ async def jwt_enforcement_middleware(request: Request, call_next):
         return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
     if is_jwt_public_path(path):
+        return await _safe_call_next(request, call_next, name="jwt_enforcement")
+
+    # The lifecycle-operations M2M credential is validated by the endpoint's
+    # narrow dependency. Admit only its three exact path shapes past the
+    # global JWT gate when the dedicated header is present; invalid values
+    # still fail closed inside ``require_lifecycle_operator``.
+    if (
+        is_lifecycle_operator_path(path)
+        and request.headers.get(LIFECYCLE_OPS_TOKEN_HEADER) is not None
+    ):
         return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
     # Public store scripts + store-facing widget APIs — no JWT possible from external stores

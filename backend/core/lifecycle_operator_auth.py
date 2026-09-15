@@ -17,6 +17,26 @@ MIN_LIFECYCLE_OPS_TOKEN_LENGTH = 43
 
 _optional_bearer = HTTPBearer(auto_error=False)
 
+_GLOBAL_PREFLIGHT_PATH = "/admin/operations/commerce-lifecycle/preflight"
+_ORDER_PREFLIGHT_PREFIX = "/admin/operations/commerce-lifecycle/orders/"
+_ORDER_PREFLIGHT_SUFFIX = "/preflight"
+_RECOVERY_PREFIX = "/admin/operations/orders/"
+_RECOVERY_SUFFIX = "/retry-final-confirmation"
+
+
+def is_lifecycle_operator_path(path: str) -> bool:
+    """True only for the three endpoint shapes owned by this credential."""
+    if path == _GLOBAL_PREFLIGHT_PATH:
+        return True
+    for prefix, suffix in (
+        (_ORDER_PREFLIGHT_PREFIX, _ORDER_PREFLIGHT_SUFFIX),
+        (_RECOVERY_PREFIX, _RECOVERY_SUFFIX),
+    ):
+        if path.startswith(prefix) and path.endswith(suffix):
+            order_id = path[len(prefix) : -len(suffix)]
+            return bool(order_id and order_id.isdecimal())
+    return False
+
 
 def _configured_ops_token() -> Optional[str]:
     token = os.getenv(LIFECYCLE_OPS_TOKEN_ENV, "").strip()
@@ -52,5 +72,6 @@ __all__ = [
     "LIFECYCLE_OPS_TOKEN_ENV",
     "LIFECYCLE_OPS_TOKEN_HEADER",
     "MIN_LIFECYCLE_OPS_TOKEN_LENGTH",
+    "is_lifecycle_operator_path",
     "require_lifecycle_operator",
 ]

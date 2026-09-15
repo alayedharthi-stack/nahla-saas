@@ -13,6 +13,7 @@ from core.lifecycle_operator_auth import (
     LIFECYCLE_OPS_TOKEN_HEADER,
     MIN_LIFECYCLE_OPS_TOKEN_LENGTH,
 )
+from core.middleware import jwt_enforcement_middleware
 from routers import admin_lifecycle_operations as ops_router
 
 
@@ -21,6 +22,7 @@ OPS_TOKEN = "o" * MIN_LIFECYCLE_OPS_TOKEN_LENGTH
 
 def _client(monkeypatch):
     app = FastAPI()
+    app.middleware("http")(jwt_enforcement_middleware)
     app.include_router(ops_router.router)
 
     def _db():
