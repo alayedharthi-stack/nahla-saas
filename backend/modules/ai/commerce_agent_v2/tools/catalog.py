@@ -19,6 +19,9 @@ from modules.ai.commerce_agent_v2.output import (
 from modules.ai.security.tenant_isolation import TenantIsolationLayer
 
 
+_GENERAL_BROWSE_EVIDENCE_LIMIT = 5
+
+
 _MAX_CONSECUTIVE_CATALOG_MISSES = 2
 
 
@@ -185,6 +188,12 @@ async def search_products(
             *list(domain_result.catalog_fact_products or []),
         ]
     else:
+        # General browsing otherwise sends ten full product/evidence records
+        # into the compose turn. Live Phase 2.7A evidence showed that payload
+        # repeatedly drove the provider attempt past the 75s runtime budget.
+        # Five grounded choices preserve useful discovery while bounding the
+        # model context; specific searches keep their existing 1..10 contract.
+        bounded_limit = min(bounded_limit, _GENERAL_BROWSE_EVIDENCE_LIMIT)
         rows = list(catalog.get_top_products(limit=bounded_limit) or [])
     _assert_catalog_rows_belong_to_tenant(context, rows)
     snapshots: list[ProductSnapshot] = []

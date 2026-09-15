@@ -58,7 +58,11 @@ from modules.ai.commerce_agent_v2.session import ConversationMessageSession, is_
 from modules.ai.commerce_agent_v2.shadow import schedule_commerce_agent_v2_shadow
 from modules.ai.commerce_agent_v2.shadow import _persist_shadow_result
 from modules.ai.commerce_agent_v2.tools import PHASE1_TOOLS
-from modules.ai.commerce_agent_v2.tools.catalog import get_product_details, search_products
+from modules.ai.commerce_agent_v2.tools.catalog import (
+    CatalogContextBuilder,
+    get_product_details,
+    search_products,
+)
 from modules.ai.commerce_agent_v2.tools.catalog import _catalog_search_enabled
 from modules.ai.commerce_agent_v2.tools.knowledge import (
     _merchant_knowledge_enabled,
@@ -498,6 +502,27 @@ async def test_empty_search_browses_only_current_tenant_catalog(seeded: Seed) ->
     returned_ids = {item.product_id for item in result.products}
     assert returned_ids == {seeded.honey_a.id, seeded.gift_a.id}
     assert seeded.honey_b.id not in returned_ids
+
+
+@pytest.mark.asyncio
+async def test_empty_search_bounds_general_browse_evidence(
+    seeded: Seed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_limits: list[int] = []
+    original = CatalogContextBuilder.get_top_products
+
+    def _record_limit(builder: CatalogContextBuilder, *, limit: int) -> Any:
+        observed_limits.append(limit)
+        return original(builder, limit=limit)
+
+    monkeypatch.setattr(CatalogContextBuilder, "get_top_products", _record_limit)
+    result = CatalogSearchResult.model_validate(
+        await _invoke(search_products, _context(seeded), {"query": "", "limit": 10})
+    )
+
+    assert result.status == "ok"
+    assert observed_limits == [5]
 
 
 @pytest.mark.asyncio
