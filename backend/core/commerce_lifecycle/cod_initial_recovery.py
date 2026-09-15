@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from core.commerce_lifecycle.intents import BusinessIntent
@@ -134,6 +135,75 @@ def _normalized_recovery_order(order: Any, meta: Mapping[str, Any]) -> dict[str,
     }
 
 
+def _resolve_and_rebind_initial_cod_template(
+    db: Session,
+    *,
+    tenant_id: int,
+) -> Any:
+    """Resolve only the canonical initial COD template, never a reminder."""
+    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
+        resolve_lifecycle_template_for_send,
+    )
+    from core.service_template_resolver import ensure_single_active  # noqa: PLC0415
+    from models import WhatsAppTemplate  # noqa: PLC0415
+
+    strict = resolve_lifecycle_template_for_send(
+        db, int(tenant_id), "cod_confirmation"
+    )
+    if strict is not None and (
+        str(getattr(strict, "nahla_source_key", None) or "") == "cod_confirmation"
+        or str(getattr(strict, "name", None) or "").startswith(
+            "nahla_cod_confirmation_"
+        )
+    ):
+        return strict
+
+    # The cod_confirmation service also owns later reminder templates.  A
+    # generic same-service fallback can therefore select a reminder, which is
+    # not a valid substitute for the initial order-bound prompt.  Require the
+    # canonical initial library identity (or its deterministic Meta name).
+    template = (
+        db.query(WhatsAppTemplate)
+        .filter(
+            WhatsAppTemplate.tenant_id == int(tenant_id),
+            WhatsAppTemplate.status == "APPROVED",
+            or_(
+                WhatsAppTemplate.nahla_source_key == "cod_confirmation",
+                WhatsAppTemplate.name.like("nahla_cod_confirmation_%"),
+            ),
+        )
+        .order_by(WhatsAppTemplate.updated_at.desc(), WhatsAppTemplate.id.desc())
+        .first()
+    )
+    if template is None:
+        return None
+
+    # Repair a stale multi-step/hidden binding without broadening template
+    # selection.  Keep the target inactive until competing slot rows have
+    # been deactivated by the existing uniqueness helper.
+    template.service_key = "cod_confirmation"
+    template.step_number = None
+    template.is_hidden = False
+    template.is_active = False
+    db.flush()
+    ensure_single_active(
+        db,
+        int(tenant_id),
+        "cod_confirmation",
+        None,
+        int(template.id),
+    )
+    db.flush()
+    logger.info(
+        "[CODRecovery] rebound canonical initial template tenant=%s "
+        "template_id=%s name=%s",
+        tenant_id,
+        template.id,
+        template.name,
+    )
+    return template
+
+
 async def reconcile_missing_initial_cod_confirmation(
     db: Session,
     *,
@@ -154,9 +224,6 @@ async def reconcile_missing_initial_cod_confirmation(
         dispatch_external_lifecycle_notification,
     )
     from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
-    from core.service_template_resolver import (  # noqa: PLC0415
-        resolve_template_for_send,
-    )
     from store_adapters.salla_lifecycle import (  # noqa: PLC0415
         salla_cod_requires_customer_confirmation,
     )
@@ -189,13 +256,8 @@ async def reconcile_missing_initial_cod_confirmation(
         order_id=order_id,
     ):
         return CodInitialRecoveryResult(False, False, True, "already_sent_evidence")
-    # Template sync can leave an APPROVED template temporarily outside the
-    # strict active/visible/single-step slot (for example an older row with a
-    # stale step number).  Recovery is the narrow self-healing path: use the
-    # existing send-flow resolver to bind that exact COD service template,
-    # then the canonical dispatcher below still performs its strict lookup.
-    if resolve_template_for_send(
-        db, int(tenant_id), "cod_confirmation", None
+    if _resolve_and_rebind_initial_cod_template(
+        db, tenant_id=int(tenant_id)
     ) is None:
         return CodInitialRecoveryResult(False, False, False, "no_approved_template")
 
