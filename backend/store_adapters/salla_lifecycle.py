@@ -76,6 +76,7 @@ _ORDER_CREATED_EVENTS = frozenset({
     "order.created",
     "order_created",
 })
+_COD_INITIAL_RECOVERY_OBSERVATION = "cod_initial_reconciliation"
 
 
 def _payment_method(normalized_order: Mapping[str, Any]) -> str:
@@ -189,10 +190,26 @@ def _is_authoritative_order_created(normalized_order: Mapping[str, Any]) -> bool
     return _lifecycle_source_event(normalized_order) in _ORDER_CREATED_EVENTS
 
 
+def _is_cod_initial_reconciliation(
+    normalized_order: Mapping[str, Any],
+) -> bool:
+    """True only for the guarded StoreSync COD recovery observation."""
+    return (
+        str(normalized_order.get("lifecycle_observation") or "")
+        .strip()
+        .lower()
+        == _COD_INITIAL_RECOVERY_OBSERVATION
+    )
+
+
 def _first_seen_acceptance_intent(
     curr: str,
     normalized_order: Mapping[str, Any],
 ) -> Optional[BusinessIntent]:
+    if _is_cod_initial_reconciliation(normalized_order):
+        if salla_cod_requires_customer_confirmation(curr, normalized_order):
+            return BusinessIntent.COD_CONFIRMATION
+        return None
     # Historical / poller first inserts are snapshots, not transitions.
     if _is_poll_first_observation(normalized_order):
         return None
@@ -234,10 +251,16 @@ def normalize_salla_lifecycle_business_intent(
             _is_authoritative_order_created(normalized_order)
             and curr in _PREPARING_STATUSES
         )
+        and not _is_cod_initial_reconciliation(normalized_order)
     ):
         return None
 
     has_prior = bool(prev) and prev != "unknown"
+
+    if _is_cod_initial_reconciliation(normalized_order):
+        if salla_cod_requires_customer_confirmation(curr, normalized_order):
+            return BusinessIntent.COD_CONFIRMATION
+        return None
 
     if not has_prior:
         return _first_seen_acceptance_intent(curr, normalized_order)

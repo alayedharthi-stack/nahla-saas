@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -191,15 +192,19 @@ def _stamp_external_cod_confirmation_sent(
     *,
     template: Any,
     send_method: str,
+    provider_message_id: Optional[str] = None,
 ) -> None:
     """Make a store-origin COD prompt discoverable by the button handler."""
     meta = dict(getattr(order, "extra_metadata", None) or {})
     meta["nahla_cod_confirmation_sent"] = True
+    meta["nahla_cod_confirmation_sent_at"] = datetime.now(timezone.utc).isoformat()
     meta["nahla_cod_confirmation_origin"] = "external_store"
     meta["nahla_cod_confirmation_send_method"] = send_method
     meta["nahla_cod_confirmation_template_id"] = getattr(template, "id", None)
     meta["nahla_cod_confirmation_template_name"] = getattr(template, "name", None)
     meta["nahla_cod_confirmation_revision"] = getattr(template, "revision", None)
+    if str(provider_message_id or "").strip():
+        meta["nahla_cod_confirmation_wamid"] = str(provider_message_id).strip()
     order.extra_metadata = meta
     try:
         flag_modified(order, "extra_metadata")
@@ -405,6 +410,11 @@ async def _execute_reserved_send(
         )
 
     payload = _build_dispatch_payload(evidence)
+    if intent == BusinessIntent.COD_CONFIRMATION:
+        # The approved COD quick replies must remain deterministically bound
+        # to the internal order, including lifecycle-reconciliation sends.
+        payload["order_id"] = str(order_id)
+        payload["order_internal_id"] = str(order_id)
     if send_method == "session_message":
         from core.automation_engine import send_lifecycle_whatsapp_session_body  # noqa: PLC0415
 
@@ -448,6 +458,7 @@ async def _execute_reserved_send(
                     order,
                     template=template,
                     send_method=send_method,
+                    provider_message_id=final.provider_message_id,
                 )
             try:
                 db.commit()

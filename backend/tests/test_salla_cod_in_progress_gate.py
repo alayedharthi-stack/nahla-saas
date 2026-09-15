@@ -20,7 +20,15 @@ for _path in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 
 from core.commerce_lifecycle.intents import BusinessIntent  # noqa: E402
 from core.salla_order_fidelity import extract_salla_payment_facts  # noqa: E402
-from database.models import AutomationEvent, Base, Customer, Order, Tenant  # noqa: E402
+from database.models import (  # noqa: E402
+    AutomationEvent,
+    Base,
+    CommerceLifecycleNotificationLedger,
+    Customer,
+    Order,
+    Tenant,
+)
+from core.merchant_capabilities import MerchantCapabilities  # noqa: E402
 from services.store_sync import StoreSyncService  # noqa: E402
 from services.store_sync import _normalise_order  # noqa: E402
 from services.salla_orders_poller import _emit_for_order  # noqa: E402
@@ -670,3 +678,221 @@ def test_cod_under_review_is_no_longer_awaiting_customer_confirmation():
     assert normalize_salla_lifecycle_business_intent(
         "in_progress", "under_review", normalized
     ) is None
+
+
+def _lifecycle_test_capabilities() -> MerchantCapabilities:
+    return MerchantCapabilities(
+        has_external_store=True,
+        supports_external_checkout=True,
+        supports_external_coupons=False,
+        supports_whatsapp_orders=True,
+        supports_nahla_orders=False,
+        supports_bank_transfer=False,
+        supports_cod=True,
+        has_whatsapp_catalog=False,
+        has_external_tracking=True,
+        has_nahla_tracking=False,
+        has_payment_link=True,
+    )
+
+
+def test_cod_template_startup_gap_recovers_on_later_poll_once(monkeypatch):
+    """A blocked live COD transition is re-evaluated by a later poll."""
+    db, engine, tenant, _customer = _race_db()
+    try:
+        phone = "+966500000001"
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
+        monkeypatch.setenv(
+            "COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST", str(tenant.id)
+        )
+        monkeypatch.setenv(
+            "COMMERCE_LIFECYCLE_DISPATCH_RECIPIENT_ALLOWLIST", phone
+        )
+
+        order = Order(
+            tenant_id=tenant.id,
+            external_id="startup-gap-cod",
+            external_order_number="REF-STARTUP-GAP",
+            status="in_progress",
+            total="174",
+            customer_name="Customer",
+            customer_info={"phone": phone},
+            is_abandoned=False,
+            extra_metadata={
+                "payment_method": "cod",
+                "payment_status": "waiting",
+                "is_cod": True,
+                "legacy_notifications_suppressed": True,
+            },
+        )
+        db.add(order)
+        db.commit()
+        db.refresh(order)
+
+        approved = MagicMock()
+        approved.id = 440
+        approved.name = "nahla_cod_confirmation_r3_3275d1"
+        approved.language = "ar"
+        approved.revision = 3
+        approved.components = []
+        template_state = {"approved": False}
+
+        def _resolve_template(*_args, **_kwargs):
+            return approved if template_state["approved"] else None
+
+        adapter = MagicMock()
+        adapter.platform = "salla"
+        adapter.update_order_status = AsyncMock()
+        adapter.get_orders = AsyncMock(return_value=[NormalizedOrder(
+            id="startup-gap-cod",
+            reference_id="REF-STARTUP-GAP",
+            status="in_progress",
+            total=174,
+            currency="SAR",
+            payment_method="cod",
+            payment_status="waiting",
+            is_cod=True,
+            customer_name="Customer",
+            customer_phone=phone,
+            source="salla",
+        )])
+        service = StoreSyncService(db, tenant.id, adapter=adapter)
+
+        from core.commerce_lifecycle.dispatch import (  # noqa: PLC0415
+            dispatch_external_lifecycle_notification,
+        )
+
+        provider_send = AsyncMock(
+            return_value=("sent", {"wa_message_id": "wamid.startup-gap"})
+        )
+        brain = AsyncMock(side_effect=AssertionError("Brain must not run"))
+        with patch(
+            "core.merchant_capabilities.resolve_merchant_capabilities",
+            return_value=_lifecycle_test_capabilities(),
+        ), patch(
+            "core.commerce_lifecycle.order_updates.evaluate_order_update_delivery",
+            return_value=(True, None),
+        ), patch(
+            "core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send",
+            side_effect=_resolve_template,
+        ), patch(
+            "core.automation_engine.send_lifecycle_whatsapp_template",
+            provider_send,
+        ), patch(
+            "services.merchant_brain_turn.evaluate_live_merchant_brain_turn",
+            brain,
+        ):
+            blocked = _run(dispatch_external_lifecycle_notification(
+                db,
+                tenant_id=tenant.id,
+                order=order,
+                provider="salla",
+                raw_previous_status=None,
+                raw_current_status="in_progress",
+                normalized_order=_live_created({
+                    "external_id": order.external_id,
+                    "external_order_number": order.external_order_number,
+                    "status": "in_progress",
+                    "total": order.total,
+                    "customer_name": order.customer_name,
+                    "customer_phone": phone,
+                    "payment_method": "cod",
+                    "payment_status": "waiting",
+                    "is_cod": True,
+                }),
+                raw_payload=None,
+            ))
+            assert blocked.reason_code == "no_approved_template"
+            assert provider_send.await_count == 0
+            assert order.extra_metadata.get("nahla_cod_confirmation_sent") is not True
+            assert db.query(AutomationEvent).count() == 0
+
+            template_state["approved"] = True
+            assert _run(service.sync_orders(
+                triggered_by="salla_orders_poller"
+            )) == 1
+            assert provider_send.await_count == 1
+            sent_payload = provider_send.await_args.args[4]
+            assert sent_payload["order_id"] == str(order.id)
+            assert sent_payload["order_internal_id"] == str(order.id)
+            db.refresh(order)
+            assert order.extra_metadata["nahla_cod_confirmation_sent"] is True
+            assert order.extra_metadata["nahla_cod_confirmation_sent_at"]
+            assert (
+                order.extra_metadata["nahla_cod_confirmation_wamid"]
+                == "wamid.startup-gap"
+            )
+
+            assert _run(service.sync_orders(
+                triggered_by="salla_orders_poller"
+            )) == 1
+
+        assert provider_send.await_count == 1
+        assert adapter.update_order_status.await_count == 0
+        assert brain.await_count == 0
+        assert db.query(AutomationEvent).count() == 0
+        rows = db.query(CommerceLifecycleNotificationLedger).all()
+        assert len(rows) == 1
+        assert rows[0].business_intent == BusinessIntent.COD_CONFIRMATION.value
+        assert rows[0].send_state == "sent"
+        assert rows[0].provider_message_id == "wamid.startup-gap"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_cod_initial_recovery_ignores_non_cod_confirmed_and_sent(monkeypatch):
+    from core.commerce_lifecycle.cod_initial_recovery import (  # noqa: PLC0415
+        reconcile_missing_initial_cod_confirmation,
+    )
+
+    db, engine, tenant, _customer = _race_db()
+    try:
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "true")
+        monkeypatch.setenv(
+            "COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST", str(tenant.id)
+        )
+        cases = (
+            Order(
+                tenant_id=tenant.id,
+                external_id="non-cod",
+                status="in_progress",
+                customer_info={"mobile": "+966500000001"},
+                is_abandoned=False,
+                extra_metadata={"payment_method": "credit_card", "is_cod": False},
+            ),
+            Order(
+                tenant_id=tenant.id,
+                external_id="confirmed-cod",
+                status="under_review",
+                customer_info={"mobile": "+966500000001"},
+                is_abandoned=False,
+                extra_metadata={"payment_method": "cod", "is_cod": True},
+            ),
+            Order(
+                tenant_id=tenant.id,
+                external_id="sent-cod",
+                status="in_progress",
+                customer_info={"mobile": "+966500000001"},
+                is_abandoned=False,
+                extra_metadata={
+                    "payment_method": "cod",
+                    "is_cod": True,
+                    "nahla_cod_confirmation_sent": True,
+                },
+            ),
+        )
+        db.add_all(cases)
+        db.commit()
+
+        reasons = [
+            _run(reconcile_missing_initial_cod_confirmation(
+                db, tenant_id=tenant.id, order=row
+            )).reason_code
+            for row in cases
+        ]
+        assert reasons == ["cod_not_proven", "status_not_pending", "already_sent_stamp"]
+        assert db.query(CommerceLifecycleNotificationLedger).count() == 0
+    finally:
+        db.close()
+        engine.dispose()
