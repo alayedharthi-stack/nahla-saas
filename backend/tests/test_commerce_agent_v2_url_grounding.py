@@ -128,6 +128,61 @@ def test_product_url_action_only_accepts_canonical_equivalence_with_strict_bindi
     assert validate_grounded_reply(context, reply) == []
 
 
+def test_product_url_action_accepts_direct_subject_bound_evidence_without_duplicate_claim() -> None:
+    ref = "catalog:product:17"
+    evidence_url = "https://demostore.salla.sa/dev/فستان/p398551325"
+    rendered_url = "https://demostore.salla.sa/dev/%D9%81%D8%B3%D8%AA%D8%A7%D9%86/p398551325"
+    context = _context_with_evidence(
+        EvidenceRecord(
+            ref=ref,
+            source="catalog_product",
+            source_id="17",
+            facts=[
+                CanonicalEvidenceFact(
+                    kind="product_url",
+                    value=evidence_url,
+                    subject_product_id=17,
+                )
+            ],
+        )
+    )
+    reply = CommerceReply(
+        text="افتح صفحة المنتج من الزر.",
+        evidence_refs=[ref],
+        ui_actions=[
+            UIAction(kind="open_product", label="عرض المنتج", url=rendered_url, evidence_ref=ref)
+        ],
+    )
+
+    assert validate_grounded_reply(context, reply) == []
+
+
+def test_product_url_action_rejects_direct_evidence_with_wrong_subject_binding() -> None:
+    ref = "catalog:product:17"
+    url = "https://demostore.salla.sa/products/17"
+    context = _context_with_evidence(
+        EvidenceRecord(
+            ref=ref,
+            source="catalog_product",
+            source_id="17",
+            facts=[
+                CanonicalEvidenceFact(
+                    kind="product_url",
+                    value=url,
+                    subject_product_id=18,
+                )
+            ],
+        )
+    )
+    reply = CommerceReply(
+        text="افتح صفحة المنتج من الزر.",
+        evidence_refs=[ref],
+        ui_actions=[UIAction(kind="open_product", label="عرض المنتج", url=url, evidence_ref=ref)],
+    )
+
+    assert "action_url_not_in_evidence" in validate_grounded_reply(context, reply)
+
+
 def test_image_url_media_accepts_canonical_equivalence() -> None:
     ref = "catalog:product:17"
     raw_url = "https://cdn.example.com/صور/فستان.jpg"

@@ -85,6 +85,37 @@ def test_structured_delivery_uses_only_grounded_fields_without_legacy_markers() 
     assert "[CALL:" not in serialized
 
 
+def test_structured_delivery_accepts_canonical_action_url_with_subject_binding() -> None:
+    evidence = EvidenceRecord(
+        ref="catalog:product:17",
+        source="catalog_product",
+        source_id="17",
+        facts=[
+            CanonicalEvidenceFact(
+                kind="product_url",
+                value="https://example.test/منتج/17",
+                subject_product_id=17,
+            )
+        ],
+    )
+    reply = CommerceReply(
+        text="افتح المنتج من الزر.",
+        evidence_refs=[evidence.ref],
+        ui_actions=[
+            UIAction(
+                kind="open_product",
+                label="عرض المنتج",
+                url="https://example.test/%D9%85%D9%86%D8%AA%D8%AC/17",
+                evidence_ref=evidence.ref,
+            )
+        ],
+    )
+
+    plan = build_commerce_delivery_plan(reply, {evidence.ref: evidence})
+
+    assert [action.kind for action in plan] == ["text", "ui_action"]
+
+
 def test_missing_presentation_evidence_fails_closed_to_grounded_text() -> None:
     reply = CommerceReply(
         text="لا تتوفر لدي صورة موثوقة.",

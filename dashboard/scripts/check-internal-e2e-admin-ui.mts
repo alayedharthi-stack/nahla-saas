@@ -37,17 +37,27 @@ const safe = {
   cross_customer_leakage: 0,
   write_mutations: 0,
   salla_mutations: 0,
+  unsupported_commercial_claims: 0,
+  duplicate_replies: 0,
   silent_v1_fallback: 0,
+  guardrail_passed: true,
+  status: 'completed',
   safety_proofs: {
     cross_tenant_leakage: provenZero,
     cross_customer_leakage: provenZero,
     write_mutations: provenZero,
     salla_mutations: provenZero,
+    unsupported_commercial_claims: provenZero,
+    duplicate_replies: provenZero,
     silent_v1_fallback: provenZero,
   },
 }
 assert.deepEqual(internalE2EStopReasons(safe), [])
 assert.deepEqual(internalE2EStopReasons({ ...safe, external_egress_count: 1 }), ['external_egress_count'])
+assert(internalE2EStopReasons({ ...safe, unsupported_commercial_claims: 1 }).includes('unsupported_commercial_claims'))
+assert(internalE2EStopReasons({ ...safe, duplicate_replies: 1 }).includes('duplicate_replies'))
+assert(internalE2EStopReasons({ ...safe, guardrail_passed: false }).includes('guardrail_failed'))
+assert(internalE2EStopReasons({ ...safe, status: 'test_contract_failed' }).includes('turn_not_completed'))
 assert(internalE2EStopReasons({
   ...safe,
   safety_proofs: { ...safe.safety_proofs, cross_customer_leakage: { value: 0, proven: false } },
