@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { INTERNAL_E2E_ALIASES } from '../src/api/internalE2E.ts'
 import { internalE2EStopReasons } from '../src/lib/internalE2ESafety.ts'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -10,7 +9,7 @@ const api = readFileSync(`${root}/src/api/internalE2E.ts`, 'utf8')
 const app = readFileSync(`${root}/src/App.tsx`, 'utf8')
 const guard = readFileSync(`${root}/src/components/ProtectedRoute.tsx`, 'utf8')
 
-assert.deepEqual(INTERNAL_E2E_ALIASES, ['A', 'B', 'C'])
+assert.match(api, /INTERNAL_E2E_ALIASES[^=]*= \['A', 'B', 'C'\]/)
 assert.match(app, /path="admin\/internal-e2e" element=\{<AdminInternalE2E \/>\}/)
 assert.match(guard, /wantsAdmin && !isOwner/)
 assert.match(guard, /<Navigate to="\/overview" replace \/>/)
