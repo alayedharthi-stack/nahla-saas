@@ -153,10 +153,10 @@ async def reconcile_missing_initial_cod_confirmation(
         commerce_lifecycle_dispatch_enabled,
         dispatch_external_lifecycle_notification,
     )
-    from core.commerce_lifecycle.order_updates import (  # noqa: PLC0415
-        resolve_lifecycle_template_for_send,
-    )
     from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
+    from core.service_template_resolver import (  # noqa: PLC0415
+        resolve_template_for_send,
+    )
     from store_adapters.salla_lifecycle import (  # noqa: PLC0415
         salla_cod_requires_customer_confirmation,
     )
@@ -189,8 +189,13 @@ async def reconcile_missing_initial_cod_confirmation(
         order_id=order_id,
     ):
         return CodInitialRecoveryResult(False, False, True, "already_sent_evidence")
-    if resolve_lifecycle_template_for_send(
-        db, int(tenant_id), "cod_confirmation"
+    # Template sync can leave an APPROVED template temporarily outside the
+    # strict active/visible/single-step slot (for example an older row with a
+    # stale step number).  Recovery is the narrow self-healing path: use the
+    # existing send-flow resolver to bind that exact COD service template,
+    # then the canonical dispatcher below still performs its strict lookup.
+    if resolve_template_for_send(
+        db, int(tenant_id), "cod_confirmation", None
     ) is None:
         return CodInitialRecoveryResult(False, False, False, "no_approved_template")
 
