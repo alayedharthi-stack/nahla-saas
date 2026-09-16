@@ -51,7 +51,7 @@ from legacy_migration_drift_postgres_fixtures import (  # noqa: E402
     drop_ephemeral_database,
     run_alembic,
 )
-from models import Customer, CustomerNameProvenance, Tenant  # noqa: E402
+from models import Base, Customer, CustomerNameProvenance, Tenant  # noqa: E402
 
 VERIFIED_NAME = "محمد أحمد الحارثي"
 
@@ -253,5 +253,121 @@ def test_durable_row_is_read_and_precedence_unchanged_when_table_exists(pg_with_
         assert cust.name == VERIFIED_NAME
         db.commit()
         assert db.get(Customer, sibling.id).name == "عميل آخر"
+    finally:
+        db.close()
+
+
+# ── Production materialization path: create_all, then the table is absent ──
+#
+# ``backend/main.py`` does not advance alembic past ``0093``; new ORM tables
+# reach production through the background ``Base.metadata.create_all`` step
+# (``_run_migrations``). Until that step has run, the schema is exactly the
+# previous release's create_all schema minus ``customer_name_provenance``.
+# This fixture builds that shape directly instead of going through alembic.
+
+@pytest.fixture(scope="module")
+def pg_create_all_without_provenance_table() -> Iterator[Engine]:
+    admin = _pg_admin()
+    db_name, _ = create_ephemeral_database(admin)
+    engine = create_engine(
+        str(admin.url.set(database=db_name).render_as_string(hide_password=False)),
+        poolclass=NullPool,
+        pool_pre_ping=True,
+    )
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE customer_name_provenance CASCADE"))
+        yield engine
+    finally:
+        engine.dispose()
+        drop_ephemeral_database(admin, db_name)
+        admin.dispose()
+
+
+class _RollbackSpy:
+    """Counts ``rollback()`` calls on the caller's session (must stay 0)."""
+
+    def __init__(self, db: Session):
+        self.db = db
+        self.calls = 0
+        self._orig = db.rollback
+
+    def __enter__(self):
+        def _spy(*a, **k):
+            self.calls += 1
+            return self._orig(*a, **k)
+
+        self.db.rollback = _spy  # type: ignore[method-assign]
+        return self
+
+    def __exit__(self, *exc):
+        self.db.rollback = self._orig  # type: ignore[method-assign]
+        return False
+
+
+def test_missing_table_read_never_rolls_back_the_caller(pg_without_provenance_table: Engine) -> None:
+    """The savepoint is what recovers the transaction — never ``session.rollback()``
+    on the caller (which would discard the caller's flushed business rows)."""
+    db = _session(pg_without_provenance_table)
+    try:
+        cust = _seed(db, name=VERIFIED_NAME, meta={"customer_name_authority": "VERIFIED_ECOMMERCE"})
+        _pending_sibling(db, cust.tenant_id, "+966544444444")
+        with _RollbackSpy(db) as spy:
+            assert read_name_authority(cust) is NameAuthority.VERIFIED_ECOMMERCE
+        assert spy.calls == 0, "read_name_authority must not roll back the caller's session"
+        assert db.in_transaction()
+        assert db.query(Customer).filter(Customer.normalized_phone == "+966544444444").count() == 1
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_missing_table_read_on_create_all_schema_keeps_caller_committable(
+    pg_create_all_without_provenance_table: Engine,
+) -> None:
+    """Same invariant on the schema shape production actually has during the
+    startup window (create_all-built, provenance table not yet created)."""
+    engine = pg_create_all_without_provenance_table
+    assert "customer_name_provenance" not in set(__import__("sqlalchemy").inspect(engine).get_table_names())
+    db = _session(engine)
+    try:
+        cust = _seed(db, name="محمد أحمد", meta={"customer_name_authority": "CUSTOMER_SELF_REPORTED"})
+        tenant = db.get(Tenant, cust.tenant_id)
+        tenant.name = "T-renamed-in-flight"  # pending UPDATE, unrelated business row
+        _pending_sibling(db, cust.tenant_id, "+966555555555")
+
+        with _RollbackSpy(db) as spy:
+            assert read_name_authority(cust) is NameAuthority.CUSTOMER_SELF_REPORTED
+        assert spy.calls == 0
+        assert db.query(Tenant).filter(Tenant.id == tenant.id).count() == 1
+        assert db.execute(text("SELECT 1")).scalar() == 1
+        db.commit()
+    finally:
+        db.close()
+
+    check = _session(engine)
+    try:
+        assert check.get(Tenant, tenant.id).name == "T-renamed-in-flight"
+        assert check.query(Customer).filter(Customer.normalized_phone == "+966555555555").count() == 1
+    finally:
+        check.close()
+
+
+def test_missing_table_read_falls_back_for_every_metadata_shape(pg_without_provenance_table: Engine) -> None:
+    db = _session(pg_without_provenance_table)
+    try:
+        cases = [
+            ({"customer_name_authority": "VERIFIED_ECOMMERCE"}, NameAuthority.VERIFIED_ECOMMERCE),
+            ({"customer_name_authority": "CUSTOMER_SELF_REPORTED"}, NameAuthority.CUSTOMER_SELF_REPORTED),
+            ({"customer_name_authority": "WHATSAPP_PROFILE"}, NameAuthority.WHATSAPP_PROFILE),
+            ({"customer_name_source": "salla_sync"}, NameAuthority.VERIFIED_ECOMMERCE),
+            ({}, NameAuthority.WHATSAPP_PROFILE),  # acquisition_channel=whatsapp_inbound
+        ]
+        for meta, expected in cases:
+            cust = _seed(db, name="محمد أحمد", meta=meta)
+            assert read_name_authority(cust) is expected, meta
+            assert db.execute(text("SELECT 1")).scalar() == 1  # still usable after each failed SELECT
+        db.commit()
     finally:
         db.close()
