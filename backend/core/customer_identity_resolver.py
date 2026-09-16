@@ -58,6 +58,12 @@ IDENTITY_METADATA_KEYS: frozenset[str] = frozenset(
         "manual_name_edited_at",
         "manual_name_previous",
         "manual_name_source",
+        # ── Authority layer (core.customer_name_authority) ───────────
+        # Mirror of customer_name_provenance. Must survive CIS merges
+        # for the same reason the keys above must.
+        "customer_name_authority",
+        "proposed_name_classification",
+        "customer_name_evidence_kind",
     }
 )
 
@@ -210,6 +216,7 @@ def _resolve_display_name(
     proposed: str,
     status: str,
     manual_cleared: bool,
+    proposed_classification: str = "",
 ) -> str:
     from core.customer_display import is_valid_customer_display_name  # noqa: PLC0415
 
@@ -217,9 +224,28 @@ def _resolve_display_name(
         return ""
     if name and is_valid_customer_display_name(name):
         return name
-    if proposed and validate_customer_name(proposed).valid:
+    # A WhatsApp profile hint may only surface as a display name when
+    # the classifier called it a person name. NOT_PERSON_NAME and
+    # AMBIGUOUS hints are retained for merchant review but never shown
+    # — this is what keeps "الحمد لله" off invoices and shipping labels.
+    if proposed and _proposed_is_displayable(proposed, proposed_classification):
         return proposed
     return name or ""
+
+
+def _proposed_is_displayable(proposed: str, classification: str) -> bool:
+    """True only for profile hints classified PERSON_NAME."""
+    from core.customer_name_authority import (  # noqa: PLC0415
+        PERSON_NAME,
+        classify_whatsapp_profile_name,
+    )
+
+    stored = str(classification or "").strip().upper()
+    if stored:
+        return stored == PERSON_NAME
+    # Legacy hint written before the classifier existed — classify now
+    # instead of trusting it.
+    return classify_whatsapp_profile_name(proposed).is_person_name
 
 
 def read_customer_identity(customer: Any) -> CustomerIdentitySnapshot:
@@ -254,6 +280,9 @@ def read_customer_identity(customer: Any) -> CustomerIdentitySnapshot:
         proposed=proposed,
         status=status,
         manual_cleared=manual_cleared,
+        proposed_classification=str(
+            meta.get("proposed_name_classification") or ""
+        ),
     )
     return CustomerIdentitySnapshot(
         customer_name=name,
@@ -395,6 +424,53 @@ def apply_customer_name(
         )
         return True
 
+    # ── Authority gate 1: WhatsApp profile classification ─────────────
+    # A profile string is user-controlled free text. Classify it before
+    # it is allowed to become a canonical name or even a stored hint.
+    profile_classification = ""
+    if canon_source == SOURCE_WHATSAPP_PROFILE and not force_merchant:
+        from core.customer_name_authority import (  # noqa: PLC0415
+            NOT_PERSON_NAME,
+            classify_whatsapp_profile_name,
+        )
+
+        verdict = classify_whatsapp_profile_name(raw_name)
+        profile_classification = verdict.classification
+        if verdict.classification == NOT_PERSON_NAME:
+            logger.info(
+                "[CUSTOMER_IDENTITY] profile hint rejected name=%r reason=%s",
+                str(raw_name or "")[:60],
+                verdict.reason,
+            )
+            _record_authority_decision(
+                customer,
+                incoming_name=raw_name,
+                source=source,
+                canon_source=canon_source,
+                classification=verdict.classification,
+                force_merchant=force_merchant,
+            )
+            return False
+
+    # ── Authority gate 2: self-reported names need explicit evidence ──
+    # "اسمي محمد", a direct answer to Nahlah's own "ما اسمك؟", or an
+    # explicit correction. Never an arbitrary third-party mention.
+    evidence_kind = ""
+    if canon_source == SOURCE_CUSTOMER_MESSAGE and not force_merchant:
+        from core.customer_name_authority import (  # noqa: PLC0415
+            evaluate_self_report_evidence,
+        )
+
+        evidence = evaluate_self_report_evidence(raw_name, message_context)
+        if not evidence.accepted:
+            logger.info(
+                "[CUSTOMER_IDENTITY] self-report rejected name=%r reason=%s",
+                str(raw_name or "")[:60],
+                evidence.reason,
+            )
+            return False
+        evidence_kind = evidence.kind
+
     validation = validate_customer_name(raw_name)
 
     if not validation.valid:
@@ -451,6 +527,8 @@ def apply_customer_name(
             )
             return False
         meta["proposed_name"] = cleaned
+        if profile_classification:
+            meta["proposed_name_classification"] = profile_classification
         meta["customer_name_source"] = canon_source
         meta["customer_name_status"] = STATUS_PROPOSED
         meta["customer_name_confidence"] = confidence
@@ -458,9 +536,19 @@ def apply_customer_name(
         meta["name_source"] = source or canon_source
         customer.extra_metadata = meta
         logger.info(
-            "[CUSTOMER_IDENTITY] proposed only name=%r source=%s",
+            "[CUSTOMER_IDENTITY] proposed only name=%r source=%s class=%s",
             cleaned,
             canon_source,
+            profile_classification or "unclassified",
+        )
+        _record_authority_decision(
+            customer,
+            incoming_name=cleaned,
+            source=source,
+            canon_source=canon_source,
+            classification=profile_classification,
+            force_merchant=force_merchant,
+            profile_hint=cleaned,
         )
         return True
 
@@ -518,6 +606,15 @@ def apply_customer_name(
     meta["customer_name_confidence"] = confidence
     meta["customer_name_updated_at"] = _utcnow_iso()
     meta["name_source"] = source or canon_source
+    from core.customer_name_authority import (  # noqa: PLC0415
+        authority_for_source,
+    )
+
+    meta["customer_name_authority"] = authority_for_source(
+        source or canon_source
+    ).label
+    if evidence_kind:
+        meta["customer_name_evidence_kind"] = evidence_kind
     meta.pop("customer_name_rejected_reason", None)
     if force_merchant:
         meta["manual_name_override"] = True
@@ -533,7 +630,79 @@ def apply_customer_name(
         canon_source,
         confidence,
     )
+    _record_authority_decision(
+        customer,
+        incoming_name=cleaned,
+        source=source,
+        canon_source=canon_source,
+        classification=profile_classification,
+        force_merchant=force_merchant,
+        evidence_kind=evidence_kind,
+        applied=True,
+    )
     return True
+
+
+def _record_authority_decision(
+    customer: Any,
+    *,
+    incoming_name: Optional[str],
+    source: Optional[str],
+    canon_source: str,
+    classification: str = "",
+    force_merchant: bool = False,
+    evidence_kind: str = "",
+    profile_hint: str = "",
+    applied: bool = False,
+) -> None:
+    """
+    Mirror the resolver's outcome into durable provenance.
+
+    Crash-safe and side-effect free on failure: provenance is an audit
+    concern and must never break ingestion or a store sync.
+    """
+    try:
+        from core.customer_name_authority import (  # noqa: PLC0415
+            DECISION_APPLIED,
+            DECISION_BLOCKED_CLASS,
+            DECISION_HINT_ONLY,
+            NameAuthority,
+            NameAuthorityDecision,
+            authority_for_source,
+        )
+        from core.customer_name_provenance import (  # noqa: PLC0415
+            record_name_decision,
+        )
+
+        authority = authority_for_source(source or canon_source)
+        if applied:
+            decision_code = DECISION_APPLIED
+            canonical = str(incoming_name or "")
+        elif classification and classification != "PERSON_NAME" and not profile_hint:
+            decision_code = DECISION_BLOCKED_CLASS
+            canonical = str(getattr(customer, "name", None) or "")
+            authority = NameAuthority.UNKNOWN
+        else:
+            decision_code = DECISION_HINT_ONLY
+            canonical = str(getattr(customer, "name", None) or "")
+
+        decision = NameAuthorityDecision(
+            decision_code,
+            canonical_name=canonical,
+            authority=authority,
+            classification=classification,
+            evidence_kind=evidence_kind,
+            reason="resolver_mirror",
+        )
+        record_name_decision(
+            customer,
+            decision,
+            source=source or canon_source,
+            profile_hint=profile_hint,
+            merchant_locked=bool(force_merchant) or is_manual_name_locked(customer),
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — audit mirror must never break ingestion or store sync
+        logger.debug("[CUSTOMER_IDENTITY] provenance mirror failed", exc_info=True)
 
 
 def official_name_from_prep_and_customer(
