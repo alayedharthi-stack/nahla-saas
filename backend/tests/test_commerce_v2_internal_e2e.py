@@ -287,6 +287,45 @@ def test_provisions_three_unmistakable_identities_and_isolated_order(
     assert db.query(MessageEvent).filter(MessageEvent.direction == "inbound").count() == 0
 
 
+def test_b_seed_history_uses_two_distinct_product_titles(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    products = db.query(Product).order_by(Product.id.asc()).all()
+    products[1].title = products[0].title
+    db.add(
+        Product(
+            tenant_id=1,
+            external_id="GENERIC-BAG",
+            title="حقيبة جلدية بنية",
+            price="220",
+            in_stock=True,
+            stock_quantity=3,
+            catalog_status="active",
+            extra_metadata={"status": "active", "currency": "SAR"},
+        )
+    )
+    db.commit()
+
+    fixture = provision_internal_e2e_fixtures(
+        db, tenant_id=1, env=enabled_env
+    )["B"]
+    bodies = [
+        str(body)
+        for (body,) in (
+            db.query(MessageEvent.body)
+            .filter(
+                MessageEvent.conversation_id == fixture.conversation_id,
+                MessageEvent.event_type == "internal_e2e_seed_history",
+                MessageEvent.direction == INTERNAL_E2E_INBOUND,
+            )
+            .order_by(MessageEvent.id.asc())
+            .all()
+        )
+    ]
+    assert bodies[0] == "أريد أن أعرف أكثر عن حذاء رياضي أبيض"
+    assert bodies[2] == "وقارنه أيضًا مع حقيبة جلدية بنية"
+
+
 def test_approved_batch_starts_from_clean_a_b_c_fixtures(
     db: Any, enabled_env: dict[str, str]
 ) -> None:
