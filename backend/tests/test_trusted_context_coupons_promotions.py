@@ -416,7 +416,7 @@ def test_facts_enter_snapshot_and_projection() -> None:
         "core.active_order_context.load_commerce_bundle_from_db",
         return_value={},
     ), patch(
-        "modules.ai.commerce_agent.capability_resolver.resolve_tenant_capabilities",
+        "modules.ai.brain.truth_surface.trusted_context._resolve_tenant_capabilities",
         return_value=SimpleNamespace(
             whatsapp_order=True,
             online_store=True,
