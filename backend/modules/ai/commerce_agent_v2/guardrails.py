@@ -36,6 +36,22 @@ _CURRENCY_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMBER_RE = re.compile(r"(?<!\d)(\d+(?:[.,]\d+)?)(?!\d)")
+_ORDER_ITEM_DUAL_QUANTITY_TOKENS = frozenset(
+    {
+        "اثنان",
+        "اثنين",
+        "اثنتان",
+        "اثنتين",
+        "قطعتان",
+        "قطعتين",
+        "وحدتان",
+        "وحدتين",
+        "حبتان",
+        "حبتين",
+        "عبوتان",
+        "عبوتين",
+    }
+)
 _QUANTITY_RE = re.compile(
     r"(?<!\d)(\d+)\s*(?:قطع(?:ة)?|عبو(?:ة|ات)|حب(?:ة|ات)|وحد(?:ة|ات))\b",
     re.IGNORECASE,
@@ -480,9 +496,21 @@ def _span_expresses_claim(
                     states.add(mention.availability)
             search_start = span_end
         return claim.value in states
-    if claim.kind in {"stock_quantity", "order_item_quantity"}:
+    if claim.kind == "stock_quantity":
         expected = _decimal(claim.value)
         return any(_decimal(value) == expected for value in _NUMBER_RE.findall(span))
+    if claim.kind == "order_item_quantity":
+        expected = _decimal(claim.value)
+        if any(_decimal(value) == expected for value in _NUMBER_RE.findall(span)):
+            return True
+        # Arabic naturally expresses a quantity of two with a dual noun and no
+        # digit (for example, "قطعتين"). Accept only explicit dual quantity
+        # tokens; the canonical claim must still exactly match trusted order
+        # evidence before this span check runs.
+        tokens = set(_TOKEN_RE.findall(_normalize_text(span)))
+        return expected == Decimal(2) and bool(
+            tokens & _ORDER_ITEM_DUAL_QUANTITY_TOKENS
+        )
     if claim.kind in {"product_url", "tracking_url"}:
         return any(
             canonical_http_url_equal(url.rstrip(".,،؛"), claim.value)

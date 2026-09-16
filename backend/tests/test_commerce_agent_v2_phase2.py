@@ -410,6 +410,47 @@ async def test_order_details_and_shipment_return_typed_canonical_evidence(
 
 
 @pytest.mark.asyncio
+async def test_order_item_dual_quantity_span_matches_canonical_two(
+    phase2_seed: Phase2Seed,
+) -> None:
+    context = _context(phase2_seed)
+    resolved = await _invoke(
+        resolve_customer_order,
+        context,
+        {"order_number": "ORD-1001", "purpose": "status"},
+    )
+    order_id = resolved["order"]["order_id"]
+    await _invoke(get_order_details, context, {"order_id": order_id})
+    evidence_ref = f"order:details:{order_id}"
+
+    supported = CommerceReply(
+        text="يتضمن الطلب قطعتين من قميص قطني ازرق.",
+        evidence_refs=[evidence_ref],
+        fact_claims=[
+            FactClaim(
+                kind="order_item_quantity",
+                value=2,
+                evidence_ref=evidence_ref,
+                subject_order_id=order_id,
+                text_span="قطعتين",
+            )
+        ],
+    )
+    assert validate_grounded_reply(context, supported) == []
+
+    mismatched = supported.model_copy(
+        update={
+            "fact_claims": [
+                supported.fact_claims[0].model_copy(update={"value": 1})
+            ]
+        }
+    )
+    assert "claim_span_not_equivalent:order_item_quantity" in (
+        validate_grounded_reply(context, mismatched)
+    )
+
+
+@pytest.mark.asyncio
 async def test_order_currency_requires_persisted_evidence(
     phase2_seed: Phase2Seed,
 ) -> None:
