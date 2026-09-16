@@ -345,8 +345,7 @@ def provision_internal_e2e_fixtures(
             conversation_id=int(conversation.id),
             identity=identity,
         )
-    titles: list[str] = []
-    seen_titles: set[str] = set()
+    catalog_titles: list[tuple[str, str]] = []
     for row in (
         db.query(Product)
         .filter(Product.tenant_id == 1, Product.catalog_status == "active")
@@ -355,12 +354,21 @@ def provision_internal_e2e_fixtures(
     ):
         title = " ".join(str(row.title or "").split())
         title_key = title.casefold()
-        if not title or title_key in seen_titles:
+        if not title:
             continue
-        seen_titles.add(title_key)
-        titles.append(title)
-        if len(titles) == 2:
-            break
+        catalog_titles.append((title_key, title))
+    title_counts: dict[str, int] = {}
+    for title_key, _title in catalog_titles:
+        title_counts[title_key] = title_counts.get(title_key, 0) + 1
+    titles = [
+        title
+        for title_key, title in catalog_titles
+        if title_counts[title_key] == 1
+    ][:2]
+    if len(titles) < 2:
+        raise InternalE2EContractError(
+            "internal_e2e_requires_two_unique_product_titles"
+        )
     _seed_customer_b_history(db, fixtures["B"], titles)
     b_conversation = db.get(Conversation, fixtures["B"].conversation_id)
     if b_conversation is None:
