@@ -50,6 +50,7 @@ import {
   pinConversationToLatestAfterLayout,
   preservedHistoryScrollTop,
   shouldAutoScrollForNewMessage,
+  shouldShowJumpToLatest,
 } from '../lib/conversationScroll'
 
 const LIST_PAGE_LIMIT = 60
@@ -783,6 +784,11 @@ export default function Conversations() {
     if (nearBottom) {
       pauseAutoScrollRef.current = false
       setNewMessagesBelow(false)
+    } else if (shouldShowJumpToLatest({
+      nearBottom,
+      operatorPausedAutoScroll: pauseAutoScrollRef.current,
+    })) {
+      setNewMessagesBelow(true)
     }
     return nearBottom
   }
@@ -2277,7 +2283,7 @@ export default function Conversations() {
                   onClick={() => scrollMessagesToBottom('smooth')}
                 >
                   <MessageSquare className="w-4 h-4" />
-                  {cp.newMessages}
+                  {cp.scrollToBottom}
                 </button>
               )}
             </div>

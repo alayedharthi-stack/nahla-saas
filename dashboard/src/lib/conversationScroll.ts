@@ -35,6 +35,16 @@ export function shouldAutoScrollForNewMessage({
   return wasNearBottom && !operatorPausedAutoScroll
 }
 
+export function shouldShowJumpToLatest({
+  nearBottom,
+  operatorPausedAutoScroll,
+}: {
+  nearBottom: boolean
+  operatorPausedAutoScroll: boolean
+}): boolean {
+  return !nearBottom && operatorPausedAutoScroll
+}
+
 /**
  * Keep an initial open pinned to the latest message while fonts/images settle.
  * The observer watches the content element (not the fixed-height scroller), so
