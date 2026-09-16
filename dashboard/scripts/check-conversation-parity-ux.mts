@@ -6,6 +6,7 @@ import {
   isConversationNearBottom,
   preservedHistoryScrollTop,
   shouldAutoScrollForNewMessage,
+  shouldShowJumpToLatest,
 } from '../src/lib/conversationScroll.ts'
 
 
@@ -31,9 +32,19 @@ assert.equal(shouldAutoScrollForNewMessage({
   wasNearBottom: false,
   operatorPausedAutoScroll: true,
 }), false, 'new messages do not steal an operator reading older history')
+assert.equal(shouldShowJumpToLatest({
+  nearBottom: false,
+  operatorPausedAutoScroll: true,
+}), true, 'manual history scrolling exposes a direct return to the latest message')
+assert.equal(shouldShowJumpToLatest({
+  nearBottom: true,
+  operatorPausedAutoScroll: true,
+}), false, 'the jump affordance disappears at the latest message')
 
 assert.match(conversations, /pinConversationToLatestAfterLayout/)
 assert.match(conversations, /data-new-messages-affordance/)
+assert.match(conversations, /shouldShowJumpToLatest/)
+assert.match(conversations, /cp\.scrollToBottom/)
 assert.match(conversations, /data-sticky-customer-header/)
 assert.match(conversations, /selected\.phone/)
 assert.match(conversations, /<Phone[\s\S]*selected\.phone[\s\S]*WhatsApp/)
