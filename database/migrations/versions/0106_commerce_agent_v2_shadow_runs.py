@@ -12,10 +12,20 @@ states — the same additive pattern as 0107:
 
 * Table absent → created exactly as before (State A).
 * Table present (create_all) → reconciled additively: missing columns are
-  added, the server defaults are set, NOT NULL is enforced only after any
-  NULLs are filled with the same defaults, and missing foreign keys /
-  indexes are created. Nothing is dropped, no row is rewritten, and the
-  revision is recorded (State B).
+  added, the server defaults are set, NOT NULL is enforced only on columns
+  that have a safe fill value (the four counters → 0, ``created_at`` →
+  now()) and only after any NULLs are filled with it, and missing foreign
+  keys / indexes are created. Nothing is dropped, no row is rewritten, and
+  the revision is recorded (State B).
+
+Reconciliation limit (fail-safe, additive): required columns with no safe
+fill value — ``tenant_id``, ``conversation_id``, ``sdk_trace_id``,
+``model``, ``status`` — are never forced NOT NULL. If a drifted table is
+missing one of them it is re-added NULLABLE and existing rows keep NULL
+there; if it exists but is nullable it stays nullable. No data is
+invented. Such a table therefore ends nullable on that column rather than
+at exact State A parity; the plain create_all shape (all of these already
+NOT NULL) reaches full State A parity.
 
 Guards check object presence by name (``migration_inspector_helpers``),
 the same mechanism used by 0104, 0105 and 0107.
@@ -127,6 +137,8 @@ def _reconcile_existing(bind) -> None:
         if column.nullable is False and column.server_default is None and not column.primary_key:
             # Cannot add NOT NULL without a default to a populated table;
             # add nullable first, fill from the default map, then enforce.
+            # No safe fill value → the column stays NULLABLE (see the
+            # reconciliation limit in the module docstring).
             fill = _SERVER_DEFAULTS.get(column.name, {}).get("fill")
             op.add_column(_TABLE, sa.Column(column.name, column.type, nullable=True))
             if fill is not None:
@@ -154,14 +166,19 @@ def _reconcile_existing(bind) -> None:
 
     # 3. NOT NULL on the columns this revision requires, after filling NULLs
     #    with the same default (no row loses data; only NULLs change).
+    #    Columns with no safe fill value are left nullable — forcing
+    #    NOT NULL on a populated table could fail, and inventing data is
+    #    out of scope for an additive reconciliation.
     for column in _columns():
         if column.nullable is not False or column.primary_key:
             continue
-        if existing[column.name].get("nullable"):
-            fill = _SERVER_DEFAULTS.get(column.name, {}).get("fill")
-            if fill is not None:
-                op.execute(sa.text(f'UPDATE {_TABLE} SET "{column.name}" = {fill} WHERE "{column.name}" IS NULL'))
-            op.alter_column(_TABLE, column.name, nullable=False)
+        if not existing[column.name].get("nullable"):
+            continue
+        fill = _SERVER_DEFAULTS.get(column.name, {}).get("fill")
+        if fill is None:
+            continue
+        op.execute(sa.text(f'UPDATE {_TABLE} SET "{column.name}" = {fill} WHERE "{column.name}" IS NULL'))
+        op.alter_column(_TABLE, column.name, nullable=False)
 
     # 4. Foreign keys — by referred table + local column, whatever the name.
     present_fks = {

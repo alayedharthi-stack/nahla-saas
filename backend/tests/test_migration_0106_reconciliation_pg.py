@@ -21,7 +21,11 @@ Proven on real PostgreSQL, ephemeral databases only:
   and ``customer_name_provenance`` is created by 0107.
 * Negative control: the unguarded ``create_table`` really fails in State B.
 * Partial drift (columns / index / FK lost, NULLs in NOT NULL columns) is
-  reconciled additively.
+  reconciled additively where a safe fill value exists; required columns
+  with no safe fill value (``tenant_id``, ``conversation_id``,
+  ``sdk_trace_id``, ``model``, ``status``) are restored / left NULLABLE and
+  never forced NOT NULL, so that shape ends nullable there rather than at
+  exact State A parity.
 * Already-at-0106 and already-at-0107 re-runs are no-ops; downgrade path.
 * 0098 (tenant-settings normalization) never executes on this path.
 
@@ -507,6 +511,121 @@ def test_state_b_partial_drift_is_reconciled_additively(admin_engine: Engine) ->
             assert after["created_at"] is not None
             assert after["failure_reason"] is None
             assert after["latency_ms"] == (0 if before["sdk_trace_id"] == "trace-0106-b" else before["latency_ms"])
+    finally:
+        engine.dispose()
+        drop_ephemeral_database(admin_engine, db_name)
+
+
+NO_SAFE_FILL_COLUMNS = ("tenant_id", "conversation_id", "sdk_trace_id", "model", "status")
+
+
+def _assert_shape_except_nullable(shape: dict[str, Any], nullable_allowed: set[str]) -> None:
+    """Required shape, except that the named no-safe-fill columns may be nullable."""
+    by_name = {name: (typ, nullable, default) for name, typ, nullable, default in shape["columns"]}
+    assert set(by_name) == set(EXPECTED_COLUMNS), sorted(by_name)
+    for name in NOT_NULL_COLUMNS:
+        if name in nullable_allowed:
+            continue
+        assert by_name[name][1] is False, f"{name} must be NOT NULL"
+    for name in ("latency_ms", "input_tokens", "output_tokens", "total_tokens"):
+        assert str(by_name[name][2]).strip("'") == "0", (name, by_name[name][2])
+    assert "now()" in str(by_name["created_at"][2])
+    assert shape["pk"] == ["id"]
+    fk_targets = {(cols, ref_table, ref_cols) for _name, cols, ref_table, ref_cols in shape["fks"]}
+    assert (("tenant_id",), "tenants", ("id",)) in fk_targets
+    assert (("conversation_id",), "conversations", ("id",)) in fk_targets
+    for index_name, columns in INDEXES:
+        assert (index_name, columns, False) in shape["indexes"], index_name
+
+
+def test_state_b_drift_missing_no_safe_fill_columns_is_restored_nullable(admin_engine: Engine) -> None:
+    """Populated create_all table missing ``model`` and ``sdk_trace_id`` (no
+    safe fill value): the upgrade must still succeed, re-add them NULLABLE
+    (existing rows keep NULL there — no data is invented), keep every other
+    row value, and still restore all defaults, FKs and indexes. Exact
+    State A parity is documented as out of reach for this shape."""
+    a_name, a_engine = _ephemeral(admin_engine)
+    db_name, engine = _state_b(admin_engine)
+    try:
+        run_alembic(a_engine, "0107")
+        state_a = _shape(a_engine)
+
+        rows_before = _seed_state_b_rows(engine)
+        with engine.begin() as conn:
+            # Dropping sdk_trace_id also drops its index; dropping created_at
+            # would drop the other two — keep created_at so this test isolates
+            # the no-safe-fill behaviour.
+            conn.execute(text(f"ALTER TABLE {TABLE} DROP COLUMN model"))
+            conn.execute(text(f"ALTER TABLE {TABLE} DROP COLUMN sdk_trace_id"))
+            conn.execute(text(f"ALTER TABLE {TABLE} DROP CONSTRAINT {TABLE}_tenant_id_fkey"))
+        oid_before = _oid(engine)
+        assert {ix["name"] for ix in inspect(engine).get_indexes(TABLE)} == {
+            "ix_commerce_v2_shadow_tenant_created", "ix_commerce_v2_shadow_conversation_created",
+        }
+
+        with _Forbid0098():
+            run_alembic(engine, "0107")
+
+        assert _versions(engine) == {"0107"}
+        assert _oid(engine) == oid_before
+        assert PROVENANCE in _table_names(engine)
+        shape = _shape(engine)
+        _assert_shape_except_nullable(shape, {"model", "sdk_trace_id"})
+        by_name = {name: nullable for name, _t, nullable, _d in shape["columns"]}
+        assert by_name["model"] is True, "no safe fill → restored nullable"
+        assert by_name["sdk_trace_id"] is True, "no safe fill → restored nullable"
+        # Everything that CAN be reconciled is: defaults, both FKs, all three indexes.
+        assert {ix[0] for ix in shape["indexes"]} == {name for name, _c in INDEXES}
+        assert {fk[2] for fk in shape["fks"]} == {"tenants", "conversations"}
+        # The only differences from State A are the two nullable flags.
+        a_cols = {name: (typ, nullable, default) for name, typ, nullable, default in state_a["columns"]}
+        b_cols = {name: (typ, nullable, default) for name, typ, nullable, default in shape["columns"]}
+        for name in EXPECTED_COLUMNS:
+            if name in {"model", "sdk_trace_id"}:
+                assert a_cols[name][0] == b_cols[name][0] and a_cols[name][2] == b_cols[name][2], name
+            else:
+                assert a_cols[name] == b_cols[name], name
+        assert shape["fks"] == state_a["fks"] and shape["indexes"] == state_a["indexes"] and shape["pk"] == state_a["pk"]
+
+        rows_after = _raw_rows(engine)
+        assert len(rows_after) == len(rows_before)
+        for before, after in zip(rows_before, rows_after):
+            for key, value in before.items():
+                if key in {"model", "sdk_trace_id"}:
+                    assert after[key] is None, key  # restored empty, never invented
+                else:
+                    assert after[key] == value, key
+    finally:
+        a_engine.dispose()
+        engine.dispose()
+        drop_ephemeral_database(admin_engine, a_name)
+        drop_ephemeral_database(admin_engine, db_name)
+
+
+def test_state_b_drift_nullable_no_safe_fill_column_with_nulls_stays_nullable(admin_engine: Engine) -> None:
+    """A populated table whose ``status`` is nullable and actually holds NULLs:
+    the upgrade must not force NOT NULL (it would fail) and must not invent
+    a value; everything else is reconciled."""
+    db_name, engine = _state_b(admin_engine)
+    try:
+        rows_before = _seed_state_b_rows(engine)
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {TABLE} ALTER COLUMN status DROP NOT NULL"))
+            conn.execute(text(f"UPDATE {TABLE} SET status = NULL WHERE sdk_trace_id = 'trace-0106-b'"))
+            conn.execute(text("DROP INDEX ix_commerce_v2_shadow_tenant_created"))
+        oid_before = _oid(engine)
+        rows_drifted = _raw_rows(engine)
+
+        with _Forbid0098():
+            run_alembic(engine, "0107")
+
+        assert _versions(engine) == {"0107"}
+        assert _oid(engine) == oid_before
+        shape = _shape(engine)
+        _assert_shape_except_nullable(shape, {"status"})
+        assert {name: n for name, _t, n, _d in shape["columns"]}["status"] is True
+        assert _raw_rows(engine) == rows_drifted, "rows untouched; NULL status not invented"
+        assert len(rows_before) == len(rows_drifted)
     finally:
         engine.dispose()
         drop_ephemeral_database(admin_engine, db_name)
