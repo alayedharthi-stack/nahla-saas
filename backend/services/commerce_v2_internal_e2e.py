@@ -345,16 +345,22 @@ def provision_internal_e2e_fixtures(
             conversation_id=int(conversation.id),
             identity=identity,
         )
-    titles = [
-        str(row.title)
-        for row in (
-            db.query(Product)
-            .filter(Product.tenant_id == 1, Product.catalog_status == "active")
-            .order_by(Product.id.asc())
-            .limit(2)
-            .all()
-        )
-    ]
+    titles: list[str] = []
+    seen_titles: set[str] = set()
+    for row in (
+        db.query(Product)
+        .filter(Product.tenant_id == 1, Product.catalog_status == "active")
+        .order_by(Product.id.asc())
+        .all()
+    ):
+        title = " ".join(str(row.title or "").split())
+        title_key = title.casefold()
+        if not title or title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        titles.append(title)
+        if len(titles) == 2:
+            break
     _seed_customer_b_history(db, fixtures["B"], titles)
     b_conversation = db.get(Conversation, fixtures["B"].conversation_id)
     if b_conversation is None:
