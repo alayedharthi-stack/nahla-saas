@@ -2136,17 +2136,22 @@ def _seed_checkout_state(prep: OrderPreparationState, ctx: BrainContext) -> None
         except Exception:  # noqa: BLE001
             customer_row = None
 
+    # Checkout identity is OPERATIONAL. Only a name the platform may use
+    # for operations (verified store name, explicit self-report, merchant
+    # lock — see can_use_name_for_operations) prefills the shipping name.
+    # The WhatsApp profile string is canonical/display identity at most
+    # (WHATSAPP_PROFILE authority, STATUS_PROPOSED) and never satisfies
+    # the checkout name slot by itself: the funnel asks the customer,
+    # and their direct answer arrives as CUSTOMER_SELF_REPORTED evidence.
     official_profile_name = ""
     if customer_row is not None and can_use_name_for_operations(customer_row):
         official_profile_name = read_customer_identity(customer_row).customer_name
     elif profile_name:
-        from core.customer_name_authority import classify_whatsapp_profile_name  # noqa: PLC0415
-
-        # Same gate as the customer row: only a PERSON_NAME profile may
-        # prefill the checkout name; "الحمد لله" never seeds a shipment.
-        verdict = classify_whatsapp_profile_name(profile_name)
-        if verdict.is_person_name:
-            official_profile_name = verdict.cleaned or profile_name
+        logger.info(
+            "[ORDER FLOW] whatsapp profile name not used for checkout identity | "
+            "tenant=%s reason=whatsapp_profile_not_operational",
+            ctx.tenant_id,
+        )
 
     first, last = _split_name(official_profile_name)
     if not prep.customer_first_name and first and not _looks_like_phone_name(first):
