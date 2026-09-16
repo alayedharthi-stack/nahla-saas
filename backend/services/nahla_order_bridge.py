@@ -797,33 +797,49 @@ def _resolve_customer_name(
     conversation: Any,
     order_prep: Dict[str, Any],
 ) -> Optional[str]:
-    candidates: List[str] = []
+    """Operational customer name for ``Order.customer_name`` / ``customer_info``.
 
+    This value reaches shipping synchronisation, so it is OPERATIONAL
+    identity and follows the platform name-authority contract:
+
+      1. the checkout / order_prep name — only ever populated through the
+         accepted checkout identity semantics (operational canonical name
+         or the customer's direct, evidenced answer to Nahlah's question);
+      2. otherwise the customer's canonical name, but ONLY when
+         ``can_use_name_for_operations(customer)`` — a verified store
+         name, an evidenced self-report, or a merchant lock.
+
+    A WhatsApp profile / display string (``wa_profile_name``,
+    ``profile_name``, ``whatsapp_name``, ``display_name``, conversation
+    ``contact_name`` …) is display identity at most and is never
+    promoted here. A missing operational name is returned as ``None``;
+    the missing-fields / fulfilment flow asks for it when it is needed,
+    and order-list UI keeps its own display-only lookup.
+    """
     first = str(order_prep.get("customer_first_name") or "").strip()
     last = str(order_prep.get("customer_last_name") or "").strip()
     prep_name = " ".join(p for p in (first, last) if p).strip()
-    if prep_name:
-        candidates.append(prep_name)
+    if prep_name and not _looks_like_phone(prep_name):
+        return prep_name
 
     customer = getattr(conversation, "customer", None)
-    if customer is not None:
-        cust_meta = getattr(customer, "extra_metadata", None) or {}
-        if isinstance(cust_meta, dict):
-            for key in ("wa_profile_name", "profile_name", "whatsapp_name", "display_name"):
-                candidates.append(str(cust_meta.get(key) or "").strip())
-        candidates.append(str(getattr(customer, "name", None) or "").strip())
+    if customer is None:
+        return None
+    try:
+        from core.customer_identity_resolver import (  # noqa: PLC0415
+            can_use_name_for_operations,
+            read_customer_identity,
+        )
 
-    conv_meta = getattr(conversation, "extra_metadata", None) or {}
-    if isinstance(conv_meta, dict):
-        for key in ("customer_name", "contact_name", "wa_profile_name", "profile_name"):
-            candidates.append(str(conv_meta.get(key) or "").strip())
-
-    for raw in candidates:
-        name = (raw or "").strip()
-        if not name or _looks_like_phone(name):
-            continue
-        return name
-    return None
+        if not can_use_name_for_operations(customer):
+            return None
+        canonical = str(read_customer_identity(customer).customer_name or "").strip()
+    except Exception:  # noqa: BLE001
+        logger.exception("[ORDER_NAME_AUTHORITY] operational gate failed conv_id=%s", getattr(conversation, "id", None))
+        return None
+    if not canonical or _looks_like_phone(canonical):
+        return None
+    return canonical
 
 
 def _conversation_phone(conversation: Any, order_prep: Dict[str, Any]) -> Optional[str]:
@@ -873,10 +889,11 @@ def _customer_payload(
 ) -> Tuple[Optional[str], Dict[str, Any]]:
     phone = _conversation_phone(conversation, order_prep)
 
-    display_name = _resolve_customer_name(conversation, order_prep)
-    if not display_name:
+    operational_name = _resolve_customer_name(conversation, order_prep)
+    if not operational_name:
         logger.info(
-            "[ORDER_NAME_FALLBACK] prep_first=%r prep_last=%r phone=%r "
+            "[ORDER_NAME_FALLBACK] no operational customer name — left empty "
+            "(whatsapp profile is display-only) prep_first=%r prep_last=%r phone=%r "
             "conv_id=%s",
             order_prep.get("customer_first_name"),
             order_prep.get("customer_last_name"),
@@ -884,14 +901,14 @@ def _customer_payload(
             getattr(conversation, "id", None),
         )
     customer_info = {
-        "name":           display_name,
+        "name":           operational_name,
         "phone":          phone,
         "shipping_phone": phone,
         "city":           order_prep.get("city"),
     }
     if phone:
         customer_info["mobile"] = phone
-    return display_name, customer_info
+    return operational_name, customer_info
 
 
 def _apply_bridge_shipping_sync(
