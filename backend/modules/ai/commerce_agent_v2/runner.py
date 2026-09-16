@@ -94,6 +94,7 @@ def _is_retryable_evidence_free_output(item: Any) -> bool:
     factual_errors = {
         "evidence_free_commercial_or_factual_claim",
         "availability_in_text_without_verified_claim",
+        "order_evidence_without_verified_claim",
         "price_in_text_without_verified_claim",
         "stock_quantity_in_text_without_verified_claim",
         "url_in_text_without_verified_claim",
@@ -109,7 +110,11 @@ def _grounding_retry_input(user_input: str) -> str:
         "استخرج اسم المنتج أو ترتيبه من سياق المحادثة المعزول، ثم استخدم "
         "أداة القراءة المناسبة بهذا الاسم في التشغيل الحالي. لا تستخدم بحثًا "
         "عامًا فارغًا إلا إذا طلب العميل تصفحًا عامًا. إذا ظل المرجع ملتبسًا "
-        "بعد الأداة فاطلب توضيحًا ولا تذكر أي حقيقة تجارية."
+        "بعد الأداة فاطلب توضيحًا ولا تذكر أي حقيقة تجارية. "
+        "إذا كان السؤال عن طلب أو شحنة، أعد resolve_customer_order ثم أداة الطلب "
+        "أو الشحنة المناسبة، واربط كل evidence_ref مذكور بـ FactClaim موثق لنفس "
+        "subject_order_id. لا تذكر evidence_ref استُخدم للتفويض فقط ولا يدعم حقيقة "
+        "أو إجراءً ظاهرًا في الرد."
     )
 
 
