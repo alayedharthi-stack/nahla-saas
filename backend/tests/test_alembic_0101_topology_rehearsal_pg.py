@@ -1,7 +1,7 @@
 """Ephemeral PostgreSQL rehearsal: integration path to 0101 without touching Production.
 
 Proves:
-- Repository heads stay {0092, 0106}; 0092 is not lost and is not selected.
+- Repository heads stay {0092, 0107}; 0092 is not lost and is not selected.
 - 0102 remains a linear step under the application head 0106.
 - Fresh bootstrap 0093 then upgrade 0101 applies 0094..0101 and creates the index.
 - A production-like DB at 0100 then upgrade 0101 applies only 0101.
@@ -449,3 +449,129 @@ def test_clean_upgrade_0104_to_0105(admin_engine: Engine) -> None:
     finally:
         engine.dispose()
         drop_ephemeral_database(admin_engine, db_name)
+
+
+# ── 0106 → 0107: customer_name_provenance, reconciled with create_all ──
+#
+# Production materializes new ORM tables through ``Base.metadata.create_all``
+# while ``alembic_version`` stays behind, so ``0107`` must succeed whether
+# the table is absent (State A) or already present (State B) — without
+# dropping it, losing rows, or diverging from the State A schema. The full
+# proof lives in ``test_migration_0107_reconciliation_pg.py``; this pair
+# keeps the two states covered by the CI a1-postgres job.
+
+_PROVENANCE = "customer_name_provenance"
+
+
+def _provenance_shape(engine: Engine) -> dict[str, object]:
+    from sqlalchemy import inspect as _inspect  # noqa: PLC0415
+
+    insp = _inspect(engine)
+    return {
+        "columns": [
+            (c["name"], str(c["type"]), bool(c["nullable"]), c.get("default"))
+            for c in insp.get_columns(_PROVENANCE)
+        ],
+        "pk": list(insp.get_pk_constraint(_PROVENANCE)["constrained_columns"]),
+        "fks": sorted(
+            (fk["name"], tuple(fk["constrained_columns"]), fk["referred_table"])
+            for fk in insp.get_foreign_keys(_PROVENANCE)
+        ),
+        "uniques": sorted(
+            (u["name"], tuple(u["column_names"])) for u in insp.get_unique_constraints(_PROVENANCE)
+        ),
+        "indexes": sorted(
+            (ix["name"], tuple(ix["column_names"]), bool(ix["unique"]))
+            for ix in insp.get_indexes(_PROVENANCE)
+        ),
+    }
+
+
+def _provenance_present(engine: Engine) -> bool:
+    from sqlalchemy import inspect as _inspect  # noqa: PLC0415
+
+    return _PROVENANCE in set(_inspect(engine).get_table_names())
+
+
+def test_clean_upgrade_0106_to_0107_state_a_table_absent(admin_engine: Engine) -> None:
+    source = (
+        _DATABASE / "migrations" / "versions" / "0107_customer_name_provenance.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision: str = "0107"' in source
+    assert 'down_revision: Union[str, None] = "0106"' in source
+    assert "has_table" in source
+    upgrade_src = source.split("def upgrade", 1)[1].split("def downgrade", 1)[0]
+    assert "upgrade head" not in upgrade_src
+    assert "drop_table" not in upgrade_src
+    assert "DELETE FROM" not in source.upper().replace(" ", "")
+
+    db_name, engine = _ephemeral_engine(admin_engine)
+    try:
+        run_alembic(engine, "0106")
+        assert _current_revisions(engine) == {"0106"}
+        assert _provenance_present(engine) is False
+        run_alembic(engine, "0107")
+        assert _current_revisions(engine) == {"0107"}
+        assert _provenance_present(engine) is True
+        shape = _provenance_shape(engine)
+        defaults = {name: default for name, _t, _n, default in shape["columns"]}
+        assert "UNKNOWN" in str(defaults["authority"])
+        assert str(defaults["merchant_locked"]).lower() == "false"
+        assert "now()" in str(defaults["created_at"]) and "now()" in str(defaults["updated_at"])
+        assert ("uq_customer_name_provenance_tenant_customer", ("tenant_id", "customer_id")) in shape["uniques"]
+        assert ("ix_customer_name_provenance_tenant_authority", ("tenant_id", "authority"), False) in shape["indexes"]
+    finally:
+        engine.dispose()
+        drop_ephemeral_database(admin_engine, db_name)
+
+
+def test_upgrade_0106_to_0107_state_b_create_all_table_survives(admin_engine: Engine) -> None:
+    from models import Base  # noqa: PLC0415
+
+    a_name, a_engine = _ephemeral_engine(admin_engine)
+    b_name, b_engine = _ephemeral_engine(admin_engine)
+    try:
+        run_alembic(a_engine, "0107")
+        state_a = _provenance_shape(a_engine)
+
+        run_alembic(b_engine, "0106")
+        Base.metadata.create_all(b_engine)  # what backend/main.py does at boot
+        assert _provenance_present(b_engine) is True
+        assert _current_revisions(b_engine) == {"0106"}
+        with b_engine.begin() as conn:
+            tenant_id = conn.execute(
+                text("INSERT INTO tenants (name, is_active) VALUES ('t-0107-b', true) RETURNING id")
+            ).scalar()
+            customer_id = conn.execute(
+                text(
+                    "INSERT INTO customers (tenant_id, phone, normalized_phone, name) "
+                    "VALUES (:t, '+966500000107', '+966500000107', 'محمد أحمد') RETURNING id"
+                ),
+                {"t": tenant_id},
+            ).scalar()
+            conn.execute(
+                text(
+                    f"INSERT INTO {_PROVENANCE} "
+                    "(tenant_id, customer_id, canonical_name, authority, source, evidence_ref, "
+                    " merchant_locked, created_at, updated_at) "
+                    "VALUES (:t, :c, 'محمد أحمد', 'VERIFIED_ECOMMERCE', 'salla_sync', "
+                    " '{\"order_id\": \"S-1\"}'::jsonb, false, now(), now())"
+                ),
+                {"t": tenant_id, "c": customer_id},
+            )
+            row_before = dict(conn.execute(text(f"SELECT * FROM {_PROVENANCE}")).mappings().one())
+            oid_before = conn.execute(text(f"SELECT '{_PROVENANCE}'::regclass::oid")).scalar()
+
+        run_alembic(b_engine, "0107")
+
+        assert _current_revisions(b_engine) == {"0107"}
+        with b_engine.connect() as conn:
+            assert conn.execute(text(f"SELECT '{_PROVENANCE}'::regclass::oid")).scalar() == oid_before
+            row_after = dict(conn.execute(text(f"SELECT * FROM {_PROVENANCE}")).mappings().one())
+        assert row_after == row_before
+        assert _provenance_shape(b_engine) == state_a
+    finally:
+        a_engine.dispose()
+        b_engine.dispose()
+        drop_ephemeral_database(admin_engine, a_name)
+        drop_ephemeral_database(admin_engine, b_name)
