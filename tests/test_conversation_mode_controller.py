@@ -38,6 +38,7 @@ from modules.ai.routing.conversation_mode import (  # noqa: E402
     ModeLease,
     RecoverySnapshot,
     SOURCE_GREETING_DETECTED,
+    SOURCE_HANDOFF_FLAG,
     SOURCE_IDENTITY_DETECTED,
     SOURCE_LEASE_HELD,
     detect_identity_topic,
@@ -431,7 +432,9 @@ class TestFreeFormOverride:
         assert decision.lease.mode == MODE_LIVE_CHAT
         assert decision.lease.locked_until
 
-    def test_support_complaint_overrides_recovery(self):
+    def test_support_complaint_overrides_recovery_to_live_chat(self):
+        """Customer staff-request wording is not a mode owner.
+        Recovery yields to live_chat so Brain/D2 can own semantics."""
         db = FakeDB()
         convo = FakeConvo()
         _seed_lease(convo, mode=MODE_AUTOMATION_RECOVERY)
@@ -442,8 +445,10 @@ class TestFreeFormOverride:
             text="أبغى أتحدث مع موظف الآن",
         )
 
-        assert decision.mode == MODE_SUPPORT_ESCALATION
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.mode != MODE_SUPPORT_ESCALATION
         assert decision.free_form_override is True
+        assert decision.previous_mode == MODE_AUTOMATION_RECOVERY
 
     def test_checkout_request_overrides_recovery(self):
         db = FakeDB()
@@ -588,6 +593,131 @@ class TestHandoffPrecedence:
             text="السلام عليكم",
         )
 
+        assert decision.mode != MODE_SUPPORT_ESCALATION
+
+
+class TestCustomerStaffRequestNotSupportMode:
+    def test_live_staff_request_stays_live_chat(self):
+        db = FakeDB()
+        convo = FakeConvo()
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="اريد التحدث مع موظف من المتجر",
+        )
+
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.mode != MODE_SUPPORT_ESCALATION
+
+    def test_paraphrase_staff_request_stays_live_chat(self):
+        db = FakeDB()
+        convo = FakeConvo()
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="نعم اريد موظف يساعدني",
+        )
+
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.mode != MODE_SUPPORT_ESCALATION
+
+    def test_product_question_stays_live_chat(self):
+        db = FakeDB()
+        convo = FakeConvo()
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="وش المنتجات المتوفرة عندكم ؟",
+        )
+
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.mode != MODE_SUPPORT_ESCALATION
+
+
+class TestStaleSupportLeaseYields:
+    def test_active_support_lease_without_ownership_yields_to_live_chat(self):
+        db = FakeDB()
+        convo = FakeConvo()
+        _seed_lease(
+            convo, mode=MODE_SUPPORT_ESCALATION, locked_until=_future(30),
+        )
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="وش المنتجات المتوفرة عندكم ؟",
+        )
+
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.mode != MODE_SUPPORT_ESCALATION
+        assert decision.transitioned is True
+        assert decision.lease.mode == MODE_LIVE_CHAT
+
+    def test_stale_support_lease_does_not_use_message_keywords(self):
+        db = FakeDB()
+        convo = FakeConvo()
+        _seed_lease(
+            convo, mode=MODE_SUPPORT_ESCALATION, locked_until=_future(30),
+        )
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="نعم اريد موظف يساعدني",
+        )
+
+        assert decision.mode == MODE_LIVE_CHAT
+        assert decision.mode != MODE_SUPPORT_ESCALATION
+
+
+class TestExplicitTakeoverPreservesSupportMode:
+    def test_dashboard_handoff_keeps_support_mode(self):
+        db = FakeDB()
+        convo = FakeConvo()
+        convo.taken_over_by = "dashboard:handoff"
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="وش المنتجات المتوفرة عندكم ؟",
+        )
+
+        assert decision.mode == MODE_SUPPORT_ESCALATION
+        assert decision.source == SOURCE_HANDOFF_FLAG
+
+    def test_paused_manual_takeover_keeps_support_mode(self):
+        db = FakeDB()
+        convo = FakeConvo()
+        convo.ai_paused = True
+        convo.ai_paused_reason = "manual_takeover"
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="وش المنتجات المتوفرة عندكم ؟",
+        )
+
+        assert decision.mode == MODE_SUPPORT_ESCALATION
+
+    def test_advisory_queue_plus_stale_lease_still_yields(self):
+        db = FakeDB()
+        convo = FakeConvo(is_human_handoff=True)
+        convo.needs_human = True
+        convo.handoff_active = True
+        _seed_lease(
+            convo, mode=MODE_SUPPORT_ESCALATION, locked_until=_future(30),
+        )
+
+        decision = resolve_conversation_mode(
+            db,
+            tenant_id=1, convo=convo, customer_phone="+966500000000",
+            text="وش المنتجات المتوفرة عندكم ؟",
+        )
+
+        assert decision.mode == MODE_LIVE_CHAT
         assert decision.mode != MODE_SUPPORT_ESCALATION
 
 

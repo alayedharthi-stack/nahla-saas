@@ -17,7 +17,8 @@ The answer is one of a small, well-defined set of MODES:
     - identity_reply        → the customer just asked "who are you?" /
                                "السلام عليكم" / "من أنت" — answer
                                deterministically before anything else
-    - support_escalation    → human handoff / explicit complaint
+    - support_escalation    → genuine human ownership / explicit takeover
+                               (never selected from customer-language regex)
     - checkout_assist       → mid-checkout (open draft order, payment)
     - post_purchase         → tracking / status / after-sale follow-up
 
@@ -393,16 +394,9 @@ _message_has_actionable_after_greeting = (
     _message_has_actionable_or_relational_after_greeting
 )
 
-_SUPPORT_PATTERNS: Tuple[re.Pattern, ...] = tuple(
-    re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
-        r"\b(تحدث\s+مع\s+(إنسان|بشر|موظف)|موظف|خدمة\s+العملاء|تواصل\s+مع\s+شخص|"
-        r"إنسان\s+حقيقي|مو\s+روبوت|مو\s+بوت)\b",
-        r"\b(human\s+agent|real\s+person|customer\s+service|speak\s+to\s+someone|"
-        r"talk\s+to\s+agent)\b",
-        r"\b(شكوى|أشتكي|اشتكي|مشكلة\s+كبيرة|ما\s+ينفع|تعب|سيء|سيئة|سيئ|"
-        r"مزعج|مزعجة|complaint|terrible|awful|disappointed)\b",
-    )
-)
+# Customer staff-request / complaint language must NOT select
+# MODE_SUPPORT_ESCALATION. Brain owns that semantic. This mode is
+# ownership state only (``_conversation_handoff_flag``).
 
 _TRACKING_PATTERNS: Tuple[re.Pattern, ...] = tuple(
     re.compile(p, re.IGNORECASE | re.UNICODE) for p in (
@@ -962,14 +956,43 @@ def resolve_conversation_mode(
             recovery=snapshot,
         )
 
-    # Other sticky leases (checkout, support, post-purchase) also win
-    # over automation recovery while held — UNLESS the customer is
-    # clearly trying to continue an order (short_code / Maps URL /
-    # numeric pick / explicit order keyword). In that case the
-    # order-flow recovery override breaks the lease and hands back to
-    # live_chat so Brain/Order Flow can take over the turn.
+    # A persisted support lease is not ownership. Step 1 already
+    # returned if ``_conversation_handoff_flag`` is true. Any leftover
+    # MODE_SUPPORT_ESCALATION lease here is stale customer-text routing
+    # residue and must yield to live AI without reading the inbound
+    # wording.
+    if prior_lease.is_lease_active(now) and prior_mode == MODE_SUPPORT_ESCALATION:
+        logger.info(
+            "[mode] stale support lease without current human ownership "
+            "— yielding to live_chat prior_until=%s",
+            prior_lease.locked_until,
+        )
+        lease = _build_lease(
+            mode=MODE_LIVE_CHAT,
+            previous_mode=prior_mode,
+            reason="support lease without current human ownership — yield to live AI",
+            source=SOURCE_DEFAULT_FALLBACK,
+            minutes=DEFAULT_LEASE_MINUTES_LIVE_CHAT,
+            now=now,
+        )
+        return ModeDecision(
+            mode=MODE_LIVE_CHAT,
+            lease=lease,
+            previous_mode=prior_mode,
+            reason=lease.reason,
+            source=lease.source,
+            transitioned=True,
+            recovery=snapshot,
+        )
+
+    # Other sticky leases (checkout, post-purchase) also win over
+    # automation recovery while held — UNLESS the customer is clearly
+    # trying to continue an order (short_code / Maps URL / numeric pick
+    # / explicit order keyword). In that case the order-flow recovery
+    # override breaks the lease and hands back to live_chat so
+    # Brain/Order Flow can take over the turn.
     if prior_lease.is_lease_active(now) and prior_mode in (
-        MODE_CHECKOUT_ASSIST, MODE_SUPPORT_ESCALATION, MODE_POST_PURCHASE,
+        MODE_CHECKOUT_ASSIST, MODE_POST_PURCHASE,
     ):
         if message_has_order_recovery_signal(text_clean):
             logger.info(
@@ -1116,9 +1139,11 @@ def _classify_freeform(text: str) -> Tuple[str, str]:
     Returns (mode, source). Falls back to live_chat when no specific
     secondary owner is detected — which is exactly what we want: the
     default active conversation owner is the store's normal AI assistant.
+
+    Customer staff-request wording is not a mode owner. Brain / D2
+    own that semantic. MODE_SUPPORT_ESCALATION is selected only by
+    ``_conversation_handoff_flag`` (current explicit human ownership).
     """
-    if _matches_any(text, _SUPPORT_PATTERNS):
-        return MODE_SUPPORT_ESCALATION, SOURCE_HANDOFF_FLAG
     if _matches_any(text, _CHECKOUT_PATTERNS):
         return MODE_CHECKOUT_ASSIST, SOURCE_CHECKOUT_OPEN
     if _matches_any(text, _TRACKING_PATTERNS):
