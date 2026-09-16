@@ -287,7 +287,7 @@ def test_provisions_three_unmistakable_identities_and_isolated_order(
     assert db.query(MessageEvent).filter(MessageEvent.direction == "inbound").count() == 0
 
 
-def test_b_seed_history_uses_two_distinct_product_titles(
+def test_b_seed_history_uses_two_globally_unique_product_titles(
     db: Any, enabled_env: dict[str, str]
 ) -> None:
     products = db.query(Product).order_by(Product.id.asc()).all()
@@ -300,6 +300,18 @@ def test_b_seed_history_uses_two_distinct_product_titles(
             price="220",
             in_stock=True,
             stock_quantity=3,
+            catalog_status="active",
+            extra_metadata={"status": "active", "currency": "SAR"},
+        )
+    )
+    db.add(
+        Product(
+            tenant_id=1,
+            external_id="GENERIC-WATCH",
+            title="ساعة رياضية سوداء",
+            price="145",
+            in_stock=True,
+            stock_quantity=5,
             catalog_status="active",
             extra_metadata={"status": "active", "currency": "SAR"},
         )
@@ -322,8 +334,22 @@ def test_b_seed_history_uses_two_distinct_product_titles(
             .all()
         )
     ]
-    assert bodies[0] == "أريد أن أعرف أكثر عن حذاء رياضي أبيض"
-    assert bodies[2] == "وقارنه أيضًا مع حقيبة جلدية بنية"
+    assert bodies[0] == "أريد أن أعرف أكثر عن حقيبة جلدية بنية"
+    assert bodies[2] == "وقارنه أيضًا مع ساعة رياضية سوداء"
+
+
+def test_b_seed_history_fails_closed_without_two_unique_product_titles(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    products = db.query(Product).order_by(Product.id.asc()).all()
+    products[1].title = products[0].title
+    db.commit()
+
+    with pytest.raises(
+        InternalE2EContractError,
+        match="internal_e2e_requires_two_unique_product_titles",
+    ):
+        provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
 
 
 def test_approved_batch_starts_from_clean_a_b_c_fixtures(
