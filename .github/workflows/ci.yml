@@ -400,6 +400,15 @@ jobs:
             --junitxml=/tmp/whatsapp-oauth-nonce-pg.xml
           python scripts/check_junit_clean.py /tmp/whatsapp-oauth-nonce-pg.xml
 
+      - name: Customer-name provenance read isolation PostgreSQL
+        env:
+          CUSTOMER_NAME_PROVENANCE_PG_REQUIRED: "1"
+        run: |
+          set -euo pipefail
+          python -m pytest \
+            backend/tests/test_customer_name_provenance_read_isolation_pg.py \
+            -v --tb=short --maxfail=1
+
       - name: WhatsApp provider schema PostgreSQL migration suite
         run: |
           python -m pytest \
