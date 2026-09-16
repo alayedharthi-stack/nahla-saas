@@ -194,7 +194,15 @@ def _seed_customer_b_history(db: Any, fixture: InternalE2EFixture, product_title
         return
     first = product_titles[0] if product_titles else "المنتج الأول"
     second = product_titles[1] if len(product_titles) > 1 else "المنتج الثاني"
-    history = (
+    pagination_history = tuple(
+        item
+        for index in range(1, 13)
+        for item in (
+            (INTERNAL_E2E_INBOUND, f"شكرًا لك — سجل سابق {index:02d}."),
+            (INTERNAL_E2E_OUTBOUND, "العفو."),
+        )
+    )
+    reference_history = (
         (INTERNAL_E2E_INBOUND, f"أريد أن أعرف أكثر عن {first}"),
         (INTERNAL_E2E_OUTBOUND, "بكل سرور، ما الجانب الذي تريد معرفته؟"),
         (INTERNAL_E2E_INBOUND, "أهم شيء عندي تفاصيله الأساسية."),
@@ -204,6 +212,7 @@ def _seed_customer_b_history(db: Any, fixture: InternalE2EFixture, product_title
         (INTERNAL_E2E_INBOUND, "الأول يبدو أقرب لاحتياجي."),
         (INTERNAL_E2E_OUTBOUND, "فهمت أنك عدت إلى المنتج الأول."),
     )
+    history = (*pagination_history, *reference_history)
     for index, (direction, body) in enumerate(history, start=1):
         db.add(
             MessageEvent(
@@ -216,6 +225,11 @@ def _seed_customer_b_history(db: Any, fixture: InternalE2EFixture, product_title
                     **internal_e2e_metadata(1, "B"),
                     "internal_message_id": f"internal_e2e:t1:b:seed:{index:02d}",
                     "seed_history": True,
+                    "seed_history_kind": (
+                        "pagination"
+                        if index <= len(pagination_history)
+                        else "reference"
+                    ),
                 },
             )
         )
