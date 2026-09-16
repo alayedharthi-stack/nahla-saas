@@ -2081,6 +2081,96 @@ async def test_evidence_free_factual_output_retries_once_with_required_tool(
     model.assert_complete()
 
 
+@pytest.mark.asyncio
+async def test_order_evidence_without_verified_claim_retries_once(
+    seeded: Seed,
+) -> None:
+    context = _context(seeded, trace_id="order-evidence-grounding-retry")
+    order_id = 77
+    order_ref = f"order:summary:{order_id}"
+    shipment_ref = f"order:shipment:{order_id}"
+    context.register_evidence(
+        [
+            EvidenceRecord(
+                ref=order_ref,
+                source="order_summary",
+                source_id=str(order_id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="order_reference",
+                        value="IE2E-C-001",
+                        subject_order_id=order_id,
+                    )
+                ],
+            ),
+            EvidenceRecord(
+                ref=shipment_ref,
+                source="order_shipment",
+                source_id=str(order_id),
+                facts=[
+                    CanonicalEvidenceFact(
+                        kind="shipment_status_label",
+                        value="قيد التوصيل",
+                        subject_order_id=order_id,
+                    )
+                ],
+            ),
+        ]
+    )
+    shipment_claim = FactClaim(
+        kind="shipment_status_label",
+        value="قيد التوصيل",
+        evidence_ref=shipment_ref,
+        subject_order_id=order_id,
+        text_span="قيد التوصيل",
+    )
+    rejected = CommerceReply(
+        text="الشحنة قيد التوصيل.",
+        evidence_refs=[order_ref, shipment_ref],
+        fact_claims=[shipment_claim],
+    )
+    grounded = CommerceReply(
+        text="الشحنة قيد التوصيل.",
+        evidence_refs=[shipment_ref],
+        fact_claims=[shipment_claim],
+    )
+    assert validate_grounded_reply(context, rejected) == [
+        "order_evidence_without_verified_claim"
+    ]
+
+    model = ScriptedModel(
+        [
+            [assistant_message(rejected.model_dump_json())],
+            [
+                function_call(
+                    "search_products",
+                    {"query": "عسل طلح بلدي", "limit": 5},
+                    call_id="call-order-reground",
+                )
+            ],
+            [assistant_message(grounded.model_dump_json())],
+        ]
+    )
+
+    result = await run_commerce_agent(
+        context=context,
+        user_input="وين وصلت الشحنة؟",
+        model=model,
+        model_name="order-evidence-grounding-retry",
+    )
+
+    assert result.status == "completed"
+    assert result.reply == grounded
+    assert sum(event.get("kind") == "grounding_retry" for event in result.tool_trace) == 1
+    assert result.guardrail_results[-1]["tripwire_triggered"] is False
+    retry_input = json.dumps(model.calls[1].input, ensure_ascii=False)
+    assert "أعد resolve_customer_order" in retry_input
+    assert "subject_order_id" in retry_input
+    assert "استُخدم للتفويض فقط" in retry_input
+    assert model.calls[1].model_settings.tool_choice == "required"
+    model.assert_complete()
+
+
 def test_tool_grounded_output_with_missing_fact_claim_retries_once(
     seeded: Seed,
 ) -> None:
