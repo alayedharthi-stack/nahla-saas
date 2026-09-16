@@ -2004,6 +2004,18 @@ def _persist_expected_checkout_name_answer(
             ):
                 return False
 
+        # Nahlah asked for the name on the previous turn (``expected`` is
+        # derived from ``prep.missing_fields[0]`` being a customer-name
+        # slot). That is the durable "awaiting name answer" state the
+        # authority engine requires; it never retro-infers a question.
+        asked_slot = next(
+            (
+                str(slot or "").strip().lower()
+                for slot in (getattr(prep, "missing_fields", None) or [])
+                if str(slot or "").strip().lower() in _CHECKOUT_NAME_SLOTS
+            ),
+            "customer_first_name",
+        )
         saved = service.upsert_customer_identity(
             phone=phone,
             name=validation.cleaned,
@@ -2011,6 +2023,10 @@ def _persist_expected_checkout_name_answer(
             message_context={
                 "raw_message": raw_message,
                 "explicit_name_correction": is_name_completion,
+                "awaiting_name_answer": True,
+                "name_question_asked_by": "nahla_checkout",
+                "asked_slot": asked_slot,
+                "conversation_id": getattr(ctx, "conversation_id", None),
             },
         )
         if saved is None:
@@ -2124,10 +2140,13 @@ def _seed_checkout_state(prep: OrderPreparationState, ctx: BrainContext) -> None
     if customer_row is not None and can_use_name_for_operations(customer_row):
         official_profile_name = read_customer_identity(customer_row).customer_name
     elif profile_name:
-        from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
+        from core.customer_name_authority import classify_whatsapp_profile_name  # noqa: PLC0415
 
-        if validate_customer_name(profile_name).valid:
-            official_profile_name = profile_name
+        # Same gate as the customer row: only a PERSON_NAME profile may
+        # prefill the checkout name; "الحمد لله" never seeds a shipment.
+        verdict = classify_whatsapp_profile_name(profile_name)
+        if verdict.is_person_name:
+            official_profile_name = verdict.cleaned or profile_name
 
     first, last = _split_name(official_profile_name)
     if not prep.customer_first_name and first and not _looks_like_phone_name(first):

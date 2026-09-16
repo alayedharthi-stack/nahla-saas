@@ -7078,6 +7078,16 @@ async def _handle_merchant_message(
         )
 
         _name_hit = extract_high_confidence_name(text)
+        # Both are bound earlier in this handler on the live path; guard
+        # anyway so a historical/skip branch can never NameError here.
+        try:
+            _name_evidence_conv_id = getattr(convo_hist, "id", None)
+        except NameError:
+            _name_evidence_conv_id = None
+        try:
+            _name_evidence_msg_id = wa_msg_id or ""
+        except NameError:
+            _name_evidence_msg_id = ""
         if _name_hit:
             from core.customer_name_adoption_guard import (  # noqa: PLC0415
                 is_trusted_name_adoption_source,
@@ -7114,6 +7124,9 @@ async def _handle_merchant_message(
                             "source": "ai_detected_name",
                             "explicit_customer_entry": True,
                             "name_capture_pattern": _name_hit.pattern,
+                            # Durable evidence reference for provenance.
+                            "conversation_id": _name_evidence_conv_id,
+                            "wa_message_id": _name_evidence_msg_id,
                         },
                     )
                     # If the row was previously CLEARED by the merchant

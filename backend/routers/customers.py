@@ -1066,7 +1066,16 @@ async def update_customer(
             meta["customer_name_source"] = "manual_admin"
             meta["name_source"] = "manual_admin"
             meta.pop("proposed_name", None)
+            meta.pop("proposed_name_classification", None)
+            meta.pop("customer_name_authority", None)
+            meta.pop("customer_name_evidence_kind", None)
+            meta.pop("customer_name_evidence_ref", None)
             cust.extra_metadata = meta
+            from core.customer_name_provenance import record_merchant_name_write  # noqa: PLC0415
+
+            record_merchant_name_write(
+                cust, None, source="manual_admin", previous_name=previous_name,
+            )
         else:
             from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
 
@@ -2529,6 +2538,11 @@ async def name_cleanup_apply(
                 new_name = new_name.strip() or None
             old_name = cust.name
             cust.name = new_name
+            from core.customer_name_provenance import record_merchant_name_write  # noqa: PLC0415
+
+            record_merchant_name_write(
+                cust, new_name, source="bulk_cleanup_apply", previous_name=old_name,
+            )
             # ── Manual-override stamps (May 2026) ─────────────────
             # The merchant explicitly approved this verdict from the
             # bulk preview UI. Mark the row as merchant-curated so:
@@ -2605,6 +2619,11 @@ async def name_cleanup_apply(
                 continue
             old_name = cust.name
             cust.name = verdict.suggested
+            from core.customer_name_provenance import record_merchant_name_write  # noqa: PLC0415
+
+            record_merchant_name_write(
+                cust, verdict.suggested, source="bulk_cleanup_fast_track", previous_name=old_name,
+            )
             # Stamp the same manual-override metadata as the per-row
             # apply path above so this fast-track behaves identically
             # to "tick every high-confidence box and apply" from the
