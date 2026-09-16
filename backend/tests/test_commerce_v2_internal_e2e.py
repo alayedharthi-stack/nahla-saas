@@ -334,8 +334,36 @@ def test_b_seed_history_uses_two_globally_unique_product_titles(
             .all()
         )
     ]
-    assert bodies[0] == "أريد أن أعرف أكثر عن حقيبة جلدية بنية"
-    assert bodies[2] == "وقارنه أيضًا مع ساعة رياضية سوداء"
+    assert bodies[-4] == "أريد أن أعرف أكثر عن حقيبة جلدية بنية"
+    assert bodies[-2] == "وقارنه أيضًا مع ساعة رياضية سوداء"
+
+
+def test_b_seed_history_exercises_message_pagination_without_evicting_references(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    fixture = provision_internal_e2e_fixtures(
+        db, tenant_id=1, env=enabled_env
+    )["B"]
+    rows = (
+        db.query(MessageEvent)
+        .filter(
+            MessageEvent.conversation_id == fixture.conversation_id,
+            MessageEvent.event_type == "internal_e2e_seed_history",
+        )
+        .order_by(MessageEvent.id.asc())
+        .all()
+    )
+
+    dashboard_page_size = 30
+    newest_page = rows[-dashboard_page_size:]
+    older_page = rows[:-dashboard_page_size]
+
+    assert len(rows) == 32
+    assert len(older_page) == 2
+    assert len(newest_page) == dashboard_page_size
+    assert newest_page[-8].body == "أريد أن أعرف أكثر عن حذاء رياضي أبيض"
+    assert newest_page[-4].body == "وقارنه أيضًا مع قميص قطني أزرق"
+    assert newest_page[-1].body == "فهمت أنك عدت إلى المنتج الأول."
 
 
 def test_b_seed_history_fails_closed_without_two_unique_product_titles(
@@ -375,7 +403,7 @@ def test_approved_batch_starts_from_clean_a_b_c_fixtures(
     assert db.query(MessageEvent).filter(
         MessageEvent.conversation_id == fixtures["B"].conversation_id,
         MessageEvent.event_type == "internal_e2e_seed_history",
-    ).count() == 8
+    ).count() == 32
 
 
 def test_internal_context_rejects_alias_and_whatsapp_confusion(
