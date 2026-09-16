@@ -2004,6 +2004,18 @@ def _persist_expected_checkout_name_answer(
             ):
                 return False
 
+        # Nahlah asked for the name on the previous turn (``expected`` is
+        # derived from ``prep.missing_fields[0]`` being a customer-name
+        # slot). That is the durable "awaiting name answer" state the
+        # authority engine requires; it never retro-infers a question.
+        asked_slot = next(
+            (
+                str(slot or "").strip().lower()
+                for slot in (getattr(prep, "missing_fields", None) or [])
+                if str(slot or "").strip().lower() in _CHECKOUT_NAME_SLOTS
+            ),
+            "customer_first_name",
+        )
         saved = service.upsert_customer_identity(
             phone=phone,
             name=validation.cleaned,
@@ -2011,6 +2023,10 @@ def _persist_expected_checkout_name_answer(
             message_context={
                 "raw_message": raw_message,
                 "explicit_name_correction": is_name_completion,
+                "awaiting_name_answer": True,
+                "name_question_asked_by": "nahla_checkout",
+                "asked_slot": asked_slot,
+                "conversation_id": getattr(ctx, "conversation_id", None),
             },
         )
         if saved is None:
@@ -2120,14 +2136,22 @@ def _seed_checkout_state(prep: OrderPreparationState, ctx: BrainContext) -> None
         except Exception:  # noqa: BLE001
             customer_row = None
 
+    # Checkout identity is OPERATIONAL. Only a name the platform may use
+    # for operations (verified store name, explicit self-report, merchant
+    # lock — see can_use_name_for_operations) prefills the shipping name.
+    # The WhatsApp profile string is canonical/display identity at most
+    # (WHATSAPP_PROFILE authority, STATUS_PROPOSED) and never satisfies
+    # the checkout name slot by itself: the funnel asks the customer,
+    # and their direct answer arrives as CUSTOMER_SELF_REPORTED evidence.
     official_profile_name = ""
     if customer_row is not None and can_use_name_for_operations(customer_row):
         official_profile_name = read_customer_identity(customer_row).customer_name
     elif profile_name:
-        from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
-
-        if validate_customer_name(profile_name).valid:
-            official_profile_name = profile_name
+        logger.info(
+            "[ORDER FLOW] whatsapp profile name not used for checkout identity | "
+            "tenant=%s reason=whatsapp_profile_not_operational",
+            ctx.tenant_id,
+        )
 
     first, last = _split_name(official_profile_name)
     if not prep.customer_first_name and first and not _looks_like_phone_name(first):

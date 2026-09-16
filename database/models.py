@@ -1384,6 +1384,84 @@ class CustomerNameCleanupDraft(Base):
     customer = relationship('Customer')
 
 
+class CustomerNameProvenance(Base):
+    """Durable, centralized provenance for the canonical customer name.
+
+    One row per ``(tenant_id, customer_id)``. This is the authoritative
+    record of *who* decided the customer's name and *why* — the JSONB
+    keys on ``customers.metadata`` are kept in sync for backward
+    compatibility, but they are a cache, not the record.
+
+    Two halves:
+      * CANONICAL (``canonical_name``, ``authority``, ``source``,
+        ``evidence_kind``, ``evidence_ref``, ``merchant_locked``,
+        ``previous_*``, ``canonical_updated_at``) — the customer's
+        current canonical identity. Changes ONLY when a name is
+        actually applied. A rejected/blocked attempt never touches it.
+      * ATTEMPT / HINT (``last_decision``, ``last_attempt_*``,
+        ``profile_hint``, ``profile_hint_classification``) — the most
+        recent attempt, including blocked ones, for audit and review.
+
+    ``authority`` holds a ``NameAuthority`` label
+    (``VERIFIED_ECOMMERCE`` > ``CUSTOMER_SELF_REPORTED`` >
+    ``WHATSAPP_PROFILE`` > ``UNKNOWN``) or ``MERCHANT_OVERRIDE`` for a
+    merchant-typed name, which is an orthogonal lock, not a rung.
+    """
+    __tablename__ = 'customer_name_provenance'
+    __table_args__ = (
+        UniqueConstraint(
+            'tenant_id', 'customer_id',
+            name='uq_customer_name_provenance_tenant_customer',
+        ),
+        Index(
+            'ix_customer_name_provenance_tenant_authority',
+            'tenant_id', 'authority',
+        ),
+    )
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=False)
+
+    # ── Canonical half ───────────────────────────────────────────────
+    canonical_name = Column(String, nullable=True)
+    authority = Column(String, nullable=False, default='UNKNOWN')
+    source = Column(String, nullable=True)
+    evidence_kind = Column(String, nullable=True)
+    # Conversation/message reference backing a self-reported name.
+    evidence_ref = Column(JSONB, nullable=True)
+    merchant_locked = Column(Boolean, default=False, nullable=False)
+    previous_name = Column(String, nullable=True)
+    previous_authority = Column(String, nullable=True)
+    canonical_updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    # ── Hint half ────────────────────────────────────────────────────
+    profile_hint = Column(String, nullable=True)
+    profile_hint_classification = Column(String, nullable=True)
+
+    # ── Attempt half ─────────────────────────────────────────────────
+    last_decision = Column(String, nullable=True)
+    last_attempt_name = Column(String, nullable=True)
+    last_attempt_authority = Column(String, nullable=True)
+    last_attempt_source = Column(String, nullable=True)
+    last_attempt_classification = Column(String, nullable=True)
+    last_attempt_reason = Column(String, nullable=True)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    tenant = relationship('Tenant')
+    customer = relationship('Customer')
+
+
 class CustomerNameAuditLog(Base):
     """Row-level audit trail for the bulk customer-name cleanup tool.
 

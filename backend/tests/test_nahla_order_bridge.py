@@ -602,16 +602,34 @@ def test_meaningful_delta_detects_awaiting_payment_flip() -> None:
     assert reason.startswith("changed:")
 
 
-def test_resolve_customer_name_prefers_wa_profile_over_phone_db_name() -> None:
+def test_resolve_customer_name_never_promotes_wa_profile_to_operational_name() -> None:
+    """Contract change (customer-name authority): a WhatsApp profile string
+    is display identity only. It must not become Order.customer_name."""
     conv = SimpleNamespace(
         customer=SimpleNamespace(
             name="0551308005",
             phone="966551308005",
             extra_metadata={"wa_profile_name": "سارة"},
         ),
+        extra_metadata={"contact_name": "سارة", "wa_profile_name": "سارة"},
+    )
+    assert _resolve_customer_name(conv, {}) is None
+
+
+def test_resolve_customer_name_uses_operationally_trusted_canonical_name() -> None:
+    conv = SimpleNamespace(
+        customer=SimpleNamespace(
+            name="سارة العتيبي",
+            phone="966551308005",
+            extra_metadata={
+                "customer_name_source": "salla_order",
+                "customer_name_status": "verified",
+                "customer_name_authority": "VERIFIED_ECOMMERCE",
+            },
+        ),
         extra_metadata={},
     )
-    assert _resolve_customer_name(conv, {}) == "سارة"
+    assert _resolve_customer_name(conv, {}) == "سارة العتيبي"
 
 
 def test_build_line_items_uses_product_title_from_order_prep() -> None:
@@ -681,7 +699,9 @@ def test_customer_payload_auto_fills_whatsapp_phone() -> None:
         extra_metadata={},
     )
     name, info = _customer_payload(conv, {"customer_phone": "966551308005"})
-    assert name == "سارة"
+    # WhatsApp profile is display-only: no operational name, phone still filled.
+    assert name is None
+    assert info["name"] is None
     assert info["phone"] == "966551308005"
     assert info["shipping_phone"] == "966551308005"
 
