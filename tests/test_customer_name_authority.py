@@ -650,3 +650,40 @@ def test_provenance_failure_inside_apply_customer_name_keeps_the_name_write(monk
     db.expire_all()
     assert db.get(Customer, cust.id).name == VERIFIED_NAME
     assert db.query(Customer).filter(Customer.normalized_phone == "+966522222222").count() == 1
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 9. Provenance READ isolation (SQLite-level; PostgreSQL proof lives in
+#    backend/tests/test_customer_name_provenance_read_isolation_pg.py)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_read_name_authority_falls_back_when_provenance_table_is_missing():
+    """Missing table → no raise, JSONB/source fallback, outer txn usable."""
+    from sqlalchemy import text
+
+    db = _make_db()
+    cust = _seed_customer(db, name=VERIFIED_NAME, meta={"customer_name_authority": "VERIFIED_ECOMMERCE"})
+    sibling = Customer(tenant_id=cust.tenant_id, phone="+966533333333",
+                       normalized_phone="+966533333333", name="عميل آخر")
+    db.add(sibling)  # pending, unrelated business mutation
+    db.execute(text("DROP TABLE customer_name_provenance"))
+
+    assert read_name_authority(cust) is NameAuthority.VERIFIED_ECOMMERCE  # JSONB mirror
+    # Outer transaction still usable and committable; sibling persists.
+    assert db.query(Customer).filter(Customer.normalized_phone == "+966533333333").count() == 1
+    db.commit()
+    db.expire_all()
+    assert db.query(Customer).filter(Customer.normalized_phone == "+966533333333").one().name == "عميل آخر"
+
+
+def test_apply_customer_name_still_applies_when_provenance_table_is_missing():
+    from sqlalchemy import text
+
+    db = _make_db()
+    cust = _seed_customer(db)
+    db.execute(text("DROP TABLE customer_name_provenance"))
+    assert apply_customer_name(cust, VERIFIED_NAME, source="salla_sync") is True
+    assert cust.name == VERIFIED_NAME
+    db.commit()
+    db.expire_all()
+    assert db.get(Customer, cust.id).name == VERIFIED_NAME

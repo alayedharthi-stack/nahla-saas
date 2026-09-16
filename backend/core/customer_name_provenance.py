@@ -232,18 +232,49 @@ def read_name_authority(customer: Any) -> NameAuthority:
     tenant_id = getattr(customer, "tenant_id", None)
     model = _model()
     if session is not None and model is not None and customer_id and tenant_id:
-        try:
-            row = (
+        row = _read_row_isolated(session, model, tenant_id=tenant_id, customer_id=customer_id)
+        if row is not None and row.canonical_name:
+            return authority_from_label(row.authority)
+
+    return _authority_from_metadata(customer)
+
+
+def _read_row_isolated(session: Any, model: Any, *, tenant_id: int, customer_id: int):
+    """
+    SELECT the provenance row inside a SAVEPOINT.
+
+    On PostgreSQL a failed statement (e.g. ``UndefinedTable`` while
+    migration 0107 has not been applied yet) aborts the *enclosing*
+    transaction; catching the Python exception alone would leave the
+    caller's transaction in ``InFailedSqlTransaction`` and its next
+    business write would fail. Running the read inside
+    ``Session.begin_nested()`` confines the failure to the savepoint —
+    the same isolation the write path already uses — so the caller's
+    session, pending mutations and ability to commit are untouched.
+
+    Autoflush note: ``begin_nested()`` flushes pending session state
+    *before* it emits SAVEPOINT (exactly as any ORM query's autoflush
+    would). Those rows therefore land in the outer transaction and are
+    never undone by a savepoint rollback. This is covered by
+    ``backend/tests/test_customer_name_provenance_read_isolation_pg.py``.
+
+    Returns the row, or ``None`` on any failure. Never raises.
+    """
+    try:
+        with session.begin_nested():
+            return (
                 session.query(model)
                 .filter(model.tenant_id == tenant_id, model.customer_id == customer_id)
                 .one_or_none()
             )
-            if row is not None and row.canonical_name:
-                return authority_from_label(row.authority)
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — best-effort read; JSONB mirror below is the fallback
-            logger.debug("[NAME_PROVENANCE] read failed", exc_info=True)
-
-    return _authority_from_metadata(customer)
+    except Exception:  # noqa: BLE001 — savepoint already rolled back; outer txn intact
+        logger.warning(
+            "[NAME_PROVENANCE] read failed (savepoint rolled back) customer=%s tenant=%s",
+            customer_id,
+            tenant_id,
+            exc_info=True,
+        )
+        return None
 
 
 def _authority_from_metadata(customer: Any) -> NameAuthority:
