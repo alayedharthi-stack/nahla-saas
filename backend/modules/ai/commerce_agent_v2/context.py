@@ -20,6 +20,11 @@ from modules.ai.security.tenant_isolation import (
     TenantIsolationViolation,
 )
 
+# One turn may spend at most this many tenant knowledge lookups: the two
+# deterministic ones (turn scope, product scope) plus a small margin for a
+# model-initiated follow-up. A retrying model cannot multiply them further.
+MAX_KNOWLEDGE_LOOKUPS_PER_TURN = 4
+
 
 class CommerceContextError(RuntimeError):
     """Raised when the trusted database scope cannot be established."""
@@ -74,6 +79,9 @@ class CommerceAgentContext(BaseModel):
     _session_history_provenance: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _session_history_query_count: int = PrivateAttr(default=0)
     _grounding_retry_active: bool = PrivateAttr(default=False)
+    _knowledge_lookups: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    _knowledge_lookup_signatures: set[str] = PrivateAttr(default_factory=set)
+    _knowledge_rows: dict[str, list[dict[str, Any]]] = PrivateAttr(default_factory=dict)
 
     @classmethod
     def from_trusted_scope(
@@ -316,6 +324,9 @@ class CommerceAgentContext(BaseModel):
         """
         self._run_user_input = str(user_input or "").strip()
         self._merchant_knowledge_relevant = None
+        self._knowledge_lookups = []
+        self._knowledge_lookup_signatures = set()
+        self._knowledge_rows = {}
 
     @property
     def grounding_retry_active(self) -> bool:
@@ -431,6 +442,52 @@ class CommerceAgentContext(BaseModel):
     def require_authorized_order(self, order_id: int) -> None:
         if int(order_id) not in self._allowed_order_ids:
             raise TenantIsolationViolation("order_id_not_discovered_in_this_run")
+
+    @property
+    def knowledge_lookups(self) -> list[dict[str, Any]]:
+        """Every tenant knowledge lookup this turn attempted, in order.
+
+        The ledger is run-local and never persisted into the Session.  It
+        records the attempt itself — including a lookup that returned nothing,
+        timed out or failed — so "the merchant documents nothing about this"
+        can be told apart from "nobody looked".
+        """
+        return [dict(item) for item in self._knowledge_lookups]
+
+    @property
+    def knowledge_lookup_attempted(self) -> bool:
+        return bool(self._knowledge_lookups)
+
+    def knowledge_lookup_seen(self, signature: str) -> bool:
+        """Has an identical lookup already run this turn?"""
+        return str(signature) in self._knowledge_lookup_signatures
+
+    def record_knowledge_lookup(self, record: dict[str, Any], *, signature: str) -> dict[str, Any]:
+        """Append one bounded lookup record; repeated signatures never duplicate.
+
+        The cap keeps a retrying model from multiplying lookups: once the
+        budget is spent the ledger keeps the outcomes it already has.
+        """
+        entry = dict(record)
+        entry["sequence"] = len(self._knowledge_lookups) + 1
+        if len(self._knowledge_lookups) >= MAX_KNOWLEDGE_LOOKUPS_PER_TURN:
+            entry["status"] = "budget_exhausted"
+            entry["sections"] = []
+            entry["section_ids"] = []
+            entry["hit_count"] = 0
+        self._knowledge_lookup_signatures.add(str(signature))
+        self._knowledge_lookups.append(entry)
+        return entry
+
+    def cache_knowledge_rows(self, signature: str, rows: list[dict[str, Any]]) -> None:
+        """Keep one lookup's retrieved sections so a repeat never re-queries."""
+        self._knowledge_rows[str(signature)] = [dict(row) for row in rows]
+
+    def cached_knowledge_rows(self, signature: str) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._knowledge_rows.get(str(signature), [])]
+
+    def knowledge_budget_available(self) -> bool:
+        return len(self._knowledge_lookups) < MAX_KNOWLEDGE_LOOKUPS_PER_TURN
 
     def register_evidence(self, records: list[EvidenceRecord]) -> None:
         for record in records:

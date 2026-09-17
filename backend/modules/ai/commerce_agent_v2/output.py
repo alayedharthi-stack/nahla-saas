@@ -114,24 +114,6 @@ class ProductSnapshot(BaseModel):
     evidence_ref: str
 
 
-class CatalogSearchResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: ToolStatus
-    products: list[ProductSnapshot] = Field(default_factory=list)
-    evidence: list[EvidenceRecord] = Field(default_factory=list)
-    failure_reason: str | None = None
-
-
-class ProductDetailsResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: ToolStatus
-    product: ProductSnapshot | None = None
-    evidence: list[EvidenceRecord] = Field(default_factory=list)
-    failure_reason: str | None = None
-
-
 class KnowledgeSectionSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -141,6 +123,28 @@ class KnowledgeSectionSnapshot(BaseModel):
     body: str
     linked_product_ids: list[int] = Field(default_factory=list)
     evidence_ref: str
+
+
+class CatalogSearchResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ToolStatus
+    products: list[ProductSnapshot] = Field(default_factory=list)
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    # Merchant-authored knowledge retrieved for these products in the same
+    # deterministic step. It may be empty, and it never carries a commercial fact.
+    knowledge_sections: list[KnowledgeSectionSnapshot] = Field(default_factory=list)
+    failure_reason: str | None = None
+
+
+class ProductDetailsResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ToolStatus
+    product: ProductSnapshot | None = None
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    knowledge_sections: list[KnowledgeSectionSnapshot] = Field(default_factory=list)
+    failure_reason: str | None = None
 
 
 class KnowledgeSearchResult(BaseModel):

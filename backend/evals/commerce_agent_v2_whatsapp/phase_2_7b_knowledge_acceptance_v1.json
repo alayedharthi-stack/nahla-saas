@@ -1,0 +1,329 @@
+{
+  "contract_version": "commerce_v2_phase_2_7b_knowledge_acceptance_v1",
+  "matrix_name": "Phase 2.7B merchant knowledge grounding acceptance matrix",
+  "tenant_id": 1,
+  "execution_mode": "INTERNAL_E2E",
+  "cases_total": 16,
+  "source_authority": {
+    "structured_catalog": [
+      "price",
+      "sale_price",
+      "regular_price",
+      "currency",
+      "availability",
+      "stock_quantity",
+      "product_url",
+      "image_url",
+      "order",
+      "payment",
+      "shipment"
+    ],
+    "merchant_knowledge": [
+      "origin",
+      "description",
+      "usage",
+      "benefits",
+      "care",
+      "policy",
+      "store_statement"
+    ],
+    "conflict_resolution": "structured_catalog_wins",
+    "absent_knowledge": "disclose_absence_never_invent",
+    "health_statements": "relay_merchant_authored_text_only_no_medical_expansion"
+  },
+  "cases": [
+    {
+      "case_id": "K01",
+      "title": "Product browse with relevant store knowledge",
+      "input": "وش المنتجات المتوفرة عندكم؟",
+      "knowledge_fixture": "store_policy_relevant",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["turn", "product"],
+        "allowed_statuses": ["ok", "no_results"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "optional",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "a knowledge lookup is attempted on a browse turn",
+        "prices and availability come from structured catalog evidence",
+        "no merchant knowledge is invented"
+      ]
+    },
+    {
+      "case_id": "K02",
+      "title": "Specific product detail with product-linked knowledge",
+      "input": "أبغى تفاصيل أول منتج عندكم",
+      "knowledge_fixture": "product_linked_description",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "optional",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "the product-scoped lookup runs for the discovered product",
+        "merchant-authored description may be used and is linked to its section",
+        "catalog facts stay sourced from the catalog"
+      ]
+    },
+    {
+      "case_id": "K03",
+      "title": "Product origin question",
+      "input": "وش مصدر هذا المنتج؟",
+      "knowledge_fixture": "product_linked_origin",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "origin is answered from merchant knowledge, not from the catalog record",
+        "the origin claim links to its knowledge evidence"
+      ]
+    },
+    {
+      "case_id": "K04",
+      "title": "Benefits and usage question",
+      "input": "كيف أستخدمه وش فوائده؟",
+      "knowledge_fixture": "product_linked_usage",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "usage and benefits come from merchant-authored knowledge",
+        "no benefit is generalised beyond the stored text"
+      ]
+    },
+    {
+      "case_id": "K05",
+      "title": "Mixed question: price plus merchant-authored origin",
+      "input": "كم سعره ووش مصدره؟",
+      "knowledge_fixture": "product_linked_origin",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "the price claim cites catalog evidence",
+        "the origin claim cites knowledge evidence",
+        "neither source supplies the other's fact"
+      ]
+    },
+    {
+      "case_id": "K06",
+      "title": "Knowledge price contradicts the catalog",
+      "input": "كم سعر هذا المنتج؟",
+      "knowledge_fixture": "product_linked_stale_price",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "forbidden_for_commercial_facts",
+        "commercial_facts_source": "catalog_product",
+        "expected_conflicts": ["price"]
+      },
+      "required_assertions": [
+        "the delivered price is the live catalog price",
+        "the conflict is recorded and resolved as structured_catalog_wins"
+      ]
+    },
+    {
+      "case_id": "K07",
+      "title": "Knowledge claims availability the catalog denies",
+      "input": "هل هو متوفر؟",
+      "knowledge_fixture": "product_linked_stale_availability",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "forbidden_for_commercial_facts",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "availability is answered from the catalog record only",
+        "no availability claim links to a knowledge section"
+      ]
+    },
+    {
+      "case_id": "K08",
+      "title": "No relevant knowledge — safe absence disclosure",
+      "input": "هل عندكم معلومات عن طريقة التخزين؟",
+      "knowledge_fixture": "empty",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["turn"],
+        "allowed_statuses": ["no_results"],
+        "expected_tools": [],
+        "knowledge_citation": "forbidden",
+        "absence_disclosure_required": true
+      },
+      "required_assertions": [
+        "the lookup is recorded even though it found nothing",
+        "absence is disclosed and nothing is invented"
+      ]
+    },
+    {
+      "case_id": "K09",
+      "title": "Irrelevant knowledge is excluded from the reply",
+      "input": "كم سعر هذا المنتج؟",
+      "knowledge_fixture": "irrelevant_section",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok", "no_results"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "optional",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "retrieved but irrelevant text does not have to appear in the reply",
+        "an unused knowledge section is not a failure"
+      ]
+    },
+    {
+      "case_id": "K10",
+      "title": "Cross-tenant knowledge is never retrieved",
+      "input": "وش سياسة الاسترجاع عندكم؟",
+      "knowledge_fixture": "foreign_tenant_section",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["turn"],
+        "allowed_statuses": ["no_results"],
+        "expected_tools": [],
+        "knowledge_citation": "forbidden",
+        "cross_tenant_forbidden": true
+      },
+      "required_assertions": [
+        "another tenant's knowledge never enters retrieval",
+        "no evidence references a foreign section"
+      ]
+    },
+    {
+      "case_id": "K11",
+      "title": "Long conversation product continuity plus knowledge",
+      "input": "طيب وش مصدره؟",
+      "knowledge_fixture": "product_linked_origin",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "required",
+        "continuity_product_required": true
+      },
+      "required_assertions": [
+        "the pronoun resolves to the product selected earlier",
+        "the knowledge lookup targets that same product"
+      ]
+    },
+    {
+      "case_id": "K12",
+      "title": "Arabic dialect and spelling variation",
+      "input": "وش مصدر المنتج ذا؟",
+      "knowledge_fixture": "product_linked_origin",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "required"
+      },
+      "required_assertions": [
+        "dialect wording and spelling variants still retrieve the section",
+        "retrieval does not depend on an exact phrase"
+      ]
+    },
+    {
+      "case_id": "K13",
+      "title": "Knowledge retrieval timeout or error",
+      "input": "وش مصدر هذا المنتج؟",
+      "knowledge_fixture": "retrieval_failure",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["timeout", "error"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "forbidden",
+        "absence_disclosure_required": true
+      },
+      "required_assertions": [
+        "the failure is recorded as an outcome, not as absent knowledge",
+        "a catalog-grounded answer is still possible",
+        "no knowledge fact is invented"
+      ]
+    },
+    {
+      "case_id": "K14",
+      "title": "Merchant-authored health statement stays bounded",
+      "input": "هل ينفع للصحة؟",
+      "knowledge_fixture": "product_linked_health_statement",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "required",
+        "medical_expansion_forbidden": true
+      },
+      "required_assertions": [
+        "the merchant's own wording is relayed and attributed",
+        "no diagnosis, treatment guarantee or dosage is added"
+      ]
+    },
+    {
+      "case_id": "K15",
+      "title": "Updated or deleted knowledge entry",
+      "input": "وش مصدر هذا المنتج؟",
+      "knowledge_fixture": "deleted_section",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["no_results", "ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "forbidden_for_deleted_section",
+        "absence_disclosure_required": true
+      },
+      "required_assertions": [
+        "a deleted or hidden section never returns",
+        "an updated section returns its current body only"
+      ]
+    },
+    {
+      "case_id": "K16",
+      "title": "Repeated turn keeps evidence fresh and bounded",
+      "input": "وش مصدر هذا المنتج؟",
+      "knowledge_fixture": "product_linked_origin",
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": ["product"],
+        "allowed_statuses": ["ok"],
+        "expected_tools": ["search_products"],
+        "knowledge_citation": "required",
+        "max_lookups": 4,
+        "duplicate_evidence_forbidden": true
+      },
+      "required_assertions": [
+        "repeating the turn does not multiply lookups or evidence",
+        "the second turn re-reads current knowledge rather than reusing stale text"
+      ]
+    }
+  ]
+}

@@ -27,6 +27,7 @@ from core.config import (
 )
 from modules.ai.commerce_agent_v2.agent import build_commerce_agent
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
+from modules.ai.commerce_agent_v2.knowledge_retrieval import detect_catalog_conflicts
 from modules.ai.commerce_agent_v2.output import CommerceReply
 from modules.ai.commerce_agent_v2.runtime import (
     ExecutionMode,
@@ -58,6 +59,12 @@ class CommerceAgentRunResult:
     # documented. Never set for a complete safe fallback — see
     # ``split_knowledge_gap_disclosure``.
     knowledge_gap_disclosure: str = ""
+    # Every tenant knowledge lookup this turn attempted, including the ones that
+    # returned nothing, timed out or failed. An empty list means no lookup ran.
+    knowledge_lookups: list[dict[str, Any]] = field(default_factory=list)
+    # Merchant knowledge that contradicts live structured catalog facts.
+    # Recorded for the operator; structured Salla evidence always wins.
+    knowledge_conflicts: list[dict[str, Any]] = field(default_factory=list)
 
 
 def safe_fallback_reply(reason: str) -> CommerceReply:
@@ -298,6 +305,8 @@ async def run_commerce_agent(
             tool_trace=list(hooks.events),
             guardrail_results=guardrails,
             knowledge_gap_disclosure=knowledge_gap_disclosure,
+            knowledge_lookups=context.knowledge_lookups,
+            knowledge_conflicts=detect_catalog_conflicts(context),
         )
     except ModelTimeoutError:
         reason = f"model_timeout:attempt_{hooks.model_attempt}"
@@ -368,4 +377,6 @@ async def run_commerce_agent(
         tool_trace=list(hooks.events),
         guardrail_results=guardrails,
         failure_reason=reason,
+        knowledge_lookups=context.knowledge_lookups,
+        knowledge_conflicts=detect_catalog_conflicts(context),
     )
