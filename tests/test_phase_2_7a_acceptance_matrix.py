@@ -46,10 +46,12 @@ from models import (  # noqa: E402
 )
 from services import commerce_v2_phase_2_7a_acceptance as acceptance  # noqa: E402
 from services.commerce_v2_internal_e2e import (  # noqa: E402
+    B_SEED_HISTORY_CONTRACT,
     InternalE2EContractError,
     InternalE2EFixture,
     _find_fixture,
     provision_internal_e2e_fixtures,
+    select_seed_reference_products,
 )
 from services.commerce_v2_phase_2_7a_acceptance import (  # noqa: E402
     ACCEPTANCE_CONTRACT_VERSION,
@@ -892,6 +894,174 @@ def test_tampered_b_seed_history_fails_closed_before_first_turn(db: Any, mutatio
     assert db.query(MessageEvent).filter(MessageEvent.event_type == "internal_e2e_acceptance_phase_2_7a").count() == 0
 
 
+def _mixed_title_catalog(db: Any) -> dict[str, int]:
+    """Two products share the oldest title; the uniquely titled ones come later.
+
+    The first two *distinct* titles and the first two *unique* titles then name
+    different products, which is exactly the shape that hid the defect: the
+    seeder referenced the unique ones while verification reported the distinct ones.
+    """
+    for row in db.query(Product).filter(Product.tenant_id == 1).all():
+        row.title = "فستان"
+    db.add_all(
+        [
+            Product(
+                tenant_id=1, external_id="MIX-JACKET", title="جاكيت", price="169",
+                in_stock=True, stock_quantity=2, catalog_status="active",
+                extra_metadata={"status": "active", "currency": "SAR"},
+            ),
+            Product(
+                tenant_id=1, external_id="MIX-SKIRT", title="تنورة", price="114",
+                in_stock=True, stock_quantity=1, catalog_status="active",
+                extra_metadata={"status": "active", "currency": "SAR"},
+            ),
+        ]
+    )
+    db.commit()
+    by_title = {
+        str(row.title): int(row.id)
+        for row in db.query(Product).filter(Product.tenant_id == 1).order_by(Product.id.asc()).all()
+    }
+    duplicate_ids = [
+        int(row.id)
+        for row in db.query(Product).filter(Product.tenant_id == 1, Product.title == "فستان")
+        .order_by(Product.id.asc()).all()
+    ]
+    return {"jacket": by_title["جاكيت"], "skirt": by_title["تنورة"], "duplicate": duplicate_ids[0]}
+
+
+def test_seed_references_report_the_products_the_history_actually_names(db: Any) -> None:
+    """Fail-before: verification reported the first two distinct titles (the duplicates)
+    while the seeded rows name the first two uniquely titled products."""
+    ids = _mixed_title_catalog(db)
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+
+    seed = verify_acceptance_fixtures(db)["B"]["seed_history"]
+    rows = _seed_rows(db)
+    assert rows[24].body == "أريد أن أعرف أكثر عن جاكيت"
+    assert rows[28].body == "وقارنه أيضًا مع تنورة"
+    assert seed["referenced_product_ids"] == [ids["jacket"], ids["skirt"]]
+    assert seed["referenced_titles"] == ["جاكيت", "تنورة"]
+    assert seed["referenced_products"] == [
+        {"slot": 1, "product_id": ids["jacket"], "title": "جاكيت"},
+        {"slot": 2, "product_id": ids["skirt"], "title": "تنورة"},
+    ]
+    assert ids["duplicate"] not in seed["referenced_product_ids"]
+    assert seed["contract"] == B_SEED_HISTORY_CONTRACT
+
+
+def test_seeder_and_verifier_share_one_reference_selection_contract(db: Any) -> None:
+    _mixed_title_catalog(db)
+    selected = select_seed_reference_products(db, tenant_id=1)
+    fixtures = provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+
+    seed = verify_acceptance_fixtures(db)["B"]["seed_history"]
+    assert [(entry["product_id"], entry["title"]) for entry in seed["referenced_products"]] == selected
+    stored = dict(db.get(Conversation, fixtures["B"].conversation_id).extra_metadata)["seed_history"]
+    assert stored["references"] == seed["referenced_products"]
+    named = [
+        (int(row.extra_metadata["seed_reference_product_id"]), row.extra_metadata["seed_reference_title"])
+        for row in _seed_rows(db)
+        if row.extra_metadata.get("seed_reference_slot")
+    ]
+    assert named == selected
+
+
+def test_catalog_changes_after_seeding_do_not_rewrite_the_seeded_references(db: Any) -> None:
+    ids = _mixed_title_catalog(db)
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    before = verify_acceptance_fixtures(db)["B"]["seed_history"]
+
+    # A newer uniquely titled product, a renamed reference and a retired one: the
+    # current catalog now answers the selection question differently.
+    db.add(
+        Product(
+            tenant_id=1, external_id="MIX-BAG", title="حقيبة جلدية", price="300",
+            in_stock=True, stock_quantity=2, catalog_status="active",
+            extra_metadata={"status": "active", "currency": "SAR"},
+        )
+    )
+    db.get(Product, ids["skirt"]).catalog_status = "archived"
+    db.commit()
+    assert select_seed_reference_products(db, tenant_id=1) != [
+        (entry["product_id"], entry["title"]) for entry in before["referenced_products"]
+    ]
+
+    after = verify_acceptance_fixtures(db)["B"]["seed_history"]
+    assert after["referenced_products"] == before["referenced_products"]
+    assert after["referenced_product_ids"] == [ids["jacket"], ids["skirt"]]
+
+
+def test_report_emits_the_stored_seeded_reference_ids_and_titles(db: Any) -> None:
+    ids = _mixed_title_catalog(db)
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    report = _run(db, _fake_submit([]))
+    seed = report["fixtures"]["B"]["seed_history"]
+    assert seed["referenced_product_ids"] == [ids["jacket"], ids["skirt"]]
+    assert seed["referenced_titles"] == ["جاكيت", "تنورة"]
+
+
+@pytest.mark.parametrize(
+    "mutation, code",
+    [
+        ("edit_reference_body", "phase_2_7a_b_seed_history_row_tampered"),
+        ("edit_pagination_body", "phase_2_7a_b_seed_history_row_tampered"),
+        ("edit_reference_product_id", "phase_2_7a_b_seed_history_reference_mismatch"),
+        ("edit_reference_title", "phase_2_7a_b_seed_history_reference_mismatch"),
+        ("move_reference_slot", "phase_2_7a_b_seed_history_reference_slot_mismatch"),
+        ("drop_reference_block", "phase_2_7a_b_seed_history_reference_metadata_missing"),
+        ("edit_block_contract", "phase_2_7a_b_seed_history_reference_contract_mismatch"),
+        ("edit_block_reference_id", "phase_2_7a_b_seed_history_reference_mismatch"),
+        ("edit_block_shape", "phase_2_7a_b_seed_history_reference_metadata_invalid"),
+    ],
+)
+def test_tampered_seed_references_fail_closed_before_first_turn(db: Any, mutation: str, code: str) -> None:
+    fixtures = provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    conversation = db.get(Conversation, fixtures["B"].conversation_id)
+    metadata = dict(conversation.extra_metadata)
+    block = json.loads(json.dumps(metadata["seed_history"]))
+    rows = _seed_rows(db)
+
+    def _retag(row: Any, **changes: Any) -> None:
+        meta = dict(row.extra_metadata)
+        meta.update(changes)
+        row.extra_metadata = meta
+        flag_modified(row, "extra_metadata")
+
+    if mutation == "edit_reference_body":
+        rows[24].body = "أريد أن أعرف أكثر عن منتج آخر"
+    elif mutation == "edit_pagination_body":
+        rows[2].body = "سجل سابق مزور"
+    elif mutation == "edit_reference_product_id":
+        _retag(rows[24], seed_reference_product_id=99999)
+    elif mutation == "edit_reference_title":
+        _retag(rows[24], seed_reference_title="عنوان آخر")
+    elif mutation == "move_reference_slot":
+        _retag(rows[26], seed_reference_slot=1)
+    elif mutation == "drop_reference_block":
+        metadata.pop("seed_history")
+        conversation.extra_metadata = metadata
+        flag_modified(conversation, "extra_metadata")
+    elif mutation == "edit_block_contract":
+        block["contract"] = "internal_e2e_b_seed_history_v1"
+        conversation.extra_metadata = {**metadata, "seed_history": block}
+        flag_modified(conversation, "extra_metadata")
+    elif mutation == "edit_block_reference_id":
+        block["references"][0]["product_id"] = 99999
+        conversation.extra_metadata = {**metadata, "seed_history": block}
+        flag_modified(conversation, "extra_metadata")
+    elif mutation == "edit_block_shape":
+        block["references"] = block["references"][:1]
+        conversation.extra_metadata = {**metadata, "seed_history": block}
+        flag_modified(conversation, "extra_metadata")
+    db.commit()
+
+    calls: list[Any] = []
+    with pytest.raises(InternalE2EContractError, match=code):
+        _run(db, _fake_submit(calls))
+    assert calls == []
+
+
 # ── Gap 3. B1→B4 continuity is machine-checked; seed history cannot mask it ──
 
 def test_b_continuity_records_shown_and_selected_products_and_verifies_b3_b4(db: Any) -> None:
@@ -941,6 +1111,41 @@ def test_fallback_to_seed_history_product_fails_even_with_expected_tools(db: Any
     assert {row["turn_id"]: row["blockers"] for row in report["results"]}["B2"] == ["b_continuity_selection_ambiguous"]
     report = _run(db, _fake_submit([], per_turn={"B1": refs(shoe, shirt), "B2": refs(shoe), "B3": refs(shoe), "B4": refs(bag)}))
     assert {row["turn_id"]: row["blockers"] for row in report["results"]}["B4"] == ["b_continuity_product_switched"]
+
+
+def test_a_product_in_both_the_seed_history_and_b1_is_a_valid_selection(db: Any) -> None:
+    """Prior discussion is not a disqualification: only being absent from B1 is."""
+    ids = _mixed_title_catalog(db)
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    seed = verify_acceptance_fixtures(db)["B"]["seed_history"]
+    jacket = ids["jacket"]
+    assert jacket in seed["referenced_product_ids"]
+
+    refs = lambda *pids: {
+        "structured_reply": {
+            "text": "x", "response_mode": "social",
+            "product_refs": [{"product_id": pid, "evidence_ref": f"ev:{pid}"} for pid in pids],
+        }
+    }
+    report = _run(
+        db,
+        _fake_submit(
+            [],
+            per_turn={
+                "B1": refs(jacket, ids["duplicate"]),
+                "B2": refs(jacket),
+                "B3": refs(jacket),
+                "B4": refs(jacket),
+            },
+        ),
+    )
+    by_id = {row["turn_id"]: row for row in report["results"]}
+    for turn_id in ("B2", "B3", "B4"):
+        assert by_id[turn_id]["blockers"] == []
+        assert by_id[turn_id]["continuity"]["status"] == "verified"
+        assert by_id[turn_id]["continuity"]["selected_product"] == jacket
+    assert report["machine_summary"] == "12/12 machine checks"
+    assert report["continuity"]["violated_turns"] == []
 
 
 def test_unextractable_product_identity_keeps_continuity_human_mandatory_and_acceptance_pending(db: Any) -> None:
