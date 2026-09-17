@@ -15,9 +15,10 @@ used to update the canonical ``Customer.name`` row in the DB.
 We need a second, narrower channel that:
   * Runs on every inbound text (not only during the order funnel).
   * Triggers ONLY on unambiguous self-identification patterns —
-    "اسمي محمد", "أنا اسمي عبدالله", "معك فهد" — never on bare
-    "أنا …" (complaints, jokes, requests) or incidental name
-    mentions elsewhere in the sentence.
+    "اسمي محمد", "أنا اسمي عبدالله", "معك فهد", or the explicit
+    compound "هذا رقمي، أنا أبو سعد". The existing "أنا" anchor
+    requires multiple validated name tokens; single-token complaints
+    and incidental name mentions are not self-identification.
   * Returns a single, clean name string with a confidence label so
     the caller can decide whether to write to ``Customer.name``.
 
@@ -77,10 +78,19 @@ logger = logging.getLogger("nahla.customer_name_extractor")
 # casual use of the same word inside a longer sentence does NOT
 # trigger an extraction.
 #
-# We deliberately do NOT include bare "أنا …" — "أنا" appears in
-# countless non-naming contexts ("أنا أبغى", "أنا انضحك علي",
-# "أنا وصلت"). Only an explicit "أنا اسمي …" intro is allowed.
+# "أنا" appears in many non-naming contexts. Its existing anchor and
+# the compound first-person anchor require multiple validated name tokens,
+# including conservative kunya normalization, unlike an explicit "اسمي".
 _NAME_PATTERNS = [
+    # Two explicit clauses; a phone announcement alone is NOT self-ID.
+    # Requires the first-person pronoun and at least two name tokens below.
+    (
+        re.compile(
+            r"^\s*هذا\s+رقمي\s*[،,]\s*(?:انا|أنا)\s+"
+            r"(?P<name>[\u0600-\u06FF\u0750-\u077F][\u0600-\u06FF\u0750-\u077F\s]{1,58})\s*[.!؟]?\s*$"
+        ),
+        "هذا رقمي، أنا",
+    ),
     # Explicit correction: "اسمي الصحيح محمد" / "صحح اسمي إلى محمد"
     (
         re.compile(
@@ -338,6 +348,8 @@ def extract_high_confidence_name(message: str) -> Optional[ExtractedName]:
         # the rare case where a long message coincidentally
         # starts with "اسمي ...".
         return None
+    # Orthography only; never remove words/clauses to manufacture an anchor.
+    txt = re.sub(r"[\u064B-\u065F\u0670ـ]", "", txt)
     for pattern, label in _NAME_PATTERNS:
         m = pattern.match(txt)
         if not m:
@@ -346,6 +358,23 @@ def extract_high_confidence_name(message: str) -> Optional[ExtractedName]:
         raw_name = re.sub(r"\s+", " ", raw_name)
         if not raw_name:
             continue
+        # Normalize a kunya only INSIDE a matched self-identification span.
+        # Do not rewrite profiles, arbitrary mentions, or the original message.
+        # A joined suffix must be a known given name (e.g. سعد), not any word
+        # beginning ابو (e.g. ابواب). Reuse the authority's existing lexicons.
+        from core.customer_name_authority import (  # noqa: PLC0415
+            _NAME_ONLY_SINGLE_TOKENS, _POLYSEMOUS_GIVEN_NAMES,
+        )
+
+        name_tokens = raw_name.split()
+        first = _normalize_arabic(name_tokens[0])
+        if first == "ابو" and len(name_tokens) >= 2:
+            name_tokens[0] = "أبو"
+        elif first.startswith("ابو") and first[3:] in (
+            _NAME_ONLY_SINGLE_TOKENS | _POLYSEMOUS_GIVEN_NAMES
+        ):
+            name_tokens[:1] = ["أبو", name_tokens[0][3:]]
+        raw_name = " ".join(name_tokens)
         try:
             from core.customer_name_validator import (  # noqa: PLC0415
                 is_deictic_or_conversational_name_phrase,
@@ -364,7 +393,7 @@ def extract_high_confidence_name(message: str) -> Optional[ExtractedName]:
         tokens = raw_name.split(" ")
         if not tokens or len(tokens) > _TOTAL_MAX_TOKENS:
             continue
-        if label == "أنا" and len(tokens) < 2:
+        if label in {"أنا", "هذا رقمي، أنا"} and len(tokens) < 2:
             continue
 
         ok = True
