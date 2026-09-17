@@ -67,3 +67,8 @@ missing/unproven proof, a proof/value mismatch, or measured leakage. Persisted
 orders with `source=internal_e2e` are independently excluded at production
 poller, automation, COD, payment, shipment, analytics, and customer-scoring
 boundaries after the synchronous confinement context has ended.
+
+Deterministic Phase 2.7A acceptance gate (A1–A4, B1–B4, C1–C4, twelve fixed
+turns, no seed): see `../commerce_agent_v2_whatsapp/PHASE_2_7A_ACCEPTANCE.md`,
+`GET/POST /admin/internal-e2e/acceptance/phase-2-7a/*`, and the CLI
+`acceptance` subcommand.

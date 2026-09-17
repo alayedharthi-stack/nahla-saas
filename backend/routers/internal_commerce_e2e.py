@@ -25,6 +25,13 @@ from services.commerce_v2_internal_e2e_operator import (
     operator_status,
     score_completed_batch,
 )
+from services.commerce_v2_phase_2_7a_acceptance import (
+    acceptance_run_status,
+    create_acceptance_run,
+    execute_acceptance_run,
+    load_acceptance_matrix,
+    record_acceptance_review,
+)
 
 
 router = APIRouter(
@@ -52,6 +59,18 @@ class TurnBody(_StrictBody):
 class BatchBody(_StrictBody):
     seed: int = Field(default=260914, ge=0, le=2_147_483_647)
     concurrency_waves: bool = False
+
+
+class AcceptanceRunBody(_StrictBody):
+    halt_on_first_failure: bool = False
+
+
+class AcceptanceReviewBody(_StrictBody):
+    turn_id: Literal["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4"]
+    assertion_index: int = Field(ge=0, le=15)
+    verdict: Literal["approved", "rejected"]
+    reviewer: str = Field(min_length=3, max_length=120)
+    evidence: str = Field(min_length=5, max_length=2000)
 
 
 def _raise_contract(exc: InternalE2EContractError) -> None:
@@ -173,6 +192,66 @@ def get_result(
         )
     except InternalE2EContractError as exc:
         _raise_contract(exc)
+
+
+@router.get("/acceptance/phase-2-7a/matrix")
+def get_acceptance_matrix() -> dict:
+    """Return the checked-in canonical A1–C4 matrix (read-only, no execution)."""
+    try:
+        return load_acceptance_matrix().to_mapping()
+    except InternalE2EContractError as exc:
+        _raise_contract(exc)
+
+
+@router.post("/acceptance/phase-2-7a/runs", status_code=202)
+def start_acceptance_run(
+    body: AcceptanceRunBody, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> dict:
+    """Queue the deterministic 12-turn run; refused unless INTERNAL_E2E is enabled
+    and the A/B/C fixtures (including C's synthetic order and shipment) exist."""
+    try:
+        result = create_acceptance_run(
+            db, halt_on_first_failure=body.halt_on_first_failure
+        )
+        background.add_task(execute_acceptance_run, str(result["run_id"]))
+        return result
+    except (InternalE2EContractError, ValueError) as exc:
+        _raise_contract(InternalE2EContractError(str(exc)))
+
+
+@router.get("/acceptance/phase-2-7a/runs/{run_id}")
+def get_acceptance_run(
+    run_id: str = Path(min_length=36, max_length=36), db: Session = Depends(get_db)
+) -> dict:
+    try:
+        return acceptance_run_status(db, str(run_id))
+    except InternalE2EContractError as exc:
+        _raise_contract(exc)
+
+
+@router.post("/acceptance/phase-2-7a/runs/{run_id}/reviews")
+def review_acceptance_run(
+    body: AcceptanceReviewBody,
+    run_id: str = Path(min_length=36, max_length=36),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Record one reviewer verdict on one required assertion of a finished run.
+
+    Machine checks never produce a final PASS on their own: the run stays at
+    MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING until every required assertion of
+    every executed turn is approved here."""
+    try:
+        return record_acceptance_review(
+            db,
+            str(run_id),
+            turn_id=body.turn_id,
+            assertion_index=body.assertion_index,
+            verdict=body.verdict,
+            reviewer=body.reviewer,
+            evidence=body.evidence,
+        )
+    except (InternalE2EContractError, ValueError) as exc:
+        _raise_contract(InternalE2EContractError(str(exc)))
 
 
 __all__ = ["router"]
