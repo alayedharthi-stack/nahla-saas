@@ -189,20 +189,48 @@ _EXC_FORMATTER = logging.Formatter()
 
 
 class SecretRedactingFilter(logging.Filter):
-    """Redact the formatted message, exception text and stack text of a record.
+    """Redact the message, arguments, exception text and stack text of a record.
 
-    Fail closed: a record whose message cannot be formatted (bad ``%`` args)
-    is replaced by ``[REDACTED_LOG_RECORD]`` instead of being passed through.
-    The filter always returns ``True`` so records are never dropped silently.
+    Arguments are redacted *in place* so the record keeps its structure:
+
+    * a tuple stays a tuple with the same item count, every item redacted
+      recursively (``redact_value``: numbers and booleans are preserved,
+      ``httpx.URL`` and other objects become redacted strings);
+    * a mapping stays a mapping so ``%(name)s`` formatting keeps working.
+
+    Formatters that unpack ``record.args`` themselves — uvicorn's
+    ``AccessFormatter`` needs its five access-log arguments — therefore keep
+    working.  Collapsing ``args`` to ``()`` (the previous behaviour) made every
+    uvicorn access record raise ``ValueError: not enough values to unpack``.
+
+    After redaction the record is formatted once to prove it still renders.
+    Fail closed: if formatting genuinely fails, or the *literal* message text
+    itself carries a secret that in-place argument redaction cannot reach, the
+    record is replaced by its redacted pre-formatted text (or by
+    ``[REDACTED_LOG_RECORD]``) with empty arguments.  The filter always returns
+    ``True`` so records are never dropped silently.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            message = record.getMessage()
+            args = record.args
+            if isinstance(args, Mapping):
+                record.args = redact_value(dict(args))
+            elif isinstance(args, tuple):
+                record.args = tuple(redact_value(item) for item in args)
+            elif args is not None:
+                record.args = (redact_value(args),)
+            formatted = record.getMessage()  # proves the mutated record still formats
+            redacted = redact_secrets(formatted)
+            if redacted != formatted:
+                # Secret in the literal message text (not in args): fall back
+                # to the pre-formatted redacted string.  ``getMessage`` skips
+                # ``%`` formatting when args is empty, so this stays renderable.
+                record.msg = redacted
+                record.args = ()
         except Exception:  # noqa: BLE001
-            message = None
-        record.msg = redact_secrets(message) if message is not None else REDACTED_RECORD
-        record.args = ()
+            record.msg = REDACTED_RECORD
+            record.args = ()
         try:
             if record.exc_info and not record.exc_text:
                 record.exc_text = redact_secrets(_EXC_FORMATTER.formatException(record.exc_info))
