@@ -1191,3 +1191,76 @@ async def test_knowledge_gap_disclosure_does_not_excuse_other_failures(
     scored = _score_b4(delivered_unsupported)
     assert scored["passed"] is False
     assert "unsupported_commercial_claims" in scored["blockers"]
+
+
+@pytest.mark.asyncio
+async def test_artifact_reads_the_runner_separated_disclosure(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    """Consumer end: the normalized runner output classifies as grounded.
+
+    ``split_knowledge_gap_disclosure`` clears ``safe_fallback_reason`` on a
+    delivered grounded reply and hands the text back separately, so the artifact
+    must read the disclosure from the run result rather than from the reply.
+    """
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+    from modules.ai.commerce_agent_v2.runner import split_knowledge_gap_disclosure
+
+    raw = CommerceReply(
+        text="سعر الجاكيت 169 ريال سعودي، وهو متوفر. لا توجد تفاصيل إضافية موثقة.",
+        response_mode="grounded",
+        evidence_refs=["catalog:product:28"],
+        fact_claims=_b4_fact_claims(),
+        safe_fallback_reason=B4_DISCLOSURE,
+    )
+    cleaned, disclosure = split_knowledge_gap_disclosure(raw)
+    assert cleaned.safe_fallback_reason is None and disclosure == B4_DISCLOSURE
+
+    async def run(*, context: CommerceAgentContext, **_: Any) -> CommerceAgentRunResult:
+        await ConversationMessageSession(context).get_items()
+        return CommerceAgentRunResult(
+            status="completed",
+            reply=cleaned,
+            model="gpt-5.6-sol",
+            session_id=f"commerce-v2:{context.tenant_id}:{context.conversation_id}",
+            sdk_trace_id=f"trace_{context.conversation_id:032x}",
+            latency_ms=12,
+            input_tokens=20, output_tokens=5, total_tokens=25, cached_input_tokens=4,
+            requested_service_tier="auto",
+            tool_trace=[{"kind": "model_start", "model_turn": 1}],
+            guardrail_results=[
+                {"name": "commerce_v2_grounded_structured_output", "tripwire_triggered": False}
+            ],
+            knowledge_gap_disclosure=disclosure,
+        )
+
+    artifact = await submit_internal_customer_turn(
+        db,
+        InternalE2ETurnRequest(
+            tenant_id=1, synthetic_customer_alias="B",
+            text="طيب هل عندكم معلومات إضافية عنه؟", case_id="P27A:B4-NORMALIZED",
+            expected={
+                "expected_tools": ["search_products", "search_product_knowledge"],
+                "expected_outcome": "grounded_reply",
+                "turn_id": "B4",
+            },
+        ),
+        env=enabled_env,
+        run_agent=run,
+    )
+
+    assert artifact["fallback_type"] == "none"
+    assert artifact["knowledge_gap_disclosure"] == 1
+    # The persisted reply no longer claims a fallback ...
+    assert artifact["structured_reply"]["safe_fallback_reason"] is None
+    # ... and the disclosure text is still on the record for human review.
+    assert artifact["actual"]["knowledge_gap_disclosure"] == B4_DISCLOSURE
+    score = score_turn(
+        {
+            "case_id": "P27A:B4-NORMALIZED",
+            "expected_tools": ["search_products", "search_product_knowledge"],
+            "expected_outcome": "grounded_reply",
+        },
+        {**artifact, "tool_calls": ["search_products", "search_product_knowledge"]},
+    )
+    assert score["passed"] is True and score["blockers"] == []
