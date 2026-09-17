@@ -861,11 +861,14 @@ def subscribe_phone_webhook(
         return False, last_msg
 
     except Exception as exc:  # noqa: BLE001
+        from core.log_redaction import redact_exception  # noqa: PLC0415
+
+        safe_exc = redact_exception(exc)
         logger.warning(
             "[WASvc] subscribed_apps EXCEPTION — tenant=%s phone=%s waba=%s: %s",
-            tenant_id, phone_number_id, waba_id, exc,
+            tenant_id, phone_number_id, waba_id, safe_exc,
         )
-        return False, str(exc)
+        return False, safe_exc
 
 
 # Backwards-compat alias so older imports keep working until callers migrate.

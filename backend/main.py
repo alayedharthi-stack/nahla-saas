@@ -42,11 +42,12 @@ for _p in (_REPO_ROOT, _BACKEND_DIR, _DATABASE_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from core.log_redaction import SecretRedactingFilter  # noqa: E402
+from core.log_redaction import install_log_redaction  # noqa: E402
 
-_secret_redact_filter = SecretRedactingFilter()
-for _logger_name in ("httpx", "httpcore"):
-    logging.getLogger(_logger_name).addFilter(_secret_redact_filter)
+# Credential redaction on every root handler (all app loggers) and on the
+# httpx / httpcore / uvicorn loggers, whose request lines carry URLs and
+# query strings. Must run right after basicConfig so no handler is left bare.
+_secret_redact_filter = install_log_redaction()
 
 # ── Config & middleware ────────────────────────────────────────────────────────
 from core.config import ENVIRONMENT, IS_PRODUCTION  # noqa: E402

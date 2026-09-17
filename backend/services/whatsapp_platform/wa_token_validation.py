@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION
+from core.log_redaction import redact_exception
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
 
 logger = logging.getLogger("nahla.wa_token_validation")
@@ -103,8 +104,10 @@ async def debug_meta_token(token: str) -> Dict[str, Any]:
             )
             data = resp.json()
     except Exception as exc:
-        logger.warning("[wa_token_validation] debug_token network error: %s", exc)
-        return {"is_valid": False, "error": {"message": str(exc)}}
+        logger.warning(
+            "[wa_token_validation] debug_token network error: %s", redact_exception(exc),
+        )
+        return {"is_valid": False, "error": {"message": redact_exception(exc)}}
     info = dict(data.get("data") or {})
     # Log safe subset only
     logger.info(
@@ -293,8 +296,8 @@ def validate_meta_access_token_sync(token: str) -> TokenValidationResult:
         )
         debug_info = dict((resp.json() or {}).get("data") or {})
     except Exception as exc:
-        logger.warning("[wa_token_validation] debug_token sync error: %s", exc)
-        debug_info = {"is_valid": False, "error": {"message": str(exc)}}
+        logger.warning("[wa_token_validation] debug_token sync error: %s", redact_exception(exc))
+        debug_info = {"is_valid": False, "error": {"message": redact_exception(exc)}}
     if not debug_info:
         return TokenValidationResult(
             is_valid=False,

@@ -1304,7 +1304,11 @@ async def _refresh_all_wa_tokens() -> None:
             except Exception as exc:
                 db.rollback()
                 failed += 1
-                logger.warning("[WA Token Refresh] tenant=%s error: %s", conn.tenant_id, exc)
+                from core.log_redaction import redact_exception  # noqa: PLC0415
+
+                logger.warning(
+                    "[WA Token Refresh] tenant=%s error: %s", conn.tenant_id, redact_exception(exc),
+                )
 
         logger.info(
             "[WA Token Refresh] Done — refreshed=%d failed=%d skipped=%d total=%d",
