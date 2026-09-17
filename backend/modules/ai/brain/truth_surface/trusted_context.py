@@ -489,14 +489,97 @@ def _load_payment_shipment_facts(
     return facts
 
 
+# Commerce tool action types projected as ``capabilities.available_tools``.
+# Read-only tools first, then permission-gated commerce actions; the tenant's
+# ``CommercePermissionSet`` decides which of the gated ones are listed.
+_CAPABILITY_TOOL_ACTIONS: Tuple[str, ...] = (
+    "search_products",
+    "get_product_details",
+    "check_stock",
+    "track_order",
+    "get_store_info",
+    "get_customer_history",
+    "recommend_addon",
+    "create_draft_order",
+    "create_checkout_link",
+    "send_payment_link",
+    "apply_coupon",
+    "cancel_order",
+)
+
+
+class _TenantCapabilitySnapshot:
+    """Capability values for the CAPABILITIES domain (attribute access only)."""
+
+    __slots__ = (
+        "whatsapp_order",
+        "online_store",
+        "pickup",
+        "native_catalog",
+        "showroom_enabled",
+        "cod_enabled",
+        "store_url",
+        "available_tools",
+    )
+
+    def __init__(self, **values: Any) -> None:
+        for name in self.__slots__:
+            setattr(self, name, values.get(name))
+
+
+def _resolve_tenant_capabilities(db: Any, tenant_id: int) -> _TenantCapabilitySnapshot:
+    """Resolve CAPABILITIES facts from the platform's existing resolvers.
+
+    ``modules.ai.commerce_agent.capability_resolver`` (referenced since
+    #1019) was never committed, so this loader raised
+    ``ModuleNotFoundError`` on every turn and the CAPABILITIES domain was
+    never loaded. The fact keys are unchanged; their values now come from:
+
+      * ``modules.ai.brain.commerce.sales_channel_capabilities`` — the
+        single source of truth for purchase-channel availability
+        (``online_store`` / ``whatsapp_quick_order`` / ``showroom_visit``
+        and the canonical ``store_url``);
+      * ``core.merchant_capabilities`` — native catalog eligibility and
+        cash-on-delivery from tenant settings, integration config and the
+        merchant payment methods;
+      * ``modules.ai.commerce.permission_loader`` — the tenant's commerce
+        permission set, projected onto ``available_tools``.
+
+    A channel counts as available only when it is both enabled and
+    available (the same rule ``available_purchase_channel_ids`` applies).
+    """
+    from core.merchant_capabilities import resolve_merchant_capabilities  # noqa: PLC0415
+    from modules.ai.brain.commerce.sales_channel_capabilities import (  # noqa: PLC0415
+        resolve_merchant_sales_channels,
+    )
+    from modules.ai.commerce.permission_loader import (  # noqa: PLC0415
+        load_tenant_commerce_permissions,
+    )
+
+    channels = resolve_merchant_sales_channels(db, tenant_id)
+    merchant = resolve_merchant_capabilities(db, tenant_id)
+    permissions = load_tenant_commerce_permissions(db, tenant_id).permissions
+    showroom = channels.showroom_visit
+    return _TenantCapabilitySnapshot(
+        whatsapp_order=bool(
+            channels.whatsapp_quick_order.enabled and channels.whatsapp_quick_order.available
+        ),
+        online_store=bool(channels.online_store.enabled and channels.online_store.available),
+        pickup=bool(showroom.enabled and showroom.available),
+        native_catalog=bool(merchant.has_whatsapp_catalog),
+        showroom_enabled=bool(showroom.enabled),
+        cod_enabled=bool(merchant.supports_cod),
+        store_url=str(channels.store_url or ""),
+        available_tools=[
+            action for action in _CAPABILITY_TOOL_ACTIONS if permissions.is_permitted(action)
+        ],
+    )
+
+
 def _load_capability_facts(db: Any, tenant_id: int) -> List[TrustedFact]:
     facts: List[TrustedFact] = []
     try:
-        from modules.ai.commerce_agent.capability_resolver import (  # noqa: PLC0415
-            resolve_tenant_capabilities,
-        )
-
-        caps = resolve_tenant_capabilities(db, tenant_id)
+        caps = _resolve_tenant_capabilities(db, tenant_id)
         for key, value in (
             ("whatsapp_order", caps.whatsapp_order),
             ("online_store", caps.online_store),

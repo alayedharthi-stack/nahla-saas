@@ -28,6 +28,7 @@ from models import (
     Customer,
     CustomerNameAuditLog,
     CustomerNameCleanupDraft,
+    CustomerNameProvenance,
     CustomerProfile,
     CustomerSegmentManual,
 )
@@ -1215,6 +1216,15 @@ def _delete_customer_children(db: Session, customer_ids: list, tenant_id: int) -
         CustomerNameAuditLog.tenant_id == tenant_id,
     ).delete(synchronize_session=False)
 
+    # Durable customer-name provenance (migration 0107): one row per
+    # (tenant, customer) with a NOT NULL ``customer_id`` FK and no
+    # ON DELETE CASCADE. Any name decision — including a no-op re-sync —
+    # creates the row, so it must go before the parent customer row.
+    db.query(CustomerNameProvenance).filter(
+        CustomerNameProvenance.customer_id.in_(customer_ids),
+        CustomerNameProvenance.tenant_id == tenant_id,
+    ).delete(synchronize_session=False)
+
     db.query(CustomerProfile).filter(
         CustomerProfile.customer_id.in_(customer_ids),
         CustomerProfile.tenant_id == tenant_id,
@@ -1257,7 +1267,11 @@ def _delete_customer_children(db: Session, customer_ids: list, tenant_id: int) -
 
     # Nullable FK tables — use raw SQL to SET NULL so we preserve the
     # historical records (orders, conversations, etc.) while unlinking the
-    # deleted customer rows.
+    # deleted customer rows. Only tables present in the bound schema are
+    # touched: ``delivery_quality_events`` has no model or migration in
+    # this repository, and an UPDATE against a missing relation aborts the
+    # whole delete transaction on PostgreSQL.
+    present_tables = set(sa.inspect(db.get_bind()).get_table_names())
     for table, col in (
         ("notification_logs",          "customer_id"),
         ("automation_events",          "customer_id"),
@@ -1266,6 +1280,8 @@ def _delete_customer_children(db: Session, customer_ids: list, tenant_id: int) -
         ("delivery_quality_events",    "customer_id"),
         ("campaign_send_logs",         "customer_id"),
     ):
+        if table not in present_tables:
+            continue
         db.execute(
             sa.text(
                 f"UPDATE {table} SET {col} = NULL "
