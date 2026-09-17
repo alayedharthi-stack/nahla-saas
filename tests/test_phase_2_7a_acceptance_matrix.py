@@ -53,6 +53,9 @@ from services.commerce_v2_internal_e2e import (  # noqa: E402
 )
 from services.commerce_v2_phase_2_7a_acceptance import (  # noqa: E402
     ACCEPTANCE_CONTRACT_VERSION,
+    machine_digest,
+    persist_completed_report,
+    record_acceptance_review,
     ACCEPTANCE_MATRIX_PATH,
     ACCEPTANCE_TURN_IDS,
     CLASS_ACCEPTANCE_PASSED,
@@ -679,12 +682,7 @@ def test_persisted_run_review_endpoint_updates_classification(db: Any, api: tupl
         run = acceptance.create_acceptance_run(db, env=ENABLED_ENV)
         # Simulate the background completion by running the matrix with the fake submitter.
         report = _run(db, _fake_submit([]), run_id=run["run_id"])
-        control = acceptance._acceptance_control(db, run["run_id"])
-        meta = dict(control.extra_metadata or {})
-        meta.update({"status": "completed", "report": acceptance._compact_results(report), **{k: report[k] for k in ("review_status", "review", "acceptance_passed", "classification", "machine_passed", "machine_summary")}})
-        control.extra_metadata = meta
-        flag_modified(control, "extra_metadata")
-        db.commit()
+        persist_completed_report(db, run["run_id"], report)
         status = client.get(f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{run['run_id']}").json()
         assert status["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
         assert status["acceptance_passed"] is False and status["machine_passed"] is True
@@ -881,3 +879,154 @@ def test_support_grant_gate_missing_expired_wrong_tenant_wrong_purpose_and_activ
 CANONICAL_ASSERTION_COUNTS = {
     turn.turn_id: list(turn.required_assertions) for turn in load_acceptance_matrix().turns
 }
+
+
+# ── Final correction: review path is independent of the execution gates ──
+
+def _finished_run(db: Any, **run_kwargs: Any) -> tuple[str, dict[str, Any]]:
+    """Create, execute (fake submitter) and persist a finished run while INTERNAL_E2E is enabled."""
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    run = acceptance.create_acceptance_run(db, env=ENABLED_ENV)
+    report = _run(db, _fake_submit([], **run_kwargs), run_id=run["run_id"])
+    return run["run_id"], persist_completed_report(db, run["run_id"], report)
+
+
+def _turn_rows(db: Any) -> int:
+    return db.query(MessageEvent).filter(
+        MessageEvent.direction.in_(["internal_e2e_inbound", "internal_e2e_outbound"])
+    ).count()
+
+
+def _review(db: Any, run_id: str, turn_id: str, index: int, verdict: str) -> dict[str, Any]:
+    return record_acceptance_review(
+        db, run_id, turn_id=turn_id, assertion_index=index, verdict=verdict,
+        reviewer="qa-lead", evidence=f"{verdict} {turn_id}#{index} after reading the visible reply",
+    )
+
+
+def test_reviews_are_recorded_after_internal_e2e_is_disabled_and_runs_are_not(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id, meta = _finished_run(db)
+    assert meta["status"] == "completed" and meta["machine_digest"] and meta["support_grant"]["tenant_id"] == 1
+    # Safe sequence: disable the execution channel (and let the grant lapse) before reviewing.
+    monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED", "false")
+    monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_TENANT_IDS", "1")
+    _revoke(db)
+    # Execution paths stay closed…
+    with pytest.raises(InternalE2EContractError, match="internal_e2e_disabled"):
+        acceptance.create_acceptance_run(db)
+    with pytest.raises(InternalE2EContractError, match="internal_e2e_disabled"):
+        asyncio.run(run_acceptance_matrix(db, submit_turn=_fake_submit([])))
+    # …while reading and reviewing the finished run works without the channel or a live grant.
+    assert acceptance.acceptance_run_status(db, run_id)["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
+    before_rows = _turn_rows(db)
+
+    def _forbidden(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("review must not execute a turn, tool or agent")
+
+    monkeypatch.setattr(acceptance, "submit_internal_customer_turn", _forbidden)
+    monkeypatch.setattr(acceptance, "run_acceptance_matrix", _forbidden)
+    updated = _review(db, run_id, "A4", 1, "rejected")
+    assert updated["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED
+    assert updated["acceptance_passed"] is False and updated["review"]["rejected"] == 1
+    assert _turn_rows(db) == before_rows
+    updated = _review(db, run_id, "A4", 1, "approved")
+    for row in updated["report"]["results"]:
+        for item in row["review"]["assertions"]:
+            updated = _review(db, run_id, row["turn_id"], item["index"], "approved")
+    assert updated["review_status"] == "approved" and updated["review"]["pending"] == 0
+    assert updated["acceptance_passed"] is True and updated["classification"] == CLASS_ACCEPTANCE_PASSED
+    assert updated["machine_passed"] is True and updated["machine_digest"] == machine_digest(updated["report"])
+    assert _turn_rows(db) == before_rows
+    ledger = updated["report"]["results"][3]["review"]["assertions"][1]
+    assert ledger["reviewer"] == "qa-lead" and ledger["reviewed_at"] and ledger["verdict"] == "approved"
+
+
+def test_review_refuses_unknown_unfinished_non_synthetic_or_mismatched_runs(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    queued = acceptance.create_acceptance_run(db, env=ENABLED_ENV)
+    monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED", "false")
+    with pytest.raises(InternalE2EContractError, match="phase_2_7a_run_not_found"):
+        _review(db, "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f", "A1", 0, "approved")
+    with pytest.raises(InternalE2EContractError, match="phase_2_7a_review_run_not_finished"):
+        _review(db, queued["run_id"], "A1", 0, "approved")
+
+    monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED", "true")
+    run_id, _meta = _finished_run(db)
+    monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED", "false")
+    control = acceptance._acceptance_control(db, run_id)
+
+    def mutate(**changes: Any) -> None:
+        meta = dict(control.extra_metadata or {})
+        meta.update(changes)
+        control.extra_metadata = meta
+        flag_modified(control, "extra_metadata")
+        db.commit()
+
+    good = dict(control.extra_metadata or {})
+    for changes, code in (
+        ({"synthetic": False}, "review_run_not_synthetic"),
+        ({"test_only": False}, "review_run_not_synthetic"),
+        ({"channel": "whatsapp"}, "review_run_not_synthetic"),
+        ({"contract_version": "commerce_v2_phase_2_7a_acceptance_v0"}, "review_contract_mismatch"),
+        ({"matrix_sha256": "0" * 64}, "review_matrix_hash_mismatch"),
+        ({"support_grant": None}, "review_run_grant_record_missing"),
+        ({"machine_digest": "0" * 64}, "review_machine_evidence_tampered"),
+    ):
+        mutate(**changes)
+        with pytest.raises(InternalE2EContractError, match=code):
+            _review(db, run_id, "A1", 0, "approved")
+        mutate(**{key: good[key] for key in changes})
+    # Tampering with machine evidence inside the stored report is detected too.
+    tampered = json.loads(json.dumps(good["report"]))
+    tampered["results"][1]["machine_passed"] = True
+    tampered["results"][1]["blockers"] = []
+    tampered["results"][1]["evidence"]["tool_calls"] = ["search_products", "get_product_details"]
+    mutate(report=tampered)
+    with pytest.raises(InternalE2EContractError, match="review_machine_evidence_tampered"):
+        _review(db, run_id, "A1", 0, "approved")
+    mutate(report=good["report"])
+    # A run for tenant 2 is never reviewable as a Phase 2.7A run.
+    control.tenant_id = 2
+    db.commit()
+    with pytest.raises(InternalE2EContractError, match="phase_2_7a_run_not_found"):
+        _review(db, run_id, "A1", 0, "approved")
+    control.tenant_id = 1
+    db.commit()
+    assert _review(db, run_id, "A1", 0, "approved")["review"]["approved"] == 1
+
+
+def test_review_cannot_change_machine_evidence_or_machine_verdicts(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id, meta = _finished_run(db, per_turn={"A2": {"tool_calls": []}})
+    assert meta["classification"] == CLASS_MACHINE_GATE_FAILED
+    monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED", "false")
+    frozen_before = {k: v for k, v in meta["report"].items() if k not in {"review_status", "review", "acceptance_passed", "classification"}}
+    updated = meta
+    for row in meta["report"]["results"]:
+        for item in row["review"]["assertions"]:
+            updated = _review(db, run_id, row["turn_id"], item["index"], "approved")
+    frozen_after = {k: v for k, v in updated["report"].items() if k not in {"review_status", "review", "acceptance_passed", "classification"}}
+    for key in ("machine_passed", "machine_summary", "turns_machine_passed", "continuity", "fixtures", "support_grant", "matrix_sha256"):
+        assert frozen_before[key] == frozen_after[key]
+    strip = lambda rows: [{k: v for k, v in r.items() if k not in {"review", "acceptance_passed"}} for r in rows]
+    assert strip(frozen_before["results"]) == strip(frozen_after["results"])
+    assert updated["review_status"] == "approved"
+    assert updated["acceptance_passed"] is False and updated["classification"] == CLASS_MACHINE_GATE_FAILED
+    assert updated["machine_digest"] == meta["machine_digest"] == machine_digest(updated["report"])
+
+
+def test_review_endpoint_works_with_internal_e2e_disabled(db: Any, api: tuple[TestClient, FastAPI], monkeypatch: pytest.MonkeyPatch) -> None:
+    client, app = api
+    app.dependency_overrides[require_admin] = lambda: {"role": "admin"}
+    run_id, _meta = _finished_run(db)
+    monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED", "false")
+    monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_TENANT_IDS", "1")
+    _revoke(db)
+    assert client.post("/admin/internal-e2e/acceptance/phase-2-7a/runs", json={}).status_code == 409
+    assert client.get(f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{run_id}").status_code == 200
+    response = client.post(
+        f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{run_id}/reviews",
+        json={"turn_id": "C4", "assertion_index": 2, "verdict": "rejected", "reviewer": "qa-lead", "evidence": "tracking link was invented"},
+    )
+    assert response.status_code == 200
+    assert response.json()["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED
+    assert app.state.executed == []  # reviewing never queues an execution

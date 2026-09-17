@@ -139,6 +139,24 @@ fixture is read or a control row is created. Failures:
 never creates, requests or approves a grant. `GET …/matrix` is read-only and
 does not require a grant.
 
+## Safe operating sequence
+
+1. **Run** — `POST …/acceptance/phase-2-7a/runs` (admin, INTERNAL_E2E enabled,
+   Tenant 1 allowlisted, active Phase 2.7A support grant, verified fixtures).
+2. **Disable INTERNAL_E2E immediately** once the run is `completed` or `halted`.
+3. **Review evidence** — `GET …/runs/{run_id}` is read-only and keeps working with
+   the channel disabled.
+4. **Record verdicts** — `POST …/runs/{run_id}/reviews` is admin-only but does
+   **not** require INTERNAL_E2E, the tenant allowlist or a live support grant,
+   because it executes no agent, tool or turn. It accepts only an existing,
+   finished (`completed`/`halted`), synthetic Tenant 1 Phase 2.7A run whose
+   contract version and matrix hash match the checked-in matrix and whose
+   record carries the grant verified at run time; a stored machine-evidence
+   digest is checked before and after each verdict, so machine evidence and
+   machine verdicts can never change through the review path. Only the
+   human-review fields change, then the final classification is recomputed.
+5. **Clean up** the synthetic A/B/C fixtures.
+
 ## Safety gates and cleanup
 
 * Execution requires the existing INTERNAL_E2E gates

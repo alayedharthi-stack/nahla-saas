@@ -932,17 +932,48 @@ def record_acceptance_review(
     reviewer: str,
     evidence: str,
 ) -> dict[str, Any]:
-    """Persist a reviewer verdict on a completed/halted run's control row."""
-    assert_internal_e2e_operator_scope(ACCEPTANCE_TENANT_ID)
+    """Persist a reviewer verdict on a finished run's control row.
+
+    Recording a verdict runs no agent, tool or turn, so it deliberately does
+    NOT require INTERNAL_E2E to be enabled or a live support grant: the safe
+    sequence is run → disable INTERNAL_E2E → review evidence → record verdicts
+    → clean up.  The run record must be a finished, synthetic, Tenant 1 Phase
+    2.7A run whose contract version and matrix hash match the checked-in
+    matrix and whose machine evidence digest is intact; only human-review
+    fields change, then the final classification is recomputed.
+    """
     control = _acceptance_control(db, run_id)
     meta = dict(control.extra_metadata or {})
-    report = meta.get("report")
-    if not isinstance(report, dict) or meta.get("status") not in {"completed", "halted"}:
+    if int(control.tenant_id or 0) != ACCEPTANCE_TENANT_ID or (
+        meta.get("channel") != INTERNAL_E2E_CHANNEL
+        or meta.get("synthetic") is not True
+        or meta.get("test_only") is not True
+    ):
+        raise _fail("review_run_not_synthetic")
+    if meta.get("status") not in {"completed", "halted"}:
         raise _fail("review_run_not_finished")
+    report = meta.get("report")
+    if not isinstance(report, dict):
+        raise _fail("review_run_not_finished")
+    if (
+        meta.get("contract_version") != ACCEPTANCE_CONTRACT_VERSION
+        or report.get("contract_version") != ACCEPTANCE_CONTRACT_VERSION
+    ):
+        raise _fail("review_contract_mismatch")
+    expected_hash = load_acceptance_matrix().matrix_sha256
+    if meta.get("matrix_sha256") != expected_hash or report.get("matrix_sha256") != expected_hash:
+        raise _fail("review_matrix_hash_mismatch")
+    if not meta.get("support_grant"):
+        raise _fail("review_run_grant_record_missing")
+    digest = meta.get("machine_digest")
+    if not digest or machine_digest(report) != digest:
+        raise _fail("review_machine_evidence_tampered")
     report = apply_assertion_review(
-        dict(report), turn_id=turn_id, assertion_index=assertion_index,
+        json.loads(json.dumps(report)), turn_id=turn_id, assertion_index=assertion_index,
         verdict=verdict, reviewer=reviewer, evidence=evidence,
     )
+    if machine_digest(report) != digest:
+        raise _fail("review_machine_evidence_tampered")
     meta["report"] = report
     meta.update({key: report[key] for key in ("review_status", "review", "acceptance_passed", "classification")})
     control.extra_metadata = meta
@@ -974,6 +1005,53 @@ def _compact_results(report: Mapping[str, Any]) -> dict[str, Any]:
         for row in report.get("results") or []
     ]
     return compact
+
+
+_REVIEW_ONLY_RUN_KEYS = frozenset({"review_status", "review", "acceptance_passed", "classification"})
+_REVIEW_ONLY_TURN_KEYS = frozenset({"review", "acceptance_passed"})
+
+
+def machine_digest(report: Mapping[str, Any]) -> str:
+    """SHA-256 over everything in a report except the human-review fields.
+
+    Recording a verdict may only change review fields; the digest is stored
+    when a run finishes and re-checked on every review so machine evidence
+    and machine verdicts can never be edited through the review path.
+    """
+    frozen = {key: value for key, value in report.items() if key not in _REVIEW_ONLY_RUN_KEYS}
+    frozen["results"] = [
+        {key: value for key, value in row.items() if key not in _REVIEW_ONLY_TURN_KEYS}
+        for row in report.get("results") or []
+    ]
+    return _canonical_sha256(frozen)
+
+
+def persist_completed_report(db: Any, run_id: str, report: Mapping[str, Any]) -> dict[str, Any]:
+    """Store a finished run's compact report plus its machine digest on the control row."""
+    control = _acceptance_control(db, run_id)
+    meta = dict(control.extra_metadata or {})
+    compact = _compact_results(report)
+    meta.update(
+        {
+            "status": "completed" if report.get("halted_at") is None else "halted",
+            **{
+                key: report[key]
+                for key in (
+                    "turns_executed", "turns_machine_passed", "turns_machine_failed",
+                    "turns_not_executed", "machine_passed", "machine_summary",
+                    "review_status", "review", "acceptance_passed", "classification",
+                    "continuity", "halted_at", "halt_reason", "external_egress_total",
+                    "fixtures", "aliases",
+                )
+            },
+            "report": compact,
+            "machine_digest": machine_digest(compact),
+        }
+    )
+    control.extra_metadata = meta
+    flag_modified(control, "extra_metadata")
+    db.commit()
+    return dict(control.extra_metadata or {})
 
 
 def _acceptance_control(db: Any, run_id: str) -> Any:
@@ -1044,7 +1122,8 @@ def create_acceptance_run(
 
 
 def acceptance_run_status(db: Any, run_id: str) -> dict[str, Any]:
-    assert_internal_e2e_operator_scope(ACCEPTANCE_TENANT_ID)
+    """Read a run's record.  Read-only and admin-only; it does not execute anything,
+    so it stays available after INTERNAL_E2E has been disabled for the review phase."""
     return dict(_acceptance_control(db, run_id).extra_metadata or {})
 
 
@@ -1065,27 +1144,7 @@ async def execute_acceptance_run(run_id: str) -> None:
             run_id=run_id,
             halt_on_first_failure=bool(meta.get("halt_on_first_failure")),
         )
-        control = _acceptance_control(db, run_id)
-        meta = dict(control.extra_metadata or {})
-        meta.update(
-            {
-                "status": "completed" if report["halted_at"] is None else "halted",
-                **{
-                    key: report[key]
-                    for key in (
-                        "turns_executed", "turns_machine_passed", "turns_machine_failed",
-                        "turns_not_executed", "machine_passed", "machine_summary",
-                        "review_status", "review", "acceptance_passed", "classification",
-                        "continuity", "halted_at", "halt_reason", "external_egress_total",
-                        "fixtures", "aliases",
-                    )
-                },
-                "report": _compact_results(report),
-            }
-        )
-        control.extra_metadata = meta
-        flag_modified(control, "extra_metadata")
-        db.commit()
+        persist_completed_report(db, run_id, report)
     except Exception as exc:
         db.rollback()
         logger.exception(
@@ -1121,6 +1180,8 @@ __all__ = [
     "execute_acceptance_run",
     "finalize_acceptance",
     "load_acceptance_matrix",
+    "machine_digest",
+    "persist_completed_report",
     "record_acceptance_review",
     "require_phase_2_7a_support_grant",
     "run_acceptance_matrix",
