@@ -15,10 +15,29 @@ from __future__ import annotations
 import os
 from typing import Any, Mapping
 
+from modules.ai.commerce_agent_v2.internal_e2e_identity import (
+    INTERNAL_E2E_CHANNEL,
+    InternalE2EAlias,
+    internal_e2e_customer_identity,
+    internal_e2e_metadata,
+    metadata_matches_internal_e2e_identity,
+)
+
 ISOLATED_ACCEPTANCE_ENV = "NAHLA_P27B_ISOLATED_ACCEPTANCE"
 ACCEPTANCE_TENANT_MARKER = "PHASE_2_7B_SYNTHETIC_ACCEPTANCE"
-ACCEPTANCE_CHANNEL = "internal_e2e"
-ACCEPTANCE_IDENTITY_PREFIX = "phase_2_7b:synthetic:customer:"
+# The acceptance conversations live on the INTERNAL_E2E channel, so the channel
+# name is the canonical one rather than a second spelling of it.
+ACCEPTANCE_CHANNEL = INTERNAL_E2E_CHANNEL
+ACCEPTANCE_FIXTURE_CONTRACT = "phase_2_7b_acceptance_fixture_v2"
+
+
+def acceptance_aliases() -> tuple[InternalE2EAlias, ...]:
+    """Aliases the checked-in K01-K16 matrix requires, in matrix order."""
+    from services.commerce_v2_phase_2_7b_knowledge_acceptance import (
+        load_knowledge_acceptance_matrix,
+    )
+
+    return load_knowledge_acceptance_matrix().required_aliases
 
 # Fixture kinds the matrix refers to by name.
 FIXTURE_STORE_POLICY = "store_policy_relevant"
@@ -110,13 +129,60 @@ def assert_isolated_acceptance_database(
     }
 
 
+def verify_acceptance_fixtures(db: Any, tenant_id: int) -> dict[str, Any]:
+    """Prove every matrix alias resolves to exactly one canonical fixture.
+
+    This is the check the provisioner failed to make before: it wrote fixtures
+    in one shape and the turn path looked them up in another.  Here the lookup
+    is the canonical one, so a fixture that the run could not resolve cannot be
+    reported as provisioned.  Duplicates, a wrong tenant, a stray customer_id
+    and half-written metadata each fail closed rather than reaching a run.
+    """
+    from models import Conversation
+
+    resolved: dict[str, int] = {}
+    for alias in acceptance_aliases():
+        identity = internal_e2e_customer_identity(tenant_id, alias)
+        rows = (
+            db.query(Conversation)
+            .filter(
+                Conversation.tenant_id == int(tenant_id),
+                Conversation.external_id == identity,
+            )
+            .all()
+        )
+        if len(rows) != 1:
+            raise _fail(f"fixture_missing_or_ambiguous:{alias}")
+        conversation = rows[0]
+        if conversation.customer_id is not None:
+            raise _fail(f"fixture_customer_id_not_null:{alias}")
+        if not metadata_matches_internal_e2e_identity(
+            conversation.extra_metadata, tenant_id=tenant_id, alias=alias
+        ):
+            raise _fail(f"fixture_metadata_not_canonical:{alias}")
+        resolved[alias] = int(conversation.id)
+
+    # A conversation on this tenant that is not one of the resolved fixtures is
+    # an unknown fixture; refuse rather than run beside it.
+    known = set(resolved.values())
+    strays = [
+        int(row.id)
+        for row in db.query(Conversation)
+        .filter(Conversation.tenant_id == int(tenant_id))
+        .all()
+        if int(row.id) not in known
+    ]
+    if strays:
+        raise _fail("fixture_unexpected_conversation_present")
+    return {"aliases": sorted(resolved), "conversations": resolved}
+
+
 def provision_knowledge_acceptance_environment(
     db: Any, *, env: Mapping[str, str] | None = None
 ) -> dict[str, Any]:
     """Create the full synthetic world once; calling it again changes nothing."""
     from models import (
         Conversation,
-        Customer,
         MerchantKnowledgeSection,
         MerchantKnowledgeSectionProduct,
         Order,
@@ -134,6 +200,9 @@ def provision_knowledge_acceptance_environment(
         .one_or_none()
     )
     if tenant is not None:
+        # Reprovisioning changes nothing, but it still has to prove the world
+        # already there is the one a run can resolve.
+        verify_acceptance_fixtures(db, int(tenant.id))
         return describe_knowledge_acceptance_environment(db, env=env)
 
     tenant = Tenant(name=ACCEPTANCE_TENANT_MARKER, is_active=True)
@@ -345,43 +414,42 @@ def provision_knowledge_acceptance_environment(
         ]
     )
 
-    customers: dict[str, Customer] = {}
+    # The acceptance turns are submitted through ``submit_internal_customer_turn``,
+    # which resolves its conversation with ``_find_fixture``.  That resolver owns
+    # the identity contract, so the fixtures are built from the same canonical
+    # helpers it reads back: a conversation whose ``external_id`` is the canonical
+    # identity, no ``customer_id``, and the canonical metadata block.  Phase 2.7B
+    # keys are added on top of that block, never in place of it.
     conversations: dict[str, Conversation] = {}
-    for alias in ("k1", "k2"):
-        customer = Customer(
-            tenant_id=tenant.id,
-            phone=f"05000000{len(customers) + 11}",
-            normalized_phone=f"+96650000000{len(customers) + 1}",
-        )
-        db.add(customer)
-        db.flush()
+    for alias in acceptance_aliases():
+        identity = internal_e2e_customer_identity(tenant.id, alias)
         conversation = Conversation(
             tenant_id=tenant.id,
-            customer_id=customer.id,
+            customer_id=None,
             status="active",
-            external_id=f"{ACCEPTANCE_IDENTITY_PREFIX}{alias}",
+            external_id=identity,
             extra_metadata={
-                "channel": ACCEPTANCE_CHANNEL,
-                "synthetic": True,
-                "test_only": True,
-                "external_egress_allowed": False,
+                **internal_e2e_metadata(tenant.id, alias),
                 "phase": "2.7B",
+                "fixture_contract": ACCEPTANCE_FIXTURE_CONTRACT,
             },
         )
         db.add(conversation)
         db.flush()
-        customers[alias] = customer
         conversations[alias] = conversation
 
+    primary_identity = internal_e2e_customer_identity(
+        tenant.id, acceptance_aliases()[0]
+    )
     order = Order(
         tenant_id=tenant.id,
-        customer_id=customers["k2"].id,
+        customer_id=None,
         external_id="P27B-ORDER-001",
         external_order_number="P27B-K-001",
         status="draft",
         total="249.00",
         customer_name="PHASE 2.7B SYNTHETIC CUSTOMER",
-        customer_info={"name": "PHASE 2.7B SYNTHETIC CUSTOMER", "phone": customers["k2"].normalized_phone},
+        customer_info={"name": "PHASE 2.7B SYNTHETIC CUSTOMER", "phone": primary_identity},
         line_items=[{"name": "عسل جبلي", "quantity": 1, "price": "249.00"}],
         source=ACCEPTANCE_CHANNEL,
     )
@@ -394,10 +462,13 @@ def provision_knowledge_acceptance_environment(
             status="in_transit",
             tracking_number="P27B-TRACK-001",
             recipient_name="PHASE 2.7B SYNTHETIC CUSTOMER",
-            recipient_phone=customers["k2"].normalized_phone,
+            recipient_phone=primary_identity,
             extra_metadata={"synthetic": True, "test_only": True, "external_mutation_allowed": False},
         )
     )
+    db.flush()
+    # Refuse to commit a world the run could not resolve.
+    verify_acceptance_fixtures(db, int(tenant.id))
     db.commit()
     return describe_knowledge_acceptance_environment(db, env=env)
 
@@ -444,6 +515,8 @@ def describe_knowledge_acceptance_environment(
             str(row.external_id): int(row.id)
             for row in db.query(Conversation).filter(Conversation.tenant_id == tenant.id).all()
         },
+        "fixture_contract": ACCEPTANCE_FIXTURE_CONTRACT,
+        "resolvable_aliases": sorted(acceptance_aliases()),
         "customers": int(
             db.query(Customer).filter(Customer.tenant_id == tenant.id).count()
         ),
@@ -522,6 +595,8 @@ def cleanup_knowledge_acceptance_environment(
 
 
 __all__ = [
+    "ACCEPTANCE_CHANNEL",
+    "ACCEPTANCE_FIXTURE_CONTRACT",
     "ACCEPTANCE_TENANT_MARKER",
     "AcceptanceEnvironmentError",
     "FIXTURE_DELETED",
@@ -538,5 +613,7 @@ __all__ = [
     "assert_isolated_acceptance_database",
     "cleanup_knowledge_acceptance_environment",
     "describe_knowledge_acceptance_environment",
+    "acceptance_aliases",
     "provision_knowledge_acceptance_environment",
+    "verify_acceptance_fixtures",
 ]
