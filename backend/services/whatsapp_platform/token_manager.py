@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION, WA_TOKEN
+from core.log_redaction import redact_exception
 from .provider_utils import (
     WHATSAPP_CONNECTION_TYPE_DIRECT,
     WHATSAPP_PROVIDER_360DIALOG,
@@ -252,7 +253,9 @@ async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppToke
             )
             data = resp.json()
     except Exception as exc:
-        logger.warning("[WA token] refresh failed with network error: %s", exc)
+        # httpx exceptions embed the request URL, which carries the app
+        # secret and the exchange token — never log the raw exception.
+        logger.warning("[WA token] refresh failed with network error: %s", redact_exception(exc))
         return None
     if "error" in data:
         err_code = int(data.get("error", {}).get("code") or 0)

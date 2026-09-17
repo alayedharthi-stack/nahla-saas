@@ -1,36 +1,116 @@
-"""Redact secrets from log messages (Graph tokens, OAuth codes, Bearer headers)."""
+"""Redact credentials from log output — fail closed.
+
+Why this exists
+===============
+Outbound Meta Graph calls carry credentials in the query string (``client_secret``,
+``fb_exchange_token``, ``access_token``, ``input_token``, ``appsecret_proof``) and
+``httpx`` logs every request as ``HTTP Request: <method> <url> "<status>"`` at
+INFO level. Inbound requests can carry ``hub.verify_token`` (webhook verification)
+and OAuth ``code`` values, which uvicorn's access log prints with the full query
+string. ``httpx`` exceptions embed the request URL in ``str(exc)``.
+
+The previous filter only scrubbed *string* log arguments; ``httpx`` passes the URL
+as an ``httpx.URL`` object, so the credential-bearing URL was formatted into the
+final line untouched. This module therefore redacts the **formatted** message
+(``record.getMessage()``), the rendered exception text and the stack text, and
+never lets an unformattable record through unredacted.
+
+Public API (stable):
+  * ``redact_secrets(text)``     — scrub URLs, ``key=value`` / ``"key": "value"``
+                                   fragments, Bearer/Authorization/Cookie values
+                                   and Meta-style ``EAA…`` tokens from free text.
+  * ``redact_value(value)``      — recursive redaction for mappings / sequences
+                                   (dict keys are matched case-insensitively).
+  * ``redact_exception(exc)``    — ``"ExcType: <redacted message>"`` for logging.
+  * ``SecretRedactingFilter``    — logging filter, safe on any handler or logger.
+  * ``install_log_redaction()``  — idempotent installation on the root handlers
+                                   and on the ``httpx`` / ``httpcore`` / uvicorn
+                                   loggers (uvicorn's access logger does not
+                                   propagate to the root handlers).
+
+Policy: the marker is the fixed string ``REDACTED``; no prefix, suffix, length,
+hash or fingerprint of a secret is ever emitted.
+"""
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-_SENSITIVE_QUERY_KEYS = frozenset({
+REDACTED = "REDACTED"
+REDACTED_RECORD = "[REDACTED_LOG_RECORD]"
+REDACTED_URL = "[REDACTED_URL]"
+
+# Exact key names (case-insensitive) whose values are always secrets.
+_EXACT_SENSITIVE_KEYS = frozenset({
     "access_token",
     "token",
+    "refresh_token",
+    "fb_exchange_token",
+    "id_token",
+    "input_token",
+    "verify_token",
+    "hub.verify_token",
+    "client_secret",
+    "app_secret",
+    "appsecret_proof",
+    "api_key",
+    "apikey",
+    "api-key",
+    "x-api-key",
+    "d360-api-key",
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "secret",
+    "password",
+    "passwd",
+    "client_id_secret",
     "code",
     "state",
-    "appsecret_proof",
-    "client_secret",
-    "authorization",
-    "input_token",
 })
-_SENSITIVE_DICT_KEYS = _SENSITIVE_QUERY_KEYS | frozenset({
-    "refresh_token",
-    "id_token",
-    "client_id_secret",
-})
-_BEARER = re.compile(r"(Bearer\s+)[^\s\"']+", re.IGNORECASE)
+# Any key *containing* one of these fragments is treated as a secret
+# (``x-api-key``, ``app_secret``, ``proxy-authorization`` …).
+_SENSITIVE_KEY_FRAGMENTS = ("secret", "password", "passwd", "api_key", "apikey", "api-key",
+                            "authorization", "cookie")
+# ``token`` is a secret only when it is the whole key or its last word
+# (``fb_exchange_token``, ``hub.verify_token``, ``input_token``): usage
+# counters (``input_tokens``) and status fields (``token_status``,
+# ``token_type``, ``access_token_set``) are safe diagnostics.
+_TOKEN_KEY_RE = re.compile(r"(?:^|[_.\-])token$")
+
+
+def is_sensitive_key(key: Any) -> bool:
+    k = str(key or "").strip().lower()
+    if not k:
+        return False
+    if k in _EXACT_SENSITIVE_KEYS:
+        return True
+    if _TOKEN_KEY_RE.search(k):
+        return True
+    return any(fragment in k for fragment in _SENSITIVE_KEY_FRAGMENTS)
+
+
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+_BEARER = re.compile(r"(Bearer\s+)[^\s\"',;]+", re.IGNORECASE)
 _AUTH_HEADER = re.compile(
-    r"(Authorization\s*[:=]\s*)(?!Bearer\b)([^\s\"']+)",
+    r"((?:Authorization|Proxy-Authorization|Cookie|Set-Cookie)\s*[:=]\s*)(?!Bearer\b)([^\s\"',;]+)",
     re.IGNORECASE,
 )
+# ``key=value``, ``key: value``, ``"key": "value"`` fragments in free text (JSON,
+# query strings, bare request paths such as uvicorn's access log).
 _KV = re.compile(
-    r"((?:access_token|token|code|state|appsecret_proof|client_secret)"
-    r"\s*[=:]\s*|authorization\s*=\s*)([^\s\"'&,;]+)",
+    r"((?<![A-Za-z0-9_.\-])"
+    r"(?:[A-Za-z0-9_.\-]*token"
+    r"|[A-Za-z0-9_.\-]*(?:secret|password|passwd|api[_\-]?key|authorization|cookie)[A-Za-z0-9_.\-]*"
+    r"|code|state|appsecret_proof)"
+    r"[\"']?\s*[=:]\s*[\"']?)(?!(?:Bearer|Basic|Digest)\b)([^\s\"'&,;]+)",
     re.IGNORECASE,
 )
+# Meta Graph user / page / system-user tokens start with ``EAA``.
+_META_TOKEN = re.compile(r"\bEAA[A-Za-z0-9]{20,}")
 
 
 def _redact_query(query: str) -> str:
@@ -38,61 +118,146 @@ def _redact_query(query: str) -> str:
         return query
     pairs = []
     for key, value in parse_qsl(query, keep_blank_values=True):
-        if str(key).lower() in _SENSITIVE_QUERY_KEYS:
-            pairs.append((key, "REDACTED"))
-        else:
-            pairs.append((key, value))
+        pairs.append((key, REDACTED if is_sensitive_key(key) else value))
     return urlencode(pairs)
 
 
-def _redact_urls(text: str) -> str:
-    out = text
-    for match in re.finditer(r"https?://[^\s\"']+", text):
-        raw = match.group(0)
+def _redact_one_url(raw: str) -> str:
+    """Redact a single URL; unparseable input collapses to ``[REDACTED_URL]``."""
+    try:
         parts = urlsplit(raw)
-        if not parts.query:
-            continue
-        redacted = urlunsplit(
-            (parts.scheme, parts.netloc, parts.path, _redact_query(parts.query), parts.fragment)
-        )
-        out = out.replace(raw, redacted)
-    return out
+        netloc = parts.netloc
+        if "@" in netloc:  # user:password@host — never keep credentials
+            netloc = f"{REDACTED}@{netloc.rsplit('@', 1)[1]}"
+        fragment = _redact_query(parts.fragment) if "=" in parts.fragment else parts.fragment
+        return urlunsplit((parts.scheme, netloc, parts.path, _redact_query(parts.query), fragment))
+    except Exception:  # noqa: BLE001 — fail closed: drop the whole URL
+        return REDACTED_URL
 
 
-def redact_secrets(text: str) -> str:
-    """Remove OAuth/Graph secrets from URLs, headers, and key=value fragments."""
-    if not text:
-        return text
-    out = _redact_urls(str(text))
-    out = _BEARER.sub(r"\1REDACTED", out)
-    out = _AUTH_HEADER.sub(r"\1REDACTED", out)
-    out = _KV.sub(r"\1REDACTED", out)
-    return out
+def _redact_urls(text: str) -> str:
+    return _URL_RE.sub(lambda m: _redact_one_url(m.group(0)), text)
+
+
+def redact_secrets(text: Any) -> str:
+    """Remove credentials from free text. Never raises; fails closed."""
+    if text is None:
+        return ""
+    try:
+        out = str(text)
+        if not out:
+            return out
+        out = _redact_urls(out)
+        out = _BEARER.sub(r"\1" + REDACTED, out)
+        out = _AUTH_HEADER.sub(r"\1" + REDACTED, out)
+        out = _KV.sub(r"\1" + REDACTED, out)
+        out = _META_TOKEN.sub(REDACTED, out)
+        return out
+    except Exception:  # noqa: BLE001 — a failing redactor must not leak the input
+        return REDACTED_RECORD
 
 
 def redact_value(value: Any) -> Any:
+    """Recursively redact strings, mappings and sequences (dict keys case-insensitive).
+
+    Objects that are neither primitives nor containers (``httpx.URL``, exceptions,
+    dataclasses …) are rendered with ``str()`` and redacted as text — the
+    previous behaviour passed them through untouched, which is how credential
+    URLs reached the log line.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
     if isinstance(value, str):
         return redact_secrets(value)
     if isinstance(value, Mapping):
         return {
-            k: ("REDACTED" if str(k).lower() in _SENSITIVE_DICT_KEYS else redact_value(v))
+            k: (REDACTED if is_sensitive_key(k) else redact_value(v))
             for k, v in value.items()
         }
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set, frozenset)):
         seq = [redact_value(item) for item in value]
-        return type(value)(seq) if not isinstance(value, list) else seq
-    return value
+        return seq if isinstance(value, list) else type(value)(seq)
+    return redact_secrets(str(value))
+
+
+def redact_exception(exc: BaseException) -> str:
+    """``"ExcType: message"`` with credentials removed — safe for ``%s`` logging."""
+    return f"{type(exc).__name__}: {redact_secrets(str(exc))}"
+
+
+_EXC_FORMATTER = logging.Formatter()
 
 
 class SecretRedactingFilter(logging.Filter):
-    """Logging filter that scrubs secrets from the final log message."""
+    """Redact the formatted message, exception text and stack text of a record.
+
+    Fail closed: a record whose message cannot be formatted (bad ``%`` args)
+    is replaced by ``[REDACTED_LOG_RECORD]`` instead of being passed through.
+    The filter always returns ``True`` so records are never dropped silently.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            record.msg = redact_secrets(record.msg)
-        if record.args:
-            record.args = redact_value(record.args)
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001
+            message = None
+        record.msg = redact_secrets(message) if message is not None else REDACTED_RECORD
+        record.args = ()
+        try:
+            if record.exc_info and not record.exc_text:
+                record.exc_text = redact_secrets(_EXC_FORMATTER.formatException(record.exc_info))
+            elif record.exc_text:
+                record.exc_text = redact_secrets(record.exc_text)
+        except Exception:  # noqa: BLE001
+            record.exc_text = REDACTED_RECORD
+        if record.stack_info:
+            record.stack_info = redact_secrets(record.stack_info)
         return True
 
 
-__all__ = ["SecretRedactingFilter", "redact_secrets", "redact_value"]
+# Loggers that own their own handlers (uvicorn) or emit request URLs (httpx).
+DEFAULT_REDACTED_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "uvicorn",
+    "uvicorn.access",
+    "uvicorn.error",
+)
+
+_SHARED_FILTER = SecretRedactingFilter()
+
+
+def _add_once(target: Any, filt: logging.Filter) -> None:
+    if not any(isinstance(existing, SecretRedactingFilter) for existing in target.filters):
+        target.addFilter(filt)
+
+
+def install_log_redaction(
+    logger_names: Iterable[str] = DEFAULT_REDACTED_LOGGERS,
+    *,
+    root: Optional[logging.Logger] = None,
+) -> SecretRedactingFilter:
+    """Attach the redacting filter to every root handler and to ``logger_names``.
+
+    Idempotent. Handler-level installation covers every logger that propagates
+    to the root; logger-level installation covers loggers with private,
+    non-propagating handlers (uvicorn's access log) and ``httpx``.
+    """
+    root_logger = root if root is not None else logging.getLogger()
+    for handler in list(root_logger.handlers):
+        _add_once(handler, _SHARED_FILTER)
+    for name in logger_names:
+        _add_once(logging.getLogger(name), _SHARED_FILTER)
+    return _SHARED_FILTER
+
+
+__all__ = [
+    "DEFAULT_REDACTED_LOGGERS",
+    "REDACTED",
+    "SecretRedactingFilter",
+    "install_log_redaction",
+    "is_sensitive_key",
+    "redact_exception",
+    "redact_secrets",
+    "redact_value",
+]
