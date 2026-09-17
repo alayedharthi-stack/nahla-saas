@@ -32,6 +32,7 @@ from services.commerce_v2_whatsapp_e2e_contract import (  # noqa: E402
     render_controlled_test_data,
 )
 from services.commerce_v2_phase_2_7a_acceptance import (  # noqa: E402
+    apply_assertion_review,
     load_acceptance_matrix,
     run_acceptance_matrix,
 )
@@ -313,8 +314,11 @@ def command_acceptance(args: argparse.Namespace) -> int:
         print(
             json.dumps(
                 {
-                    "ok": bool(report["passed"]),
-                    "summary": report["summary"],
+                    "machine_passed": bool(report["machine_passed"]),
+                    "machine_summary": report["machine_summary"],
+                    "review_status": report["review_status"],
+                    "acceptance_passed": bool(report["acceptance_passed"]),
+                    "classification": report["classification"],
                     "turns_executed": report["turns_executed"],
                     "halted_at": report["halted_at"],
                     "external_egress_total": report["external_egress_total"],
@@ -324,10 +328,41 @@ def command_acceptance(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
-        return 0 if report["passed"] else 1
+        return 0 if report["machine_passed"] else 1
     finally:
         db.close()
         engine.dispose()
+
+
+def command_acceptance_review(args: argparse.Namespace) -> int:
+    """Record a reviewer verdict on one assertion of an offline acceptance report."""
+    report = json.loads(args.report.read_text(encoding="utf-8"))
+    report = apply_assertion_review(
+        report,
+        turn_id=args.turn,
+        assertion_index=args.assertion,
+        verdict=args.verdict,
+        reviewer=args.reviewer,
+        evidence=args.evidence,
+    )
+    output = args.output or args.report
+    output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        json.dumps(
+            {
+                "review_status": report["review_status"],
+                "acceptance_passed": bool(report["acceptance_passed"]),
+                "classification": report["classification"],
+                "pending": report["review"]["pending"],
+                "output": str(output),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def parser() -> argparse.ArgumentParser:
@@ -367,6 +402,15 @@ def parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--halt-on-first-failure", action="store_true")
     acceptance.add_argument("--print-matrix", action="store_true")
     acceptance.set_defaults(func=command_acceptance)
+    review = sub.add_parser("acceptance-review")
+    review.add_argument("--report", type=Path, required=True)
+    review.add_argument("--turn", required=True)
+    review.add_argument("--assertion", type=int, required=True)
+    review.add_argument("--verdict", choices=("approved", "rejected"), required=True)
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--evidence", required=True)
+    review.add_argument("--output", type=Path)
+    review.set_defaults(func=command_acceptance_review)
     score = sub.add_parser("score")
     score.add_argument("--seed", type=int, default=260914)
     score.add_argument("--order-number", default="IE2E-C-001")

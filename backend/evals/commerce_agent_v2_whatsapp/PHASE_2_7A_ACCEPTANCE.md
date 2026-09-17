@@ -39,11 +39,36 @@ tools or expected outcome at that pointer differ from the artifact.
 | C3 | وش حالة شحنة طلبي؟ | C / 4 / shipment_status / 0 / 0 | resolve_customer_order, get_order_shipment | grounded_reply |
 | C4 | عطني رقم التتبع | C / 6 / tracking / 0 / 0 | resolve_customer_order, get_order_shipment | grounded_reply |
 
-## Acceptance semantics
+## Three tiers: machine gate, human reply review, final acceptance
+
+| Tier | Who | What it proves | Output field |
+|---|---|---|---|
+| 1. Machine gate | runner | every turn executed in canonical order with tools, outcome, ownership, safety proofs, isolation, prior context and B continuity verified by code | `machine_passed`, `machine_summary` (`N/12 machine checks`), per-turn `machine_passed` / `machine_status` |
+| 2. Human-visible reply review | named reviewer | every `required_assertion` of every executed turn judged against the customer-visible text and evidence, with reviewer, timestamp, verdict and short evidence | per-turn `review.assertions[]`, run `review_status` (`pending` / `approved` / `rejected`) |
+| 3. Final Salla-readiness acceptance | both | tier 1 passed **and** tier 2 approved every assertion | `acceptance_passed`, `classification` |
+
+`classification` is exactly one of `MACHINE_GATE_FAILED`,
+`MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING`,
+`MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED`, or `ACCEPTANCE_PASSED`. A run whose
+twelve turns all pass the machine checks is reported as
+**MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING**, never as "12/12 PASS", until a
+reviewer has approved every required assertion through
+`POST …/acceptance/phase-2-7a/runs/{run_id}/reviews` (or the offline
+`acceptance-review` CLI subcommand). Any rejected assertion makes the run
+`MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED`; a failed machine check makes it
+`MACHINE_GATE_FAILED` regardless of reviews.
+
+Continuity assertions on B2–B4 that the machine verified are annotated
+`machine_check: b_continuity_verified` in the ledger but still need the
+reviewer's verdict; when product identity could not be extracted
+(`continuity.status = unverifiable`) the turn is `passed_unverified_continuity`
+and those assertions remain strictly human-mandatory.
+
+## Machine-gate semantics
 
 A turn is **not** a pass because an HTTP request returned 200. For each turn the
 runner records the full INTERNAL_E2E artifact evidence and scores it with the
-existing `score_turn` contract plus three matrix-specific checks:
+existing `score_turn` contract plus matrix-specific checks:
 
 * expected tools are a subset of the tools actually called; every called tool is
   one of the seven read-only tools;
@@ -58,11 +83,20 @@ existing `score_turn` contract plus three matrix-specific checks:
   (`alias_conversation_mismatch` otherwise), with no real `customer_id`
   (`real_customer_fallback_forbidden` otherwise), and turns flagged
   `requires_prior_context` ran after every earlier turn of the same alias
-  completed (`prior_context_incomplete` otherwise).
+  completed (`prior_context_incomplete` otherwise);
+* **B continuity** from `structured_reply.product_refs`: B1 records the products
+  shown (`continuity.products_shown`); B2 must select exactly one of them
+  (`b_continuity_selection_not_from_b1`, `b_continuity_selection_ambiguous`);
+  B3 and B4 must reference exactly that product (`b_continuity_product_switched`).
+  When the stray product is one of the two catalog products named in B's seed
+  history, the blocker is `b_continuity_seed_history_fallback`: the seeded
+  history must never stand in for B1's grounded results, even when the expected
+  tools were called. If no product identity is present the turn is marked
+  `unverifiable`, not passed, and the continuity assertions stay human-mandatory.
 
 `required_assertions` are the owner's per-turn review criteria; they are carried
-verbatim into every result so a human reviewer can judge the customer-visible
-text against them alongside the machine checks.
+verbatim into every result and into the review ledger so a human reviewer can
+judge the customer-visible text against them alongside the machine checks.
 
 Ordering is fixed: A1→A4, then B1→B4, then C1→C4, sequentially, one turn at a
 time. A, B and C use three separate fixture conversations; continuity within an
@@ -85,6 +119,25 @@ The runner never provisions, resets, or heals fixtures. Before a run:
    `phase_2_7a_fixture_missing:<alias>`, `phase_2_7a_c_order_fixture_missing`,
    `phase_2_7a_c_shipment_fixture_missing`, or
    `phase_2_7a_real_customer_fallback_forbidden` before executing any turn.
+3. B's seed history is verified row by row: exactly 32
+   `internal_e2e_seed_history` rows (24 pagination + 8 reference), ids
+   `internal_e2e:t1:b:seed:01…32` in order, alternating inbound/outbound,
+   B-only identity metadata, and no such row in any other conversation.
+   Failures: `phase_2_7a_b_seed_history_missing`, `…_count_invalid`,
+   `…_order_invalid`, `…_metadata_mismatch`, `…_row_invalid`,
+   `…_contaminated`.
+
+## Support-access gate (production run path)
+
+Creating or running an acceptance run requires an ACTIVE Tenant 1 support-access
+grant whose merchant-approved purpose names Phase 2.7A and which has at least 30
+minutes remaining. The gate reads the grant exactly as the support-access router
+stores it and runs **after** the INTERNAL_E2E scope check and **before** any
+fixture is read or a control row is created. Failures:
+`phase_2_7a_support_grant_missing`, `…_expired`, `…_expiry_missing`,
+`…_insufficient_remaining`, `…_purpose_mismatch`, `…_wrong_tenant`. The runner
+never creates, requests or approves a grant. `GET …/matrix` is read-only and
+does not require a grant.
 
 ## Safety gates and cleanup
 
@@ -92,8 +145,10 @@ The runner never provisions, resets, or heals fixtures. Before a run:
   (`NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED`, tenant allowlist `1`); when
   disabled the runner raises `internal_e2e_disabled` before reading fixtures.
 * All routes live under the admin-only `/admin/internal-e2e/acceptance/phase-2-7a/*`
-  prefix (`GET …/matrix`, `POST …/runs`, `GET …/runs/{run_id}`); the CLI
-  equivalent is `scripts/operators/commerce_v2_internal_e2e.py acceptance`.
+  prefix (`GET …/matrix`, `POST …/runs`, `GET …/runs/{run_id}`,
+  `POST …/runs/{run_id}/reviews`); the CLI equivalents are
+  `scripts/operators/commerce_v2_internal_e2e.py acceptance` and
+  `acceptance-review`.
 * Every turn is persisted through the normal INTERNAL_E2E inbound/outbound
   rows with `case_id=P27A:<turn_id>` and `batch_id=p27a:<run_id>`; full
   artifacts remain retrievable via `GET /admin/internal-e2e/results?trace_id=…`.
@@ -109,7 +164,7 @@ The runner never provisions, resets, or heals fixtures. Before a run:
 | Variant selection | none, verbatim text | seeded random variant per step |
 | Ordering | fixed A1→C4, sequential | scheduled, optional A/B/C concurrency waves |
 | Purpose | pre-review acceptance, one deterministic pass/fail | regression coverage and latency/tier metrics |
-| Output | per-turn results + `12/12` summary | batch score report (`score_batch`) |
+| Output | per-turn results, machine summary, review ledger, classification | batch score report (`score_batch`) |
 
 Both run through the same INTERNAL_E2E turn path, the same safety proofs, and
 the same zero-egress hard gate.

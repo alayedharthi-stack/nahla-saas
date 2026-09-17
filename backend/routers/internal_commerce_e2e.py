@@ -30,6 +30,7 @@ from services.commerce_v2_phase_2_7a_acceptance import (
     create_acceptance_run,
     execute_acceptance_run,
     load_acceptance_matrix,
+    record_acceptance_review,
 )
 
 
@@ -62,6 +63,14 @@ class BatchBody(_StrictBody):
 
 class AcceptanceRunBody(_StrictBody):
     halt_on_first_failure: bool = False
+
+
+class AcceptanceReviewBody(_StrictBody):
+    turn_id: Literal["A1", "A2", "A3", "A4", "B1", "B2", "B3", "B4", "C1", "C2", "C3", "C4"]
+    assertion_index: int = Field(ge=0, le=15)
+    verdict: Literal["approved", "rejected"]
+    reviewer: str = Field(min_length=3, max_length=120)
+    evidence: str = Field(min_length=5, max_length=2000)
 
 
 def _raise_contract(exc: InternalE2EContractError) -> None:
@@ -218,6 +227,31 @@ def get_acceptance_run(
         return acceptance_run_status(db, str(run_id))
     except InternalE2EContractError as exc:
         _raise_contract(exc)
+
+
+@router.post("/acceptance/phase-2-7a/runs/{run_id}/reviews")
+def review_acceptance_run(
+    body: AcceptanceReviewBody,
+    run_id: str = Path(min_length=36, max_length=36),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Record one reviewer verdict on one required assertion of a finished run.
+
+    Machine checks never produce a final PASS on their own: the run stays at
+    MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING until every required assertion of
+    every executed turn is approved here."""
+    try:
+        return record_acceptance_review(
+            db,
+            str(run_id),
+            turn_id=body.turn_id,
+            assertion_index=body.assertion_index,
+            verdict=body.verdict,
+            reviewer=body.reviewer,
+            evidence=body.evidence,
+        )
+    except (InternalE2EContractError, ValueError) as exc:
+        _raise_contract(InternalE2EContractError(str(exc)))
 
 
 __all__ = ["router"]

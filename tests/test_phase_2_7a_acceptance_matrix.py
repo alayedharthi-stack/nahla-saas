@@ -10,6 +10,7 @@ import copy
 import json
 import os
 import sys
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +30,14 @@ for _p in (REPO, os.path.join(REPO, "backend"), os.path.join(REPO, "database")):
 from core.auth import require_admin  # noqa: E402
 from core.database import get_db  # noqa: E402
 from evals.commerce_agent_v2_whatsapp.scorer import SAFETY_KEYS  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from sqlalchemy.orm.attributes import flag_modified  # noqa: E402
+
 from models import (  # noqa: E402
     Base,
     Conversation,
+    MessageEvent,
     Order,
     OrderShipment,
     Product,
@@ -49,7 +55,13 @@ from services.commerce_v2_phase_2_7a_acceptance import (  # noqa: E402
     ACCEPTANCE_CONTRACT_VERSION,
     ACCEPTANCE_MATRIX_PATH,
     ACCEPTANCE_TURN_IDS,
+    CLASS_ACCEPTANCE_PASSED,
+    CLASS_MACHINE_GATE_FAILED,
+    CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING,
+    CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED,
+    apply_assertion_review,
     load_acceptance_matrix,
+    require_phase_2_7a_support_grant,
     run_acceptance_matrix,
     verify_acceptance_fixtures,
 )
@@ -77,6 +89,32 @@ DISABLED_ENV = {
     "NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED": "false",
     "NAHLA_COMMERCE_V2_INTERNAL_E2E_TENANT_IDS": "1",
 }
+
+
+def _grant(db: Any, *, tenant_id: int = 1, hours: float = 2, reason: str = "Phase 2.7A acceptance run", enabled: bool = True) -> None:
+    settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).one()
+    now = datetime.now(timezone.utc)
+    meta = dict(settings.extra_metadata or {})
+    meta["support_access"] = {
+        "enabled": enabled,
+        "granted_at": now.isoformat(),
+        "expires_at": (now + timedelta(hours=hours)).isoformat(),
+        "granted_by": "merchant@example.test",
+        "reason": reason,
+        "session_version": 1,
+    }
+    settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
+    db.commit()
+
+
+def _revoke(db: Any, tenant_id: int = 1) -> None:
+    settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).one()
+    meta = dict(settings.extra_metadata or {})
+    meta.pop("support_access", None)
+    settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
+    db.commit()
 
 
 @pytest.fixture()
@@ -111,9 +149,24 @@ def db() -> Any:
         ]
     )
     session.commit()
+    _grant(session)
     yield session
     session.close()
     engine.dispose()
+
+
+# Product ids the fake replies reference: B1 shows [pid(shoe), pid(shirt)] and B2..B4 select the shoe.
+def _catalog_ids(db: Any) -> list[int]:
+    return [int(p.id) for p in db.query(Product).filter(Product.tenant_id == 1).order_by(Product.id.asc()).all()]
+
+
+def _default_refs(db: Any, request: Any) -> list[dict[str, Any]]:
+    turn_id = str(request.expected.get("turn_id") or "")
+    if turn_id == "B1":
+        return [{"product_id": pid, "evidence_ref": f"ev:{pid}"} for pid in _catalog_ids(db)]
+    if turn_id in {"B2", "B3", "B4"}:
+        return [{"product_id": _catalog_ids(db)[0], "evidence_ref": "ev:selected"}]
+    return []
 
 
 def _artifact(db: Any, request: Any, **overrides: Any) -> dict[str, Any]:
@@ -142,7 +195,7 @@ def _artifact(db: Any, request: Any, **overrides: Any) -> dict[str, Any]:
         "tool_calls": list(expected.get("expected_tools") or []),
         "guardrail_passed": True,
         "customer_visible_text": f"رد تجريبي على: {request.text}",
-        "structured_reply": {"text": "x", "response_mode": "social"},
+        "structured_reply": {"text": "x", "response_mode": "social", "product_refs": _default_refs(db, request)},
         "total_runner_latency_ms": 10,
         "requested_service_tier": request.service_tier,
         "input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1, "total_tokens": 2,
@@ -317,7 +370,7 @@ def test_a_b_and_c_remain_isolated(db: Any) -> None:
     a2 = report["results"][1]
     assert "alias_conversation_mismatch" in a2["blockers"]
     assert a2["halting"] is True and report["halted_at"] == "A2"
-    assert report["passed"] is False
+    assert report["machine_passed"] is False and report["classification"] == CLASS_MACHINE_GATE_FAILED
 
 
 def test_context_is_retained_within_each_alias(db: Any) -> None:
@@ -333,8 +386,8 @@ def test_context_is_retained_within_each_alias(db: Any) -> None:
         convs = {row["evidence"]["conversation_id"] for row in report["results"] if row["alias"] == alias}
         assert len(convs) == 1
         assert report["aliases"][alias]["completed_turn_ids"] == [f"{alias}{n}" for n in range(1, 5)]
-        assert report["aliases"][alias]["all_passed"] is True
-    assert all(row["passed"] for row in report["results"] if row["requires_prior_context"])
+        assert report["aliases"][alias]["all_machine_passed"] is True
+    assert all(row["machine_passed"] for row in report["results"] if row["requires_prior_context"])
 
 
 # ── 9–11. Fail-closed gates ────────────────────────────────────────────
@@ -416,15 +469,19 @@ def test_output_contains_evidence_and_result_fields_for_every_turn(db: Any) -> N
     report = _run(db, _fake_submit([]))
     assert report["contract_version"] == ACCEPTANCE_CONTRACT_VERSION
     assert report["turns_total"] == 12 and report["turns_executed"] == 12
-    assert report["turns_passed"] == 12 and report["summary"] == "12/12" and report["passed"] is True
+    assert report["turns_machine_passed"] == 12 and report["machine_summary"] == "12/12 machine checks"
+    assert report["machine_passed"] is True
+    assert report["acceptance_passed"] is False and report["review_status"] == "pending"
+    assert report["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
     assert report["halted_at"] is None and report["external_egress_total"] == 0
     assert report["execution_mode"] == "INTERNAL_E2E" and report["tenant_id"] == 1
     assert report["fixtures"]["C"]["order_number"] == "IE2E-C-001"
     assert report["fixtures"]["C"]["tracking_present"] is True
     required = {
         "turn_id", "alias", "sequence", "input", "requires_prior_context", "expected",
-        "required_assertions", "executed", "status", "passed", "halting", "blockers",
-        "prior_turn_ids", "evidence",
+        "required_assertions", "executed", "status", "machine_passed", "machine_status",
+        "halting", "blockers", "prior_turn_ids", "continuity", "evidence", "review",
+        "acceptance_passed",
     }
     evidence_keys = {
         "conversation_id", "customer_id", "trace_id", "internal_inbound_message_id",
@@ -441,6 +498,9 @@ def test_output_contains_evidence_and_result_fields_for_every_turn(db: Any) -> N
         assert row["expected"] == {"tools": CANONICAL[row["turn_id"]][2], "outcome": CANONICAL[row["turn_id"]][3]}
         assert row["required_assertions"]
         assert row["evidence"]["trace_id"] and row["evidence"]["safety_proofs_proven"] is True
+        assert row["acceptance_passed"] is False
+        assert [a["assertion"] for a in row["review"]["assertions"]] == row["required_assertions"]
+        assert all(a["verdict"] == "pending" and a["human_mandatory"] for a in row["review"]["assertions"])
     json.dumps(report, ensure_ascii=False)  # serialisable
 
 
@@ -453,8 +513,10 @@ def test_halting_failure_stops_the_sequence_and_never_reports_twelve(db: Any) ->
     )
     assert [c.expected["turn_id"] for c in calls] == ["A1", "A2", "A3", "A4", "B1", "B2"]
     assert report["halted_at"] == "B2" and report["halt_reason"] == "internal_e2e_external_egress_attempted"
-    assert report["turns_executed"] == 6 and report["turns_passed"] == 5 and report["summary"] == "5/12"
-    assert report["turns_not_executed"] == 6 and report["passed"] is False
+    assert report["turns_executed"] == 6 and report["turns_machine_passed"] == 5
+    assert report["machine_summary"] == "5/12 machine checks"
+    assert report["turns_not_executed"] == 6 and report["machine_passed"] is False
+    assert report["classification"] == CLASS_MACHINE_GATE_FAILED and report["acceptance_passed"] is False
     assert report["external_egress_total"] == 1
     assert all(row["blockers"] == ["halted_before_execution"] for row in report["results"][6:])
 
@@ -462,7 +524,8 @@ def test_halting_failure_stops_the_sequence_and_never_reports_twelve(db: Any) ->
     calls.clear()
     report = _run(db, _fake_submit(calls, per_turn={"A2": {"tool_calls": []}}))
     assert report["results"][1]["blockers"] == ["expected_tool_missing"]
-    assert report["turns_executed"] == 12 and report["summary"] == "11/12" and report["passed"] is False
+    assert report["turns_executed"] == 12 and report["machine_summary"] == "11/12 machine checks"
+    assert report["machine_passed"] is False
     calls.clear()
     report = _run(db, _fake_submit(calls, per_turn={"A2": {"tool_calls": []}}), halt_on_first_failure=True)
     assert report["halted_at"] == "A2" and report["turns_executed"] == 2
@@ -505,6 +568,12 @@ def test_api_requires_admin_and_gates_on_internal_e2e(api: tuple[TestClient, Fas
     assert app.state.executed == []
 
     monkeypatch.setenv("NAHLA_COMMERCE_V2_INTERNAL_E2E_ENABLED", "true")
+    _revoke(db)
+    no_grant = client.post("/admin/internal-e2e/acceptance/phase-2-7a/runs", json={})
+    assert no_grant.status_code == 409 and no_grant.json()["detail"] == "phase_2_7a_support_grant_missing"
+    assert app.state.executed == []
+    assert client.get("/admin/internal-e2e/acceptance/phase-2-7a/matrix").status_code == 200  # no grant needed
+    _grant(db)
     missing = client.post("/admin/internal-e2e/acceptance/phase-2-7a/runs", json={})
     assert missing.status_code == 409 and missing.json()["detail"] == "phase_2_7a_fixture_missing:A"
     assert app.state.executed == []
@@ -519,8 +588,296 @@ def test_api_requires_admin_and_gates_on_internal_e2e(api: tuple[TestClient, Fas
     assert app.state.executed == [body["run_id"]]
     status = client.get(f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{body['run_id']}")
     assert status.status_code == 200 and status.json()["run_id"] == body["run_id"]
+    assert body["support_grant"]["tenant_id"] == 1 and body["acceptance_passed"] is False
+    assert body["review_status"] == "pending" and body["classification"] is None
+    # Reviews are refused until the run has finished.
+    review = client.post(
+        f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{body['run_id']}/reviews",
+        json={"turn_id": "A1", "assertion_index": 0, "verdict": "approved", "reviewer": "qa-lead", "evidence": "reply is a natural greeting"},
+    )
+    assert review.status_code == 409 and review.json()["detail"] == "phase_2_7a_review_run_not_finished"
     unknown = "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"
     absent = client.get(f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{unknown}")
     assert absent.status_code == 404 and absent.json()["detail"] == "phase_2_7a_run_not_found"
     malformed = client.get("/admin/internal-e2e/acceptance/phase-2-7a/runs/" + "0" * 36)
     assert malformed.status_code == 409 and malformed.json()["detail"] == "phase_2_7a_run_id_invalid"
+
+
+# ── Gap 1. Machine gate vs human review vs final acceptance ─────────────
+
+def test_machine_pass_is_never_final_acceptance_without_reviews(db: Any) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    report = _run(db, _fake_submit([]))
+    assert report["machine_passed"] is True
+    assert report["acceptance_passed"] is False
+    assert report["review_status"] == "pending"
+    assert report["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
+    assert report["review"]["assertions_total"] == sum(len(CANONICAL_ASSERTION_COUNTS[t]) for t in ACCEPTANCE_TURN_IDS)
+    assert report["review"]["pending"] == report["review"]["assertions_total"]
+    assert set(report["review"]["human_mandatory_turns"]) == set(ACCEPTANCE_TURN_IDS)
+    assert "12/12" not in json.dumps({k: v for k, v in report.items() if k != "results"}).replace("12/12 machine checks", "")
+
+
+def test_assertion_reviews_record_reviewer_timestamp_verdict_and_evidence(db: Any) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    report = _run(db, _fake_submit([]))
+    # Invalid inputs are refused.
+    for kwargs, code in (
+        ({"verdict": "maybe"}, "review_verdict_invalid"),
+        ({"reviewer": "x"}, "review_reviewer_invalid"),
+        ({"evidence": "ok"}, "review_evidence_invalid"),
+        ({"turn_id": "D1"}, "review_turn_unknown"),
+        ({"assertion_index": 99}, "review_assertion_unknown"),
+    ):
+        base = {"turn_id": "A1", "assertion_index": 0, "verdict": "approved", "reviewer": "qa-lead", "evidence": "reply greets naturally"}
+        base.update(kwargs)
+        with pytest.raises(InternalE2EContractError, match=code):
+            apply_assertion_review(copy.deepcopy(report), **base)
+    # Approve every assertion of every turn → ACCEPTANCE_PASSED.
+    stamp = datetime(2026, 9, 17, 8, 0, tzinfo=timezone.utc)
+    for row in report["results"]:
+        for item in row["review"]["assertions"]:
+            report = apply_assertion_review(
+                report, turn_id=row["turn_id"], assertion_index=item["index"], verdict="approved",
+                reviewer="qa-lead", evidence=f"checked {row['turn_id']} against the visible reply", reviewed_at=stamp,
+            )
+            if not (row["turn_id"] == "C4" and item["index"] == len(row["review"]["assertions"]) - 1):
+                assert report["acceptance_passed"] is False
+                assert report["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
+    assert report["review_status"] == "approved" and report["review"]["pending"] == 0
+    assert report["acceptance_passed"] is True and report["classification"] == CLASS_ACCEPTANCE_PASSED
+    ledger = report["results"][0]["review"]["assertions"][0]
+    assert ledger == {**ledger, "verdict": "approved", "reviewer": "qa-lead", "reviewed_at": stamp.isoformat()}
+    assert ledger["evidence"].startswith("checked A1")
+    assert all(row["acceptance_passed"] for row in report["results"])
+    # One rejection flips the run to REJECTED and clears final acceptance.
+    report = apply_assertion_review(report, turn_id="A4", assertion_index=1, verdict="rejected", reviewer="qa-lead", evidence="reply claimed availability without evidence")
+    assert report["review_status"] == "rejected" and report["acceptance_passed"] is False
+    assert report["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED
+    assert report["results"][3]["acceptance_passed"] is False
+
+
+def test_reviews_cannot_rescue_a_failed_machine_gate_or_unexecuted_turn(db: Any) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    report = _run(db, _fake_submit([], per_turn={"A2": {"tool_calls": []}}))
+    assert report["classification"] == CLASS_MACHINE_GATE_FAILED
+    for row in report["results"]:
+        for item in row["review"]["assertions"]:
+            report = apply_assertion_review(report, turn_id=row["turn_id"], assertion_index=item["index"], verdict="approved", reviewer="qa-lead", evidence="approved after reading the reply")
+    assert report["review_status"] == "approved"
+    assert report["acceptance_passed"] is False and report["classification"] == CLASS_MACHINE_GATE_FAILED
+    halted = _run(db, _fake_submit([], per_turn={"B2": {"status": "test_contract_failed", "external_egress_count": 1}}))
+    with pytest.raises(InternalE2EContractError, match="review_turn_not_executed"):
+        apply_assertion_review(halted, turn_id="C1", assertion_index=0, verdict="approved", reviewer="qa-lead", evidence="never ran")
+
+
+def test_persisted_run_review_endpoint_updates_classification(db: Any, api: tuple[TestClient, FastAPI]) -> None:
+    client, app = api
+    app.dependency_overrides[require_admin] = lambda: {"role": "admin"}
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    with patch.dict(os.environ, ENABLED_ENV):
+        run = acceptance.create_acceptance_run(db, env=ENABLED_ENV)
+        # Simulate the background completion by running the matrix with the fake submitter.
+        report = _run(db, _fake_submit([]), run_id=run["run_id"])
+        control = acceptance._acceptance_control(db, run["run_id"])
+        meta = dict(control.extra_metadata or {})
+        meta.update({"status": "completed", "report": acceptance._compact_results(report), **{k: report[k] for k in ("review_status", "review", "acceptance_passed", "classification", "machine_passed", "machine_summary")}})
+        control.extra_metadata = meta
+        flag_modified(control, "extra_metadata")
+        db.commit()
+        status = client.get(f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{run['run_id']}").json()
+        assert status["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
+        assert status["acceptance_passed"] is False and status["machine_passed"] is True
+        response = client.post(
+            f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{run['run_id']}/reviews",
+            json={"turn_id": "A1", "assertion_index": 0, "verdict": "rejected", "reviewer": "qa-lead", "evidence": "greeting was in English"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED
+        assert body["review"]["rejected"] == 1 and body["acceptance_passed"] is False
+        ledger = body["report"]["results"][0]["review"]["assertions"][0]
+        assert ledger["reviewer"] == "qa-lead" and ledger["reviewed_at"] and ledger["evidence"] == "greeting was in English"
+        bad = client.post(
+            f"/admin/internal-e2e/acceptance/phase-2-7a/runs/{run['run_id']}/reviews",
+            json={"turn_id": "A1", "assertion_index": 0, "verdict": "approved", "reviewer": "qa-lead"},
+        )
+        assert bad.status_code == 422
+
+
+# ── Gap 2. Customer B seed history is verified before any turn ───────────
+
+def _seed_rows(db: Any) -> list[MessageEvent]:
+    return db.query(MessageEvent).filter(MessageEvent.event_type == "internal_e2e_seed_history").order_by(MessageEvent.id.asc()).all()
+
+
+def test_b_seed_history_is_verified_complete_and_b_only(db: Any) -> None:
+    fixtures = provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    summary = verify_acceptance_fixtures(db)
+    seed = summary["B"]["seed_history"]
+    assert seed == {**seed, "rows": 32, "pagination_rows": 24, "reference_rows": 8, "verified": True}
+    assert seed["conversation_id"] == fixtures["B"].conversation_id
+    assert seed["referenced_product_ids"] == _catalog_ids(db)[:2]
+    assert all(r.conversation_id == fixtures["B"].conversation_id for r in _seed_rows(db))
+
+
+@pytest.mark.parametrize(
+    "mutation, code",
+    [
+        ("delete_row", "phase_2_7a_b_seed_history_count_invalid"),
+        ("edit_metadata_alias", "phase_2_7a_b_seed_history_metadata_mismatch"),
+        ("edit_metadata_kind", "phase_2_7a_b_seed_history_metadata_mismatch"),
+        ("add_foreign_row", "phase_2_7a_b_seed_history_count_invalid"),
+        ("rebind_to_other_conversation", "phase_2_7a_b_seed_history_contaminated"),
+        ("seed_row_in_a_conversation", "phase_2_7a_b_seed_history_contaminated"),
+        ("delete_all", "phase_2_7a_b_seed_history_missing"),
+        ("reorder_ids", "phase_2_7a_b_seed_history_order_invalid"),
+        ("flip_direction", "phase_2_7a_b_seed_history_row_invalid"),
+    ],
+)
+def test_tampered_b_seed_history_fails_closed_before_first_turn(db: Any, mutation: str, code: str) -> None:
+    fixtures = provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    rows = _seed_rows(db)
+    if mutation == "delete_row":
+        db.delete(rows[5])
+    elif mutation == "edit_metadata_alias":
+        meta = dict(rows[3].extra_metadata); meta["synthetic_customer_alias"] = "A"; meta["internal_e2e_alias"] = "A"
+        meta = {k: ("A" if v == "B" else v) for k, v in meta.items()}
+        rows[3].extra_metadata = meta; flag_modified(rows[3], "extra_metadata")
+    elif mutation == "edit_metadata_kind":
+        meta = dict(rows[0].extra_metadata); meta["seed_history_kind"] = "reference"
+        rows[0].extra_metadata = meta; flag_modified(rows[0], "extra_metadata")
+    elif mutation == "add_foreign_row":
+        db.add(MessageEvent(tenant_id=1, conversation_id=fixtures["B"].conversation_id, direction="internal_e2e_inbound", body="دخيل", event_type="internal_e2e_seed_history", extra_metadata={**dict(rows[0].extra_metadata), "internal_message_id": "internal_e2e:t1:b:seed:33"}))
+    elif mutation == "rebind_to_other_conversation":
+        rows[7].conversation_id = fixtures["C"].conversation_id
+    elif mutation == "seed_row_in_a_conversation":
+        db.add(MessageEvent(tenant_id=1, conversation_id=fixtures["A"].conversation_id, direction="internal_e2e_inbound", body="تلوث", event_type="internal_e2e_seed_history", extra_metadata=dict(rows[0].extra_metadata)))
+    elif mutation == "delete_all":
+        for row in rows:
+            db.delete(row)
+    elif mutation == "reorder_ids":
+        a, b = dict(rows[0].extra_metadata), dict(rows[1].extra_metadata)
+        rows[0].extra_metadata, rows[1].extra_metadata = b, a
+        flag_modified(rows[0], "extra_metadata"); flag_modified(rows[1], "extra_metadata")
+    elif mutation == "flip_direction":
+        rows[0].direction = "internal_e2e_outbound"
+    db.commit()
+    calls: list[Any] = []
+    with pytest.raises(InternalE2EContractError, match=code):
+        _run(db, _fake_submit(calls))
+    assert calls == []
+    with pytest.raises(InternalE2EContractError, match=code):
+        acceptance.create_acceptance_run(db, env=ENABLED_ENV)
+    assert db.query(MessageEvent).filter(MessageEvent.event_type == "internal_e2e_acceptance_phase_2_7a").count() == 0
+
+
+# ── Gap 3. B1→B4 continuity is machine-checked; seed history cannot mask it ──
+
+def test_b_continuity_records_shown_and_selected_products_and_verifies_b3_b4(db: Any) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    shoe, shirt = _catalog_ids(db)[:2]
+    report = _run(db, _fake_submit([]))
+    by_id = {row["turn_id"]: row for row in report["results"]}
+    assert by_id["B1"]["continuity"]["products_shown"] == [shoe, shirt]
+    assert by_id["B2"]["continuity"] == {**by_id["B2"]["continuity"], "status": "verified", "selected_product": shoe}
+    for turn_id in ("B3", "B4"):
+        assert by_id[turn_id]["continuity"]["status"] == "verified"
+        assert by_id[turn_id]["continuity"]["selected_product"] == shoe
+        assert by_id[turn_id]["machine_status"] == "passed"
+        assert any(a["machine_check"] == "b_continuity_verified" for a in by_id[turn_id]["review"]["assertions"])
+        assert all(a["human_mandatory"] for a in by_id[turn_id]["review"]["assertions"])
+    assert report["continuity"] == {"b1_products_shown": [shoe, shirt], "b2_selected_product": shoe, "unverifiable_turns": [], "violated_turns": []}
+
+
+def test_fallback_to_seed_history_product_fails_even_with_expected_tools(db: Any) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    shoe, shirt = _catalog_ids(db)[:2]
+    # A third product exists in the catalog; B1 shows only it, so shoe/shirt are seed-history products only.
+    db.add(Product(tenant_id=1, external_id="GENERIC-BAG", title="حقيبة جلدية", price="300", in_stock=True, stock_quantity=2, catalog_status="active", extra_metadata={"status": "active", "currency": "SAR"}))
+    db.commit()
+    bag = _catalog_ids(db)[2]
+    refs = lambda *ids: {"structured_reply": {"text": "x", "response_mode": "social", "product_refs": [{"product_id": i, "evidence_ref": f"ev:{i}"} for i in ids]}}
+    # B2 picks a seed-history product instead of B1's grounded result.
+    report = _run(db, _fake_submit([], per_turn={"B1": refs(bag), "B2": refs(shoe), "B3": refs(shoe), "B4": refs(shoe)}))
+    by_id = {row["turn_id"]: row for row in report["results"]}
+    assert by_id["B2"]["evidence"]["tool_calls"] == ["search_products"]  # expected tools were called…
+    assert by_id["B2"]["blockers"] == ["b_continuity_seed_history_fallback"]  # …and it still fails
+    assert by_id["B2"]["machine_passed"] is False and by_id["B2"]["continuity"]["status"] == "violated"
+    assert by_id["B3"]["continuity"]["status"] == "unverifiable"  # no trusted selection to compare with
+    assert report["machine_passed"] is False and report["classification"] == CLASS_MACHINE_GATE_FAILED
+    assert report["continuity"]["violated_turns"] == ["B2"]
+    # B3 silently switches to the seed-history product after a valid B2.
+    report = _run(db, _fake_submit([], per_turn={"B1": refs(bag, shirt), "B2": refs(bag), "B3": refs(shirt), "B4": refs(bag)}))
+    by_id = {row["turn_id"]: row for row in report["results"]}
+    assert by_id["B2"]["continuity"]["status"] == "verified"
+    assert by_id["B3"]["blockers"] == ["b_continuity_seed_history_fallback"] and by_id["B3"]["machine_passed"] is False
+    assert by_id["B4"]["continuity"]["status"] == "verified"
+    assert report["machine_passed"] is False
+    # A switch to a non-seed product is a plain product switch; an ambiguous B2 selection also fails.
+    report = _run(db, _fake_submit([], per_turn={"B1": refs(bag, shirt), "B2": refs(bag), "B3": refs(bag), "B4": refs(bag, shirt)}))
+    assert {row["turn_id"]: row["blockers"] for row in report["results"]}["B4"] == ["b_continuity_seed_history_fallback"]
+    report = _run(db, _fake_submit([], per_turn={"B1": refs(shoe, shirt), "B2": refs(shoe, shirt)}))
+    assert {row["turn_id"]: row["blockers"] for row in report["results"]}["B2"] == ["b_continuity_selection_ambiguous"]
+    report = _run(db, _fake_submit([], per_turn={"B1": refs(shoe, shirt), "B2": refs(shoe), "B3": refs(shoe), "B4": refs(bag)}))
+    assert {row["turn_id"]: row["blockers"] for row in report["results"]}["B4"] == ["b_continuity_product_switched"]
+
+
+def test_unextractable_product_identity_keeps_continuity_human_mandatory_and_acceptance_pending(db: Any) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    no_refs = {"structured_reply": {"text": "x", "response_mode": "social", "product_refs": []}}
+    report = _run(db, _fake_submit([], per_turn={"B1": no_refs, "B2": no_refs, "B3": no_refs, "B4": no_refs}))
+    by_id = {row["turn_id"]: row for row in report["results"]}
+    for turn_id in ("B1", "B2", "B3", "B4"):
+        assert by_id[turn_id]["continuity"]["status"] == "unverifiable"
+        assert by_id[turn_id]["machine_status"] == "passed_unverified_continuity"
+        assert all(a["human_mandatory"] and a["machine_check"] is None for a in by_id[turn_id]["review"]["assertions"])
+    assert report["continuity"]["unverifiable_turns"] == ["B1", "B2", "B3", "B4"]
+    assert report["machine_summary"] == "12/12 machine checks"
+    assert report["acceptance_passed"] is False
+    assert report["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
+
+
+# ── Gap 4. Support-access gate on the production run path ────────────────
+
+def test_support_grant_gate_missing_expired_wrong_tenant_wrong_purpose_and_active(db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    db.add(Tenant(id=2, name="other", is_active=True)); db.add(TenantSettings(tenant_id=2, extra_metadata={})); db.commit()
+    calls: list[Any] = []
+    fixtures_read: list[int] = []
+    original = acceptance.verify_acceptance_fixtures
+    monkeypatch.setattr(acceptance, "verify_acceptance_fixtures", lambda *a, **k: (fixtures_read.append(1), original(*a, **k))[1])
+
+    def expect(code: str) -> None:
+        with pytest.raises(InternalE2EContractError, match=code):
+            _run(db, _fake_submit(calls))
+        with pytest.raises(InternalE2EContractError, match=code):
+            acceptance.create_acceptance_run(db, env=ENABLED_ENV)
+        with pytest.raises(InternalE2EContractError, match=code):
+            require_phase_2_7a_support_grant(db)
+        assert calls == [] and fixtures_read == []
+        assert db.query(MessageEvent).filter(MessageEvent.event_type == "internal_e2e_acceptance_phase_2_7a").count() == 0
+
+    _revoke(db); expect("phase_2_7a_support_grant_missing")                       # missing
+    _grant(db, enabled=False); expect("phase_2_7a_support_grant_missing")         # disabled block
+    _grant(db, hours=-1); expect("phase_2_7a_support_grant_expired")              # expired
+    _grant(db, hours=0.25); expect("phase_2_7a_support_grant_insufficient_remaining")  # below minimum scope
+    _revoke(db); _grant(db, tenant_id=2); expect("phase_2_7a_support_grant_missing")  # wrong tenant
+    _grant(db, reason="Investigate WhatsApp template rejection"); expect("phase_2_7a_support_grant_purpose_mismatch")  # wrong purpose
+    _grant(db, reason="Phase 2.7A acceptance run — Salla review readiness")
+    grant = require_phase_2_7a_support_grant(db)
+    assert grant["tenant_id"] == 1 and grant["remaining_minutes"] >= 119 and "Phase 2.7A" in grant["purpose"]
+    with pytest.raises(InternalE2EContractError, match="phase_2_7a_support_grant_wrong_tenant"):
+        require_phase_2_7a_support_grant(db, tenant_id=2)
+    report = _run(db, _fake_submit(calls))
+    assert len(calls) == 12 and report["support_grant"]["purpose"].startswith("Phase 2.7A")
+    assert fixtures_read == [1]
+    # Gate order: INTERNAL_E2E scope is checked before the grant.
+    _revoke(db)
+    with pytest.raises(InternalE2EContractError, match="internal_e2e_disabled"):
+        asyncio.run(run_acceptance_matrix(db, env=DISABLED_ENV, submit_turn=_fake_submit(calls)))
+
+
+CANONICAL_ASSERTION_COUNTS = {
+    turn.turn_id: list(turn.required_assertions) for turn in load_acceptance_matrix().turns
+}

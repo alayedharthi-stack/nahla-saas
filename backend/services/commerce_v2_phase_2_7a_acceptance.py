@@ -22,6 +22,7 @@ import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -32,8 +33,11 @@ from modules.ai.commerce_agent_v2.internal_e2e_identity import (
     INTERNAL_E2E_ALIASES,
     INTERNAL_E2E_CHANNEL,
     internal_e2e_customer_identity,
+    metadata_matches_internal_e2e_identity,
 )
 from services.commerce_v2_internal_e2e import (
+    INTERNAL_E2E_INBOUND,
+    INTERNAL_E2E_OUTBOUND,
     InternalE2EContractError,
     InternalE2EFixture,
     InternalE2ETurnRequest,
@@ -59,6 +63,26 @@ SOURCE_CORPUS_CONTRACT_VERSION = "commerce_v2_real_whatsapp_e2e_v1"
 
 _CONTROL_DIRECTION = "internal_e2e_control"
 _CONTROL_EVENT_TYPE = "internal_e2e_acceptance_phase_2_7a"
+
+# Support-access gate (production run path only; the read-only matrix route is exempt).
+SUPPORT_GRANT_PURPOSE_TOKENS: tuple[str, ...] = ("phase 2.7a", "phase_2_7a", "phase-2-7a", "phase2.7a")
+SUPPORT_GRANT_MIN_REMAINING = timedelta(minutes=30)
+
+# Customer B's approved seed history (see ``_seed_customer_b_history``).
+B_SEED_HISTORY_EVENT_TYPE = "internal_e2e_seed_history"
+B_SEED_HISTORY_PAGINATION_ROWS = 24
+B_SEED_HISTORY_REFERENCE_ROWS = 8
+B_SEED_HISTORY_ROWS = B_SEED_HISTORY_PAGINATION_ROWS + B_SEED_HISTORY_REFERENCE_ROWS
+
+# Review / classification vocabulary.
+REVIEW_PENDING = "pending"
+REVIEW_APPROVED = "approved"
+REVIEW_REJECTED = "rejected"
+CLASS_MACHINE_GATE_FAILED = "MACHINE_GATE_FAILED"
+CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING = "MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING"
+CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED = "MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED"
+CLASS_ACCEPTANCE_PASSED = "ACCEPTANCE_PASSED"
+_CONTINUITY_ASSERTION_TURNS = frozenset({"B1", "B2", "B3", "B4"})
 _HALTING_BLOCKERS = frozenset(
     {
         "tenant_mismatch",
@@ -265,6 +289,116 @@ def load_acceptance_matrix(
     )
 
 
+def _parse_iso(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def require_phase_2_7a_support_grant(
+    db: Any, *, tenant_id: int = ACCEPTANCE_TENANT_ID, now: datetime | None = None
+) -> dict[str, Any]:
+    """Fail closed unless Tenant 1 holds an ACTIVE support-access grant for Phase 2.7A.
+
+    Reads the merchant-approved ``support_access`` block exactly as the
+    support-access router writes it (``enabled``, ``expires_at``, ``reason``).
+    Never creates, requests or approves a grant.
+    """
+    from models import TenantSettings
+
+    if int(tenant_id) != ACCEPTANCE_TENANT_ID:
+        raise _fail("support_grant_wrong_tenant")
+    current = now or datetime.now(timezone.utc)
+    settings = (
+        db.query(TenantSettings).filter(TenantSettings.tenant_id == ACCEPTANCE_TENANT_ID).one_or_none()
+    )
+    grant = dict((dict(settings.extra_metadata or {}) if settings else {}).get("support_access") or {})
+    if not grant or grant.get("enabled") is not True:
+        raise _fail("support_grant_missing")
+    expires_at = _parse_iso(grant.get("expires_at"))
+    if expires_at is None:
+        raise _fail("support_grant_expiry_missing")
+    if current > expires_at:
+        raise _fail("support_grant_expired")
+    remaining = expires_at - current
+    if remaining < SUPPORT_GRANT_MIN_REMAINING:
+        raise _fail("support_grant_insufficient_remaining")
+    purpose = str(grant.get("reason") or "").strip()
+    if not any(token in purpose.lower() for token in SUPPORT_GRANT_PURPOSE_TOKENS):
+        raise _fail("support_grant_purpose_mismatch")
+    return {
+        "tenant_id": ACCEPTANCE_TENANT_ID,
+        "granted_at": grant.get("granted_at"),
+        "expires_at": expires_at.isoformat(),
+        "remaining_minutes": int(remaining.total_seconds() // 60),
+        "purpose": purpose,
+        "granted_by": grant.get("granted_by"),
+    }
+
+
+def _verify_b_seed_history(db: Any, *, tenant_id: int, b_conversation_id: int) -> dict[str, Any]:
+    """Customer B's approved seed history must be complete, ordered, B-only and untampered."""
+    from models import MessageEvent, Product
+
+    rows = (
+        db.query(MessageEvent)
+        .filter(
+            MessageEvent.tenant_id == tenant_id,
+            MessageEvent.event_type == B_SEED_HISTORY_EVENT_TYPE,
+        )
+        .order_by(MessageEvent.id.asc())
+        .all()
+    )
+    foreign = [row for row in rows if int(row.conversation_id or 0) != int(b_conversation_id)]
+    if foreign:
+        raise _fail("b_seed_history_contaminated")
+    if not rows:
+        raise _fail("b_seed_history_missing")
+    if len(rows) != B_SEED_HISTORY_ROWS:
+        raise _fail("b_seed_history_count_invalid")
+    for index, row in enumerate(rows, start=1):
+        meta = dict(row.extra_metadata or {})
+        if meta.get("internal_message_id") != f"internal_e2e:t1:b:seed:{index:02d}":
+            raise _fail("b_seed_history_order_invalid")
+        if meta.get("seed_history") is not True or not metadata_matches_internal_e2e_identity(
+            meta, tenant_id=tenant_id, alias="B"
+        ):
+            raise _fail("b_seed_history_metadata_mismatch")
+        expected_kind = "pagination" if index <= B_SEED_HISTORY_PAGINATION_ROWS else "reference"
+        if meta.get("seed_history_kind") != expected_kind:
+            raise _fail("b_seed_history_metadata_mismatch")
+        expected_direction = INTERNAL_E2E_INBOUND if index % 2 else INTERNAL_E2E_OUTBOUND
+        if str(row.direction or "") != expected_direction or not str(row.body or "").strip():
+            raise _fail("b_seed_history_row_invalid")
+    # The reference rows name the first two active catalog products; their ids
+    # let the continuity check recognise a fall-back to seeded context.
+    seen: set[str] = set()
+    referenced: list[int] = []
+    for product in (
+        db.query(Product)
+        .filter(Product.tenant_id == tenant_id, Product.catalog_status == "active")
+        .order_by(Product.id.asc())
+        .all()
+    ):
+        key = " ".join(str(product.title or "").split()).casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        referenced.append(int(product.id))
+        if len(referenced) == 2:
+            break
+    return {
+        "rows": len(rows),
+        "pagination_rows": B_SEED_HISTORY_PAGINATION_ROWS,
+        "reference_rows": B_SEED_HISTORY_REFERENCE_ROWS,
+        "conversation_id": int(b_conversation_id),
+        "referenced_product_ids": referenced,
+        "verified": True,
+    }
+
+
 def verify_acceptance_fixtures(
     db: Any, *, tenant_id: int = ACCEPTANCE_TENANT_ID
 ) -> dict[str, dict[str, Any]]:
@@ -297,6 +431,9 @@ def verify_acceptance_fixtures(
     conversation_ids = [entry["conversation_id"] for entry in summary.values()]
     if len(set(conversation_ids)) != len(conversation_ids):
         raise _fail("alias_conversations_not_isolated")
+    summary["B"]["seed_history"] = _verify_b_seed_history(
+        db, tenant_id=tenant_id, b_conversation_id=fixtures["B"].conversation_id
+    )
 
     c_fixture = fixtures["C"]
     if c_fixture.order_id is None or not c_fixture.order_number:
@@ -332,10 +469,26 @@ def verify_acceptance_fixtures(
     return summary
 
 
+def _product_ids(artifact: Mapping[str, Any]) -> list[int]:
+    """Product identities the reply is grounded on, from ``structured_reply.product_refs``."""
+    ids: list[int] = []
+    reply = artifact.get("structured_reply")
+    refs = reply.get("product_refs") if isinstance(reply, Mapping) else None
+    for ref in refs or []:
+        try:
+            value = int(ref.get("product_id")) if isinstance(ref, Mapping) else int(ref)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in ids:
+            ids.append(value)
+    return ids
+
+
 def _evidence(artifact: Mapping[str, Any]) -> dict[str, Any]:
     proofs = artifact.get("safety_proofs")
     proofs_map = proofs if isinstance(proofs, Mapping) else {}
     return {
+        "product_ids": _product_ids(artifact),
         "conversation_id": artifact.get("conversation_id"),
         "customer_id": artifact.get("customer_id"),
         "trace_id": artifact.get("trace_id"),
@@ -376,6 +529,98 @@ def _evidence(artifact: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _review_block(turn: AcceptanceTurn, *, machine_verified: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Per-assertion human review ledger: every required assertion starts ``pending``."""
+    verified = dict(machine_verified or {})
+    return {
+        "status": REVIEW_PENDING,
+        "assertions": [
+            {
+                "index": index,
+                "assertion": assertion,
+                "verdict": REVIEW_PENDING,
+                "reviewer": None,
+                "reviewed_at": None,
+                "evidence": None,
+                "human_mandatory": True,
+                "machine_check": verified.get(assertion),
+            }
+            for index, assertion in enumerate(turn.required_assertions)
+        ],
+    }
+
+
+def _continuity_assertions(turn: AcceptanceTurn) -> list[str]:
+    return [
+        assertion
+        for assertion in turn.required_assertions
+        if any(marker in assertion for marker in ("resolves", "selected", "context", "same product", "switching"))
+    ]
+
+
+def _check_b_continuity(
+    turn: AcceptanceTurn,
+    product_ids: list[int],
+    state: dict[str, Any],
+    seed_referenced: list[int],
+) -> tuple[dict[str, Any], list[str]]:
+    """Machine continuity check for B1→B4 (anchor → selection → same product)."""
+    if turn.alias != "B":
+        return {"status": "not_applicable"}, []
+    blockers: list[str] = []
+    if turn.turn_id == "B1":
+        state["b1_shown"] = list(product_ids)
+        status = "anchor_recorded" if product_ids else "unverifiable"
+        return {
+            "status": status, "role": "anchor", "products_shown": list(product_ids),
+            "detail": None if product_ids else "no product identity in B1 reply",
+        }, blockers
+    shown = list(state.get("b1_shown") or [])
+    if turn.turn_id == "B2":
+        if not shown or not product_ids:
+            state["b2_selected"] = []
+            return {
+                "status": "unverifiable", "role": "selection", "products": list(product_ids),
+                "anchor_products": shown, "selected_product": None,
+                "detail": "product identity unavailable for B1 or B2",
+            }, blockers
+        outside = [pid for pid in product_ids if pid not in shown]
+        if outside:
+            blockers.append(
+                "b_continuity_seed_history_fallback"
+                if all(pid in seed_referenced for pid in outside)
+                else "b_continuity_selection_not_from_b1"
+            )
+        if len(product_ids) != 1:
+            blockers.append("b_continuity_selection_ambiguous")
+        state["b2_selected"] = [] if blockers else list(product_ids)
+        return {
+            "status": "violated" if blockers else "verified", "role": "selection",
+            "products": list(product_ids), "anchor_products": shown,
+            "selected_product": product_ids[0] if not blockers else None,
+            "detail": ", ".join(blockers) or None,
+        }, blockers
+    selected = list(state.get("b2_selected") or [])
+    if not selected or not product_ids:
+        return {
+            "status": "unverifiable", "role": "follow_up", "products": list(product_ids),
+            "selected_product": selected[0] if selected else None,
+            "detail": "product identity unavailable for B2 selection or this reply",
+        }, blockers
+    if set(product_ids) != set(selected):
+        strays = [pid for pid in product_ids if pid not in selected]
+        blockers.append(
+            "b_continuity_seed_history_fallback"
+            if strays and all(pid in seed_referenced for pid in strays)
+            else "b_continuity_product_switched"
+        )
+    return {
+        "status": "violated" if blockers else "verified", "role": "follow_up",
+        "products": list(product_ids), "selected_product": selected[0],
+        "detail": ", ".join(blockers) or None,
+    }, blockers
+
+
 def _not_executed(turn: AcceptanceTurn, reason: str) -> dict[str, Any]:
     return {
         "turn_id": turn.turn_id,
@@ -387,10 +632,13 @@ def _not_executed(turn: AcceptanceTurn, reason: str) -> dict[str, Any]:
         "required_assertions": list(turn.required_assertions),
         "executed": False,
         "status": "not_executed",
-        "passed": False,
+        "machine_passed": False,
+        "machine_status": "not_executed",
         "halting": False,
         "blockers": [reason],
+        "continuity": {"status": "not_executed"},
         "evidence": None,
+        "review": _review_block(turn),
     }
 
 
@@ -406,22 +654,28 @@ async def run_acceptance_matrix(
 ) -> dict[str, Any]:
     """Execute A1→A4, B1→B4, C1→C4 sequentially and return machine-readable results.
 
-    Gate order is deliberate: INTERNAL_E2E scope first, matrix validation second,
-    fixture verification third, and only then the first turn.  A halting
+    Gate order is deliberate: INTERNAL_E2E scope first, the Tenant 1 Phase 2.7A
+    support-access grant second, matrix validation third, fixture verification
+    (A/B/C, B's seed history, C's order and shipment) fourth, and only then the
+    first turn.  The result separates the machine gate from the human review of
+    the customer-visible replies; ``acceptance_passed`` needs both.  A halting
     failure (state-corrupting or safety-critical) stops the sequence; remaining
     turns are reported as ``not_executed`` so the summary can never claim 12/12.
     """
     assert_internal_e2e_operator_scope(ACCEPTANCE_TENANT_ID, env=env)
+    support_grant = require_phase_2_7a_support_grant(db, tenant_id=ACCEPTANCE_TENANT_ID)
     matrix = matrix or load_acceptance_matrix()
     if matrix.contract_version != ACCEPTANCE_CONTRACT_VERSION or matrix.turn_ids != ACCEPTANCE_TURN_IDS:
         raise _fail("matrix_invalid")
     fixtures = verify_acceptance_fixtures(db, tenant_id=matrix.tenant_id)
+    seed_referenced = list(fixtures["B"]["seed_history"]["referenced_product_ids"])
     run_id = str(run_id or uuid.uuid4())
 
     results: list[dict[str, Any]] = []
     halted_at: str | None = None
     halt_reason: str | None = None
     completed_by_alias: dict[str, list[str]] = {alias: [] for alias in INTERNAL_E2E_ALIASES}
+    continuity_state: dict[str, Any] = {}
     for turn in matrix.turns:
         if halted_at is not None:
             results.append(_not_executed(turn, "halted_before_execution"))
@@ -469,7 +723,14 @@ async def run_acceptance_matrix(
             blockers.append("real_customer_fallback_forbidden")
         if turn.requires_prior_context and len(prior) != turn.sequence - 1:
             blockers.append("prior_context_incomplete")
+        continuity, continuity_blockers = _check_b_continuity(
+            turn, _product_ids(artifact), continuity_state, seed_referenced
+        )
+        blockers.extend(continuity_blockers)
         blockers = sorted(set(blockers))
+        machine_verified = {}
+        if continuity.get("status") == "verified":
+            machine_verified = {assertion: "b_continuity_verified" for assertion in _continuity_assertions(turn)}
         halting = (
             artifact.get("status") != "completed"
             or int(artifact.get("external_egress_count") or 0) != 0
@@ -481,6 +742,11 @@ async def run_acceptance_matrix(
             or "real_customer_fallback_forbidden" in blockers
         )
         passed = not blockers
+        machine_status = (
+            "failed" if not passed
+            else "passed_unverified_continuity" if continuity.get("status") == "unverifiable"
+            else "passed"
+        )
         results.append(
             {
                 "turn_id": turn.turn_id,
@@ -492,11 +758,14 @@ async def run_acceptance_matrix(
                 "required_assertions": list(turn.required_assertions),
                 "executed": True,
                 "status": artifact.get("status"),
-                "passed": passed,
+                "machine_passed": passed,
+                "machine_status": machine_status,
                 "halting": halting,
                 "blockers": blockers,
                 "prior_turn_ids": prior,
+                "continuity": continuity,
                 "evidence": _evidence(artifact),
+                "review": _review_block(turn, machine_verified=machine_verified),
             }
         )
         if artifact.get("status") == "completed":
@@ -509,35 +778,46 @@ async def run_acceptance_matrix(
             )
 
     executed = [row for row in results if row["executed"]]
-    passed_rows = [row for row in results if row["passed"]]
+    passed_rows = [row for row in results if row["machine_passed"]]
     aliases = {
         alias: {
             "conversation_id": fixtures[alias]["conversation_id"],
             "turn_ids": [turn.turn_id for turn in matrix.turns_for(alias)],
             "completed_turn_ids": completed_by_alias[alias],
-            "all_passed": all(
-                row["passed"] for row in results if row["alias"] == alias
+            "all_machine_passed": all(
+                row["machine_passed"] for row in results if row["alias"] == alias
             ),
         }
         for alias in INTERNAL_E2E_ALIASES
     }
-    return {
+    report = {
         "contract_version": matrix.contract_version,
         "matrix_sha256": matrix.matrix_sha256,
         "run_id": run_id,
         "tenant_id": ACCEPTANCE_TENANT_ID,
         "execution_mode": "INTERNAL_E2E",
         "channel": INTERNAL_E2E_CHANNEL,
+        "support_grant": support_grant,
         "turn_order": list(matrix.turn_ids),
         "fixtures": fixtures,
         "aliases": aliases,
         "turns_total": len(matrix.turns),
         "turns_executed": len(executed),
-        "turns_passed": len(passed_rows),
-        "turns_failed": len(executed) - len(passed_rows),
+        "turns_machine_passed": len(passed_rows),
+        "turns_machine_failed": len(executed) - len(passed_rows),
         "turns_not_executed": len(results) - len(executed),
-        "passed": len(passed_rows) == len(matrix.turns),
-        "summary": f"{len(passed_rows)}/{len(matrix.turns)}",
+        "machine_passed": len(passed_rows) == len(matrix.turns),
+        "machine_summary": f"{len(passed_rows)}/{len(matrix.turns)} machine checks",
+        "continuity": {
+            "b1_products_shown": list(continuity_state.get("b1_shown") or []),
+            "b2_selected_product": (continuity_state.get("b2_selected") or [None])[0],
+            "unverifiable_turns": [
+                row["turn_id"] for row in executed if row["continuity"].get("status") == "unverifiable"
+            ],
+            "violated_turns": [
+                row["turn_id"] for row in executed if row["continuity"].get("status") == "violated"
+            ],
+        },
         "halted_at": halted_at,
         "halt_reason": halt_reason,
         "external_egress_total": sum(
@@ -546,6 +826,129 @@ async def run_acceptance_matrix(
         ),
         "results": results,
     }
+    return finalize_acceptance(report)
+
+
+# ── Human review ledger and final classification ───────────────────────
+
+def finalize_acceptance(report: dict[str, Any]) -> dict[str, Any]:
+    """Recompute review status, acceptance and classification from the ledger.
+
+    ``acceptance_passed`` is true only when every turn passed the machine gate
+    AND every required assertion of every turn carries an ``approved`` verdict.
+    A pending assertion keeps the run at MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING;
+    machine checks alone can never produce a final PASS.
+    """
+    results = list(report.get("results") or [])
+    machine_passed = bool(report.get("machine_passed"))
+    total = approved = rejected = pending = 0
+    for row in results:
+        review = row.setdefault("review", {"status": REVIEW_PENDING, "assertions": []})
+        verdicts = [item.get("verdict") for item in review.get("assertions") or []]
+        total += len(verdicts)
+        approved += sum(v == REVIEW_APPROVED for v in verdicts)
+        rejected += sum(v == REVIEW_REJECTED for v in verdicts)
+        pending += sum(v == REVIEW_PENDING for v in verdicts)
+        review["status"] = (
+            REVIEW_REJECTED if REVIEW_REJECTED in verdicts
+            else REVIEW_APPROVED if verdicts and all(v == REVIEW_APPROVED for v in verdicts)
+            else REVIEW_PENDING
+        )
+        row["acceptance_passed"] = bool(row.get("machine_passed")) and review["status"] == REVIEW_APPROVED
+    review_status = (
+        REVIEW_REJECTED if rejected else REVIEW_APPROVED if total and not pending else REVIEW_PENDING
+    )
+    acceptance_passed = machine_passed and review_status == REVIEW_APPROVED and total > 0
+    if not machine_passed:
+        classification = CLASS_MACHINE_GATE_FAILED
+    elif review_status == REVIEW_REJECTED:
+        classification = CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED
+    elif acceptance_passed:
+        classification = CLASS_ACCEPTANCE_PASSED
+    else:
+        classification = CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
+    report.update(
+        {
+            "review_status": review_status,
+            "review": {
+                "assertions_total": total,
+                "approved": approved,
+                "rejected": rejected,
+                "pending": pending,
+                "human_mandatory_turns": [
+                    row["turn_id"] for row in results
+                    if any(item.get("human_mandatory") for item in row["review"]["assertions"])
+                ],
+            },
+            "acceptance_passed": acceptance_passed,
+            "classification": classification,
+        }
+    )
+    return report
+
+
+def apply_assertion_review(
+    report: dict[str, Any],
+    *,
+    turn_id: str,
+    assertion_index: int,
+    verdict: str,
+    reviewer: str,
+    evidence: str,
+    reviewed_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Record one reviewer verdict on one required assertion and re-finalize."""
+    verdict = str(verdict or "").strip().lower()
+    if verdict not in {REVIEW_APPROVED, REVIEW_REJECTED}:
+        raise _fail("review_verdict_invalid")
+    reviewer = str(reviewer or "").strip()
+    evidence = str(evidence or "").strip()
+    if len(reviewer) < 3 or len(reviewer) > 120:
+        raise _fail("review_reviewer_invalid")
+    if len(evidence) < 5 or len(evidence) > 2000:
+        raise _fail("review_evidence_invalid")
+    row = next((item for item in report.get("results") or [] if item.get("turn_id") == turn_id), None)
+    if row is None:
+        raise _fail("review_turn_unknown")
+    if not row.get("executed") or row.get("status") == "not_executed":
+        raise _fail("review_turn_not_executed")
+    assertions = row.get("review", {}).get("assertions") or []
+    if not 0 <= int(assertion_index) < len(assertions):
+        raise _fail("review_assertion_unknown")
+    stamp = (reviewed_at or datetime.now(timezone.utc)).isoformat()
+    assertions[int(assertion_index)].update(
+        {"verdict": verdict, "reviewer": reviewer, "reviewed_at": stamp, "evidence": evidence}
+    )
+    return finalize_acceptance(report)
+
+
+def record_acceptance_review(
+    db: Any,
+    run_id: str,
+    *,
+    turn_id: str,
+    assertion_index: int,
+    verdict: str,
+    reviewer: str,
+    evidence: str,
+) -> dict[str, Any]:
+    """Persist a reviewer verdict on a completed/halted run's control row."""
+    assert_internal_e2e_operator_scope(ACCEPTANCE_TENANT_ID)
+    control = _acceptance_control(db, run_id)
+    meta = dict(control.extra_metadata or {})
+    report = meta.get("report")
+    if not isinstance(report, dict) or meta.get("status") not in {"completed", "halted"}:
+        raise _fail("review_run_not_finished")
+    report = apply_assertion_review(
+        dict(report), turn_id=turn_id, assertion_index=assertion_index,
+        verdict=verdict, reviewer=reviewer, evidence=evidence,
+    )
+    meta["report"] = report
+    meta.update({key: report[key] for key in ("review_status", "review", "acceptance_passed", "classification")})
+    control.extra_metadata = meta
+    flag_modified(control, "extra_metadata")
+    db.commit()
+    return dict(control.extra_metadata or {})
 
 
 # ── Background execution for the admin API ─────────────────────────────
@@ -604,6 +1007,7 @@ def create_acceptance_run(
     from models import MessageEvent
 
     assert_internal_e2e_operator_scope(ACCEPTANCE_TENANT_ID, env=env)
+    support_grant = require_phase_2_7a_support_grant(db, tenant_id=ACCEPTANCE_TENANT_ID)
     matrix = load_acceptance_matrix()
     fixtures = verify_acceptance_fixtures(db, tenant_id=matrix.tenant_id)
     run_id = str(uuid.uuid4())
@@ -622,10 +1026,15 @@ def create_acceptance_run(
             "matrix_sha256": matrix.matrix_sha256,
             "turn_order": list(matrix.turn_ids),
             "halt_on_first_failure": bool(halt_on_first_failure),
+            "support_grant": support_grant,
             "status": "queued",
             "turns_total": len(matrix.turns),
             "turns_executed": 0,
-            "turns_passed": 0,
+            "turns_machine_passed": 0,
+            "machine_passed": False,
+            "review_status": REVIEW_PENDING,
+            "acceptance_passed": False,
+            "classification": None,
             "external_egress_total": 0,
         },
     )
@@ -664,9 +1073,11 @@ async def execute_acceptance_run(run_id: str) -> None:
                 **{
                     key: report[key]
                     for key in (
-                        "turns_executed", "turns_passed", "turns_failed",
-                        "turns_not_executed", "passed", "summary", "halted_at",
-                        "halt_reason", "external_egress_total", "fixtures", "aliases",
+                        "turns_executed", "turns_machine_passed", "turns_machine_failed",
+                        "turns_not_executed", "machine_passed", "machine_summary",
+                        "review_status", "review", "acceptance_passed", "classification",
+                        "continuity", "halted_at", "halt_reason", "external_egress_total",
+                        "fixtures", "aliases",
                     )
                 },
                 "report": _compact_results(report),
@@ -698,12 +1109,20 @@ __all__ = [
     "ACCEPTANCE_MATRIX_PATH",
     "ACCEPTANCE_TENANT_ID",
     "ACCEPTANCE_TURN_IDS",
+    "CLASS_ACCEPTANCE_PASSED",
+    "CLASS_MACHINE_GATE_FAILED",
+    "CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING",
+    "CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED",
     "AcceptanceMatrix",
     "AcceptanceTurn",
     "acceptance_run_status",
+    "apply_assertion_review",
     "create_acceptance_run",
     "execute_acceptance_run",
+    "finalize_acceptance",
     "load_acceptance_matrix",
+    "record_acceptance_review",
+    "require_phase_2_7a_support_grant",
     "run_acceptance_matrix",
     "verify_acceptance_fixtures",
 ]
