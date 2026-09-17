@@ -872,6 +872,33 @@ async def submit_internal_customer_turn(
         )
         # Non-zero only when an ungrounded reply actually reached the customer.
         unsupported_claims = int(grounding_tripwire and delivered_commercial_structure)
+
+        # Observed outcome. A reply is a *fallback* only when it replaces the
+        # answer: the turn did not complete, the grounding guardrail rejected the
+        # model's reply, or the delivered reply carries no verified fact the
+        # customer can act on. A completed, guardrail-passed reply that carries
+        # verified fact claims stays a grounded reply even when it also names a
+        # sub-detail the merchant has not documented — the agent contract asks
+        # for that disclosure, and reading it as a full fallback failed Phase
+        # 2.7A turn B4, whose own required assertion is "absent knowledge is
+        # handled safely". The disclosure is reported on its own field so the
+        # two cases stay distinguishable in evidence and in human review.
+        disclosure_present = bool(result.reply.safe_fallback_reason)
+        delivered_verified_facts = bool(result.reply.fact_claims)
+        reply_replaces_the_answer = (
+            result.status != "completed"
+            or not guardrail_passed
+            or not delivered_verified_facts
+        )
+        is_fallback_reply = disclosure_present and reply_replaces_the_answer
+        knowledge_gap_disclosure = int(disclosure_present and not is_fallback_reply)
+        fallback_type = (
+            "none"
+            if not is_fallback_reply
+            else "expected_safe_fallback"
+            if str(request.expected.get("expected_outcome") or "") == "safe_missing_fact"
+            else "unexpected_runtime_fallback"
+        )
         isolation_proofs = _runtime_isolation_proofs(
             db, fixture=fixture, context=context, result=result
         )
@@ -1015,15 +1042,8 @@ async def submit_internal_customer_turn(
                 "response_mode": result.reply.response_mode,
                 "safe_fallback_reason": result.reply.safe_fallback_reason,
             },
-            "fallback_type": (
-                "expected_safe_fallback"
-                if result.reply.safe_fallback_reason
-                and str(request.expected.get("expected_outcome") or "")
-                == "safe_missing_fact"
-                else "unexpected_runtime_fallback"
-                if result.reply.safe_fallback_reason
-                else "none"
-            ),
+            "fallback_type": fallback_type,
+            "knowledge_gap_disclosure": knowledge_gap_disclosure,
             "leakage_checks": {
                 "cross_tenant_leakage": isolation_proofs["cross_tenant_leakage"],
                 "cross_customer_leakage": isolation_proofs["cross_customer_leakage"],

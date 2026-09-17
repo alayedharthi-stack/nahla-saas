@@ -608,6 +608,54 @@ def test_an_ungrounded_claim_that_reached_the_customer_still_halts(db: Any) -> N
     assert report["classification"] == CLASS_MACHINE_GATE_FAILED
 
 
+
+def test_b4_knowledge_gap_disclosure_reaches_twelve_without_touching_the_matrix(db: Any) -> None:
+    """A grounded B4 that discloses an absent sub-detail completes the sequence.
+
+    Phase 2.7A run 3 scored 11/12 solely because B4's grounded reply carried a
+    scoped knowledge-gap disclosure. With the observed-outcome derivation fixed,
+    the same turn reports fallback_type "none" plus knowledge_gap_disclosure 1,
+    and the run reaches twelve. The classification still stops at
+    MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING: passing the machine gate never
+    grants acceptance on the owner's behalf.
+    """
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    b4 = {
+        "fallback_type": "none",
+        "knowledge_gap_disclosure": 1,
+        "customer_visible_text": (
+            "المعلومات الموثقة المتاحة عن الجاكيت حاليًا: سعره 169 ريال سعودي، "
+            "وهو متوفر، والمتبقي قطعتان فقط. لا توجد حاليًا تفاصيل إضافية موثقة "
+            "عن الخامة أو المقاسات أو اللون."
+        ),
+    }
+    calls: list[Any] = []
+    report = _run(db, _fake_submit(calls, per_turn={"B4": b4}))
+
+    assert [c.expected["turn_id"] for c in calls] == list(ACCEPTANCE_TURN_IDS)
+    assert report["turns_executed"] == 12 and report["turns_not_executed"] == 0
+    assert report["turns_machine_passed"] == 12
+    assert report["machine_summary"] == "12/12 machine checks"
+    assert report["machine_passed"] is True and report["halted_at"] is None
+    assert report["external_egress_total"] == 0
+
+    row = next(r for r in report["results"] if r["turn_id"] == "B4")
+    assert row["blockers"] == [] and row["machine_passed"] is True
+    assert row["evidence"]["fallback_type"] == "none"
+    assert row["evidence"]["knowledge_gap_disclosure"] == 1
+    # The matrix itself is untouched: B4 still expects a grounded reply.
+    assert row["expected"]["outcome"] == "grounded_reply"
+    assert row["expected"]["tools"] == ["search_products", "search_product_knowledge"]
+
+    # Machine gate passed, human review still owed — never auto-approved.
+    assert report["classification"] == CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING
+    assert report["acceptance_passed"] is False
+    assert report["review_status"] == "pending"
+    assert all(
+        a["verdict"] == "pending" for r in report["results"] for a in r["review"]["assertions"]
+    )
+
+
 # ── Admin API surface ──────────────────────────────────────────────────
 
 @pytest.fixture()

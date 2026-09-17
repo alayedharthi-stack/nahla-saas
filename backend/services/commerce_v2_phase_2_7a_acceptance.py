@@ -506,6 +506,10 @@ def _evidence(artifact: Mapping[str, Any]) -> dict[str, Any]:
         "requested_service_tier": artifact.get("requested_service_tier"),
         "tool_calls": list(artifact.get("tool_calls") or []),
         "fallback_type": artifact.get("fallback_type"),
+        # 1 when a grounded, delivered reply also named a sub-detail the merchant
+        # has not documented. Distinct from a fallback: the answer still carries
+        # verified facts, so the turn's observed outcome stays grounded_reply.
+        "knowledge_gap_disclosure": artifact.get("knowledge_gap_disclosure"),
         "guardrail_passed": artifact.get("guardrail_passed"),
         # 1 when the grounding guardrail rejected the model's reply and the
         # customer received the safe fallback instead. A quality failure, not a
