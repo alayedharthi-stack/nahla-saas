@@ -26,7 +26,10 @@ import pytest
 import uvicorn.config
 import uvicorn.logging
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Root pytest.ini puts ``backend`` on ``pythonpath``; this keeps direct invocation working too.
+_BACKEND = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
 
 from core import log_redaction  # noqa: E402
 from core.log_redaction import (  # noqa: E402
