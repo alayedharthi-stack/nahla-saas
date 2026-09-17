@@ -3247,3 +3247,82 @@ async def test_live_sol_eval_reports_grounding_and_usage(
     if os.environ.get("NAHLA_COMMERCE_V2_ENFORCE_LIVE_GATE") == "1":
         assert summary["provider_observability_passed"] is True
         assert summary["quality_gate_passed"] is True
+
+
+# ── Producer end: safe_fallback_reason carries one meaning only ─────────
+#
+# ``safe_fallback_reason`` leaves the model with two meanings: the guardrail
+# accepts it as an acknowledgement of partial evidence coverage, and
+# ``safe_fallback_reply`` uses it for a complete substitute after a run fails.
+# Phase 2.7A turn B4 delivered a grounded answer with seven verified facts that
+# also named an undocumented sub-detail, and every consumer read it as a
+# fallback. ``split_knowledge_gap_disclosure`` separates the two at the source.
+
+def _claim(span: str = "169 ريال") -> FactClaim:
+    return FactClaim(
+        kind="price",
+        value=169,
+        evidence_ref="catalog:product:28",
+        subject_product_id=28,
+        text_span=span,
+    )
+
+
+def test_split_knowledge_gap_disclosure_keeps_a_grounded_reply_grounded() -> None:
+    from modules.ai.commerce_agent_v2.runner import split_knowledge_gap_disclosure
+
+    disclosure = "لا توجد معرفة إضافية موثقة عن مواصفات الجاكيت."
+    reply = CommerceReply(
+        text="سعر الجاكيت 169 ريال، ولا توجد تفاصيل إضافية موثقة.",
+        response_mode="grounded",
+        evidence_refs=["catalog:product:28"],
+        fact_claims=[_claim()],
+        safe_fallback_reason=disclosure,
+    )
+
+    cleaned, extracted = split_knowledge_gap_disclosure(reply)
+
+    # The disclosure is preserved, but no longer masquerades as a fallback.
+    assert extracted == disclosure
+    assert cleaned.safe_fallback_reason is None
+    # Nothing else about the reply changes.
+    assert cleaned.text == reply.text
+    assert cleaned.fact_claims == reply.fact_claims
+    assert cleaned.evidence_refs == reply.evidence_refs
+    assert cleaned.response_mode == "grounded"
+    # The input is not mutated in place.
+    assert reply.safe_fallback_reason == disclosure
+
+
+def test_split_knowledge_gap_disclosure_leaves_a_complete_fallback_alone() -> None:
+    from modules.ai.commerce_agent_v2.runner import (
+        safe_fallback_reply,
+        split_knowledge_gap_disclosure,
+    )
+
+    # A complete substitute: no verified facts at all.
+    fallback = safe_fallback_reply("run_deadline_exceeded")
+    cleaned, extracted = split_knowledge_gap_disclosure(fallback)
+    assert extracted == ""
+    assert cleaned.safe_fallback_reason == "run_deadline_exceeded"
+    assert cleaned is fallback
+
+    # A reply with a reason but no facts is a substitute too, whatever its text.
+    bare = CommerceReply(
+        text="لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن.",
+        response_mode="grounded",
+        safe_fallback_reason="لا توجد معرفة إضافية موثقة عن مواصفات الجاكيت.",
+    )
+    cleaned, extracted = split_knowledge_gap_disclosure(bare)
+    assert extracted == ""
+    assert cleaned.safe_fallback_reason == bare.safe_fallback_reason
+
+    # A grounded reply that never set the field is untouched.
+    plain = CommerceReply(
+        text="سعر الجاكيت 169 ريال.",
+        response_mode="grounded",
+        evidence_refs=["catalog:product:28"],
+        fact_claims=[_claim()],
+    )
+    cleaned, extracted = split_knowledge_gap_disclosure(plain)
+    assert extracted == "" and cleaned is plain

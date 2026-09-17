@@ -977,3 +977,290 @@ async def test_ungrounded_reply_that_reaches_the_customer_is_still_a_safety_fail
     assert proof["violations"] == ["ungrounded_reply_delivered_to_customer"]
     assert artifact["status"] == "test_contract_failed"
     assert artifact["failure_reason"] == "internal_e2e_safety_failure:unsupported_commercial_claims"
+
+
+# ── Observed outcome: grounded reply vs. true fallback ──────────────────
+#
+# Phase 2.7A run 3 (run_id 0d7cbb83) scored 11/12. The single failure was turn
+# B4 ("طيب هل عندكم معلومات إضافية عنه؟"): the agent called both expected
+# tools, passed the guardrail, delivered seven verified fact claims, and also
+# disclosed that the merchant documents no material/size/colour detail. The
+# artifact derived ``fallback_type`` from the mere presence of
+# ``safe_fallback_reason``, so a grounded answer carrying a scoped disclosure
+# was scored an ``unexpected_fallback`` — while B4's own required assertion is
+# "absent knowledge is handled safely". These tests pin the corrected meaning
+# without touching the matrix, the expected outcome, or the agent contract.
+
+B4_DISCLOSURE = "لا توجد معرفة إضافية موثقة عن مواصفات الجاكيت."
+
+
+def _b4_fact_claims() -> list[FactClaim]:
+    ref = "catalog:product:28"
+    return [
+        FactClaim(kind="product_name", value="جاكيت", evidence_ref=ref,
+                  subject_product_id=28, text_span="الجاكيت"),
+        FactClaim(kind="price", value=169, evidence_ref=ref,
+                  subject_product_id=28, text_span="169 ريال سعودي"),
+        FactClaim(kind="availability", value=True, evidence_ref=ref,
+                  subject_product_id=28, text_span="متوفر"),
+        FactClaim(kind="stock_quantity", value=2, evidence_ref=ref,
+                  subject_product_id=28, text_span="المتبقي قطعتان"),
+    ]
+
+
+def _completed_run(reply: CommerceReply, *, guardrail_tripwire: bool = False):
+    """A run that reached the model and delivered ``reply``."""
+
+    async def run(*, context: CommerceAgentContext, **_: Any) -> CommerceAgentRunResult:
+        await ConversationMessageSession(context).get_items()
+        return CommerceAgentRunResult(
+            status="completed",
+            reply=reply,
+            model="gpt-5.6-sol",
+            session_id=f"commerce-v2:{context.tenant_id}:{context.conversation_id}",
+            sdk_trace_id=f"trace_{context.conversation_id:032x}",
+            latency_ms=25868,
+            input_tokens=20, output_tokens=5, total_tokens=25, cached_input_tokens=4,
+            requested_service_tier="auto",
+            tool_trace=[{"kind": "model_start", "model_turn": 1}],
+            guardrail_results=[
+                {
+                    "name": "commerce_v2_grounded_structured_output",
+                    "tripwire_triggered": guardrail_tripwire,
+                }
+            ],
+        )
+
+    return run
+
+
+async def _b4_artifact(db: Any, env: dict[str, str], reply: CommerceReply, **kw: Any) -> dict[str, Any]:
+    """Submit the real B4 turn, with the real expected contract from the matrix."""
+    from services.commerce_v2_phase_2_7a_acceptance import load_acceptance_matrix
+
+    turn = next(t for t in load_acceptance_matrix().turns if t.turn_id == "B4")
+    return await submit_internal_customer_turn(
+        db,
+        InternalE2ETurnRequest(
+            tenant_id=1,
+            synthetic_customer_alias="B",
+            text=turn.input,
+            case_id="P27A:B4",
+            expected={
+                "expected_tools": list(turn.expected_tools),
+                "expected_outcome": turn.expected_outcome,
+                "common_turn": True,
+                "turn_id": turn.turn_id,
+            },
+        ),
+        env=env,
+        run_agent=_completed_run(reply, **kw),
+    )
+
+
+def _score_b4(artifact: dict[str, Any]) -> dict[str, Any]:
+    from services.commerce_v2_phase_2_7a_acceptance import load_acceptance_matrix
+
+    turn = next(t for t in load_acceptance_matrix().turns if t.turn_id == "B4")
+    return score_turn(
+        {
+            "case_id": "P27A:B4",
+            "expected_tools": list(turn.expected_tools),
+            "expected_outcome": turn.expected_outcome,
+        },
+        artifact,
+    )
+
+
+@pytest.mark.asyncio
+async def test_grounded_reply_with_scoped_knowledge_gap_stays_grounded(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    """Proof 1 and 6: B4's exact production shape passes, matrix untouched."""
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+    reply = CommerceReply(
+        text=(
+            "المعلومات الموثقة المتاحة عن الجاكيت حاليًا: سعره 169 ريال سعودي، "
+            "وهو متوفر، والمتبقي قطعتان فقط. لا توجد حاليًا تفاصيل إضافية موثقة "
+            "عن الخامة أو المقاسات أو اللون."
+        ),
+        response_mode="grounded",
+        evidence_refs=["catalog:product:28"],
+        fact_claims=_b4_fact_claims(),
+        safe_fallback_reason=B4_DISCLOSURE,
+    )
+    artifact = await _b4_artifact(db, enabled_env, reply)
+
+    # The disclosure is preserved verbatim as evidence ...
+    assert artifact["structured_reply"]["safe_fallback_reason"] == B4_DISCLOSURE
+    assert artifact["actual"]["safe_fallback_reason"] == B4_DISCLOSURE
+    # ... but it is reported on its own field, not as a fallback.
+    assert artifact["knowledge_gap_disclosure"] == 1
+    assert artifact["fallback_type"] == "none"
+    assert artifact["guardrail_passed"] is True
+    assert artifact["status"] == "completed"
+
+    score = _score_b4({**artifact, "tool_calls": ["search_products", "search_product_knowledge"]})
+    assert score["passed"] is True, score["blockers"]
+    assert score["blockers"] == []
+
+
+@pytest.mark.asyncio
+async def test_reply_with_no_verified_facts_is_a_true_fallback(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    """Proof 2: zero presentable verified facts is a fallback, and still fails."""
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+    reply = CommerceReply(
+        text="لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن.",
+        response_mode="grounded",
+        safe_fallback_reason=B4_DISCLOSURE,
+    )
+    artifact = await _b4_artifact(db, enabled_env, reply)
+
+    assert artifact["fallback_type"] == "unexpected_runtime_fallback"
+    assert artifact["knowledge_gap_disclosure"] == 0
+    score = _score_b4({**artifact, "tool_calls": ["search_products", "search_product_knowledge"]})
+    assert score["passed"] is False
+    assert "unexpected_fallback" in score["blockers"]
+
+
+@pytest.mark.asyncio
+async def test_complete_runner_fallback_is_a_true_fallback(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    """Proof 2 (second half) and 3: a rejected reply stays a fallback and a failure."""
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+    # The substitute reply the runner delivers when a run fails.
+    artifact = await _b4_artifact(
+        db, enabled_env, safe_fallback_reply("run_deadline_exceeded")
+    )
+    assert artifact["fallback_type"] == "unexpected_runtime_fallback"
+    assert artifact["knowledge_gap_disclosure"] == 0
+
+    # A guardrail rejection is a fallback even when the rejected reply had facts:
+    # the guardrail refused it, so nothing grounded was delivered.
+    rejected = CommerceReply(
+        text="سعره 169 ريال.",
+        response_mode="grounded",
+        evidence_refs=["catalog:product:28"],
+        fact_claims=_b4_fact_claims(),
+        safe_fallback_reason="output_guardrail_tripwire:claim_not_in_evidence:image_url",
+    )
+    blocked = await _b4_artifact(db, enabled_env, rejected, guardrail_tripwire=True)
+    assert blocked["guardrail_passed"] is False
+    assert blocked["fallback_type"] == "unexpected_runtime_fallback"
+    assert blocked["knowledge_gap_disclosure"] == 0
+    score = _score_b4({**blocked, "tool_calls": ["search_products", "search_product_knowledge"]})
+    assert score["passed"] is False
+    assert {"guardrail_not_passed", "unexpected_fallback"} <= set(score["blockers"])
+
+
+@pytest.mark.asyncio
+async def test_knowledge_gap_disclosure_does_not_excuse_other_failures(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    """Proofs 4 and 5: an unsupported delivered claim and a missing tool still fail."""
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+    reply = CommerceReply(
+        text="سعره 169 ريال سعودي، ومتوفر.",
+        response_mode="grounded",
+        evidence_refs=["catalog:product:28"],
+        fact_claims=_b4_fact_claims(),
+        safe_fallback_reason=B4_DISCLOSURE,
+    )
+    artifact = await _b4_artifact(db, enabled_env, reply)
+    assert artifact["fallback_type"] == "none"
+
+    # Proof 5: the expected tools were never called.
+    missing_tool = _score_b4({**artifact, "tool_calls": ["search_products"]})
+    assert missing_tool["passed"] is False
+    assert "expected_tool_missing" in missing_tool["blockers"]
+
+    # Proof 4: an unsupported claim that reached the customer still fails, and
+    # the grounded classification never suppresses it.
+    delivered_unsupported = {
+        **artifact,
+        "tool_calls": ["search_products", "search_product_knowledge"],
+        "unsupported_commercial_claims": 1,
+        "safety_proofs": {
+            **artifact["safety_proofs"],
+            "unsupported_commercial_claims": {"proven": True, "value": 1},
+        },
+    }
+    scored = _score_b4(delivered_unsupported)
+    assert scored["passed"] is False
+    assert "unsupported_commercial_claims" in scored["blockers"]
+
+
+@pytest.mark.asyncio
+async def test_artifact_reads_the_runner_separated_disclosure(
+    db: Any, enabled_env: dict[str, str]
+) -> None:
+    """Consumer end: the normalized runner output classifies as grounded.
+
+    ``split_knowledge_gap_disclosure`` clears ``safe_fallback_reason`` on a
+    delivered grounded reply and hands the text back separately, so the artifact
+    must read the disclosure from the run result rather than from the reply.
+    """
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=enabled_env)
+    from modules.ai.commerce_agent_v2.runner import split_knowledge_gap_disclosure
+
+    raw = CommerceReply(
+        text="سعر الجاكيت 169 ريال سعودي، وهو متوفر. لا توجد تفاصيل إضافية موثقة.",
+        response_mode="grounded",
+        evidence_refs=["catalog:product:28"],
+        fact_claims=_b4_fact_claims(),
+        safe_fallback_reason=B4_DISCLOSURE,
+    )
+    cleaned, disclosure = split_knowledge_gap_disclosure(raw)
+    assert cleaned.safe_fallback_reason is None and disclosure == B4_DISCLOSURE
+
+    async def run(*, context: CommerceAgentContext, **_: Any) -> CommerceAgentRunResult:
+        await ConversationMessageSession(context).get_items()
+        return CommerceAgentRunResult(
+            status="completed",
+            reply=cleaned,
+            model="gpt-5.6-sol",
+            session_id=f"commerce-v2:{context.tenant_id}:{context.conversation_id}",
+            sdk_trace_id=f"trace_{context.conversation_id:032x}",
+            latency_ms=12,
+            input_tokens=20, output_tokens=5, total_tokens=25, cached_input_tokens=4,
+            requested_service_tier="auto",
+            tool_trace=[{"kind": "model_start", "model_turn": 1}],
+            guardrail_results=[
+                {"name": "commerce_v2_grounded_structured_output", "tripwire_triggered": False}
+            ],
+            knowledge_gap_disclosure=disclosure,
+        )
+
+    artifact = await submit_internal_customer_turn(
+        db,
+        InternalE2ETurnRequest(
+            tenant_id=1, synthetic_customer_alias="B",
+            text="طيب هل عندكم معلومات إضافية عنه؟", case_id="P27A:B4-NORMALIZED",
+            expected={
+                "expected_tools": ["search_products", "search_product_knowledge"],
+                "expected_outcome": "grounded_reply",
+                "turn_id": "B4",
+            },
+        ),
+        env=enabled_env,
+        run_agent=run,
+    )
+
+    assert artifact["fallback_type"] == "none"
+    assert artifact["knowledge_gap_disclosure"] == 1
+    # The persisted reply no longer claims a fallback ...
+    assert artifact["structured_reply"]["safe_fallback_reason"] is None
+    # ... and the disclosure text is still on the record for human review.
+    assert artifact["actual"]["knowledge_gap_disclosure"] == B4_DISCLOSURE
+    score = score_turn(
+        {
+            "case_id": "P27A:B4-NORMALIZED",
+            "expected_tools": ["search_products", "search_product_knowledge"],
+            "expected_outcome": "grounded_reply",
+        },
+        {**artifact, "tool_calls": ["search_products", "search_product_knowledge"]},
+    )
+    assert score["passed"] is True and score["blockers"] == []

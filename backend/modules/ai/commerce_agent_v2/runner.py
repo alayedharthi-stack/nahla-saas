@@ -54,6 +54,10 @@ class CommerceAgentRunResult:
     tool_trace: list[dict[str, Any]] = field(default_factory=list)
     guardrail_results: list[dict[str, Any]] = field(default_factory=list)
     failure_reason: str = ""
+    # Set when a DELIVERED reply named a sub-detail the merchant has not
+    # documented. Never set for a complete safe fallback — see
+    # ``split_knowledge_gap_disclosure``.
+    knowledge_gap_disclosure: str = ""
 
 
 def safe_fallback_reply(reason: str) -> CommerceReply:
@@ -61,6 +65,32 @@ def safe_fallback_reply(reason: str) -> CommerceReply:
         text="لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن.",
         safe_fallback_reason=reason[:240],
     )
+
+
+def split_knowledge_gap_disclosure(reply: CommerceReply) -> tuple[CommerceReply, str]:
+    """Separate a partial knowledge-gap disclosure from a complete safe fallback.
+
+    ``safe_fallback_reason`` leaves the model carrying two different meanings.
+    ``validate_grounded_reply`` accepts it as an acknowledgement that a reply
+    could not cover every piece of evidence it referenced, so the model sets it
+    on an otherwise grounded answer whenever the merchant documents nothing for
+    part of the question. It is also the field ``safe_fallback_reply`` uses when
+    a run fails and the customer receives a complete substitute instead of an
+    answer.
+
+    Every consumer read the field as the second meaning only, so a grounded
+    reply that merely named an absent sub-detail was scored a fallback — this is
+    what failed Phase 2.7A turn B4. A delivered reply that still carries
+    verified fact claims is not a substitute: its disclosure moves to a value of
+    its own and ``safe_fallback_reason`` keeps only its fallback meaning.
+
+    Applied to delivered replies only. A rejected reply never reaches here: the
+    runner replaces it with ``safe_fallback_reply`` on the failure path.
+    """
+    disclosure = str(reply.safe_fallback_reason or "")
+    if not disclosure or not reply.fact_claims:
+        return reply, ""
+    return reply.model_copy(update={"safe_fallback_reason": None}), disclosure
 
 
 def _guardrail_record(item: Any) -> dict[str, Any]:
@@ -232,6 +262,7 @@ async def run_commerce_agent(
                         continue
                     raise
         output = run.final_output_as(CommerceReply, raise_if_incorrect_type=True)
+        output, knowledge_gap_disclosure = split_knowledge_gap_disclosure(output)
         usage = run.context_wrapper.usage
         guardrails = [
             _guardrail_record(item)
@@ -266,6 +297,7 @@ async def run_commerce_agent(
             requested_service_tier=requested_service_tier,
             tool_trace=list(hooks.events),
             guardrail_results=guardrails,
+            knowledge_gap_disclosure=knowledge_gap_disclosure,
         )
     except ModelTimeoutError:
         reason = f"model_timeout:attempt_{hooks.model_attempt}"
