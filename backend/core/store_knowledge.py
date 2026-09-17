@@ -34,9 +34,15 @@ from sqlalchemy.orm import Session
 
 _THIS = os.path.dirname(os.path.abspath(__file__))
 _DB   = os.path.abspath(os.path.join(_THIS, "../../database"))
-for _p in (_THIS, _DB):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# Only the database/ directory is a legitimate import root (for the legacy
+# ``from models import ...`` style below). ``backend/core`` must never be one:
+# at sys.path[0] it made ``import database`` resolve to ``core/database.py``
+# in any process that imports this module before the ``database`` package is
+# cached, which silently broke every lazy ``from database.models import ...``
+# (observed as AI_USAGE_LEDGER_WRITE_ERROR ModuleNotFoundError in operator jobs)
+# and let ``core/secrets.py`` shadow the stdlib ``secrets`` module.
+if _DB not in sys.path:
+    sys.path.insert(0, _DB)
 
 
 def _s_public_phone(merchant_profile: Dict[str, Any]) -> str:
