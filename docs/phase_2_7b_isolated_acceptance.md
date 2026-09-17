@@ -55,12 +55,28 @@ and the production `DATABASE_URL`. Without them the job has **no route** to a
 real customer, a real merchant store, a payment provider or production data —
 it can reach the model provider and its own temporary database, nothing else.
 
+## Fixture identity contract
+
+The acceptance turns are submitted through `submit_internal_customer_turn`,
+whose `_find_fixture` owns the identity contract.  The provisioner therefore
+builds its conversations from the same canonical helpers that resolver reads
+back — `internal_e2e_customer_identity` and `internal_e2e_metadata` — with a
+NULL `customer_id`, and adds the Phase 2.7B keys alongside that block rather
+than in place of it.  The aliases come from the matrix: it names no per-case
+thread and K11 is a bare follow-up, so all sixteen cases share one
+INTERNAL_E2E conversation.
+
+`verify_acceptance_fixtures` runs before the provisioning commit, again on a
+repeat provision, and once more in the operator before the first case, so a
+world the run could not resolve is never reported as provisioned.
+
 ## What the run does
 
 1. `provision` — synthetic tenant, a neighbouring tenant (for the cross-tenant
    case), 4 products (including a discounted one and an out-of-stock one),
-   10 knowledge sections covering every fixture the matrix names, 2 synthetic
-   customers with conversations, 1 order with a shipment.
+   10 knowledge sections covering every fixture the matrix names, one
+   canonical INTERNAL_E2E conversation per matrix alias, 1 order with a
+   shipment.
 2. `create --commit <sha>` — writes the run record **before** the first case:
    contract version, matrix hash, commit, case order, `status: queued`.
 3. `run --run-id <id>` — executes K01→K16 in order through the internal
