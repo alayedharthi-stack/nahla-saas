@@ -775,3 +775,312 @@ def test_tenant_isolation_and_persistence_on_postgresql() -> None:
     finally:
         db.close()
         engine.dispose()
+
+
+# ── 6. Owner-required edge proofs ────────────────────────────────────────────
+
+def test_a_store_only_question_looks_up_knowledge_without_any_catalog_tool(
+    seeded: Seed,
+) -> None:
+    """هل منتجاتكم محلية؟ — no catalog tool runs, and a lookup still happens."""
+    for question in ("وش سياسة الاسترجاع عندكم؟", "هل منتجاتكم محلية؟"):
+        context = _context(seeded, user_input=question)
+        exposed = _merchant_knowledge_enabled(_wrapper(context), None)
+        lookups = context.knowledge_lookups
+        assert context.knowledge_lookup_attempted is True, question
+        assert [item["scope"] for item in lookups] == [SCOPE_TURN], question
+        assert lookups[0]["tenant_id"] == seeded.tenant.id
+        assert exposed is (lookups[0]["status"] == STATUS_OK)
+        assert not context.authorized_product_ids
+
+
+def test_a_browse_turn_performs_exactly_one_bounded_lookup(
+    seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _context(seeded, user_input="وش المنتجات المتوفرة عندكم؟")
+    calls = {"n": 0}
+    original = knowledge_retrieval.retrieve_catalog_candidate_kb_sections
+
+    def _counted(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge_retrieval, "retrieve_catalog_candidate_kb_sections", _counted)
+    result = asyncio.run(_invoke(search_products, context, {"query": "", "limit": 5}))
+
+    assert result.status == "ok"
+    assert calls["n"] == 1
+    assert len(context.knowledge_lookups) == 1
+    assert context.knowledge_lookups[0]["limit"] == knowledge_retrieval.KNOWLEDGE_RESULT_LIMIT
+    assert len(context.knowledge_lookups[0]["section_ids"]) <= knowledge_retrieval.KNOWLEDGE_RESULT_LIMIT
+
+
+def test_the_cache_lives_for_one_turn_only(seeded: Seed, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    original = knowledge_retrieval.retrieve_catalog_candidate_kb_sections
+
+    def _counted(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge_retrieval, "retrieve_catalog_candidate_kb_sections", _counted)
+
+    first = _context(seeded, user_input="وش مصدر الجاكيت؟")
+    asyncio.run(_invoke(search_products, first, {"query": "جاكيت", "limit": 5}))
+    asyncio.run(_invoke(search_products, first, {"query": "جاكيت", "limit": 5}))
+    assert calls["n"] == 1, "within one turn the cached rows are reused"
+
+    seeded.origin_section.body = "مصدر هذا الجاكيت من ورشة جديدة تمامًا."
+    seeded.db.commit()
+
+    second = _context(seeded, user_input="وش مصدر الجاكيت؟")
+    result = asyncio.run(_invoke(search_products, second, {"query": "جاكيت", "limit": 5}))
+    assert calls["n"] == 2, "a new turn re-queries instead of serving stale text"
+    assert result.knowledge_sections[0].body == "مصدر هذا الجاكيت من ورشة جديدة تمامًا."
+
+    # Re-binding the turn input on the same context also clears the cache.
+    second.bind_run_user_input("وش مصدر الجاكيت؟")
+    assert second.knowledge_lookups == []
+
+
+def test_neither_raw_customer_text_nor_knowledge_bodies_reach_the_ledger_or_logs(
+    seeded: Seed, caplog: pytest.LogCaptureFixture
+) -> None:
+    question = "وش مصدر الجاكيت يا اخوي؟"
+    body = seeded.origin_section.body
+    with caplog.at_level("DEBUG"):
+        context = _context(seeded, user_input=question)
+        asyncio.run(_invoke(search_products, context, {"query": "جاكيت", "limit": 5}))
+
+    serialized = json.dumps(context.knowledge_lookups, ensure_ascii=False)
+    assert question not in serialized
+    assert body not in serialized
+    assert "body" not in serialized and "title" not in serialized
+    record = context.knowledge_lookups[0]
+    assert len(record["query_fingerprint"]) == 16
+    assert record["query_fingerprint"] != question
+    assert set(record) >= {"scope", "status", "hit_count", "section_ids", "duration_ms"}
+
+    logged = " ".join(item.getMessage() for item in caplog.records)
+    assert question not in logged
+    assert body not in logged
+
+
+def test_knowledge_cannot_override_structured_price_in_any_digit_or_currency_form(
+    seeded: Seed,
+) -> None:
+    from services.commerce_v2_phase_2_7b_knowledge_acceptance import (
+        COMMERCIAL_FACT_KINDS,
+        load_knowledge_acceptance_matrix,
+        score_knowledge_turn,
+    )
+
+    seeded.origin_section.body = "سعر هذا الجاكيت ٩٩ ر.س وبتخفيض 89.50 SAR حسب نشرتنا القديمة."
+    seeded.db.commit()
+    context = _context(seeded, user_input="كم سعر الجاكيت؟")
+    asyncio.run(_invoke(search_products, context, {"query": "جاكيت", "limit": 5}))
+
+    conflicts = detect_catalog_conflicts(context)
+    assert [item["kind"] for item in conflicts] == ["price"]
+    assert conflicts[0]["catalog_value"] == 169.0
+    assert 89.5 in conflicts[0]["knowledge_values"]
+    assert conflicts[0]["resolution"] == "structured_catalog_wins"
+
+    matrix = load_knowledge_acceptance_matrix()
+    for kind in ("price", "sale_price", "regular_price", "currency"):
+        assert kind in COMMERCIAL_FACT_KINDS
+        scored = score_knowledge_turn(
+            matrix.case("K06"),
+            {
+                "knowledge_lookups": [{"scope": SCOPE_PRODUCT, "tenant_id": 1, "status": STATUS_OK}],
+                "knowledge_lookup_attempted": 1,
+                "tool_calls": ["search_products"],
+                "knowledge_conflicts": conflicts,
+                "structured_reply": {
+                    "evidence_refs": ["kb:section:1"],
+                    "fact_claims": [{"kind": kind, "evidence_ref": "kb:section:1", "value": 99}],
+                },
+            },
+        )
+        assert "commercial_fact_sourced_from_knowledge" in scored["blockers"], kind
+
+
+def test_availability_stock_and_variants_stay_structured_source_authoritative() -> None:
+    from modules.ai.commerce_agent_v2.guardrails import _expected_evidence_sources
+
+    for kind in (
+        "availability",
+        "stock_quantity",
+        "price",
+        "sale_price",
+        "regular_price",
+        "currency",
+        "product_url",
+        "image_url",
+        "product_name",
+    ):
+        assert _expected_evidence_sources(kind) == frozenset({"catalog_product"}), kind
+    assert _expected_evidence_sources("product_knowledge") == frozenset({"product_knowledge"})
+    assert _expected_evidence_sources("merchant_knowledge") == frozenset({"merchant_knowledge"})
+
+
+def test_a_merchant_health_statement_is_relayed_but_never_expanded(seeded: Seed) -> None:
+    from modules.ai.commerce_agent_v2.guardrails import _knowledge_span_supported
+
+    seeded.origin_section.body = (
+        "يقول التاجر إن هذا المنتج يُستخدم تقليديًا للصحة العامة كمُحلٍّ طبيعي."
+    )
+    seeded.db.commit()
+
+    # Relevant question: the merchant's own sentence is retrieved.
+    context = _context(seeded, user_input="هل ينفع للصحة؟")
+    asyncio.run(_invoke(search_products, context, {"query": "جاكيت", "limit": 5}))
+    record = context.evidence[f"kb:section:{seeded.origin_section.id}"]
+
+    # A section that shares nothing with the question stays out of the turn:
+    # the merchant's store-hours text is never dragged into a product answer.
+    from models import MerchantKnowledgeSection
+
+    seeded.db.add(
+        MerchantKnowledgeSection(
+            tenant_id=seeded.tenant.id,
+            kind="custom",
+            title="مواعيد الفرع",
+            body="يفتح الفرع من العاشرة صباحًا حتى العاشرة مساءً.",
+            is_active=True,
+            ai_status="approved",
+        )
+    )
+    seeded.db.commit()
+    unrelated = _context(seeded, user_input="هل ينفع للصحة؟")
+    again = asyncio.run(_invoke(search_products, unrelated, {"query": "جاكيت", "limit": 5}))
+    assert [section.title for section in again.knowledge_sections] == ["مصدر الجاكيت"]
+
+    # The merchant's own sentence is relayable; a partial fragment that drops
+    # most of it is not, because the guardrail requires the span to cover the body.
+    assert _knowledge_span_supported(record, seeded.origin_section.body) is True
+    assert _knowledge_span_supported(record, "يُستخدم تقليديًا كمُحلٍّ طبيعي") is False
+    for invented in (
+        "يعالج السكري ويغني عن الدواء",
+        "يشفي التهاب المعدة خلال أسبوع",
+        "الجرعة الموصى بها ملعقتان يوميًا لعلاج الحساسية",
+    ):
+        assert _knowledge_span_supported(record, invented) is False, invented
+
+
+def test_a_knowledge_timeout_cannot_block_a_catalog_price_answer(
+    seeded: Seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _timeout(*_args: Any, **_kwargs: Any) -> Any:
+        raise TimeoutError("kb slow")
+
+    monkeypatch.setattr(knowledge_retrieval, "retrieve_catalog_candidate_kb_sections", _timeout)
+    context = _context(seeded, user_input="كم سعر الجاكيت وهل هو متوفر؟")
+
+    result = asyncio.run(_invoke(search_products, context, {"query": "جاكيت", "limit": 5}))
+
+    assert result.status == "ok"
+    product = result.products[0]
+    assert product.price == "169" and product.in_stock is True
+    assert result.knowledge_sections == []
+    assert context.knowledge_lookups[0]["status"] == STATUS_ERROR
+    assert context.evidence[f"catalog:product:{seeded.jacket.id}"].source == "catalog_product"
+
+
+def test_a_failed_lookup_on_a_knowledge_only_question_must_end_in_a_disclosure() -> None:
+    from services.commerce_v2_phase_2_7b_knowledge_acceptance import (
+        load_knowledge_acceptance_matrix,
+        score_knowledge_turn,
+    )
+
+    matrix = load_knowledge_acceptance_matrix()
+    failed_lookup = {
+        "scope": SCOPE_PRODUCT,
+        "tenant_id": 1,
+        "status": STATUS_TIMEOUT,
+        "hit_count": 0,
+        "section_ids": [],
+        "evidence_refs": [],
+        "failure_reason": "knowledge_retrieval_timeout",
+    }
+    base = {
+        "knowledge_lookup_attempted": 1,
+        "knowledge_lookups": [failed_lookup],
+        "tool_calls": ["search_products"],
+        "knowledge_conflicts": [],
+    }
+    invented = score_knowledge_turn(
+        matrix.case("K13"),
+        {
+            **base,
+            "knowledge_gap_disclosure": 0,
+            "structured_reply": {
+                "evidence_refs": [],
+                "fact_claims": [],
+                "safe_fallback_reason": None,
+            },
+        },
+    )
+    assert "absent_knowledge_not_disclosed" in invented["blockers"]
+
+    disclosed = score_knowledge_turn(
+        matrix.case("K13"),
+        {
+            **base,
+            "knowledge_gap_disclosure": 1,
+            "structured_reply": {
+                "evidence_refs": [],
+                "fact_claims": [],
+                "safe_fallback_reason": None,
+            },
+        },
+    )
+    assert disclosed["blockers"] == []
+
+
+def test_a_cross_tenant_section_or_product_link_fails_closed(seeded: Seed) -> None:
+    from modules.ai.commerce_agent_v2.knowledge_retrieval import (
+        build_knowledge_snapshots,
+        linked_products,
+    )
+
+    context = _context(seeded, user_input="وش سياسة الاسترجاع عندكم؟")
+    foreign_row = {
+        "section_id": seeded.foreign_section.id,
+        "title": seeded.foreign_section.title,
+        "body": seeded.foreign_section.body,
+        "kind": "custom",
+    }
+
+    with pytest.raises(RuntimeError, match="knowledge_service_returned_out_of_scope_section"):
+        build_knowledge_snapshots(
+            context, [foreign_row], source="merchant_knowledge", required_product_id=None
+        )
+
+    # A link row that points at another tenant's product is never returned.
+    from models import MerchantKnowledgeSectionProduct, Product
+
+    foreign_product = Product(
+        tenant_id=seeded.other_tenant.id,
+        external_id="X-FOREIGN",
+        title="منتج متجر آخر",
+        price="10",
+        in_stock=True,
+        stock_quantity=1,
+        catalog_status="active",
+        extra_metadata={"status": "active"},
+    )
+    seeded.db.add(foreign_product)
+    seeded.db.flush()
+    seeded.db.add(
+        MerchantKnowledgeSectionProduct(
+            section_id=seeded.origin_section.id,
+            product_id=foreign_product.id,
+            source="manual",
+        )
+    )
+    seeded.db.commit()
+
+    links = linked_products(context, [seeded.origin_section.id])
+    assert links[seeded.origin_section.id] == [seeded.jacket.id]
+    assert foreign_product.id not in links[seeded.origin_section.id]
