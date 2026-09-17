@@ -1,0 +1,350 @@
+{
+  "contract_version": "commerce_v2_phase_2_7a_acceptance_v1",
+  "matrix_name": "Phase 2.7A canonical A1–C4 acceptance matrix",
+  "tenant_id": 1,
+  "execution_mode": "INTERNAL_E2E",
+  "aliases": [
+    "A",
+    "B",
+    "C"
+  ],
+  "turns_total": 12,
+  "d_scenario": null,
+  "source_corpus": {
+    "path": "backend/evals/commerce_agent_v2_whatsapp/corpus_v1.json",
+    "contract_version": "commerce_v2_real_whatsapp_e2e_v1",
+    "selection": "owner-approved verbatim variants; no seed, no randomization"
+  },
+  "turns": [
+    {
+      "turn_id": "A1",
+      "alias": "A",
+      "sequence": 1,
+      "input": "السلام عليكم",
+      "expected_tools": [],
+      "expected_outcome": "social_reply",
+      "required_assertions": [
+        "natural Arabic social reply",
+        "no commerce tool call",
+        "no fabricated product or store claim"
+      ],
+      "requires_prior_context": false,
+      "fixture_prerequisites": [
+        "fixture_A_conversation"
+      ],
+      "source": {
+        "alias": "A",
+        "segment_index": 0,
+        "category": "social",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "A2",
+      "alias": "A",
+      "sequence": 2,
+      "input": "وش المنتجات المتوفرة عندكم؟",
+      "expected_tools": [
+        "search_products"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "response grounded in the current Salla catalog",
+        "only actual products are shown",
+        "no fabricated price, availability or media"
+      ],
+      "requires_prior_context": false,
+      "fixture_prerequisites": [
+        "fixture_A_conversation",
+        "tenant_1_salla_catalog"
+      ],
+      "source": {
+        "alias": "A",
+        "segment_index": 1,
+        "category": "catalog_browse",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "A3",
+      "alias": "A",
+      "sequence": 3,
+      "input": "أبغى تفاصيل أول منتج عندكم",
+      "expected_tools": [
+        "search_products",
+        "get_product_details"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "resolves the first product from grounded catalog evidence",
+        "product identity, description and attributes come from evidence",
+        "no unsupported claim"
+      ],
+      "requires_prior_context": true,
+      "fixture_prerequisites": [
+        "fixture_A_conversation",
+        "tenant_1_salla_catalog"
+      ],
+      "source": {
+        "alias": "A",
+        "segment_index": 2,
+        "category": "specific_product",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "A4",
+      "alias": "A",
+      "sequence": 4,
+      "input": "كم سعر أول منتج وهل هو متوفر؟",
+      "expected_tools": [
+        "search_products"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "exact current price and availability come from Salla evidence",
+        "unavailable product must not be represented as available",
+        "currency and variant context remain correct"
+      ],
+      "requires_prior_context": true,
+      "fixture_prerequisites": [
+        "fixture_A_conversation",
+        "tenant_1_salla_catalog"
+      ],
+      "source": {
+        "alias": "A",
+        "segment_index": 3,
+        "category": "price_availability",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "B1",
+      "alias": "B",
+      "sequence": 1,
+      "input": "السلام عليكم، أبغى أتصفح المنتجات",
+      "expected_tools": [
+        "search_products"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "grounded product choices",
+        "conversation establishes usable product context"
+      ],
+      "requires_prior_context": false,
+      "fixture_prerequisites": [
+        "fixture_B_conversation",
+        "fixture_B_seed_history",
+        "tenant_1_salla_catalog"
+      ],
+      "source": {
+        "alias": "B",
+        "segment_index": 6,
+        "category": "long_multiturn",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "B2",
+      "alias": "B",
+      "sequence": 2,
+      "input": "اختر لي واحداً منها",
+      "expected_tools": [
+        "search_products"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "pronoun/reference resolves from B1",
+        "selected product must be one of the grounded B1 products",
+        "no silent product switching"
+      ],
+      "requires_prior_context": true,
+      "fixture_prerequisites": [
+        "fixture_B_conversation",
+        "tenant_1_salla_catalog"
+      ],
+      "source": {
+        "alias": "B",
+        "segment_index": 6,
+        "category": "long_multiturn",
+        "step_index": 1,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "B3",
+      "alias": "B",
+      "sequence": 3,
+      "input": "كم سعره وهل هو متوفر؟",
+      "expected_tools": [
+        "search_products"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "\"ـه\" resolves to the product selected in B2",
+        "price and availability are grounded in current Salla evidence",
+        "context is preserved across turns"
+      ],
+      "requires_prior_context": true,
+      "fixture_prerequisites": [
+        "fixture_B_conversation",
+        "tenant_1_salla_catalog"
+      ],
+      "source": {
+        "alias": "B",
+        "segment_index": 6,
+        "category": "long_multiturn",
+        "step_index": 2,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "B4",
+      "alias": "B",
+      "sequence": 4,
+      "input": "طيب هل عندكم معلومات إضافية عنه؟",
+      "expected_tools": [
+        "search_products",
+        "search_product_knowledge"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "\"عنه\" resolves to the same product",
+        "merchant/product knowledge is used when present",
+        "absent knowledge is handled safely",
+        "no invented benefits, guarantees or medical claims"
+      ],
+      "requires_prior_context": true,
+      "fixture_prerequisites": [
+        "fixture_B_conversation",
+        "tenant_1_salla_catalog",
+        "tenant_1_product_knowledge_optional"
+      ],
+      "source": {
+        "alias": "B",
+        "segment_index": 6,
+        "category": "long_multiturn",
+        "step_index": 3,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "C1",
+      "alias": "C",
+      "sequence": 1,
+      "input": "وش حالة آخر طلب لي؟",
+      "expected_tools": [
+        "resolve_customer_order"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "resolves only Customer C's synthetic test order",
+        "tenant and customer isolation enforced",
+        "order status matches stored Salla evidence"
+      ],
+      "requires_prior_context": false,
+      "fixture_prerequisites": [
+        "fixture_C_conversation",
+        "fixture_C_synthetic_order"
+      ],
+      "source": {
+        "alias": "C",
+        "segment_index": 0,
+        "category": "latest_order",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "C2",
+      "alias": "C",
+      "sequence": 2,
+      "input": "وش محتويات آخر طلب؟",
+      "expected_tools": [
+        "resolve_customer_order",
+        "get_order_details"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "returns only the synthetic order's actual items",
+        "quantities, variants and totals are grounded",
+        "no cross-customer or cross-tenant data"
+      ],
+      "requires_prior_context": true,
+      "fixture_prerequisites": [
+        "fixture_C_conversation",
+        "fixture_C_synthetic_order"
+      ],
+      "source": {
+        "alias": "C",
+        "segment_index": 2,
+        "category": "order_items",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "C3",
+      "alias": "C",
+      "sequence": 3,
+      "input": "وش حالة شحنة طلبي؟",
+      "expected_tools": [
+        "resolve_customer_order",
+        "get_order_shipment"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "shipment belongs to the resolved synthetic order",
+        "status and carrier facts come from evidence",
+        "missing shipment is handled safely"
+      ],
+      "requires_prior_context": true,
+      "fixture_prerequisites": [
+        "fixture_C_conversation",
+        "fixture_C_synthetic_order",
+        "fixture_C_synthetic_shipment"
+      ],
+      "source": {
+        "alias": "C",
+        "segment_index": 4,
+        "category": "shipment_status",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    },
+    {
+      "turn_id": "C4",
+      "alias": "C",
+      "sequence": 4,
+      "input": "عطني رقم التتبع",
+      "expected_tools": [
+        "resolve_customer_order",
+        "get_order_shipment"
+      ],
+      "expected_outcome": "grounded_reply",
+      "required_assertions": [
+        "maintains order context from C1–C3",
+        "exposes only the synthetic shipment's real tracking reference",
+        "does not invent a number or link when absent"
+      ],
+      "requires_prior_context": true,
+      "fixture_prerequisites": [
+        "fixture_C_conversation",
+        "fixture_C_synthetic_order",
+        "fixture_C_synthetic_shipment"
+      ],
+      "source": {
+        "alias": "C",
+        "segment_index": 6,
+        "category": "tracking",
+        "step_index": 0,
+        "variant_index": 0
+      }
+    }
+  ]
+}

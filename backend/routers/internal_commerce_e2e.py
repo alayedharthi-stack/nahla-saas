@@ -25,6 +25,12 @@ from services.commerce_v2_internal_e2e_operator import (
     operator_status,
     score_completed_batch,
 )
+from services.commerce_v2_phase_2_7a_acceptance import (
+    acceptance_run_status,
+    create_acceptance_run,
+    execute_acceptance_run,
+    load_acceptance_matrix,
+)
 
 
 router = APIRouter(
@@ -52,6 +58,10 @@ class TurnBody(_StrictBody):
 class BatchBody(_StrictBody):
     seed: int = Field(default=260914, ge=0, le=2_147_483_647)
     concurrency_waves: bool = False
+
+
+class AcceptanceRunBody(_StrictBody):
+    halt_on_first_failure: bool = False
 
 
 def _raise_contract(exc: InternalE2EContractError) -> None:
@@ -171,6 +181,41 @@ def get_result(
         return inspect_result(
             db, internal_message_id=internal_message_id, trace_id=trace_id
         )
+    except InternalE2EContractError as exc:
+        _raise_contract(exc)
+
+
+@router.get("/acceptance/phase-2-7a/matrix")
+def get_acceptance_matrix() -> dict:
+    """Return the checked-in canonical A1–C4 matrix (read-only, no execution)."""
+    try:
+        return load_acceptance_matrix().to_mapping()
+    except InternalE2EContractError as exc:
+        _raise_contract(exc)
+
+
+@router.post("/acceptance/phase-2-7a/runs", status_code=202)
+def start_acceptance_run(
+    body: AcceptanceRunBody, background: BackgroundTasks, db: Session = Depends(get_db)
+) -> dict:
+    """Queue the deterministic 12-turn run; refused unless INTERNAL_E2E is enabled
+    and the A/B/C fixtures (including C's synthetic order and shipment) exist."""
+    try:
+        result = create_acceptance_run(
+            db, halt_on_first_failure=body.halt_on_first_failure
+        )
+        background.add_task(execute_acceptance_run, str(result["run_id"]))
+        return result
+    except (InternalE2EContractError, ValueError) as exc:
+        _raise_contract(InternalE2EContractError(str(exc)))
+
+
+@router.get("/acceptance/phase-2-7a/runs/{run_id}")
+def get_acceptance_run(
+    run_id: str = Path(min_length=36, max_length=36), db: Session = Depends(get_db)
+) -> dict:
+    try:
+        return acceptance_run_status(db, str(run_id))
     except InternalE2EContractError as exc:
         _raise_contract(exc)
 

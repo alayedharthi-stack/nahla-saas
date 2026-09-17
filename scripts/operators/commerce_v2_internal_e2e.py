@@ -31,6 +31,10 @@ from services.commerce_v2_whatsapp_e2e_contract import (  # noqa: E402
     load_corpus,
     render_controlled_test_data,
 )
+from services.commerce_v2_phase_2_7a_acceptance import (  # noqa: E402
+    load_acceptance_matrix,
+    run_acceptance_matrix,
+)
 
 
 CORPUS_PATH = BACKEND / "evals" / "commerce_agent_v2_whatsapp" / "corpus_v1.json"
@@ -285,6 +289,47 @@ def command_score(args: argparse.Namespace) -> int:
     return 0 if report["hard_gates_passed"] else 1
 
 
+def command_acceptance(args: argparse.Namespace) -> int:
+    """Run the deterministic Phase 2.7A A1–C4 matrix (no seed, no variants)."""
+    matrix = load_acceptance_matrix()
+    if args.print_matrix:
+        print(json.dumps(matrix.to_mapping(), ensure_ascii=False, sort_keys=True))
+        return 0
+    engine, SessionLocal = _database()
+    db = SessionLocal()
+    try:
+        report = asyncio.run(
+            run_acceptance_matrix(
+                db,
+                matrix=matrix,
+                halt_on_first_failure=args.halt_on_first_failure,
+            )
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": bool(report["passed"]),
+                    "summary": report["summary"],
+                    "turns_executed": report["turns_executed"],
+                    "halted_at": report["halted_at"],
+                    "external_egress_total": report["external_egress_total"],
+                    "run_id": report["run_id"],
+                    "output": str(args.output),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if report["passed"] else 1
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     sub = root.add_subparsers(dest="command", required=True)
@@ -317,6 +362,11 @@ def parser() -> argparse.ArgumentParser:
     reset.add_argument("--tenant-id", type=int, default=1)
     reset.add_argument("--alias", choices=list("ABC"), required=True)
     reset.set_defaults(func=command_reset)
+    acceptance = sub.add_parser("acceptance")
+    acceptance.add_argument("--output", type=Path, default=Path("/tmp/phase-2-7a-acceptance.json"))
+    acceptance.add_argument("--halt-on-first-failure", action="store_true")
+    acceptance.add_argument("--print-matrix", action="store_true")
+    acceptance.set_defaults(func=command_acceptance)
     score = sub.add_parser("score")
     score.add_argument("--seed", type=int, default=260914)
     score.add_argument("--order-number", default="IE2E-C-001")
