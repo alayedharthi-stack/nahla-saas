@@ -534,6 +534,80 @@ def test_halting_failure_stops_the_sequence_and_never_reports_twelve(db: Any) ->
     assert report["halted_at"] == "A2" and report["turns_executed"] == 2
 
 
+def test_guardrail_blocked_reply_fails_its_turn_without_halting_the_sequence(db: Any) -> None:
+    """A rejected model reply is a quality failure, not a safety halt.
+
+    Production Phase 2.7A run 2 (2026-09-17, run_id 1c567f37) stopped at B1 because
+    the grounding guardrail rejected a reply carrying a fabricated product image
+    URL. The guardrail worked: the customer received only the safe fallback. But
+    the halt discarded turns B2–B4 and C1–C4, so the run produced no evidence for
+    seven of twelve turns. The turn must still fail; the sequence must continue.
+    """
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    blocked = {
+        "status": "failed",
+        "failure_reason": "output_guardrail_tripwire:claim_not_in_evidence:image_url",
+        "guardrail_passed": False,
+        "guardrail_blocked_reply": 1,
+        "fallback_type": "unexpected_runtime_fallback",
+        "customer_visible_text": "لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن.",
+        "structured_reply": {
+            "text": "لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن.",
+            "response_mode": "grounded",
+            "safe_fallback_reason": "output_guardrail_tripwire:claim_not_in_evidence:image_url",
+            "product_refs": [],
+        },
+    }
+    calls: list[Any] = []
+    report = _run(db, _fake_submit(calls, per_turn={"B1": dict(blocked)}))
+
+    assert [c.expected["turn_id"] for c in calls] == list(ACCEPTANCE_TURN_IDS)
+    assert report["halted_at"] is None and report["turns_not_executed"] == 0
+    assert report["turns_executed"] == 12
+
+    b1 = next(row for row in report["results"] if row["turn_id"] == "B1")
+    assert b1["halting"] is False and b1["machine_passed"] is False
+    assert {"guardrail_not_passed", "turn_not_completed", "unexpected_fallback"} <= set(b1["blockers"])
+    # The failure keeps its true cause and is never rewritten into a pass.
+    assert b1["evidence"]["failure_reason"] == "output_guardrail_tripwire:claim_not_in_evidence:image_url"
+    assert b1["evidence"]["guardrail_blocked_reply"] == 1
+    assert b1["evidence"]["guardrail_passed"] is False
+    assert b1["evidence"]["unsupported_commercial_claims"] == 0
+    assert report["machine_passed"] is False
+    assert report["classification"] == CLASS_MACHINE_GATE_FAILED
+    assert report["acceptance_passed"] is False
+    # Every later turn still ran, so the owner gets evidence for all twelve.
+    assert all(row["executed"] for row in report["results"])
+
+    # A turn that never completed for any other reason is likewise non-halting.
+    calls.clear()
+    report = _run(db, _fake_submit(calls, per_turn={"C2": {"status": "failed", "failure_reason": "model_timeout:attempt_2"}}))
+    assert report["halted_at"] is None and report["turns_executed"] == 12
+
+
+def test_an_ungrounded_claim_that_reached_the_customer_still_halts(db: Any) -> None:
+    """The safety meaning of ``unsupported_commercial_claims`` is unchanged."""
+    provision_internal_e2e_fixtures(db, tenant_id=1, env=ENABLED_ENV)
+    delivered = {
+        "status": "test_contract_failed",
+        "failure_reason": "internal_e2e_safety_failure:unsupported_commercial_claims",
+        "unsupported_commercial_claims": 1,
+        "safety_proofs": {
+            **{key: {"proven": True, "value": 0} for key in SAFETY_KEYS},
+            "unsupported_commercial_claims": {"proven": True, "value": 1},
+        },
+    }
+    calls: list[Any] = []
+    report = _run(db, _fake_submit(calls, per_turn={"B1": delivered}))
+
+    assert report["halted_at"] == "B1"
+    assert report["halt_reason"] == "internal_e2e_safety_failure:unsupported_commercial_claims"
+    assert report["turns_executed"] == 5 and report["turns_not_executed"] == 7
+    b1 = next(row for row in report["results"] if row["turn_id"] == "B1")
+    assert b1["halting"] is True and "unsupported_commercial_claims" in b1["blockers"]
+    assert report["classification"] == CLASS_MACHINE_GATE_FAILED
+
+
 # ── Admin API surface ──────────────────────────────────────────────────
 
 @pytest.fixture()

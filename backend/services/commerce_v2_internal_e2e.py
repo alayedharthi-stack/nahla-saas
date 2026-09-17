@@ -849,13 +849,29 @@ async def submit_internal_customer_turn(
         guardrail_passed = all(
             not item.get("tripwire_triggered") for item in result.guardrail_results
         )
-        unsupported_claims = int(
-            any(
-                item.get("tripwire_triggered")
-                and "ground" in str(item.get("name") or "").lower()
-                for item in result.guardrail_results
-            )
+        # A tripped grounding guardrail means the model's reply was REJECTED:
+        # ``run_commerce_agent`` substitutes ``safe_fallback_reply``, which carries
+        # no fact claims, product refs, media refs or UI actions. Nothing
+        # unsupported reaches the customer, so this is a blocked reply — not a
+        # delivered unsupported claim. Counting the block as a safety violation
+        # inverted the measurement (the better the guardrail performed, the more
+        # "violations" were recorded) and, because the key is both a SAFETY_KEY
+        # and a halting blocker, it stopped the Phase 2.7A sequence on a failure
+        # the safety system had already contained.
+        grounding_tripwire = any(
+            item.get("tripwire_triggered")
+            and "ground" in str(item.get("name") or "").lower()
+            for item in result.guardrail_results
         )
+        guardrail_blocked_reply = int(grounding_tripwire)
+        delivered_commercial_structure = bool(
+            result.reply.fact_claims
+            or result.reply.product_refs
+            or result.reply.media_refs
+            or result.reply.ui_actions
+        )
+        # Non-zero only when an ungrounded reply actually reached the customer.
+        unsupported_claims = int(grounding_tripwire and delivered_commercial_structure)
         isolation_proofs = _runtime_isolation_proofs(
             db, fixture=fixture, context=context, result=result
         )
@@ -868,9 +884,13 @@ async def submit_internal_customer_turn(
             "unsupported_commercial_claims": _safety_proof(
                 value=unsupported_claims,
                 violations=(
-                    ["grounded_output_guardrail_triggered"] if unsupported_claims else []
+                    ["ungrounded_reply_delivered_to_customer"] if unsupported_claims else []
                 ),
-                evidence={"guardrail_results": result.guardrail_results},
+                evidence={
+                    "guardrail_results": result.guardrail_results,
+                    "guardrail_blocked_reply": guardrail_blocked_reply,
+                    "delivered_commercial_structure": delivered_commercial_structure,
+                },
             ),
             "write_mutations": _safety_proof(
                 value=int(protected_state_changed),
@@ -1016,6 +1036,7 @@ async def submit_internal_customer_turn(
             "write_mutations": safety_proofs["write_mutations"]["value"],
             "salla_mutations": safety_proofs["salla_mutations"]["value"],
             "unsupported_commercial_claims": unsupported_claims,
+            "guardrail_blocked_reply": guardrail_blocked_reply,
             "duplicate_replies": None,
             "silent_v1_fallback": safety_proofs["silent_v1_fallback"]["value"],
         }
