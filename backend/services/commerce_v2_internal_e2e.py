@@ -178,7 +178,100 @@ def _find_fixture(db: Any, tenant_id: int, alias: object) -> InternalE2EFixture:
     )
 
 
-def _seed_customer_b_history(db: Any, fixture: InternalE2EFixture, product_titles: list[str]) -> None:
+B_SEED_HISTORY_CONTRACT = "internal_e2e_b_seed_history_v2"
+B_SEED_HISTORY_EVENT_TYPE = "internal_e2e_seed_history"
+B_SEED_HISTORY_PAGINATION_ROWS = 24
+B_SEED_HISTORY_REFERENCE_ROWS = 8
+B_SEED_HISTORY_ROWS = B_SEED_HISTORY_PAGINATION_ROWS + B_SEED_HISTORY_REFERENCE_ROWS
+B_SEED_REFERENCE_SLOTS = 2
+
+
+def normalize_seed_title(value: object) -> str:
+    """The one spelling of a catalog title used by both the seeder and verification."""
+    return " ".join(str(value or "").split())
+
+
+def select_seed_reference_products(db: Any, *, tenant_id: int) -> list[tuple[int, str]]:
+    """Canonical selection of the products Customer B's seeded history names.
+
+    A title that more than one active product carries cannot anchor a reference
+    ("the first one" would be ambiguous), so only uniquely titled products
+    qualify; the first two by id win.
+
+    This runs exactly once per seeded history, when the rows are written. It is
+    never repeated to check an existing history: the catalog is mutable, and a
+    later edit must not rewrite what the synthetic customer already said. The
+    chosen ids and titles are persisted with the rows instead.
+    """
+    from models import Product
+
+    catalog: list[tuple[int, str]] = []
+    counts: dict[str, int] = {}
+    for row in (
+        db.query(Product)
+        .filter(Product.tenant_id == int(tenant_id), Product.catalog_status == "active")
+        .order_by(Product.id.asc())
+        .all()
+    ):
+        title = normalize_seed_title(row.title)
+        if not title:
+            continue
+        catalog.append((int(row.id), title))
+        counts[title.casefold()] = counts.get(title.casefold(), 0) + 1
+    unique = [(pid, title) for pid, title in catalog if counts[title.casefold()] == 1]
+    return unique[:B_SEED_REFERENCE_SLOTS]
+
+
+def build_b_seed_history(first: str, second: str) -> tuple[tuple[str, str, int | None], ...]:
+    """Customer B's seeded history as (direction, body, reference slot) rows.
+
+    One function builds the rows and, at verification time, rebuilds them from
+    the persisted titles to compare against what is stored, so an edited body is
+    a contract failure rather than a silent change of what B is taken to have said.
+    """
+    pagination = tuple(
+        item
+        for index in range(1, 1 + B_SEED_HISTORY_PAGINATION_ROWS // 2)
+        for item in (
+            (INTERNAL_E2E_INBOUND, f"شكرًا لك — سجل سابق {index:02d}.", None),
+            (INTERNAL_E2E_OUTBOUND, "العفو.", None),
+        )
+    )
+    reference = (
+        (INTERNAL_E2E_INBOUND, f"أريد أن أعرف أكثر عن {first}", 1),
+        (INTERNAL_E2E_OUTBOUND, "بكل سرور، ما الجانب الذي تريد معرفته؟", None),
+        (INTERNAL_E2E_INBOUND, "أهم شيء عندي تفاصيله الأساسية.", None),
+        (INTERNAL_E2E_OUTBOUND, "تم، وسأعتمد معلومات المتجر الموثوقة.", None),
+        (INTERNAL_E2E_INBOUND, f"وقارنه أيضًا مع {second}", 2),
+        (INTERNAL_E2E_OUTBOUND, "حسنًا، أصبح المنتج الثاني ضمن سياق المقارنة.", None),
+        (INTERNAL_E2E_INBOUND, "الأول يبدو أقرب لاحتياجي.", None),
+        (INTERNAL_E2E_OUTBOUND, "فهمت أنك عدت إلى المنتج الأول.", None),
+    )
+    return (*pagination, *reference)
+
+
+def seed_history_reference_block(references: list[tuple[int, str]]) -> dict[str, Any]:
+    """The persisted record of which products the seeded history actually names."""
+    return {
+        "contract": B_SEED_HISTORY_CONTRACT,
+        "rows": B_SEED_HISTORY_ROWS,
+        "pagination_rows": B_SEED_HISTORY_PAGINATION_ROWS,
+        "reference_rows": B_SEED_HISTORY_REFERENCE_ROWS,
+        "references": [
+            {"slot": slot, "product_id": int(pid), "title": normalize_seed_title(title)}
+            for slot, (pid, title) in enumerate(references, start=1)
+        ],
+    }
+
+
+def _seed_customer_b_history(
+    db: Any, fixture: InternalE2EFixture, references: list[tuple[int, str]]
+) -> dict[str, Any] | None:
+    """Write B's deterministic history; return the reference block, or None if present.
+
+    Returning ``None`` keeps provisioning idempotent: an existing history is
+    never re-seeded, and its persisted reference block is left untouched.
+    """
     from models import MessageEvent
 
     exists = (
@@ -186,53 +279,40 @@ def _seed_customer_b_history(db: Any, fixture: InternalE2EFixture, product_title
         .filter(
             MessageEvent.tenant_id == 1,
             MessageEvent.conversation_id == fixture.conversation_id,
-            MessageEvent.event_type == "internal_e2e_seed_history",
+            MessageEvent.event_type == B_SEED_HISTORY_EVENT_TYPE,
         )
         .first()
     )
     if exists is not None:
-        return
-    first = product_titles[0] if product_titles else "المنتج الأول"
-    second = product_titles[1] if len(product_titles) > 1 else "المنتج الثاني"
-    pagination_history = tuple(
-        item
-        for index in range(1, 13)
-        for item in (
-            (INTERNAL_E2E_INBOUND, f"شكرًا لك — سجل سابق {index:02d}."),
-            (INTERNAL_E2E_OUTBOUND, "العفو."),
-        )
-    )
-    reference_history = (
-        (INTERNAL_E2E_INBOUND, f"أريد أن أعرف أكثر عن {first}"),
-        (INTERNAL_E2E_OUTBOUND, "بكل سرور، ما الجانب الذي تريد معرفته؟"),
-        (INTERNAL_E2E_INBOUND, "أهم شيء عندي تفاصيله الأساسية."),
-        (INTERNAL_E2E_OUTBOUND, "تم، وسأعتمد معلومات المتجر الموثوقة."),
-        (INTERNAL_E2E_INBOUND, f"وقارنه أيضًا مع {second}"),
-        (INTERNAL_E2E_OUTBOUND, "حسنًا، أصبح المنتج الثاني ضمن سياق المقارنة."),
-        (INTERNAL_E2E_INBOUND, "الأول يبدو أقرب لاحتياجي."),
-        (INTERNAL_E2E_OUTBOUND, "فهمت أنك عدت إلى المنتج الأول."),
-    )
-    history = (*pagination_history, *reference_history)
-    for index, (direction, body) in enumerate(history, start=1):
+        return None
+    if len(references) != B_SEED_REFERENCE_SLOTS:
+        raise InternalE2EContractError("internal_e2e_requires_two_unique_product_titles")
+    history = build_b_seed_history(references[0][1], references[1][1])
+    by_slot = {slot: (pid, normalize_seed_title(title)) for slot, (pid, title) in enumerate(references, start=1)}
+    for index, (direction, body, slot) in enumerate(history, start=1):
+        metadata: dict[str, Any] = {
+            **internal_e2e_metadata(1, "B"),
+            "internal_message_id": f"internal_e2e:t1:b:seed:{index:02d}",
+            "seed_history": True,
+            "seed_history_kind": (
+                "pagination" if index <= B_SEED_HISTORY_PAGINATION_ROWS else "reference"
+            ),
+        }
+        if slot is not None:
+            metadata["seed_reference_slot"] = int(slot)
+            metadata["seed_reference_product_id"] = int(by_slot[slot][0])
+            metadata["seed_reference_title"] = by_slot[slot][1]
         db.add(
             MessageEvent(
                 tenant_id=1,
                 conversation_id=fixture.conversation_id,
                 direction=direction,
                 body=body,
-                event_type="internal_e2e_seed_history",
-                extra_metadata={
-                    **internal_e2e_metadata(1, "B"),
-                    "internal_message_id": f"internal_e2e:t1:b:seed:{index:02d}",
-                    "seed_history": True,
-                    "seed_history_kind": (
-                        "pagination"
-                        if index <= len(pagination_history)
-                        else "reference"
-                    ),
-                },
+                event_type=B_SEED_HISTORY_EVENT_TYPE,
+                extra_metadata=metadata,
             )
         )
+    return seed_history_reference_block(list(references))
 
 
 def _provision_order_fixture(db: Any, fixture: InternalE2EFixture) -> InternalE2EFixture:
@@ -314,7 +394,7 @@ def provision_internal_e2e_fixtures(
     env: Mapping[str, str] | None = None,
 ) -> dict[InternalE2EAlias, InternalE2EFixture]:
     """Idempotently provision A/B/C as test-only rows in one approved tenant."""
-    from models import Conversation, Product, Tenant
+    from models import Conversation, Tenant
 
     assert_internal_e2e_operator_scope(tenant_id, env=env)
     if int(tenant_id) != 1:
@@ -359,34 +439,22 @@ def provision_internal_e2e_fixtures(
             conversation_id=int(conversation.id),
             identity=identity,
         )
-    catalog_titles: list[tuple[str, str]] = []
-    for row in (
-        db.query(Product)
-        .filter(Product.tenant_id == 1, Product.catalog_status == "active")
-        .order_by(Product.id.asc())
-        .all()
-    ):
-        title = " ".join(str(row.title or "").split())
-        title_key = title.casefold()
-        if not title:
-            continue
-        catalog_titles.append((title_key, title))
-    title_counts: dict[str, int] = {}
-    for title_key, _title in catalog_titles:
-        title_counts[title_key] = title_counts.get(title_key, 0) + 1
-    titles = [
-        title
-        for title_key, title in catalog_titles
-        if title_counts[title_key] == 1
-    ][:2]
-    if len(titles) < 2:
+    references = select_seed_reference_products(db, tenant_id=1)
+    if len(references) != B_SEED_REFERENCE_SLOTS:
         raise InternalE2EContractError(
             "internal_e2e_requires_two_unique_product_titles"
         )
-    _seed_customer_b_history(db, fixtures["B"], titles)
+    reference_block = _seed_customer_b_history(db, fixtures["B"], references)
     b_conversation = db.get(Conversation, fixtures["B"].conversation_id)
     if b_conversation is None:
         raise InternalE2EContractError("internal_e2e_fixture_missing_after_provision")
+    if reference_block is not None:
+        # Persisted with the rows it describes: verification reads this record
+        # instead of re-deriving the references from a catalog that has moved on.
+        b_conversation.extra_metadata = {
+            **dict(b_conversation.extra_metadata or {}),
+            "seed_history": reference_block,
+        }
     b_conversation.last_read_at = _utcnow_naive()
     fixtures["C"] = _provision_order_fixture(db, fixtures["C"])
     db.commit()

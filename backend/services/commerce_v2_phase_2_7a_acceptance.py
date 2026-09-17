@@ -36,6 +36,12 @@ from modules.ai.commerce_agent_v2.internal_e2e_identity import (
     metadata_matches_internal_e2e_identity,
 )
 from services.commerce_v2_internal_e2e import (
+    B_SEED_HISTORY_CONTRACT,
+    B_SEED_HISTORY_EVENT_TYPE,
+    B_SEED_HISTORY_PAGINATION_ROWS,
+    B_SEED_HISTORY_REFERENCE_ROWS,
+    B_SEED_HISTORY_ROWS,
+    B_SEED_REFERENCE_SLOTS,
     INTERNAL_E2E_INBOUND,
     INTERNAL_E2E_OUTBOUND,
     InternalE2EContractError,
@@ -43,6 +49,8 @@ from services.commerce_v2_internal_e2e import (
     InternalE2ETurnRequest,
     _find_fixture,
     assert_internal_e2e_operator_scope,
+    build_b_seed_history,
+    normalize_seed_title,
     submit_internal_customer_turn,
 )
 from services.commerce_v2_whatsapp_e2e_contract import READ_ONLY_TOOLS
@@ -68,11 +76,8 @@ _CONTROL_EVENT_TYPE = "internal_e2e_acceptance_phase_2_7a"
 SUPPORT_GRANT_PURPOSE_TOKENS: tuple[str, ...] = ("phase 2.7a", "phase_2_7a", "phase-2-7a", "phase2.7a")
 SUPPORT_GRANT_MIN_REMAINING = timedelta(minutes=30)
 
-# Customer B's approved seed history (see ``_seed_customer_b_history``).
-B_SEED_HISTORY_EVENT_TYPE = "internal_e2e_seed_history"
-B_SEED_HISTORY_PAGINATION_ROWS = 24
-B_SEED_HISTORY_REFERENCE_ROWS = 8
-B_SEED_HISTORY_ROWS = B_SEED_HISTORY_PAGINATION_ROWS + B_SEED_HISTORY_REFERENCE_ROWS
+# Customer B's approved seed history: shape, content and reference selection all
+# come from the seeding module, so the writer and this verifier cannot drift apart.
 
 # Review / classification vocabulary.
 REVIEW_PENDING = "pending"
@@ -343,9 +348,51 @@ def require_phase_2_7a_support_grant(
     }
 
 
+def _seed_reference_block(db: Any, *, b_conversation_id: int) -> dict[str, Any]:
+    """The reference record persisted when B's history was seeded, validated in shape."""
+    from models import Conversation
+
+    conversation = db.get(Conversation, int(b_conversation_id))
+    if conversation is None:
+        raise _fail("b_seed_history_conversation_missing")
+    block = dict(conversation.extra_metadata or {}).get("seed_history")
+    if not isinstance(block, dict):
+        raise _fail("b_seed_history_reference_metadata_missing")
+    if block.get("contract") != B_SEED_HISTORY_CONTRACT:
+        raise _fail("b_seed_history_reference_contract_mismatch")
+    if (
+        block.get("rows") != B_SEED_HISTORY_ROWS
+        or block.get("pagination_rows") != B_SEED_HISTORY_PAGINATION_ROWS
+        or block.get("reference_rows") != B_SEED_HISTORY_REFERENCE_ROWS
+    ):
+        raise _fail("b_seed_history_reference_metadata_invalid")
+    references = block.get("references")
+    if not isinstance(references, list) or len(references) != B_SEED_REFERENCE_SLOTS:
+        raise _fail("b_seed_history_reference_metadata_invalid")
+    resolved: dict[int, dict[str, Any]] = {}
+    for slot, entry in enumerate(references, start=1):
+        if not isinstance(entry, dict) or entry.get("slot") != slot:
+            raise _fail("b_seed_history_reference_metadata_invalid")
+        product_id = entry.get("product_id")
+        title = normalize_seed_title(entry.get("title"))
+        if not isinstance(product_id, int) or isinstance(product_id, bool) or not title:
+            raise _fail("b_seed_history_reference_metadata_invalid")
+        resolved[slot] = {"slot": slot, "product_id": int(product_id), "title": title}
+    return {"block": block, "references": resolved}
+
+
 def _verify_b_seed_history(db: Any, *, tenant_id: int, b_conversation_id: int) -> dict[str, Any]:
-    """Customer B's approved seed history must be complete, ordered, B-only and untampered."""
-    from models import MessageEvent, Product
+    """Customer B's approved seed history must be complete, ordered, B-only and untampered.
+
+    The products the history names are read from the record persisted when it was
+    seeded, never re-derived from the live catalog: the catalog is mutable, and a
+    product added, renamed or retired afterwards must not change which products B
+    is taken to have discussed.  Every stored row is compared against the history
+    rebuilt from those persisted titles, so an edited body, a dropped row, a
+    reordered sequence, a foreign conversation or a rewritten reference id all
+    fail closed here rather than reaching the continuity check as silent truth.
+    """
+    from models import MessageEvent
 
     rows = (
         db.query(MessageEvent)
@@ -363,7 +410,11 @@ def _verify_b_seed_history(db: Any, *, tenant_id: int, b_conversation_id: int) -
         raise _fail("b_seed_history_missing")
     if len(rows) != B_SEED_HISTORY_ROWS:
         raise _fail("b_seed_history_count_invalid")
-    for index, row in enumerate(rows, start=1):
+    persisted = _seed_reference_block(db, b_conversation_id=b_conversation_id)
+    references = persisted["references"]
+    expected_history = build_b_seed_history(references[1]["title"], references[2]["title"])
+    for index, (row, expected) in enumerate(zip(rows, expected_history), start=1):
+        expected_direction, expected_body, expected_slot = expected
         meta = dict(row.extra_metadata or {})
         if meta.get("internal_message_id") != f"internal_e2e:t1:b:seed:{index:02d}":
             raise _fail("b_seed_history_order_invalid")
@@ -374,32 +425,29 @@ def _verify_b_seed_history(db: Any, *, tenant_id: int, b_conversation_id: int) -
         expected_kind = "pagination" if index <= B_SEED_HISTORY_PAGINATION_ROWS else "reference"
         if meta.get("seed_history_kind") != expected_kind:
             raise _fail("b_seed_history_metadata_mismatch")
-        expected_direction = INTERNAL_E2E_INBOUND if index % 2 else INTERNAL_E2E_OUTBOUND
         if str(row.direction or "") != expected_direction or not str(row.body or "").strip():
             raise _fail("b_seed_history_row_invalid")
-    # The reference rows name the first two active catalog products; their ids
-    # let the continuity check recognise a fall-back to seeded context.
-    seen: set[str] = set()
-    referenced: list[int] = []
-    for product in (
-        db.query(Product)
-        .filter(Product.tenant_id == tenant_id, Product.catalog_status == "active")
-        .order_by(Product.id.asc())
-        .all()
-    ):
-        key = " ".join(str(product.title or "").split()).casefold()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        referenced.append(int(product.id))
-        if len(referenced) == 2:
-            break
+        if str(row.body or "") != expected_body:
+            raise _fail("b_seed_history_row_tampered")
+        if meta.get("seed_reference_slot") != expected_slot:
+            raise _fail("b_seed_history_reference_slot_mismatch")
+        if expected_slot is not None:
+            reference = references[expected_slot]
+            if (
+                meta.get("seed_reference_product_id") != reference["product_id"]
+                or normalize_seed_title(meta.get("seed_reference_title")) != reference["title"]
+            ):
+                raise _fail("b_seed_history_reference_mismatch")
+    referenced_products = [references[slot] for slot in sorted(references)]
     return {
         "rows": len(rows),
         "pagination_rows": B_SEED_HISTORY_PAGINATION_ROWS,
         "reference_rows": B_SEED_HISTORY_REFERENCE_ROWS,
         "conversation_id": int(b_conversation_id),
-        "referenced_product_ids": referenced,
+        "contract": B_SEED_HISTORY_CONTRACT,
+        "referenced_products": referenced_products,
+        "referenced_product_ids": [entry["product_id"] for entry in referenced_products],
+        "referenced_titles": [entry["title"] for entry in referenced_products],
         "verified": True,
     }
 
@@ -577,7 +625,16 @@ def _check_b_continuity(
     state: dict[str, Any],
     seed_referenced: list[int],
 ) -> tuple[dict[str, Any], list[str]]:
-    """Machine continuity check for B1→B4 (anchor → selection → same product)."""
+    """Machine continuity check for B1→B4 (anchor → selection → same product).
+
+    B1 anchors the set of products actually shown.  B2 must select exactly one of
+    them, and B3/B4 must stay on it.  Seeded history never widens that set: a
+    product B discussed before B1 but that B1 did not show is a fall-back to
+    stale context and fails, while a product that appears in both the seeded
+    history and B1 is an ordinary valid choice and is never penalised for having
+    come up before.  A product outside B1 fails either way — ``seed_referenced``
+    only names the failure, it never excuses it.
+    """
     if turn.alias != "B":
         return {"status": "not_applicable"}, []
     blockers: list[str] = []
