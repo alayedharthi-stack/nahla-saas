@@ -83,15 +83,20 @@ CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_PENDING = "MACHINE_GATE_PASSED_HUMAN_REVI
 CLASS_MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED = "MACHINE_GATE_PASSED_HUMAN_REVIEW_REJECTED"
 CLASS_ACCEPTANCE_PASSED = "ACCEPTANCE_PASSED"
 _CONTINUITY_ASSERTION_TURNS = frozenset({"B1", "B2", "B3", "B4"})
+# Only a safety-critical or state-corrupting condition stops the sequence.
+# ``turn_not_completed`` and ``guardrail_not_passed`` are deliberately absent:
+# a rejected model reply means the grounding guardrail did its job and the
+# customer received the safe fallback instead. That is an ordinary quality
+# failure — the turn still fails its machine check — and halting the campaign on
+# it destroys the evidence for every later turn. Production Phase 2.7A runs 1 and
+# 2 each stopped this way (A3, then B1), leaving seven of twelve turns unrun.
 _HALTING_BLOCKERS = frozenset(
     {
         "tenant_mismatch",
         "v2_not_owner",
         "v1_not_bypassed",
-        "turn_not_completed",
         "external_egress",
         "external_egress_unproven",
-        "guardrail_not_passed",
         "unknown_or_write_tool_observed",
         "unsupported_commercial_claims",
         "cross_tenant_leakage",
@@ -502,6 +507,10 @@ def _evidence(artifact: Mapping[str, Any]) -> dict[str, Any]:
         "tool_calls": list(artifact.get("tool_calls") or []),
         "fallback_type": artifact.get("fallback_type"),
         "guardrail_passed": artifact.get("guardrail_passed"),
+        # 1 when the grounding guardrail rejected the model's reply and the
+        # customer received the safe fallback instead. A quality failure, not a
+        # delivered unsupported claim — see ``unsupported_commercial_claims``.
+        "guardrail_blocked_reply": artifact.get("guardrail_blocked_reply"),
         "customer_visible_text": artifact.get("customer_visible_text"),
         "structured_reply": artifact.get("structured_reply"),
         "latency_ms": artifact.get("total_runner_latency_ms"),
@@ -661,6 +670,11 @@ async def run_acceptance_matrix(
     the customer-visible replies; ``acceptance_passed`` needs both.  A halting
     failure (state-corrupting or safety-critical) stops the sequence; remaining
     turns are reported as ``not_executed`` so the summary can never claim 12/12.
+
+    An ordinary quality failure — a rejected model reply, a missing expected
+    tool, an unexpected safe fallback — does not halt: the turn fails its machine
+    check and the sequence continues, so the run still yields evidence for every
+    later turn.  Pass ``halt_on_first_failure`` to stop on any failure instead.
     """
     assert_internal_e2e_operator_scope(ACCEPTANCE_TENANT_ID, env=env)
     support_grant = require_phase_2_7a_support_grant(db, tenant_id=ACCEPTANCE_TENANT_ID)
@@ -732,8 +746,7 @@ async def run_acceptance_matrix(
         if continuity.get("status") == "verified":
             machine_verified = {assertion: "b_continuity_verified" for assertion in _continuity_assertions(turn)}
         halting = (
-            artifact.get("status") != "completed"
-            or int(artifact.get("external_egress_count") or 0) != 0
+            int(artifact.get("external_egress_count") or 0) != 0
             or any(
                 blocker in _HALTING_BLOCKERS or blocker.endswith("_unproven") or blocker.endswith("_proof_mismatch")
                 for blocker in blockers
