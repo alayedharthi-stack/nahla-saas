@@ -1078,6 +1078,23 @@ async def submit_internal_customer_turn(
             else result.failure_reason
         )
         outbound_id = f"internal_e2e:t{request.tenant_id}:{alias.lower()}:out:{uuid.uuid4()}"
+        knowledge_lookups = [dict(item) for item in getattr(result, "knowledge_lookups", []) or []]
+        # Knowledge evidence the run registered, and the subset the delivered
+        # reply actually cited: retrieved-but-unused knowledge is normal.
+        knowledge_evidence_refs = sorted(
+            {
+                ref
+                for item in knowledge_lookups
+                for ref in (item.get("evidence_refs") or [])
+            }
+        )
+        knowledge_refs_used = sorted(
+            {
+                str(ref)
+                for ref in (result.reply.evidence_refs or [])
+                if str(ref).startswith("kb:section:")
+            }
+        )
         artifact = {
             "artifact_version": INTERNAL_E2E_ARTIFACT_VERSION,
             "execution_mode": "INTERNAL_E2E",
@@ -1122,6 +1139,18 @@ async def submit_internal_customer_turn(
             },
             "fallback_type": fallback_type,
             "knowledge_gap_disclosure": knowledge_gap_disclosure,
+            # Retrieval is mandatory and using it is not, so the artifact records
+            # the attempt itself. An empty ledger means no lookup ran, which is a
+            # different fact from a lookup that found nothing.
+            "knowledge_lookup_attempted": int(bool(knowledge_lookups)),
+            "knowledge_lookups": knowledge_lookups,
+            "knowledge_lookup_statuses": sorted(
+                {str(item.get("status") or "") for item in knowledge_lookups}
+            ),
+            "knowledge_hits": sum(int(item.get("hit_count") or 0) for item in knowledge_lookups),
+            "knowledge_evidence_refs": knowledge_evidence_refs,
+            "knowledge_evidence_used_in_reply": knowledge_refs_used,
+            "knowledge_conflicts": list(getattr(result, "knowledge_conflicts", []) or []),
             "leakage_checks": {
                 "cross_tenant_leakage": isolation_proofs["cross_tenant_leakage"],
                 "cross_customer_leakage": isolation_proofs["cross_customer_leakage"],

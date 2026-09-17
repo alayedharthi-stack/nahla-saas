@@ -9,11 +9,18 @@ from agents import RunContextWrapper
 
 from core.store_knowledge import CatalogContextBuilder
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
+from modules.ai.commerce_agent_v2.knowledge_retrieval import (
+    SCOPE_PRODUCT,
+    build_knowledge_snapshots,
+    retrieved_sections,
+    run_knowledge_lookup,
+)
 from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import (
     CatalogSearchResult,
     CanonicalEvidenceFact,
     EvidenceRecord,
+    KnowledgeSectionSnapshot,
     ProductDetailsResult,
     ProductSnapshot,
 )
@@ -163,6 +170,42 @@ def _catalog_search_enabled(
         run_context.context.consecutive_catalog_misses
         < _MAX_CONSECUTIVE_CATALOG_MISSES
     )
+
+
+def _attach_product_knowledge(
+    context: CommerceAgentContext,
+    product_ids: list[int],
+) -> list[KnowledgeSectionSnapshot]:
+    """Retrieve merchant knowledge for the products this tool just grounded.
+
+    Deterministic by construction: the lookup follows the catalog evidence
+    rather than an intent guess, runs once per (question, product set), and is
+    recorded even when it returns nothing.  A retrieval failure returns no
+    sections and never disturbs the catalog answer the customer asked for.
+    """
+    ids = sorted({int(pid) for pid in product_ids if int(pid) > 0})
+    if not ids:
+        return []
+    query = context.run_user_input
+    run_knowledge_lookup(
+        context,
+        scope=SCOPE_PRODUCT,
+        purpose="catalog_product_knowledge",
+        query=query,
+        product_ids=ids,
+    )
+    rows = retrieved_sections(context, scope=SCOPE_PRODUCT, query=query, product_ids=ids)
+    if not rows:
+        return []
+    snapshots, evidence = build_knowledge_snapshots(
+        context,
+        rows,
+        source="product_knowledge",
+        required_product_id=None,
+        allowed_product_ids=ids,
+    )
+    context.register_evidence(evidence)
+    return snapshots
 
 
 def _canonical_money(value: Any) -> int | float | None:
@@ -351,7 +394,15 @@ async def search_products(
             ),
         )
     context.record_catalog_search_outcome(found=True)
-    return CatalogSearchResult(status="ok", products=snapshots, evidence=evidence)
+    knowledge_sections = _attach_product_knowledge(
+        context, [item.product_id for item in snapshots]
+    )
+    return CatalogSearchResult(
+        status="ok",
+        products=snapshots,
+        evidence=evidence,
+        knowledge_sections=knowledge_sections,
+    )
 
 
 @commerce_read_tool("get_product_details", is_enabled=_catalog_search_enabled)
@@ -372,4 +423,10 @@ async def get_product_details(
     _assert_catalog_rows_belong_to_tenant(context, [row])
     snapshot, evidence = _product_evidence(row)
     context.register_evidence([evidence])
-    return ProductDetailsResult(status="ok", product=snapshot, evidence=[evidence])
+    knowledge_sections = _attach_product_knowledge(context, [snapshot.product_id])
+    return ProductDetailsResult(
+        status="ok",
+        product=snapshot,
+        evidence=[evidence],
+        knowledge_sections=knowledge_sections,
+    )
