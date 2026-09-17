@@ -424,15 +424,10 @@ def _get_or_create_customer(
     resolved_name = (customer_name or "").strip()
     if is_untrusted_message_name_source(source):
         resolved_name = ""
-    elif not resolved_name:
-        existing = db.query(Customer).filter(
-            Customer.tenant_id == tenant_id,
-            (Customer.phone == customer_phone)
-            | (Customer.phone == normalized_phone)
-            | (Customer.normalized_phone == normalized_phone),
-        ).first()
-        if existing and existing.name:
-            resolved_name = str(existing.name).strip()
+    # An absent incoming name is a lookup, not fresh WhatsApp evidence.
+    # upsert_customer_identity already preserves the stored name. Feeding it
+    # back as a profile would overwrite the last-attempt provenance on every
+    # conversation lookup (including persistence of an AI-suppressed turn).
 
     customer = service.upsert_customer_identity(
         phone=normalized_phone,

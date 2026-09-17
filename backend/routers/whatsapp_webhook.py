@@ -3585,6 +3585,37 @@ async def _dispatch_message(
             )
             if _lead:
                 _inbound_customer_id = _lead.id
+            # Identity belongs to inbound ingestion, before any AI-reply gate.
+            # Tenant resolution, the conversation lock, and both replay guards
+            # have already run. Use the resolved customer, never a name lookup.
+            # Only original live customer text may establish self-report evidence;
+            # media descriptions, history, buttons and outbound echoes may not.
+            if _lead and not _hist_skip_live and msg_type == "text":
+                try:
+                    from core.customer_name_extractor import extract_high_confidence_name  # noqa: PLC0415
+                    from core.customer_identity_resolver import apply_customer_name  # noqa: PLC0415
+
+                    _name_text = (msg.get("text") or {}).get("body", "")
+                    _name_hit = extract_high_confidence_name(_name_text)
+                    if _name_hit:
+                        apply_customer_name(
+                            _lead, _name_hit.value, source="ai_detected_name",
+                            explicit_customer_entry=True,
+                            message_context={
+                                "message": _name_text,
+                                "wa_message_id": msg_id,
+                                "name_capture_pattern": _name_hit.pattern,
+                            },
+                        )
+                        # Also commit blocked-attempt provenance; a True return
+                        # alone does not mean the canonical name changed.
+                        db.commit()
+                except Exception:  # noqa: BLE001 — identity failure must not lose the inbound message
+                    db.rollback()
+                    logger.warning(
+                        "[NAME_EXTRACTOR] inbound capture failed tenant=%s customer=%s",
+                        resolved_tenant_id, _inbound_customer_id,
+                    )
             if _lead and _hist_skip_live:
                 try:
                     from services.merchant_first_contact import (  # noqa: PLC0415
@@ -3855,7 +3886,6 @@ async def _dispatch_message(
                         tenant_id=resolved_tenant_id,
                         customer=_lead,
                         customer_phone=normalized_sender,
-                        customer_name=contact_name or "",
                         message_preview=_msg_text,
                         log_notification=_log_notification,
                     )
@@ -7057,107 +7087,6 @@ async def _handle_merchant_message(
         )
         return
 
-    # ── Customer self-introduction capture (May 2026) ────────────────────────
-    # If the inbound text is an UNAMBIGUOUS self-intro ("اسمي محمد",
-    # "أنا دخيل الله", "معك فهد", "my name is …") and the customer row
-    # is either nameless OR was cleared by the merchant via the inline
-    # pencil (manual_name_cleared=true), adopt the volunteered name as
-    # the canonical ``Customer.name``. Side-effects are bounded:
-    #   * NEVER overwrites a non-empty merchant-curated name.
-    #   * NEVER fires on incidental name mentions inside a longer
-    #     sentence — only on the conservative anchors in
-    #     ``core.customer_name_extractor``.
-    #   * Failure is logged and ignored — the rest of the inbound
-    #     pipeline runs as before.
-    try:
-        from core.customer_name_extractor import (  # noqa: PLC0415
-            extract_high_confidence_name,
-        )
-        from services.customer_intelligence import (  # noqa: PLC0415
-            CustomerIntelligenceService as _NameCIS,
-        )
-
-        _name_hit = extract_high_confidence_name(text)
-        # Both are bound earlier in this handler on the live path; guard
-        # anyway so a historical/skip branch can never NameError here.
-        try:
-            _name_evidence_conv_id = getattr(convo_hist, "id", None)
-        except NameError:
-            _name_evidence_conv_id = None
-        try:
-            _name_evidence_msg_id = wa_msg_id or ""
-        except NameError:
-            _name_evidence_msg_id = ""
-        if _name_hit:
-            from core.customer_name_adoption_guard import (  # noqa: PLC0415
-                is_trusted_name_adoption_source,
-            )
-            from core.customer_name_validator import validate_customer_name  # noqa: PLC0415
-
-            if not is_trusted_name_adoption_source(
-                "ai_detected_name",
-                direction="inbound",
-                explicit_customer_entry=True,
-            ):
-                logger.info(
-                    "[NAME_EXTRACTOR] blocked by adoption guard | tenant=%s phone=%s",
-                    tenant_id, to,
-                )
-            elif not validate_customer_name(_name_hit.value).valid:
-                logger.info(
-                    "[NAME_EXTRACTOR] rejected by validator | tenant=%s phone=%s name=%r",
-                    tenant_id, to, _name_hit.value,
-                )
-            else:
-                try:
-                    _name_svc = _NameCIS(db, tenant_id)
-                    _name_cust = _name_svc.upsert_customer_identity(
-                        phone=to,
-                        name=_name_hit.value,
-                        source="ai_detected_name",
-                        extra_metadata={
-                            "inbound_text": text,
-                            "name_capture_pattern": _name_hit.pattern,
-                        },
-                        message_context={
-                            "message": text,
-                            "source": "ai_detected_name",
-                            "explicit_customer_entry": True,
-                            "name_capture_pattern": _name_hit.pattern,
-                            # Durable evidence reference for provenance.
-                            "conversation_id": _name_evidence_conv_id,
-                            "wa_message_id": _name_evidence_msg_id,
-                        },
-                    )
-                    # If the row was previously CLEARED by the merchant
-                    # we now flip ``manual_name_cleared`` back to false
-                    # because we successfully refilled it. The override
-                    # flag stays true so future low-trust sources (CSV
-                    # imports, WhatsApp profile syncs) still cannot touch
-                    # this name.
-                    if _name_cust is not None:
-                        _meta = dict(_name_cust.extra_metadata or {})
-                        if _meta.get("manual_name_cleared"):
-                            _meta["manual_name_cleared"] = False
-                            from datetime import timezone as _tz_name  # noqa: PLC0415
-                            _meta["manual_name_refilled_by_ai_at"] = (
-                                datetime.now(_tz_name.utc).isoformat()
-                            )
-                            _name_cust.extra_metadata = _meta
-                            db.add(_name_cust)
-                    db.flush()
-                    logger.info(
-                        "[NAME_EXTRACTOR] adopted | tenant=%s phone=%s "
-                        "pattern=%s name=%r",
-                        tenant_id, to, _name_hit.pattern, _name_hit.value,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "[NAME_EXTRACTOR] adopt failed | tenant=%s phone=%s err=%s",
-                        tenant_id, to, exc,
-                    )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[NAME_EXTRACTOR] skipped (init err): %s", exc)
 
     # ── COD reply interception ────────────────────────────────────────────────
     # Some WhatsApp clients render QUICK_REPLY taps as plain text rather

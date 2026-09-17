@@ -268,6 +268,13 @@ _NAME_ONLY_SINGLE_TOKENS: FrozenSet[str] = frozenset(_normalize_arabic(t) for t 
     "وضحي", "شيماء", "زينب", "رقية", "رقيه", "سمية", "سميه",
 })
 
+# Reviewed Saudi family/tribal display names. Exact positive membership only:
+# neither the article ال nor a nisba-shaped suffix establishes personhood.
+# Extend deliberately with both positive and ordinary-word regression cases.
+_TRUSTED_SAUDI_FAMILY_NAMES: FrozenSet[str] = frozenset(_normalize_arabic(t) for t in {
+    "الغامدي", "الحارثي", "العتيبي", "القحطاني", "الزهراني",
+})
+
 # POLYSEMOUS: real, common given names that are ALSO ordinary words.
 # From a profile string alone these are AMBIGUOUS — never rejected,
 # never canonicalised without stronger evidence. Explicitly enumerated
@@ -379,6 +386,8 @@ def classify_whatsapp_profile_name(raw: Optional[str]) -> ProfileClassification:
 
     # ── Single token: deterministic positive rules only ──────────────
     token = norm_tokens[0]
+    if token in _TRUSTED_SAUDI_FAMILY_NAMES:
+        return ProfileClassification(PERSON_NAME, cleaned=cleaned, reason="trusted_saudi_family_name")
     if _is_theophoric_compound(token):
         return ProfileClassification(PERSON_NAME, cleaned=cleaned, reason="theophoric_compound")
     if token in _NAME_ONLY_SINGLE_TOKENS:

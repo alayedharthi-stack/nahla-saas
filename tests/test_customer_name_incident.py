@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -200,13 +200,18 @@ def _connection(db, customer, suffix):
     return connection.phone_number_id
 
 
-def _dispatch_disabled(db, monkeypatch, *, customers, message="اسمي أبو سعد", replay=False):
+def _dispatch_disabled(db, monkeypatch, *, customers, message="اسمي أبو سعد", replay=False,
+                       historical=False):
     from core.ai_disabled_gate import AIDisabledDecision
     from core.inbound_dedup import reset_cache
     import core.customer_identity_resolver as identity
     import routers.whatsapp_webhook as webhook
 
     pid_by_tenant = {c.tenant_id: _connection(db, c, str(c.tenant_id)) for c in customers}
+    if historical:
+        for row in db.query(WhatsAppConnection).all():
+            row.whatsapp_ai_live_since = datetime.now(timezone.utc)
+        db.commit()
     monkeypatch.setattr(webhook, "get_db", lambda: iter([db]))
     monkeypatch.setattr(db, "close", lambda: None)
     monkeypatch.setattr(webhook, "_is_platform_tenant", lambda *_a, **_k: False)
@@ -220,10 +225,14 @@ def _dispatch_disabled(db, monkeypatch, *, customers, message="اسمي أبو �
         patch.object(webhook, "_post_wa", new=AsyncMock()) as outbound,
         patch("modules.ai.brain.pipeline.get_brain") as brain,
         patch.object(webhook, "_run_and_deliver_commerce_v2_owner", new=AsyncMock()) as commerce,
+        patch("modules.ai.commerce_agent_v2.runner.run_commerce_agent", new=AsyncMock()) as runner,
+        patch("services.whatsapp_platform.service.provider_post_with_context", new=AsyncMock()) as provider,
     ):
         for customer in customers:
             msg = {"from": PHONE.lstrip("+"), "id": "synthetic:same-event",
                    "type": "text", "text": {"body": message}}
+            if historical:
+                msg["timestamp"] = "1"
             value = {"contacts": [{"wa_id": PHONE.lstrip("+"),
                                     "profile": {"name": "الغامدي"}}]}
             asyncio.run(webhook._dispatch_message(pid_by_tenant[customer.tenant_id], msg, value))
@@ -235,6 +244,8 @@ def _dispatch_disabled(db, monkeypatch, *, customers, message="اسمي أبو �
         outbound.assert_not_called()
         brain.assert_not_called()
         commerce.assert_not_called()
+        runner.assert_not_called()
+        provider.assert_not_called()
     return apply
 
 
@@ -264,3 +275,46 @@ def test_disabled_gate_same_phone_and_event_are_tenant_isolated(db, monkeypatch)
         assert row.canonical_name == "أبو سعد"
         assert db.query(MessageEvent).filter_by(tenant_id=customer.tenant_id).count() == 1
     assert db.query(CustomerNameProvenance).count() == 2
+
+
+def test_conversation_lookup_does_not_resubmit_stored_name_as_profile(db):
+    from routers.conversations import _get_or_create_customer
+    import core.customer_identity_resolver as identity
+
+    customer = _customer(db)
+    apply_customer_name(customer, "أحمد سالم", source="salla_sync")
+    db.commit()
+    with patch.object(identity, "apply_customer_name", wraps=identity.apply_customer_name) as apply:
+        resolved = _get_or_create_customer(db, customer.tenant_id, PHONE)
+    assert resolved.id == customer.id
+    apply.assert_not_called()
+    assert _provenance(db, customer).last_decision == "applied"
+
+
+@pytest.mark.parametrize("message", AMBIGUOUS)
+def test_disabled_ingress_ambiguous_name_keeps_profile(db, monkeypatch, message):
+    customer = _customer(db)
+    apply = _dispatch_disabled(db, monkeypatch, customers=[customer], message=message, replay=True)
+    assert customer.name == "الغامدي"
+    assert _provenance(db, customer).authority == "WHATSAPP_PROFILE"
+    assert not any(c.kwargs.get("source") == "ai_detected_name" for c in apply.call_args_list)
+    assert db.query(MessageEvent).filter_by(tenant_id=customer.tenant_id).count() == 1
+
+
+@pytest.mark.parametrize("protected", ["verified", "manual"])
+def test_disabled_ingress_keeps_stronger_name(db, monkeypatch, protected):
+    customer = _customer(db)
+    apply_customer_name(customer, "أحمد سالم",
+                        source="salla_sync" if protected == "verified" else "manual_admin",
+                        force_merchant=protected == "manual")
+    db.commit()
+    _dispatch_disabled(db, monkeypatch, customers=[customer], replay=True)
+    assert customer.name == _provenance(db, customer).canonical_name == "أحمد سالم"
+    assert db.query(MessageEvent).filter_by(tenant_id=customer.tenant_id).count() == 1
+
+
+def test_history_does_not_acquire_live_self_report_evidence(db, monkeypatch):
+    customer = _customer(db)
+    apply = _dispatch_disabled(db, monkeypatch, customers=[customer], historical=True)
+    assert customer.name != "أبو سعد"
+    assert not any(c.kwargs.get("source") == "ai_detected_name" for c in apply.call_args_list)

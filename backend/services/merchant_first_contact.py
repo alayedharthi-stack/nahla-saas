@@ -219,6 +219,7 @@ def maybe_notify_first_customer(
         from models import User  # noqa: PLC0415
         from services.email_service import enqueue_email  # noqa: PLC0415
         from core.config import DASHBOARD_URL  # noqa: PLC0415
+        from core.customer_identity_resolver import display_name_for_customer  # noqa: PLC0415
 
         merchant = db.query(User).filter(
             User.tenant_id == tenant_id, User.role == "merchant",
@@ -238,7 +239,11 @@ def maybe_notify_first_customer(
             sender_type="growth",
             variables={
                 "merchant_name": merchant.username or "",
-                "customer_name": customer_name or "",
+                # Keep the legacy argument for caller compatibility, but never
+                # let an unchecked profile string override resolved identity.
+                "customer_name": display_name_for_customer(
+                    customer, phone_fallback=customer_phone or "",
+                ),
                 "customer_phone": customer_phone,
                 "message_preview": message_preview,
                 "conversation_url": conversation_url or f"{DASHBOARD_URL}/conversations",

@@ -128,6 +128,47 @@ def _pending_sibling(db: Session, tenant_id: int, phone: str) -> Customer:
     return sibling
 
 
+def test_family_profile_then_explicit_kunya_persists_on_postgres(pg_with_provenance_table: Engine) -> None:
+    """The existing 0107 shape records both authorities without a new schema."""
+    from core.customer_name_extractor import extract_high_confidence_name
+
+    db = _session(pg_with_provenance_table)
+    try:
+        customer = _seed(db)
+        apply_customer_name(customer, "الغامدي", source="whatsapp_inbound")
+        db.commit()
+        db.expire_all()
+        assert customer.name == "الغامدي"
+        hit = extract_high_confidence_name("هذا رقمي، أنا ابوسعد")
+        assert hit is not None and hit.value == "أبو سعد"
+        context = {"message": "هذا رقمي، أنا ابوسعد", "wa_message_id": "synthetic:pg-name"}
+        apply_customer_name(customer, hit.value, source="ai_detected_name",
+                            explicit_customer_entry=True, message_context=context)
+        db.commit()
+        db.expire_all()
+        row = db.query(CustomerNameProvenance).filter_by(
+            tenant_id=customer.tenant_id, customer_id=customer.id,
+        ).one()
+        assert customer.name == row.canonical_name == "أبو سعد"
+        assert row.previous_name == row.profile_hint == "الغامدي"
+        assert row.previous_authority == "WHATSAPP_PROFILE"
+        assert row.authority == "CUSTOMER_SELF_REPORTED"
+        assert row.evidence_ref["wa_message_id"] == "synthetic:pg-name"
+        canonical_at = row.canonical_updated_at
+        apply_customer_name(customer, hit.value, source="ai_detected_name",
+                            explicit_customer_entry=True, message_context=context)
+        db.commit()
+        db.expire_all()
+        assert row.canonical_updated_at == canonical_at
+        assert row.previous_name == "الغامدي"
+        assert row.last_decision == "noop"
+        assert db.query(CustomerNameProvenance).filter_by(
+            tenant_id=customer.tenant_id, customer_id=customer.id,
+        ).count() == 1
+    finally:
+        db.close()
+
+
 # ── Negative control: the hazard is real on PostgreSQL ────────────────
 
 def test_control_unprotected_read_poisons_the_transaction(pg_without_provenance_table: Engine) -> None:
