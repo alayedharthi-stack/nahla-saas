@@ -38,6 +38,34 @@ _WEAK_QUERY_VALUES = frozenset(
     {"هذا", "هذه", "هذي", "ذا", "هو", "هي", "this", "that", "it"}
 )
 
+# A decimal number followed directly by another decimal ("11.53820.5125...")
+# can only come from numeric cells whose separators were lost upstream.
+_FUSED_DECIMAL_RUN_RE = re.compile(r"\d+[.,]\d+[.,]\d+")
+# Arabic letters fused to digits with no whitespace ("المقاس36نصف") show the
+# same loss between words and numbers; together the two rules single out
+# flattened merchant tables and leave dotted identifiers in normal prose alone.
+_ARABIC_DIGIT_ADJACENCY_RE = re.compile(r"[؀-ۿ]\d|\d[؀-ۿ]")
+DESCRIPTION_WITHHELD_FUSED_NUMERIC_TEXT = "fused_numeric_text"
+
+
+def citable_description(raw: Any) -> tuple[str, str | None]:
+    """Return the description the model may cite, or "" plus a withhold reason.
+
+    Salla can return a merchant's size chart flattened with no separators at
+    all (Phase 2.7A run 1, product 23:
+    ``المقاس36نصف محيط الخصر19.5الطول125الكم11.53820.512511.5...``). The
+    numeric boundaries in such text are irrecoverable, so no faithful
+    rendering can satisfy the grounding guardrail's number check; the model's
+    only outcomes are a rejected reply and a safe fallback. Withholding the
+    text from evidence lets the turn stay grounded on the product facts that
+    are verifiable (name, price, availability, media). Nothing is added to
+    evidence here; the check only removes unverifiable text.
+    """
+    text = str(raw or "")
+    if _FUSED_DECIMAL_RUN_RE.search(text) and _ARABIC_DIGIT_ADJACENCY_RE.search(text):
+        return "", DESCRIPTION_WITHHELD_FUSED_NUMERIC_TEXT
+    return text, None
+
 
 def _normalise_reference_text(value: Any) -> str:
     text = str(value or "").strip().casefold()
@@ -160,11 +188,12 @@ def _canonical_money(value: Any) -> int | float | None:
 def _product_evidence(row: dict[str, Any]) -> tuple[ProductSnapshot, EvidenceRecord]:
     product_id = int(row["id"])
     evidence_ref = f"catalog:product:{product_id}"
+    description, description_withheld = citable_description(row.get("description"))
     fields = {
         "product_id": product_id,
         "external_id": row.get("external_id"),
         "title": str(row.get("title") or ""),
-        "description": str(row.get("description") or ""),
+        "description": description,
         "price": row.get("price"),
         "sale_price": row.get("sale_price"),
         "regular_price": row.get("regular_price"),
@@ -198,17 +227,20 @@ def _product_evidence(row: dict[str, Any]) -> tuple[ProductSnapshot, EvidenceRec
     add_fact("stock_quantity", fields["stock_quantity"])
     add_fact("image_url", fields["image_url"])
     add_fact("product_url", fields["product_url"])
+    provenance = {
+        "service": "core.store_knowledge.CatalogContextBuilder",
+        "record": "products",
+        "freshness": "synced_catalog",
+    }
+    if description_withheld is not None:
+        provenance["description_withheld"] = description_withheld
     evidence = EvidenceRecord(
         ref=evidence_ref,
         source="catalog_product",
         source_id=str(product_id),
         facts=facts,
         fields=fields,
-        provenance={
-            "service": "core.store_knowledge.CatalogContextBuilder",
-            "record": "products",
-            "freshness": "synced_catalog",
-        },
+        provenance=provenance,
     )
     snapshot = ProductSnapshot(
         product_id=product_id,
