@@ -183,16 +183,30 @@ def test_malformed_manifest_is_rejected(synthetic_root: Path) -> None:
 
 
 def test_committed_inventory_matches_pytest_collection_exactly() -> None:
+    """No fixed counts here on purpose: the inventory must equal pytest's own
+    collection of each listed module, so a test added to a module without an
+    inventory update fails this test instead of being silently omitted."""
     manifest = json.loads(COMMITTED_MANIFEST.read_text(encoding="utf-8"))
     ids = [s["id"] for s in manifest["suites"]]
-    assert ids == ["commerce_runtime_foundation", "global_customer_identity"]
+    assert ids == ["commerce_runtime_foundation", "commerce_runtime_migration", "global_customer_identity"]
     expected_env = {
         "commerce_runtime_foundation": {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None},
+        "commerce_runtime_migration": {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None},
         "global_customer_identity": {"CUSTOMER_NAME_PROVENANCE_PG_REQUIRED": "1", "LEGACY_MIG_PG_TEST_DATABASE_URL": None},
     }
     for suite in manifest["suites"]:
         assert suite["required_env"] == expected_env[suite["id"]], suite["id"]
         collected = _collect(REPO_ROOT, suite["module"])
+        assert collected, suite["module"]
         assert collected == suite["nodeids"], (suite["id"], set(collected) ^ set(suite["nodeids"]))
-    assert len(manifest["suites"][0]["nodeids"]) == 18
-    assert len(manifest["suites"][1]["nodeids"]) == 5
+
+
+def test_inventory_drift_is_detected_not_tolerated(synthetic_root: Path) -> None:
+    """A module that gains a test the inventory does not list is NOT PROVEN."""
+    module = _write_module(synthetic_root, "test_ok.py", PASSING_MODULE)
+    manifest = _manifest(synthetic_root, module, _collect(synthetic_root, module))
+    (synthetic_root / "proofs" / "test_ok.py").write_text(PASSING_MODULE + "\ndef test_added_later():\n    assert True\n",
+                                                          encoding="utf-8")
+    result = _run(synthetic_root, manifest, ENV_OK)
+    assert result["exit"] == 1
+    assert any(b.startswith(f"uninventoried_collection:{module}::test_added_later") for b in result["report"]["suites"][0]["blockers"])

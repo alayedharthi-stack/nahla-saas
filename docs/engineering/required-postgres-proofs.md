@@ -16,8 +16,15 @@ protection rule show the required checks `Scan repository for leaked secrets`,
 
 | Suite id | Module | Origin | Required tests |
 | --- | --- | --- | --- |
-| `commerce_runtime_foundation` | `tests/commerce_reliability/test_commerce_runtime_foundation_pg.py` | PR #1089, dormant commerce runtime foundation | 18 |
+| `commerce_runtime_foundation` | `tests/commerce_reliability/test_commerce_runtime_foundation_pg.py` | PR #1089, dormant commerce runtime foundation, including the lock-wait, scope-binding and ordered-processing regressions | 27 |
+| `commerce_runtime_migration` | `tests/commerce_reliability/test_commerce_runtime_migration_pg.py` | PR #1089, revision 0108 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation) | 10 |
 | `global_customer_identity` | `backend/tests/test_global_customer_display_identity_pg.py` | PR #1087 (merged), 0107 persistence cases | 5 |
+
+The counts above are informational. Nothing in the runner or its self-test
+pins a count: the inventory must equal pytest's own collection of each
+module, so a test added without an inventory update fails
+(`uninventoried_collection`) rather than being omitted, and a listed test
+that disappears fails (`missing_collection`).
 
 The exact node ids live in `scripts/required_postgres_proofs.json`
 (`python scripts/required_postgres_proofs.py --manifest scripts/required_postgres_proofs.json --junit-dir /tmp/x --list`
@@ -39,17 +46,19 @@ process with `--junitxml` and judges the JUnit output:
 | Any skip, failure or error | exit **1**, the node id and reason are listed; a skip is never a pass |
 | Leaf `testsuite` counts differ from the inventory or show skips, failures or errors | exit **1** |
 | Non-zero pytest exit | exit **1** |
-| Everything above satisfied for every suite | exit **0**, `PROVEN (23/23 required tests passed, 0 skips tolerated)` |
+| Everything above satisfied for every suite | exit **0**, `PROVEN (42/42 required tests passed, 0 skips tolerated)` at the current inventory |
 
 The runner is pure standard library, imports no application code and carries
 no allowances. `tests/commerce_reliability/test_required_postgres_proofs_runner.py`
-proves every rule with a negative control on synthetic suites and pins the
-committed inventory to pytest's own collection of the two real modules, so an
-added or removed test is a reviewed inventory change, never a silent drift.
+proves every rule with a negative control on synthetic suites, proves that
+a test added to a module without an inventory update is refused, and pins
+the committed inventory to pytest's own collection of the three real
+modules, so an added or removed test is a reviewed inventory change, never
+a silent drift.
 
 ### Fixture contracts (unchanged; used as they are)
 
-* Foundation suite: `NAHLA_RELIABILITY_REQUIRE_PG=1` with
+* Foundation and migration suites: `NAHLA_RELIABILITY_REQUIRE_PG=1` with
   `NAHLA_RELIABILITY_PG_ADMIN_DSN` set. The harness fixture fails (never
   skips) when the flag is set without the DSN; without the flag it skips,
   which ordinary local runs report as skipped and which is never proof. Each
@@ -70,7 +79,7 @@ Inside `lint-and-test`: a `postgres:16` service (user `nahla`, database
 `a1-postgres-integration` job) and one step directly after "Run unit tests":
 
 ```yaml
-      - name: Required PostgreSQL proofs (commerce runtime foundation + customer identity)
+      - name: Required PostgreSQL proofs (commerce runtime foundation, migration, customer identity)
         env:
           NAHLA_RELIABILITY_REQUIRE_PG: "1"
           NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
@@ -141,8 +150,10 @@ python scripts/required_postgres_proofs.py --manifest scripts/required_postgres_
 python -m pytest tests/commerce_reliability/test_commerce_runtime_foundation_pg.py -q -rs
 ```
 
-Recorded on 2026-09-18 (PostgreSQL 16.13, Python 3.11): PROVEN, 23/23 passed,
-0 skipped, 0 databases left behind; with the variables unset the runner exits
-2 before starting pytest; with the variables set and no server listening, the
-foundation suite reports 2 failed + 16 errors and the identity suite 5 errors
-(its module-scoped fixture fails instead of skipping), verdict NOT PROVEN, 0/23.
+Recorded on 2026-09-18 (PostgreSQL 16.13, Python 3.11): first inventory
+PROVEN 23/23; after the review corrections PROVEN 42/42 (27 + 10 + 5), 0
+skipped, 64 s, 0 databases left behind. With the variables unset the runner
+exits 2 before starting pytest; with the variables set and no server
+listening, the foundation suite reported 2 failed + 16 errors and the
+identity suite 5 errors (its module-scoped fixture fails instead of
+skipping), verdict NOT PROVEN.
