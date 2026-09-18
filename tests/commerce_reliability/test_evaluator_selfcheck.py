@@ -113,29 +113,135 @@ def test_guardrail_passed_without_execution_rejected() -> None:
     assert "guardrail_passed_without_execution:h" in optional.blockers
 
 
+_TIMEOUT = {"n": 1, "type": "interactive", "status": None, "wamid": None, "error": "ReadTimeout"}
+_NO_ID = {"n": 1, "type": "interactive", "status": 200, "wamid": None, "error": None}
+_REJECTED = {"n": 1, "type": "interactive", "status": 400, "wamid": None, "error": None}
+_ACCEPTED_2 = {"n": 2, "type": "text", "status": 200, "wamid": "wamid.accepted.2", "error": None}
+_ACCEPTED_1 = {"n": 1, "type": "text", "status": 200, "wamid": "wamid.accepted.1", "error": None}
+
+
+def _after_ambiguous(retry_evidence, first=_TIMEOUT):
+    """Timeout (or 200 without id) followed by one accepted text carrying retry_evidence."""
+    later = {**_ACCEPTED_2, "retry_evidence": retry_evidence}
+    return ev.evaluate_turn(
+        _reference_expectation(),
+        _reference_evidence(send_attempts=[first, later], accepted_wamids=["wamid.accepted.2"]),
+    )
+
+
+def _unsafe_reason(verdict, index=2):
+    prefix = f"unsafe_dispatch_after_ambiguous_attempt:{index}:"
+    reasons = [b[len(prefix):] for b in verdict.blockers if b.startswith(prefix)]
+    assert len(reasons) == 1, verdict.blockers
+    return reasons[0]
+
+
 def test_dispatch_after_ambiguous_attempt_rejected() -> None:
-    timeout = {"n": 1, "type": "interactive", "status": None, "wamid": None, "error": "ReadTimeout"}
-    no_id = {"n": 1, "type": "interactive", "status": 200, "wamid": None, "error": None}
-    rejected = {"n": 1, "type": "interactive", "status": 400, "wamid": None, "error": None}
-    accepted = {"n": 2, "type": "text", "status": 200, "wamid": "wamid.accepted.2", "error": None}
-    for first in (timeout, no_id):
-        verdict = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[first, accepted], accepted_wamids=["wamid.accepted.2"]))
-        assert "unsafe_dispatch_after_ambiguous_attempt:2" in verdict.blockers, first
-    # Authoritative evidence permitting another attempt lifts the block.
-    permitted = ev.evaluate_turn(_reference_expectation(), _reference_evidence(
-        send_attempts=[timeout, {**accepted, "retry_evidence": "provider:status_query:not_delivered"}], accepted_wamids=["wamid.accepted.2"]))
-    assert not [b for b in permitted.blockers if b.startswith("unsafe_dispatch")], permitted.blockers
-    # A definitive rejection followed by one send is the documented recovery path.
-    recovery = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[rejected, accepted], accepted_wamids=["wamid.accepted.2"]))
-    assert recovery.passed, recovery.blockers
-    # After an accepted send, a further dispatch is a duplicate risk for a single-send case.
+    for first in (_TIMEOUT, _NO_ID):
+        assert _unsafe_reason(_after_ambiguous(None, first)) == "no_retry_evidence", first
+    # A further dispatch after an accepted send is a duplicate risk in a single-send case.
     again = {"n": 2, "type": "text", "status": None, "wamid": None, "error": "ReadTimeout"}
-    duplicate_risk = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[{**accepted, "n": 1}, again]))
-    assert "dispatch_after_accepted_send:2" in duplicate_risk.blockers
-    multi = ev.evaluate_turn(_reference_expectation(max_accepted_sends=2), _reference_evidence(send_attempts=[{**accepted, "n": 1}, again]))
-    assert not [b for b in multi.blockers if b.startswith("dispatch_after_accepted_send")], multi.blockers
+    duplicate_risk = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[_ACCEPTED_1, again]))
+    assert "dispatch_after_accepted_send:2:no_retry_evidence" in duplicate_risk.blockers
     malformed = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=["not-a-record"]))
     assert "send_attempt_record_malformed" in malformed.blockers
+
+
+def test_retry_evidence_never_authorizes_dispatch_by_itself() -> None:
+    """The presence of a retry_evidence field is never an authorisation."""
+    assert _unsafe_reason(_after_ambiguous(True)) == "not_a_mapping"
+    assert _unsafe_reason(_after_ambiguous("provider:status_query:not_delivered")) == "not_a_mapping"
+    assert _unsafe_reason(_after_ambiguous("retry")) == "not_a_mapping"
+    assert _unsafe_reason(_after_ambiguous({})) == "kind_unknown"
+    assert _unsafe_reason(_after_ambiguous({"kind": "operator_says_ok"})) == "kind_unknown"
+    # Incomplete objects: the right kind without binding, or bound without source/reference.
+    assert _unsafe_reason(_after_ambiguous({"kind": ev.RETRY_EVIDENCE_KIND_NOT_ACCEPTED})) == "attempt_binding_mismatch"
+    assert _unsafe_reason(_after_ambiguous({"kind": ev.RETRY_EVIDENCE_KIND_NOT_ACCEPTED, "attempt": 1})) == "incomplete"
+    assert _unsafe_reason(_after_ambiguous({"kind": ev.RETRY_EVIDENCE_KIND_NOT_ACCEPTED, "attempt": 1, "source": "x"})) == "incomplete"
+    assert _unsafe_reason(_after_ambiguous({"kind": ev.RETRY_EVIDENCE_KIND_IDEMPOTENT, "attempt": 1})) == "incomplete"
+    # A retry flag or an explanation string inside the object changes nothing.
+    assert _unsafe_reason(_after_ambiguous({"kind": ev.RETRY_EVIDENCE_KIND_NOT_ACCEPTED, "attempt": 1, "retry": True,
+                                            "explanation": "timeout means it was not sent"})) == "incomplete"
+
+
+def test_retry_evidence_binding_and_conflict_rejected() -> None:
+    bound_ok = {"kind": ev.RETRY_EVIDENCE_KIND_NOT_ACCEPTED, "attempt": 1, "source": "provider_status_query", "reference": "req-1"}
+    # Evidence referring to another attempt of this turn, or to no attempt at all.
+    assert _unsafe_reason(_after_ambiguous({**bound_ok, "attempt": 9})) == "attempt_binding_mismatch"
+    assert _unsafe_reason(_after_ambiguous({**bound_ok, "attempt": "1"})) == "attempt_binding_mismatch"
+    assert _unsafe_reason(_after_ambiguous({**bound_ok, "attempt": True})) == "attempt_binding_mismatch"
+    # Evidence referring to another delivery (a provider message id the bound attempt never had).
+    assert _unsafe_reason(_after_ambiguous({**bound_ok, "provider_message_id": "wamid.other"})) == "refers_to_other_delivery"
+    # Evidence claiming non-acceptance for an attempt that has an accepted receipt.
+    later = {**_ACCEPTED_2, "retry_evidence": {**bound_ok}}
+    conflicting = ev.evaluate_turn(
+        _reference_expectation(),
+        _reference_evidence(send_attempts=[_ACCEPTED_1, later], accepted_wamids=["wamid.accepted.1", "wamid.accepted.2"]),
+    )
+    assert "dispatch_after_accepted_send:2:conflicts_with_accepted_receipt" in conflicting.blockers
+    assert "duplicate_effects:accepted_sends=2" in conflicting.blockers
+    # After an accepted send AND an ambiguous one, the ambiguous label wins and the claim still conflicts.
+    later3 = {"n": 3, "type": "text", "status": 200, "wamid": "wamid.3", "error": None, "retry_evidence": {**bound_ok}}
+    mixed = ev.evaluate_turn(
+        _reference_expectation(max_accepted_sends=2),
+        _reference_evidence(send_attempts=[_ACCEPTED_1, {**_TIMEOUT, "n": 2}, later3], accepted_wamids=["wamid.accepted.1", "wamid.3"]),
+    )
+    assert "unsafe_dispatch_after_ambiguous_attempt:3:conflicts_with_accepted_receipt" in mixed.blockers
+
+
+def test_retry_evidence_idempotency_claim_unverified_rejected() -> None:
+    first = {**_TIMEOUT, "idempotency_key": "k-1"}
+    claim = {"kind": ev.RETRY_EVIDENCE_KIND_IDEMPOTENT, "attempt": 1, "guarantee": "outbound_dedup_5min", "idempotency_key": "k-1"}
+    later = {**_ACCEPTED_2, "idempotency_key": "k-1", "retry_evidence": claim}
+    verdict = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[first, later], accepted_wamids=["wamid.accepted.2"]))
+    assert _unsafe_reason(verdict) == "idempotency_guarantee_unverified:outbound_dedup_5min"
+    # The claim must name the same key on both attempts; a different or missing key is a different delivery.
+    other_key = ev.evaluate_turn(_reference_expectation(), _reference_evidence(
+        send_attempts=[first, {**later, "idempotency_key": "k-2"}], accepted_wamids=["wamid.accepted.2"]))
+    assert _unsafe_reason(other_key) == "idempotency_key_mismatch"
+    no_prior_key = ev.evaluate_turn(_reference_expectation(), _reference_evidence(
+        send_attempts=[_TIMEOUT, later], accepted_wamids=["wamid.accepted.2"]))
+    assert _unsafe_reason(no_prior_key) == "idempotency_key_mismatch"
+    # A guarantee name the harness has never verified is rejected whatever it claims.
+    for guarantee in ("provider_idempotency_key", "meta_cloud_api_dedupe", "verified"):
+        v = ev.evaluate_turn(_reference_expectation(), _reference_evidence(
+            send_attempts=[first, {**later, "retry_evidence": {**claim, "guarantee": guarantee}}], accepted_wamids=["wamid.accepted.2"]))
+        assert _unsafe_reason(v) == f"idempotency_guarantee_unverified:{guarantee}"
+
+
+def test_retry_evidence_structurally_complete_still_fails_closed() -> None:
+    """No verified source or guarantee exists today, so even well-formed, correctly
+    bound evidence cannot authorise a dispatch after an UNKNOWN outcome."""
+    assert ev.VERIFIED_NOT_ACCEPTED_SOURCES == frozenset()
+    assert ev.VERIFIED_IDEMPOTENCY_GUARANTEES == frozenset()
+    complete = {"kind": ev.RETRY_EVIDENCE_KIND_NOT_ACCEPTED, "attempt": 1, "source": "provider_status_query",
+                "reference": "status-read-2026-09-18T16:00:00Z", "provider_message_id": None}
+    for first in (_TIMEOUT, _NO_ID):
+        assert _unsafe_reason(_after_ambiguous(complete, first)) == "source_unverified:provider_status_query", first
+    permitted, reason = ev.validate_retry_evidence(complete, attempt=_ACCEPTED_2, prior_attempts=[_TIMEOUT])
+    assert (permitted, reason) == (False, "source_unverified:provider_status_query")
+
+
+def test_dispatch_safety_positive_controls() -> None:
+    # A definitive rejection is bound to its own attempt by the provider's response: one recovery send is safe.
+    recovery = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[_REJECTED, _ACCEPTED_2], accepted_wamids=["wamid.accepted.2"]))
+    assert recovery.passed, recovery.blockers
+    # No further dispatch after an ambiguous attempt: safe, reported as an explicit failure with UNKNOWN transport.
+    stopped = ev.evaluate_turn(
+        _reference_expectation(terminal=ev.TERMINAL_EXPLICIT_FAILURE),
+        _reference_evidence(send_attempts=[_TIMEOUT], accepted_wamids=[], terminal=ev.TERMINAL_EXPLICIT_FAILURE,
+                            terminal_source="lifecycle:end_delivery_failed"),
+    )
+    assert stopped.passed and stopped.facts["transport_outcome"] == ev.TRANSPORT_UNKNOWN, stopped.blockers
+    # A single accepted send.
+    single = ev.evaluate_turn(_reference_expectation(), _reference_evidence())
+    assert single.passed, single.blockers
+    # A case that allows two accepted deliveries: a second dispatch after an accepted one is not a retry.
+    second = {"n": 2, "type": "text", "status": 200, "wamid": "wamid.accepted.2", "error": None}
+    multi = ev.evaluate_turn(_reference_expectation(max_accepted_sends=2), _reference_evidence(
+        send_attempts=[_ACCEPTED_1, second], accepted_wamids=["wamid.accepted.1", "wamid.accepted.2"]))
+    assert multi.passed, multi.blockers
+    # No positive control exists for a dispatch after an UNKNOWN outcome: none is supported today.
 
 
 def test_unknown_fallback_provenance_rejected() -> None:

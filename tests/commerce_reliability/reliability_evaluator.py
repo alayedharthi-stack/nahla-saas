@@ -25,7 +25,7 @@ import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 # ── Closed vocabularies ──────────────────────────────────────────────────────
 
@@ -63,6 +63,24 @@ TRANSPORT_NOT_ATTEMPTED = "not_attempted"
 TRANSPORT_OUTCOMES = frozenset({
     TRANSPORT_ACCEPTED, TRANSPORT_REJECTED_DEFINITIVE, TRANSPORT_UNKNOWN, TRANSPORT_NOT_ATTEMPTED,
 })
+
+# Retry-evidence contract (fail closed). A dispatch that follows an ambiguous
+# attempt — or follows an accepted send in a single-send case — is permitted
+# only by VALIDATED evidence of one of two kinds:
+#   * prior_attempt_not_accepted: bound to the exact earlier attempt of this
+#     turn, consistent with that attempt's receipt, from a VERIFIED source;
+#   * upstream_idempotency_guarantee: a VERIFIED guarantee for the same
+#     logical delivery and the same idempotency key on both attempts.
+# The registries of verified sources / guarantees are EMPTY: neither the
+# WhatsApp Cloud API nor the runtime offers a bound not-accepted proof or an
+# idempotency guarantee that prevents a second customer message, so no retry
+# after an ambiguous outcome is accepted until an adequate evidence contract
+# exists. The presence of a retry_evidence field never authorises anything.
+RETRY_EVIDENCE_KIND_NOT_ACCEPTED = "prior_attempt_not_accepted"
+RETRY_EVIDENCE_KIND_IDEMPOTENT = "upstream_idempotency_guarantee"
+RETRY_EVIDENCE_KINDS = frozenset({RETRY_EVIDENCE_KIND_NOT_ACCEPTED, RETRY_EVIDENCE_KIND_IDEMPOTENT})
+VERIFIED_NOT_ACCEPTED_SOURCES: FrozenSet[str] = frozenset()
+VERIFIED_IDEMPOTENCY_GUARANTEES: FrozenSet[str] = frozenset()
 
 # Dimensions a turn verdict reports explicitly as evaluated / not evaluated.
 DIMENSION_SEMANTIC_BINDING = "semantic_binding_resolution"
@@ -190,6 +208,67 @@ def _is_ambiguous_attempt(attempt: Mapping[str, Any]) -> bool:
     return status_int == 200 and not str(attempt.get("wamid") or "").strip()
 
 
+def _attempt_number(attempt: Mapping[str, Any]) -> Optional[int]:
+    n = attempt.get("n")
+    if isinstance(n, bool) or not isinstance(n, int):
+        return None
+    return n
+
+
+def validate_retry_evidence(
+    evidence: Any,
+    *,
+    attempt: Mapping[str, Any],
+    prior_attempts: Sequence[Mapping[str, Any]],
+) -> Tuple[bool, str]:
+    """(permitted, reason). Fail closed: anything not validated is rejected.
+
+    ``attempt`` is the later dispatch carrying the evidence; ``prior_attempts``
+    are this turn's earlier attempts. The reason names exactly why evidence
+    was rejected so a changed cause is never absorbed.
+    """
+    if evidence is None:
+        return False, "no_retry_evidence"
+    if not isinstance(evidence, Mapping):
+        return False, "not_a_mapping"
+    kind = evidence.get("kind")
+    if kind not in RETRY_EVIDENCE_KINDS:
+        return False, "kind_unknown"
+    by_n = {}
+    for prior in prior_attempts:
+        n = _attempt_number(prior)
+        if n is not None:
+            by_n[n] = prior
+    ref = evidence.get("attempt")
+    if isinstance(ref, bool) or not isinstance(ref, int) or ref not in by_n:
+        return False, "attempt_binding_mismatch"
+    prior = by_n[ref]
+    if kind == RETRY_EVIDENCE_KIND_NOT_ACCEPTED:
+        if _accepted_attempt(prior):
+            return False, "conflicts_with_accepted_receipt"
+        claimed_id = str(evidence.get("provider_message_id") or "").strip()
+        if claimed_id and claimed_id != str(prior.get("wamid") or "").strip():
+            return False, "refers_to_other_delivery"
+        source = str(evidence.get("source") or "").strip()
+        reference = str(evidence.get("reference") or "").strip()
+        if not source or not reference:
+            return False, "incomplete"
+        if source not in VERIFIED_NOT_ACCEPTED_SOURCES:
+            return False, f"source_unverified:{source}"
+        return True, f"verified_not_accepted:{source}"
+    guarantee = str(evidence.get("guarantee") or "").strip()
+    key = str(evidence.get("idempotency_key") or "").strip()
+    if not guarantee or not key:
+        return False, "incomplete"
+    prior_key = str(prior.get("idempotency_key") or "").strip()
+    later_key = str(attempt.get("idempotency_key") or "").strip()
+    if not prior_key or prior_key != key or later_key != key:
+        return False, "idempotency_key_mismatch"
+    if guarantee not in VERIFIED_IDEMPOTENCY_GUARANTEES:
+        return False, f"idempotency_guarantee_unverified:{guarantee}"
+    return True, f"verified_idempotency:{guarantee}"
+
+
 def derive_transport_outcome(send_attempts: Sequence[Mapping[str, Any]]) -> str:
     attempts = [a for a in send_attempts if isinstance(a, Mapping)]
     if any(_accepted_attempt(a) for a in attempts):
@@ -262,22 +341,25 @@ def evaluate_turn(expectation: TurnExpectation, evidence: TurnEvidence) -> TurnV
         seen_keys.add(key)
 
     # Dispatch-sequence safety: after an ambiguous attempt (the provider may
-    # have delivered) another dispatch is unsafe unless authoritative evidence
-    # permits it; after an accepted send a further dispatch is a duplicate
-    # risk when the case allows one accepted send only.
+    # have delivered) another dispatch is unsafe, and after an accepted send a
+    # further dispatch is a duplicate risk when the case allows one accepted
+    # send only. Only evidence validated by validate_retry_evidence permits
+    # it; a bare retry_evidence field never does.
     for idx, attempt in enumerate(attempts):
         prior = attempts[:idx]
         if not prior:
             continue
-        permitted = bool(str(attempt.get("retry_evidence") or "").strip())
-        if any(_is_ambiguous_attempt(p) for p in prior) and not permitted:
-            blockers.append(f"unsafe_dispatch_after_ambiguous_attempt:{idx + 1}")
-        elif (
-            expectation.max_accepted_sends <= 1
-            and any(_accepted_attempt(p) for p in prior)
-            and not permitted
-        ):
-            blockers.append(f"dispatch_after_accepted_send:{idx + 1}")
+        ambiguous_prior = any(_is_ambiguous_attempt(p) for p in prior)
+        accepted_prior = expectation.max_accepted_sends <= 1 and any(_accepted_attempt(p) for p in prior)
+        if not (ambiguous_prior or accepted_prior):
+            continue
+        permitted, reason = validate_retry_evidence(
+            attempt.get("retry_evidence"), attempt=attempt, prior_attempts=prior,
+        )
+        if permitted:
+            continue
+        label = "unsafe_dispatch_after_ambiguous_attempt" if ambiguous_prior else "dispatch_after_accepted_send"
+        blockers.append(f"{label}:{idx + 1}:{reason}")
     transport = derive_transport_outcome(attempts)
     if evidence.transport_outcome and evidence.transport_outcome != transport:
         blockers.append(
@@ -773,7 +855,10 @@ __all__ = [
     "FALLBACK_EXPECTED_DELIVERY_RECOVERY", "FALLBACK_EXPECTED_SAFE",
     "FALLBACK_KINDS", "FALLBACK_NONE", "FALLBACK_UNEXPECTED_RUNTIME", "FALLBACK_UNKNOWN_PROVENANCE",
     "GateVerdict", "TRANSPORT_ACCEPTED", "TRANSPORT_NOT_ATTEMPTED", "TRANSPORT_OUTCOMES",
-    "TRANSPORT_REJECTED_DEFINITIVE", "TRANSPORT_UNKNOWN", "derive_transport_outcome",
+    "TRANSPORT_REJECTED_DEFINITIVE", "TRANSPORT_UNKNOWN", "RETRY_EVIDENCE_KINDS",
+    "RETRY_EVIDENCE_KIND_IDEMPOTENT", "RETRY_EVIDENCE_KIND_NOT_ACCEPTED",
+    "VERIFIED_IDEMPOTENCY_GUARANTEES", "VERIFIED_NOT_ACCEPTED_SOURCES", "derive_transport_outcome",
+    "validate_retry_evidence",
     "LIFECYCLE_END_DELIVERY_FAILED", "LIFECYCLE_END_DELIVERY_RECOVERED", "LIFECYCLE_END_OK",
     "MODES", "MODE_ACCEPTANCE", "MODE_DIAGNOSTIC", "UNASSIGNED_OWNER_PREFIX", "acceptance_status",
     "OUTCOME_EXPLICIT_FAILURE", "OUTCOME_GROUNDED_REPLY", "OUTCOME_SAFE_MISSING_FACT",

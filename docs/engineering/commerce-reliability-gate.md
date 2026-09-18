@@ -36,7 +36,7 @@ the evaluator):
 | --- | --- | --- |
 | Closed delivery terminal, provider message id, duplicate accepted sends | rejects missing / non-closed / mismatched terminals, acceptance without an id, duplicates | V1 owner turns: accepted, HTTP 200 without id, timeout, definitive rejection + recovery, replay; V2 owner rejected send (UC-01) |
 | Transport outcome | derives accepted / rejected_definitive / **unknown** / not_attempted from the attempt sequence; rejects an adapter that reports otherwise | reported per turn; an ambiguous timeout stays UNKNOWN even where the legacy lifecycle records `end_delivery_failed` |
-| Dispatch-sequence safety | rejects a second dispatch after an ambiguous attempt (no `retry_evidence`), and a further dispatch after an accepted send in a single-send case | every V1 scenario above: one dispatch after ambiguity, one recovery text after a definitive rejection |
+| Dispatch-sequence safety | rejects any dispatch after an ambiguous attempt, and any further dispatch after an accepted send in a single-send case, unless evidence validated under the retry-evidence contract below permits it; the contract's verified registries are empty, so no such dispatch is accepted today | every V1 scenario above: one dispatch after ambiguity, one recovery text after a definitive rejection |
 | Tenant isolation | rejects foreign tenant ids in touched rows | stamps, wire attempts and persisted rows carry tenant 1 only |
 | Fallback provenance | rejects unknown provenance, runtime fallbacks, and safe fallbacks the case did not expect | classified from the runtime's own metadata vocabulary (`compose_source`, `final_customer_text_source`, `fallback_reason`, `delivery_recovery`, V2 `v2_status`); unknown or unrecognised provenance is never "no fallback" |
 | Evidence references | rejects blank / whitespace / non-string entries and empty required lists | lifecycle event names |
@@ -48,6 +48,37 @@ the evaluator):
 
 Every turn verdict carries `facts["coverage"]` and `facts["not_evaluated"]`
 so a report cannot imply coverage that was not measured.
+
+### Retry-evidence contract (fail closed)
+
+A dispatch that follows an ambiguous attempt (exception/timeout, no status,
+or HTTP 200 without a provider message id), or follows an accepted send in a
+single-send case, is rejected with
+`unsafe_dispatch_after_ambiguous_attempt:<n>:<reason>` /
+`dispatch_after_accepted_send:<n>:<reason>` unless `retry_evidence` on the
+later attempt validates (`validate_retry_evidence`) as one of:
+
+| Kind | Required fields | Validation |
+| --- | --- | --- |
+| `prior_attempt_not_accepted` | `attempt` (the exact earlier attempt number of this turn), `source`, `reference`, optional `provider_message_id` | the bound attempt must exist and must not hold an accepted receipt (`conflicts_with_accepted_receipt`); a provider message id the bound attempt never had is `refers_to_other_delivery`; `source` must be in `VERIFIED_NOT_ACCEPTED_SOURCES` (`source_unverified:<source>` otherwise) |
+| `upstream_idempotency_guarantee` | `attempt`, `guarantee`, `idempotency_key` | the same key must be present on the earlier and the later attempt (`idempotency_key_mismatch`); `guarantee` must be in `VERIFIED_IDEMPOTENCY_GUARANTEES` (`idempotency_guarantee_unverified:<guarantee>` otherwise) |
+
+Anything else is rejected: absent (`no_retry_evidence`), `True` or any
+string (`not_a_mapping`), an unknown or missing kind (`kind_unknown`), an
+unbound or mistyped attempt reference (`attempt_binding_mismatch`), missing
+fields (`incomplete`). A timeout, a missing provider message id, an
+explanation string or a local retry flag establishes nothing.
+
+**Both registries are empty.** Neither the WhatsApp Cloud API nor the runtime
+offers a not-accepted proof bound to a specific attempt, or an idempotency
+guarantee that prevents a second customer message for the same key, so no
+dispatch after an UNKNOWN outcome is accepted until an adequate evidence
+contract exists and is registered in a reviewed change
+(`test_retry_evidence_structurally_complete_still_fails_closed` pins the
+registries empty). The supported safe cases have positive controls: a
+definitive provider rejection followed by one recovery send, no further
+dispatch after an ambiguous attempt, a single accepted send, and a case that
+explicitly allows several accepted deliveries.
 
 The three-value terminal set (`provider_accepted`, `human_handoff`,
 `explicit_delivery_failure`) is **legacy characterisation** of today's
@@ -262,7 +293,7 @@ Consequences:
 | 1A blank required evidence `[""]` passed | `blank_evidence_reference`; blank entries never satisfy a required list | `test_blank_required_evidence_reference_rejected` | — |
 | 1B same guardrail failed then passed → last wins | results grouped by (name, attempt); mixed results in one execution → `contradictory_guardrail_result`; a documented retry (distinct attempts) is allowed; reused attempt identity rejected | `test_contradictory_guardrail_results_rejected_but_documented_retry_allowed` | application guardrail execution remains NOT EVALUATED at the delivery seam |
 | 1C `passed=True, executed=False` passed | `guardrail_passed_without_execution`; required guardrails need `executed: True` (`guardrail_not_executed` / `guardrail_execution_unknown`) | `test_guardrail_passed_without_execution_rejected` | same |
-| 1D timeout then another send with one accepted id passed | `unsafe_dispatch_after_ambiguous_attempt` unless the later attempt carries `retry_evidence`; `dispatch_after_accepted_send` for single-send cases | `test_dispatch_after_ambiguous_attempt_rejected` | what counts as authoritative retry evidence is an explicit field, not derived from the runtime |
+| 1D timeout then another send with one accepted id passed | `unsafe_dispatch_after_ambiguous_attempt:<n>:<reason>`; `dispatch_after_accepted_send:<n>:<reason>` for single-send cases; the first correction accepted any non-empty `retry_evidence` value (a false positive found in the owner's final check) and was replaced by the fail-closed contract above | `test_dispatch_after_ambiguous_attempt_rejected`, `test_retry_evidence_never_authorizes_dispatch_by_itself`, `test_retry_evidence_binding_and_conflict_rejected`, `test_retry_evidence_idempotency_claim_unverified_rejected`, `test_retry_evidence_structurally_complete_still_fails_closed`, `test_dispatch_safety_positive_controls` | no retry after an UNKNOWN outcome is supported until a verified evidence source or guarantee is registered |
 | 1E adapter discarded deterministic-fallback provenance (`fallback_kind="none"`) | adapter classifies from the runtime's own vocabulary; unknown/unrecognised → `unknown_provenance` → `fallback_provenance_unknown`; evaluator default is unknown | `test_fallback_provenance_classifier_matrix`, `test_unknown_fallback_provenance_rejected` | provenance keys outside the enumerated vocabulary are unknown by design |
 | 1 bindings are string-set checks | documented as fixture identity; semantic binding resolution reported NOT EVALUATED in every verdict | `test_valid_reference_turn_passes` (coverage facts) | not evaluated |
 | 2 UC-01 predicate absorbed unrelated failures | `classify_uc01_observation`: exact blocker set, `end_ok`, no accepted id, `rejected_definitive`, no records; unrelated blockers fail independently | `test_uc01_predicate_rejects_changed_causes` | — |

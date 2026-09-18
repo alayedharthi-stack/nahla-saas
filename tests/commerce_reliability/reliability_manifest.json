@@ -10,7 +10,8 @@
     "A baseline-compatible gate result is NOT production acceptance.",
     "Node ids are pytest item node ids exactly as JUnit reports them; parametrized Arabic ids therefore use pytest's escaped \\uXXXX form.",
     "Baseline entries are reproduced current implementation defects; replacement_contracts are unapproved future decisions tracked separately and never measured as coverage.",
-    "A JUnit expected-failure message must equal the recorded marker exactly (whitespace-normalised); extra cause text fails reconciliation."
+    "A JUnit expected-failure message must equal the recorded marker exactly (whitespace-normalised); extra cause text fails reconciliation.",
+    "Retry evidence never authorises a dispatch by itself: the evaluator's verified-source and verified-guarantee registries are empty, so no dispatch after an ambiguous outcome is accepted until an adequate evidence contract exists."
   ],
   "required_modules": [
     {
@@ -323,6 +324,26 @@
     },
     {
       "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_dispatch_after_ambiguous_attempt_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_retry_evidence_never_authorizes_dispatch_by_itself",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_retry_evidence_binding_and_conflict_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_retry_evidence_idempotency_claim_unverified_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_retry_evidence_structurally_complete_still_fails_closed",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_dispatch_safety_positive_controls",
       "tier": "unit"
     },
     {
