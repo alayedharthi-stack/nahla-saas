@@ -15,9 +15,10 @@ import hashlib
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Mapping
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -39,6 +40,20 @@ KNOWLEDGE_CASES_TOTAL = 16
 KNOWLEDGE_TENANT_ID = 1
 KNOWLEDGE_EXECUTION_MODE = "INTERNAL_E2E"
 
+# v1 is the artifact failed Run 1 was scored against.  It is frozen: its file,
+# its digest, its run record and its verdicts stay exactly as they are, and the
+# corrections below apply only from v2 onwards.
+KNOWLEDGE_CONTRACT_VERSION_V1 = "commerce_v2_phase_2_7b_knowledge_acceptance_v1"
+KNOWLEDGE_CONTRACT_VERSION_V2 = "commerce_v2_phase_2_7b_knowledge_acceptance_v2"
+KNOWLEDGE_CONTRACT_VERSIONS = (
+    KNOWLEDGE_CONTRACT_VERSION_V1,
+    KNOWLEDGE_CONTRACT_VERSION_V2,
+)
+KNOWLEDGE_MATRIX_PATHS = {
+    KNOWLEDGE_CONTRACT_VERSION_V1: "phase_2_7b_knowledge_acceptance_v1.json",
+    KNOWLEDGE_CONTRACT_VERSION_V2: "phase_2_7b_knowledge_acceptance_v2.json",
+}
+
 # Commercial truth is Salla's. A knowledge section may never carry these.
 COMMERCIAL_FACT_KINDS = frozenset(
     {
@@ -57,6 +72,9 @@ COMMERCIAL_FACT_KINDS = frozenset(
     }
 )
 KNOWLEDGE_EVIDENCE_PREFIX = "kb:section:"
+# Fault modes a v2 case may force on knowledge retrieval alone.  They exist
+# only so K13 can prove that a catalog answer survives a knowledge failure.
+KNOWLEDGE_FAULT_MODES = frozenset({"timeout", "error"})
 MAX_KNOWLEDGE_LOOKUPS = 4
 
 _REQUIRED_CASE_KEYS = frozenset({"case_id", "title", "input", "expected", "required_assertions"})
@@ -96,6 +114,9 @@ def _fail(code: str) -> KnowledgeAcceptanceError:
     return KnowledgeAcceptanceError(f"phase_2_7b_{code}")
 
 
+_EMPTY_BINDING: Mapping[str, Any] = MappingProxyType({})
+
+
 @dataclass(frozen=True)
 class KnowledgeCase:
     case_id: str
@@ -104,6 +125,35 @@ class KnowledgeCase:
     knowledge_fixture: str
     expected: Mapping[str, Any]
     required_assertions: tuple[str, ...]
+    binding: Mapping[str, Any] = field(default_factory=lambda: _EMPTY_BINDING)
+
+    @property
+    def thread(self) -> str:
+        return str(self.binding.get("thread") or "")
+
+    @property
+    def target_product_sku(self) -> str:
+        return str(self.binding.get("target_product_sku") or "")
+
+    @property
+    def required_section_fixture(self) -> str:
+        return str(self.binding.get("required_section_fixture") or "")
+
+    @property
+    def forbidden_section_fixtures(self) -> tuple[str, ...]:
+        return tuple(str(item) for item in (self.binding.get("forbidden_section_fixtures") or []))
+
+    @property
+    def anchor_turns(self) -> tuple[str, ...]:
+        return tuple(str(item) for item in (self.binding.get("anchor_turns") or []))
+
+    @property
+    def reset_thread_before(self) -> bool:
+        return bool(self.binding.get("reset_thread_before"))
+
+    @property
+    def knowledge_fault_mode(self) -> str:
+        return str(self.binding.get("knowledge_fault_mode") or "")
 
 
 @dataclass(frozen=True)
@@ -137,22 +187,44 @@ def _required_aliases(cases_raw: list[Any]) -> tuple[InternalE2EAlias, ...]:
     provisioner and the turn path can never disagree about them.
     """
     declared = {
-        str(entry.get("thread") or "").strip()
+        str((entry.get("binding") or {}).get("thread") or entry.get("thread") or "").strip()
         for entry in cases_raw
         if isinstance(entry, dict)
     }
-    needed = max(1, len({thread for thread in declared if thread}))
-    if needed > len(INTERNAL_E2E_ALIASES):
-        raise _fail("matrix_thread_count_unsupported")
+    threads = {thread for thread in declared if thread}
+    # More declared threads than INTERNAL_E2E aliases is fine: every case
+    # carries ``reset_thread_before``, which clears the conversation's stored
+    # turns, so threads are separated by a proven reset boundary rather than by
+    # needing one conversation each.
+    needed = 1 if len(threads) > len(INTERNAL_E2E_ALIASES) else max(1, len(threads))
     return tuple(
         normalize_internal_e2e_alias(alias)
         for alias in INTERNAL_E2E_ALIASES[:needed]
     )
 
 
-def load_knowledge_acceptance_matrix(path: Path | None = None) -> KnowledgeMatrix:
-    """Load and validate the checked-in matrix; any deviation fails closed."""
-    source = Path(path or KNOWLEDGE_MATRIX_PATH)
+def knowledge_matrix_path(contract_version: str) -> Path:
+    """The checked-in artifact for one contract version."""
+    name = KNOWLEDGE_MATRIX_PATHS.get(str(contract_version))
+    if not name:
+        raise _fail("matrix_contract_unknown")
+    return KNOWLEDGE_MATRIX_PATH.parent / name
+
+
+def load_knowledge_acceptance_matrix(
+    path: Path | None = None,
+    *,
+    contract_version: str = KNOWLEDGE_CONTRACT_VERSION,
+) -> KnowledgeMatrix:
+    """Load and validate one checked-in matrix; any deviation fails closed.
+
+    Each contract version is its own immutable artifact.  v1 is the one failed
+    Run 1 was scored against and is never rewritten; a later version is a new
+    file with its own digest.
+    """
+    if str(contract_version) not in KNOWLEDGE_CONTRACT_VERSIONS:
+        raise _fail("matrix_contract_unknown")
+    source = Path(path or knowledge_matrix_path(contract_version))
     try:
         raw_bytes = source.read_bytes()
     except OSError as exc:
@@ -163,7 +235,7 @@ def load_knowledge_acceptance_matrix(path: Path | None = None) -> KnowledgeMatri
         raise _fail("matrix_invalid_json") from exc
     if not isinstance(raw, dict):
         raise _fail("matrix_invalid")
-    if raw.get("contract_version") != KNOWLEDGE_CONTRACT_VERSION:
+    if raw.get("contract_version") != contract_version:
         raise _fail("matrix_contract_mismatch")
     if int(raw.get("tenant_id") or 0) != KNOWLEDGE_TENANT_ID:
         raise _fail("matrix_tenant_invalid")
@@ -189,6 +261,21 @@ def load_knowledge_acceptance_matrix(path: Path | None = None) -> KnowledgeMatri
             raise _fail("matrix_case_invalid")
         if not str(entry["input"]).strip():
             raise _fail("matrix_case_invalid")
+        binding = entry.get("binding")
+        if contract_version == KNOWLEDGE_CONTRACT_VERSION_V2:
+            # From v2 a case must say which product and which section it is
+            # about.  Run 1 failed because nothing bound a case to the product
+            # its fixture was attached to, so the turn resolved whatever the
+            # conversation happened to surface.
+            if not isinstance(binding, dict):
+                raise _fail("matrix_case_binding_missing")
+            if not str(binding.get("thread") or "").strip():
+                raise _fail("matrix_case_binding_thread_missing")
+            if "reset_thread_before" not in binding:
+                raise _fail("matrix_case_binding_reset_missing")
+            fault = str(binding.get("knowledge_fault_mode") or "")
+            if fault and fault not in KNOWLEDGE_FAULT_MODES:
+                raise _fail("matrix_case_fault_mode_invalid")
         cases.append(
             KnowledgeCase(
                 case_id=case_id,
@@ -197,6 +284,7 @@ def load_knowledge_acceptance_matrix(path: Path | None = None) -> KnowledgeMatri
                 knowledge_fixture=str(entry.get("knowledge_fixture") or ""),
                 expected=dict(expected),
                 required_assertions=tuple(str(item) for item in assertions),
+                binding=MappingProxyType(dict(binding or {})),
             )
         )
     return KnowledgeMatrix(
@@ -218,7 +306,54 @@ def _knowledge_refs(values: Any) -> set[str]:
     }
 
 
-def score_knowledge_turn(case: KnowledgeCase, artifact: Mapping[str, Any]) -> dict[str, Any]:
+def _section_tenants(db: Any, section_ids: set[int]) -> dict[int, int]:
+    """Each section's owning tenant, read from the trusted database record.
+
+    Never inferred from a citation, a fixture name or a ledger field: the row
+    itself is the authority on who owns a section.
+    """
+    if not section_ids or db is None:
+        return {}
+    from models import MerchantKnowledgeSection
+
+    rows = (
+        db.query(MerchantKnowledgeSection)
+        .filter(MerchantKnowledgeSection.id.in_(sorted(section_ids)))
+        .all()
+    )
+    return {int(row.id): int(row.tenant_id) for row in rows}
+
+
+def _reply_makes_positive_knowledge_claim(
+    reply: Mapping[str, Any], artifact: Mapping[str, Any]
+) -> bool:
+    """Did the reply actually assert merchant knowledge?
+
+    A bare safe fallback or an explicit "this is not documented" asserts
+    nothing, so demanding a citation from it is meaningless.  Anything that
+    states real knowledge content still needs evidence — this exemption never
+    covers an unsupported claim.
+    """
+    if bool(reply.get("safe_fallback_reason")):
+        return False
+    if bool(artifact.get("knowledge_gap_disclosure")):
+        return False
+    if bool(artifact.get("knowledge_evidence_used_in_reply")):
+        return True
+    for claim in list(reply.get("fact_claims") or []):
+        kind = str(claim.get("kind") or "")
+        if kind and kind not in COMMERCIAL_FACT_KINDS:
+            return True
+    return False
+
+
+def score_knowledge_turn(
+    case: KnowledgeCase,
+    artifact: Mapping[str, Any],
+    *,
+    db: Any = None,
+    contract_version: str = KNOWLEDGE_CONTRACT_VERSION_V1,
+) -> dict[str, Any]:
     """Score one turn artifact against one case.  Blockers are the verdict.
 
     Every check answers a question the owner asked of this phase: did a lookup
@@ -256,9 +391,15 @@ def score_knowledge_turn(case: KnowledgeCase, artifact: Mapping[str, Any]) -> di
         if kind in COMMERCIAL_FACT_KINDS and ref.startswith(KNOWLEDGE_EVIDENCE_PREFIX):
             blockers.append("commercial_fact_sourced_from_knowledge")
 
+    v2 = str(contract_version) == KNOWLEDGE_CONTRACT_VERSION_V2
     citation = str(expected.get("knowledge_citation") or "optional")
     if citation == "required" and not cited:
-        blockers.append("knowledge_claim_missing_evidence")
+        # From v2 a reply that asserts nothing is exempt — Run 1 raised this
+        # blocker against «لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن.»,
+        # which makes no claim at all.  A reply that does state merchant
+        # knowledge without evidence is still a blocker.
+        if not v2 or _reply_makes_positive_knowledge_claim(reply, artifact):
+            blockers.append("knowledge_claim_missing_evidence")
     if citation == "forbidden" and cited:
         blockers.append("knowledge_cited_when_forbidden")
 
@@ -275,7 +416,31 @@ def score_knowledge_turn(case: KnowledgeCase, artifact: Mapping[str, Any]) -> di
             for item in lookups
             if int(item.get("tenant_id") or 0) != KNOWLEDGE_TENANT_ID
         ]
-        if foreign or cited:
+        if v2:
+            # Ask the database who owns each section that was retrieved or
+            # cited.  Run 1 failed K10 for citing the tenant's *own* return
+            # policy, because any citation counted as exposure.
+            touched: set[int] = set()
+            for item in lookups:
+                for section_id in item.get("section_ids") or []:
+                    touched.add(int(section_id))
+            for ref in cited:
+                try:
+                    touched.add(int(str(ref).split(":")[-1]))
+                except (TypeError, ValueError):
+                    blockers.append("knowledge_evidence_ref_invalid")
+            owners = _section_tenants(db, touched)
+            unknown = sorted(touched - set(owners))
+            if db is not None and unknown:
+                blockers.append("knowledge_section_owner_unknown")
+            outsiders = sorted(
+                section_id
+                for section_id, owner in owners.items()
+                if owner != int(artifact.get("tenant_id") or KNOWLEDGE_TENANT_ID)
+            )
+            if foreign or outsiders:
+                blockers.append("cross_tenant_knowledge_exposed")
+        elif foreign or cited:
             blockers.append("cross_tenant_knowledge_exposed")
 
     conflicts = list(artifact.get("knowledge_conflicts") or [])
@@ -400,6 +565,7 @@ def create_knowledge_acceptance_run(
     conversation_id: int,
     tenant_id: int = KNOWLEDGE_TENANT_ID,
     matrix: KnowledgeMatrix | None = None,
+    contract_version: str = KNOWLEDGE_CONTRACT_VERSION,
 ) -> dict[str, Any]:
     """Write the official run record BEFORE the first case executes.
 
@@ -410,7 +576,7 @@ def create_knowledge_acceptance_run(
     """
     from models import MessageEvent
 
-    matrix = matrix or load_knowledge_acceptance_matrix()
+    matrix = matrix or load_knowledge_acceptance_matrix(contract_version=contract_version)
     if matrix.tenant_id != int(tenant_id):
         raise _fail("matrix_tenant_invalid")
     if not str(commit or "").strip():
@@ -518,7 +684,11 @@ async def execute_knowledge_acceptance_run(
     meta = dict(control.extra_metadata or {})
     if str(meta.get("status") or "") != "queued":
         raise _fail("run_not_queued")
-    matrix = matrix or load_knowledge_acceptance_matrix()
+    # Load the artifact this run was created against, never a default: a run
+    # is always scored by its own contract version.
+    matrix = matrix or load_knowledge_acceptance_matrix(
+        contract_version=str(meta.get("contract_version") or KNOWLEDGE_CONTRACT_VERSION)
+    )
     if meta.get("contract_version") != matrix.contract_version:
         raise _fail("run_contract_mismatch")
     if meta.get("matrix_sha256") != matrix.matrix_sha256:
@@ -534,12 +704,15 @@ async def execute_knowledge_acceptance_run(
         artifact = await submit_case(db, case)
         if int(dict(artifact).get("tenant_id") or tenant_id) != int(tenant_id):
             raise _fail("case_tenant_mismatch")
-        scored = score_knowledge_turn(case, artifact)
+        scored = score_knowledge_turn(
+            case, artifact, db=db, contract_version=matrix.contract_version
+        )
         scored.update(
             {
                 "title": case.title,
                 "input": case.input,
                 "knowledge_fixture": case.knowledge_fixture,
+                "binding": dict(case.binding),
                 "expected": dict(case.expected),
                 "required_assertions": list(case.required_assertions),
                 "tool_calls": list(artifact.get("tool_calls") or []),
@@ -655,7 +828,10 @@ def record_knowledge_review(
     report = meta.get("report")
     if not isinstance(report, dict):
         raise _fail("review_run_not_finished")
-    matrix = load_knowledge_acceptance_matrix()
+    recorded = str(meta.get("contract_version") or "")
+    if recorded not in KNOWLEDGE_CONTRACT_VERSIONS:
+        raise _fail("review_contract_mismatch")
+    matrix = load_knowledge_acceptance_matrix(contract_version=recorded)
     if (
         meta.get("contract_version") != matrix.contract_version
         or report.get("contract_version") != matrix.contract_version

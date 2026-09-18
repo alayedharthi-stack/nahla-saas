@@ -145,6 +145,23 @@ def _section_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows[:KNOWLEDGE_RESULT_LIMIT]
 
 
+# Acceptance-only fault hook.  Production never arms it: the only caller is the
+# Phase 2.7B fault module, which refuses unless the process is an isolated
+# acceptance database on the INTERNAL_E2E channel.  Unarmed, this is one `is
+# None` check on the retrieval path.
+_ARMED_KNOWLEDGE_FAULT: str | None = None
+
+
+def arm_knowledge_fault(mode: str | None) -> None:
+    """Arm or disarm the acceptance fault.  Never called by production code."""
+    global _ARMED_KNOWLEDGE_FAULT
+    _ARMED_KNOWLEDGE_FAULT = str(mode) if mode else None
+
+
+def active_knowledge_fault() -> str | None:
+    return _ARMED_KNOWLEDGE_FAULT
+
+
 def _retrieve(
     context: CommerceAgentContext,
     *,
@@ -236,6 +253,17 @@ def run_knowledge_lookup(
             status=STATUS_SKIPPED_NO_QUERY, sections=[], duration_ms=0,
         )
     started = time.monotonic()
+    fault = active_knowledge_fault()
+    if fault:
+        # Knowledge retrieval alone fails; the catalog evidence this turn
+        # already gathered is untouched and still answers the customer.
+        status = STATUS_TIMEOUT if fault == "timeout" else STATUS_ERROR
+        return _record(
+            context, scope=scope, purpose=purpose, query=query, product_ids=ids,
+            subject=subject, status=status, sections=[],
+            duration_ms=int((time.monotonic() - started) * 1000),
+            failure_reason=f"phase_2_7b_injected_knowledge_fault:{fault}",
+        )
     try:
         payload = _retrieve(
             context, query=query, product_ids=ids, limit=limit, subject=subject
@@ -563,6 +591,8 @@ __all__ = [
     "STATUS_SKIPPED_NO_QUERY",
     "STATUS_TIMEOUT",
     "build_knowledge_snapshots",
+    "active_knowledge_fault",
+    "arm_knowledge_fault",
     "build_product_anchor",
     "detect_catalog_conflicts",
     "knowledge_evidence_refs",
