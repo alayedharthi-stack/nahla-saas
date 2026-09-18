@@ -39,7 +39,10 @@ def _repository(dsn: str):
 def _token(raw: Dict[str, Any]):
     from core.commerce_runtime.contracts import OwnershipToken  # noqa: PLC0415
 
-    return OwnershipToken(owner_id=raw["owner_id"], fence=int(raw["fence"]), epoch=int(raw["epoch"]))
+    return OwnershipToken(
+        owner_id=raw["owner_id"], fence=int(raw["fence"]), epoch=int(raw["epoch"]),
+        tenant_id=int(raw["tenant_id"]), namespace=raw["namespace"], conversation_id=int(raw["conversation_id"]),
+    )
 
 
 def _run(out, label: str, fn: Callable[[], Any]) -> None:

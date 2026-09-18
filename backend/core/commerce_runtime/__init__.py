@@ -21,8 +21,13 @@ What it provides
   tables: conversations (ownership + versioned state), turns (durable inbound
   admission with per-conversation order) and immutable per-turn terminals.
 * ``repositories`` — short-transaction operations: admission, claim, renew,
-  release, revision-based state commit, atomic terminal recording and
-  administrative ownership invalidation.
+  release, revision-based state commit bound to the eligible turn, atomic
+  terminal recording of the eligible turn and administrative ownership
+  invalidation. Each operation runs one write transaction; after a database
+  conflict rolled it back, admission and terminal recording open one further
+  read-only transaction to report the committed truth. Lease validity uses
+  the database wall clock read after the row lock; ownership tokens are
+  bound to tenant, namespace and conversation.
 
 What it does not provide (accurate boundaries)
 ==============================================
