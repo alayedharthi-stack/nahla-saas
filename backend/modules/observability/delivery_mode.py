@@ -471,6 +471,17 @@ def is_acceptable_mode_for_product_intent(
         and action in _PRODUCT_BRAIN_ACTIONS
     ):
         return True
+    # Sept 2026 product-silence incident: when rich presentation was
+    # rejected by the provider or suppressed by a guard, ONE grounded
+    # plain-text reply built from the verified candidates is the designed
+    # outcome of the turn (see core.product_reply_recovery). It is recorded
+    # under its own ``product_reply_outcome`` and must not re-trip the alarm.
+    if (
+        mode == DELIVERY_MODE_TEXT_ONLY
+        and isinstance(audit, dict)
+        and audit.get("product_text_recovery_sent")
+    ):
+        return True
     if (
         mode == DELIVERY_MODE_TEXT_ONLY
         and is_text_only_catalog_fact_answer_acceptable(

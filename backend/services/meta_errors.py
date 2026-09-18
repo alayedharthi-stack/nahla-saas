@@ -152,6 +152,21 @@ ERRORS: Dict[str, ClassifiedError] = {
         suppress_on_repeat=True,
         advice_ar="تأكد من صيغة الرقم E.164 (مثال: +9665XXXXXXXX).",
     ),
+    # Meta rejected the STRUCTURE of our payload (e.g. HTTP 400 code 100
+    # with ``error_data.details = "Duplicate button title"``). This is a
+    # Nahla-side payload defect, not a recipient problem: it must never
+    # count against the phone's deliverability (``suppress_on_repeat``)
+    # and it is fixable by sending a corrected / plain-text payload.
+    "invalid_payload": ClassifiedError(
+        key="invalid_payload",
+        label_ar="المزود رفض بنية الرسالة (خطأ في تكوين الرسالة)",
+        severity="major",
+        is_recoverable=True,
+        retryable=False,
+        quality_tier="warning",
+        suppress_on_repeat=False,
+        advice_ar="تم رفض تركيبة الرسالة التفاعلية من واتساب — راجع عناوين الأزرار/الحقول. الرقم نفسه سليم.",
+    ),
     "out_of_24h_window": ClassifiedError(
         key="out_of_24h_window",
         label_ar="انتهت نافذة 24 ساعة لخدمة العميل",
@@ -573,6 +588,40 @@ _TEXT_PATTERNS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+_STRUCTURED_PAYLOAD_REJECTION_RE = re.compile(
+    r"(duplicate\s+button|button\s+title|button.*(?:id|label|text)|"
+    r"interactive|header|footer|body\s+text|list\s+section|row\s+title|"
+    r"cta_url|display_text|parameter\s+(?:is\s+)?(?:invalid|missing).*"
+    r"(?:button|interactive|action))",
+    re.I,
+)
+_PHONE_REJECTION_RE = re.compile(r"(phone|wa[_\-]?id|recipient|\bto\b)", re.I)
+
+
+def _error_data_details(raw_response: Any) -> str:
+    """Meta nests the actionable text under ``error.error_data.details``."""
+    if not isinstance(raw_response, dict):
+        return ""
+    err = raw_response.get("error")
+    if not isinstance(err, dict):
+        return ""
+    data = err.get("error_data")
+    if isinstance(data, dict):
+        return str(data.get("details") or "")
+    return str(err.get("details") or "")
+
+
+def _is_structured_payload_rejection(message: Any, raw_response: Any) -> bool:
+    text = " ".join(
+        part for part in (str(message or ""), _error_data_details(raw_response)) if part
+    )
+    if not text:
+        return False
+    if _PHONE_REJECTION_RE.search(text) and not re.search(r"button|interactive", text, re.I):
+        return False
+    return bool(_STRUCTURED_PAYLOAD_REJECTION_RE.search(text))
+
+
 def classify_meta_error(
     *,
     code: Any = None,
@@ -593,6 +642,13 @@ def classify_meta_error(
         code_int = int(code) if code is not None and str(code).strip() else None
     except (TypeError, ValueError):
         code_int = None
+    # 1a. Code 100 ("Invalid parameter") is ambiguous: Meta uses it both for
+    # a bad ``to`` phone and for a malformed payload. When the error text
+    # names a structural payload defect (duplicate button title, invalid
+    # interactive/button/header field) the phone is NOT at fault — never
+    # push the recipient toward suppression for our own payload bug.
+    if code_int == 100 and _is_structured_payload_rejection(message, raw_response):
+        return ERRORS["invalid_payload"]
     if code_int is not None and code_int in _CODE_MAP:
         return ERRORS[_CODE_MAP[code_int]]
 

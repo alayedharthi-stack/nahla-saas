@@ -472,19 +472,39 @@ def apply_search_product_presentation(
     return decision
 
 
-def build_standard_pick_buttons(candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """WhatsApp reply buttons pick_1..pick_3 from candidate titles."""
-    wa_buttons: List[Dict[str, Any]] = []
-    for i, p in enumerate(list(candidates or [])[:3], 1):
-        from core.product_button_label import (  # noqa: PLC0415
-            compact_whatsapp_product_button_title,
-        )
+WA_PICK_BUTTON_LIMIT = 3
 
+
+def build_standard_pick_buttons(candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """WhatsApp reply buttons ``pick_<candidate index>`` from candidate titles.
+
+    Visible titles must be unique — Meta rejects the whole interactive payload
+    with HTTP 400 ``Duplicate button title`` otherwise. Candidates are scanned
+    in order; one whose visible title duplicates an earlier button is skipped
+    and the scan continues to the next unique candidate, up to three buttons.
+    The button id keeps the candidate's ORIGINAL 1-based index so a tap still
+    resolves against the same ``last_search_candidates`` position. Products
+    are never renamed or merged to manufacture uniqueness.
+    """
+    from core.product_button_label import (  # noqa: PLC0415
+        compact_whatsapp_product_button_title,
+        normalize_button_title_key,
+    )
+
+    wa_buttons: List[Dict[str, Any]] = []
+    seen_titles: set = set()
+    for i, p in enumerate(list(candidates or []), 1):
+        if len(wa_buttons) >= WA_PICK_BUTTON_LIMIT:
+            break
         raw_title = str((p or {}).get("title") or "")
-        title = compact_whatsapp_product_button_title(raw_title)
+        title = compact_whatsapp_product_button_title(raw_title) or str(i)
+        key = normalize_button_title_key(title)
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
         wa_buttons.append({
             "type": "reply",
-            "reply": {"id": f"pick_{i}", "title": title or str(i)},
+            "reply": {"id": f"pick_{i}", "title": title},
         })
     return wa_buttons
 

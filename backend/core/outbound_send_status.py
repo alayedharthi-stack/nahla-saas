@@ -173,6 +173,13 @@ def _extract_meta_error(
     out["message"]    = err.get("message") or err.get("details") or err.get("type")
     out["type"]       = err.get("type")
     out["fbtrace_id"] = err.get("fbtrace_id")
+    # Meta puts the actionable text ("Duplicate button title") under
+    # ``error_data.details``; preserve it verbatim so operators can see the
+    # real rejection reason instead of the generic "(#100) Invalid parameter".
+    data = err.get("error_data")
+    details = data.get("details") if isinstance(data, dict) else None
+    if details:
+        out["details"] = str(details)
     return out
 
 
@@ -197,6 +204,8 @@ def _classify_with_meta_errors(
         "type":       meta_err.get("type"),
         "fbtrace_id": meta_err.get("fbtrace_id"),
     }
+    if meta_err.get("details"):
+        out["details"] = meta_err["details"]
     # When the classification is `exception` we won't have a Meta
     # error body — surface the transport error text so the UI still
     # has something concrete to render.

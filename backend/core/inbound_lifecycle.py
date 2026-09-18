@@ -159,10 +159,25 @@ EVENT_MESSAGE_SAVE_ROLLBACK       = "message_save_rollback"
 EVENT_AUTO_LINK_OK                = "auto_link_ok"
 EVENT_AUTO_LINK_FAILED            = "auto_link_failed"
 
+# Customer-reply delivery outcome (product turns that REQUIRE a reply).
+# ``end_ok`` used to be inferred from "inbound persisted + handler returned"
+# even when no outbound was ever provider-accepted. These tokens make the
+# delivery result explicit:
+#   * delivery_text_recovered  — rich presentation failed / was suppressed
+#                                and one grounded plain-text reply was
+#                                provider-accepted (marker, non-terminal)
+#   * end_delivery_recovered   — terminal: turn succeeded via text recovery
+#   * end_delivery_failed      — terminal: nothing provider-accepted; the
+#                                detail distinguishes an ambiguous provider
+#                                outcome from a terminal delivery failure
+EVENT_DELIVERY_TEXT_RECOVERED     = "delivery_text_recovered"
+
 # Terminal markers
 EVENT_END_OK                      = "end_ok"
 EVENT_END_DROPPED                 = "end_dropped"
 EVENT_END_UNCAUGHT                = "end_uncaught_exception"
+EVENT_END_DELIVERY_RECOVERED      = "end_delivery_recovered"
+EVENT_END_DELIVERY_FAILED         = "end_delivery_failed"
 
 
 ALL_EVENTS: Tuple[str, ...] = (
@@ -208,9 +223,12 @@ ALL_EVENTS: Tuple[str, ...] = (
     EVENT_MESSAGE_SAVE_ROLLBACK,
     EVENT_AUTO_LINK_OK,
     EVENT_AUTO_LINK_FAILED,
+    EVENT_DELIVERY_TEXT_RECOVERED,
     EVENT_END_OK,
     EVENT_END_DROPPED,
     EVENT_END_UNCAUGHT,
+    EVENT_END_DELIVERY_RECOVERED,
+    EVENT_END_DELIVERY_FAILED,
 )
 
 
@@ -329,7 +347,13 @@ class InboundLifecycleTrace:
             tid = kwargs.get("tenant_id")
             if isinstance(tid, int):
                 self.tenant_id = tid
-        elif event_name in (EVENT_END_OK, EVENT_END_DROPPED, EVENT_END_UNCAUGHT):
+        elif event_name in (
+            EVENT_END_OK,
+            EVENT_END_DROPPED,
+            EVENT_END_UNCAUGHT,
+            EVENT_END_DELIVERY_RECOVERED,
+            EVENT_END_DELIVERY_FAILED,
+        ):
             self.final_token = event_name
 
 
@@ -693,7 +717,10 @@ __all__ = [
     "EVENT_MESSAGE_SAVE_ROLLBACK",
     "EVENT_AUTO_LINK_OK",
     "EVENT_AUTO_LINK_FAILED",
+    "EVENT_DELIVERY_TEXT_RECOVERED",
     "EVENT_END_OK",
     "EVENT_END_DROPPED",
     "EVENT_END_UNCAUGHT",
+    "EVENT_END_DELIVERY_RECOVERED",
+    "EVENT_END_DELIVERY_FAILED",
 ]
