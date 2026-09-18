@@ -139,7 +139,29 @@ def compact_whatsapp_product_button_title(
     return label[:limit]
 
 
+def normalize_button_title_key(title: str) -> str:
+    """Comparison key for *visible* reply-button titles.
+
+    Meta rejects an interactive payload whose buttons share a visible title
+    (HTTP 400 ``Duplicate button title``). Two titles are considered the same
+    when they only differ by leading/trailing whitespace, repeated internal
+    whitespace, or Arabic orthographic variants the project already treats as
+    equivalent (``normalize_arabic``: diacritics, alef/ya/ta-marbuta forms,
+    tatweel, case). The key is never shown to the customer and never renames
+    a product.
+    """
+    raw = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not raw:
+        return ""
+    try:
+        normalized = _normalize(raw)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — fall back to whitespace-only normalization
+        normalized = raw.casefold()
+    return re.sub(r"\s+", " ", normalized or "").strip()
+
+
 __all__ = [
     "WA_REPLY_BUTTON_TITLE_MAX",
     "compact_whatsapp_product_button_title",
+    "normalize_button_title_key",
 ]

@@ -65,6 +65,35 @@ def refresh_wire_audit(tenant_id: Any, recipient: str, body: str, metadata: dict
         ctx.pending = []
 
 
+def attach_wire_audit_row(tenant_id: Any, recipient: str, row_id: Any,
+                          body: str, metadata: dict) -> bool:
+    """Bind a row persisted AFTER the audit opened (e.g. the grounded text
+    recovery row for a turn whose original reply was suppressed before
+    persist). Only an UNBOUND audit may be attached; a bound row is never
+    replaced. Returns True when the audit now targets ``row_id``."""
+    ctx = current_wire_audit(tenant_id, recipient)
+    if ctx is None or ctx.row_id is not None:
+        return False
+    bound_id = row_id if type(row_id) is int and row_id > 0 else None
+    if bound_id is None:
+        return False
+    ctx.row_id = bound_id
+    ctx.source_body = body
+    ctx.previous_body = body
+    ctx.metadata = dict(metadata)
+    ctx.pending = []
+    return True
+
+
+def note_wire_delivery_recovery(tenant_id: Any, recipient: str, info: dict) -> None:
+    """Record structured delivery-recovery evidence on the bound row's
+    provenance without re-attributing the customer text."""
+    ctx = current_wire_audit(tenant_id, recipient)
+    if ctx is None:
+        return
+    ctx.metadata["delivery_recovery"] = dict(info or {})
+
+
 def reset_wire_audit(token: Token) -> None:
     ctx = _current.get()
     if ctx is not None:

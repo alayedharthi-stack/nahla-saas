@@ -241,18 +241,38 @@ def _tidy_body_after_store_url_elision(text: str) -> str:
 
 
 def whatsapp_reply_buttons_payload(buttons: Sequence[Any]) -> list[Dict[str, Any]]:
-    """WhatsApp Cloud API reply buttons: ``type`` + ``reply.{id,title}`` only."""
+    """WhatsApp Cloud API reply buttons: ``type`` + ``reply.{id,title}`` only.
+
+    Final wire boundary (defense in depth): Meta rejects the whole payload
+    with HTTP 400 ``Duplicate button title`` when two visible titles collide,
+    and reply ids must be unique. Later duplicates (by normalized visible
+    title or by id) are dropped here so they can never reach the provider;
+    order is preserved and titles are never rewritten.
+    """
+    from core.product_button_label import normalize_button_title_key  # noqa: PLC0415
+
     out: list[Dict[str, Any]] = []
+    seen_titles: set = set()
+    seen_ids: set = set()
     for button in list(buttons or [])[:3]:
         if not isinstance(button, dict):
             continue
         reply = button.get("reply") if isinstance(button.get("reply"), dict) else {}
+        button_id = str(reply.get("id") or "")
+        title = str(reply.get("title") or "")
+        title_key = normalize_button_title_key(title)
+        if (title_key and title_key in seen_titles) or (button_id and button_id in seen_ids):
+            continue
+        if title_key:
+            seen_titles.add(title_key)
+        if button_id:
+            seen_ids.add(button_id)
         out.append(
             {
                 "type": str(button.get("type") or "reply"),
                 "reply": {
-                    "id": str(reply.get("id") or ""),
-                    "title": str(reply.get("title") or ""),
+                    "id": button_id,
+                    "title": title,
                 },
             }
         )

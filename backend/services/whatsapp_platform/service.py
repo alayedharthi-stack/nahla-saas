@@ -527,6 +527,10 @@ async def provider_post_with_context(
             data["_nahla_wamid"]          = wamid
             data["_nahla_is_send"]        = is_send
             data["_nahla_duration_ms"]    = duration_ms
+            # HTTP status lets the caller tell a DEFINITIVE 4xx rejection
+            # (safe to recover with a corrected payload) from an ambiguous
+            # 5xx / transport outcome (never resend automatically).
+            data["_nahla_http_status"]    = status_code
         except Exception:
             # Some providers occasionally hand back a dict subclass
             # that rejects new keys; never let bookkeeping break the

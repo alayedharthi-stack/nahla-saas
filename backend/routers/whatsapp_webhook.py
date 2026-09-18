@@ -13110,6 +13110,7 @@ async def _handle_merchant_message(
         _send_ok = False
         _social_send_suppressed = False
         _outbound_wire_boundary_done = False
+        _interactive_recovered_as_text = False
         try:
             from modules.ai.brain.postprocess.social_single_reply_guard import (  # noqa: PLC0415
                 should_suppress_competing_social_outbound,
@@ -13387,15 +13388,74 @@ async def _handle_merchant_message(
                             pass
         elif _brain_buttons and reply:
             _outbound_wire_boundary_done = True
+            _interactive_sink: Dict[str, Any] = {}
             _send_ok = await _send_interactive_reply(
                 phone_id=phone_id, to=to,
                 body_text=reply,
                 buttons=_brain_buttons,
                 _tenant_id=tenant_id, _db=db,
+                _result_sink=_interactive_sink,
             )
             if _send_ok and isinstance(_delivery_audit, dict):
                 _delivery_audit["interactive_buttons_sent"] = True
                 _delivery_audit["text_sent"] = True
+            elif not _send_ok and isinstance(_delivery_audit, dict):
+                # ── Sept 2026 product-silence incident ──────────────
+                # Meta DEFINITIVELY rejected the interactive payload
+                # (e.g. HTTP 400 "Duplicate button title"). The guarded
+                # text body already survived every truth guard, so send
+                # it once as plain text. Ambiguous outcomes (timeout,
+                # connection loss, 5xx, malformed 2xx) are NEVER resent:
+                # the customer may already have the message.
+                try:
+                    from core.product_reply_recovery import (  # noqa: PLC0415
+                        PROVIDER_DEFINITIVE_REJECTION as _PRR_DEFINITIVE,
+                        classify_provider_outcome as _prr_classify,
+                        new_recovery_audit_fields as _prr_fields,
+                        provider_error_snapshot as _prr_error,
+                    )
+
+                    for _prr_k, _prr_v in _prr_fields().items():
+                        _delivery_audit.setdefault(_prr_k, _prr_v)
+                    _rich_outcome = _prr_classify(_interactive_sink, send_ok=False)
+                    _delivery_audit["provider_outcome"] = _rich_outcome
+                    _delivery_audit["original_provider_error"] = _prr_error(_interactive_sink)
+                    _delivery_audit["interactive_rejected"] = (
+                        _rich_outcome == _PRR_DEFINITIVE
+                    )
+                    logger.warning(
+                        "[PRODUCT_TEXT_RECOVERY] tenant=%s to=*%s interactive_outcome=%s "
+                        "error_key=%s http_status=%s detail=%r",
+                        tenant_id, (to[-4:] if to else ""), _rich_outcome,
+                        (_delivery_audit["original_provider_error"] or {}).get("key"),
+                        (_delivery_audit["original_provider_error"] or {}).get("http_status"),
+                        str((_delivery_audit["original_provider_error"] or {}).get("detail") or "")[:120],
+                    )
+                    if _rich_outcome == _PRR_DEFINITIVE:
+                        _recovery_ok = await _recover_product_reply_with_grounded_text(
+                            db=db,
+                            tenant_id=tenant_id,
+                            phone_id=phone_id,
+                            to=to,
+                            wa_msg_id=wa_msg_id,
+                            convo=convo,
+                            guarded_reply=reply,
+                            brain_state=_bs_for_nc if isinstance(_bs_for_nc, dict) else {},
+                            brain_result=brain_result if isinstance(brain_result, dict) else None,
+                            delivery_audit=_delivery_audit,
+                            outbound_event_id=_outbound_event_id,
+                            base_metadata=_persona_ownership.to_metadata(),
+                            trace=_trace,
+                            trigger="interactive_rejected",
+                        )
+                        if _recovery_ok:
+                            _send_ok = True
+                            _interactive_recovered_as_text = True
+                except Exception as _prr_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[PRODUCT_TEXT_RECOVERY] tenant=%s interactive recovery failed: %s",
+                        tenant_id, _prr_exc,
+                    )
         elif (reply or "").strip():
             _outbound_wire_boundary_done = True
             # ── URL → CTA-button normaliser ─────────────────────────
@@ -13576,13 +13636,33 @@ async def _handle_merchant_message(
                 # No URLs in reply → plain text send (also handles the
                 # degenerate case where the splitter returned only
                 # plain-text segments).
+                _plain_text_sink: Dict[str, Any] = {}
                 _send_ok = await _send_whatsapp_message(
                     phone_id=phone_id, to=to, text=reply,
                     _tenant_id=tenant_id, _db=db,
                     _inbound_message_id=wa_msg_id,
+                    _result_sink=_plain_text_sink,
                 )
                 if _send_ok and isinstance(_delivery_audit, dict):
                     _delivery_audit["text_sent"] = True
+                elif isinstance(_delivery_audit, dict):
+                    # Telemetry only: keep the ORIGINAL provider outcome so
+                    # an ambiguous transport failure is never reported as a
+                    # terminal rejection. Plain text is never auto-resent.
+                    try:
+                        from core.product_reply_recovery import (  # noqa: PLC0415
+                            classify_provider_outcome as _prr_classify_text,
+                            provider_error_snapshot as _prr_error_text,
+                        )
+
+                        _delivery_audit["provider_outcome"] = _prr_classify_text(
+                            _plain_text_sink, send_ok=False,
+                        )
+                        _delivery_audit["original_provider_error"] = _prr_error_text(
+                            _plain_text_sink,
+                        )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — telemetry must not block the turn
+                        pass
         else:
             # Cards/media dispatch separately below. Do not send an empty
             # standalone text merely because a structured attachment exists.
@@ -13636,7 +13716,11 @@ async def _handle_merchant_message(
             _trace.mark_outbound_sent(
                 source=_trace_src,
                 length=len(reply or ""),
-                mode=(_TS.DELIVERY_INTERACTIVE if _brain_buttons else _TS.DELIVERY_TEXT),
+                mode=(
+                    _TS.DELIVERY_INTERACTIVE
+                    if (_brain_buttons and not _interactive_recovered_as_text)
+                    else _TS.DELIVERY_TEXT
+                ),
             )
             logger.info(
                 "[OUTBOUND] tenant=%s to=%s source=%s trigger=inbound "
@@ -14676,6 +14760,7 @@ async def _handle_merchant_message(
                     customer_wants_product_or_image as _wants_product,
                 )
                 from modules.observability.delivery_mode import (  # noqa: PLC0415
+                    DELIVERY_MODE_FAILED as _MODE_FAILED,
                     DELIVERY_MODE_TEXT_ONLY as _MODE_TEXT_ONLY,
                     is_acceptable_mode_for_product_intent as _mode_ok,
                 )
@@ -14685,6 +14770,58 @@ async def _handle_merchant_message(
                     inbound_text=text or "",
                     brain_action=_br_action or "",
                 )
+
+                # ── Grounded plain-text recovery (Sept 2026 incident) ──
+                # Nothing was provider-accepted (``failed``) although the
+                # customer asked for products and this turn's catalog
+                # search produced verified candidates: the composed text
+                # was emptied by a truth guard and the only queued card
+                # was (correctly) rejected as stale/unrelated. Send ONE
+                # deterministic list built from the verified candidates.
+                # Never after an ambiguous provider outcome, never twice.
+                _prr_product_turn = _is_product_reply_turn(
+                    wants_product=bool(_wants),
+                    decision_action=_br_dec_action,
+                    brain_action=_br_action,
+                )
+                if (
+                    _prr_product_turn
+                    and _final_mode == _MODE_FAILED
+                    and not _brain_handoff
+                    and not _social_send_suppressed
+                    and not _commerce_blocked
+                    and not _structured_catalog_miss
+                    and not (reply or "").strip()
+                    and not _delivery_audit.get("text_sent")
+                    and not _native_catalog_entry.get("thumbnail_product_retailer_id")
+                    and _product_discovery_action(_br_dec_action, _br_action)
+                    and str(_delivery_audit.get("provider_outcome") or "") not in (
+                        "ambiguous", "blocked",
+                    )
+                ):
+                    try:
+                        await _recover_product_reply_with_grounded_text(
+                            db=db,
+                            tenant_id=tenant_id,
+                            phone_id=phone_id,
+                            to=to,
+                            wa_msg_id=wa_msg_id,
+                            convo=convo,
+                            guarded_reply="",
+                            brain_state=_bs_for_nc if isinstance(_bs_for_nc, dict) else {},
+                            brain_result=brain_result if isinstance(brain_result, dict) else None,
+                            delivery_audit=_delivery_audit,
+                            outbound_event_id=_outbound_event_id,
+                            base_metadata=_persona_ownership.to_metadata(),
+                            trace=_trace,
+                            trigger="pre_provider_suppression",
+                        )
+                    except Exception as _prr_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[PRODUCT_TEXT_RECOVERY] tenant=%s final-stage recovery failed: %s",
+                            tenant_id, _prr_exc,
+                        )
+                    _final_mode = _compute_mode(_delivery_audit)
 
                 # ── Hard fallback recovery — May 2026 #10 ──────────
                 # The [DELIVERY_GUARD_FAIL] log used to be observation
@@ -14712,6 +14849,10 @@ async def _handle_merchant_message(
                     and not _delivery_audit.get("first_send_failed")
                     and _allow_product_cards
                     and not _structured_catalog_miss
+                    # A grounded text recovery already answered the turn;
+                    # a title-resolved CTA would pick a product the
+                    # customer never chose.
+                    and not _delivery_audit.get("product_text_recovery_sent")
                 ):
                     _rescue_url = ""
                     _rescue_title = ""
@@ -14896,6 +15037,13 @@ async def _handle_merchant_message(
                         len(reply or ""),
                         _delivery_audit,
                     )
+                _record_product_reply_delivery_outcome(
+                    delivery_audit=_delivery_audit,
+                    final_mode=_final_mode,
+                    product_reply_turn=_prr_product_turn,
+                    tenant_id=tenant_id,
+                    to=to,
+                )
             except Exception as _fd_exc:  # noqa: BLE001
                 logger.debug(
                     "[FINAL_DELIVERY] tenant=%s instrumentation failed: %s",
@@ -14941,6 +15089,54 @@ async def _handle_merchant_message(
                     _br_action or "?",
                     _delivery_audit,
                 )
+                # ── Grounded plain-text recovery (Sept 2026 incident) ──
+                # Same contract as the main dispatch block: a product turn
+                # whose composed text was emptied and that queued no card
+                # at all lands here with NOTHING provider-accepted.
+                _prr_product_turn = _is_product_reply_turn(
+                    wants_product=bool(_wants),
+                    decision_action=_br_dec_action,
+                    brain_action=_br_action,
+                )
+                if (
+                    _prr_product_turn
+                    and not _brain_handoff
+                    and not _social_send_suppressed
+                    and not _commerce_blocked
+                    and not _structured_catalog_miss
+                    and not (reply or "").strip()
+                    and not _delivery_audit.get("text_sent")
+                    and not _native_catalog_entry.get("thumbnail_product_retailer_id")
+                    and _product_discovery_action(_br_dec_action, _br_action)
+                    and str(_delivery_audit.get("provider_outcome") or "") not in (
+                        "ambiguous", "blocked",
+                    )
+                ):
+                    try:
+                        _prr_ok = await _recover_product_reply_with_grounded_text(
+                            db=db,
+                            tenant_id=tenant_id,
+                            phone_id=phone_id,
+                            to=to,
+                            wa_msg_id=wa_msg_id,
+                            convo=convo,
+                            guarded_reply="",
+                            brain_state=_bs_for_nc if isinstance(_bs_for_nc, dict) else {},
+                            brain_result=brain_result if isinstance(brain_result, dict) else None,
+                            delivery_audit=_delivery_audit,
+                            outbound_event_id=_outbound_event_id,
+                            base_metadata=_persona_ownership.to_metadata(),
+                            trace=_trace,
+                            trigger="pre_provider_suppression",
+                        )
+                        if _prr_ok:
+                            _delivery_audit["first_send_failed"] = False
+                    except Exception as _prr_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[PRODUCT_TEXT_RECOVERY] tenant=%s failed-branch recovery failed: %s",
+                            tenant_id, _prr_exc,
+                        )
+                    _final_mode = _compute_mode(_delivery_audit)
                 if _wants and not _mode_ok(
                     _final_mode,
                     audit=_delivery_audit,
@@ -14959,6 +15155,13 @@ async def _handle_merchant_message(
                         _br_action or "?",
                         len(reply or ""),
                     )
+                _record_product_reply_delivery_outcome(
+                    delivery_audit=_delivery_audit,
+                    final_mode=_final_mode,
+                    product_reply_turn=_prr_product_turn,
+                    tenant_id=tenant_id,
+                    to=to,
+                )
             except Exception as _fd_exc:  # noqa: BLE001
                 logger.debug(
                     "[FINAL_DELIVERY] tenant=%s instrumentation failed: %s",
@@ -15665,6 +15868,8 @@ async def _post_wa(
                             "wamid": _wamid,
                             "duration_ms": _duration,
                             "duplicate_suppressed": False,
+                            "http_status": (resp_data or {}).get("_nahla_http_status"),
+                            "response_body": resp_data,
                         }
                     )
                 _stamped_id = stamp_outbound_send_status(
@@ -15876,6 +16081,21 @@ async def _post_wa(
         except Exception as exc:
             logger.error("[WA] post error: %s", exc)
             # Transport-level failure (timeout, DNS, TLS, connection reset).
+            # The outcome is AMBIGUOUS — the provider may have accepted the
+            # message before the connection died — so callers must never
+            # auto-resend. Surface that through the result sink.
+            if _result_sink is not None:
+                _result_sink.update(
+                    {
+                        "classification": "exception",
+                        "wamid": None,
+                        "duration_ms": None,
+                        "duplicate_suppressed": False,
+                        "http_status": None,
+                        "response_body": None,
+                        "error_text": f"{type(exc).__name__}: {exc}",
+                    }
+                )
             # Stamp the row so the merchant sees "تعذّر الاتصال" instead
             # of an optimistic double-check.
             try:
@@ -16613,6 +16833,272 @@ async def _run_and_deliver_commerce_v2_owner_impl(
     }
 
 
+_PRODUCT_DISCOVERY_ACTIONS = frozenset({"search_products", "narrow", "recommend_addon"})
+
+
+def _product_discovery_action(decision_action: Any, brain_action: Any) -> bool:
+    """True when THIS turn's brain decision was a product-discovery action.
+
+    ``decision_action`` comes from the current ``brain_result``; the state
+    ``last_action`` is only consulted when the result carries no action.
+    Stale candidates from an earlier turn are never listed on a turn the
+    brain did not decide as product discovery.
+    """
+    action = str(decision_action or "").strip() or str(brain_action or "").strip()
+    return action in _PRODUCT_DISCOVERY_ACTIONS
+
+
+def _is_product_reply_turn(
+    *, wants_product: bool, decision_action: Any, brain_action: Any,
+) -> bool:
+    """A turn whose customer REQUIRES a product reply (outcome is recorded)."""
+    return bool(wants_product) or _product_discovery_action(decision_action, brain_action)
+
+
+async def _recover_product_reply_with_grounded_text(
+    *,
+    db,
+    tenant_id: int,
+    phone_id: str,
+    to: str,
+    wa_msg_id: Optional[str],
+    convo,
+    guarded_reply: str,
+    brain_state: Optional[Dict[str, Any]],
+    brain_result: Optional[Dict[str, Any]],
+    delivery_audit: Optional[Dict[str, Any]],
+    outbound_event_id: Optional[int],
+    base_metadata: Optional[Dict[str, Any]] = None,
+    trace=None,
+    trigger: str = "pre_provider_suppression",
+) -> bool:
+    """One-shot grounded plain-text recovery for a product turn (Sept 2026).
+
+    Runs strictly AFTER every truth / commercial-claim / stale-product guard
+    and only consumes their verdicts:
+
+    * reuses the guarded LLM text verbatim when it survived; otherwise builds
+      the deterministic factual list from THIS turn's verified candidates
+      (``core.product_reply_recovery``) — nothing is resolved by title, no
+      product is pre-selected for the customer;
+    * persists exactly one outbound row when the original reply was
+      suppressed before persist (and binds the wire audit to it), otherwise
+      re-stamps the existing row with the final provider outcome;
+    * attempts the provider once. Ambiguous outcomes are recorded, never
+      retried. Returns True only when the provider accepted the text.
+    """
+    from core.outbound_wire_audit import (  # noqa: PLC0415
+        attach_wire_audit_row,
+        note_wire_delivery_recovery,
+        set_wire_expression,
+    )
+    from core.product_reply_recovery import (  # noqa: PLC0415
+        CHOSEN_PATH_TEXT_RECOVERY,
+        choose_recovery_text,
+        classify_provider_outcome,
+        eligible_recovery_candidates,
+        fallback_provenance_metadata,
+        new_recovery_audit_fields,
+        provider_error_snapshot,
+    )
+
+    audit = delivery_audit if isinstance(delivery_audit, dict) else {}
+    for key, value in new_recovery_audit_fields().items():
+        audit.setdefault(key, value)
+    if int(audit.get("text_recovery_attempts") or 0) > 0:
+        audit["text_recovery_skip_reason"] = "already_attempted"
+        return False
+
+    candidates = eligible_recovery_candidates(brain_state, brain_result=brain_result)
+    text, source = choose_recovery_text(guarded_reply=guarded_reply, candidates=candidates)
+    if not text:
+        audit["text_recovery_skip_reason"] = "no_eligible_candidates"
+        logger.warning(
+            "[PRODUCT_TEXT_RECOVERY] tenant=%s to=*%s SKIP reason=no_eligible_candidates "
+            "trigger=%s",
+            tenant_id, (to[-4:] if to else ""), trigger,
+        )
+        return False
+
+    audit["text_recovery_attempts"] = int(audit.get("text_recovery_attempts") or 0) + 1
+    audit["text_recovery_source"] = source
+    recovery_info: Dict[str, Any] = {
+        "trigger": trigger,
+        "text_source": source,
+        "candidate_count": len(candidates),
+        "original_provider_error": audit.get("original_provider_error"),
+    }
+    provenance = (
+        fallback_provenance_metadata(fallback_reason=trigger)
+        if source == "fallback_deterministic"
+        else {}
+    )
+
+    row_id = outbound_event_id if (type(outbound_event_id) is int and outbound_event_id > 0) else None
+    if row_id is None:
+        # The original (empty) reply was never persisted — this text is the
+        # turn's single outbound row.
+        meta: Dict[str, Any] = dict(base_metadata or {})
+        meta.update(provenance)
+        meta["delivery_recovery"] = dict(recovery_info)
+        try:
+            row_id = StateManager.save_message(
+                db, to, text, "outbound",
+                conversation_id=getattr(convo, "id", None),
+                tenant_id=tenant_id,
+                extra_metadata=meta,
+            )
+        except Exception as persist_exc:  # noqa: BLE001
+            logger.warning(
+                "[PRODUCT_TEXT_RECOVERY] tenant=%s outbound persist failed: %s",
+                tenant_id, persist_exc,
+            )
+            row_id = None
+        try:
+            attach_wire_audit_row(tenant_id, to, row_id, text, meta)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — audit binding must not block recovery
+            pass
+    try:
+        if source == "fallback_deterministic":
+            set_wire_expression(
+                tenant_id, to, text, CHOSEN_PATH_TEXT_RECOVERY,
+                source="deterministic", model_metadata=provenance,
+            )
+        note_wire_delivery_recovery(tenant_id, to, recovery_info)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — provenance stamp must not block recovery
+        pass
+
+    sink: Dict[str, Any] = {}
+    ok = await _send_whatsapp_message(
+        phone_id=phone_id, to=to, text=text,
+        _tenant_id=tenant_id, _db=db,
+        _inbound_message_id=wa_msg_id,
+        _result_sink=sink,
+    )
+    audit["text_recovery_provider_outcome"] = classify_provider_outcome(sink, send_ok=ok)
+    if ok:
+        audit["text_sent"] = True
+        audit["product_text_recovery_sent"] = True
+        audit["text_recovery_wamid"] = sink.get("wamid")
+        audit["text_recovery_duplicate_suppressed"] = bool(sink.get("duplicate_suppressed"))
+        if trace is not None:
+            try:
+                from services import turn_trace as _turn_trace  # noqa: PLC0415
+
+                trace.mark_outbound_sent(
+                    source=_turn_trace.SOURCE_BRAIN,
+                    length=len(text),
+                    mode=_turn_trace.DELIVERY_TEXT,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — turn trace is observability only
+                pass
+        logger.info(
+            "[PRODUCT_TEXT_RECOVERY] tenant=%s to=*%s SENT trigger=%s source=%s "
+            "candidates=%d wamid_present=%s duplicate_suppressed=%s row=%s",
+            tenant_id, (to[-4:] if to else ""), trigger, source, len(candidates),
+            str(bool(sink.get("wamid"))).lower(),
+            str(bool(sink.get("duplicate_suppressed"))).lower(),
+            row_id,
+        )
+    else:
+        audit["text_recovery_error"] = provider_error_snapshot(sink)
+        if audit.get("original_provider_error") is None:
+            audit["original_provider_error"] = audit["text_recovery_error"]
+        logger.error(
+            "[PRODUCT_TEXT_RECOVERY] tenant=%s to=*%s FAILED trigger=%s source=%s "
+            "provider_outcome=%s error_key=%s",
+            tenant_id, (to[-4:] if to else ""), trigger, source,
+            audit["text_recovery_provider_outcome"],
+            (audit["text_recovery_error"] or {}).get("key"),
+        )
+    return bool(ok)
+
+
+def _record_product_reply_delivery_outcome(
+    *,
+    delivery_audit: Optional[Dict[str, Any]],
+    final_mode: str,
+    product_reply_turn: bool,
+    tenant_id: int,
+    to: str,
+) -> None:
+    """Closed-enum delivery verdict + explicit lifecycle terminal (Sept 2026).
+
+    ``end_ok`` must not mean "the handler returned": a product turn ends as
+    ``end_delivery_recovered`` when text recovery was provider-accepted and
+    as ``end_delivery_failed`` when nothing was (ambiguous vs terminal is
+    kept apart in the outcome). Never raises.
+    """
+    if not product_reply_turn or not isinstance(delivery_audit, dict):
+        return
+    try:
+        from core.product_reply_recovery import (  # noqa: PLC0415
+            OUTCOME_AMBIGUOUS_PROVIDER,
+            OUTCOME_RICH_ACCEPTED,
+            OUTCOME_RICH_REJECTED_TEXT_RECOVERED,
+            OUTCOME_SUPPRESSED_TEXT_RECOVERED,
+            OUTCOME_TERMINAL_FAILURE,
+            OUTCOME_TEXT_ACCEPTED,
+            PROVIDER_AMBIGUOUS,
+            record_product_reply_outcome,
+        )
+        from modules.observability.delivery_mode import (  # noqa: PLC0415
+            DELIVERY_MODE_FAILED,
+            DELIVERY_MODE_TEXT_ONLY,
+        )
+
+        audit = delivery_audit
+        if audit.get("product_text_recovery_sent"):
+            outcome = (
+                OUTCOME_RICH_REJECTED_TEXT_RECOVERED
+                if audit.get("interactive_rejected")
+                else OUTCOME_SUPPRESSED_TEXT_RECOVERED
+            )
+        elif final_mode == DELIVERY_MODE_FAILED:
+            outcomes = {
+                str(audit.get("provider_outcome") or ""),
+                str(audit.get("text_recovery_provider_outcome") or ""),
+            }
+            outcome = (
+                OUTCOME_AMBIGUOUS_PROVIDER
+                if PROVIDER_AMBIGUOUS in outcomes
+                else OUTCOME_TERMINAL_FAILURE
+            )
+        elif final_mode == DELIVERY_MODE_TEXT_ONLY and not audit.get(
+            "interactive_buttons_sent"
+        ):
+            outcome = OUTCOME_TEXT_ACCEPTED
+        else:
+            # catalog / image_cta / media_only / cta_only, or an accepted
+            # interactive (buttons) payload — the rich presentation landed.
+            outcome = OUTCOME_RICH_ACCEPTED
+        record_product_reply_outcome(
+            audit,
+            outcome=outcome,
+            final_mode=final_mode,
+            detail=(
+                f"trigger={audit.get('text_recovery_source') or '-'} "
+                f"skip={audit.get('text_recovery_skip_reason') or '-'}"
+            ),
+        )
+        err = audit.get("original_provider_error") or {}
+        logger.info(
+            "[PRODUCT_REPLY_OUTCOME] tenant=%s to=*%s outcome=%s mode=%s "
+            "recovery_attempts=%s recovery_wamid_present=%s skip=%s "
+            "provider_error_key=%s provider_http_status=%s",
+            tenant_id, (to[-4:] if to else ""), outcome, final_mode,
+            audit.get("text_recovery_attempts"),
+            str(bool(audit.get("text_recovery_wamid"))).lower(),
+            audit.get("text_recovery_skip_reason") or "-",
+            (err or {}).get("key") or "-",
+            (err or {}).get("http_status") or "-",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "[PRODUCT_REPLY_OUTCOME] tenant=%s recording failed: %s", tenant_id, exc,
+        )
+
+
 async def _send_whatsapp_message(
     phone_id: str, to: str, text: str,
     _tenant_id: Optional[int] = None, _store_name: str = "unknown", _db=None,
@@ -16635,6 +17121,7 @@ async def _send_whatsapp_message(
 async def _send_interactive_reply(
     phone_id: str, to: str, body_text: str, buttons: list,
     _tenant_id: Optional[int] = None, _db=None,
+    _result_sink: Optional[Dict[str, Any]] = None,
 ) -> bool:
     wire_buttons = list(buttons or [])[:3]
     try:
@@ -16652,7 +17139,7 @@ async def _send_interactive_reply(
             "body": {"text": body_text},
             "action": {"buttons": wire_buttons[:3]},
         },
-    }, _tenant_id=_tenant_id, _db=_db)
+    }, _tenant_id=_tenant_id, _db=_db, _result_sink=_result_sink)
 
 
 def _safe_cta_http_url(url: Optional[str]) -> str:
