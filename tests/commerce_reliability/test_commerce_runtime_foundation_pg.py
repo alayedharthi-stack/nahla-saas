@@ -15,6 +15,8 @@ from __future__ import annotations
 import dataclasses
 import multiprocessing as mp
 import os
+import queue
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -187,7 +189,7 @@ def _wait_past(engine, moment) -> None:
     deadline = time.monotonic() + 15
     while True:
         with engine.connect() as conn:
-            if conn.execute(text("SELECT now() > :t"), {"t": moment}).scalar():
+            if conn.execute(text("SELECT clock_timestamp() > :t"), {"t": moment}).scalar():
                 return
         assert time.monotonic() < deadline, "database clock never passed the lease expiry"
         time.sleep(0.2)
@@ -225,9 +227,18 @@ class Foundation:
                                           conversation_id=conversation_id)
 
     def claim(self, conversation_id: int, owner: str, *, seconds: int = 60, tenant: Optional[int] = None,
-              namespace: Any = LIVE) -> c.Lease:
+              namespace: Any = LIVE, turn_id: Optional[int] = None) -> c.Lease:
         return self.repo.claim(tenant_id=tenant or self.tenant_a, namespace=namespace,
-                               conversation_id=conversation_id, owner_id=owner, lease_seconds=seconds)
+                               conversation_id=conversation_id, owner_id=owner, lease_seconds=seconds,
+                               turn_id=turn_id)
+
+    def finalize(self, turn: c.AdmittedTurn, token: c.OwnershipToken, *, namespace: Any = LIVE,
+                 tenant: Optional[int] = None, state: Optional[c.StateTransition] = None) -> c.TerminalRecord:
+        return self.repo.record_terminal(
+            tenant_id=tenant or self.tenant_a, namespace=namespace, turn_id=turn.turn_id, token=token,
+            processing_outcome="completed", transport_outcome="not_attempted", customer_reach="not_applicable",
+            state_transition=state,
+        )
 
 
 @pytest.fixture(scope="module")
@@ -387,7 +398,7 @@ def test_bounded_payloads_are_rejected_before_any_write(foundation: Foundation) 
     turn = f.admit(ref)
     lease = f.claim(turn.conversation_id, "worker-a")
     with pytest.raises(c.ValidationError):
-        f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+        f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, turn_id=turn.turn_id,
                             token=lease.token, expected_revision=0, payload={"blob": "x" * c.MAX_PAYLOAD_BYTES})
     assert f.snapshot(turn.conversation_id).state_revision == 0
 
@@ -418,16 +429,15 @@ def test_different_conversations_progress_independently(foundation: Foundation) 
     turn_1, turn_2 = f.admit(_ref()), f.admit(_ref())
     lease_a = f.claim(turn_1.conversation_id, "worker-a")
     lease_b = f.claim(turn_2.conversation_id, "worker-b")
-    commit_a = f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn_1.conversation_id,
+    commit_a = f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn_1.conversation_id, turn_id=turn_1.turn_id,
                                    token=lease_a.token, expected_revision=0, payload={"owner": "a"})
-    commit_b = f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn_2.conversation_id,
+    commit_b = f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn_2.conversation_id, turn_id=turn_2.turn_id,
                                    token=lease_b.token, expected_revision=0, payload={"owner": "b"})
     assert (commit_a.revision, commit_b.revision) == (1, 1)
-    # A token is bound to its own conversation.
-    with pytest.raises(c.OwnershipRejected) as crossed:
-        f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn_2.conversation_id,
+    # A token is bound to its own conversation: the binding refuses before any ownership rule.
+    with pytest.raises(c.ScopeMismatch):
+        f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn_2.conversation_id, turn_id=turn_2.turn_id,
                             token=lease_a.token, expected_revision=1, payload={"owner": "a"})
-    assert crossed.value.reason is c.RejectReason.STALE_OWNER
     for turn, lease in ((turn_1, lease_a), (turn_2, lease_b)):
         record = f.repo.record_terminal(
             tenant_id=f.tenant_a, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
@@ -455,7 +465,7 @@ def test_lease_expiry_permits_recovery_with_a_higher_fence_and_fences_out_the_ol
                          token=token, lease_seconds=60)
         seen["renew"] = e1.value.reason
         with pytest.raises(c.OwnershipRejected) as e2:
-            f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+            f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, turn_id=turn.turn_id,
                                 token=token, expected_revision=0, payload={"from": token.owner_id})
         seen["commit"] = e2.value.reason
         with pytest.raises(c.OwnershipRejected) as e3:
@@ -485,7 +495,7 @@ def test_lease_expiry_permits_recovery_with_a_higher_fence_and_fences_out_the_ol
     renewed = f.repo.renew(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
                            token=recovered.token, lease_seconds=60)
     assert (renewed.fence, renewed.epoch) == (2, 1) and renewed.expires_at > recovered.expires_at
-    commit = f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+    commit = f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, turn_id=turn.turn_id,
                                  token=recovered.token, expected_revision=0, payload={"from": "worker-b"})
     assert commit.revision == 1
 
@@ -494,11 +504,11 @@ def test_stale_revisions_cannot_overwrite_newer_state(foundation: Foundation) ->
     f = foundation
     turn = f.admit(_ref())
     lease = f.claim(turn.conversation_id, "worker-a")
-    first = f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+    first = f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, turn_id=turn.turn_id,
                                 token=lease.token, expected_revision=0, payload={"step": 1})
     assert first.revision == 1
     with pytest.raises(c.StateConflict) as stale:
-        f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+        f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, turn_id=turn.turn_id,
                             token=lease.token, expected_revision=0, payload={"step": "stale"})
     assert stale.value.reason is c.RejectReason.STALE_REVISION
     assert stale.value.snapshot.state_revision == 1
@@ -508,7 +518,7 @@ def test_stale_revisions_cannot_overwrite_newer_state(foundation: Foundation) ->
     results = _run_workers([
         (w.commit_state_worker, (f.dsn, f"cas-{i}", dict(
             tenant_id=f.tenant_a, namespace="live", conversation_id=turn.conversation_id, token=token,
-            expected_revision=1, payload={"step": 2, "writer": i}))) for i in range(3)
+            turn_id=turn.turn_id, expected_revision=1, payload={"step": 2, "writer": i}))) for i in range(3)
     ])
     assert _statuses(results) == ["ok", "rejected", "rejected"], results
     assert {r["reason"] for r in results if r["status"] == "rejected"} == {"stale_revision"}
@@ -529,7 +539,7 @@ def test_ownership_epoch_change_invalidates_older_work(foundation: Foundation) -
     for op in (
         lambda: f.repo.renew(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
                              token=lease.token, lease_seconds=60),
-        lambda: f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+        lambda: f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, turn_id=turn.turn_id,
                                     token=lease.token, expected_revision=0, payload={"x": 1}),
         lambda: f.repo.record_terminal(
             tenant_id=f.tenant_a, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
@@ -581,13 +591,14 @@ def test_cross_tenant_access_is_rejected(foundation: Foundation) -> None:
         f.repo.get_conversation(tenant_id=foreign, namespace=LIVE, conversation_id=turn.conversation_id)
     with pytest.raises(c.ConversationNotFound):
         f.claim(turn.conversation_id, "intruder", tenant=foreign)
-    with pytest.raises(c.ConversationNotFound):
+    # Token-bearing operations refuse the foreign scope before reading anything.
+    with pytest.raises(c.ScopeMismatch):
         f.repo.renew(tenant_id=foreign, namespace=LIVE, conversation_id=turn.conversation_id,
                      token=lease.token, lease_seconds=60)
-    with pytest.raises(c.ConversationNotFound):
-        f.repo.commit_state(tenant_id=foreign, namespace=LIVE, conversation_id=turn.conversation_id,
+    with pytest.raises(c.ScopeMismatch):
+        f.repo.commit_state(tenant_id=foreign, namespace=LIVE, conversation_id=turn.conversation_id, turn_id=turn.turn_id,
                             token=lease.token, expected_revision=0, payload={"stolen": True})
-    with pytest.raises(c.ConversationNotFound):
+    with pytest.raises(c.ScopeMismatch):
         f.repo.release(tenant_id=foreign, namespace=LIVE, conversation_id=turn.conversation_id, token=lease.token)
     with pytest.raises(c.ConversationNotFound):
         f.repo.invalidate_ownership(tenant_id=foreign, namespace=LIVE, conversation_id=turn.conversation_id)
@@ -621,10 +632,9 @@ def test_shadow_and_live_namespaces_are_independent(foundation: Foundation) -> N
         f.repo.record_terminal(
             tenant_id=f.tenant_a, namespace=LIVE, turn_id=shadow_turn.turn_id, token=live_lease.token,
             processing_outcome="completed", transport_outcome="not_attempted", customer_reach="not_applicable")
-    with pytest.raises(c.OwnershipRejected) as crossed:
-        f.repo.commit_state(tenant_id=f.tenant_a, namespace=SHADOW, conversation_id=shadow_turn.conversation_id,
+    with pytest.raises(c.ScopeMismatch):
+        f.repo.commit_state(tenant_id=f.tenant_a, namespace=SHADOW, conversation_id=shadow_turn.conversation_id, turn_id=shadow_turn.turn_id,
                             token=live_lease.token, expected_revision=0, payload={"x": 1})
-    assert crossed.value.reason is c.RejectReason.STALE_OWNER
     shadow_record = f.repo.record_terminal(
         tenant_id=f.tenant_a, namespace=SHADOW, turn_id=shadow_turn.turn_id, token=shadow_lease.token,
         processing_outcome="completed", transport_outcome="not_attempted", customer_reach="not_applicable",
@@ -737,7 +747,7 @@ def test_every_operation_closes_its_transaction_before_returning(foundation: Fou
     lease = f.claim(turn.conversation_id, "worker-a")
     f.repo.renew(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
                  token=lease.token, lease_seconds=60)
-    f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+    f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, turn_id=turn.turn_id,
                         token=lease.token, expected_revision=0, payload={"n": 1})
     f.repo.record_terminal(
         tenant_id=f.tenant_a, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
@@ -748,3 +758,241 @@ def test_every_operation_closes_its_transaction_before_returning(foundation: Fou
             "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
             "AND state IN ('idle in transaction', 'idle in transaction (aborted)')")).scalar()
     assert open_transactions == 0
+
+
+# ── B1: the lease clock after a lock wait ────────────────────────────────────
+
+
+def _hold_row_lock(dsn: str, conversation_id: int, locked: threading.Event, release: threading.Event) -> None:
+    """Independent connection: lock the conversation row until told to release."""
+    engine = create_engine(dsn, pool_pre_ping=True)
+    try:
+        with engine.connect() as conn:
+            tx = conn.begin()
+            conn.execute(text(f"SELECT id FROM {m.CONVERSATIONS_TABLE} WHERE id = :id FOR UPDATE"),
+                         {"id": conversation_id})
+            locked.set()
+            release.wait(timeout=60)
+            tx.rollback()
+    finally:
+        engine.dispose()
+
+
+def _call_on_own_connection(dsn: str, fn: Callable[[CommerceRuntimeRepository], Any]) -> "queue.Queue":
+    out: "queue.Queue" = queue.Queue()
+
+    def run() -> None:
+        engine = create_engine(dsn, pool_pre_ping=True)
+        try:
+            out.put(("ok", fn(CommerceRuntimeRepository(engine))))
+        except Exception as exc:  # noqa: BLE001 — surfaced to the test, never hidden
+            out.put(("err", exc))
+        finally:
+            engine.dispose()
+
+    threading.Thread(target=run, daemon=True).start()
+    return out
+
+
+def _wait_for_lock_waiter(engine) -> None:
+    deadline = time.monotonic() + 15
+    while True:
+        with engine.connect() as conn:
+            waiting = conn.execute(text(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                "AND wait_event_type = 'Lock'")).scalar()
+        if waiting:
+            return
+        assert time.monotonic() < deadline, "no connection is waiting on a row lock"
+        time.sleep(0.05)
+
+
+def _blocked_across_expiry(f: Foundation, conversation_id: int, expires_at, fn) -> Tuple[str, Any]:
+    """Run ``fn`` on its own connection while another connection holds the row
+    lock until the database clock passes ``expires_at``; return its outcome."""
+    locked, release = threading.Event(), threading.Event()
+    holder = threading.Thread(target=_hold_row_lock, args=(f.dsn, conversation_id, locked, release), daemon=True)
+    holder.start()
+    assert locked.wait(timeout=30)
+    try:
+        out = _call_on_own_connection(f.dsn, fn)
+        _wait_for_lock_waiter(f.engine)
+        _wait_past(f.engine, expires_at)
+    finally:
+        release.set()
+    holder.join(timeout=30)
+    return out.get(timeout=60)
+
+
+@pytest.mark.parametrize("operation", ["renew", "release", "commit", "finalize"])
+def test_lock_wait_across_expiry_rejects_the_expired_owner(foundation: Foundation, operation: str) -> None:
+    f = foundation
+    turn = f.admit(_ref())
+    lease = f.claim(turn.conversation_id, "worker-a", seconds=2)
+    tid, cid, token = f.tenant_a, turn.conversation_id, lease.token
+    calls = {
+        "renew": lambda r: r.renew(tenant_id=tid, namespace=LIVE, conversation_id=cid, token=token, lease_seconds=60),
+        "release": lambda r: r.release(tenant_id=tid, namespace=LIVE, conversation_id=cid, token=token),
+        "commit": lambda r: r.commit_state(tenant_id=tid, namespace=LIVE, conversation_id=cid, token=token,
+                                           turn_id=turn.turn_id, expected_revision=0, payload={"late": True}),
+        "finalize": lambda r: r.record_terminal(
+            tenant_id=tid, namespace=LIVE, turn_id=turn.turn_id, token=token, processing_outcome="completed",
+            transport_outcome="accepted", customer_reach="reached",
+            state_transition=c.StateTransition(expected_revision=0, payload={"late": True})),
+    }
+    status, outcome = _blocked_across_expiry(f, cid, lease.expires_at, calls[operation])
+    assert status == "err", f"{operation} was accepted after the lease expired during a lock wait: {outcome!r}"
+    assert isinstance(outcome, c.OwnershipRejected) and outcome.reason is c.RejectReason.EXPIRED_LEASE, outcome
+    after = f.snapshot(cid)
+    assert (after.state_revision, after.state_payload, after.lease_owner, after.lease_fence) == (0, {}, "worker-a", 1)
+    assert f.repo.get_terminal(tenant_id=tid, namespace=LIVE, turn_id=turn.turn_id) is None
+
+
+def test_lock_wait_across_expiry_lets_a_new_claimant_take_over(foundation: Foundation) -> None:
+    f = foundation
+    turn = f.admit(_ref())
+    old = f.claim(turn.conversation_id, "worker-a", seconds=2)
+    status, outcome = _blocked_across_expiry(
+        f, turn.conversation_id, old.expires_at,
+        lambda r: r.claim(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+                          owner_id="worker-b", lease_seconds=30),
+    )
+    assert status == "ok", f"claim after waiting across the expiry was refused: {outcome!r}"
+    assert (outcome.owner_id, outcome.fence, outcome.epoch, outcome.takeover) == ("worker-b", 2, 1, True)
+    assert outcome.expires_at > outcome.db_now
+    with f.engine.connect() as conn:
+        assert conn.execute(text("SELECT clock_timestamp() < :t"), {"t": outcome.expires_at}).scalar()
+    renewed = f.repo.renew(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+                           token=outcome.token, lease_seconds=60)
+    assert renewed.fence == 2
+
+
+def test_claim_expiry_is_measured_after_the_lock_wait(foundation: Foundation) -> None:
+    f = foundation
+    turn = f.admit(_ref())
+    with f.engine.connect() as conn:
+        far_future = conn.execute(text("SELECT clock_timestamp() + interval '2 seconds'")).scalar()
+    status, outcome = _blocked_across_expiry(
+        f, turn.conversation_id, far_future,   # hold the lock for two seconds, longer than the lease requested
+        lambda r: r.claim(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+                          owner_id="worker-a", lease_seconds=1),
+    )
+    assert status == "ok", outcome
+    assert outcome.expires_at > outcome.db_now, "lease already expired when the claim returned"
+    with f.engine.connect() as conn:
+        assert conn.execute(text("SELECT clock_timestamp() < :t"), {"t": outcome.expires_at}).scalar()
+    renewed = f.repo.renew(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+                           token=outcome.token, lease_seconds=60)
+    assert renewed.expires_at > outcome.expires_at
+
+
+# ── B2: scope-bound ownership tokens ─────────────────────────────────────────
+
+
+def test_same_owner_fence_and_epoch_cannot_cross_conversation_namespace_or_tenant(foundation: Foundation) -> None:
+    f, owner, ref = foundation, "worker-same", _ref()
+    source = f.admit(ref)
+    other_conversation = f.admit(_ref())
+    other_namespace = f.admit(ref, namespace=SHADOW)
+    other_tenant = f.admit(ref, tenant=f.tenant_b)
+    source_lease = f.claim(source.conversation_id, owner)
+    targets = [
+        ("conversation", f.tenant_a, LIVE, other_conversation, f.claim(other_conversation.conversation_id, owner)),
+        ("namespace", f.tenant_a, SHADOW, other_namespace, f.claim(other_namespace.conversation_id, owner, namespace=SHADOW)),
+        ("tenant", f.tenant_b, LIVE, other_tenant, f.claim(other_tenant.conversation_id, owner, tenant=f.tenant_b)),
+    ]
+    # Identical owner, fence and epoch everywhere: only the scope binding can tell the tokens apart.
+    for _, _, _, _, lease in targets:
+        assert (lease.owner_id, lease.fence, lease.epoch) == (source_lease.owner_id, source_lease.fence, source_lease.epoch)
+    foreign = source_lease.token
+    for label, tenant, namespace, turn, _ in targets:
+        before = f.snapshot(turn.conversation_id, tenant=tenant, namespace=namespace)
+        attempts = {
+            "renew": lambda: f.repo.renew(tenant_id=tenant, namespace=namespace, conversation_id=turn.conversation_id,
+                                          token=foreign, lease_seconds=60),
+            "release": lambda: f.repo.release(tenant_id=tenant, namespace=namespace,
+                                              conversation_id=turn.conversation_id, token=foreign),
+            "commit": lambda: f.repo.commit_state(tenant_id=tenant, namespace=namespace,
+                                                  conversation_id=turn.conversation_id, token=foreign,
+                                                  turn_id=turn.turn_id, expected_revision=0, payload={"stolen": label}),
+            "finalize": lambda: f.finalize(turn, foreign, namespace=namespace, tenant=tenant,
+                                           state=c.StateTransition(expected_revision=0, payload={"stolen": label})),
+        }
+        for name, attempt in attempts.items():
+            with pytest.raises(c.ScopeMismatch, match="does not match target scope"):
+                attempt()
+        after = f.snapshot(turn.conversation_id, tenant=tenant, namespace=namespace)
+        assert dataclasses.replace(after, db_now=before.db_now) == before, (label, name)
+        assert f.repo.get_terminal(tenant_id=tenant, namespace=namespace, turn_id=turn.turn_id) is None
+    # Positive control: each token still works on the scope it was issued for.
+    for label, tenant, namespace, turn, lease in targets:
+        commit = f.repo.commit_state(tenant_id=tenant, namespace=namespace, conversation_id=turn.conversation_id,
+                                     token=lease.token, turn_id=turn.turn_id, expected_revision=0, payload={"own": label})
+        assert commit.revision == 1
+    assert f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=source.conversation_id,
+                               token=foreign, turn_id=source.turn_id, expected_revision=0, payload={"own": "source"}).revision == 1
+
+
+def test_terminal_scope_is_derived_from_the_turn_not_the_caller(foundation: Foundation) -> None:
+    f, owner = foundation, "worker-same"
+    one, two = f.admit(_ref()), f.admit(_ref())
+    lease_one, lease_two = f.claim(one.conversation_id, owner), f.claim(two.conversation_id, owner)
+    assert (lease_one.fence, lease_one.epoch) == (lease_two.fence, lease_two.epoch)
+    # The token of conversation one presented for a turn that belongs to conversation two.
+    with pytest.raises(c.ScopeMismatch):
+        f.finalize(two, lease_one.token)
+    assert f.repo.get_terminal(tenant_id=f.tenant_a, namespace=LIVE, turn_id=two.turn_id) is None
+    assert f.finalize(two, lease_two.token).turn_id == two.turn_id
+
+
+# ── Ordered processing at the repository boundary ────────────────────────────
+
+
+def test_processing_is_bound_to_the_oldest_unresolved_turn(foundation: Foundation) -> None:
+    f, ref = foundation, _ref()
+    first, second, third = f.admit(ref), f.admit(ref), f.admit(ref)
+    assert [t.sequence for t in (first, second, third)] == [1, 2, 3]
+    lease = f.claim(first.conversation_id, "worker-a")
+    assert (lease.eligible_turn_id, lease.eligible_sequence) == (first.turn_id, 1)
+
+    # Finalising or committing for sequence 2 while sequence 1 is unresolved is refused, and nothing changes.
+    with pytest.raises(c.OwnershipRejected) as early:
+        f.finalize(second, lease.token, state=c.StateTransition(expected_revision=0, payload={"processed_sequence": 2}))
+    assert early.value.reason is c.RejectReason.TURN_NOT_ELIGIBLE
+    assert early.value.snapshot.eligible_turn_id == first.turn_id
+    with pytest.raises(c.OwnershipRejected) as early_commit:
+        f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=first.conversation_id,
+                            token=lease.token, turn_id=second.turn_id, expected_revision=0, payload={"processed_sequence": 2})
+    assert early_commit.value.reason is c.RejectReason.TURN_NOT_ELIGIBLE
+    snap = f.snapshot(first.conversation_id)
+    assert (snap.state_revision, snap.state_payload, snap.eligible_sequence) == (0, {}, 1)
+    assert f.repo.get_terminal(tenant_id=f.tenant_a, namespace=LIVE, turn_id=second.turn_id) is None
+
+    # In order: commit and finalise 1, then 2, then 3; eligibility advances after each terminal.
+    assert f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=first.conversation_id,
+                               token=lease.token, turn_id=first.turn_id, expected_revision=0,
+                               payload={"processed_sequence": 1}).revision == 1
+    f.finalize(first, lease.token)
+    assert f.snapshot(first.conversation_id).eligible_turn_id == second.turn_id
+    with pytest.raises(c.OwnershipRejected) as skip:
+        f.finalize(third, lease.token)
+    assert skip.value.reason is c.RejectReason.TURN_NOT_ELIGIBLE
+    f.finalize(second, lease.token, state=c.StateTransition(expected_revision=1, payload={"processed_sequence": 2}))
+    assert f.snapshot(first.conversation_id).state_payload == {"processed_sequence": 2}
+    f.finalize(third, lease.token)
+    after = f.snapshot(first.conversation_id)
+    assert (after.eligible_turn_id, after.eligible_sequence) == (None, None)
+    # With every turn resolved there is nothing to commit for.
+    with pytest.raises(c.OwnershipRejected) as nothing:
+        f.repo.commit_state(tenant_id=f.tenant_a, namespace=LIVE, conversation_id=first.conversation_id,
+                            token=lease.token, turn_id=third.turn_id, expected_revision=2, payload={"x": 1})
+    assert nothing.value.reason is c.RejectReason.TURN_NOT_ELIGIBLE
+    # A claim naming a turn that is not the eligible one is refused; naming the eligible one is not.
+    ref_2 = _ref()
+    a, b = f.admit(ref_2), f.admit(ref_2)
+    with pytest.raises(c.OwnershipRejected) as wrong_turn:
+        f.claim(a.conversation_id, "worker-b", turn_id=b.turn_id)
+    assert wrong_turn.value.reason is c.RejectReason.TURN_NOT_ELIGIBLE
+    assert f.snapshot(a.conversation_id).lease_owner is None
+    named = f.claim(a.conversation_id, "worker-b", turn_id=a.turn_id)
+    assert (named.eligible_turn_id, named.eligible_sequence) == (a.turn_id, 1)
