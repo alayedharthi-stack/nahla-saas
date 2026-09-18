@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 """Strict runner for required PostgreSQL proof suites.
 
-Runs each suite of ``scripts/required_postgres_proofs.json`` as its own
-pytest process against a real PostgreSQL and judges the JUnit output against
-the suite's node-id inventory. The verdict is PROVEN only when, for every
-suite, the required configuration was present before pytest started, the
-collected node ids equal the inventory exactly, every test passed, and the
-JUnit counts show zero skipped, zero failures and zero errors. A skip is
-never a pass; there is no diagnostic or advisory mode.
+Runs every suite listed in ``scripts/required_postgres_proofs.json`` as its
+own pytest process against a real PostgreSQL and judges the JUnit output
+against the suite's node-id inventory. The verdict is PROVEN only when, for
+every suite, the required configuration was present before pytest started,
+the collected node ids equal the inventory exactly, every test passed, and
+the JUnit counts show zero skipped, zero failures and zero errors. A skip is
+never a pass; there is no diagnostic or advisory mode. Suites carry a
+``kind``: ``proof`` (the PostgreSQL proofs themselves) or
+``runner_regression`` (tests of this runner and of the shared connection
+helper); the verdict counts them separately and requires both.
+
+Report freshness: any previous report at ``--report`` and any previous
+JUnit files in ``--junit-dir`` are removed before validation starts, and
+every early failure (unreadable manifest, missing configuration, missing
+module) writes a fresh NOT RUN report, so a stale PROVEN report can never
+appear current.
 
 This runner is independent of the commerce reliability gate
 (``scripts/commerce_reliability_gate.py``): it carries no allowances, and a
@@ -36,6 +45,10 @@ from typing import Any, Dict, List, Optional, Tuple
 EXIT_PROVEN = 0
 EXIT_NOT_PROVEN = 1
 EXIT_NOT_RUN = 2
+
+KIND_PROOF = "proof"
+KIND_RUNNER_REGRESSION = "runner_regression"
+KINDS = (KIND_PROOF, KIND_RUNNER_REGRESSION)
 
 OUTCOME_PASSED = "passed"
 OUTCOME_SKIPPED = "skipped"
@@ -83,6 +96,8 @@ def load_manifest(path: Path) -> Dict[str, Any]:
         for key, value in env.items():
             if value is not None and not isinstance(value, str):
                 raise ManifestError(f"{suite_id}: required_env[{key}] must be a string or null")
+        if suite.get("kind", KIND_PROOF) not in KINDS:
+            raise ManifestError(f"{suite_id}: kind must be one of {KINDS}")
     return data
 
 
@@ -200,6 +215,7 @@ def judge_suite(suite: Dict[str, Any], junit: Dict[str, Any], pytest_exit: int) 
     passed = sum(1 for o, _ in outcomes.values() if o == OUTCOME_PASSED)
     return {
         "id": suite["id"],
+        "kind": suite.get("kind", KIND_PROOF),
         "module": suite["module"],
         "required": len(required),
         "collected": len(outcomes),
@@ -230,6 +246,29 @@ def run_suite(root: Path, suite: Dict[str, Any], junit_dir: Path) -> Tuple[int, 
     return proc.returncode, junit_path
 
 
+def _write_report(report: Optional[Path], verdict: Dict[str, Any]) -> None:
+    if report is None:
+        return
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(verdict, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _reset_outputs(report: Optional[Path], junit_dir: Path) -> None:
+    """Invalidate every earlier output before validation starts.
+
+    A previous PROVEN report or JUnit file must never survive into a run
+    that stops early; the report starts as NOT RUN and is only replaced by
+    this run's own verdict.
+    """
+    if report is not None and report.exists():
+        report.unlink()
+    _write_report(report, {"verdict": "NOT RUN", "reason": "validation_not_started",
+                           "note": "placeholder written before validation; replaced by this run's verdict"})
+    if junit_dir.exists():
+        for stale in junit_dir.glob("*.xml"):
+            stale.unlink()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", type=Path, required=True)
@@ -240,15 +279,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--list", action="store_true", help="print the inventory and exit")
     args = parser.parse_args(argv)
 
+    if not args.list:
+        _reset_outputs(args.report, args.junit_dir)
+
     try:
         manifest = load_manifest(args.manifest)
     except ManifestError as exc:
+        _write_report(args.report, {"verdict": "NOT RUN", "reason": "manifest", "detail": str(exc)})
         print(f"REQUIRED POSTGRES PROOFS: NOT RUN — {exc}", flush=True)
         return EXIT_NOT_RUN
 
     if args.list:
         for suite in manifest["suites"]:
-            print(f"[{suite['id']}] {suite['module']} ({len(suite['nodeids'])} required)")
+            print(f"[{suite['id']}] kind={suite.get('kind', KIND_PROOF)} {suite['module']} "
+                  f"({len(suite['nodeids'])} required)")
             for nodeid in suite["nodeids"]:
                 print(f"  {nodeid}")
         return EXIT_PROVEN
@@ -265,10 +309,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for suite_id, blockers in config_blockers.items():
             for blocker in blockers:
                 print(f"  {suite_id}: {blocker}", flush=True)
-        verdict = {"verdict": "NOT RUN", "reason": "configuration", "suites": config_blockers}
-        if args.report:
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(json.dumps(verdict, indent=2, ensure_ascii=False), encoding="utf-8")
+        _write_report(args.report, {"verdict": "NOT RUN", "reason": "configuration", "suites": config_blockers})
         print("REQUIRED POSTGRES PROOFS: NOT RUN — required configuration missing; pytest was not started",
               flush=True)
         return EXIT_NOT_RUN
@@ -284,9 +325,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     proven = all(r["proven"] for r in results)
     total_required = sum(r["required"] for r in results)
     total_passed = sum(r["passed"] for r in results)
+    by_kind = {kind: {"required": 0, "passed": 0} for kind in KINDS}
+    for r in results:
+        by_kind[r["kind"]]["required"] += r["required"]
+        by_kind[r["kind"]]["passed"] += r["passed"]
     print("REQUIRED POSTGRES PROOFS — per suite", flush=True)
     for r in results:
-        print(f"  {r['id']}: required={r['required']} collected={r['collected']} passed={r['passed']} "
+        print(f"  {r['id']} [{r['kind']}]: required={r['required']} collected={r['collected']} passed={r['passed']} "
               f"skipped={r['skipped']} failed={r['failed']} errors={r['errors']} "
               f"pytest_exit={r['pytest_exit_code']} verdict={'PROVEN' if r['proven'] else 'NOT PROVEN'}",
               flush=True)
@@ -296,15 +341,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         "verdict": "PROVEN" if proven else "NOT PROVEN",
         "required": total_required,
         "passed": total_passed,
+        "by_kind": by_kind,
         "suites": results,
         "note": ("Proof of the inventoried suites only; the commerce reliability gate's acceptance is a "
                  "separate result and is not measured or implied here."),
     }
-    if args.report:
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(verdict, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"REQUIRED POSTGRES PROOFS: {verdict['verdict']} ({total_passed}/{total_required} required tests passed, "
-          f"0 skips tolerated)", flush=True)
+    _write_report(args.report, verdict)
+    proofs, regressions = by_kind[KIND_PROOF], by_kind[KIND_RUNNER_REGRESSION]
+    print(f"REQUIRED POSTGRES PROOFS: {verdict['verdict']} ({total_passed}/{total_required} required tests passed: "
+          f"{proofs['passed']}/{proofs['required']} proofs + {regressions['passed']}/{regressions['required']} "
+          f"runner/fixture regressions, 0 skips tolerated)", flush=True)
     return EXIT_PROVEN if proven else EXIT_NOT_PROVEN
 
 

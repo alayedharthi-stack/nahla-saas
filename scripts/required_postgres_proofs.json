@@ -1,17 +1,19 @@
 {
   "manifest_version": 1,
-  "title": "Required PostgreSQL proof suites (strict; independent of the commerce reliability gate)",
+  "title": "Required PostgreSQL suites (strict; independent of the commerce reliability gate): PostgreSQL proofs plus runner/fixture regressions",
   "rules": [
     "Every node id below must be collected and must pass; a skip, failure, error, missing or uninventoried collection fails the run.",
     "The required_env of a suite must be present (and equal, where a value is given) before pytest starts; otherwise the runner exits 2 without running anything.",
+    "kind is 'proof' for the PostgreSQL proofs themselves and 'runner_regression' for regressions of the runner and the shared fixture; the verdict counts them separately, and both kinds are required. Any other kind is rejected before anything runs.",
     "This inventory carries no allowances. It does not measure the commerce reliability gate; that gate's acceptance remains a separate result.",
     "Adding or removing a test in a listed module is a reviewed change to this inventory; the self-test compares it with pytest's own collection, so a stale inventory fails instead of silently omitting a test."
   ],
   "suites": [
     {
       "id": "commerce_runtime_foundation",
+      "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py",
-      "origin": "PR #1089 — dormant commerce runtime foundation proofs, including the lock-wait, scope-binding and ordered-processing regressions",
+      "origin": "PR #1089 \u2014 dormant commerce runtime foundation proofs, including the lock-wait, scope-binding and ordered-processing regressions",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -48,8 +50,9 @@
     },
     {
       "id": "commerce_runtime_migration",
+      "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_migration_pg.py",
-      "origin": "PR #1089 — revision 0108 reconciliation: fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation",
+      "origin": "PR #1089 \u2014 revision 0108 reconciliation: fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -69,8 +72,9 @@
     },
     {
       "id": "global_customer_identity",
+      "kind": "proof",
       "module": "backend/tests/test_global_customer_display_identity_pg.py",
-      "origin": "PR #1087 (merged) — global customer display identity, 0107 persistence cases",
+      "origin": "PR #1087 (merged) \u2014 global customer display identity, 0107 persistence cases",
       "required_env": {
         "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED": "1",
         "LEGACY_MIG_PG_TEST_DATABASE_URL": null
@@ -81,6 +85,20 @@
         "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[Jos\\xe9-None]",
         "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[\\u0418\\u0440\\u0438\\u043d\\u0430-None]",
         "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[Acme Studio-Acme Studio]"
+      ]
+    },
+    {
+      "id": "runner_connection_regressions",
+      "kind": "runner_regression",
+      "module": "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py",
+      "origin": "Runner PR \u2014 explicit-target authority at the shared fixture's connection boundary (R1): an unreachable explicit URL fails the proof with no fallback and no test database on an alternate service; a reachable explicit URL is used while every alternate is dead",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py::test_unreachable_explicit_target_fails_without_fallback_to_a_reachable_service",
+        "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py::test_reachable_explicit_target_is_used_even_when_every_alternate_is_dead"
       ]
     }
   ]

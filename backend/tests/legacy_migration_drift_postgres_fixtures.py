@@ -157,20 +157,58 @@ _DRIFT_STATEMENTS: tuple[str, ...] = (
 )
 
 
+EXPLICIT_URL_ENV = "LEGACY_MIG_PG_TEST_DATABASE_URL"
+FALLBACK_URL_ENVS = ("A1_PG_TEST_DATABASE_URL", "DATABASE_URL")
+DEFAULT_SERVICE_URL = "postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas"
+
+
+def _explicit_database_url() -> str:
+    return (os.getenv(EXPLICIT_URL_ENV) or "").strip()
+
+
+def _redact(url: str) -> str:
+    try:
+        from sqlalchemy.engine import make_url  # noqa: PLC0415
+
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:  # noqa: BLE001 — an unparsable URL is reported as given, minus nothing
+        return url
+
+
+def _scrub_secret(message: str, url: str) -> str:
+    """Remove the URL's password from driver error text before it is reported."""
+    try:
+        from sqlalchemy.engine import make_url  # noqa: PLC0415
+
+        password = make_url(url).password
+    except Exception:  # noqa: BLE001 — nothing to scrub from an unparsable URL
+        return message
+    if password:
+        return message.replace(password, "***")
+    return message
+
+
 def _candidate_database_urls() -> list[str]:
-    urls: list[str] = []
-    explicit = (os.getenv("LEGACY_MIG_PG_TEST_DATABASE_URL") or "").strip()
+    """Connection candidates, in order.
+
+    When ``LEGACY_MIG_PG_TEST_DATABASE_URL`` is set it is **authoritative**: it
+    is the only candidate, and a connection failure fails or skips the caller
+    (see ``connect_engine``) instead of falling through to
+    ``A1_PG_TEST_DATABASE_URL``, ``DATABASE_URL`` or the default service URL.
+    Without it, the historical fallback order applies unchanged.
+    """
+    explicit = _explicit_database_url()
     if explicit:
-        urls.append(explicit)
+        return [explicit]
+    urls: list[str] = []
     a1_url = (os.getenv("A1_PG_TEST_DATABASE_URL") or "").strip()
     if a1_url and a1_url not in urls:
         urls.append(a1_url)
     db_url = (os.getenv("DATABASE_URL") or "").strip()
     if db_url and db_url not in urls:
         urls.append(db_url)
-    default = "postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas"
-    if default not in urls:
-        urls.append(default)
+    if DEFAULT_SERVICE_URL not in urls:
+        urls.append(DEFAULT_SERVICE_URL)
     return urls
 
 
@@ -179,6 +217,14 @@ def _integration_required() -> bool:
 
 
 def connect_engine() -> Engine:
+    """Connect to the first reachable candidate; an explicit target is the only candidate.
+
+    With ``LEGACY_MIG_PG_TEST_DATABASE_URL`` set, a failure to reach it never
+    falls back to another URL: the caller fails when integration is required
+    and skips otherwise, and the message names the explicit target (password
+    redacted) so the outcome cannot be mistaken for a fallback.
+    """
+    explicit = _explicit_database_url()
     last_error: Exception | None = None
     for url in _candidate_database_urls():
         try:
@@ -188,7 +234,13 @@ def connect_engine() -> Engine:
             return engine
         except Exception as exc:  # noqa: BLE001
             last_error = exc
-    message = f"PostgreSQL unavailable for legacy migration drift tests: {last_error}"
+    if explicit:
+        message = (
+            f"no fallback attempted: the explicit {EXPLICIT_URL_ENV} target {_redact(explicit)} is "
+            f"unreachable ({_scrub_secret(str(last_error), explicit)})"
+        )
+    else:
+        message = f"PostgreSQL unavailable for legacy migration drift tests: {last_error}"
     if _integration_required():
         pytest.fail(message)
     pytest.skip(message)

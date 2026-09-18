@@ -188,17 +188,62 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
     inventory update fails this test instead of being silently omitted."""
     manifest = json.loads(COMMITTED_MANIFEST.read_text(encoding="utf-8"))
     ids = [s["id"] for s in manifest["suites"]]
-    assert ids == ["commerce_runtime_foundation", "commerce_runtime_migration", "global_customer_identity"]
-    expected_env = {
-        "commerce_runtime_foundation": {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None},
-        "commerce_runtime_migration": {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None},
-        "global_customer_identity": {"CUSTOMER_NAME_PROVENANCE_PG_REQUIRED": "1", "LEGACY_MIG_PG_TEST_DATABASE_URL": None},
+    assert ids == ["commerce_runtime_foundation", "commerce_runtime_migration", "global_customer_identity",
+                   "runner_connection_regressions"]
+    harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
+    expected = {
+        "commerce_runtime_foundation": ("proof", harness_env),
+        "commerce_runtime_migration": ("proof", harness_env),
+        "global_customer_identity": ("proof", {"CUSTOMER_NAME_PROVENANCE_PG_REQUIRED": "1",
+                                               "LEGACY_MIG_PG_TEST_DATABASE_URL": None}),
+        "runner_connection_regressions": ("runner_regression", harness_env),
     }
     for suite in manifest["suites"]:
-        assert suite["required_env"] == expected_env[suite["id"]], suite["id"]
+        kind, env = expected[suite["id"]]
+        assert (suite["kind"], suite["required_env"]) == (kind, env), suite["id"]
         collected = _collect(REPO_ROOT, suite["module"])
         assert collected, suite["module"]
         assert collected == suite["nodeids"], (suite["id"], set(collected) ^ set(suite["nodeids"]))
+
+
+def test_stale_report_and_junit_are_invalidated_before_validation(synthetic_root: Path) -> None:
+    """A reused --report path never shows an earlier PROVEN after an early failure."""
+    module = _write_module(synthetic_root, "test_ok.py", PASSING_MODULE)
+    good = _manifest(synthetic_root, module, _collect(synthetic_root, module))
+    first = _run(synthetic_root, good, ENV_OK)
+    assert first["exit"] == 0 and first["report"]["verdict"] == "PROVEN" and first["junit_written"]
+    # Early failure 1: unreadable manifest, same report and junit paths.
+    broken = synthetic_root / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    second = _run(synthetic_root, broken, ENV_OK)
+    assert second["exit"] == 2
+    assert second["report"]["verdict"] == "NOT RUN" and second["report"]["reason"] == "manifest"
+    assert not second["junit_written"], "stale JUnit from the earlier PROVEN run survived"
+    # Early failure 2: missing configuration after a PROVEN run.
+    third_ok = _run(synthetic_root, good, ENV_OK)
+    assert third_ok["report"]["verdict"] == "PROVEN"
+    third = _run(synthetic_root, good, {})
+    assert third["exit"] == 2 and third["report"]["verdict"] == "NOT RUN" and third["report"]["reason"] == "configuration"
+    assert not third["junit_written"]
+
+
+def test_suite_kinds_are_validated_and_counted_separately(synthetic_root: Path) -> None:
+    module = _write_module(synthetic_root, "test_ok.py", PASSING_MODULE)
+    nodeids = _collect(synthetic_root, module)
+    bad = synthetic_root / "manifest.json"
+    bad.write_text(json.dumps({"suites": [{"id": "s", "module": module, "nodeids": nodeids, "kind": "advisory"}]}),
+                   encoding="utf-8")
+    assert _run(synthetic_root, bad, ENV_OK)["exit"] == 2
+    good = synthetic_root / "manifest.json"
+    good.write_text(json.dumps({"suites": [
+        {"id": "p", "module": module, "nodeids": nodeids, "kind": "proof",
+         "required_env": {"PROOF_PG_REQUIRED": "1", "PROOF_PG_DSN": None}},
+    ]}), encoding="utf-8")
+    result = _run(synthetic_root, good, ENV_OK)
+    assert result["exit"] == 0
+    assert result["report"]["by_kind"] == {"proof": {"required": 3, "passed": 3},
+                                           "runner_regression": {"required": 0, "passed": 0}}
+    assert "3/3 proofs + 0/0 runner/fixture regressions" in result["stdout"]
 
 
 def test_inventory_drift_is_detected_not_tolerated(synthetic_root: Path) -> None:
