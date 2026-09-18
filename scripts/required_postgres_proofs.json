@@ -1,0 +1,105 @@
+{
+  "manifest_version": 1,
+  "title": "Required PostgreSQL suites (strict; independent of the commerce reliability gate): PostgreSQL proofs plus runner/fixture regressions",
+  "rules": [
+    "Every node id below must be collected and must pass; a skip, failure, error, missing or uninventoried collection fails the run.",
+    "The required_env of a suite must be present (and equal, where a value is given) before pytest starts; otherwise the runner exits 2 without running anything.",
+    "kind is 'proof' for the PostgreSQL proofs themselves and 'runner_regression' for regressions of the runner and the shared fixture; the verdict counts them separately, and both kinds are required. Any other kind is rejected before anything runs.",
+    "This inventory carries no allowances. It does not measure the commerce reliability gate; that gate's acceptance remains a separate result.",
+    "Adding or removing a test in a listed module is a reviewed change to this inventory; the self-test compares it with pytest's own collection, so a stale inventory fails instead of silently omitting a test."
+  ],
+  "suites": [
+    {
+      "id": "commerce_runtime_foundation",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py",
+      "origin": "PR #1089 \u2014 dormant commerce runtime foundation proofs, including the lock-wait, scope-binding and ordered-processing regressions",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_migration_applies_cleanly_on_the_current_head_and_is_reversible",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_package_metadata_and_migration_declare_the_same_schema",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_duplicate_admission_resolves_to_one_durable_turn",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_concurrent_admission_preserves_unique_conversation_order",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_inbound_identity_bound_to_another_conversation_is_an_explicit_conflict",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_bounded_payloads_are_rejected_before_any_write",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_only_one_worker_owns_a_conversation_at_a_time",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_different_conversations_progress_independently",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_lease_expiry_permits_recovery_with_a_higher_fence_and_fences_out_the_old_worker",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_stale_revisions_cannot_overwrite_newer_state",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_ownership_epoch_change_invalidates_older_work",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_fencing_identities_are_never_reset_or_reused",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_cross_tenant_access_is_rejected",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_shadow_and_live_namespaces_are_independent",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_competing_completion_attempts_cannot_create_two_terminals",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_crash_before_commit_leaves_no_partial_transition",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_unknown_transport_outcome_is_recorded_as_unknown_and_grants_no_replay",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_every_operation_closes_its_transaction_before_returning",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_lock_wait_across_expiry_rejects_the_expired_owner[renew]",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_lock_wait_across_expiry_rejects_the_expired_owner[release]",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_lock_wait_across_expiry_rejects_the_expired_owner[commit]",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_lock_wait_across_expiry_rejects_the_expired_owner[finalize]",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_lock_wait_across_expiry_lets_a_new_claimant_take_over",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_claim_expiry_is_measured_after_the_lock_wait",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_same_owner_fence_and_epoch_cannot_cross_conversation_namespace_or_tenant",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_terminal_scope_is_derived_from_the_turn_not_the_caller",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_processing_is_bound_to_the_oldest_unresolved_turn"
+      ]
+    },
+    {
+      "id": "commerce_runtime_migration",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_migration_pg.py",
+      "origin": "PR #1089 \u2014 revision 0108 reconciliation: fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_fresh_and_compatible_precreation_pass_the_verifier",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_admission_uniqueness-ALTER TABLE commerce_runtime_turns DROP CONSTRAINT uq_commerce_runtime_turns_admission-constraint uq_commerce_runtime_turns_admission absent]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[wrong_default-ALTER TABLE commerce_runtime_conversations ALTER COLUMN state_revision SET DEFAULT 99-commerce_runtime_conversations.state_revision]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[disabled_trigger-ALTER TABLE commerce_runtime_turn_terminals DISABLE TRIGGER trg_commerce_runtime_turn_terminals_immutable-is not enabled]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[narrowed_column-ALTER TABLE commerce_runtime_turns ALTER COLUMN provider_message_id TYPE varchar(64)-commerce_runtime_turns.provider_message_id]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_check-ALTER TABLE commerce_runtime_turn_terminals DROP CONSTRAINT ck_commerce_runtime_turn_terminals_transport-constraint ck_commerce_runtime_turn_terminals_transport absent]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[extra_column-ALTER TABLE commerce_runtime_conversations ADD COLUMN legacy_flag boolean-commerce_runtime_conversations.legacy_flag: unexpected column]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_same_named_trigger_on_an_unrelated_table_does_not_satisfy_the_verifier",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_same_named_function_with_a_different_body_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_missing_terminal_index_is_reconciled"
+      ]
+    },
+    {
+      "id": "global_customer_identity",
+      "kind": "proof",
+      "module": "backend/tests/test_global_customer_display_identity_pg.py",
+      "origin": "PR #1087 (merged) \u2014 global customer display identity, 0107 persistence cases",
+      "required_env": {
+        "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED": "1",
+        "LEGACY_MIG_PG_TEST_DATABASE_URL": null
+      },
+      "nodeids": [
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[\\u0645\\u0634\\u0627\\u0639\\u0644-None]",
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[\\u674e\\u96f7-None]",
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[Jos\\xe9-None]",
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[\\u0418\\u0440\\u0438\\u043d\\u0430-None]",
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[Acme Studio-Acme Studio]"
+      ]
+    },
+    {
+      "id": "runner_connection_regressions",
+      "kind": "runner_regression",
+      "module": "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py",
+      "origin": "Runner PR \u2014 explicit-target authority at the shared fixture's connection boundary (R1): an unreachable explicit URL fails the proof with no fallback and no test database on an alternate service; a reachable explicit URL is used while every alternate is dead",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py::test_unreachable_explicit_target_fails_without_fallback_to_a_reachable_service",
+        "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py::test_reachable_explicit_target_is_used_even_when_every_alternate_is_dead"
+      ]
+    }
+  ]
+}
