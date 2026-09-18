@@ -6,12 +6,22 @@ invocation (unchanged), then the reliability harness for the requested tier,
 and judges the JUnit results against the reviewed manifest with
 ``tests/commerce_reliability/reliability_evaluator.py``.
 
-    python scripts/commerce_reliability_gate.py --tier unit
+    python scripts/commerce_reliability_gate.py --tier unit            # acceptance mode
+    python scripts/commerce_reliability_gate.py --tier unit --mode diagnostic
     NAHLA_RELIABILITY_REQUIRE_PG=1 NAHLA_RELIABILITY_PG_ADMIN_DSN=postgresql://... \\
         python scripts/commerce_reliability_gate.py --tier postgres
 
-Exit status is 0 only when the gate passes. A passing gate proves harness
-integrity and baseline compatibility; it is NOT production acceptance.
+Modes and exit status:
+
+* ``acceptance`` (default, the merge/release gate): exit 0 only when the
+  measurement is consistent AND every allowance is approved debt (assigned
+  owner, explicit unexpired expiry). Anything else exits 1.
+* ``diagnostic``: measures the current baseline. Exit 3 when the measurement
+  is consistent (still NOT ACCEPTED), exit 1 when it is blocked. It never
+  exits 0, so it cannot stand in for the acceptance gate.
+
+Even an ACCEPTED result proves harness integrity and approved-debt
+compatibility; it is NOT production acceptance.
 """
 from __future__ import annotations
 
@@ -74,6 +84,8 @@ def _run_pytest(label: str, targets: List[str], junit_path: Path, env: Dict[str,
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tier", choices=list(ev.TIERS), required=True)
+    parser.add_argument("--mode", choices=list(ev.MODES), default=ev.MODE_ACCEPTANCE,
+                        help="acceptance = merge/release gate (default); diagnostic = measure only, never accepted")
     parser.add_argument("--junit-dir", type=Path, default=Path("/tmp/commerce-reliability"))
     parser.add_argument("--report", type=Path, default=None, help="write the JSON gate report here")
     args = parser.parse_args(argv)
@@ -92,6 +104,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     header: Dict[str, Any] = {
         "tier": args.tier,
+        "mode": args.mode,
         "manifest": str(MANIFEST_PATH.relative_to(REPO_ROOT)),
         "manifest_sha256": ev.sha256_of(MANIFEST_PATH),
         "manifest_base_sha": manifest["base_sha"],
@@ -132,19 +145,24 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     verdict = ev.evaluate_gate(
         manifest, tier=args.tier, records=records, env=os.environ, module_hashes=module_hashes,
+        mode=args.mode,
     )
     verdict.blockers = runner_blockers + verdict.blockers
     verdict.passed = not verdict.blockers
+    verdict.accepted, verdict.status = ev.acceptance_status(args.mode, verdict.blockers)
     header["invocations"] = invocations
     header["finished_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
     print("\n" + ev.render_gate_report(verdict, header={
-        k: v for k, v in header.items() if k in ("tier", "git_head", "manifest_base_sha", "manifest_sha256")
+        k: v for k, v in header.items() if k in ("tier", "mode", "git_head", "manifest_base_sha", "manifest_sha256")
     }), flush=True)
 
     report = {
         "header": header,
-        "passed": verdict.passed,
+        "mode": verdict.mode,
+        "accepted": verdict.accepted,
+        "status": verdict.status,
+        "measurement_consistent": verdict.passed,
         "blockers": verdict.blockers,
         "warnings": verdict.warnings,
         "sections": verdict.sections,
@@ -156,7 +174,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"gate report written: {args.report}", flush=True)
-    return 0 if verdict.passed else 1
+    if args.mode == ev.MODE_DIAGNOSTIC:
+        # Never 0: a diagnostic measurement cannot substitute for the acceptance gate.
+        code = 1 if verdict.blockers else 3
+        print(f"exit {code}: diagnostic measurement {'BLOCKED' if verdict.blockers else 'complete'} — NOT ACCEPTED", flush=True)
+        return code
+    print(f"exit {0 if verdict.accepted else 1}: {verdict.status}", flush=True)
+    return 0 if verdict.accepted else 1
 
 
 if __name__ == "__main__":

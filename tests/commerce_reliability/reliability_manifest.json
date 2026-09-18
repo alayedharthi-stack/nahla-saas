@@ -288,6 +288,18 @@
       "tier": "unit"
     },
     {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_acceptance_mode_rejects_unapproved_debt",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_diagnostic_mode_measures_but_is_never_accepted",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_repo_manifest_debt_is_unapproved_and_blocks_acceptance",
+      "tier": "unit"
+    },
+    {
       "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_reconciliation_plugin_fails_unexpected_pass",
       "tier": "unit"
     },
@@ -442,7 +454,11 @@
       "signature": "v2_owner_delivery_failure_ends_with_inferred_end_ok",
       "planned_by": "C1-PR2 (delivery terminal contract) — not authorised in this PR",
       "evidence": "Phase C0 report §5/§13; reproduced at base_sha: with outbound_enabled_for_tenant patched True and a scripted 400 on the text send, the lifecycle ends end_ok with no provider message id, no outcome record and no outbound row",
-      "tier": "unit"
+      "tier": "unit",
+      "owner": "UNASSIGNED (owner review)",
+      "expiry": null,
+      "proposed_owner": "Commerce Agent V2 owners (C1-PR2 delivery terminal contract) — proposal only",
+      "proposed_expiry": "set by owner when C1-PR2 is scheduled"
     },
     {
       "contract_id": "UC-02",
@@ -451,7 +467,11 @@
       "signature": "state_store_save_lost_update",
       "planned_by": "C1-PR3 (state CAS) — not authorised in this PR",
       "evidence": "Phase C0 report §6; reproduced at base_sha with two independent spawned processes calling the real DefaultStateStore.save against a disposable PostgreSQL database",
-      "tier": "postgres"
+      "tier": "postgres",
+      "owner": "UNASSIGNED (owner review)",
+      "expiry": null,
+      "proposed_owner": "Brain state persistence maintainers (C1-PR3 state CAS) — proposal only",
+      "proposed_expiry": "set by owner when C1-PR3 is scheduled"
     }
   ],
   "allowed_skips": [],
@@ -477,5 +497,10 @@
         "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_concurrent_state_saves_do_not_lose_updates"
       }
     ]
+  },
+  "debt_policy": {
+    "acceptance_mode": "Every allowance (baseline failure or unimplemented contract) must carry an assigned owner and an explicit, unexpired expiry. UNASSIGNED owners or null expiry are unapproved debt and fail the acceptance gate.",
+    "diagnostic_mode": "Measures the current baseline with the same reconciliation rules; reports NOT ACCEPTED always and exits non-zero; never a merge/release verdict.",
+    "proposals": "owner / expiry values below marked UNASSIGNED / null are proposals for owner decision; the harness never assigns them."
   }
 }

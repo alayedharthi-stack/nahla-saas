@@ -61,6 +61,15 @@ TIER_UNIT = "unit"
 TIER_POSTGRES = "postgres"
 TIERS = (TIER_UNIT, TIER_POSTGRES)
 
+# Gate modes. ACCEPTANCE is the merge/release gate: every allowance must be
+# approved debt (assigned owner, explicit expiry). DIAGNOSTIC measures the
+# current baseline and always reports NOT ACCEPTED; it never substitutes for
+# the acceptance gate.
+MODE_ACCEPTANCE = "acceptance"
+MODE_DIAGNOSTIC = "diagnostic"
+MODES = (MODE_ACCEPTANCE, MODE_DIAGNOSTIC)
+UNASSIGNED_OWNER_PREFIX = "UNASSIGNED"
+
 PG_REQUIRE_ENV = "NAHLA_RELIABILITY_REQUIRE_PG"
 PG_ADMIN_DSN_ENV = "NAHLA_RELIABILITY_PG_ADMIN_DSN"
 
@@ -256,7 +265,7 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
             if key not in entry:
                 raise ValueError(f"baseline_entry_missing_key:{entry.get('case_id')}:{key}")
     for entry in manifest["unimplemented_contracts"]:
-        for key in ("contract_id", "test_id", "signature", "planned_by", "tier"):
+        for key in ("contract_id", "test_id", "signature", "planned_by", "tier", "owner", "expiry"):
             if key not in entry:
                 raise ValueError(f"unimplemented_entry_missing_key:{entry.get('contract_id')}:{key}")
 
@@ -377,6 +386,18 @@ class GateVerdict:
     blockers: List[str]
     warnings: List[str]
     sections: Dict[str, Any]
+    mode: str = MODE_ACCEPTANCE
+    accepted: bool = False
+    status: str = "NOT ACCEPTED"
+
+
+def acceptance_status(mode: str, blockers: Sequence[str]) -> Tuple[bool, str]:
+    """Acceptance is possible only in acceptance mode with no blockers."""
+    if mode == MODE_DIAGNOSTIC:
+        return False, "NOT ACCEPTED (diagnostic measurement; never a merge/release verdict)"
+    if blockers:
+        return False, "NOT ACCEPTED"
+    return True, "ACCEPTED"
 
 
 def evaluate_gate(
@@ -387,9 +408,12 @@ def evaluate_gate(
     env: Mapping[str, str],
     today: Optional[_dt.date] = None,
     module_hashes: Optional[Mapping[str, str]] = None,
+    mode: str = MODE_ACCEPTANCE,
 ) -> GateVerdict:
     if tier not in TIERS:
         raise ValueError(f"unknown_tier:{tier}")
+    if mode not in MODES:
+        raise ValueError(f"unknown_mode:{mode}")
     today = today or _dt.date.today()
     blockers: List[str] = []
     warnings: List[str] = []
@@ -461,10 +485,15 @@ def evaluate_gate(
         else:
             blockers.append(f"reconcile:{entry['id']}:{rec.outcome}:{rec.message[:160]}")
             status["observed"] = f"{rec.outcome}:{rec.message[:120]}"
-        if not entry.get("expiry"):
-            warnings.append(f"allowance_expiry_unset_owner_review:{entry['id']}")
-        if str(entry.get("owner", "")).upper().startswith("UNASSIGNED"):
-            warnings.append(f"allowance_owner_unassigned_owner_review:{entry['id']}")
+        owner = str(entry.get("owner") or "").strip()
+        owner_unassigned = (not owner) or owner.upper().startswith(UNASSIGNED_OWNER_PREFIX)
+        expiry_unset = not entry.get("expiry")
+        debt_sink = blockers if mode == MODE_ACCEPTANCE else warnings
+        if owner_unassigned:
+            debt_sink.append(f"unapproved_debt:owner_unassigned:{entry['id']}")
+        if expiry_unset:
+            debt_sink.append(f"unapproved_debt:expiry_unset:{entry['id']}")
+        status["approved"] = not (owner_unassigned or expiry_unset)
         allowance_results.append(status)
 
     # Any other failure / error / skip is a gate failure.
@@ -516,21 +545,35 @@ def evaluate_gate(
         "unimplemented_contracts": [a for a in allowance_results if a["kind"] == "unimplemented"],
         "rollout_readiness": {
             "statement": (
-                "A baseline-compatible gate result proves harness integrity and "
+                "A baseline-compatible measurement proves harness integrity and "
                 "records current behaviour; it is NOT production acceptance. "
-                "Rollout requires every baseline allowance removed by a merged fix "
-                "and every unimplemented contract implemented under its own PR."
+                "Acceptance requires every allowance to be approved debt (assigned "
+                "owner, explicit expiry) and rollout requires every baseline "
+                "allowance removed by a merged fix and every unimplemented contract "
+                "implemented under its own PR."
             ),
+            "mode": mode,
             "baseline_allowances_open": sum(1 for a in allowance_results if a["kind"] == "baseline"),
             "unimplemented_contracts_open": sum(1 for a in allowance_results if a["kind"] == "unimplemented"),
+            "unapproved_debt": [a["id"] for a in allowance_results if not a.get("approved")],
         },
     }
-    return GateVerdict(passed=not blockers, tier=tier, blockers=blockers, warnings=warnings, sections=sections)
+    accepted, status_text = acceptance_status(mode, blockers)
+    return GateVerdict(
+        passed=not blockers, tier=tier, blockers=blockers, warnings=warnings, sections=sections,
+        mode=mode, accepted=accepted, status=status_text,
+    )
 
 
 def render_gate_report(verdict: GateVerdict, *, header: Optional[Mapping[str, Any]] = None) -> str:
     lines: List[str] = []
-    lines.append(f"COMMERCE RELIABILITY GATE — tier={verdict.tier} result={'PASS' if verdict.passed else 'FAIL'}")
+    lines.append(
+        f"COMMERCE RELIABILITY GATE — tier={verdict.tier} mode={verdict.mode} "
+        f"measurement={'CONSISTENT' if verdict.passed else 'BLOCKED'} :: {verdict.status}"
+    )
+    if verdict.mode == MODE_DIAGNOSTIC:
+        lines.append("  DIAGNOSTIC MODE measures the current baseline only. It is NOT ACCEPTED and does not "
+                     "substitute for the acceptance (merge/release) gate.")
     for key, value in (header or {}).items():
         lines.append(f"  {key}={value}")
     hi = verdict.sections["harness_integrity"]
@@ -548,17 +591,22 @@ def render_gate_report(verdict: GateVerdict, *, header: Optional[Mapping[str, An
     lines.append("2. CURRENT RUNTIME BEHAVIOUR (real entry points, scripted models, fake providers)")
     for nodeid in verdict.sections["current_runtime_behavior"]:
         lines.append(f"  PASS {nodeid}")
-    lines.append("3. OUTSTANDING BASELINE FAILURES (allowed only through the reviewed manifest)")
+    lines.append("3a. OUTSTANDING BASELINE FAILURES — empirically reproduced current-runtime defects "
+                 "(allowed only through the reviewed manifest)")
     for a in verdict.sections["outstanding_baseline_failures"]:
-        lines.append(f"  {a['id']} observed={a['observed']} owner={a['owner']} expiry={a['expiry'] or 'UNSET'} :: {a['signature']}")
-    lines.append("   UNIMPLEMENTED CONTRACTS (never reported as completed behaviour)")
+        lines.append(f"  {a['id']} observed={a['observed']} approved_debt={'yes' if a.get('approved') else 'NO'} "
+                     f"owner={a['owner'] or 'UNSET'} expiry={a['expiry'] or 'UNSET'} :: {a['signature']}")
+    lines.append("3b. UNIMPLEMENTED CONTRACTS — future work, not coverage, never completed behaviour")
     for a in verdict.sections["unimplemented_contracts"]:
-        lines.append(f"  {a['id']} observed={a['observed']} :: {a['signature']}")
+        lines.append(f"  {a['id']} observed={a['observed']} approved_debt={'yes' if a.get('approved') else 'NO'} "
+                     f"owner={a['owner'] or 'UNSET'} expiry={a['expiry'] or 'UNSET'} :: {a['signature']}")
     rr = verdict.sections["rollout_readiness"]
     lines.append("4. ROLLOUT READINESS")
     lines.append(f"  {rr['statement']}")
+    lines.append(f"  mode={rr['mode']} acceptance={verdict.status}")
     lines.append(f"  baseline_allowances_open={rr['baseline_allowances_open']} "
-                 f"unimplemented_contracts_open={rr['unimplemented_contracts_open']}")
+                 f"unimplemented_contracts_open={rr['unimplemented_contracts_open']} "
+                 f"unapproved_debt={','.join(rr['unapproved_debt']) or 'none'}")
     if verdict.warnings:
         lines.append("WARNINGS")
         lines.extend(f"  {w}" for w in verdict.warnings)
@@ -572,6 +620,7 @@ __all__ = [
     "BASELINE_PREFIX", "FALLBACK_EXPECTED_DELIVERY_RECOVERY", "FALLBACK_EXPECTED_SAFE",
     "FALLBACK_KINDS", "FALLBACK_NONE", "FALLBACK_UNEXPECTED_RUNTIME", "GateVerdict",
     "LIFECYCLE_END_DELIVERY_FAILED", "LIFECYCLE_END_DELIVERY_RECOVERED", "LIFECYCLE_END_OK",
+    "MODES", "MODE_ACCEPTANCE", "MODE_DIAGNOSTIC", "UNASSIGNED_OWNER_PREFIX", "acceptance_status",
     "OUTCOME_EXPLICIT_FAILURE", "OUTCOME_GROUNDED_REPLY", "OUTCOME_SAFE_MISSING_FACT",
     "PG_ADMIN_DSN_ENV", "PG_REQUIRE_ENV", "RECONCILE_PREFIX", "TERMINALS",
     "TERMINAL_EXPLICIT_FAILURE", "TERMINAL_HUMAN_HANDOFF", "TERMINAL_PROVIDER_ACCEPTED",

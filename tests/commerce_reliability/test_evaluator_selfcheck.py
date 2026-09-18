@@ -212,11 +212,24 @@ def _manifest(**overrides) -> Dict:
             {
                 "contract_id": "UC-X", "test_id": "tests/commerce_reliability/test_runtime_x.py::test_contract",
                 "signature": "contract_missing", "planned_by": "later PR", "tier": "unit",
+                "owner": "UNASSIGNED (owner review)", "expiry": None,
             },
         ],
         "postgres": {"tests": [{"nodeid": "tests/commerce_reliability/test_runtime_pg.py::test_pg"}]},
     }
     manifest.update(overrides)
+    return manifest
+
+
+TODAY = dt.date(2026, 9, 18)
+
+
+def _approved_manifest(expiry: str = "2026-12-31") -> Dict:
+    """Same manifest with every allowance turned into approved debt."""
+    manifest = _manifest()
+    for entry in manifest["baseline_failures"] + manifest["unimplemented_contracts"]:
+        entry["owner"] = "owner-assigned-for-test"
+        entry["expiry"] = expiry
     return manifest
 
 
@@ -241,16 +254,71 @@ _HASHES = {"backend/tests/test_mod.py": "abc"}
 
 
 def test_gate_accepts_exact_baseline_observation() -> None:
-    verdict = ev.evaluate_gate(_manifest(), tier="unit", records=_records(), env=_ENV_UNIT, module_hashes=_HASHES)
-    assert verdict.passed, verdict.blockers
+    verdict = ev.evaluate_gate(
+        _approved_manifest(), tier="unit", records=_records(), env=_ENV_UNIT,
+        module_hashes=_HASHES, today=TODAY,
+    )
+    assert verdict.passed and verdict.accepted, verdict.blockers
+    assert verdict.mode == ev.MODE_ACCEPTANCE and verdict.status == "ACCEPTED"
     assert verdict.sections["harness_integrity"]["counts"]["collected"] == 5
     assert [a["observed"] for a in verdict.sections["outstanding_baseline_failures"]] == ["expected_failure_observed"]
     assert [a["observed"] for a in verdict.sections["unimplemented_contracts"]] == ["expected_failure_observed"]
-    assert "allowance_owner_unassigned_owner_review:RB-X" in verdict.warnings
-    assert "allowance_expiry_unset_owner_review:RB-X" in verdict.warnings
+    assert all(a["approved"] for a in verdict.sections["outstanding_baseline_failures"])
+    assert verdict.sections["rollout_readiness"]["unapproved_debt"] == []
+    assert not [w for w in verdict.warnings if w.startswith("unapproved_debt")]
     assert "NOT production acceptance" in verdict.sections["rollout_readiness"]["statement"]
     report = ev.render_gate_report(verdict, header={"base_sha": "0" * 40})
-    assert "result=PASS" in report and "4. ROLLOUT READINESS" in report
+    assert "measurement=CONSISTENT :: ACCEPTED" in report and "4. ROLLOUT READINESS" in report
+    assert "3a. OUTSTANDING BASELINE FAILURES" in report and "3b. UNIMPLEMENTED CONTRACTS" in report
+
+
+def test_acceptance_mode_rejects_unapproved_debt() -> None:
+    """UNASSIGNED owners or null expiry are proposals, never approved exceptions."""
+    verdict = ev.evaluate_gate(_manifest(), tier="unit", records=_records(), env=_ENV_UNIT,
+                               module_hashes=_HASHES, today=TODAY)
+    assert not verdict.passed and not verdict.accepted
+    assert verdict.status == "NOT ACCEPTED"
+    for ident in ("RB-X", "UC-X"):
+        assert f"unapproved_debt:owner_unassigned:{ident}" in verdict.blockers
+        assert f"unapproved_debt:expiry_unset:{ident}" in verdict.blockers
+    assert sorted(verdict.sections["rollout_readiness"]["unapproved_debt"]) == ["RB-X", "UC-X"]
+    # An assigned owner without an expiry is still unapproved, and so is an empty owner.
+    manifest = _approved_manifest()
+    manifest["baseline_failures"][0]["expiry"] = None
+    manifest["unimplemented_contracts"][0]["owner"] = ""
+    verdict = ev.evaluate_gate(manifest, tier="unit", records=_records(), env=_ENV_UNIT,
+                               module_hashes=_HASHES, today=TODAY)
+    assert "unapproved_debt:expiry_unset:RB-X" in verdict.blockers
+    assert "unapproved_debt:owner_unassigned:UC-X" in verdict.blockers
+    assert "unapproved_debt:owner_unassigned:RB-X" not in verdict.blockers
+    report = ev.render_gate_report(verdict)
+    assert "approved_debt=NO" in report and ":: NOT ACCEPTED" in report
+
+
+def test_diagnostic_mode_measures_but_is_never_accepted() -> None:
+    verdict = ev.evaluate_gate(_manifest(), tier="unit", records=_records(), env=_ENV_UNIT,
+                               module_hashes=_HASHES, today=TODAY, mode=ev.MODE_DIAGNOSTIC)
+    assert verdict.passed, verdict.blockers  # the measurement itself is consistent
+    assert not verdict.accepted and verdict.mode == ev.MODE_DIAGNOSTIC
+    assert verdict.status.startswith("NOT ACCEPTED (diagnostic")
+    assert "unapproved_debt:owner_unassigned:RB-X" in verdict.warnings
+    assert "unapproved_debt:expiry_unset:UC-X" in verdict.warnings
+    report = ev.render_gate_report(verdict)
+    assert "DIAGNOSTIC MODE" in report and "NOT ACCEPTED" in report and "ACCEPTED\n" not in report.replace("NOT ACCEPTED", "")
+    # Even fully approved debt is never accepted in diagnostic mode.
+    approved = ev.evaluate_gate(_approved_manifest(), tier="unit", records=_records(), env=_ENV_UNIT,
+                                module_hashes=_HASHES, today=TODAY, mode=ev.MODE_DIAGNOSTIC)
+    assert approved.passed and not approved.accepted
+    # A reconciliation failure still blocks the diagnostic measurement.
+    records = [
+        ev.TestRecord(r.nodeid, "passed", "", r.file) if r.nodeid.endswith("::test_defect") else r
+        for r in _records()
+    ]
+    blocked = ev.evaluate_gate(_manifest(), tier="unit", records=records, env=_ENV_UNIT,
+                               module_hashes=_HASHES, today=TODAY, mode=ev.MODE_DIAGNOSTIC)
+    assert not blocked.passed and "reconcile:unexpected_pass:RB-X" in blocked.blockers
+    with pytest.raises(ValueError):
+        ev.evaluate_gate(_manifest(), tier="unit", records=_records(), env=_ENV_UNIT, mode="bogus")
 
 
 def test_gate_rejects_empty_selection() -> None:
@@ -326,18 +394,18 @@ def test_gate_rejects_changed_failure_signature() -> None:
 
 
 def test_gate_rejects_expired_allowance() -> None:
-    manifest = _manifest()
+    manifest = _approved_manifest()
     manifest["baseline_failures"][0]["expiry"] = "2026-01-01"
     verdict = ev.evaluate_gate(
         manifest, tier="unit", records=_records(), env=_ENV_UNIT,
         today=dt.date(2026, 9, 18), module_hashes=_HASHES,
     )
-    assert "expired_allowance:RB-X:2026-01-01" in verdict.blockers
+    assert "expired_allowance:RB-X:2026-01-01" in verdict.blockers and not verdict.accepted
     fresh = ev.evaluate_gate(
         manifest, tier="unit", records=_records(), env=_ENV_UNIT,
         today=dt.date(2025, 12, 31), module_hashes=_HASHES,
     )
-    assert fresh.passed, fresh.blockers
+    assert fresh.passed and fresh.accepted, fresh.blockers
     manifest["baseline_failures"][0]["expiry"] = "not-a-date"
     assert ev.allowance_expired(manifest["baseline_failures"][0], dt.date(2025, 1, 1))
 
@@ -450,6 +518,8 @@ def test_manifest_in_repo_is_well_formed_and_self_consistent() -> None:
         assert entry["base_sha"] == manifest["base_sha"]
         assert entry["removal_condition"]
         assert entry["owner"]  # explicit, even when UNASSIGNED for owner review
+    for entry in manifest["unimplemented_contracts"]:
+        assert "owner" in entry and "expiry" in entry and entry["planned_by"]
     # The PR #1084 modules are pinned unchanged.
     for module in manifest["required_modules"]:
         assert ev.sha256_of(REPO_ROOT / module["path"]) == module["content_sha256"], (
@@ -464,6 +534,39 @@ def test_manifest_in_repo_is_well_formed_and_self_consistent() -> None:
         if req.get("tier") == ev.TIER_POSTGRES:
             assert req["nodeid"] in pg_declared, req["nodeid"]
     assert manifest["allowed_skips"] == []
+
+
+def _perfect_records(manifest: Dict, tier: str) -> List[ev.TestRecord]:
+    """Every required test passes and every allowance fails with its exact marker."""
+    records = [
+        ev.TestRecord(t["nodeid"], "passed", "", t["nodeid"].split("::")[0])
+        for t in manifest["required_tests"] if t.get("tier", "unit") == tier
+    ]
+    for nodeid, entry in ev.allowance_index(manifest).items():
+        if entry.get("tier", "unit") == tier:
+            records.append(ev.TestRecord(nodeid, "xfailed", ev.expected_marker(entry), nodeid.split("::")[0]))
+    return records
+
+
+def test_repo_manifest_debt_is_unapproved_and_blocks_acceptance() -> None:
+    """The committed manifest holds proposals only: acceptance must stay blocked
+    until the owner assigns owners and expiries, even on a perfect measurement."""
+    manifest = ev.load_manifest(MANIFEST_PATH)
+    hashes = {m["path"]: m["content_sha256"] for m in manifest["required_modules"]}
+    pg_env = {ev.PG_REQUIRE_ENV: "1", ev.PG_ADMIN_DSN_ENV: "postgresql://u:p@127.0.0.1:5433/postgres"}
+    expected_debt = {
+        "unit": {"RB-01", "RB-02", "RB-03", "RB-04", "RB-05", "UC-01"},
+        "postgres": {"RB-03-PG", "UC-02"},
+    }
+    for tier, env in (("unit", {}), ("postgres", pg_env)):
+        records = _perfect_records(manifest, tier)
+        acceptance = ev.evaluate_gate(manifest, tier=tier, records=records, env=env, module_hashes=hashes)
+        assert not acceptance.accepted and acceptance.status == "NOT ACCEPTED", tier
+        assert set(acceptance.sections["rollout_readiness"]["unapproved_debt"]) == expected_debt[tier]
+        assert all(b.startswith("unapproved_debt:") for b in acceptance.blockers), acceptance.blockers
+        diagnostic = ev.evaluate_gate(manifest, tier=tier, records=records, env=env, module_hashes=hashes,
+                                      mode=ev.MODE_DIAGNOSTIC)
+        assert diagnostic.passed and not diagnostic.accepted, diagnostic.blockers
 
 
 # ── Reconciliation plugin, proven in a separate pytest session ──────────────
@@ -509,6 +612,7 @@ def reconciliation_session(tmp_path_factory: pytest.TempPathFactory) -> Dict[str
             {
                 "contract_id": "UC-EXACT", "test_id": "test_probe.py::test_contract_exact",
                 "signature": "contract_sig", "planned_by": "later", "tier": "unit",
+                "owner": "UNASSIGNED (owner review)", "expiry": None,
             },
         ],
         "postgres": {"tests": []},
