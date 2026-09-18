@@ -156,23 +156,10 @@ def _resolve_operational_name(
                 name = str(snap.customer_name or "").strip()
                 if name:
                     return name, str(snap.customer_name_source or "customer_db").strip()
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — customer identity read must not block checkout
-            pass
-        for key in ("full_name", "name"):
-            val = str(getattr(customer, key, "") or "").strip()
-            if _valid_customer_name(val):
-                return val, "customer_db"
-
-    for key in ("customer_name", "name", "display_name", "full_name"):
-        val = str(profile.get(key) or "").strip()
-        if _valid_customer_name(val):
-            return val, "profile"
-    customer_block = profile.get("customer")
-    if isinstance(customer_block, dict):
-        for key in ("full_name", "name", "display_name", "customer_name"):
-            val = str(customer_block.get(key) or "").strip()
-            if _valid_customer_name(val):
-                return val, "profile.customer"
+        except Exception:  # noqa: BLE001
+            logger.exception("[CATALOG_CHECKOUT_IDENTITY] operational identity unavailable")
+    # Raw profile aliases carry no operational provenance. Never undo the
+    # resolver's refusal by rereading Customer.name or a provider display label.
     return "", ""
 
 
