@@ -86,8 +86,47 @@ def query_fingerprint(query: str) -> str:
     return hashlib.sha256(str(query or "").strip().encode("utf-8")).hexdigest()[:16]
 
 
-def lookup_signature(*, scope: str, query: str, product_ids: list[int]) -> str:
-    parts = [str(scope), query_fingerprint(query), ",".join(str(pid) for pid in sorted(product_ids))]
+def build_product_anchor(
+    *,
+    product_titles: list[str] | None = None,
+    product_aliases: list[str] | None = None,
+) -> str:
+    """The product subject a product-scoped KB lookup is anchored on.
+
+    A customer who says only «أبغى تفاصيل أول منتج عندكم» or «طيب وش مصدره؟»
+    names no product, so their words alone share no vocabulary with a section
+    titled «مصدر الجاكيت».  The retriever already scores the product subject
+    and the customer's question as two independent dimensions and keeps the
+    better one, so the resolved product's title and alias are passed as that
+    subject rather than mixed into the question — mixing them would dilute both
+    scores instead of lifting either, and the relevance floor stays untouched.
+
+    The anchor is only ever built from catalog evidence the turn already
+    resolved and authorized, never from a guess.
+
+    Aliases are accepted but callers pass them only when they are words a
+    merchant would actually write.  A SKU such as ``T-JACKET`` never appears in
+    merchant prose, so adding it does not match anything and only lowers the
+    ratio of matched tokens — it would push a section that should be found back
+    under the floor.
+    """
+    parts: list[str] = []
+    for value in list(product_titles or []) + list(product_aliases or []):
+        text = str(value or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    return normalize_lookup_query(" ".join(parts))
+
+
+def lookup_signature(
+    *, scope: str, query: str, product_ids: list[int], subject: str = ""
+) -> str:
+    parts = [
+        str(scope),
+        query_fingerprint(query),
+        query_fingerprint(subject),
+        ",".join(str(pid) for pid in sorted(product_ids)),
+    ]
     return "|".join(parts)
 
 
@@ -112,11 +151,16 @@ def _retrieve(
     query: str,
     product_ids: list[int],
     limit: int,
+    subject: str = "",
 ) -> dict[str, Any]:
+    # The retriever scores the product subject and the customer question as two
+    # independent dimensions and keeps the better one, so they are passed
+    # separately: the resolved product anchors the subject, the customer's own
+    # words stay the question.
     return retrieve_catalog_candidate_kb_sections(
         context.db,
         context.tenant_id,
-        subject=str(query or ""),
+        subject=str(subject or query or ""),
         message=str(query or ""),
         product_id=product_ids[0] if len(product_ids) == 1 else None,
         product_ids=list(product_ids) or None,
@@ -135,6 +179,7 @@ def _record(
     sections: list[dict[str, Any]],
     duration_ms: int,
     failure_reason: str | None = None,
+    subject: str = "",
 ) -> dict[str, Any]:
     """Append one attempt to the run ledger; bodies never enter the record."""
     record = {
@@ -154,7 +199,9 @@ def _record(
         "duration_ms": int(duration_ms),
         "failure_reason": failure_reason,
     }
-    signature = lookup_signature(scope=scope, query=query, product_ids=product_ids)
+    signature = lookup_signature(
+        scope=scope, query=query, product_ids=product_ids, subject=subject
+    )
     context.cache_knowledge_rows(signature, sections)
     return context.record_knowledge_lookup(record, signature=signature)
 
@@ -167,6 +214,7 @@ def run_knowledge_lookup(
     query: str,
     product_ids: list[int] | None = None,
     limit: int = KNOWLEDGE_RESULT_LIMIT,
+    subject: str = "",
 ) -> dict[str, Any]:
     """Run one bounded tenant-scoped lookup and record the attempt.
 
@@ -176,26 +224,29 @@ def run_knowledge_lookup(
     """
     ids = sorted({int(pid) for pid in (product_ids or []) if int(pid) > 0})
     query = normalize_lookup_query(query)
-    signature = lookup_signature(scope=scope, query=query, product_ids=ids)
+    subject = normalize_lookup_query(subject)
+    signature = lookup_signature(scope=scope, query=query, product_ids=ids, subject=subject)
     if context.knowledge_lookup_seen(signature):
         for existing in reversed(context.knowledge_lookups):
             if existing.get("scope") == scope and existing.get("product_ids") == ids:
                 return existing
     if not str(query or "").strip():
         return _record(
-            context, scope=scope, purpose=purpose, query=query, product_ids=ids,
+            context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
             status=STATUS_SKIPPED_NO_QUERY, sections=[], duration_ms=0,
         )
     started = time.monotonic()
     try:
-        payload = _retrieve(context, query=query, product_ids=ids, limit=limit)
+        payload = _retrieve(
+            context, query=query, product_ids=ids, limit=limit, subject=subject
+        )
     except Exception as exc:  # noqa: BLE001 — recorded as an outcome, never fatal
         logger.debug(
             "[COMMERCE_V2_KB] lookup failed tenant=%s scope=%s error_class=%s",
             context.tenant_id, scope, type(exc).__name__,
         )
         return _record(
-            context, scope=scope, purpose=purpose, query=query, product_ids=ids,
+            context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
             status=STATUS_ERROR, sections=[],
             duration_ms=int((time.monotonic() - started) * 1000),
             failure_reason=f"knowledge_retrieval_exception:{type(exc).__name__}",
@@ -203,13 +254,13 @@ def run_knowledge_lookup(
     duration_ms = int((time.monotonic() - started) * 1000)
     if payload.get("kb_retrieval_failed"):
         return _record(
-            context, scope=scope, purpose=purpose, query=query, product_ids=ids,
+            context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
             status=STATUS_ERROR, sections=[], duration_ms=duration_ms,
             failure_reason="knowledge_retrieval_failed",
         )
     rows = _section_rows(payload)
     return _record(
-        context, scope=scope, purpose=purpose, query=query, product_ids=ids,
+        context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
         status=STATUS_OK if rows else STATUS_NO_RESULTS,
         sections=rows, duration_ms=duration_ms,
     )
@@ -223,6 +274,7 @@ async def run_knowledge_lookup_async(
     query: str,
     product_ids: list[int] | None = None,
     timeout_seconds: float = KNOWLEDGE_TIMEOUT_SECONDS,
+    subject: str = "",
 ) -> dict[str, Any]:
     """Bounded async wrapper: a slow knowledge base never holds up a Salla answer."""
     ids = sorted({int(pid) for pid in (product_ids or []) if int(pid) > 0})
@@ -236,6 +288,7 @@ async def run_knowledge_lookup_async(
                 purpose=purpose,
                 query=query,
                 product_ids=ids,
+                subject=subject,
             ),
             timeout=float(timeout_seconds),
         )
@@ -244,7 +297,7 @@ async def run_knowledge_lookup_async(
             "[COMMERCE_V2_KB] lookup timed out tenant=%s scope=%s", context.tenant_id, scope
         )
         return _record(
-            context, scope=scope, purpose=purpose, query=query, product_ids=ids,
+            context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
             status=STATUS_TIMEOUT, sections=[],
             duration_ms=int((time.monotonic() - started) * 1000),
             failure_reason="knowledge_retrieval_timeout",
@@ -287,12 +340,21 @@ def build_knowledge_snapshots(
     source: str,
     required_product_id: int | None,
     allowed_product_ids: list[int] | None = None,
+    deduplicate: bool = True,
 ) -> tuple[list[KnowledgeSectionSnapshot], list[EvidenceRecord]]:
     """Re-read every retrieved section under tenant scope and type it as evidence.
 
     The retrieval service is trusted to filter, but the rows are still re-read
     and asserted against the tenant context here: a section that cannot be
     re-read in scope is a safety failure, never a silent drop.
+
+    A turn may look a section up more than once — the deterministic catalog
+    lookup finds it, then the model calls the knowledge tool and finds it
+    again.  Every one of those attempts stays in the ledger, but the section
+    itself reaches the model exactly once: ``deduplicate`` drops a repeat by
+    tenant-scoped section identity, so the same text is never presented, cited
+    or counted twice.  Identity is the id, so two distinct sections that happen
+    to share wording are both kept.
     """
     from models import MerchantKnowledgeSection
     from modules.ai.security.tenant_isolation import TenantIsolationLayer
@@ -342,6 +404,8 @@ def build_knowledge_snapshots(
         body = str(raw.get("body") or "").strip()
         if not body:
             continue
+        if deduplicate and context.knowledge_section_emitted(section_id):
+            continue
         evidence_ref = f"kb:section:{section_id}"
         subject_product_id = None
         if linked_ids:
@@ -386,6 +450,8 @@ def build_knowledge_snapshots(
                 evidence_ref=evidence_ref,
             )
         )
+        if deduplicate:
+            context.mark_knowledge_section_emitted(section_id)
     return snapshots, evidence
 
 
@@ -395,11 +461,17 @@ def retrieved_sections(
     scope: str,
     query: str,
     product_ids: list[int] | None = None,
+    subject: str = "",
 ) -> list[dict[str, Any]]:
     """The raw sections one recorded lookup returned, without re-querying."""
     ids = sorted({int(pid) for pid in (product_ids or []) if int(pid) > 0})
     return context.cached_knowledge_rows(
-        lookup_signature(scope=scope, query=normalize_lookup_query(query), product_ids=ids)
+        lookup_signature(
+            scope=scope,
+            query=normalize_lookup_query(query),
+            product_ids=ids,
+            subject=normalize_lookup_query(subject),
+        )
     )
 
 
@@ -491,6 +563,7 @@ __all__ = [
     "STATUS_SKIPPED_NO_QUERY",
     "STATUS_TIMEOUT",
     "build_knowledge_snapshots",
+    "build_product_anchor",
     "detect_catalog_conflicts",
     "knowledge_evidence_refs",
     "lookup_signature",

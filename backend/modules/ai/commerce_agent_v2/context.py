@@ -82,6 +82,9 @@ class CommerceAgentContext(BaseModel):
     _knowledge_lookups: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _knowledge_lookup_signatures: set[str] = PrivateAttr(default_factory=set)
     _knowledge_rows: dict[str, list[dict[str, Any]]] = PrivateAttr(default_factory=dict)
+    _knowledge_sections_emitted: set[str] = PrivateAttr(default_factory=set)
+    _authorized_product_titles: dict[int, str] = PrivateAttr(default_factory=dict)
+    _authorized_product_aliases: dict[int, str] = PrivateAttr(default_factory=dict)
 
     @classmethod
     def from_trusted_scope(
@@ -327,6 +330,7 @@ class CommerceAgentContext(BaseModel):
         self._knowledge_lookups = []
         self._knowledge_lookup_signatures = set()
         self._knowledge_rows = {}
+        self._knowledge_sections_emitted = set()
 
     @property
     def grounding_retry_active(self) -> bool:
@@ -428,8 +432,44 @@ class CommerceAgentContext(BaseModel):
                 raise TenantIsolationViolation("connection scope is no longer valid")
             TenantIsolationLayer.assert_belongs(connection, self._tenant_context)
 
-    def authorize_products(self, product_ids: list[int]) -> None:
+    def authorize_products(
+        self,
+        product_ids: list[int],
+        *,
+        titles: dict[int, str] | None = None,
+        aliases: dict[int, str] | None = None,
+    ) -> None:
         self._allowed_product_ids.update(int(value) for value in product_ids if int(value) > 0)
+        for product_id, title in (titles or {}).items():
+            text = str(title or "").strip()
+            if int(product_id) > 0 and text:
+                self._authorized_product_titles[int(product_id)] = text
+        for product_id, alias in (aliases or {}).items():
+            text = str(alias or "").strip()
+            if int(product_id) > 0 and text:
+                self._authorized_product_aliases[int(product_id)] = text
+
+    def authorized_product_anchors(
+        self, product_ids: list[int]
+    ) -> tuple[list[str], list[str]]:
+        """Titles and aliases of products this run already authorized.
+
+        Only a product the catalog tools grounded appears here, so a query
+        anchored on it can never name a product the turn never saw.  Both the
+        deterministic catalog lookup and the model's own knowledge tool read
+        the anchor from here, so the two compose the same query and the second
+        resolves to the first recorded attempt instead of re-querying.
+        """
+        titles: list[str] = []
+        aliases: list[str] = []
+        for product_id in product_ids:
+            title = self._authorized_product_titles.get(int(product_id), "")
+            if title and title not in titles:
+                titles.append(title)
+            alias = self._authorized_product_aliases.get(int(product_id), "")
+            if alias and alias not in aliases:
+                aliases.append(alias)
+        return titles, aliases
 
     def require_authorized_product(self, product_id: int) -> None:
         if int(product_id) not in self._allowed_product_ids:
@@ -488,6 +528,33 @@ class CommerceAgentContext(BaseModel):
 
     def knowledge_budget_available(self) -> bool:
         return len(self._knowledge_lookups) < MAX_KNOWLEDGE_LOOKUPS_PER_TURN
+
+    @staticmethod
+    def knowledge_section_key(tenant_id: int, section_id: int) -> str:
+        """Canonical identity of one merchant knowledge section.
+
+        Tenant is part of the key so two tenants' sections can never collapse
+        into one another, and the id is the stable identity rather than the
+        body: two different sections that happen to share wording stay
+        distinct.
+        """
+        return f"t{int(tenant_id)}:section:{int(section_id)}"
+
+    def knowledge_section_emitted(self, section_id: int) -> bool:
+        """True when this section already reached the model this turn."""
+        return (
+            self.knowledge_section_key(self.tenant_id, section_id)
+            in self._knowledge_sections_emitted
+        )
+
+    def mark_knowledge_section_emitted(self, section_id: int) -> None:
+        self._knowledge_sections_emitted.add(
+            self.knowledge_section_key(self.tenant_id, section_id)
+        )
+
+    @property
+    def knowledge_sections_emitted(self) -> list[str]:
+        return sorted(self._knowledge_sections_emitted)
 
     def register_evidence(self, records: list[EvidenceRecord]) -> None:
         for record in records:

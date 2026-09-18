@@ -12,6 +12,7 @@ from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.knowledge_retrieval import (
     SCOPE_PRODUCT,
     build_knowledge_snapshots,
+    build_product_anchor,
     retrieved_sections,
     run_knowledge_lookup,
 )
@@ -174,7 +175,7 @@ def _catalog_search_enabled(
 
 def _attach_product_knowledge(
     context: CommerceAgentContext,
-    product_ids: list[int],
+    products: list[Any],
 ) -> list[KnowledgeSectionSnapshot]:
     """Retrieve merchant knowledge for the products this tool just grounded.
 
@@ -182,10 +183,26 @@ def _attach_product_knowledge(
     rather than an intent guess, runs once per (question, product set), and is
     recorded even when it returns nothing.  A retrieval failure returns no
     sections and never disturbs the catalog answer the customer asked for.
+
+    The query carries the resolved product's own title and alias alongside the
+    customer's words, because the customer often names no product at all
+    («أبغى تفاصيل أول منتج عندكم»).  The anchor is the catalog evidence this
+    tool just authorized, so a pronoun resolves only to a product the turn has
+    actually grounded.
     """
-    ids = sorted({int(pid) for pid in product_ids if int(pid) > 0})
+    ids: list[int] = []
+    for item in products:
+        try:
+            product_id = int(getattr(item, "product_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if product_id > 0 and product_id not in ids:
+            ids.append(product_id)
+    ids = sorted(set(ids))
     if not ids:
         return []
+    titles, _aliases = context.authorized_product_anchors(ids)
+    subject = build_product_anchor(product_titles=titles)
     query = context.run_user_input
     run_knowledge_lookup(
         context,
@@ -193,8 +210,11 @@ def _attach_product_knowledge(
         purpose="catalog_product_knowledge",
         query=query,
         product_ids=ids,
+        subject=subject,
     )
-    rows = retrieved_sections(context, scope=SCOPE_PRODUCT, query=query, product_ids=ids)
+    rows = retrieved_sections(
+        context, scope=SCOPE_PRODUCT, query=query, product_ids=ids, subject=subject
+    )
     if not rows:
         return []
     snapshots, evidence = build_knowledge_snapshots(
@@ -381,7 +401,17 @@ async def search_products(
         snapshot, record = _product_evidence(row)
         snapshots.append(snapshot)
         evidence.append(record)
-    context.authorize_products([item.product_id for item in snapshots])
+    context.authorize_products(
+        [item.product_id for item in snapshots],
+        titles={
+            int(item.product_id): str(getattr(item, "title", "") or "")
+            for item in snapshots
+        },
+        aliases={
+            int(item.product_id): str(getattr(item, "external_id", "") or "")
+            for item in snapshots
+        },
+    )
     context.register_evidence(evidence)
     if not snapshots:
         misses = context.record_catalog_search_outcome(found=False)
@@ -394,9 +424,7 @@ async def search_products(
             ),
         )
     context.record_catalog_search_outcome(found=True)
-    knowledge_sections = _attach_product_knowledge(
-        context, [item.product_id for item in snapshots]
-    )
+    knowledge_sections = _attach_product_knowledge(context, snapshots)
     return CatalogSearchResult(
         status="ok",
         products=snapshots,
@@ -423,7 +451,7 @@ async def get_product_details(
     _assert_catalog_rows_belong_to_tenant(context, [row])
     snapshot, evidence = _product_evidence(row)
     context.register_evidence([evidence])
-    knowledge_sections = _attach_product_knowledge(context, [snapshot.product_id])
+    knowledge_sections = _attach_product_knowledge(context, [snapshot])
     return ProductDetailsResult(
         status="ok",
         product=snapshot,
