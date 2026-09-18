@@ -35,7 +35,7 @@ from scripts.operators.staging_migration_0088_to_0089_contract import (  # noqa:
 )
 
 MIGRATION_TENANT_ID = 890_002
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0107"})
+_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0108"})
 
 _ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",

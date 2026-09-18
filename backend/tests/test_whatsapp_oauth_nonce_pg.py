@@ -91,8 +91,8 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert 'down_revision = "0102"' in source
     assert "down_revision = (\"0092\"" not in source
     assert "down_revision = ('0092'" not in source
-    assert APPLICATION_ALEMBIC_HEAD == "0107"
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0107"})
+    assert APPLICATION_ALEMBIC_HEAD == "0108"
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0108"})
     assert INTEGRATION_BOOTSTRAP_TARGET == "0093"
     prev = os.getcwd()
     try:
@@ -104,9 +104,10 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         rev_0105 = script.get_revision("0105")
         rev_0106 = script.get_revision("0106")
         rev_0107 = script.get_revision("0107")
+        rev_0108 = script.get_revision("0108")
     finally:
         os.chdir(prev)
-    assert heads == frozenset({"0092", "0107"})
+    assert heads == frozenset({"0092", "0108"})
     assert rev.down_revision == _PARENT
     assert not isinstance(rev.down_revision, tuple)
     assert rev_0104 is not None
@@ -120,6 +121,11 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert rev_0107 is not None
     assert rev_0107.down_revision == "0106"
     assert not isinstance(rev_0107.down_revision, tuple)
+    # 0108 (commerce runtime foundation, dormant) extends 0107 linearly —
+    # it must not merge the abandoned 0092 branch or open a new head.
+    assert rev_0108 is not None
+    assert rev_0108.down_revision == "0107"
+    assert not isinstance(rev_0108.down_revision, tuple)
 
 
 def _pg_required() -> bool:
