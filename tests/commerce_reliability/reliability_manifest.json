@@ -1,0 +1,481 @@
+{
+  "manifest_version": 1,
+  "title": "Commerce Conversation Reliability Gate — reviewed manifest (C1-PR1)",
+  "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
+  "base_ref": "origin/main at PR #1084 merge",
+  "review_rules": [
+    "Every allowance below is a recorded, empirically measured failure at base_sha. It is never a permission.",
+    "Owners marked UNASSIGNED and expiry null are proposals for owner review; the gate warns on them and never fills them in.",
+    "A changed failure signature, an expired allowance, an unexpected pass, or a missing allowed test fails the gate with a RECONCILE marker; the manifest must be re-reviewed by a human, never broadened by the harness.",
+    "A baseline-compatible gate result is NOT production acceptance.",
+    "Node ids are pytest item node ids exactly as JUnit reports them; parametrized Arabic ids therefore use pytest's escaped \\uXXXX form."
+  ],
+  "required_modules": [
+    {
+      "path": "backend/tests/test_customer_product_silence_delivery_recovery.py",
+      "origin": "PR #1084 (unchanged)",
+      "content_sha256": "f74dd5b76210eb06037ae43b7676a2d86cde99496fcba625a5ad8d134880de51",
+      "min_tests": 17,
+      "tier": "unit"
+    },
+    {
+      "path": "backend/tests/test_product_reply_recovery_units.py",
+      "origin": "PR #1084 (unchanged)",
+      "content_sha256": "d19ed6d4845a85c119dcf8799bf1102a507ce48f15f404657b5341373e32bd2c",
+      "min_tests": 24,
+      "tier": "unit"
+    }
+  ],
+  "required_tests": [
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_broad_query_empty_guarded_text_gets_one_grounded_text_reply",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_repeated_legitimate_input_gets_its_own_single_reply",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_pick_buttons_dedupe_visible_titles_preserving_order_and_ids",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_pick_buttons_scan_past_duplicates_for_next_unique_candidate",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_pick_buttons_treat_whitespace_and_unicode_variants_as_duplicates",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_wire_boundary_never_sends_duplicate_normalized_titles",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_wire_boundary_keeps_distinct_titles_and_order",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_what_do_you_have_duplicate_titles_never_reach_meta",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_definitive_interactive_rejection_recovers_with_guarded_text_once",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_ambiguous_timeout_after_interactive_dispatch_never_resends",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_ambiguous_timeout_on_text_recovery_is_not_retried",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_no_eligible_candidates_fabricates_nothing",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_social_messages_keep_single_text_delivery[\\u0627\\u0644\\u0633\\u0644\\u0627\\u0645 \\u0639\\u0644\\u064a\\u0643\\u0645 \\u0648\\u0631\\u062d\\u0645\\u0629 \\u0627\\u0644\\u0644\\u0647 \\u0648\\u0628\\u0631\\u0643\\u0627\\u062a\\u0647]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_social_messages_keep_single_text_delivery[\\u0643\\u064a\\u0641 \\u0627\\u0644\\u062d\\u0627\\u0644]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_specific_product_request_still_sends_matching_card",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_stale_card_rejected_and_delivered_text_is_not_duplicated",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_customer_product_silence_delivery_recovery.py::test_stale_card_rejection_still_blocks_arbitrary_cta_rescue_after_recovery",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink0-True-accepted]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink1-True-accepted]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink2-False-definitive_rejection]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink3-False-definitive_rejection]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink4-False-ambiguous]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink5-False-ambiguous]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink6-False-ambiguous]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink7-False-ambiguous]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink8-False-blocked]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink9-False-blocked]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[sink10-False-not_attempted]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_classify_provider_outcome_matrix[None-False-not_attempted]",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_provider_error_snapshot_preserves_original_rejection",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_provider_error_snapshot_exception_is_ambiguous_not_phone",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_duplicate_button_title_is_invalid_payload_not_invalid_phone",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_code_100_phone_rejection_still_invalid_phone",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_outbound_send_status_block_keeps_details_and_invalid_payload_key",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_eligible_candidates_come_only_from_current_turn_state",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_eligible_candidates_narrow_to_compose_ids_when_they_match",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_grounded_text_uses_only_authorised_fields",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_choose_recovery_text_prefers_surviving_guarded_reply",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_fallback_provenance_is_constitution_complete",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_lifecycle_vocabulary_has_delivery_terminals",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "backend/tests/test_product_reply_recovery_units.py::test_record_outcome_stamps_audit_without_active_trace",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_valid_reference_turn_passes",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_null_result_fails",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_wrong_tenant_evidence_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_duplicate_effects_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_missing_terminal_record_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_inferred_end_ok_without_wamid_is_not_a_terminal",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_missing_required_evidence_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_unexpected_runtime_fallback_disguised_as_success_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_safe_fallback_only_passes_when_case_expects_it",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_required_guardrail_evidence_cannot_pass_when_missing",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_required_fixture_binding_cannot_pass_when_missing",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_terminal_vocabulary_is_closed",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_gate_rejects_empty_selection",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_gate_rejects_missing_required_test_and_module",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_gate_rejects_unexpected_skip",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_gate_rejects_unexpected_pass_of_allowance",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_gate_rejects_changed_failure_signature",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_gate_rejects_expired_allowance",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_gate_rejects_unlisted_xfail",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_gate_accepts_exact_baseline_observation",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_postgres_tier_rejects_missing_required_configuration",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_postgres_tier_rejects_skipped_postgres_test",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_junit_parser_maps_xfail_and_nodeids",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_manifest_in_repo_is_well_formed_and_self_consistent",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_reconciliation_plugin_fails_unexpected_pass",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_reconciliation_plugin_fails_changed_signature",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_reconciliation_plugin_marks_exact_signature_as_expected_failure",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_v1_owner_accepted_send_reaches_closed_terminal",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_v1_owner_missing_provider_message_id_is_explicit_failure",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_v1_owner_ambiguous_timeout_is_explicit_failure_without_resend",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_v1_owner_definitive_rejection_recovers_once_with_grounded_text",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_duplicate_inbound_event_id_produces_no_second_send",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_turn_touches_only_its_own_tenant",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_browse.py::test_singular_query_and_tenant_isolation_hold",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_browse.py::test_list_pick_selects_the_right_candidate_before_compose",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_v1_browse.py::test_unlocked_discovery_request_reaches_product_search",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_webhook_claim_next_batch_never_double_claims_across_processes",
+      "tier": "postgres"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_catalog_search_singular_and_tenant_isolation_on_postgres",
+      "tier": "postgres"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_disposable_database_is_isolated_and_utf8",
+      "tier": "postgres"
+    }
+  ],
+  "baseline_failures": [
+    {
+      "case_id": "RB-01",
+      "title": "Interpreter browse repeats already-shown candidates",
+      "owner": "UNASSIGNED (owner review)",
+      "proposed_owner": "V1 brain catalog maintainers — proposal only",
+      "evidence": "Phase C0 report §11 (RCA defect 1); backend/modules/ai/brain/commerce/catalog_request_interpreter.py browse branch returns snapshot rows[:5] with no cursor; reproduced at base_sha with scripted interpreter output {capability: browse}",
+      "test_id": "tests/commerce_reliability/test_runtime_v1_browse.py::test_more_products_request_does_not_repeat_shown_candidates",
+      "failure_signature": "interpreter_browse_repeats_shown_ids",
+      "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
+      "expiry": null,
+      "proposed_expiry": "set by owner when the C1-PR2 browse-cursor fix is scheduled",
+      "removal_condition": "A merged product fix makes the interpreter browse decision exclude last_search_candidates ids (or advance a cursor); the test then passes and this entry is deleted in the same PR.",
+      "tier": "unit"
+    },
+    {
+      "case_id": "RB-02",
+      "title": "Guard-emptied 'more products' reply recovers by resending the same stored candidates",
+      "owner": "UNASSIGNED (owner review)",
+      "proposed_owner": "Delivery recovery maintainers (PR #1084 authors) — proposal only",
+      "evidence": "Phase C0 report §11 (RCA defects 2/3); backend/core/product_reply_recovery.py eligible candidates come from last_search_candidates only; reproduced at base_sha through the PR #1084 incident harness with guard_empties_reply=True",
+      "test_id": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_guard_emptied_more_request_does_not_resend_shown_candidates",
+      "failure_signature": "recovery_resends_shown_candidates",
+      "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
+      "expiry": null,
+      "proposed_expiry": "set by owner when the C1-PR2 recovery-scope fix is scheduled",
+      "removal_condition": "A merged product fix makes recovery for a 'more' request either present unseen candidates or send an honest no-more-products text; the test then passes and this entry is deleted in the same PR.",
+      "tier": "unit"
+    },
+    {
+      "case_id": "RB-03",
+      "title": "Arabic broken plural query does not resolve to its singular product",
+      "owner": "UNASSIGNED (owner review)",
+      "proposed_owner": "Catalog search maintainers — proposal only",
+      "evidence": "Phase C0 report §11 (RCA defect 4); backend/core/store_knowledge.py CatalogContextBuilder.search_products has no broken-plural handling (only definite-article and single-token feminine-plural variants); reproduced at base_sha on sqlite with product 'تنورة قطنية سوداء' and query 'تنانير'",
+      "test_id": "tests/commerce_reliability/test_runtime_v1_browse.py::test_broken_plural_query_finds_singular_product",
+      "failure_signature": "broken_plural_query_returns_no_rows",
+      "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
+      "expiry": null,
+      "proposed_expiry": "set by owner when the search redesign is scheduled",
+      "removal_condition": "A merged search change (not a hardcoded noun table as final design) resolves 'تنانير' to 'تنورة' rows for the same tenant only; the test then passes and this entry is deleted in the same PR.",
+      "tier": "unit"
+    },
+    {
+      "case_id": "RB-03-PG",
+      "title": "Arabic broken plural query does not resolve on the PostgreSQL FTS path either",
+      "owner": "UNASSIGNED (owner review)",
+      "proposed_owner": "Catalog search maintainers — proposal only",
+      "evidence": "Same defect as RB-03 measured on the real PostgreSQL full-text path (to_tsvector('simple')) in a disposable database at base_sha",
+      "test_id": "tests/commerce_reliability/test_runtime_state_postgres.py::test_broken_plural_query_finds_singular_product_on_postgres",
+      "failure_signature": "broken_plural_query_returns_no_rows",
+      "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
+      "expiry": null,
+      "proposed_expiry": "set by owner together with RB-03",
+      "removal_condition": "Same as RB-03, proven on PostgreSQL.",
+      "tier": "postgres"
+    },
+    {
+      "case_id": "RB-04",
+      "title": "List pick selects the right product but the composer emits the no-synchronised-products template",
+      "owner": "UNASSIGNED (owner review)",
+      "proposed_owner": "V1 compose maintainers — proposal only",
+      "evidence": "Phase C0 report §11 (RCA defect 5); executor returns products=[] with product=selected and no presentation_identity_grounded, composer _trusted_search_compose_candidates returns [] and falls to T.no_products(variant=2); reproduced at base_sha with a real DefaultDecisionEngine/ProductSearchHandler/DefaultComposer chain and a scripted provider",
+      "test_id": "tests/commerce_reliability/test_runtime_v1_browse.py::test_list_pick_compose_keeps_selected_product",
+      "failure_signature": "list_pick_compose_emits_no_products_template",
+      "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
+      "expiry": null,
+      "proposed_expiry": "set by owner when the C1-PR2 compose fix is scheduled",
+      "removal_condition": "A merged product fix makes the composer ground the selected singleton (or the executor emit it as a candidate) so the reply names the selected product; the test then passes and this entry is deleted in the same PR.",
+      "tier": "unit"
+    },
+    {
+      "case_id": "RB-05",
+      "title": "Fulfillment lock blocks a new discovery request",
+      "owner": "UNASSIGNED (owner review)",
+      "proposed_owner": "Order context gate maintainers — proposal only",
+      "evidence": "Phase C0 report §11 (RCA defect 6); locked fulfillment session (order_prep with missing fields): for the deterministic ask_product request 'عندكم تنانير؟' the real DefaultDecisionEngine returns llm_reply ('active order — generic alternate-product enquiry') and the catalog interpreter is gated off (returns None); for 'فيه تنانير؟' try_fulfillment_lock_continuation returns propose_draft_order. The same request in an unlocked browsing state reaches search_products (control test). Reproduced at base_sha.",
+      "test_id": "tests/commerce_reliability/test_runtime_v1_browse.py::test_locked_fulfillment_session_still_allows_new_discovery",
+      "failure_signature": "fulfillment_lock_blocks_discovery",
+      "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
+      "expiry": null,
+      "proposed_expiry": "set by owner when the C1-PR2 gate fix is scheduled",
+      "removal_condition": "A merged product fix routes an explicit new-category discovery request during fulfillment to product search (without weakening the lock for fulfillment answers); the test then passes and this entry is deleted in the same PR.",
+      "tier": "unit"
+    }
+  ],
+  "unimplemented_contracts": [
+    {
+      "contract_id": "UC-01",
+      "title": "Commerce Agent V2 owner path has no closed delivery terminal",
+      "test_id": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_v2_owner_rejected_send_reaches_closed_terminal",
+      "signature": "v2_owner_delivery_failure_ends_with_inferred_end_ok",
+      "planned_by": "C1-PR2 (delivery terminal contract) — not authorised in this PR",
+      "evidence": "Phase C0 report §5/§13; reproduced at base_sha: with outbound_enabled_for_tenant patched True and a scripted 400 on the text send, the lifecycle ends end_ok with no provider message id, no outcome record and no outbound row",
+      "tier": "unit"
+    },
+    {
+      "contract_id": "UC-02",
+      "title": "Brain state persistence has no compare-and-set; concurrent saves lose updates",
+      "test_id": "tests/commerce_reliability/test_runtime_state_postgres.py::test_concurrent_state_saves_do_not_lose_updates",
+      "signature": "state_store_save_lost_update",
+      "planned_by": "C1-PR3 (state CAS) — not authorised in this PR",
+      "evidence": "Phase C0 report §6; reproduced at base_sha with two independent spawned processes calling the real DefaultStateStore.save against a disposable PostgreSQL database",
+      "tier": "postgres"
+    }
+  ],
+  "allowed_skips": [],
+  "postgres": {
+    "require_env": "NAHLA_RELIABILITY_REQUIRE_PG",
+    "admin_dsn_env": "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "ci_admin_dsn": "postgresql://nahla:nahla_password@127.0.0.1:5433/postgres",
+    "database_policy": "one disposable database per test session, created with ENCODING 'UTF8' TEMPLATE template0, dropped WITH (FORCE) at teardown",
+    "tests": [
+      {
+        "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_disposable_database_is_isolated_and_utf8"
+      },
+      {
+        "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_webhook_claim_next_batch_never_double_claims_across_processes"
+      },
+      {
+        "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_catalog_search_singular_and_tenant_isolation_on_postgres"
+      },
+      {
+        "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_broken_plural_query_finds_singular_product_on_postgres"
+      },
+      {
+        "nodeid": "tests/commerce_reliability/test_runtime_state_postgres.py::test_concurrent_state_saves_do_not_lose_updates"
+      }
+    ]
+  }
+}
