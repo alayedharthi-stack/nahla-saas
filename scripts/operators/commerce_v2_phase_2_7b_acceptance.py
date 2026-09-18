@@ -34,6 +34,7 @@ from services.commerce_v2_phase_2_7b_environment import (  # noqa: E402
     cleanup_knowledge_acceptance_environment,
     describe_knowledge_acceptance_environment,
     provision_knowledge_acceptance_environment,
+    verify_acceptance_fixtures,
 )
 from services.commerce_v2_phase_2_7b_knowledge_acceptance import (  # noqa: E402
     create_knowledge_acceptance_run,
@@ -60,7 +61,12 @@ def _emit(tag: str, payload: Any) -> None:
 def command_provision(_args: argparse.Namespace) -> int:
     engine, db = _session()
     try:
-        _emit("P27B_PROVISION", provision_knowledge_acceptance_environment(db))
+        environment = provision_knowledge_acceptance_environment(db)
+        _emit("P27B_PROVISION", environment)
+        _emit(
+            "P27B_FIXTURES",
+            verify_acceptance_fixtures(db, int(environment["tenant_id"])),
+        )
         return 0
     finally:
         db.close()
@@ -105,11 +111,15 @@ def command_run(args: argparse.Namespace) -> int:
         tenant_id = int(environment["tenant_id"])
         conversations = sorted(environment["conversations"].values())
         matrix = load_knowledge_acceptance_matrix()
+        # Prove every fixture the matrix needs resolves through the real
+        # lookup before a single case is spent.
+        _emit("P27B_FIXTURES", verify_acceptance_fixtures(db, tenant_id))
+        alias = matrix.required_aliases[0]
 
         async def submit_case(session: Any, case: Any) -> dict[str, Any]:
             request = InternalE2ETurnRequest(
                 tenant_id=tenant_id,
-                synthetic_customer_alias="A",
+                synthetic_customer_alias=alias,
                 text=case.input,
                 case_id=f"P27B:{case.case_id}",
                 expected={

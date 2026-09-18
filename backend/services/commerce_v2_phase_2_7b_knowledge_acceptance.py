@@ -22,6 +22,12 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from sqlalchemy.orm.attributes import flag_modified
 
+from modules.ai.commerce_agent_v2.internal_e2e_identity import (
+    INTERNAL_E2E_ALIASES,
+    InternalE2EAlias,
+    normalize_internal_e2e_alias,
+)
+
 KNOWLEDGE_CONTRACT_VERSION = "commerce_v2_phase_2_7b_knowledge_acceptance_v1"
 KNOWLEDGE_MATRIX_PATH = (
     Path(__file__).resolve().parents[1]
@@ -31,6 +37,7 @@ KNOWLEDGE_MATRIX_PATH = (
 )
 KNOWLEDGE_CASES_TOTAL = 16
 KNOWLEDGE_TENANT_ID = 1
+KNOWLEDGE_EXECUTION_MODE = "INTERNAL_E2E"
 
 # Commercial truth is Salla's. A knowledge section may never carry these.
 COMMERCIAL_FACT_KINDS = frozenset(
@@ -107,6 +114,7 @@ class KnowledgeMatrix:
     matrix_sha256: str
     source_authority: Mapping[str, Any]
     cases: tuple[KnowledgeCase, ...]
+    required_aliases: tuple[InternalE2EAlias, ...]
 
     @property
     def case_ids(self) -> tuple[str, ...]:
@@ -117,6 +125,29 @@ class KnowledgeMatrix:
             if item.case_id == case_id:
                 return item
         raise _fail("case_unknown")
+
+
+def _required_aliases(cases_raw: list[Any]) -> tuple[InternalE2EAlias, ...]:
+    """Aliases this matrix needs, derived from the matrix rather than hardcoded.
+
+    A case may name the thread it belongs to.  This matrix names none, and K11
+    is a bare follow-up ("طيب وش مصدره؟") that only resolves against the turns
+    before it, so all sixteen cases run on a single INTERNAL_E2E conversation.
+    The alias spellings come from the canonical INTERNAL_E2E alias list, so the
+    provisioner and the turn path can never disagree about them.
+    """
+    declared = {
+        str(entry.get("thread") or "").strip()
+        for entry in cases_raw
+        if isinstance(entry, dict)
+    }
+    needed = max(1, len({thread for thread in declared if thread}))
+    if needed > len(INTERNAL_E2E_ALIASES):
+        raise _fail("matrix_thread_count_unsupported")
+    return tuple(
+        normalize_internal_e2e_alias(alias)
+        for alias in INTERNAL_E2E_ALIASES[:needed]
+    )
 
 
 def load_knowledge_acceptance_matrix(path: Path | None = None) -> KnowledgeMatrix:
@@ -136,6 +167,8 @@ def load_knowledge_acceptance_matrix(path: Path | None = None) -> KnowledgeMatri
         raise _fail("matrix_contract_mismatch")
     if int(raw.get("tenant_id") or 0) != KNOWLEDGE_TENANT_ID:
         raise _fail("matrix_tenant_invalid")
+    if str(raw.get("execution_mode") or "") != KNOWLEDGE_EXECUTION_MODE:
+        raise _fail("matrix_execution_mode_invalid")
     cases_raw = raw.get("cases")
     if not isinstance(cases_raw, list) or len(cases_raw) != KNOWLEDGE_CASES_TOTAL:
         raise _fail("matrix_case_count_invalid")
@@ -173,6 +206,7 @@ def load_knowledge_acceptance_matrix(path: Path | None = None) -> KnowledgeMatri
         matrix_sha256=hashlib.sha256(raw_bytes).hexdigest(),
         source_authority=dict(raw.get("source_authority") or {}),
         cases=tuple(cases),
+        required_aliases=_required_aliases(cases_raw),
     )
 
 
