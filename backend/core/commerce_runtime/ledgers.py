@@ -431,7 +431,8 @@ class LedgerRepository:
             if latest.kind != lc.DeliveryKind.RICH.value:
                 raise lc.RecoveryNotPermitted(lc.RecoveryRefusal.NOT_RICH_TO_TEXT, seq)
             self._touch_under_guard(conn, snap, token)
-            return self._insert_delivery_attempt(conn, seq, token, attempt_no=seq.attempt_count + 1,
+            next_no = seq.attempt_count + 1
+            return self._insert_delivery_attempt(conn, seq, token, attempt_no=next_no,
                                                  kind=lc.DeliveryKind.TEXT.value, payload=body)
 
     # ── Outcome evidence (scope-bound; no lease required) ────────────────────
