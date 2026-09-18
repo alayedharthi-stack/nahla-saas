@@ -1,24 +1,39 @@
 # Required PostgreSQL proofs — strict execution inside `lint-and-test`
 
-Status: prepared 2026-09-18 for review. This document describes the strict
-runner, its inventory and the proposed CI invocation. Nothing here changes the
-commerce reliability gate, its manifest, its allowances or its acceptance.
+Status: prepared 2026-09-18 for review; corrected 2026-09-18 (explicit
+target authority at the connection boundary, report freshness, inventory
+kinds). This document describes the strict runner, its inventory and the
+proposed CI invocation. Nothing here changes the commerce reliability gate,
+its manifest, its allowances or its acceptance.
 
 ## 1. Scope
 
-Two proof suites must execute against a real PostgreSQL on every pull request
-and must be **merge-blocking**. Owner-provided screenshots of the `main`
-protection rule show the required checks `Scan repository for leaked secrets`,
-`lint-and-test`, `constitution-compliance` and `merge-freeze-gate`, with
-"require branches to be up to date" and "do not allow bypassing" enabled;
-`a1-postgres-integration` is **not** required. The suites therefore run inside
-`lint-and-test` with a disposable `postgres:16` service (Variant B).
+The inventoried PostgreSQL suites must execute against a real PostgreSQL on
+every pull request and must be **merge-blocking**. Owner-provided screenshots
+of the `main` protection rule show the required checks `Scan repository for
+leaked secrets`, `lint-and-test`, `constitution-compliance` and
+`merge-freeze-gate`, with "require branches to be up to date" and "do not
+allow bypassing" enabled; `a1-postgres-integration` is **not** required. The
+suites therefore run inside `lint-and-test` with a disposable `postgres:16`
+service (Variant B).
 
-| Suite id | Module | Origin | Required tests |
-| --- | --- | --- | --- |
-| `commerce_runtime_foundation` | `tests/commerce_reliability/test_commerce_runtime_foundation_pg.py` | PR #1089, dormant commerce runtime foundation, including the lock-wait, scope-binding and ordered-processing regressions | 27 |
-| `commerce_runtime_migration` | `tests/commerce_reliability/test_commerce_runtime_migration_pg.py` | PR #1089, revision 0108 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation) | 10 |
-| `global_customer_identity` | `backend/tests/test_global_customer_display_identity_pg.py` | PR #1087 (merged), 0107 persistence cases | 5 |
+The inventory distinguishes two kinds of suite:
+
+* `proof` — the **42 PostgreSQL proofs** of the dormant commerce runtime
+  foundation, its migration and global customer identity. These are the
+  proofs the owner asked to make required.
+* `runner_regression` — **2 regressions of the strict harness itself** (the
+  runner and the shared PostgreSQL fixture's connection selection). They run
+  on the same service and are equally required, but they prove that the
+  harness fails the way it must; they are not proofs of commerce runtime or
+  identity behaviour, and the verdict counts them separately.
+
+| Suite id | Kind | Module | Origin | Tests |
+| --- | --- | --- | --- | --- |
+| `commerce_runtime_foundation` | proof | `tests/commerce_reliability/test_commerce_runtime_foundation_pg.py` | PR #1089, dormant commerce runtime foundation, including the lock-wait, scope-binding and ordered-processing regressions | 27 |
+| `commerce_runtime_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_migration_pg.py` | PR #1089, revision 0108 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation) | 10 |
+| `global_customer_identity` | proof | `backend/tests/test_global_customer_display_identity_pg.py` | PR #1087 (merged), 0107 persistence cases | 5 |
+| `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
 
 The counts above are informational. Nothing in the runner or its self-test
 pins a count: the inventory must equal pytest's own collection of each
@@ -28,9 +43,14 @@ that disappears fails (`missing_collection`).
 
 The exact node ids live in `scripts/required_postgres_proofs.json`
 (`python scripts/required_postgres_proofs.py --manifest scripts/required_postgres_proofs.json --junit-dir /tmp/x --list`
-prints them). The identity ids carry pytest's escaped parametrisation form,
-for example `[مشاعل-None]`, exactly as pytest collects
+prints them with their kind). The identity ids carry pytest's escaped
+parametrisation form, for example `[مشاعل-None]`, exactly as pytest collects
 and reports them.
+
+Six further pure tests, `tests/commerce_reliability/test_pg_connection_selection.py`,
+exercise the shared fixture's candidate selection with a recording fake
+engine and no database. They belong to the ordinary root suite, not to the
+strict inventory, because they need no PostgreSQL.
 
 ## 2. Strict execution mechanism
 
@@ -39,6 +59,7 @@ process with `--junitxml` and judges the JUnit output:
 
 | Rule | Effect |
 | --- | --- |
+| Manifest unreadable, invalid, or a suite with an unknown `kind` | exit **2**, nothing runs |
 | Required environment missing, blank or with a wrong value | exit **2**, pytest is not started for any suite |
 | Listed module missing | exit **2**, nothing runs |
 | Required node id not collected | exit **1** (`missing_collection`) |
@@ -46,31 +67,92 @@ process with `--junitxml` and judges the JUnit output:
 | Any skip, failure or error | exit **1**, the node id and reason are listed; a skip is never a pass |
 | Leaf `testsuite` counts differ from the inventory or show skips, failures or errors | exit **1** |
 | Non-zero pytest exit | exit **1** |
-| Everything above satisfied for every suite | exit **0**, `PROVEN (42/42 required tests passed, 0 skips tolerated)` at the current inventory |
+| Everything above satisfied for every suite | exit **0**, `PROVEN (44/44 required tests passed: 42/42 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
 
 The runner is pure standard library, imports no application code and carries
 no allowances. `tests/commerce_reliability/test_required_postgres_proofs_runner.py`
 proves every rule with a negative control on synthetic suites, proves that
-a test added to a module without an inventory update is refused, and pins
-the committed inventory to pytest's own collection of the three real
-modules, so an added or removed test is a reviewed inventory change, never
-a silent drift.
+a test added to a module without an inventory update is refused, proves the
+report freshness rule below, and pins the committed inventory to pytest's
+own collection of the four inventoried modules, so an added or removed test
+is a reviewed inventory change, never a silent drift.
 
-### Fixture contracts (unchanged; used as they are)
+### 2.1 Report freshness
 
-* Foundation and migration suites: `NAHLA_RELIABILITY_REQUIRE_PG=1` with
-  `NAHLA_RELIABILITY_PG_ADMIN_DSN` set. The harness fixture fails (never
-  skips) when the flag is set without the DSN; without the flag it skips,
-  which ordinary local runs report as skipped and which is never proof. Each
-  session creates and drops its own database (`nahla_runtime_*`).
+Before the manifest is read, the runner **invalidates the previous
+outputs**: it deletes any report at `--report` and any `*.xml` in
+`--junit-dir`, then writes a placeholder report
+`{"verdict": "NOT RUN", "reason": "validation_not_started", ...}`. Every
+early exit replaces that placeholder with the failure it hit:
+
+| Early failure | Report written | Exit |
+| --- | --- | --- |
+| Manifest unreadable or invalid | `{"verdict": "NOT RUN", "reason": "manifest", "detail": ...}` | 2 |
+| Required environment missing | `{"verdict": "NOT RUN", "reason": "configuration", "suites": {...}}` | 2 |
+| Run completed | `PROVEN` or `NOT PROVEN` with per-suite results and `by_kind` counts | 0 / 1 |
+
+A previous PROVEN report therefore never appears current after a later
+failed or aborted run at the same path. `--list` neither resets nor writes
+outputs. Regression: `test_stale_report_and_junit_are_invalidated_before_validation`
+in the runner self-test module.
+
+### 2.2 Explicit target authority at the connection boundary (R1)
+
+The identity proofs connect through the shared fixture helper
+`backend/tests/legacy_migration_drift_postgres_fixtures.py`
+(`connect_engine`). Its rule:
+
+* When `LEGACY_MIG_PG_TEST_DATABASE_URL` is set, that URL is
+  **authoritative and the only candidate**. A connection failure fails the
+  caller when integration is required (`LEGACY_MIG_PG_INTEGRATION_REQUIRED=1`
+  directly, or `CUSTOMER_NAME_PROVENANCE_PG_REQUIRED=1` through the identity
+  fixture, which turns the helper's skip into a failure) and skips otherwise.
+  It never falls through to `A1_PG_TEST_DATABASE_URL`, `DATABASE_URL` or the
+  default service URL, so no connection and no `legacy_mig_*` database
+  creation can happen on an alternate service. The message begins with
+  `no fallback attempted`, names the explicit target with its password
+  redacted, and scrubs the password from the driver's error text.
+* Without the explicit variable the historical order is unchanged
+  (`A1_PG_TEST_DATABASE_URL`, then `DATABASE_URL`, then the default
+  `postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas`). The
+  `a1-postgres-integration` job never sets the explicit variable, so its
+  behaviour is unchanged.
+
+The runner's configuration preflight (every required variable present before
+pytest starts) remains, but it is not the enforcement. Enforcement is at the
+connection boundary, inside the fixture that every identity proof uses; a
+preflight cannot see which URL a fixture actually connected to.
+
+Regressions:
+
+* `tests/commerce_reliability/test_pg_connection_selection.py` (6 pure
+  tests, root suite): the explicit target is the only candidate; an
+  unreachable explicit target with every alternate reachable fails
+  (required) or skips (not required) after attempting exactly one URL, with
+  the target named and the password absent; the historical order and its
+  later-candidate fallback are unchanged without the explicit variable.
+* `runner_connection_regressions` (2 tests, strict inventory, PostgreSQL):
+  the runner executed on the identity suite with the explicit URL pointing
+  at a dead port while `A1_PG_TEST_DATABASE_URL` and `DATABASE_URL` point at
+  the live service exits 1 with `NOT PROVEN`, 0 passed, 0 skipped, errors
+  plus failures equal to the required count, a blocker naming the dead
+  target without its password, and the set of `legacy_mig_*` databases on
+  the live service unchanged. The positive control (explicit URL live, every
+  alternate dead) is PROVEN with no leftover database.
+
+### Fixture contracts
+
+* Foundation, migration and runner regression suites:
+  `NAHLA_RELIABILITY_REQUIRE_PG=1` with `NAHLA_RELIABILITY_PG_ADMIN_DSN` set.
+  The harness fixture fails (never skips) when the flag is set without the
+  DSN; without the flag it skips, which ordinary local runs report as
+  skipped and which is never proof. Each session creates and drops its own
+  database (`nahla_runtime_*`).
 * Identity suite: `CUSTOMER_NAME_PROVENANCE_PG_REQUIRED=1` makes an
   unavailable PostgreSQL a failure instead of a skip;
-  `LEGACY_MIG_PG_TEST_DATABASE_URL` is the preferred admin URL. The shared
-  fixture's own candidate order is that variable, then
-  `A1_PG_TEST_DATABASE_URL`, then `DATABASE_URL`, then the default
-  `postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas`; in CI every
-  candidate resolves to the same disposable service. Ephemeral databases
-  (`legacy_mig_*`) are created at revision `0107` and dropped.
+  `LEGACY_MIG_PG_TEST_DATABASE_URL` is the authoritative admin URL
+  (section 2.2). Ephemeral databases (`legacy_mig_*`) are created at
+  revision `0107` and dropped.
 
 ## 3. Proposed CI invocation (separate `ci.yml`-only pull request)
 
@@ -93,27 +175,38 @@ Inside `lint-and-test`: a `postgres:16` service (user `nahla`, database
             --report /tmp/required-postgres-proofs/report.json
 ```
 
-The environment is **step-scoped**. No job-level variable is added, so the
-root `python -m pytest -q --maxfail=1` step and every later step see exactly
-the environment they see today.
+The step executes the whole inventory: the 42 proofs and the 2 runner/fixture
+regressions. The environment is **step-scoped**. No job-level variable is
+added, so the root `python -m pytest -q --maxfail=1` step and every later
+step see exactly the environment they see today.
 
 ### Why the service does not redirect existing tests
 
-* The root collection (283 files under `tests/`) contains no test that
-  connects to `127.0.0.1:5433`; the only mention is a fake DSN inside the
-  reliability evaluator's pure self-tests. The harness's own PostgreSQL tier
-  keeps skipping in that step because its variables are not set there.
+* The root collection contains no test that connects to `127.0.0.1:5433`
+  without the step variables; the only mentions are a fake DSN inside the
+  reliability evaluator's pure self-tests and the dead-port and
+  service-URL constants of the connection regressions, which skip without
+  the harness variables. The harness's own PostgreSQL tier keeps skipping in
+  the root step because its variables are not set there.
 * The `backend/tests` modules that `lint-and-test` runs explicitly build
   their engines on `sqlite+pysqlite:///:memory:` (staging migration and
   tenant clone operators), use must-not-connect sentinels or fake
   `postgres://staging` values, or are gated on `TENANT_CLONE_PG_*` variables
   that the job does not set.
-* Evidence: the full root suite run locally with a PostgreSQL 16 service
-  reachable on `127.0.0.1:5433` (database `nahla_saas` present) and no step
-  variables produced 6751 passed, 63 skipped, 7 xfailed, exit 0; the run
-  without a service on the same base gave 6742 passed, 63 skipped, 7 xfailed,
-  and the 9 extra passes are exactly this branch's runner self-tests. No
-  skip count moved, so no existing test found and used the service.
+* Evidence, first runner head: the full root suite run locally with a
+  PostgreSQL 16 service reachable on `127.0.0.1:5433` (database `nahla_saas`
+  present) and no step variables produced 6751 passed, 63 skipped,
+  7 xfailed, exit 0; the run without a service on the same base gave
+  6742 passed, 63 skipped, 7 xfailed, and the 9 extra passes were exactly
+  that head's runner self-tests. No skip count moved, so no existing test
+  found and used the service.
+* Evidence, corrected head: the same root suite with the service reachable
+  and no step variables gave 6771 passed, 84 skipped, 7 xfailed, exit 0
+  (206 s). Of the 84 skips, 39 are the harness-gated PostgreSQL modules
+  (27 foundation, 10 migration, 2 connection regressions) skipping because
+  the step variables are not set in that step; the remaining 45 equal the
+  first head's non-PostgreSQL skips (63 minus its 18 foundation skips).
+  Again no test found and used the service.
 
 ## 4. Separation from the commerce reliability gate
 
@@ -129,12 +222,17 @@ failure, substitutes diagnostic mode or creates an allowance.
 ## 5. Dependency and merge order
 
 1. PR #1088 — contract record (governance only).
-2. PR #1089 — dormant persistence foundation (provides the 18 proofs).
+2. PR #1089 — dormant persistence foundation (provides the 37 foundation
+   and migration proofs).
 3. Runner PR — this document, `scripts/required_postgres_proofs.py`,
-   `scripts/required_postgres_proofs.json`, the self-test module. Based on
+   `scripts/required_postgres_proofs.json`, the runner self-test module,
+   the shared fixture correction
+   (`backend/tests/legacy_migration_drift_postgres_fixtures.py`) with its
+   pure regressions and the PostgreSQL connection regressions. Based on
    #1089 because the inventory pin needs the foundation module.
-4. `ci.yml`-only PR — the service and the step above. Based on the runner
-   PR so its CI run exercises the new step with the new runner.
+4. `ci.yml`-only PR — the service and the step above, nothing else. Based on
+   the runner PR so its CI run exercises the new step with the new runner;
+   it carries no fixture, runner or test edits of its own.
 
 ## 6. Local usage
 
@@ -144,16 +242,30 @@ NAHLA_RELIABILITY_REQUIRE_PG=1 \
 NAHLA_RELIABILITY_PG_ADMIN_DSN=postgresql://nahla:nahla_password@127.0.0.1:5433/postgres \
 CUSTOMER_NAME_PROVENANCE_PG_REQUIRED=1 \
 LEGACY_MIG_PG_TEST_DATABASE_URL=postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas \
-python scripts/required_postgres_proofs.py --manifest scripts/required_postgres_proofs.json --junit-dir /tmp/required-postgres-proofs
+python scripts/required_postgres_proofs.py --manifest scripts/required_postgres_proofs.json --junit-dir /tmp/required-postgres-proofs --report /tmp/required-postgres-proofs/report.json
+
+# Negative control for explicit target authority: the same command with
+# LEGACY_MIG_PG_TEST_DATABASE_URL pointing at a dead port (for example 5499)
+# and A1_PG_TEST_DATABASE_URL / DATABASE_URL pointing at the live service
+# exits 1, NOT PROVEN, with the identity suite in error and no legacy_mig_*
+# database created on the live service.
 
 # Ordinary local run of the modules without the variables: the proofs skip and are reported as skipped.
 python -m pytest tests/commerce_reliability/test_commerce_runtime_foundation_pg.py -q -rs
 ```
 
-Recorded on 2026-09-18 (PostgreSQL 16.13, Python 3.11): first inventory
-PROVEN 23/23; after the review corrections PROVEN 42/42 (27 + 10 + 5), 0
-skipped, 64 s, 0 databases left behind. With the variables unset the runner
-exits 2 before starting pytest; with the variables set and no server
-listening, the foundation suite reported 2 failed + 16 errors and the
-identity suite 5 errors (its module-scoped fixture fails instead of
-skipping), verdict NOT PROVEN.
+Recorded on 2026-09-18 (PostgreSQL 16.13, Python 3.11), corrected head:
+PROVEN 44/44 (27 + 10 + 5 proofs, 2 runner/fixture regressions), 0 skipped,
+70 s, 0 databases left behind. With the variables unset the runner exits 2
+before starting pytest and the report reads `NOT RUN` / `configuration`;
+with an unreadable manifest at a path that already held a PROVEN report,
+the runner exits 2, the report reads `NOT RUN` / `manifest`, and the old
+JUnit files are gone. With the explicit identity URL pointing at a dead port
+and every alternate pointing at the live service, the run exits 1, NOT
+PROVEN (39/44: 37/42 proofs + 2/2 regressions), the identity suite reports
+5 errors whose message begins `no fallback attempted` and names
+`postgresql://nahla:***@127.0.0.1:5499/nahla_saas`, the live service's
+`legacy_mig_*` set is unchanged, and PostgreSQL connection logging on the
+live service recorded zero connections from the identity suite during that
+run (the positive control, explicit live and alternates dead, recorded its
+connections on the explicit target only).
