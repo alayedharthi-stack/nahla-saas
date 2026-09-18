@@ -1,0 +1,49 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index d599d158..853f2b6f 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -45,6 +45,21 @@ jobs:
+       - name: Run unit tests
+         run: python -m pytest -q --maxfail=1
+ 
++      # Commerce Conversation Reliability Gate (C1-PR1), unit tier. Runs the
++      # PR #1084 regression modules unchanged plus the reliability harness and
++      # judges the JUnit output against the reviewed manifest
++      # (tests/commerce_reliability/reliability_manifest.json). Missing or
++      # skipped required tests, unlisted failures, unexpected passes of a
++      # recorded baseline, and changed failure signatures all fail this step.
++      # Runbook: docs/engineering/commerce-reliability-gate.md
++      - name: Commerce reliability gate (unit tier)
++        run: |
++          set -euo pipefail
++          python scripts/commerce_reliability_gate.py \
++            --tier unit \
++            --junit-dir /tmp/commerce-reliability \
++            --report /tmp/commerce-reliability/gate-unit.json
++
+       - name: WhatsApp OAuth callback auth boundary
+         run: |
+           set -euo pipefail
+@@ -552,6 +567,22 @@ jobs:
+ 
+           echo "4 passed, 0 skipped"
+ 
++      # Commerce Conversation Reliability Gate (C1-PR1), PostgreSQL tier.
++      # Creates its own disposable UTF-8 database from the admin DSN, runs
++      # the concurrency checks in separate spawned processes, and drops the
++      # database. Any skip fails the step; missing configuration fails it
++      # before pytest starts. Runbook: docs/engineering/commerce-reliability-gate.md
++      - name: Commerce reliability gate (PostgreSQL tier)
++        env:
++          NAHLA_RELIABILITY_REQUIRE_PG: "1"
++          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
++        run: |
++          set -euo pipefail
++          python scripts/commerce_reliability_gate.py \
++            --tier postgres \
++            --junit-dir /tmp/commerce-reliability \
++            --report /tmp/commerce-reliability/gate-postgres.json
++
+   whatsapp-catalog-sync-postgres:
+     runs-on: ubuntu-latest
+     timeout-minutes: 20
