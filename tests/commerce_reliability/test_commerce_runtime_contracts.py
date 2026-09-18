@@ -10,7 +10,7 @@ from core.commerce_runtime import contracts as c
 NOW = _dt.datetime(2026, 9, 18, 12, 0, tzinfo=_dt.timezone.utc)
 LATER = NOW + _dt.timedelta(seconds=30)
 EARLIER = NOW - _dt.timedelta(seconds=30)
-TOKEN = c.OwnershipToken(owner_id="worker-a", fence=3, epoch=1)
+TOKEN = c.OwnershipToken(owner_id="worker-a", fence=3, epoch=1, tenant_id=7, namespace="live", conversation_id=42)
 
 
 def _classify(**overrides):
@@ -113,14 +113,37 @@ def test_closed_vocabularies_reject_unknown_values() -> None:
         c.validate_enum("done", c.ProcessingOutcome, field="p")
 
 
-def test_token_validation_rejects_negative_or_boolean_counters() -> None:
+def _token(**overrides) -> c.OwnershipToken:
+    fields = dict(owner_id="w", fence=1, epoch=0, tenant_id=7, namespace="live", conversation_id=42)
+    fields.update(overrides)
+    return c.OwnershipToken(**fields)
+
+
+@pytest.mark.parametrize("overrides", [
+    {"fence": -1}, {"fence": True}, {"epoch": -2}, {"tenant_id": 0}, {"tenant_id": "7"},
+    {"namespace": "production"}, {"conversation_id": -1}, {"owner_id": ""},
+])
+def test_token_validation_rejects_bad_counters_or_scope(overrides) -> None:
     with pytest.raises(c.ValidationError):
-        c.validate_token(c.OwnershipToken(owner_id="w", fence=-1, epoch=0))
-    with pytest.raises(c.ValidationError):
-        c.validate_token(c.OwnershipToken(owner_id="w", fence=True, epoch=0))
+        c.validate_token(_token(**overrides))
+
+
+def test_token_validation_normalises_and_keeps_the_scope() -> None:
     with pytest.raises(c.ValidationError):
         c.validate_token(("w", 1, 0))
-    assert c.validate_token(c.OwnershipToken(owner_id="w", fence=1, epoch=0)) == c.OwnershipToken("w", 1, 0)
+    assert c.validate_token(_token(namespace=c.Namespace.SHADOW)) == _token(namespace="shadow")
+
+
+@pytest.mark.parametrize("target", [
+    dict(tenant_id=8, namespace="live", conversation_id=42),    # other tenant
+    dict(tenant_id=7, namespace="shadow", conversation_id=42),  # other namespace
+    dict(tenant_id=7, namespace="live", conversation_id=43),    # other conversation
+])
+def test_token_scope_binding_refuses_any_other_scope(target) -> None:
+    with pytest.raises(c.ScopeMismatch) as rejected:
+        c.require_token_scope(_token(), **target)
+    assert rejected.value.target == (target["tenant_id"], target["namespace"], target["conversation_id"])
+    c.require_token_scope(_token(), tenant_id=7, namespace="live", conversation_id=42)  # exact scope passes
 
 
 def test_transport_unknown_is_a_distinct_recorded_value_not_a_failure_alias() -> None:

@@ -1,18 +1,45 @@
 """Short-transaction repository of the dormant commerce runtime foundation.
 
-Every public method opens exactly one database transaction and closes it
-before returning; none of them calls a model, a provider or the network, and
-no transaction is ever held across such a call. Every conflict is explicit:
-an update that cannot be applied raises with the exact reason and the row as
-the database saw it, and nothing is discarded or replayed on the caller's
-behalf.
+Transaction behaviour (bounded, stated exactly)
+===============================================
+Every public operation runs **one write transaction**, opened and committed
+or rolled back before the operation returns. Two operations may open **one
+further read-only transaction** after their write transaction rolled back on
+a database conflict, to report the committed truth instead of guessing:
+``admit_turn`` after an admission-identity race and ``record_terminal`` after
+a terminal primary-key race. No operation opens more than those, and none of
+them calls a model, a provider or the network, so no transaction is ever
+held across such a call.
 
-PostgreSQL only (row locks, ``now()``, ``ON CONFLICT``, JSONB).
+Time
+====
+Lease validity and lease expiry use the database's current wall clock,
+``clock_timestamp()``, sampled **after** the conversation row lock has been
+acquired and again inside every guarded UPDATE. ``now()`` (transaction start
+time) is never used for validity or expiry: a connection that waited on a
+row lock across a lease expiry must see that expiry.
+
+Ownership tokens
+================
+A token is bound to the scope it was issued for (tenant, namespace,
+conversation) in addition to owner, fence and epoch; every token-bearing
+operation validates the complete binding before touching the database, and
+``record_terminal`` compares it with the scope derived from the turn row.
+
+Ordered processing
+==================
+The *eligible* turn of a conversation is its oldest admitted turn without a
+terminal record. State commits and terminal records are bound to the
+eligible turn; a claim may name the turn it intends to process and is
+refused when that turn is not the eligible one. Nothing here schedules work:
+the repository enforces the order for whoever calls it.
+
+PostgreSQL only (row locks, ``clock_timestamp()``, ``ON CONFLICT``, JSONB).
 """
 from __future__ import annotations
 
 import datetime as _dt
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -28,18 +55,34 @@ TERM = RuntimeTurnTerminal.__table__
 
 
 def _db_now(conn: Connection) -> _dt.datetime:
-    return conn.execute(select(func.now())).scalar_one()
+    """Current database wall time (not the transaction start time)."""
+    return conn.execute(select(func.clock_timestamp())).scalar_one()
 
 
-def _snapshot(row: Row, db_now: _dt.datetime) -> c.ConversationSnapshot:
+def _eligible_turn(conn: Connection, conversation_id: int) -> Tuple[Optional[int], Optional[int]]:
+    """The oldest admitted turn of the conversation without a terminal record."""
+    row = conn.execute(
+        select(TURN.c.id, TURN.c.sequence)
+        .select_from(TURN.outerjoin(TERM, TERM.c.turn_id == TURN.c.id))
+        .where(TURN.c.conversation_id == conversation_id, TERM.c.turn_id.is_(None))
+        .order_by(TURN.c.sequence)
+        .limit(1)
+    ).one_or_none()
+    if row is None:
+        return None, None
+    return int(row.id), int(row.sequence)
+
+
+def _snapshot(conn: Connection, row: Row) -> c.ConversationSnapshot:
     m = row._mapping
+    eligible_turn_id, eligible_sequence = _eligible_turn(conn, int(m["id"]))
     return c.ConversationSnapshot(
         conversation_id=int(m["id"]), tenant_id=int(m["tenant_id"]), namespace=str(m["namespace"]),
         conversation_ref=str(m["conversation_ref"]), next_sequence=int(m["next_sequence"]),
         ownership_epoch=int(m["ownership_epoch"]), lease_owner=m["lease_owner"],
         lease_fence=int(m["lease_fence"]), lease_expires_at=m["lease_expires_at"],
         state_revision=int(m["state_revision"]), state_payload=dict(m["state_payload"] or {}),
-        db_now=db_now,
+        db_now=_db_now(conn), eligible_turn_id=eligible_turn_id, eligible_sequence=eligible_sequence,
     )
 
 
@@ -63,6 +106,10 @@ def _terminal(row: Row) -> c.TerminalRecord:
         recorded_fence=int(m["recorded_fence"]), recorded_epoch=int(m["recorded_epoch"]),
         recorded_by=str(m["recorded_by"]), details=dict(m["details"] or {}), recorded_at=m["recorded_at"],
     )
+
+
+def _lease_expiry(lease_seconds: int):
+    return func.clock_timestamp() + func.make_interval(0, 0, 0, 0, 0, 0, lease_seconds)
 
 
 class CommerceRuntimeRepository:
@@ -122,7 +169,9 @@ class CommerceRuntimeRepository:
         The identity is (tenant, namespace, channel connection, provider
         message id). A repeated admission returns the existing turn with
         ``duplicate=True`` and consumes no sequence number; the same identity
-        presented for a different conversation is an explicit conflict.
+        presented for a different conversation is an explicit conflict that
+        writes nothing. One write transaction; after an identity race that
+        rolled it back, one read transaction reports the committed truth.
         """
         tenant_id = c.validate_tenant_id(tenant_id)
         ns = c.validate_namespace(namespace).value
@@ -156,7 +205,7 @@ class CommerceRuntimeRepository:
                     return _turn(existing, duplicate=True)
                 sequence = conn.execute(
                     update(CONV).where(CONV.c.id == conv.id)
-                    .values(next_sequence=CONV.c.next_sequence + 1, updated_at=func.now())
+                    .values(next_sequence=CONV.c.next_sequence + 1, updated_at=func.clock_timestamp())
                     .returning(CONV.c.next_sequence)
                 ).scalar_one() - 1
                 row = conn.execute(
@@ -168,9 +217,9 @@ class CommerceRuntimeRepository:
                 ).one()
                 return _turn(row)
         except IntegrityError:
-            # Only reachable when two different conversation rows raced on the
-            # same inbound identity: the losing transaction rolled back, so no
-            # sequence was consumed. Resolve against the committed truth.
+            # Two different conversation rows raced on the same inbound identity:
+            # the losing write transaction rolled back (no sequence consumed).
+            # One read transaction reports the committed truth.
             with self._engine.begin() as conn:
                 existing = conn.execute(select(TURN).where(*identity)).one_or_none()
                 conv_id = conn.execute(
@@ -189,25 +238,34 @@ class CommerceRuntimeRepository:
 
     def claim(
         self, *, tenant_id: int, namespace: Any, conversation_id: int, owner_id: str, lease_seconds: int,
+        turn_id: Optional[int] = None,
     ) -> c.Lease:
         """Take exclusive ownership when no unexpired lease exists.
 
-        Each successful claim issues ``lease_fence + 1``; fences are never
-        reset. Taking over a lease that expired without being released also
-        advances the ownership epoch, so work issued under the old lease can
-        never commit.
+        Validity is judged on the database wall clock read after the row lock
+        was acquired, so a claimant that waited on the lock across an expiry
+        takes the lease over instead of being told it is held, and the new
+        expiry is measured from that same moment. Each successful claim
+        issues ``lease_fence + 1``; fences are never reset. Taking over a
+        lease that expired without being released also advances the
+        ownership epoch. ``turn_id``, when given, must be the eligible turn
+        (the oldest turn without a terminal), otherwise ``turn_not_eligible``.
         """
         tenant_id = c.validate_tenant_id(tenant_id)
         ns = c.validate_namespace(namespace).value
         conversation_id = c.validate_counter(conversation_id, field="conversation_id")
         owner_id = c.validate_owner_id(owner_id)
         lease_seconds = c.validate_lease_seconds(lease_seconds)
+        if turn_id is not None:
+            turn_id = c.validate_counter(turn_id, field="turn_id")
         with self._engine.begin() as conn:
             snap = self._lock(conn, tenant_id, ns, conversation_id)
             held = snap.lease_owner is not None and snap.lease_expires_at is not None \
                 and snap.lease_expires_at > snap.db_now
             if held:
                 raise c.OwnershipRejected(c.RejectReason.LEASE_HELD, snap)
+            if turn_id is not None and turn_id != snap.eligible_turn_id:
+                raise c.OwnershipRejected(c.RejectReason.TURN_NOT_ELIGIBLE, snap)
             takeover = snap.lease_owner is not None
             row = conn.execute(
                 update(CONV)
@@ -219,8 +277,8 @@ class CommerceRuntimeRepository:
                     lease_owner=owner_id,
                     lease_fence=CONV.c.lease_fence + 1,
                     ownership_epoch=CONV.c.ownership_epoch + (1 if takeover else 0),
-                    lease_expires_at=func.now() + func.make_interval(0, 0, 0, 0, 0, 0, lease_seconds),
-                    updated_at=func.now(),
+                    lease_expires_at=_lease_expiry(lease_seconds),
+                    updated_at=func.clock_timestamp(),
                 )
                 .returning(CONV.c.lease_fence, CONV.c.ownership_epoch, CONV.c.lease_expires_at)
             ).one_or_none()
@@ -230,53 +288,45 @@ class CommerceRuntimeRepository:
                 conversation_id=conversation_id, tenant_id=tenant_id, namespace=ns, owner_id=owner_id,
                 fence=int(row.lease_fence), epoch=int(row.ownership_epoch), expires_at=row.lease_expires_at,
                 db_now=snap.db_now, takeover=takeover,
+                eligible_turn_id=snap.eligible_turn_id, eligible_sequence=snap.eligible_sequence,
             )
 
     def renew(
         self, *, tenant_id: int, namespace: Any, conversation_id: int, token: c.OwnershipToken, lease_seconds: int,
     ) -> c.Lease:
-        """Extend an unexpired lease held with exactly this token."""
-        tenant_id = c.validate_tenant_id(tenant_id)
-        ns = c.validate_namespace(namespace).value
-        conversation_id = c.validate_counter(conversation_id, field="conversation_id")
-        token = c.validate_token(token)
+        """Extend a lease that is still valid on the database clock after the lock."""
+        tenant_id, ns, conversation_id, token = self._scoped(tenant_id, namespace, conversation_id, token)
         lease_seconds = c.validate_lease_seconds(lease_seconds)
         with self._engine.begin() as conn:
             snap = self._lock(conn, tenant_id, ns, conversation_id)
             self._require(snap, token)
             row = conn.execute(
                 self._guarded_update(conversation_id, tenant_id, ns, token)
-                .values(
-                    lease_expires_at=func.now() + func.make_interval(0, 0, 0, 0, 0, 0, lease_seconds),
-                    updated_at=func.now(),
-                )
+                .values(lease_expires_at=_lease_expiry(lease_seconds), updated_at=func.clock_timestamp())
                 .returning(CONV.c.lease_expires_at)
             ).one_or_none()
             if row is None:
-                raise c.OwnershipRejected(c.RejectReason.UNCLASSIFIED, snap)
+                self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token)
             return c.Lease(
                 conversation_id=conversation_id, tenant_id=tenant_id, namespace=ns, owner_id=token.owner_id,
                 fence=token.fence, epoch=token.epoch, expires_at=row.lease_expires_at, db_now=snap.db_now,
-                takeover=False,
+                takeover=False, eligible_turn_id=snap.eligible_turn_id, eligible_sequence=snap.eligible_sequence,
             )
 
     def release(
         self, *, tenant_id: int, namespace: Any, conversation_id: int, token: c.OwnershipToken,
     ) -> c.ConversationSnapshot:
-        """Give up an unexpired lease. The fence stays where it is."""
-        tenant_id = c.validate_tenant_id(tenant_id)
-        ns = c.validate_namespace(namespace).value
-        conversation_id = c.validate_counter(conversation_id, field="conversation_id")
-        token = c.validate_token(token)
+        """Give up a still-valid lease. The fence stays where it is."""
+        tenant_id, ns, conversation_id, token = self._scoped(tenant_id, namespace, conversation_id, token)
         with self._engine.begin() as conn:
             snap = self._lock(conn, tenant_id, ns, conversation_id)
             self._require(snap, token)
             result = conn.execute(
                 self._guarded_update(conversation_id, tenant_id, ns, token)
-                .values(lease_owner=None, lease_expires_at=None, updated_at=func.now())
+                .values(lease_owner=None, lease_expires_at=None, updated_at=func.clock_timestamp())
             )
             if result.rowcount != 1:
-                raise c.OwnershipRejected(c.RejectReason.UNCLASSIFIED, snap)
+                self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token)
             return self._load(conn, tenant_id, ns, conversation_id=conversation_id)
 
     def invalidate_ownership(
@@ -298,29 +348,35 @@ class CommerceRuntimeRepository:
                 .where(CONV.c.id == conversation_id, CONV.c.tenant_id == tenant_id, CONV.c.namespace == ns,
                        CONV.c.ownership_epoch == snap.ownership_epoch)
                 .values(ownership_epoch=CONV.c.ownership_epoch + 1, lease_owner=None, lease_expires_at=None,
-                        updated_at=func.now())
+                        updated_at=func.clock_timestamp())
             )
             return self._load(conn, tenant_id, ns, conversation_id=conversation_id)
 
     # ── State ────────────────────────────────────────────────────────────────
 
     def commit_state(
-        self, *, tenant_id: int, namespace: Any, conversation_id: int, token: c.OwnershipToken,
+        self, *, tenant_id: int, namespace: Any, conversation_id: int, token: c.OwnershipToken, turn_id: int,
         expected_revision: int, payload: Mapping[str, Any],
     ) -> c.StateCommit:
-        """Compare-and-set the state: revision ``expected`` becomes ``expected + 1``."""
-        tenant_id = c.validate_tenant_id(tenant_id)
-        ns = c.validate_namespace(namespace).value
-        conversation_id = c.validate_counter(conversation_id, field="conversation_id")
-        token = c.validate_token(token)
+        """Compare-and-set the state for the eligible turn.
+
+        ``turn_id`` must be the conversation's eligible turn (its oldest turn
+        without a terminal); a commit for any other turn is refused with
+        ``turn_not_eligible``. Revision ``expected`` becomes ``expected + 1``.
+        """
+        tenant_id, ns, conversation_id, token = self._scoped(tenant_id, namespace, conversation_id, token)
+        turn_id = c.validate_counter(turn_id, field="turn_id")
         expected_revision = c.validate_counter(expected_revision, field="expected_revision")
         body = c.validate_payload(payload, field="payload", max_bytes=c.MAX_PAYLOAD_BYTES)
         with self._engine.begin() as conn:
             snap = self._lock(conn, tenant_id, ns, conversation_id)
             self._require(snap, token, expected_revision=expected_revision)
+            if snap.eligible_turn_id != turn_id:
+                raise c.OwnershipRejected(c.RejectReason.TURN_NOT_ELIGIBLE, snap)
             row = self._apply_state(conn, conversation_id, tenant_id, ns, token, expected_revision, body)
             if row is None:
-                raise c.OwnershipRejected(c.RejectReason.UNCLASSIFIED, snap)
+                self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token,
+                                                expected_revision=expected_revision)
             return c.StateCommit(
                 conversation_id=conversation_id, revision=int(row.state_revision), fence=token.fence,
                 epoch=token.epoch, committed_at=row.updated_at,
@@ -334,14 +390,19 @@ class CommerceRuntimeRepository:
         details: Optional[Mapping[str, Any]] = None, state_transition: Optional[c.StateTransition] = None,
         _fault_before_commit: Optional[Callable[[], None]] = None,
     ) -> c.TerminalRecord:
-        """Record the single immutable terminal of a turn, atomically with an
-        optional state transition, under a valid ownership token.
+        """Record the single immutable terminal of the eligible turn, atomically
+        with an optional state transition, under a valid ownership token.
 
-        Processing outcome, transport outcome and customer reach are recorded
-        as three separate facts; ``transport_outcome='unknown'`` is stored as
-        unknown and grants no replay. ``_fault_before_commit`` is a test-only
-        fault-injection point that runs after every statement and before the
-        commit; production callers never pass it.
+        The token's scope is compared with the scope derived from the turn
+        row. The turn must be the conversation's eligible turn: an older
+        unresolved turn refuses the finalisation of a newer one. Lease
+        validity is re-checked by a guarded UPDATE on the database clock
+        immediately before the terminal row is inserted. Processing outcome,
+        transport outcome and customer reach are three separate facts;
+        ``transport_outcome='unknown'`` is stored as unknown and grants no
+        replay. One write transaction; after a terminal primary-key race that
+        rolled it back, one read transaction reports the existing terminal.
+        ``_fault_before_commit`` is a test-only fault-injection point.
         """
         tenant_id = c.validate_tenant_id(tenant_id)
         ns = c.validate_namespace(namespace).value
@@ -366,16 +427,27 @@ class CommerceRuntimeRepository:
                 if turn is None:
                     raise c.TurnNotFound(f"turn not found in tenant {tenant_id}/{ns}")
                 conversation_id = int(turn._mapping["conversation_id"])
+                c.require_token_scope(token, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id)
                 snap = self._lock(conn, tenant_id, ns, conversation_id)
                 self._require(snap, token, expected_revision=expected_revision)
                 existing = conn.execute(select(TERM).where(TERM.c.turn_id == turn_id)).one_or_none()
                 if existing is not None:
                     raise c.TerminalAlreadyRecorded(_terminal(existing))
+                if snap.eligible_turn_id != turn_id:
+                    raise c.OwnershipRejected(c.RejectReason.TURN_NOT_ELIGIBLE, snap)
                 if state_body is not None:
                     applied = self._apply_state(conn, conversation_id, tenant_id, ns, token,
                                                 expected_revision, state_body)
                     if applied is None:
-                        raise c.OwnershipRejected(c.RejectReason.UNCLASSIFIED, snap)
+                        self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token,
+                                                        expected_revision=expected_revision)
+                else:
+                    touched = conn.execute(
+                        self._guarded_update(conversation_id, tenant_id, ns, token)
+                        .values(updated_at=func.clock_timestamp())
+                    )
+                    if touched.rowcount != 1:
+                        self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token)
                 row = conn.execute(
                     insert(TERM).values(
                         turn_id=turn_id, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id,
@@ -389,13 +461,24 @@ class CommerceRuntimeRepository:
                 return _terminal(row)
         except IntegrityError:
             # Two completion attempts raced past the existence check: the
-            # primary key kept exactly one, this transaction rolled back whole.
+            # primary key kept exactly one, this write transaction rolled back
+            # whole, and one read transaction reports the existing terminal.
             existing = self.get_terminal(tenant_id=tenant_id, namespace=ns, turn_id=turn_id)
             if existing is None:
                 raise
             raise c.TerminalAlreadyRecorded(existing) from None
 
     # ── Internals ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _scoped(tenant_id: Any, namespace: Any, conversation_id: Any, token: Any) -> Tuple[int, str, int, c.OwnershipToken]:
+        """Validate the target scope and the token, and bind them before any database access."""
+        tenant_id = c.validate_tenant_id(tenant_id)
+        ns = c.validate_namespace(namespace).value
+        conversation_id = c.validate_counter(conversation_id, field="conversation_id")
+        token = c.validate_token(token)
+        c.require_token_scope(token, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id)
+        return tenant_id, ns, conversation_id, token
 
     @staticmethod
     def _load(
@@ -412,7 +495,8 @@ class CommerceRuntimeRepository:
         row = conn.execute(stmt).one_or_none()
         if row is None:
             return None
-        return _snapshot(row, _db_now(conn))
+        # The clock and the eligibility facts are read after the lock (if any) was acquired.
+        return _snapshot(conn, row)
 
     def _lock(self, conn: Connection, tenant_id: int, ns: str, conversation_id: int) -> c.ConversationSnapshot:
         snap = self._load(conn, tenant_id, ns, conversation_id=conversation_id, for_update=True)
@@ -434,12 +518,23 @@ class CommerceRuntimeRepository:
         if reason is not None:
             raise c.OwnershipRejected(reason, snap)
 
+    def _reject_after_failed_guard(
+        self, conn: Connection, tenant_id: int, ns: str, conversation_id: int, token: c.OwnershipToken,
+        *, expected_revision: Optional[int] = None,
+    ) -> None:
+        """A guarded UPDATE matched no row although the snapshot passed: the
+        lease lapsed between the two clock reads. Re-read and name the exact
+        reason; if none applies, fail closed as unclassified."""
+        snap = self._lock(conn, tenant_id, ns, conversation_id)
+        self._require(snap, token, expected_revision=expected_revision)
+        raise c.OwnershipRejected(c.RejectReason.UNCLASSIFIED, snap)
+
     @staticmethod
     def _guarded_update(conversation_id: int, tenant_id: int, ns: str, token: c.OwnershipToken):
         return update(CONV).where(
             CONV.c.id == conversation_id, CONV.c.tenant_id == tenant_id, CONV.c.namespace == ns,
             CONV.c.lease_owner == token.owner_id, CONV.c.lease_fence == token.fence,
-            CONV.c.ownership_epoch == token.epoch, CONV.c.lease_expires_at > func.now(),
+            CONV.c.ownership_epoch == token.epoch, CONV.c.lease_expires_at > func.clock_timestamp(),
         )
 
     def _apply_state(
@@ -451,7 +546,8 @@ class CommerceRuntimeRepository:
             .where(CONV.c.state_revision == expected_revision)
             .values(
                 state_revision=CONV.c.state_revision + 1, state_payload=body,
-                state_committed_fence=token.fence, state_committed_epoch=token.epoch, updated_at=func.now(),
+                state_committed_fence=token.fence, state_committed_epoch=token.epoch,
+                updated_at=func.clock_timestamp(),
             )
             .returning(CONV.c.state_revision, CONV.c.updated_at)
         ).one_or_none()

@@ -68,6 +68,7 @@ class RejectReason(str, enum.Enum):
     STALE_OWNER = "stale_owner"            # lease released, or held by another owner at this fence
     EXPIRED_LEASE = "expired_lease"        # token current but the lease lapsed (database time)
     STALE_REVISION = "stale_revision"      # expected state revision is not the current one
+    TURN_NOT_ELIGIBLE = "turn_not_eligible"  # the named turn is not the oldest unresolved turn
     UNCLASSIFIED = "unclassified"          # a guard failed and no rule explains it: fail closed
 
 
@@ -112,6 +113,25 @@ class ConversationSnapshot:
     state_revision: int
     state_payload: Dict[str, Any]
     db_now: _dt.datetime
+    eligible_turn_id: Optional[int] = None      # oldest turn without a terminal, if any
+    eligible_sequence: Optional[int] = None
+
+
+class ScopeMismatch(CommerceRuntimeError):
+    """A token issued for one scope was presented against another.
+
+    Raised before any database read or write. The token binds tenant,
+    namespace and conversation; a target outside that binding is refused even
+    when the owner id, fence and epoch would match.
+    """
+
+    def __init__(self, token: "OwnershipToken", *, tenant_id: int, namespace: str, conversation_id: int) -> None:
+        self.token = token
+        self.target = (tenant_id, namespace, conversation_id)
+        super().__init__(
+            f"token scope {(token.tenant_id, token.namespace, token.conversation_id)} "
+            f"does not match target scope {self.target}"
+        )
 
 
 class OwnershipRejected(CommerceRuntimeError):
@@ -144,11 +164,19 @@ class TerminalAlreadyRecorded(CommerceRuntimeError):
 
 @dataclasses.dataclass(frozen=True)
 class OwnershipToken:
-    """What a worker presents on every guarded operation."""
+    """What a worker presents on every guarded operation.
+
+    The token is bound to the scope it was issued for (tenant, namespace,
+    conversation) as well as to the owner, fence and epoch; every
+    token-bearing operation validates the complete binding.
+    """
 
     owner_id: str
     fence: int
     epoch: int
+    tenant_id: int
+    namespace: str
+    conversation_id: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,10 +208,15 @@ class Lease:
     expires_at: _dt.datetime
     db_now: _dt.datetime
     takeover: bool
+    eligible_turn_id: Optional[int] = None      # oldest unresolved turn at claim time, if any
+    eligible_sequence: Optional[int] = None
 
     @property
     def token(self) -> OwnershipToken:
-        return OwnershipToken(owner_id=self.owner_id, fence=self.fence, epoch=self.epoch)
+        return OwnershipToken(
+            owner_id=self.owner_id, fence=self.fence, epoch=self.epoch,
+            tenant_id=self.tenant_id, namespace=self.namespace, conversation_id=self.conversation_id,
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -304,7 +337,16 @@ def validate_token(token: Any) -> OwnershipToken:
         owner_id=validate_owner_id(token.owner_id),
         fence=validate_counter(token.fence, field="fence"),
         epoch=validate_counter(token.epoch, field="epoch"),
+        tenant_id=validate_tenant_id(token.tenant_id),
+        namespace=validate_namespace(token.namespace).value,
+        conversation_id=validate_counter(token.conversation_id, field="conversation_id"),
     )
+
+
+def require_token_scope(token: OwnershipToken, *, tenant_id: int, namespace: str, conversation_id: int) -> None:
+    """Refuse a token presented outside the scope it was issued for."""
+    if (token.tenant_id, token.namespace, token.conversation_id) != (tenant_id, namespace, conversation_id):
+        raise ScopeMismatch(token, tenant_id=tenant_id, namespace=namespace, conversation_id=conversation_id)
 
 
 # ── Rejection classifier (pure) ──────────────────────────────────────────────
@@ -348,9 +390,9 @@ __all__ = [
     "ConversationSnapshot", "CustomerReach", "Lease", "MAX_DETAILS_BYTES", "MAX_LEASE_SECONDS",
     "MAX_OWNER_ID_LENGTH", "MAX_PAYLOAD_BYTES", "MAX_PROVIDER_MESSAGE_ID_LENGTH", "MAX_REF_LENGTH",
     "MIN_LEASE_SECONDS", "Namespace", "OwnershipRejected", "OwnershipToken", "ProcessingOutcome",
-    "RejectReason", "StateCommit", "StateConflict", "StateTransition", "TerminalAlreadyRecorded",
+    "RejectReason", "ScopeMismatch", "StateCommit", "StateConflict", "StateTransition", "TerminalAlreadyRecorded",
     "TerminalRecord", "TransportOutcome", "TurnNotFound", "TurnRecord", "ValidationError",
-    "classify_rejection", "validate_counter", "validate_enum", "validate_lease_seconds",
+    "classify_rejection", "require_token_scope", "validate_counter", "validate_enum", "validate_lease_seconds",
     "validate_namespace", "validate_owner_id", "validate_payload", "validate_ref",
     "validate_tenant_id", "validate_token",
 ]
