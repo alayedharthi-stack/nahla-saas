@@ -65,16 +65,18 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
-      # Required PostgreSQL proofs: the dormant commerce runtime foundation (18)
-      # and the global customer identity persistence cases (5) run strictly
-      # against the postgres service above. scripts/required_postgres_proofs.py
-      # fails on missing or uninventoried collection, any skip, failure or
-      # error, and refuses to start when its configuration is missing; a skip
-      # is never a pass. Inventory: scripts/required_postgres_proofs.json.
-      # Runbook: docs/engineering/required-postgres-proofs.md. This step does
-      # not execute the commerce reliability gate; that gate's acceptance is
-      # a separate result and stays blocked by its unapproved baseline debt.
-      - name: Required PostgreSQL proofs (commerce runtime foundation + customer identity)
+      # Required PostgreSQL proofs: the dormant commerce runtime foundation
+      # proofs, the revision-0108 reconciliation proofs and the global customer
+      # identity persistence cases run strictly against the postgres service
+      # above. scripts/required_postgres_proofs.py fails on missing or
+      # uninventoried collection, any skip, failure or error, and refuses to
+      # start when its configuration is missing; a skip is never a pass. The
+      # inventory (scripts/required_postgres_proofs.json) is the only source of
+      # the required node ids; no count is pinned here. Runbook:
+      # docs/engineering/required-postgres-proofs.md. This step does not
+      # execute the commerce reliability gate; that gate's acceptance is a
+      # separate result and stays blocked by its unapproved baseline debt.
+      - name: Required PostgreSQL proofs (commerce runtime foundation, migration, customer identity)
         env:
           NAHLA_RELIABILITY_REQUIRE_PG: "1"
           NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
