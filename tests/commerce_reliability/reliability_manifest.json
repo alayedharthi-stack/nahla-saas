@@ -8,7 +8,9 @@
     "Owners marked UNASSIGNED and expiry null are proposals for owner review; the gate warns on them and never fills them in.",
     "A changed failure signature, an expired allowance, an unexpected pass, or a missing allowed test fails the gate with a RECONCILE marker; the manifest must be re-reviewed by a human, never broadened by the harness.",
     "A baseline-compatible gate result is NOT production acceptance.",
-    "Node ids are pytest item node ids exactly as JUnit reports them; parametrized Arabic ids therefore use pytest's escaped \\uXXXX form."
+    "Node ids are pytest item node ids exactly as JUnit reports them; parametrized Arabic ids therefore use pytest's escaped \\uXXXX form.",
+    "Baseline entries are reproduced current implementation defects; replacement_contracts are unapproved future decisions tracked separately and never measured as coverage.",
+    "A JUnit expected-failure message must equal the recorded marker exactly (whitespace-normalised); extra cause text fails reconciliation."
   ],
   "required_modules": [
     {
@@ -296,10 +298,6 @@
       "tier": "unit"
     },
     {
-      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_repo_manifest_debt_is_unapproved_and_blocks_acceptance",
-      "tier": "unit"
-    },
-    {
       "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_reconciliation_plugin_fails_unexpected_pass",
       "tier": "unit"
     },
@@ -309,6 +307,58 @@
     },
     {
       "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_reconciliation_plugin_marks_exact_signature_as_expected_failure",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_blank_required_evidence_reference_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_contradictory_guardrail_results_rejected_but_documented_retry_allowed",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_guardrail_passed_without_execution_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_dispatch_after_ambiguous_attempt_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_unknown_fallback_provenance_rejected",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_transport_outcome_preserves_unknown",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_junit_marker_with_extra_cause_text_fails_reconciliation",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_repo_manifest_acceptance_reflects_actual_approval_state",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_predicate_selfcheck.py::test_fallback_provenance_classifier_matrix",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_predicate_selfcheck.py::test_uc01_predicate_rejects_changed_causes",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_predicate_selfcheck.py::test_uc02_predicate_distinguishes_lost_update_from_no_op",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_predicate_selfcheck.py::test_rb05_predicate_requires_recorded_conditions",
+      "tier": "unit"
+    },
+    {
+      "nodeid": "tests/commerce_reliability/test_evaluator_selfcheck.py::test_reconciliation_plugin_rejects_marker_with_extra_cause_text",
       "tier": "unit"
     },
     {
@@ -371,9 +421,10 @@
       "failure_signature": "interpreter_browse_repeats_shown_ids",
       "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
       "expiry": null,
-      "proposed_expiry": "set by owner when the C1-PR2 browse-cursor fix is scheduled",
-      "removal_condition": "A merged product fix makes the interpreter browse decision exclude last_search_candidates ids (or advance a cursor); the test then passes and this entry is deleted in the same PR.",
-      "tier": "unit"
+      "proposed_expiry": "owner decision; an actual date is required for approval",
+      "removal_condition": "Verified replacement and path retirement, or a merged change that makes the interpreter browse decision exclude last_search_candidates ids (or advance a cursor); unapproved future decision, not authorised by this harness. The test then passes and this entry is deleted in the same PR.",
+      "tier": "unit",
+      "classification": "reproduced current implementation defect (isolated application-boundary characterisation)"
     },
     {
       "case_id": "RB-02",
@@ -385,9 +436,10 @@
       "failure_signature": "recovery_resends_shown_candidates",
       "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
       "expiry": null,
-      "proposed_expiry": "set by owner when the C1-PR2 recovery-scope fix is scheduled",
-      "removal_condition": "A merged product fix makes recovery for a 'more' request either present unseen candidates or send an honest no-more-products text; the test then passes and this entry is deleted in the same PR.",
-      "tier": "unit"
+      "proposed_expiry": "owner decision; an actual date is required for approval",
+      "removal_condition": "Verified replacement and path retirement, or a merged change that makes recovery for a 'more' request present unseen candidates or send an honest no-more-products text; unapproved future decision, not authorised by this harness. The test then passes and this entry is deleted in the same PR.",
+      "tier": "unit",
+      "classification": "reproduced current implementation defect (isolated application-boundary characterisation)"
     },
     {
       "case_id": "RB-03",
@@ -399,9 +451,10 @@
       "failure_signature": "broken_plural_query_returns_no_rows",
       "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
       "expiry": null,
-      "proposed_expiry": "set by owner when the search redesign is scheduled",
-      "removal_condition": "A merged search change (not a hardcoded noun table as final design) resolves 'تنانير' to 'تنورة' rows for the same tenant only; the test then passes and this entry is deleted in the same PR.",
-      "tier": "unit"
+      "proposed_expiry": "owner decision; an actual date is required for approval",
+      "removal_condition": "Verified replacement and path retirement, or a merged search change (not a hardcoded noun table as final design) that resolves 'تنانير' to 'تنورة' rows for the same tenant only; unapproved future decision, not authorised by this harness. The test then passes and this entry is deleted in the same PR.",
+      "tier": "unit",
+      "classification": "reproduced current implementation defect (isolated application-boundary characterisation)"
     },
     {
       "case_id": "RB-03-PG",
@@ -413,9 +466,10 @@
       "failure_signature": "broken_plural_query_returns_no_rows",
       "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
       "expiry": null,
-      "proposed_expiry": "set by owner together with RB-03",
+      "proposed_expiry": "owner decision; an actual date is required for approval",
       "removal_condition": "Same as RB-03, proven on PostgreSQL.",
-      "tier": "postgres"
+      "tier": "postgres",
+      "classification": "reproduced current implementation defect (isolated application-boundary characterisation)"
     },
     {
       "case_id": "RB-04",
@@ -427,9 +481,10 @@
       "failure_signature": "list_pick_compose_emits_no_products_template",
       "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
       "expiry": null,
-      "proposed_expiry": "set by owner when the C1-PR2 compose fix is scheduled",
-      "removal_condition": "A merged product fix makes the composer ground the selected singleton (or the executor emit it as a candidate) so the reply names the selected product; the test then passes and this entry is deleted in the same PR.",
-      "tier": "unit"
+      "proposed_expiry": "owner decision; an actual date is required for approval",
+      "removal_condition": "Verified replacement and path retirement, or a merged change that makes the composer ground the selected singleton (or the executor emit it as a candidate); unapproved future decision, not authorised by this harness. The test then passes and this entry is deleted in the same PR.",
+      "tier": "unit",
+      "classification": "reproduced current implementation defect (isolated application-boundary characterisation)"
     },
     {
       "case_id": "RB-05",
@@ -441,39 +496,43 @@
       "failure_signature": "fulfillment_lock_blocks_discovery",
       "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
       "expiry": null,
-      "proposed_expiry": "set by owner when the C1-PR2 gate fix is scheduled",
-      "removal_condition": "A merged product fix routes an explicit new-category discovery request during fulfillment to product search (without weakening the lock for fulfillment answers); the test then passes and this entry is deleted in the same PR.",
-      "tier": "unit"
-    }
-  ],
-  "unimplemented_contracts": [
-    {
-      "contract_id": "UC-01",
-      "title": "Commerce Agent V2 owner path has no closed delivery terminal",
-      "test_id": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_v2_owner_rejected_send_reaches_closed_terminal",
-      "signature": "v2_owner_delivery_failure_ends_with_inferred_end_ok",
-      "planned_by": "C1-PR2 (delivery terminal contract) — not authorised in this PR",
-      "evidence": "Phase C0 report §5/§13; reproduced at base_sha: with outbound_enabled_for_tenant patched True and a scripted 400 on the text send, the lifecycle ends end_ok with no provider message id, no outcome record and no outbound row",
+      "proposed_expiry": "owner decision; an actual date is required for approval",
+      "removal_condition": "Verified replacement and path retirement, or a merged change that routes an explicit new-category discovery request during fulfillment to product search without weakening fulfillment answers; unapproved future decision, not authorised by this harness. The test then passes and this entry is deleted in the same PR.",
       "tier": "unit",
-      "owner": "UNASSIGNED (owner review)",
-      "expiry": null,
-      "proposed_owner": "Commerce Agent V2 owners (C1-PR2 delivery terminal contract) — proposal only",
-      "proposed_expiry": "set by owner when C1-PR2 is scheduled"
+      "classification": "reproduced current implementation defect (isolated application-boundary characterisation)"
     },
     {
-      "contract_id": "UC-02",
-      "title": "Brain state persistence has no compare-and-set; concurrent saves lose updates",
-      "test_id": "tests/commerce_reliability/test_runtime_state_postgres.py::test_concurrent_state_saves_do_not_lose_updates",
-      "signature": "state_store_save_lost_update",
-      "planned_by": "C1-PR3 (state CAS) — not authorised in this PR",
-      "evidence": "Phase C0 report §6; reproduced at base_sha with two independent spawned processes calling the real DefaultStateStore.save against a disposable PostgreSQL database",
-      "tier": "postgres",
+      "case_id": "UC-01",
+      "title": "Commerce Agent V2 owner path: a rejected send ends with inferred end_ok and no delivery record",
+      "classification": "reproduced current implementation defect (isolated application-boundary characterisation); replacement contract tracked separately as RC-01",
       "owner": "UNASSIGNED (owner review)",
+      "proposed_owner": "Commerce Agent V2 owners — proposal only",
+      "evidence": "Phase C0 report §5/§13; reproduced at base_sha: with outbound_enabled_for_tenant patched True and a scripted 400 on the text send, the lifecycle ends end_ok with no provider message id, no outcome record and no outbound row. Exact recorded observation: provider HTTP 400 on the text send, transport rejected_definitive, no accepted id, lifecycle end_ok, no outbound row, no outcome record. This does not prove the V2 owner is activated in production.",
+      "test_id": "tests/commerce_reliability/test_runtime_v1_delivery.py::test_v2_owner_rejected_send_reaches_closed_terminal",
+      "failure_signature": "v2_owner_delivery_failure_ends_with_inferred_end_ok",
+      "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
       "expiry": null,
-      "proposed_owner": "Brain state persistence maintainers (C1-PR3 state CAS) — proposal only",
-      "proposed_expiry": "set by owner when C1-PR3 is scheduled"
+      "proposed_expiry": "owner decision; an actual date is required for approval",
+      "removal_condition": "Verified replacement (RC-01) retires this path, or a merged change closes every V2-owned turn with a provider-accepted id, a human handoff or an explicit failure record; then the test passes and this entry is deleted in the same PR. Not authorised by this harness.",
+      "tier": "unit"
+    },
+    {
+      "case_id": "UC-02",
+      "title": "Concurrent brain-state saves lose an independently changed field",
+      "classification": "reproduced current implementation defect (isolated application-boundary characterisation); replacement contract tracked separately as RC-02",
+      "owner": "UNASSIGNED (owner review)",
+      "proposed_owner": "Brain state persistence maintainers — proposal only",
+      "evidence": "Phase C0 report §6; reproduced at base_sha with two independent spawned processes calling the real DefaultStateStore.save against a disposable PostgreSQL database. Exact recorded observation: both workers report saved; exactly one of the two independently changed fields survives; the surviving value equals the value that worker wrote.",
+      "test_id": "tests/commerce_reliability/test_runtime_state_postgres.py::test_concurrent_state_saves_do_not_lose_updates",
+      "failure_signature": "state_store_save_lost_update",
+      "base_sha": "4a270df82bcf11cdd88b1ef6d9946dc2dc46ca3e",
+      "expiry": null,
+      "proposed_expiry": "owner decision; an actual date is required for approval",
+      "removal_condition": "Verified replacement (RC-02) retires this path, or a merged change makes concurrent DefaultStateStore.save unable to lose an update; then the test passes and this entry is deleted in the same PR. Not authorised by this harness.",
+      "tier": "postgres"
     }
   ],
+  "unimplemented_contracts": [],
   "allowed_skips": [],
   "postgres": {
     "require_env": "NAHLA_RELIABILITY_REQUIRE_PG",
@@ -502,5 +561,19 @@
     "acceptance_mode": "Every allowance (baseline failure or unimplemented contract) must carry an assigned owner and an explicit, unexpired expiry. UNASSIGNED owners or null expiry are unapproved debt and fail the acceptance gate.",
     "diagnostic_mode": "Measures the current baseline with the same reconciliation rules; reports NOT ACCEPTED always and exits non-zero; never a merge/release verdict.",
     "proposals": "owner / expiry values below marked UNASSIGNED / null are proposals for owner decision; the harness never assigns them."
-  }
+  },
+  "replacement_contracts": [
+    {
+      "id": "RC-01",
+      "replaces": "UC-01",
+      "summary": "Durable terminal processing record per turn, with transport uncertainty (unknown outcomes) and reach evidence recorded separately; not measured by this gate",
+      "status": "unapproved future decision; not authorised by this harness"
+    },
+    {
+      "id": "RC-02",
+      "replaces": "UC-02",
+      "summary": "Durable conversation ownership, fencing, versioned state and compare-and-set for brain state; not measured by this gate",
+      "status": "unapproved future decision; not authorised by this harness"
+    }
+  ]
 }

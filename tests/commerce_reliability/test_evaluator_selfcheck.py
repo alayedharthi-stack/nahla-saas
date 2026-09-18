@@ -40,7 +40,8 @@ def _reference_evidence(**overrides) -> ev.TurnEvidence:
         terminal_source="lifecycle:end_ok+wamid",
         persisted_outbound=[{"tenant_id": 1, "reply_owner": "brain"}],
         evidence_refs=["lifecycle:end_ok"],
-        guardrail_results=[{"name": "availability_truth_guard", "passed": True}],
+        guardrail_results=[{"name": "availability_truth_guard", "passed": True, "executed": True}],
+        fallback_kind=ev.FALLBACK_NONE,
         fixture_bindings=["provider:scripted_httpx"],
     )
     for key, value in overrides.items():
@@ -55,6 +56,125 @@ def test_valid_reference_turn_passes() -> None:
     verdict = ev.evaluate_turn(_reference_expectation(), _reference_evidence())
     assert verdict.passed, verdict.blockers
     assert verdict.facts["accepted_sends"] == 1
+    assert verdict.facts["transport_outcome"] == ev.TRANSPORT_ACCEPTED
+    # Evaluator capability is reported per dimension; unevaluated ones are named, never implied.
+    assert verdict.facts["coverage"][ev.DIMENSION_SEMANTIC_BINDING] == "not_evaluated"
+    assert ev.DIMENSION_DURABLE_DELIVERY_RECORD in verdict.facts["not_evaluated"]
+
+
+def test_blank_required_evidence_reference_rejected() -> None:
+    for refs in ([""], ["   "], [None], ["", "  "]):
+        verdict = ev.evaluate_turn(_reference_expectation(require_evidence_refs=True), _reference_evidence(evidence_refs=refs))
+        assert "blank_evidence_reference" in verdict.blockers, refs
+        assert "missing_required_evidence" in verdict.blockers, refs
+    mixed = ev.evaluate_turn(_reference_expectation(require_evidence_refs=True), _reference_evidence(evidence_refs=["lifecycle:end_ok", ""]))
+    assert "blank_evidence_reference" in mixed.blockers and "missing_required_evidence" not in mixed.blockers
+    clean = ev.evaluate_turn(_reference_expectation(require_evidence_refs=True), _reference_evidence(evidence_refs=[" lifecycle:end_ok "]))
+    assert clean.passed, clean.blockers
+
+
+def test_contradictory_guardrail_results_rejected_but_documented_retry_allowed() -> None:
+    expectation = _reference_expectation(required_guardrails=("g",))
+    # Same execution (no attempt identity): failed then passed is contradictory, never "last wins".
+    same_execution = [{"name": "g", "passed": False, "executed": True}, {"name": "g", "passed": True, "executed": True}]
+    verdict = ev.evaluate_turn(expectation, _reference_evidence(guardrail_results=same_execution))
+    assert "contradictory_guardrail_result:g:attempt=unspecified" in verdict.blockers
+    # Same attempt id, different results: contradictory for that execution.
+    same_attempt = [{"name": "g", "passed": False, "executed": True, "attempt": 1}, {"name": "g", "passed": True, "executed": True, "attempt": 1}]
+    verdict = ev.evaluate_turn(expectation, _reference_evidence(guardrail_results=same_attempt))
+    assert "contradictory_guardrail_result:g:attempt=1" in verdict.blockers
+    # Documented first-pass rejection followed by a retry that passed: allowed.
+    retry = [{"name": "g", "passed": False, "executed": True, "attempt": 1}, {"name": "g", "passed": True, "executed": True, "attempt": 2}]
+    verdict = ev.evaluate_turn(expectation, _reference_evidence(guardrail_results=retry))
+    assert verdict.passed, verdict.blockers
+    # A retry whose final attempt failed is a failed guardrail.
+    failed_retry = [{"name": "g", "passed": True, "executed": True, "attempt": 1}, {"name": "g", "passed": False, "executed": True, "attempt": 2}]
+    verdict = ev.evaluate_turn(expectation, _reference_evidence(guardrail_results=failed_retry))
+    assert "guardrail_failed:g" in verdict.blockers
+    # An attempt identity reused after another attempt is rejected.
+    reused = [{"name": "g", "passed": True, "executed": True, "attempt": 1}, {"name": "g", "passed": False, "executed": True, "attempt": 2},
+              {"name": "g", "passed": True, "executed": True, "attempt": 1}]
+    verdict = ev.evaluate_turn(expectation, _reference_evidence(guardrail_results=reused))
+    assert "guardrail_attempt_identity_reused:g:attempt=1" in verdict.blockers
+    unnamed = ev.evaluate_turn(expectation, _reference_evidence(guardrail_results=[{"passed": True, "executed": True}]))
+    assert "guardrail_result_unnamed" in unnamed.blockers
+
+
+def test_guardrail_passed_without_execution_rejected() -> None:
+    expectation = _reference_expectation(required_guardrails=("g",))
+    not_executed = ev.evaluate_turn(expectation, _reference_evidence(guardrail_results=[{"name": "g", "passed": True, "executed": False}]))
+    assert "guardrail_passed_without_execution:g" in not_executed.blockers
+    assert "guardrail_not_executed:g" in not_executed.blockers
+    unknown = ev.evaluate_turn(expectation, _reference_evidence(guardrail_results=[{"name": "g", "passed": True}]))
+    assert "guardrail_passed_without_execution:g" in unknown.blockers
+    assert "guardrail_execution_unknown:g" in unknown.blockers
+    # Even a guardrail the case does not require cannot claim "passed" without executing.
+    optional = ev.evaluate_turn(_reference_expectation(), _reference_evidence(guardrail_results=[{"name": "h", "passed": True, "executed": False}]))
+    assert "guardrail_passed_without_execution:h" in optional.blockers
+
+
+def test_dispatch_after_ambiguous_attempt_rejected() -> None:
+    timeout = {"n": 1, "type": "interactive", "status": None, "wamid": None, "error": "ReadTimeout"}
+    no_id = {"n": 1, "type": "interactive", "status": 200, "wamid": None, "error": None}
+    rejected = {"n": 1, "type": "interactive", "status": 400, "wamid": None, "error": None}
+    accepted = {"n": 2, "type": "text", "status": 200, "wamid": "wamid.accepted.2", "error": None}
+    for first in (timeout, no_id):
+        verdict = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[first, accepted], accepted_wamids=["wamid.accepted.2"]))
+        assert "unsafe_dispatch_after_ambiguous_attempt:2" in verdict.blockers, first
+    # Authoritative evidence permitting another attempt lifts the block.
+    permitted = ev.evaluate_turn(_reference_expectation(), _reference_evidence(
+        send_attempts=[timeout, {**accepted, "retry_evidence": "provider:status_query:not_delivered"}], accepted_wamids=["wamid.accepted.2"]))
+    assert not [b for b in permitted.blockers if b.startswith("unsafe_dispatch")], permitted.blockers
+    # A definitive rejection followed by one send is the documented recovery path.
+    recovery = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[rejected, accepted], accepted_wamids=["wamid.accepted.2"]))
+    assert recovery.passed, recovery.blockers
+    # After an accepted send, a further dispatch is a duplicate risk for a single-send case.
+    again = {"n": 2, "type": "text", "status": None, "wamid": None, "error": "ReadTimeout"}
+    duplicate_risk = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=[{**accepted, "n": 1}, again]))
+    assert "dispatch_after_accepted_send:2" in duplicate_risk.blockers
+    multi = ev.evaluate_turn(_reference_expectation(max_accepted_sends=2), _reference_evidence(send_attempts=[{**accepted, "n": 1}, again]))
+    assert not [b for b in multi.blockers if b.startswith("dispatch_after_accepted_send")], multi.blockers
+    malformed = ev.evaluate_turn(_reference_expectation(), _reference_evidence(send_attempts=["not-a-record"]))
+    assert "send_attempt_record_malformed" in malformed.blockers
+
+
+def test_unknown_fallback_provenance_rejected() -> None:
+    # An adapter that never classified provenance must not pass as "no fallback".
+    unclassified = ev.TurnEvidence(
+        tenant_ids_touched=[1], accepted_wamids=["wamid.1"],
+        send_attempts=[{"n": 1, "type": "text", "status": 200, "wamid": "wamid.1"}],
+        terminal=ev.TERMINAL_PROVIDER_ACCEPTED, terminal_source="lifecycle:end_ok+wamid",
+        persisted_outbound=[{"tenant_id": 1}], evidence_refs=["lifecycle:end_ok"],
+    )
+    verdict = ev.evaluate_turn(_reference_expectation(), unclassified)
+    assert "fallback_provenance_unknown" in verdict.blockers
+    empty = ev.evaluate_turn(_reference_expectation(), _reference_evidence(fallback_kind=""))
+    assert "fallback_provenance_unknown" in empty.blockers
+    explicit = ev.evaluate_turn(_reference_expectation(), _reference_evidence(fallback_kind=ev.FALLBACK_UNKNOWN_PROVENANCE))
+    assert "fallback_provenance_unknown" in explicit.blockers and not explicit.passed
+
+
+def test_transport_outcome_preserves_unknown() -> None:
+    timeout = {"n": 1, "type": "interactive", "status": None, "wamid": None, "error": "ReadTimeout"}
+    no_id = {"n": 1, "type": "interactive", "status": 200, "wamid": None, "error": None}
+    rejected = {"n": 1, "type": "interactive", "status": 400, "wamid": None, "error": None}
+    accepted = {"n": 2, "type": "text", "status": 200, "wamid": "wamid.2", "error": None}
+    assert ev.derive_transport_outcome([]) == ev.TRANSPORT_NOT_ATTEMPTED
+    assert ev.derive_transport_outcome([rejected]) == ev.TRANSPORT_REJECTED_DEFINITIVE
+    assert ev.derive_transport_outcome([timeout]) == ev.TRANSPORT_UNKNOWN
+    assert ev.derive_transport_outcome([no_id]) == ev.TRANSPORT_UNKNOWN
+    assert ev.derive_transport_outcome([rejected, accepted]) == ev.TRANSPORT_ACCEPTED
+    # The legacy explicit-failure terminal does not turn an unknown transport outcome into a known one.
+    verdict = ev.evaluate_turn(
+        _reference_expectation(terminal=ev.TERMINAL_EXPLICIT_FAILURE),
+        _reference_evidence(send_attempts=[timeout], accepted_wamids=[], terminal=ev.TERMINAL_EXPLICIT_FAILURE,
+                            terminal_source="lifecycle:end_delivery_failed"),
+    )
+    assert verdict.passed, verdict.blockers
+    assert verdict.facts["transport_outcome"] == ev.TRANSPORT_UNKNOWN and verdict.facts["ambiguous_attempts"] == 1
+    # An adapter that reports a different transport outcome than the attempts support is rejected.
+    mismatch = ev.evaluate_turn(_reference_expectation(), _reference_evidence(transport_outcome=ev.TRANSPORT_UNKNOWN))
+    assert any(b.startswith("transport_outcome_mismatch:") for b in mismatch.blockers)
 
 
 def test_null_result_fails() -> None:
@@ -181,7 +301,9 @@ def test_terminal_vocabulary_is_closed() -> None:
     })
     assert ev.FALLBACK_KINDS == frozenset({
         "none", "expected_safe_fallback", "expected_delivery_recovery", "unexpected_runtime_fallback",
+        "unknown_provenance",
     })
+    assert ev.TRANSPORT_OUTCOMES == frozenset({"accepted", "rejected_definitive", "unknown", "not_attempted"})
 
 
 # ── Gate evaluator ───────────────────────────────────────────────────────────
@@ -269,7 +391,8 @@ def test_gate_accepts_exact_baseline_observation() -> None:
     assert "NOT production acceptance" in verdict.sections["rollout_readiness"]["statement"]
     report = ev.render_gate_report(verdict, header={"base_sha": "0" * 40})
     assert "measurement=CONSISTENT :: ACCEPTED" in report and "4. ROLLOUT READINESS" in report
-    assert "3a. OUTSTANDING BASELINE FAILURES" in report and "3b. UNIMPLEMENTED CONTRACTS" in report
+    assert "3a. OUTSTANDING BASELINE FAILURES" in report and "3b. UNIMPLEMENTED CONTRACT ALLOWANCES" in report
+    assert "3c. FUTURE REPLACEMENT CONTRACTS" in report
 
 
 def test_acceptance_mode_rejects_unapproved_debt() -> None:
@@ -520,6 +643,14 @@ def test_manifest_in_repo_is_well_formed_and_self_consistent() -> None:
         assert entry["owner"]  # explicit, even when UNASSIGNED for owner review
     for entry in manifest["unimplemented_contracts"]:
         assert "owner" in entry and "expiry" in entry and entry["planned_by"]
+    # Replacement contracts are tracked separately: never allowances, never measured as coverage.
+    case_ids = {e["case_id"] for e in manifest["baseline_failures"]}
+    for contract in manifest.get("replacement_contracts", []):
+        assert contract["id"] and contract["summary"] and contract["status"]
+        assert contract["replaces"] in case_ids, contract
+        assert contract["id"] not in ids, "a replacement contract must not double as an allowance"
+    for entry in manifest["baseline_failures"]:
+        assert "current implementation defect" in entry.get("classification", ""), entry["case_id"]
     # The PR #1084 modules are pinned unchanged.
     for module in manifest["required_modules"]:
         assert ev.sha256_of(REPO_ROOT / module["path"]) == module["content_sha256"], (
@@ -548,22 +679,62 @@ def _perfect_records(manifest: Dict, tier: str) -> List[ev.TestRecord]:
     return records
 
 
-def test_repo_manifest_debt_is_unapproved_and_blocks_acceptance() -> None:
-    """The committed manifest holds proposals only: acceptance must stay blocked
-    until the owner assigns owners and expiries, even on a perfect measurement."""
+def test_junit_marker_with_extra_cause_text_fails_reconciliation() -> None:
+    """The JUnit layer compares the whole normalised marker; extra cause text is a changed cause."""
+    manifest = _approved_manifest()
+    suffixed = [
+        ev.TestRecord(r.nodeid, "xfailed", "RELIABILITY_BASELINE[RB-X] sig_x UNRELATED_CAUSE", r.file)
+        if r.nodeid.endswith("::test_defect") else r
+        for r in _records()
+    ]
+    verdict = ev.evaluate_gate(manifest, tier="unit", records=suffixed, env=_ENV_UNIT, module_hashes=_HASHES, today=TODAY)
+    assert not verdict.accepted
+    assert any(b.startswith("reconcile:RB-X:xfailed:") for b in verdict.blockers), verdict.blockers
+    prefixed = [
+        ev.TestRecord(r.nodeid, "xfailed", "reason: RELIABILITY_BASELINE[RB-X] sig_x", r.file)
+        if r.nodeid.endswith("::test_defect") else r
+        for r in _records()
+    ]
+    verdict = ev.evaluate_gate(manifest, tier="unit", records=prefixed, env=_ENV_UNIT, module_hashes=_HASHES, today=TODAY)
+    assert any(b.startswith("reconcile:RB-X:xfailed:") for b in verdict.blockers), verdict.blockers
+    # Whitespace differences alone are normalised away.
+    spaced = [
+        ev.TestRecord(r.nodeid, "xfailed", "  RELIABILITY_BASELINE[RB-X]   sig_x ", r.file)
+        if r.nodeid.endswith("::test_defect") else r
+        for r in _records()
+    ]
+    verdict = ev.evaluate_gate(manifest, tier="unit", records=spaced, env=_ENV_UNIT, module_hashes=_HASHES, today=TODAY)
+    assert verdict.accepted, verdict.blockers
+
+
+def _unapproved_ids(manifest: Dict, tier: str) -> set:
+    ids = set()
+    for entry in ev.allowance_index(manifest).values():
+        if entry.get("tier", "unit") != tier:
+            continue
+        owner = str(entry.get("owner") or "").strip()
+        if not owner or owner.upper().startswith(ev.UNASSIGNED_OWNER_PREFIX) or not entry.get("expiry"):
+            ids.add(entry["id"])
+    return ids
+
+
+def test_repo_manifest_acceptance_reflects_actual_approval_state() -> None:
+    """The committed manifest is judged on its real owner/expiry values: whatever
+    is unapproved blocks acceptance, and nothing else does on a perfect
+    measurement. The test never requires debt to stay unapproved."""
     manifest = ev.load_manifest(MANIFEST_PATH)
     hashes = {m["path"]: m["content_sha256"] for m in manifest["required_modules"]}
     pg_env = {ev.PG_REQUIRE_ENV: "1", ev.PG_ADMIN_DSN_ENV: "postgresql://u:p@127.0.0.1:5433/postgres"}
-    expected_debt = {
-        "unit": {"RB-01", "RB-02", "RB-03", "RB-04", "RB-05", "UC-01"},
-        "postgres": {"RB-03-PG", "UC-02"},
-    }
     for tier, env in (("unit", {}), ("postgres", pg_env)):
         records = _perfect_records(manifest, tier)
+        unapproved = _unapproved_ids(manifest, tier)
         acceptance = ev.evaluate_gate(manifest, tier=tier, records=records, env=env, module_hashes=hashes)
-        assert not acceptance.accepted and acceptance.status == "NOT ACCEPTED", tier
-        assert set(acceptance.sections["rollout_readiness"]["unapproved_debt"]) == expected_debt[tier]
+        assert set(acceptance.sections["rollout_readiness"]["unapproved_debt"]) == unapproved, tier
         assert all(b.startswith("unapproved_debt:") for b in acceptance.blockers), acceptance.blockers
+        if unapproved:
+            assert not acceptance.accepted and acceptance.status == "NOT ACCEPTED", tier
+        else:
+            assert acceptance.accepted and acceptance.status == "ACCEPTED", (tier, acceptance.blockers)
         diagnostic = ev.evaluate_gate(manifest, tier=tier, records=records, env=env, module_hashes=hashes,
                                       mode=ev.MODE_DIAGNOSTIC)
         assert diagnostic.passed and not diagnostic.accepted, diagnostic.blockers
@@ -607,6 +778,11 @@ def reconciliation_session(tmp_path_factory: pytest.TempPathFactory) -> Dict[str
                 "test_id": "test_probe.py::test_wrong_case_id", "failure_signature": "sig_other",
                 "base_sha": "0" * 40, "expiry": None, "removal_condition": "r", "tier": "unit",
             },
+            {
+                "case_id": "RB-SUFFIX", "owner": "UNASSIGNED (owner review)", "evidence": "e",
+                "test_id": "test_probe.py::test_marker_with_extra_cause_text", "failure_signature": "sig_suffix",
+                "base_sha": "0" * 40, "expiry": None, "removal_condition": "r", "tier": "unit",
+            },
         ],
         "unimplemented_contracts": [
             {
@@ -639,6 +815,9 @@ def reconciliation_session(tmp_path_factory: pytest.TempPathFactory) -> Dict[str
 
         def test_wrong_case_id(baseline):
             baseline.defect("RB-SOMETHING-ELSE", "sig_other")
+
+        def test_marker_with_extra_cause_text(baseline):
+            baseline.defect("RB-SUFFIX", "sig_suffix UNRELATED_CAUSE")
 
         def test_contract_exact(unimplemented):
             unimplemented.contract("UC-EXACT", "contract_sig")
@@ -678,6 +857,13 @@ def test_reconciliation_plugin_fails_changed_signature(reconciliation_session) -
     assert expired.outcome == "failed" and expired.message.startswith("RECONCILE expired_allowance:RB-EXPIRED")
     wrong = reconciliation_session["test_probe.py::test_wrong_case_id"]
     assert wrong.outcome == "failed" and "RECONCILE" in wrong.message
+
+
+def test_reconciliation_plugin_rejects_marker_with_extra_cause_text(reconciliation_session) -> None:
+    rec = reconciliation_session["test_probe.py::test_marker_with_extra_cause_text"]
+    assert rec.outcome == "failed", rec
+    assert rec.message.startswith("RECONCILE signature_changed:RB-SUFFIX")
+    assert "UNRELATED_CAUSE" in rec.message
 
 
 def test_reconciliation_plugin_marks_exact_signature_as_expected_failure(reconciliation_session) -> None:

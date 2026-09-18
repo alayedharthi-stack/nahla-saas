@@ -134,7 +134,8 @@ def test_broken_plural_query_finds_singular_product_on_postgres(disposable_pg, b
         db.close()
 
 
-def test_concurrent_state_saves_do_not_lose_updates(disposable_pg, unimplemented) -> None:
+def test_concurrent_state_saves_do_not_lose_updates(disposable_pg, baseline) -> None:
+    """Recorded current defect UC-02: exactly one of two independent updates survives."""
     from tests.commerce_reliability import pg_workers  # noqa: PLC0415
 
     db = disposable_pg.session()
@@ -155,16 +156,29 @@ def test_concurrent_state_saves_do_not_lose_updates(disposable_pg, unimplemented
     finally:
         db.close()
 
-    _run_workers([
+    expected = {
+        "last_search_candidates": [{"id": 11, "title": "فستان"}],
+        "current_product_focus": {"id": 13, "title": "جاكيت"},
+    }
+    # Pre-race values as the real store loads them: the value a losing worker
+    # writes back over the other worker's update.
+    from modules.ai.brain.state.store import DefaultStateStore  # noqa: PLC0415
+
+    db = disposable_pg.session()
+    try:
+        pre_race = DefaultStateStore().load(db, tenant_id, NORMALIZED_PHONE)
+        baseline_values = {name: getattr(pre_race, name) for name in expected}
+    finally:
+        db.close()
+    results = _run_workers([
         (pg_workers.state_save_worker, (
-            disposable_pg.dsn, tenant_id, NORMALIZED_PHONE,
-            "last_search_candidates", [{"id": 11, "title": "فستان"}],
+            disposable_pg.dsn, tenant_id, NORMALIZED_PHONE, "last_search_candidates", expected["last_search_candidates"],
         )),
         (pg_workers.state_save_worker, (
-            disposable_pg.dsn, tenant_id, NORMALIZED_PHONE,
-            "current_product_focus", {"id": 13, "title": "جاكيت"},
+            disposable_pg.dsn, tenant_id, NORMALIZED_PHONE, "current_product_focus", expected["current_product_focus"],
         )),
     ])
+    worker_status = {r["field"]: r["status"] for r in results}
 
     db = disposable_pg.session()
     try:
@@ -173,10 +187,14 @@ def test_concurrent_state_saves_do_not_lose_updates(disposable_pg, unimplemented
         brain_state = (row.extra_metadata or {}).get("brain_state") or {}
     finally:
         db.close()
-    kept = {
-        "last_search_candidates": bool(brain_state.get("last_search_candidates")),
-        "current_product_focus": bool(brain_state.get("current_product_focus")),
-    }
-    if not all(kept.values()):
-        unimplemented.contract("UC-02", "state_store_save_lost_update", kept=kept)
-    assert all(kept.values()), kept
+    persisted = {name: brain_state.get(name) for name in expected}
+    # Both workers must have completed their saves; then exactly one lost
+    # update is the recorded defect. Neither update persisting, a worker
+    # failure or a wrong value is a changed cause and fails on its own.
+    outcome = rs.classify_state_save_outcome(
+        worker_status=worker_status, persisted=persisted, expected=expected, baseline=baseline_values,
+    )
+    assert outcome in ("both_persisted", "single_lost_update"), (outcome, worker_status, persisted, baseline_values)
+    if outcome == "single_lost_update":
+        baseline.defect("UC-02", "state_store_save_lost_update", persisted={k: bool(v) for k, v in persisted.items()})
+    assert outcome == "both_persisted", persisted

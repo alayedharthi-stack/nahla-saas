@@ -153,20 +153,37 @@ def test_locked_fulfillment_session_still_allows_new_discovery(baseline) -> None
         try_fulfillment_lock_continuation,
     )
 
+    # Unlocked control, same request: must reach product search (see the test above).
+    control_ctx = rs.brain_context(DISCOVERY_REQUEST, state=MerchantConversationState(
+        greeted=True, stage="browsing", turn=3, last_search_candidates=rs.shown_candidates(),
+    ))
+    control_action = DefaultDecisionEngine().decide(control_ctx).action
+
     ctx = rs.brain_context(DISCOVERY_REQUEST, state=_locked_state())
     assert ctx.intent.name == "ask_product", ctx.intent
-    assert is_fulfillment_session_locked(ctx)
+    locked = is_fulfillment_session_locked(ctx)
     lock_decision = try_fulfillment_lock_continuation(ctx)
     scripted = json.dumps({"capability": "search", "product_ids": [], "query": SKIRT_BROKEN_PLURAL,
                            "reference": "none", "confidence": 0.95})
     with rs.scripted_model(scripted) as model:
         ctx.catalog_request = asyncio.run(interpret_catalog_request(ctx))
     engine_decision = DefaultDecisionEngine().decide(ctx)
-    if engine_decision.action != ACTION_SEARCH_PRODUCTS:
+    # Only the exact recorded observation raises the allowance marker: locked
+    # session, llm_reply with the recorded "active order" reason, interpreter
+    # gated off, and the unlocked control reaching search. Anything else is a
+    # changed cause and fails on its own.
+    observation = rs.classify_lock_decision(
+        locked=locked, action=engine_decision.action, reason=engine_decision.reason,
+        interpreter_result=ctx.catalog_request, control_action=control_action,
+    )
+    assert not observation.startswith("changed_cause:"), (
+        observation, engine_decision.action, engine_decision.reason, getattr(lock_decision, "action", None),
+        bool(model.calls),
+    )
+    if observation == "recorded_defect":
         baseline.defect(
             "RB-05", "fulfillment_lock_blocks_discovery",
             engine_action=engine_decision.action, engine_reason=engine_decision.reason[:80],
-            lock_action=getattr(lock_decision, "action", None),
-            interpreter_ran=bool(model.calls), interpreted=repr(ctx.catalog_request),
+            lock_action=getattr(lock_decision, "action", None), interpreter_ran=bool(model.calls),
         )
     assert engine_decision.action == ACTION_SEARCH_PRODUCTS, (engine_decision.action, engine_decision.reason)

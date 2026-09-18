@@ -42,12 +42,34 @@ FALLBACK_NONE = "none"
 FALLBACK_EXPECTED_SAFE = "expected_safe_fallback"
 FALLBACK_EXPECTED_DELIVERY_RECOVERY = "expected_delivery_recovery"
 FALLBACK_UNEXPECTED_RUNTIME = "unexpected_runtime_fallback"
+# Provenance that is missing or unrecognised is never proof of "no fallback".
+FALLBACK_UNKNOWN_PROVENANCE = "unknown_provenance"
 FALLBACK_KINDS = frozenset({
     FALLBACK_NONE,
     FALLBACK_EXPECTED_SAFE,
     FALLBACK_EXPECTED_DELIVERY_RECOVERY,
     FALLBACK_UNEXPECTED_RUNTIME,
+    FALLBACK_UNKNOWN_PROVENANCE,
 })
+
+# Transport outcome of the provider dispatch sequence. An ambiguous attempt
+# (exception, timeout, no status, or HTTP 200 without a provider message id)
+# is an UNKNOWN transport outcome even where the legacy lifecycle records a
+# delivery failure; the terminal vocabulary below is legacy characterisation.
+TRANSPORT_ACCEPTED = "accepted"
+TRANSPORT_REJECTED_DEFINITIVE = "rejected_definitive"
+TRANSPORT_UNKNOWN = "unknown"
+TRANSPORT_NOT_ATTEMPTED = "not_attempted"
+TRANSPORT_OUTCOMES = frozenset({
+    TRANSPORT_ACCEPTED, TRANSPORT_REJECTED_DEFINITIVE, TRANSPORT_UNKNOWN, TRANSPORT_NOT_ATTEMPTED,
+})
+
+# Dimensions a turn verdict reports explicitly as evaluated / not evaluated.
+DIMENSION_SEMANTIC_BINDING = "semantic_binding_resolution"
+DIMENSION_GUARDRAIL_EXECUTION = "application_guardrail_execution"
+DIMENSION_DURABLE_DELIVERY_RECORD = "durable_delivery_record"
+DIMENSION_ORDER_IDEMPOTENCY = "order_idempotency"
+DIMENSION_CONVERSATION_SERIALIZATION = "conversation_serialization"
 
 OUTCOME_GROUNDED_REPLY = "grounded_reply"
 OUTCOME_SAFE_MISSING_FACT = "safe_missing_fact"
@@ -107,9 +129,11 @@ class TurnEvidence:
     persisted_outbound: List[Dict[str, Any]] = field(default_factory=list)
     evidence_refs: List[str] = field(default_factory=list)
     guardrail_results: List[Dict[str, Any]] = field(default_factory=list)
-    fallback_kind: str = FALLBACK_NONE
+    fallback_kind: str = FALLBACK_UNKNOWN_PROVENANCE  # adapters must classify explicitly
     fixture_bindings: List[str] = field(default_factory=list)
     side_effect_keys: List[str] = field(default_factory=list)
+    transport_outcome: str = ""  # optional adapter report; must agree with the derivation
+    not_evaluated: List[str] = field(default_factory=list)
     notes: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -144,13 +168,72 @@ def derive_terminal(
     return None, f"lifecycle:{final_token or 'absent'}"
 
 
+def _normalize_marker(text: Any) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _accepted_attempt(attempt: Mapping[str, Any]) -> bool:
+    return bool(str(attempt.get("wamid") or "").strip()) and not attempt.get("error")
+
+
+def _is_ambiguous_attempt(attempt: Mapping[str, Any]) -> bool:
+    """Exception/timeout, no status, or HTTP 200 without a provider message id."""
+    if attempt.get("error"):
+        return True
+    status = attempt.get("status")
+    if status is None:
+        return True
+    try:
+        status_int = int(status)
+    except (TypeError, ValueError):
+        return True
+    return status_int == 200 and not str(attempt.get("wamid") or "").strip()
+
+
+def derive_transport_outcome(send_attempts: Sequence[Mapping[str, Any]]) -> str:
+    attempts = [a for a in send_attempts if isinstance(a, Mapping)]
+    if any(_accepted_attempt(a) for a in attempts):
+        return TRANSPORT_ACCEPTED
+    if any(_is_ambiguous_attempt(a) for a in attempts):
+        return TRANSPORT_UNKNOWN
+    if attempts:
+        return TRANSPORT_REJECTED_DEFINITIVE
+    return TRANSPORT_NOT_ATTEMPTED
+
+
+def _group_guardrail_results(
+    results: Sequence[Any], blockers: List[str],
+) -> Dict[str, List[Tuple[Any, List[Mapping[str, Any]]]]]:
+    """name -> ordered [(attempt, [results])]. Attempt identity is preserved:
+    a documented first-pass rejection followed by a retry is two attempts;
+    results that share an attempt (or carry none) form one execution."""
+    per_name: Dict[str, List[Tuple[Any, List[Mapping[str, Any]]]]] = {}
+    for result in results:
+        if not isinstance(result, Mapping) or not str(result.get("name") or "").strip():
+            blockers.append("guardrail_result_unnamed")
+            continue
+        name = str(result["name"]).strip()
+        attempt = result.get("attempt")
+        groups = per_name.setdefault(name, [])
+        if groups and groups[-1][0] == attempt:
+            groups[-1][1].append(result)
+        elif any(existing == attempt for existing, _ in groups):
+            blockers.append(f"guardrail_attempt_identity_reused:{name}:attempt={attempt}")
+        else:
+            groups.append((attempt, [result]))
+    return per_name
+
+
 def evaluate_turn(expectation: TurnExpectation, evidence: TurnEvidence) -> TurnVerdict:
     blockers: List[str] = []
     accepted = [w for w in evidence.accepted_wamids if str(w or "").strip()]
+    attempts = [a for a in evidence.send_attempts if isinstance(a, Mapping)]
+    if len(attempts) != len(evidence.send_attempts):
+        blockers.append("send_attempt_record_malformed")
 
     # Null / no-op result: nothing happened at all.
     if (
-        not evidence.send_attempts
+        not attempts
         and not accepted
         and evidence.terminal is None
         and not evidence.persisted_outbound
@@ -178,7 +261,30 @@ def evaluate_turn(expectation: TurnExpectation, evidence: TurnEvidence) -> TurnV
             blockers.append(f"duplicate_effects:side_effect:{key}")
         seen_keys.add(key)
 
-    # Terminal contract.
+    # Dispatch-sequence safety: after an ambiguous attempt (the provider may
+    # have delivered) another dispatch is unsafe unless authoritative evidence
+    # permits it; after an accepted send a further dispatch is a duplicate
+    # risk when the case allows one accepted send only.
+    for idx, attempt in enumerate(attempts):
+        prior = attempts[:idx]
+        if not prior:
+            continue
+        permitted = bool(str(attempt.get("retry_evidence") or "").strip())
+        if any(_is_ambiguous_attempt(p) for p in prior) and not permitted:
+            blockers.append(f"unsafe_dispatch_after_ambiguous_attempt:{idx + 1}")
+        elif (
+            expectation.max_accepted_sends <= 1
+            and any(_accepted_attempt(p) for p in prior)
+            and not permitted
+        ):
+            blockers.append(f"dispatch_after_accepted_send:{idx + 1}")
+    transport = derive_transport_outcome(attempts)
+    if evidence.transport_outcome and evidence.transport_outcome != transport:
+        blockers.append(
+            f"transport_outcome_mismatch:reported={evidence.transport_outcome}:derived={transport}"
+        )
+
+    # Terminal contract (legacy three-value characterisation).
     if evidence.terminal is None:
         blockers.append(f"missing_terminal:{evidence.terminal_source or 'unrecorded'}")
     elif evidence.terminal not in TERMINALS:
@@ -192,28 +298,55 @@ def evaluate_turn(expectation: TurnExpectation, evidence: TurnEvidence) -> TurnV
     if expectation.terminal == TERMINAL_EXPLICIT_FAILURE and accepted:
         blockers.append("failure_expected_but_provider_accepted")
 
-    # Evidence, guardrails, fixture bindings.
-    if expectation.require_evidence_refs and not evidence.evidence_refs:
+    # Evidence references: blank or whitespace-only entries are invalid.
+    refs_raw = list(evidence.evidence_refs)
+    if any(not isinstance(r, str) or not r.strip() for r in refs_raw):
+        blockers.append("blank_evidence_reference")
+    refs = [r.strip() for r in refs_raw if isinstance(r, str) and r.strip()]
+    if expectation.require_evidence_refs and not refs:
         blockers.append("missing_required_evidence")
-    observed_guardrails = {
-        str(g.get("name") or ""): g for g in evidence.guardrail_results if isinstance(g, Mapping)
-    }
+
+    # Guardrail results: contradictory results for one execution are
+    # rejected; "passed" without execution is rejected; the required
+    # guardrails must have passed AND executed on their final attempt.
+    per_name = _group_guardrail_results(evidence.guardrail_results, blockers)
+    for name, groups in per_name.items():
+        for attempt, results in groups:
+            passed_values = {r.get("passed") is True for r in results}
+            executed_values = {r.get("executed") is True for r in results}
+            if len(passed_values) > 1 or len(executed_values) > 1:
+                label = "unspecified" if attempt is None else attempt
+                blockers.append(f"contradictory_guardrail_result:{name}:attempt={label}")
+        if any(r.get("passed") is True and r.get("executed") is not True for _, rs in groups for r in rs):
+            blockers.append(f"guardrail_passed_without_execution:{name}")
     for name in expectation.required_guardrails:
-        result = observed_guardrails.get(name)
-        if result is None:
+        groups = per_name.get(name)
+        if not groups:
             blockers.append(f"missing_required_guardrail_evidence:{name}")
-        elif result.get("passed") is not True:
+            continue
+        final = groups[-1][1][-1]
+        if final.get("executed") is None:
+            blockers.append(f"guardrail_execution_unknown:{name}")
+        elif final.get("executed") is not True:
+            blockers.append(f"guardrail_not_executed:{name}")
+        if final.get("passed") is not True:
             blockers.append(f"guardrail_failed:{name}")
+
+    # Fixture bindings are fixture identity labels only; they never validate
+    # semantic (knowledge) binding resolution, which is reported NOT EVALUATED.
     bound = set(evidence.fixture_bindings)
     for binding in expectation.required_fixture_bindings:
         if binding not in bound:
             blockers.append(f"missing_fixture_binding:{binding}")
 
     # Fallback honesty (Phase 2.7B v3 rule): a runtime fallback is never a
-    # compliant answer; a safe fallback stands only when the case expects it.
-    kind = evidence.fallback_kind or FALLBACK_NONE
+    # compliant answer; a safe fallback stands only when the case expects it;
+    # unknown provenance is never proof of "no fallback".
+    kind = evidence.fallback_kind or FALLBACK_UNKNOWN_PROVENANCE
     if kind not in FALLBACK_KINDS:
         blockers.append(f"fallback_kind_not_closed_enum:{kind}")
+    elif kind == FALLBACK_UNKNOWN_PROVENANCE:
+        blockers.append("fallback_provenance_unknown")
     elif kind == FALLBACK_UNEXPECTED_RUNTIME:
         blockers.append("unexpected_runtime_fallback_disguised_as_success")
     elif kind == FALLBACK_EXPECTED_SAFE and expectation.expected_outcome != OUTCOME_SAFE_MISSING_FACT:
@@ -221,16 +354,30 @@ def evaluate_turn(expectation: TurnExpectation, evidence: TurnEvidence) -> TurnV
     elif expectation.expected_outcome == OUTCOME_SAFE_MISSING_FACT and kind == FALLBACK_NONE:
         # The case expected a disclosed missing fact; a grounded-looking
         # answer with no disclosure is not that.
-        if not evidence.evidence_refs:
+        if not refs:
             blockers.append("expected_safe_fallback_missing")
 
+    coverage = {
+        DIMENSION_SEMANTIC_BINDING: "not_evaluated",
+        DIMENSION_GUARDRAIL_EXECUTION: "evaluated" if expectation.required_guardrails else "not_evaluated",
+        DIMENSION_DURABLE_DELIVERY_RECORD: "not_evaluated",
+        DIMENSION_ORDER_IDEMPOTENCY: "evaluated" if evidence.side_effect_keys else "not_evaluated",
+        DIMENSION_CONVERSATION_SERIALIZATION: "not_evaluated",
+    }
+    not_evaluated = sorted(
+        set(evidence.not_evaluated) | {k for k, v in coverage.items() if v == "not_evaluated"}
+    )
     facts = {
         "accepted_sends": len(accepted),
-        "send_attempts": len(evidence.send_attempts),
+        "send_attempts": len(attempts),
+        "ambiguous_attempts": sum(1 for a in attempts if _is_ambiguous_attempt(a)),
+        "transport_outcome": transport,
         "terminal": evidence.terminal,
         "terminal_source": evidence.terminal_source,
         "fallback_kind": kind,
         "tenants_touched": sorted({int(t) for t in evidence.tenant_ids_touched}),
+        "coverage": coverage,
+        "not_evaluated": not_evaluated,
     }
     return TurnVerdict(passed=not blockers, blockers=tuple(blockers), facts=facts)
 
@@ -477,7 +624,7 @@ def evaluate_gate(
         if rec is None:
             blockers.append(f"allowance_test_missing:{entry['id']}:{nodeid}")
             status["observed"] = "missing"
-        elif rec.outcome == "xfailed" and expected_marker(entry) in rec.message:
+        elif rec.outcome == "xfailed" and _normalize_marker(rec.message) == _normalize_marker(expected_marker(entry)):
             status["observed"] = "expected_failure_observed"
         elif rec.outcome == "passed":
             blockers.append(f"reconcile:unexpected_pass:{entry['id']}")
@@ -543,6 +690,7 @@ def evaluate_gate(
         ],
         "outstanding_baseline_failures": [a for a in allowance_results if a["kind"] == "baseline"],
         "unimplemented_contracts": [a for a in allowance_results if a["kind"] == "unimplemented"],
+        "future_replacement_contracts": [dict(c) for c in manifest.get("replacement_contracts", [])],
         "rollout_readiness": {
             "statement": (
                 "A baseline-compatible measurement proves harness integrity and "
@@ -591,15 +739,18 @@ def render_gate_report(verdict: GateVerdict, *, header: Optional[Mapping[str, An
     lines.append("2. CURRENT RUNTIME BEHAVIOUR (real entry points, scripted models, fake providers)")
     for nodeid in verdict.sections["current_runtime_behavior"]:
         lines.append(f"  PASS {nodeid}")
-    lines.append("3a. OUTSTANDING BASELINE FAILURES — empirically reproduced current-runtime defects "
+    lines.append("3a. OUTSTANDING BASELINE FAILURES — empirically reproduced current implementation defects "
                  "(allowed only through the reviewed manifest)")
     for a in verdict.sections["outstanding_baseline_failures"]:
         lines.append(f"  {a['id']} observed={a['observed']} approved_debt={'yes' if a.get('approved') else 'NO'} "
                      f"owner={a['owner'] or 'UNSET'} expiry={a['expiry'] or 'UNSET'} :: {a['signature']}")
-    lines.append("3b. UNIMPLEMENTED CONTRACTS — future work, not coverage, never completed behaviour")
+    lines.append("3b. UNIMPLEMENTED CONTRACT ALLOWANCES — future work, not coverage, never completed behaviour")
     for a in verdict.sections["unimplemented_contracts"]:
         lines.append(f"  {a['id']} observed={a['observed']} approved_debt={'yes' if a.get('approved') else 'NO'} "
                      f"owner={a['owner'] or 'UNSET'} expiry={a['expiry'] or 'UNSET'} :: {a['signature']}")
+    lines.append("3c. FUTURE REPLACEMENT CONTRACTS — tracked separately; not measured by this gate")
+    for c in verdict.sections.get("future_replacement_contracts", []):
+        lines.append(f"  {c.get('id')} replaces={c.get('replaces')} :: {c.get('summary')}")
     rr = verdict.sections["rollout_readiness"]
     lines.append("4. ROLLOUT READINESS")
     lines.append(f"  {rr['statement']}")
@@ -617,8 +768,12 @@ def render_gate_report(verdict: GateVerdict, *, header: Optional[Mapping[str, An
 
 
 __all__ = [
-    "BASELINE_PREFIX", "FALLBACK_EXPECTED_DELIVERY_RECOVERY", "FALLBACK_EXPECTED_SAFE",
-    "FALLBACK_KINDS", "FALLBACK_NONE", "FALLBACK_UNEXPECTED_RUNTIME", "GateVerdict",
+    "BASELINE_PREFIX", "DIMENSION_CONVERSATION_SERIALIZATION", "DIMENSION_DURABLE_DELIVERY_RECORD",
+    "DIMENSION_GUARDRAIL_EXECUTION", "DIMENSION_ORDER_IDEMPOTENCY", "DIMENSION_SEMANTIC_BINDING",
+    "FALLBACK_EXPECTED_DELIVERY_RECOVERY", "FALLBACK_EXPECTED_SAFE",
+    "FALLBACK_KINDS", "FALLBACK_NONE", "FALLBACK_UNEXPECTED_RUNTIME", "FALLBACK_UNKNOWN_PROVENANCE",
+    "GateVerdict", "TRANSPORT_ACCEPTED", "TRANSPORT_NOT_ATTEMPTED", "TRANSPORT_OUTCOMES",
+    "TRANSPORT_REJECTED_DEFINITIVE", "TRANSPORT_UNKNOWN", "derive_transport_outcome",
     "LIFECYCLE_END_DELIVERY_FAILED", "LIFECYCLE_END_DELIVERY_RECOVERED", "LIFECYCLE_END_OK",
     "MODES", "MODE_ACCEPTANCE", "MODE_DIAGNOSTIC", "UNASSIGNED_OWNER_PREFIX", "acceptance_status",
     "OUTCOME_EXPLICIT_FAILURE", "OUTCOME_GROUNDED_REPLY", "OUTCOME_SAFE_MISSING_FACT",

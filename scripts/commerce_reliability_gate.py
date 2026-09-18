@@ -48,6 +48,7 @@ HARNESS_DIR = "tests/commerce_reliability"
 HARNESS_MODULES = {
     ev.TIER_UNIT: [
         f"{HARNESS_DIR}/test_evaluator_selfcheck.py",
+        f"{HARNESS_DIR}/test_predicate_selfcheck.py",
         f"{HARNESS_DIR}/test_runtime_v1_delivery.py",
         f"{HARNESS_DIR}/test_runtime_v1_browse.py",
     ],

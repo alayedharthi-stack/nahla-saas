@@ -2,9 +2,13 @@
 
 Every test drives ``_handle_merchant_message`` through PR #1084's incident
 harness (imported unchanged) and judges the structured evidence with the
-reliability evaluator. Tests that observe a recorded baseline defect or an
-absent runtime contract raise the exact manifest marker; they never assert
-the defect as correct behaviour.
+reliability evaluator. This is isolated application-boundary
+characterisation: persistence is mocked (not durable delivery recording),
+fixture labels are fixture identity (not knowledge-binding validation), and
+the seam exposes no guardrail execution records; those dimensions are
+reported NOT EVALUATED. Tests that observe a recorded baseline defect raise
+the exact manifest marker only when the recorded cause is observed exactly;
+any other cause fails on its own.
 """
 from __future__ import annotations
 
@@ -46,8 +50,12 @@ def test_v1_owner_accepted_send_reaches_closed_terminal() -> None:
     verdict = ev.evaluate_turn(_expect(ev.TERMINAL_PROVIDER_ACCEPTED), evidence)
     assert verdict.passed, (verdict.blockers, evidence.notes)
     assert evidence.terminal_source == "lifecycle:end_ok+wamid"
+    assert verdict.facts["transport_outcome"] == ev.TRANSPORT_ACCEPTED
+    assert evidence.fallback_kind == ev.FALLBACK_NONE, evidence.notes["provenance"]
     assert len(script.responses) == 1 and script.responses[0]["type"] == "interactive"
     assert evidence.persisted_outbound and all(r["tenant_id"] == TENANT for r in evidence.persisted_outbound)
+    # Dimensions this characterisation does not evaluate are reported, not implied.
+    assert set(rs.DELIVERY_NOT_EVALUATED) <= set(verdict.facts["not_evaluated"])
 
 
 def test_v1_owner_missing_provider_message_id_is_explicit_failure() -> None:
@@ -64,6 +72,9 @@ def test_v1_owner_missing_provider_message_id_is_explicit_failure() -> None:
     assert verdict.passed, (verdict.blockers, evidence.notes)
     assert evidence.accepted_wamids == []
     assert evidence.terminal_source == f"lifecycle:{ev.LIFECYCLE_END_DELIVERY_FAILED}"
+    # The legacy lifecycle says "failed"; the transport outcome stays UNKNOWN.
+    assert verdict.facts["transport_outcome"] == ev.TRANSPORT_UNKNOWN
+    assert len(script.responses) == 1, script.responses  # no second dispatch after the ambiguous 200
     assert harness.last_outcome.get("product_reply_outcome") == "ambiguous_provider_outcome"
 
 
@@ -78,6 +89,7 @@ def test_v1_owner_ambiguous_timeout_is_explicit_failure_without_resend() -> None
     assert verdict.passed, (verdict.blockers, evidence.notes)
     # One dispatch that may have reached the customer: never retried blindly.
     assert len(script.responses) == 1 and script.responses[0]["error"] == "ReadTimeout"
+    assert verdict.facts["transport_outcome"] == ev.TRANSPORT_UNKNOWN  # legacy "failed" is not a known outcome
     assert harness.last_outcome.get("product_reply_outcome") == "ambiguous_provider_outcome"
 
 
@@ -90,9 +102,10 @@ def test_v1_owner_definitive_rejection_recovers_once_with_grounded_text() -> Non
     evidence = rs.build_turn_evidence(harness, trace, script, rows)
     verdict = ev.evaluate_turn(_expect(ev.TERMINAL_PROVIDER_ACCEPTED), evidence)
     assert verdict.passed, (verdict.blockers, evidence.notes)
-    assert evidence.fallback_kind == ev.FALLBACK_EXPECTED_DELIVERY_RECOVERY
+    assert evidence.fallback_kind == ev.FALLBACK_EXPECTED_DELIVERY_RECOVERY, evidence.notes["provenance"]
     assert [r["type"] for r in script.responses] == ["interactive", "text"]
-    assert [r["status"] for r in script.responses] == [400, 200]
+    assert [r["status"] for r in script.responses] == [400, 200]  # definitive rejection, then one text
+    assert verdict.facts["transport_outcome"] == ev.TRANSPORT_ACCEPTED
     assert evidence.terminal_source == f"lifecycle:{ev.LIFECYCLE_END_DELIVERY_RECOVERED}+wamid"
     # The recovered text is grounded in the verified candidates only.
     body = harness.provider.text_bodies()[-1]
@@ -142,6 +155,7 @@ def test_guard_emptied_more_request_does_not_resend_shown_candidates(baseline) -
     evidence = rs.build_turn_evidence(harness, trace, script, rows)
     verdict = ev.evaluate_turn(_expect(ev.TERMINAL_PROVIDER_ACCEPTED), evidence)
     assert verdict.passed, (verdict.blockers, evidence.notes)  # delivery itself closes correctly
+    assert evidence.fallback_kind == ev.FALLBACK_EXPECTED_DELIVERY_RECOVERY, evidence.notes["provenance"]
     shown = {c["title"] for c in H._candidates()}
     bodies = harness.provider.text_bodies()
     resent_shown = [b for b in bodies if any(t in b for t in shown)]
@@ -153,10 +167,10 @@ def test_guard_emptied_more_request_does_not_resend_shown_candidates(baseline) -
     assert bodies and not resent_shown
 
 
-# ── Unimplemented runtime contract (UC-01) ───────────────────────────────────
+# ── Recorded baseline defect (UC-01): reproduced current implementation defect ─
 
 
-def test_v2_owner_rejected_send_reaches_closed_terminal(unimplemented) -> None:
+def test_v2_owner_rejected_send_reaches_closed_terminal(baseline) -> None:
     from modules.ai.commerce_agent_v2.output import CommerceReply  # noqa: PLC0415
 
     def _reject_text(payload, n):
@@ -182,10 +196,17 @@ def test_v2_owner_rejected_send_reaches_closed_terminal(unimplemented) -> None:
     evidence = rs.build_turn_evidence(harness, trace, script, rows)
     assert [r["status"] for r in script.responses] == [400], script.responses  # the provider rejected the text
     verdict = ev.evaluate_turn(_expect(ev.TERMINAL_EXPLICIT_FAILURE), evidence)
-    if not verdict.passed and evidence.terminal is None and trace.final_token == ev.LIFECYCLE_END_OK:
-        unimplemented.contract(
+    # Unrelated tenant / evidence / dispatch-safety failures fail on their own:
+    # only the exact recorded observation raises the allowance marker.
+    observation = rs.classify_uc01_observation(
+        blockers=verdict.blockers, final_token=trace.final_token, accepted_wamids=evidence.accepted_wamids,
+        persisted_outbound_count=len(evidence.persisted_outbound), outcome_count=len(harness.outcomes),
+        transport_outcome=verdict.facts["transport_outcome"],
+    )
+    assert not observation.startswith("changed_cause:"), (observation, verdict.blockers, evidence.notes)
+    if observation == "recorded_defect":
+        baseline.defect(
             "UC-01", "v2_owner_delivery_failure_ends_with_inferred_end_ok",
-            blockers=list(verdict.blockers), outcomes=evidence.notes["outcomes"],
-            persisted_outbound=len(evidence.persisted_outbound),
+            blockers=list(verdict.blockers), transport_outcome=verdict.facts["transport_outcome"],
         )
     assert verdict.passed, verdict.blockers

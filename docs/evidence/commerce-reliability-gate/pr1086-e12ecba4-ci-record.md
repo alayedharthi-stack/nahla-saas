@@ -60,6 +60,8 @@ the push, produced:
 | postgres | PASS (pre-correction semantics): 5 collected, 3 passed, 2 xfailed (RB-03-PG, UC-02), 0 skipped, 0 failed; disposable database created and dropped |
 
 "PASS" here is the pre-correction gate semantics that treated unassigned
-owners and unset expiries as warnings. After the owner's fail-closed
+owners and unset expiries as warnings, before the evaluator false positives
+found by the Astra review were closed. After the owner's fail-closed
 correction the same measurement is reported as **NOT ACCEPTED** (unapproved
 debt) in acceptance mode; see `docs/engineering/commerce-reliability-gate.md`.
+This record is not acceptance evidence for any later head.
