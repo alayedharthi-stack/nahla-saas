@@ -12,6 +12,7 @@ from modules.ai.commerce_agent_v2.knowledge_retrieval import (
     STATUS_NO_RESULTS,
     STATUS_OK,
     build_knowledge_snapshots,
+    build_product_anchor,
     retrieved_sections,
     run_knowledge_lookup,
 )
@@ -111,6 +112,12 @@ async def search_product_knowledge(
     context = run_context.context
     context.assert_scope()
     context.require_authorized_product(product_id)
+    # Anchor the model's own query the same way the deterministic catalog
+    # lookup does, so both sides of the turn ask the same question of the
+    # knowledge base and a repeat resolves to the recorded attempt instead of
+    # a second, differently-worded one.
+    titles, _aliases = context.authorized_product_anchors([int(product_id)])
+    subject = build_product_anchor(product_titles=titles)
     text = str(query or "") or context.run_user_input
     record = run_knowledge_lookup(
         context,
@@ -118,13 +125,18 @@ async def search_product_knowledge(
         purpose="model_product_knowledge",
         query=text,
         product_ids=[int(product_id)],
+        subject=subject,
     )
     if str(record.get("status") or "") not in {STATUS_OK, STATUS_NO_RESULTS}:
         return KnowledgeSearchResult(
             status="error", failure_reason="knowledge_retrieval_failed"
         )
     rows = retrieved_sections(
-        context, scope=SCOPE_PRODUCT, query=text, product_ids=[int(product_id)]
+        context,
+        scope=SCOPE_PRODUCT,
+        query=text,
+        product_ids=[int(product_id)],
+        subject=subject,
     )
     return _result_from_rows(
         context,
