@@ -234,8 +234,7 @@ def _search(call_id: str) -> Any:
 # ── Runtime fix 2: K16's persisted failure now earns one re-grounding retry ──
 
 
-@pytest.mark.asyncio
-async def test_k16_paraphrased_span_retries_once_and_cites_the_section(seeded: Seed) -> None:
+def test_k16_paraphrased_span_retries_once_and_cites_the_section(seeded: Seed) -> None:
     """Persisted K16: pass 1 rejected with the exact code; the retry sees §3 again."""
     model = ScriptedModel(
         [
@@ -245,13 +244,13 @@ async def test_k16_paraphrased_span_retries_once_and_cites_the_section(seeded: S
             [assistant_message(_verbatim(seeded).model_dump_json())],
         ]
     )
-    result = await run_commerce_agent(
+    result = asyncio.run(run_commerce_agent(
         context=_context(seeded, user_input="وش مصدر هذا المنتج؟"),
         user_input="وش مصدر هذا المنتج؟",
         model=model,
         model_name="k16-regrounding",
         execution_mode="outbound",
-    )
+    ))
 
     assert result.status == "completed"
     assert result.reply == _verbatim(seeded)
@@ -277,8 +276,7 @@ async def test_k16_paraphrased_span_retries_once_and_cites_the_section(seeded: S
     assert product_lookups and product_lookups[0]["status"] == "ok"
 
 
-@pytest.mark.asyncio
-async def test_k16_second_paraphrase_stays_failed_with_no_second_retry(seeded: Seed) -> None:
+def test_k16_second_paraphrase_stays_failed_with_no_second_retry(seeded: Seed) -> None:
     model = ScriptedModel(
         [
             [_search("call-1")],
@@ -287,13 +285,13 @@ async def test_k16_second_paraphrase_stays_failed_with_no_second_retry(seeded: S
             [assistant_message(_paraphrase(seeded).model_dump_json())],
         ]
     )
-    result = await run_commerce_agent(
+    result = asyncio.run(run_commerce_agent(
         context=_context(seeded, user_input="وش مصدر هذا المنتج؟"),
         user_input="وش مصدر هذا المنتج؟",
         model=model,
         model_name="k16-regrounding-failed",
         execution_mode="outbound",
-    )
+    ))
 
     assert result.status == "failed"
     assert result.failure_reason == f"output_guardrail_tripwire:{K16_CODE}"
@@ -304,8 +302,7 @@ async def test_k16_second_paraphrase_stays_failed_with_no_second_retry(seeded: S
     assert result.guardrail_results[0]["output_info"]["errors"] == [K16_CODE]
 
 
-@pytest.mark.asyncio
-async def test_non_knowledge_span_codes_are_still_not_retried(seeded: Seed) -> None:
+def test_non_knowledge_span_codes_are_still_not_retried(seeded: Seed) -> None:
     """Only the two knowledge-span codes joined the retry path."""
     catalog_ref = f"catalog:product:{seeded.jacket.id}"
     rejected = CommerceReply(
@@ -314,13 +311,13 @@ async def test_non_knowledge_span_codes_are_still_not_retried(seeded: Seed) -> N
         product_refs=[ProductReference(product_id=seeded.jacket.id, evidence_ref=catalog_ref)],
     )
     model = ScriptedModel([[_search("call-1")], [assistant_message(rejected.model_dump_json())]])
-    result = await run_commerce_agent(
+    result = asyncio.run(run_commerce_agent(
         context=_context(seeded, user_input="وش مصدر هذا المنتج؟"),
         user_input="وش مصدر هذا المنتج؟",
         model=model,
         model_name="no-retry",
         execution_mode="outbound",
-    )
+    ))
     assert result.status == "failed"
     assert not [e for e in result.tool_trace if e.get("kind") == "grounding_retry"]
     assert len(model.calls) == 2
@@ -382,8 +379,7 @@ def test_grounding_retry_re_exposes_sections_without_a_second_lookup(seeded: See
         knowledge_retrieval._retrieve = real  # type: ignore[assignment]
 
 
-@pytest.mark.asyncio
-async def test_k15_retry_sees_the_sections_the_first_pass_saw(seeded: Seed) -> None:
+def test_k15_retry_sees_the_sections_the_first_pass_saw(seeded: Seed) -> None:
     """Persisted K15: availability without a claim, one factual retry.
 
     In Run 2 the retry's tool results carried no sections at all.  Now the
@@ -415,13 +411,13 @@ async def test_k15_retry_sees_the_sections_the_first_pass_saw(seeded: Seed) -> N
             [assistant_message(disclosed.model_dump_json())],
         ]
     )
-    result = await run_commerce_agent(
+    result = asyncio.run(run_commerce_agent(
         context=_context(seeded, user_input="وش مصدر الجاكيت؟"),
         user_input="وش مصدر الجاكيت؟",
         model=model,
         model_name="k15-retry-visibility",
         execution_mode="outbound",
-    )
+    ))
 
     assert result.status == "completed"
     retries = [e for e in result.tool_trace if e.get("kind") == "grounding_retry"]
