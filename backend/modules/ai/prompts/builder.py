@@ -18,6 +18,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from core.customer_display import (
+    RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY,
+    approved_personalization_customer_name_or_fallback,
+)
 from core.store_display import clean_store_name
 
 
@@ -45,13 +49,13 @@ def build_system_prompt(ctx: Dict[str, Any]) -> str:
     sections.append(store_section)
 
     # ── 3. Customer profile ───────────────────────────────────────────────────
-    # Read the name verbatim from context — the merchant-controlled
-    # bulk cleanup tool on the customers page is the single source
-    # of truth (see core/customer_display.py module docstring). If
-    # the name is empty/whitespace we pass an empty string and the
-    # LLM falls back to a tone-appropriate greeting on its own.
-    raw_customer_name = ctx.get("customer_name", "")
-    customer_name     = (raw_customer_name or "").strip() if isinstance(raw_customer_name, str) else ""
+    # Personal-name context must carry the resolver's typed identity snapshot.
+    # Raw aliases (customer_name/name/display_name) are provider/input data and
+    # cannot prove authority; missing or forged mapping evidence fails closed.
+    customer_name = approved_personalization_customer_name_or_fallback(
+        ctx.get(RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY),
+        fallback="",
+    )
     segment           = ctx.get("segment", "new")
     is_returning      = ctx.get("is_returning", False)
     total_orders      = ctx.get("total_orders", 0)

@@ -25,8 +25,9 @@ behaviour was hard to debug. The decision (May 2026) is:
   * If it's ``NULL`` / empty / whitespace-only / phone-shaped, callers
     fall back to the static greeting :data:`DEFAULT_FALLBACK_NAME`.
   * Dashboard ``display_name`` may show the phone for row identification;
-    that value must **never** be passed into this helper — only
-    ``Customer.name`` belongs in campaigns / automations / AI greetings.
+    that value must **never** be passed into raw-string helpers.
+  * AI/customer-addressing contexts additionally require the resolver's typed
+    identity snapshot; ``Customer.name`` alone does not prove approval.
   * No runtime mutation at send time — the value the merchant sees
     in the customers page is the value Meta receives.
 
@@ -49,6 +50,11 @@ from typing import Optional
 # tests better on WhatsApp where the tone is closer to a corner shop than
 # a customer-support hotline.
 DEFAULT_FALLBACK_NAME = "عميلنا الغالي"
+
+# Internal in-process context key.  The value must be the resolver's frozen
+# CustomerIdentitySnapshot, not a boolean or a mapping copied from a provider
+# payload.  Consumers still validate the value's concrete type before use.
+RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY = "_resolved_customer_identity"
 
 
 # ── Stopword tokens ───────────────────────────────────────────────────────────
@@ -252,7 +258,11 @@ def display_name_passthrough_or_fallback(
     automations, and AI greetings. Its job is to decide between
     "use the stored official name" and "fall back to the static
     greeting"; it does NOT strip stopwords or read dashboard
-    ``display_name``.
+    ``display_name``. AI/customer-addressing contexts that can affect model
+    personalisation must additionally use
+    :func:`approved_personalization_customer_name_or_fallback` with the
+    resolver's typed identity snapshot; a stored raw string alone is not
+    approval.
 
     Rules:
       * ``None`` / non-string         → fallback.
@@ -281,6 +291,35 @@ def personalization_customer_name_or_fallback(
     ``display_name``.
     """
     return display_name_passthrough_or_fallback(raw, fallback=fallback)
+
+
+def approved_personalization_customer_name_or_fallback(
+    identity_snapshot: object,
+    fallback: str = DEFAULT_FALLBACK_NAME,
+) -> str:
+    """Return a resolver-approved personal name, or ``fallback``.
+
+    A raw string cannot prove whether ``Customer.name`` came from a proposed
+    provider profile or from an accepted manual/ecommerce/self-report source.
+    The AI/personal-addressing boundary therefore accepts only the existing
+    resolver's typed snapshot and reuses its official-status decision.
+
+    Mappings and payload-supplied flags deliberately fail closed, even if they
+    contain fields named ``customer_name_status`` or ``verified``.
+    """
+    from core.customer_identity_resolver import (  # noqa: PLC0415
+        CustomerIdentitySnapshot,
+        is_official_name_status,
+    )
+
+    if not isinstance(identity_snapshot, CustomerIdentitySnapshot):
+        return fallback
+    if not is_official_name_status(identity_snapshot.customer_name_status):
+        return fallback
+    return display_name_passthrough_or_fallback(
+        identity_snapshot.customer_name,
+        fallback=fallback,
+    )
 
 
 # ── Deprecated aliases (kept for back-compat with older imports) ─────

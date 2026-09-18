@@ -17,6 +17,7 @@ Legacy ``name_source`` is kept in sync for existing callers.
 from __future__ import annotations
 
 import logging
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -180,6 +181,53 @@ def is_official_name_status(status: Optional[str]) -> bool:
     return (status or "").strip().lower() in OFFICIAL_STATUSES
 
 
+def _safe_provider_display_label(raw: Optional[str]) -> str:
+    """Unicode admin label, NOT evidence of a person's operational identity.
+
+    No positive name dictionary. Reuse the existing negative phrase policy;
+    the personal-name validator's script restrictions do not govern admin labels.
+    """
+    from core.customer_display import _STOP_TOKENS_EN  # noqa: PLC0415
+    from core.customer_name_authority import (  # noqa: PLC0415
+        _is_devotional_phrase, _normalize_arabic, _STATUS_PHRASE_TOKENS,
+        _POLYSEMOUS_GIVEN_NAMES,
+    )
+
+    if not isinstance(raw, str) or any(unicodedata.category(c).startswith("C") for c in raw):
+        return ""
+    text = " ".join(unicodedata.normalize("NFC", raw).split())
+    if not 2 <= len(text) <= 60 or len(text.split()) > 4:
+        return ""
+    previous_letter = False
+    letters = 0
+    for char in text:
+        category = unicodedata.category(char)
+        if category.startswith("L"):
+            previous_letter = True
+            letters += 1
+        elif category.startswith("M") and previous_letter:
+            continue
+        elif char in " '-’" and previous_letter:
+            previous_letter = False
+        else:
+            return ""
+    if not previous_letter or letters < 2:
+        return ""
+    tokens = [_normalize_arabic(t) for t in text.split()]
+    # Retain the existing ambiguity exclusions, never use positive lexicons
+    # to decide whether an otherwise unknown international label is displayable.
+    if len(tokens) == 1 and tokens[0] in _POLYSEMOUS_GIVEN_NAMES:
+        return ""
+    if _is_devotional_phrase(tokens) or any(t in _STATUS_PHRASE_TOKENS for t in tokens):
+        return ""
+    if text.casefold() in _STOP_TOKENS_EN:
+        return ""
+    validation = validate_customer_name(text)
+    if not validation.valid and validation.reason not in {"pattern_mismatch", "invalid_chars"}:
+        return ""
+    return text
+
+
 def _resolve_display_name(
     *,
     name: str,
@@ -271,6 +319,12 @@ def display_name_for_customer(customer: Any, *, phone_fallback: str = "") -> str
     snap = read_customer_identity(customer)
     if snap.display_name and is_valid_customer_display_name(snap.display_name):
         return snap.display_name
+    # Admin-only fallback. Do not expose display-only labels through the
+    # operational snapshot consumed by order context / confirmation compose.
+    if not _meta(customer).get("manual_name_cleared"):
+        label = _safe_provider_display_label(snap.proposed_name)
+        if label:
+            return label
     return phone_fallback
 
 
@@ -424,7 +478,15 @@ def apply_customer_name(
             incoming_authority=incoming_authority,
         )
 
+    provider_label = (
+        _safe_provider_display_label(raw_name)
+        if incoming_authority == NameAuthority.WHATSAPP_PROFILE else ""
+    )
     validation = validate_customer_name(raw_name)
+    if provider_label and not validation.valid:
+        from core.customer_name_validator import NameValidationResult  # noqa: PLC0415
+
+        validation = NameValidationResult(True, cleaned=provider_label, reason="provider_display_label", confidence=0.4)
     if not validation.valid:
         if raw_name and str(raw_name).strip():
             logger.info(
@@ -453,6 +515,11 @@ def apply_customer_name(
         verdict = classify_whatsapp_profile_name(raw_name)
         classification = verdict.classification
         cleaned = verdict.cleaned or cleaned
+        if provider_label and verdict.is_rejected:
+            classification = "DISPLAY_LABEL"
+            cleaned = provider_label
+        elif not provider_label and verdict.is_person_name:
+            classification = NOT_PERSON_NAME
         if classification == NOT_PERSON_NAME:
             logger.info(
                 "[CUSTOMER_IDENTITY] profile hint rejected name=%r reason=%s",
@@ -534,7 +601,7 @@ def apply_customer_name(
         return True
 
     if decision.decision == DECISION_HINT_ONLY:
-        # AMBIGUOUS profile hint: retained for merchant review only.
+        # Display-only or ambiguous hint; no operational identity promotion.
         # Canonical name / status / source / authority are untouched.
         meta["proposed_name"] = cleaned
         meta["proposed_name_classification"] = classification or ""

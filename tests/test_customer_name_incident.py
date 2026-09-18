@@ -26,9 +26,12 @@ from test_customer_name_authority import _make_db
 PHONE = "+966500000123"
 FAMILIES = ("الغامدي", "الحارثي", "العتيبي", "القحطاني", "الزهراني")
 NON_NAMES = (
-    "الموقع", "الطلب", "الشحن", "المتجر", "الحساب", "المتوفر", "الجديد",
-    "السعودي", "العالمي", "الهلالي", "المجاني", "الحمد لله", "سبحان الله",
-    "مشغول", "متجر الملابس", "Unknown", "", "نور", "شمس",
+    "الموقع", "الشحن", "الحمد لله", "سبحان الله", "مشغول",
+    "متجر الملابس", "Unknown", "", "نور",
+)
+REMOVED_PR_LOCAL_NEGATIVES = (
+    "الطلب", "المتجر", "الحساب", "المتوفر", "الجديد", "السعودي",
+    "العالمي", "الهلالي", "المجاني", "شمس",
 )
 EXPLICIT = (
     "اسمي أبو سعد", "أنا اسمي أبو سعد", "معك أبو سعد", "أنا أبو سعد",
@@ -99,6 +102,17 @@ def test_untrusted_profile_word_never_becomes_canonical(db, name):
     assert display_name_for_customer(customer, phone_fallback=PHONE) == PHONE
 
 
+@pytest.mark.parametrize("name", REMOVED_PR_LOCAL_NEGATIVES)
+def test_removed_pr_local_negative_tokens_are_display_only(db, name):
+    """These expectations changed solely because the unapproved list was removed."""
+    customer = _customer(db)
+    apply_customer_name(customer, name, source="whatsapp_inbound")
+    db.commit()
+    assert not customer.name
+    assert display_name_for_customer(customer, phone_fallback=PHONE) == name
+    assert not can_use_name_for_operations(customer)
+
+
 @pytest.mark.parametrize("message", EXPLICIT)
 def test_explicit_self_report_is_normalized_and_promoted(db, message):
     customer = _customer(db)
@@ -154,11 +168,15 @@ def test_stronger_names_protected_from_profile_and_self_report(db, protected):
     assert customer.name == _provenance(db, customer).canonical_name == "أحمد سالم"
 
 
-@pytest.mark.parametrize("profile,canonical", [
-    ("الغامدي", "الغامدي"), ("الحمد لله", None), ("شمس", None),
-    ("الغامدي", "أحمد سالم"),
+@pytest.mark.parametrize("profile,canonical,expected", [
+    ("الغامدي", "الغامدي", "الغامدي"),
+    ("الحمد لله", None, PHONE),
+    ("شمس", None, "شمس"),
+    ("الغامدي", "أحمد سالم", "أحمد سالم"),
 ])
-def test_email_customers_and_conversations_share_resolved_identity(db, profile, canonical):
+def test_email_customers_and_conversations_share_resolved_identity(
+    db, profile, canonical, expected,
+):
     from routers.customers import _serialize_customer
     from routers.conversations import list_conversations
     from services.merchant_first_contact import maybe_notify_first_customer
@@ -172,7 +190,6 @@ def test_email_customers_and_conversations_share_resolved_identity(db, profile, 
     db.add(Conversation(tenant_id=customer.tenant_id, customer_id=customer.id,
                         extra_metadata={"phone": PHONE}, status="active"))
     db.commit()
-    expected = canonical or PHONE
     request = SimpleNamespace(state=SimpleNamespace(tenant_id=customer.tenant_id))
     with patch("routers.conversations.resolve_tenant_id", return_value=customer.tenant_id):
         conversations = asyncio.run(list_conversations(request, db=db))

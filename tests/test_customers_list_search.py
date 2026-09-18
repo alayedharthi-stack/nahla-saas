@@ -24,6 +24,7 @@ for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
         sys.path.insert(0, str(_p))
 
 from models import Base, Customer, CustomerProfile, Tenant  # noqa: E402
+from core.customer_identity_resolver import apply_customer_name  # noqa: E402
 
 TARGET_E164 = "+966506569015"
 TARGET_RAW = "966506569015"
@@ -154,6 +155,68 @@ class TestCustomersListPhoneSearch:
         assert result["total"] == 1
         assert result["customers"][0]["id"] == other_id
         assert result["customers"][0]["id"] != target_id
+
+
+class TestCustomersListProviderHintSearch:
+    def _seed_hint(self, engine, tenant_id: int, label: str, phone: str) -> int:
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        c = Customer(tenant_id=tenant_id, phone=phone, normalized_phone=phone)
+        db.add(c)
+        db.flush()
+        apply_customer_name(c, label, source="whatsapp_inbound")
+        db.commit()
+        customer_id = c.id
+        assert c.name is None
+        db.close()
+        return customer_id
+
+    def test_proposed_name_search_finds_hint_without_promoting_customer_name(self, tenant_db):
+        engine, tenant_id, _, _ = tenant_db
+        customer_id = self._seed_hint(engine, tenant_id, "مشاعل", "+966500001111")
+
+        result = _call_list(engine, tenant_id, search="مشاعل")
+
+        assert result["total"] == 1
+        assert result["customers"][0]["id"] == customer_id
+        assert result["customers"][0]["display_name"] == "مشاعل"
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        assert db.get(Customer, customer_id).name is None
+        db.close()
+
+    def test_proposed_name_search_remains_tenant_scoped(self, tenant_db):
+        engine, tenant_id, _, _ = tenant_db
+        local_id = self._seed_hint(engine, tenant_id, "مشاعل", "+966500001112")
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        foreign = Tenant(name="ForeignSearchTenant", is_active=True)
+        db.add(foreign)
+        db.commit()
+        foreign_id = foreign.id
+        db.close()
+        foreign_customer_id = self._seed_hint(engine, foreign_id, "مشاعل", "+966500001113")
+
+        result = _call_list(engine, tenant_id, search="مشاعل")
+
+        assert result["total"] == 1
+        assert result["customers"][0]["id"] == local_id
+        assert result["customers"][0]["id"] != foreign_customer_id
+
+    def test_proposed_name_search_preserves_count_pagination_and_unique_rows(self, tenant_db):
+        engine, tenant_id, _, _ = tenant_db
+        ids = {
+            self._seed_hint(engine, tenant_id, "مشاعل", "+966500001114"),
+            self._seed_hint(engine, tenant_id, "مشاعل", "+966500001115"),
+        }
+
+        first = _call_list(engine, tenant_id, search="مشاعل", page=1, per_page=1)
+        second = _call_list(engine, tenant_id, search="مشاعل", page=2, per_page=1)
+
+        assert first["total"] == second["total"] == 2
+        assert first["pages"] == second["pages"] == 2
+        returned = {first["customers"][0]["id"], second["customers"][0]["id"]}
+        assert returned == ids
 
 
 class TestCustomersListSearchWithSegmentFilter:
