@@ -34,9 +34,13 @@ from services.commerce_v2_phase_2_7b_environment import (  # noqa: E402
     cleanup_knowledge_acceptance_environment,
     describe_knowledge_acceptance_environment,
     provision_knowledge_acceptance_environment,
+    reset_acceptance_thread,
     verify_acceptance_fixtures,
+    verify_case_bindings,
 )
+from services.commerce_v2_phase_2_7b_faults import knowledge_fault  # noqa: E402
 from services.commerce_v2_phase_2_7b_knowledge_acceptance import (  # noqa: E402
+    KNOWLEDGE_CONTRACT_VERSION_V2,
     create_knowledge_acceptance_run,
     execute_knowledge_acceptance_run,
     knowledge_run_status,
@@ -96,6 +100,7 @@ def command_create(args: argparse.Namespace) -> int:
             commit=args.commit,
             conversation_id=int(conversation_id),
             tenant_id=int(environment["tenant_id"]),
+            contract_version=args.contract,
         )
         _emit("P27B_CREATE", {key: meta[key] for key in ("run_id", "status", "contract_version", "matrix_sha256", "commit")})
         return 0
@@ -110,17 +115,20 @@ def command_run(args: argparse.Namespace) -> int:
         environment = describe_knowledge_acceptance_environment(db)
         tenant_id = int(environment["tenant_id"])
         conversations = sorted(environment["conversations"].values())
-        matrix = load_knowledge_acceptance_matrix()
+        matrix = load_knowledge_acceptance_matrix(contract_version=args.contract)
         # Prove every fixture the matrix needs resolves through the real
         # lookup before a single case is spent.
         _emit("P27B_FIXTURES", verify_acceptance_fixtures(db, tenant_id))
+        if matrix.contract_version == KNOWLEDGE_CONTRACT_VERSION_V2:
+            _emit("P27B_BINDINGS", verify_case_bindings(db, tenant_id, matrix))
         alias = matrix.required_aliases[0]
+        conversation_id = int(sorted(environment["conversations"].values())[0])
 
-        async def submit_case(session: Any, case: Any) -> dict[str, Any]:
+        async def _turn(session: Any, case: Any, text: str) -> dict[str, Any]:
             request = InternalE2ETurnRequest(
                 tenant_id=tenant_id,
                 synthetic_customer_alias=alias,
-                text=case.input,
+                text=text,
                 case_id=f"P27B:{case.case_id}",
                 expected={
                     "case_id": case.case_id,
@@ -130,6 +138,32 @@ def command_run(args: argparse.Namespace) -> int:
                 batch_id=f"p27b:{args.run_id}"[:64],
             )
             return await submit_internal_customer_turn(session, request)
+
+        async def submit_case(session: Any, case: Any) -> dict[str, Any]:
+            # Reset first: the model reads history from stored MessageEvent
+            # rows, so a previous case's turns reach this prompt until they are
+            # deleted.  Then replay this case's own anchor turns, so the case
+            # stands on the product its binding declares and not on whatever an
+            # earlier case happened to surface.
+            if getattr(case, "reset_thread_before", False):
+                _emit(
+                    "P27B_RESET",
+                    {
+                        "case_id": case.case_id,
+                        **reset_acceptance_thread(
+                            session,
+                            tenant_id=tenant_id,
+                            conversation_id=conversation_id,
+                        ),
+                    },
+                )
+            for anchor in getattr(case, "anchor_turns", ()) or ():
+                await _turn(session, case, anchor)
+            fault = str(getattr(case, "knowledge_fault_mode", "") or "")
+            if fault:
+                with knowledge_fault(fault):
+                    return await _turn(session, case, case.input)
+            return await _turn(session, case, case.input)
 
         meta = asyncio.run(
             execute_knowledge_acceptance_run(
@@ -215,10 +249,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     create = sub.add_parser("create")
     create.add_argument("--commit", required=True)
+    create.add_argument("--contract", default=KNOWLEDGE_CONTRACT_VERSION_V2)
     create.set_defaults(func=command_create)
 
     run = sub.add_parser("run")
     run.add_argument("--run-id", dest="run_id", required=True)
+    run.add_argument("--contract", default=KNOWLEDGE_CONTRACT_VERSION_V2)
     run.set_defaults(func=command_run)
 
     status = sub.add_parser("status")

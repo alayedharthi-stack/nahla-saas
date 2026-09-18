@@ -29,6 +29,37 @@ ACCEPTANCE_TENANT_MARKER = "PHASE_2_7B_SYNTHETIC_ACCEPTANCE"
 # name is the canonical one rather than a second spelling of it.
 ACCEPTANCE_CHANNEL = INTERNAL_E2E_CHANNEL
 ACCEPTANCE_FIXTURE_CONTRACT = "phase_2_7b_acceptance_fixture_v2"
+# The two directions the model's session reads back as conversation history.
+# The reset boundary clears exactly these and nothing else, so a run's own
+# control row — also a MessageEvent on this conversation — survives.
+ACCEPTANCE_TURN_DIRECTIONS = ("internal_e2e_inbound", "internal_e2e_outbound")
+
+# Which product each knowledge fixture is attached to, and the title it is
+# stored under.  The v2 matrix binds a case to a fixture; this is how that
+# binding is checked against the database before the run spends a case.
+FIXTURE_SECTION_TITLES = {
+    "store_policy_relevant": "سياسة الاسترجاع",
+    "product_linked_description": "وصف الجاكيت",
+    "product_linked_origin": "مصدر الجاكيت",
+    "product_linked_usage": "طريقة العناية بالتنورة",
+    "product_linked_stale_price": "نشرة قديمة عن العسل",
+    "product_linked_stale_availability": "ملاحظة قديمة عن الصابون",
+    "product_linked_health_statement": "بيان التاجر عن العسل",
+    "irrelevant_section": "مواعيد الفرع",
+    "deleted_section": "بيان ملغى عن الصابون",
+    "foreign_tenant_section": "سياسة متجر آخر",
+}
+FIXTURE_PRODUCT_SKUS = {
+    "product_linked_description": "P27B-JACKET",
+    "product_linked_origin": "P27B-JACKET",
+    "product_linked_usage": "P27B-SKIRT",
+    "product_linked_stale_price": "P27B-HONEY",
+    "product_linked_stale_availability": "P27B-SOAP",
+    "product_linked_health_statement": "P27B-HONEY",
+    "deleted_section": "P27B-SOAP",
+}
+DELETED_FIXTURES = frozenset({"deleted_section"})
+FOREIGN_FIXTURES = frozenset({"foreign_tenant_section"})
 
 
 def acceptance_aliases() -> tuple[InternalE2EAlias, ...]:
@@ -126,6 +157,141 @@ def assert_isolated_acceptance_database(
         "isolated": True,
         "acceptance_tenant_ids": acceptance_ids,
         "row_census": census,
+    }
+
+
+def verify_case_bindings(db: Any, tenant_id: int, matrix: Any) -> dict[str, Any]:
+    """Fail closed unless every v2 case can actually reach what it declares.
+
+    Run 1 spent sixteen cases against fixtures several of them could never
+    touch: the usage section was on the skirt while the turn resolved the
+    jacket, the stale price was on the honey, the deleted section on the soap.
+    Nothing checked, so the run reported failures that were really unreachable
+    expectations.  This refuses to start instead.
+    """
+    from models import (
+        MerchantKnowledgeSection,
+        MerchantKnowledgeSectionProduct,
+        Product,
+        Tenant,
+    )
+
+    products = {
+        str(row.external_id): row
+        for row in db.query(Product).filter(Product.tenant_id == int(tenant_id)).all()
+    }
+    sections = {
+        str(row.title): row
+        for row in db.query(MerchantKnowledgeSection)
+        .filter(MerchantKnowledgeSection.tenant_id == int(tenant_id))
+        .all()
+    }
+    foreign_ids = [
+        int(row.id)
+        for row in db.query(Tenant).all()
+        if int(row.id) != int(tenant_id)
+    ]
+    foreign_sections = {
+        str(row.title): row
+        for row in db.query(MerchantKnowledgeSection)
+        .filter(MerchantKnowledgeSection.tenant_id.in_(foreign_ids))
+        .all()
+    } if foreign_ids else {}
+
+    bound: dict[str, Any] = {}
+    for case in matrix.cases:
+        sku = case.target_product_sku
+        fixture = case.required_section_fixture
+        entry: dict[str, Any] = {"thread": case.thread, "reset": case.reset_thread_before}
+        product = None
+        if sku:
+            product = products.get(sku)
+            if product is None:
+                raise _fail(f"binding_target_product_missing:{case.case_id}:{sku}")
+            entry["product_id"] = int(product.id)
+            entry["product_sku"] = sku
+        if fixture:
+            title = FIXTURE_SECTION_TITLES.get(fixture)
+            section = sections.get(title or "")
+            if section is None:
+                raise _fail(f"binding_section_missing:{case.case_id}:{fixture}")
+            if int(section.tenant_id) != int(tenant_id):
+                raise _fail(f"binding_section_wrong_tenant:{case.case_id}:{fixture}")
+            entry["section_id"] = int(section.id)
+            entry["section_fixture"] = fixture
+            expected_sku = FIXTURE_PRODUCT_SKUS.get(fixture)
+            if expected_sku:
+                if expected_sku != sku:
+                    raise _fail(
+                        f"binding_section_not_linked_to_target:{case.case_id}:{fixture}"
+                    )
+                links = {
+                    int(row.product_id)
+                    for row in db.query(MerchantKnowledgeSectionProduct)
+                    .filter(MerchantKnowledgeSectionProduct.section_id == int(section.id))
+                    .all()
+                }
+                if product is None or int(product.id) not in links:
+                    raise _fail(
+                        f"binding_section_link_missing:{case.case_id}:{fixture}"
+                    )
+        for forbidden in case.forbidden_section_fixtures:
+            title = FIXTURE_SECTION_TITLES.get(forbidden)
+            if forbidden in FOREIGN_FIXTURES:
+                row = foreign_sections.get(title or "")
+                if row is None:
+                    raise _fail(f"binding_foreign_fixture_missing:{case.case_id}")
+                entry.setdefault("forbidden_section_ids", []).append(int(row.id))
+            else:
+                row = sections.get(title or "")
+                if row is None:
+                    raise _fail(f"binding_forbidden_fixture_missing:{case.case_id}")
+                if forbidden in DELETED_FIXTURES and bool(row.is_active):
+                    raise _fail(f"binding_deleted_fixture_still_active:{case.case_id}")
+                entry.setdefault("forbidden_section_ids", []).append(int(row.id))
+        if case.knowledge_fault_mode:
+            entry["knowledge_fault_mode"] = case.knowledge_fault_mode
+        bound[case.case_id] = entry
+    return {"contract_version": matrix.contract_version, "cases": bound}
+
+
+def reset_acceptance_thread(
+    db: Any, *, tenant_id: int, conversation_id: int, env: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    """Clear one synthetic conversation's stored turns, and prove it is clear.
+
+    This is the reset boundary the v2 matrix relies on.  It has to delete rows,
+    not just drop in-process state: the model's history comes from
+    ``MessageEvent`` rows read back by ``ConversationMessageSession``, so a
+    previous case's turns reach the next case's prompt until those rows are
+    gone.  That is exactly how Run 1 let «هذا المنتج» keep resolving to
+    whichever product an earlier case had surfaced.
+
+    Refuses outside the isolated acceptance database, and only ever touches the
+    one synthetic conversation it is given.
+    """
+    from models import MessageEvent
+
+    assert_isolated_acceptance_database(db, env=env)
+
+    def _turns() -> Any:
+        return db.query(MessageEvent).filter(
+            MessageEvent.tenant_id == int(tenant_id),
+            MessageEvent.conversation_id == int(conversation_id),
+            MessageEvent.direction.in_(ACCEPTANCE_TURN_DIRECTIONS),
+        )
+
+    before = _turns().count()
+    deleted = _turns().delete(synchronize_session=False)
+    db.commit()
+    remaining = _turns().count()
+    if remaining:
+        raise _fail("thread_reset_incomplete")
+    return {
+        "conversation_id": int(conversation_id),
+        "messages_before": int(before),
+        "messages_deleted": int(deleted),
+        "messages_remaining": int(remaining),
     }
 
 
@@ -614,6 +780,9 @@ __all__ = [
     "cleanup_knowledge_acceptance_environment",
     "describe_knowledge_acceptance_environment",
     "acceptance_aliases",
+    "ACCEPTANCE_TURN_DIRECTIONS",
+    "reset_acceptance_thread",
+    "verify_case_bindings",
     "provision_knowledge_acceptance_environment",
     "verify_acceptance_fixtures",
 ]
