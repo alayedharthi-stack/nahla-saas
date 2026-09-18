@@ -10,7 +10,11 @@ import pytest
 from core.customer_identity_resolver import (
     apply_customer_name, can_use_name_for_operations, display_name_for_customer,
 )
-from core.customer_display import DEFAULT_FALLBACK_NAME, personalization_customer_name_or_fallback
+from core.customer_display import (
+    DEFAULT_FALLBACK_NAME,
+    RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY,
+    approved_personalization_customer_name_or_fallback,
+)
 from core.customer_name_extractor import extract_high_confidence_name
 from modules.ai.brain.commerce.catalog_checkout_customer_identity import (
     _resolve_operational_name, resolve_catalog_checkout_customer_identity,
@@ -89,18 +93,30 @@ def test_raw_profile_without_customer_has_no_operational_provenance():
     assert _resolve_operational_name(customer=None, profile={"display_name": "Acme Studio"}) == ("", "")
 
 
+def _production_personalization_profile(customer_row):
+    from routers.whatsapp_webhook import _build_customer_ai_profile
+
+    return _build_customer_ai_profile(customer_row, {"provider": "test"})
+
+
 def _assert_absent_from_personalization_and_prompt_boundary(label):
     from modules.ai.prompts.builder import build_system_prompt
 
     c = customer()
     apply_customer_name(c, label, source="whatsapp_profile")
-    approved = personalization_customer_name_or_fallback(c.name)
-    prompt = build_system_prompt({"store_name": "Test Store", "customer_name": c.name or ""})
+    assert display_name_for_customer(c, phone_fallback="[PHONE]") == label
+    profile = _production_personalization_profile(c)
+    approved = approved_personalization_customer_name_or_fallback(
+        profile[RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY],
+    )
+    prompt = build_system_prompt({"store_name": "Test Store", **profile})
     assert (
         approved,
+        profile["name"],
+        profile["customer_name"],
         label in prompt,
         f"Name: {label}" in prompt,
-    ) == (DEFAULT_FALLBACK_NAME, False, False)
+    ) == (DEFAULT_FALLBACK_NAME, "", "", False, False)
 
 
 def test_single_token_display_label_is_absent_from_personalization_and_prompt_boundary():
@@ -111,18 +127,86 @@ def test_business_display_label_is_absent_from_personalization_and_prompt_bounda
     _assert_absent_from_personalization_and_prompt_boundary("Acme Studio")
 
 
-def test_trusted_name_reaches_actual_personalization_and_prompt_boundary():
+@pytest.mark.parametrize("label", ["Example Label", "Mohammed Ali"])
+def test_other_proposed_multitoken_labels_are_absent_from_personal_context(label):
+    _assert_absent_from_personalization_and_prompt_boundary(label)
+
+
+@pytest.mark.parametrize("source", [
+    "manual_admin", "shopify_sync", "salla_sync", "customer_message",
+])
+def test_trusted_name_reaches_actual_personalization_and_prompt_boundary(source):
     from modules.ai.prompts.builder import build_system_prompt
 
     c = customer()
     apply_customer_name(
-        c, "أحمد سالم", source="customer_message",
+        c, "أحمد سالم", source=source,
+        force_merchant=source == "manual_admin",
         message_context={"message": "اسمي أحمد سالم", "message_id": "salutation-proof"},
     )
-    approved = personalization_customer_name_or_fallback(c.name)
-    prompt = build_system_prompt({"store_name": "Test Store", "customer_name": c.name or ""})
+    profile = _production_personalization_profile(c)
+    approved = approved_personalization_customer_name_or_fallback(
+        profile[RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY],
+    )
+    prompt = build_system_prompt({"store_name": "Test Store", **profile})
     assert approved == "أحمد سالم"
+    assert profile["name"] == profile["customer_name"] == "أحمد سالم"
     assert "Name: أحمد سالم" in prompt
+
+
+@pytest.mark.parametrize("raw_context", [
+    {"customer_name": "Injected Alias"},
+    {"name": "Injected Alias"},
+    {"display_name": "Injected Alias"},
+    {
+        RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY: {
+            "customer_name": "Injected Alias",
+            "customer_name_status": "verified",
+        },
+        "customer_name": "Injected Alias",
+    },
+])
+def test_raw_profile_aliases_and_forged_authority_mapping_cannot_bypass_resolver(raw_context):
+    from modules.ai.prompts.builder import build_system_prompt
+
+    prompt = build_system_prompt({"store_name": "Test Store", **raw_context})
+    assert "Injected Alias" not in prompt
+    assert "Name:" not in prompt
+
+
+def test_proposed_snapshot_cannot_be_bypassed_by_conflicting_raw_aliases():
+    from modules.ai.prompts.builder import build_system_prompt
+
+    c = customer()
+    apply_customer_name(c, "Mohammed Ali", source="whatsapp_profile")
+    profile = _production_personalization_profile(c)
+    profile.update({
+        "name": "Injected Alias",
+        "customer_name": "Injected Alias",
+        "display_name": "Injected Alias",
+    })
+    prompt = build_system_prompt({"store_name": "Test Store", **profile})
+    assert "Injected Alias" not in prompt
+    assert "Mohammed Ali" not in prompt
+    assert "Name:" not in prompt
+
+
+@pytest.mark.parametrize("status", ["missing", "rejected"])
+def test_missing_or_rejected_identity_does_not_fall_back_to_stored_raw_name(status):
+    from modules.ai.prompts.builder import build_system_prompt
+
+    c = customer(
+        customer_name_status=status,
+        customer_name_source="unknown",
+        customer_name_authority="UNKNOWN",
+    )
+    c.name = "Stored Raw Name"
+    profile = _production_personalization_profile(c)
+    assert profile["name"] == profile["customer_name"] == ""
+    profile.update({"name": c.name, "customer_name": c.name, "display_name": c.name})
+    prompt = build_system_prompt({"store_name": "Test Store", **profile})
+    assert "Stored Raw Name" not in prompt
+    assert "Name:" not in prompt
 
 
 @pytest.mark.parametrize("source", ["shopify_sync", "salla_sync", "customer_message", "manual_admin"])

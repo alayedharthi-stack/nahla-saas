@@ -6223,6 +6223,38 @@ async def _handle_media_fallback(
             )
 
 
+def _build_customer_ai_profile(
+    customer: Any,
+    inbound_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build the in-process customer profile passed to Brain.
+
+    Administrative display labels may legitimately occupy ``Customer.name``
+    with proposed authority.  Only the resolver snapshot can distinguish them
+    from an approved personal identity, so raw model/profile aliases are never
+    used to make that decision here.
+    """
+    from core.customer_display import (  # noqa: PLC0415
+        RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY,
+        approved_personalization_customer_name_or_fallback,
+    )
+    from core.customer_identity_resolver import read_customer_identity  # noqa: PLC0415
+
+    identity = read_customer_identity(customer)
+    approved_name = approved_personalization_customer_name_or_fallback(
+        identity,
+        fallback="",
+    )
+    return {
+        RESOLVED_CUSTOMER_IDENTITY_CONTEXT_KEY: identity,
+        "name": approved_name,
+        "customer_name": approved_name,
+        "email": getattr(customer, "email", None) or "",
+        "id": getattr(customer, "id", None),
+        "inbound_metadata": dict(inbound_metadata or {}),
+    }
+
+
 async def _handle_merchant_message(
     phone_id: str,
     to: str,
@@ -9395,12 +9427,7 @@ async def _handle_merchant_message(
                         )
                 except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
                     pass
-                profile = {
-                    "name": getattr(customer, "name", None) or "",
-                    "email": getattr(customer, "email", None) or "",
-                    "id": getattr(customer, "id", None),
-                    "inbound_metadata": dict(inbound_metadata or {}),
-                }
+                profile = _build_customer_ai_profile(customer, inbound_metadata)
                 if customer is not None:
                     try:
                         import time as _time_prof  # noqa: PLC0415
