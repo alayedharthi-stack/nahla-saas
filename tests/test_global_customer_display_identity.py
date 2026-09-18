@@ -10,6 +10,7 @@ import pytest
 from core.customer_identity_resolver import (
     apply_customer_name, can_use_name_for_operations, display_name_for_customer,
 )
+from core.customer_display import DEFAULT_FALLBACK_NAME, personalization_customer_name_or_fallback
 from core.customer_name_extractor import extract_high_confidence_name
 from modules.ai.brain.commerce.catalog_checkout_customer_identity import (
     _resolve_operational_name, resolve_catalog_checkout_customer_identity,
@@ -37,9 +38,8 @@ def test_provider_label_display_without_checkout_identity(label):
 
 @pytest.mark.parametrize("label", [
     "", " ", "Unknown", "+15550000123", "123456", "https://example.test",
-    "person@example.test", "😀", "!!!", "a\u202eb", "a\nb", "الموقع", "الطلب",
-    "الشحن", "المتجر", "الحساب", "المتوفر", "الجديد", "السعودي", "العالمي",
-    "الهلالي", "المجاني", "نور", "الحمد لله", "سبحان الله", "مشغول", "متجر الملابس",
+    "person@example.test", "😀", "!!!", "a\u202eb", "a\nb", "الموقع",
+    "الشحن", "نور", "الحمد لله", "سبحان الله", "مشغول", "متجر الملابس",
 ])
 def test_non_identity_profile_has_only_phone_fallback(label):
     c = customer()
@@ -48,11 +48,32 @@ def test_non_identity_profile_has_only_phone_fallback(label):
     assert not can_use_name_for_operations(c)
 
 
-def test_business_label_is_not_canonical_personal_name():
+@pytest.mark.parametrize("label", [
+    "الطلب", "المتجر", "الحساب", "المتوفر", "الجديد", "السعودي",
+    "العالمي", "الهلالي", "المجاني", "شمس",
+])
+def test_removed_incident_lexicon_values_are_display_only_when_structurally_safe(label):
+    """These values were rejected only by the removed PR-local token list.
+
+    Without a product-approved worldwide lexicon, safe provider text may be
+    discoverable to the merchant while remaining non-operational.
+    """
     c = customer()
-    apply_customer_name(c, "Acme Studio", source="whatsapp_profile")
+    apply_customer_name(c, label, source="whatsapp_profile")
     assert c.name is None
-    assert c.extra_metadata["proposed_name"] == "Acme Studio"
+    assert display_name_for_customer(c, phone_fallback="[PHONE]") == label
+    assert not can_use_name_for_operations(c)
+
+
+@pytest.mark.parametrize("label", ["Acme Studio", "Example LLC"])
+def test_inherited_multitoken_profile_policy_remains_proposed_but_non_operational(label):
+    """List removal must not silently rewrite the inherited profile classifier."""
+    c = customer()
+    apply_customer_name(c, label, source="whatsapp_profile")
+    assert c.name == label
+    assert c.extra_metadata["proposed_name"] == label
+    assert display_name_for_customer(c) == label
+    assert not can_use_name_for_operations(c)
 
 
 @pytest.mark.parametrize("profile", [{"name": "أحمد سالم"}, {"display_name": "Acme Studio"},
@@ -66,6 +87,42 @@ def test_denied_customer_cannot_fall_back_to_raw_profile(profile):
 
 def test_raw_profile_without_customer_has_no_operational_provenance():
     assert _resolve_operational_name(customer=None, profile={"display_name": "Acme Studio"}) == ("", "")
+
+
+def _assert_absent_from_personalization_and_prompt_boundary(label):
+    from modules.ai.prompts.builder import build_system_prompt
+
+    c = customer()
+    apply_customer_name(c, label, source="whatsapp_profile")
+    approved = personalization_customer_name_or_fallback(c.name)
+    prompt = build_system_prompt({"store_name": "Test Store", "customer_name": c.name or ""})
+    assert (
+        approved,
+        label in prompt,
+        f"Name: {label}" in prompt,
+    ) == (DEFAULT_FALLBACK_NAME, False, False)
+
+
+def test_single_token_display_label_is_absent_from_personalization_and_prompt_boundary():
+    _assert_absent_from_personalization_and_prompt_boundary("مشاعل")
+
+
+def test_business_display_label_is_absent_from_personalization_and_prompt_boundary():
+    _assert_absent_from_personalization_and_prompt_boundary("Acme Studio")
+
+
+def test_trusted_name_reaches_actual_personalization_and_prompt_boundary():
+    from modules.ai.prompts.builder import build_system_prompt
+
+    c = customer()
+    apply_customer_name(
+        c, "أحمد سالم", source="customer_message",
+        message_context={"message": "اسمي أحمد سالم", "message_id": "salutation-proof"},
+    )
+    approved = personalization_customer_name_or_fallback(c.name)
+    prompt = build_system_prompt({"store_name": "Test Store", "customer_name": c.name or ""})
+    assert approved == "أحمد سالم"
+    assert "Name: أحمد سالم" in prompt
 
 
 @pytest.mark.parametrize("source", ["shopify_sync", "salla_sync", "customer_message", "manual_admin"])

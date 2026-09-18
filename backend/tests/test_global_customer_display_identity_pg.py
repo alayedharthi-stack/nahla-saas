@@ -9,8 +9,13 @@ from test_customer_name_provenance_read_isolation_pg import (
 )
 
 
-@pytest.mark.parametrize("label", ["مشاعل", "李雷", "José", "Ирина", "Acme Studio"])
-def test_provider_display_persists_without_operational_identity(pg_with_provenance_table, label):
+@pytest.mark.parametrize("label,expected_canonical", [
+    ("مشاعل", None), ("李雷", None), ("José", None), ("Ирина", None),
+    ("Acme Studio", "Acme Studio"),
+])
+def test_provider_display_persists_without_operational_identity(
+    pg_with_provenance_table, label, expected_canonical,
+):
     with _session(pg_with_provenance_table) as db:
         first, second = _seed(db), _seed(db)
         for c, value in [(first, label), (second, "Verified Person")]:
@@ -27,7 +32,9 @@ def test_provider_display_persists_without_operational_identity(pg_with_provenan
         row = db.query(CustomerNameProvenance).filter_by(tenant_id=first.tenant_id, customer_id=first.id).one()
         assert row.profile_hint == label
         assert row.last_attempt_source == "whatsapp_profile"
-        assert row.canonical_name is None
+        # Multi-token profile names retain main's inherited proposed-name
+        # behavior; all five remain ineligible for operational checkout use.
+        assert row.canonical_name == expected_canonical
         assert db.query(CustomerNameProvenance).filter_by(customer_id=first.id).count() == 1
         apply_customer_name(first, "أحمد سالم", source="customer_message",
                             message_context={"message": "اسمي أحمد سالم", "message_id": "synthetic-proof"})

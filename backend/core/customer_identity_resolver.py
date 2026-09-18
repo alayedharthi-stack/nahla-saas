@@ -220,21 +220,12 @@ def _safe_provider_display_label(raw: Optional[str]) -> str:
         return ""
     if _is_devotional_phrase(tokens) or any(t in _STATUS_PHRASE_TOKENS for t in tokens):
         return ""
-    # Existing incident negatives: generic labels and the retained نور ambiguity.
-    if text.casefold() in _STOP_TOKENS_EN or " ".join(tokens) in {
-        "الموقع", "الطلب", "الشحن", "المتجر", "الحساب", "المتوفر", "الجديد",
-        "السعودي", "العالمي", "الهلالي", "المجاني", "نور", "شمس",
-    }:
+    if text.casefold() in _STOP_TOKENS_EN:
         return ""
     validation = validate_customer_name(text)
     if not validation.valid and validation.reason not in {"pattern_mismatch", "invalid_chars"}:
         return ""
     return text
-
-
-def _provider_label_is_business(label: str) -> bool:
-    """Conservative business signals downgrade only; never grant authority."""
-    return bool(set(label.casefold().split()) & {"studio", "ltd", "llc", "inc", "gmbh"})
 
 
 def _resolve_display_name(
@@ -524,7 +515,7 @@ def apply_customer_name(
         verdict = classify_whatsapp_profile_name(raw_name)
         classification = verdict.classification
         cleaned = verdict.cleaned or cleaned
-        if provider_label and (verdict.is_rejected or _provider_label_is_business(provider_label)):
+        if provider_label and verdict.is_rejected:
             classification = "DISPLAY_LABEL"
             cleaned = provider_label
         elif not provider_label and verdict.is_person_name:

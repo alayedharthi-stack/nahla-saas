@@ -84,10 +84,14 @@ def _normalize_phone(raw: str) -> str:
 def _customer_search_clauses(search: str):
     """OR filter for ``list_customers`` search.
 
-    Matches display name and raw phone (legacy). Also matches
+    Matches canonical name, stored provider hint, and raw phone (legacy). Also matches
     ``normalized_phone`` (E.164) so merchants can paste numbers with
     or without ``+``, and local Saudi ``05…`` forms still resolve when
     libphonenumber can normalize them.
+
+    ``proposed_name`` is only a discovery field here. Matching it never
+    promotes it into ``Customer.name`` or grants operational authority.
+    Final rendering still goes through ``display_name_for_customer``.
     """
     from sqlalchemy import or_  # noqa: PLC0415
     from utils.phone_utils import normalize_to_e164  # noqa: PLC0415
@@ -97,8 +101,11 @@ def _customer_search_clauses(search: str):
         return None
 
     term = f"%{stripped}%"
+    from services.manual_segments import _json_meta_text  # noqa: PLC0415
+
     clauses = [
         Customer.name.ilike(term),
+        _json_meta_text("proposed_name").ilike(term),
         Customer.phone.ilike(term),
         Customer.normalized_phone.ilike(term),
     ]
