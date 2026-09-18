@@ -35,6 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PREVIOUS_HEAD = "0107"      # integration-bootstrap chain head before this slice
 THIS_REVISION = "0108"
 OTHER_HEAD = "0092"         # pre-existing A1-Validate branch head, untouched
+APPLICATION_HEAD = "0109"   # the ledger slice (0109) extends this revision linearly
 TABLES = (m.CONVERSATIONS_TABLE, m.TURNS_TABLE, m.TERMINALS_TABLE)
 CHANNEL = "wa:connection-1"
 LIVE = c.Namespace.LIVE
@@ -263,7 +264,7 @@ def foundation(pg_admin_dsn: str):
 
 
 def test_migration_applies_cleanly_on_the_current_head_and_is_reversible(pg_admin_dsn: str) -> None:
-    assert _script_heads() == {OTHER_HEAD, THIS_REVISION}, "0108 must extend 0107 and leave 0092 untouched"
+    assert _script_heads() == {OTHER_HEAD, APPLICATION_HEAD}, "the chain must extend 0107 and leave 0092 untouched"
     name, dsn = _create_database(pg_admin_dsn)
     engine = None
     try:

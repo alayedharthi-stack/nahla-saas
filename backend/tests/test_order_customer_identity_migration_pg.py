@@ -31,7 +31,7 @@ MIGRATION_TENANT_ID = 880_001
 LEGACY_CUSTOMER_REF = "LEG-CUST-1"
 LEGACY_ORDER_EXT_ID = "LEG-ORD-1"
 _EXPAND_MIGRATION_TARGET = "0087"
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0108"})
+_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0109"})
 
 _0087_CONSTRAINTS = (
     "chk_orders_external_no_canonical_customer",
@@ -253,7 +253,7 @@ def test_migration_chain_0086_seed_0087_target_repository_0098_head(
     assert heads == _REPOSITORY_ALEMBIC_HEADS
     # Ephemeral DB stops at A1-Expand 0087; integration bootstrap pins 0093.
     # Application Alembic head is 0106 (extends 0105 → 0104 → 0103); sibling 0092 stays parallel.
-    assert "0108" in heads
+    assert "0109" in heads
 
     with ephemeral_migration_engine.connect() as conn:
         rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()

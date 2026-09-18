@@ -421,44 +421,11 @@ class CommerceRuntimeRepository:
             state_body = c.validate_payload(state_transition.payload, field="payload", max_bytes=c.MAX_PAYLOAD_BYTES)
         try:
             with self._engine.begin() as conn:
-                turn = conn.execute(
-                    select(TURN).where(TURN.c.id == turn_id, TURN.c.tenant_id == tenant_id, TURN.c.namespace == ns)
-                ).one_or_none()
-                if turn is None:
-                    raise c.TurnNotFound(f"turn not found in tenant {tenant_id}/{ns}")
-                conversation_id = int(turn._mapping["conversation_id"])
-                c.require_token_scope(token, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id)
-                snap = self._lock(conn, tenant_id, ns, conversation_id)
-                self._require(snap, token, expected_revision=expected_revision)
-                existing = conn.execute(select(TERM).where(TERM.c.turn_id == turn_id)).one_or_none()
-                if existing is not None:
-                    raise c.TerminalAlreadyRecorded(_terminal(existing))
-                if snap.eligible_turn_id != turn_id:
-                    raise c.OwnershipRejected(c.RejectReason.TURN_NOT_ELIGIBLE, snap)
-                if state_body is not None:
-                    applied = self._apply_state(conn, conversation_id, tenant_id, ns, token,
-                                                expected_revision, state_body)
-                    if applied is None:
-                        self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token,
-                                                        expected_revision=expected_revision)
-                else:
-                    touched = conn.execute(
-                        self._guarded_update(conversation_id, tenant_id, ns, token)
-                        .values(updated_at=func.clock_timestamp())
-                    )
-                    if touched.rowcount != 1:
-                        self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token)
-                row = conn.execute(
-                    insert(TERM).values(
-                        turn_id=turn_id, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id,
-                        processing_outcome=processing, transport_outcome=transport, customer_reach=reach,
-                        recorded_fence=token.fence, recorded_epoch=token.epoch, recorded_by=token.owner_id,
-                        details=body,
-                    ).returning(TERM)
-                ).one()
-                if _fault_before_commit is not None:
-                    _fault_before_commit()
-                return _terminal(row)
+                return self._record_terminal_in(
+                    conn, tenant_id=tenant_id, ns=ns, turn_id=turn_id, token=token, processing=processing,
+                    transport=transport, reach=reach, details=body, expected_revision=expected_revision,
+                    state_body=state_body, fault_before_commit=_fault_before_commit,
+                )
         except IntegrityError:
             # Two completion attempts raced past the existence check: the
             # primary key kept exactly one, this write transaction rolled back
@@ -467,6 +434,68 @@ class CommerceRuntimeRepository:
             if existing is None:
                 raise
             raise c.TerminalAlreadyRecorded(existing) from None
+
+    def _record_terminal_in(
+        self, conn: Connection, *, tenant_id: int, ns: str, turn_id: int, token: c.OwnershipToken,
+        processing: str, transport: Optional[str], reach: Optional[str], details: Dict[str, Any],
+        expected_revision: Optional[int] = None, state_body: Optional[Dict[str, Any]] = None,
+        fault_before_commit: Optional[Callable[[], None]] = None,
+        resolve: Optional[Callable[[Connection, c.ConversationSnapshot], Tuple[Any, Any, Mapping[str, Any]]]] = None,
+    ) -> c.TerminalRecord:
+        """Insert the terminal of the eligible turn inside the caller's transaction.
+
+        Inputs are already validated. ``resolve``, when given, runs after the
+        conversation lock, the ownership guard, the existence check and the
+        eligibility check, and returns the transport outcome, the customer
+        reach and the details to record; the ledgers use it to derive those
+        facts from rows read under the same lock. Without ``resolve`` the
+        given ``transport`` and ``reach`` are recorded as they are.
+        """
+        turn = conn.execute(
+            select(TURN).where(TURN.c.id == turn_id, TURN.c.tenant_id == tenant_id, TURN.c.namespace == ns)
+        ).one_or_none()
+        if turn is None:
+            raise c.TurnNotFound(f"turn not found in tenant {tenant_id}/{ns}")
+        conversation_id = int(turn._mapping["conversation_id"])
+        c.require_token_scope(token, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id)
+        snap = self._lock(conn, tenant_id, ns, conversation_id)
+        self._require(snap, token, expected_revision=expected_revision)
+        existing = conn.execute(select(TERM).where(TERM.c.turn_id == turn_id)).one_or_none()
+        if existing is not None:
+            raise c.TerminalAlreadyRecorded(_terminal(existing))
+        if snap.eligible_turn_id != turn_id:
+            raise c.OwnershipRejected(c.RejectReason.TURN_NOT_ELIGIBLE, snap)
+        if resolve is not None:
+            transport, reach, resolved_details = resolve(conn, snap)
+            transport = c.validate_enum(transport, c.TransportOutcome, field="transport_outcome")
+            reach = c.validate_enum(reach, c.CustomerReach, field="customer_reach")
+            details = c.validate_payload(resolved_details, field="details", max_bytes=c.MAX_DETAILS_BYTES)
+        if transport is None or reach is None:
+            raise c.ValidationError("transport_outcome and customer_reach are required")
+        if state_body is not None:
+            applied = self._apply_state(conn, conversation_id, tenant_id, ns, token,
+                                        expected_revision, state_body)
+            if applied is None:
+                self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token,
+                                                expected_revision=expected_revision)
+        else:
+            touched = conn.execute(
+                self._guarded_update(conversation_id, tenant_id, ns, token)
+                .values(updated_at=func.clock_timestamp())
+            )
+            if touched.rowcount != 1:
+                self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token)
+        row = conn.execute(
+            insert(TERM).values(
+                turn_id=turn_id, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id,
+                processing_outcome=processing, transport_outcome=transport, customer_reach=reach,
+                recorded_fence=token.fence, recorded_epoch=token.epoch, recorded_by=token.owner_id,
+                details=details,
+            ).returning(TERM)
+        ).one()
+        if fault_before_commit is not None:
+            fault_before_commit()
+        return _terminal(row)
 
     # ── Internals ────────────────────────────────────────────────────────────
 
