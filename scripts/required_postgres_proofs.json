@@ -1,0 +1,57 @@
+{
+  "manifest_version": 1,
+  "title": "Required PostgreSQL proof suites (strict; independent of the commerce reliability gate)",
+  "rules": [
+    "Every node id below must be collected and must pass; a skip, failure, error, missing or uninventoried collection fails the run.",
+    "The required_env of a suite must be present (and equal, where a value is given) before pytest starts; otherwise the runner exits 2 without running anything.",
+    "This inventory carries no allowances. It does not measure the commerce reliability gate; that gate's acceptance remains a separate result.",
+    "Adding or removing a test in a listed module is a reviewed change to this inventory; the self-test compares it with pytest's own collection."
+  ],
+  "suites": [
+    {
+      "id": "commerce_runtime_foundation",
+      "module": "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py",
+      "origin": "PR #1089 — dormant commerce runtime foundation (18 real-PostgreSQL proofs)",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_migration_applies_cleanly_on_the_current_head_and_is_reversible",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_package_metadata_and_migration_declare_the_same_schema",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_duplicate_admission_resolves_to_one_durable_turn",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_concurrent_admission_preserves_unique_conversation_order",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_inbound_identity_bound_to_another_conversation_is_an_explicit_conflict",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_bounded_payloads_are_rejected_before_any_write",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_only_one_worker_owns_a_conversation_at_a_time",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_different_conversations_progress_independently",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_lease_expiry_permits_recovery_with_a_higher_fence_and_fences_out_the_old_worker",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_stale_revisions_cannot_overwrite_newer_state",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_ownership_epoch_change_invalidates_older_work",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_fencing_identities_are_never_reset_or_reused",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_cross_tenant_access_is_rejected",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_shadow_and_live_namespaces_are_independent",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_competing_completion_attempts_cannot_create_two_terminals",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_crash_before_commit_leaves_no_partial_transition",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_unknown_transport_outcome_is_recorded_as_unknown_and_grants_no_replay",
+        "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py::test_every_operation_closes_its_transaction_before_returning"
+      ]
+    },
+    {
+      "id": "global_customer_identity",
+      "module": "backend/tests/test_global_customer_display_identity_pg.py",
+      "origin": "PR #1087 (merged) — global customer display identity, 0107 persistence cases",
+      "required_env": {
+        "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED": "1",
+        "LEGACY_MIG_PG_TEST_DATABASE_URL": null
+      },
+      "nodeids": [
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[\\u0645\\u0634\\u0627\\u0639\\u0644-None]",
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[\\u674e\\u96f7-None]",
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[Jos\\xe9-None]",
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[\\u0418\\u0440\\u0438\\u043d\\u0430-None]",
+        "backend/tests/test_global_customer_display_identity_pg.py::test_provider_display_persists_without_operational_identity[Acme Studio-Acme Studio]"
+      ]
+    }
+  ]
+}
