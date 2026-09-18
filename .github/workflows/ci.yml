@@ -11,6 +11,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # Disposable PostgreSQL 16 for the "Required PostgreSQL proofs" step below.
+    # Nothing else in this job reads it: no job-level DSN environment is set,
+    # the root pytest run collects no test that probes 127.0.0.1:5433, and the
+    # backend modules run by the later steps use in-memory sqlite engines or
+    # environment-gated URLs that this job never sets.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nahla
+          POSTGRES_PASSWORD: nahla_password
+          POSTGRES_DB: nahla_saas
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nahla -d nahla_saas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,6 +64,30 @@ jobs:
 
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
+
+      # Required PostgreSQL proofs: the dormant commerce runtime foundation
+      # proofs, the revision-0108 reconciliation proofs and the global customer
+      # identity persistence cases run strictly against the postgres service
+      # above. scripts/required_postgres_proofs.py fails on missing or
+      # uninventoried collection, any skip, failure or error, and refuses to
+      # start when its configuration is missing; a skip is never a pass. The
+      # inventory (scripts/required_postgres_proofs.json) is the only source of
+      # the required node ids; no count is pinned here. Runbook:
+      # docs/engineering/required-postgres-proofs.md. This step does not
+      # execute the commerce reliability gate; that gate's acceptance is a
+      # separate result and stays blocked by its unapproved baseline debt.
+      - name: Required PostgreSQL proofs (commerce runtime foundation, migration, customer identity)
+        env:
+          NAHLA_RELIABILITY_REQUIRE_PG: "1"
+          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+          CUSTOMER_NAME_PROVENANCE_PG_REQUIRED: "1"
+          LEGACY_MIG_PG_TEST_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
+        run: |
+          set -euo pipefail
+          python scripts/required_postgres_proofs.py \
+            --manifest scripts/required_postgres_proofs.json \
+            --junit-dir /tmp/required-postgres-proofs \
+            --report /tmp/required-postgres-proofs/report.json
 
       - name: WhatsApp OAuth callback auth boundary
         run: |
