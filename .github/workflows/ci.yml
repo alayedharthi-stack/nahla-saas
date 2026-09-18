@@ -23,7 +23,7 @@ jobs:
         # needs Rust + libpq headers and breaks `pip install` in CI.
         # Bump back to 3.13 once the stack is upgraded (pydantic >= 2.9,
         # psycopg2-binary >= 2.9.10, bcrypt >= 4.2).
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
