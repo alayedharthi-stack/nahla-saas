@@ -351,18 +351,18 @@ def _assert_catalog_rows_belong_to_tenant(
         TenantIsolationLayer.assert_belongs(row, context.tenant_context)
 
 
-@commerce_read_tool("search_products", is_enabled=_catalog_search_enabled)
-async def search_products(
-    run_context: RunContextWrapper[CommerceAgentContext],
+async def search_products_impl(
+    context: CommerceAgentContext,
     query: str,
     limit: int,
 ) -> CatalogSearchResult:
-    """Search the current merchant's synced catalog.
+    """SDK-free implementation of the ``search_products`` read tool.
 
-    Use an empty query to browse the merchant's top available products. Limit
-    must be between 1 and 10. Tenant identity is taken only from trusted context.
+    The model-visible name, signature and description stay on the
+    decorated wrapper below; this body is unchanged and is the single
+    implementation shared by the Agents-SDK tool and by the commerce
+    runtime's own loop, which passes the trusted context directly.
     """
-    context = run_context.context
     context.assert_scope()
     bounded_limit = max(1, min(int(limit), 10))
     catalog = CatalogContextBuilder(context.db, context.tenant_id)
@@ -433,13 +433,17 @@ async def search_products(
     )
 
 
-@commerce_read_tool("get_product_details", is_enabled=_catalog_search_enabled)
-async def get_product_details(
-    run_context: RunContextWrapper[CommerceAgentContext],
+async def get_product_details_impl(
+    context: CommerceAgentContext,
     product_id: int,
 ) -> ProductDetailsResult:
-    """Get exact details for a product returned earlier by search_products."""
-    context = run_context.context
+    """SDK-free implementation of the ``get_product_details`` read tool.
+
+    The model-visible name, signature and description stay on the
+    decorated wrapper below; this body is unchanged and is the single
+    implementation shared by the Agents-SDK tool and by the commerce
+    runtime's own loop, which passes the trusted context directly.
+    """
     context.assert_scope()
     context.require_authorized_product(product_id)
     row = CatalogContextBuilder(context.db, context.tenant_id).get_by_id(int(product_id))
@@ -458,3 +462,26 @@ async def get_product_details(
         evidence=[evidence],
         knowledge_sections=knowledge_sections,
     )
+
+
+@commerce_read_tool("search_products", is_enabled=_catalog_search_enabled)
+async def search_products(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    query: str,
+    limit: int,
+) -> CatalogSearchResult:
+    """Search the current merchant's synced catalog.
+
+    Use an empty query to browse the merchant's top available products. Limit
+    must be between 1 and 10. Tenant identity is taken only from trusted context.
+    """
+    return await search_products_impl(run_context.context, query=query, limit=limit)
+
+
+@commerce_read_tool("get_product_details", is_enabled=_catalog_search_enabled)
+async def get_product_details(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    product_id: int,
+) -> ProductDetailsResult:
+    """Get exact details for a product returned earlier by search_products."""
+    return await get_product_details_impl(run_context.context, product_id=product_id)
