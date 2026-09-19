@@ -19,6 +19,7 @@ from services import commerce_runtime_pilot as seam
 TENANT = 4242
 PHONE_ID = "1555000111"
 OWNER_PHONE = "+966500000001"
+MODEL = "model-configured-for-this-pilot"
 
 
 class _Connection:
@@ -68,6 +69,14 @@ def enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(pg.ENV_ENABLED, "true")
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, str(TENANT))
     monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, OWNER_PHONE)
+    monkeypatch.setenv(pg.ENV_MODEL, MODEL)
+
+
+HISTORY = [
+    ("inbound", "سؤال سابق", None),
+    ("outbound", "جواب سابق", None),
+    ("inbound", "عندكم حذاء؟", None),
+]
 
 
 @pytest.fixture()
@@ -80,16 +89,21 @@ def saved(monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
             rows.append({"phone": phone, "body": body, "direction": direction, **kwargs})
             return 1
 
-        @staticmethod
-        def load_history(db, *, phone: str, tenant_id: int) -> List[Dict[str, Any]]:
-            return [{"direction": "inbound", "body": "سؤال سابق"},
-                    {"direction": "outbound", "body": "جواب سابق"},
-                    {"direction": "inbound", "body": "عندكم حذاء؟"}]
-
     import core.conversation_engine as engine_module
 
     monkeypatch.setattr(engine_module, "StateManager", _StateManager, raising=True)
+    monkeypatch.setattr(seam, "_history_rows",
+                        lambda db, **kwargs: (read.append(kwargs) or list(HISTORY)),
+                        raising=True)
     return rows
+
+
+read: List[Dict[str, Any]] = []
+
+
+@pytest.fixture(autouse=True)
+def _clear_reads() -> None:
+    read.clear()
 
 
 def call(*, trace: Optional[_Trace] = None, text: str = "عندكم حذاء؟",
@@ -138,6 +152,14 @@ def test_every_refusal_leaves_the_turn_with_the_legacy_path(enabled, monkeypatch
     assert calls == []
 
 
+def test_a_pilot_with_no_configured_model_never_reaches_the_runtime(enabled, monkeypatch):
+    monkeypatch.delenv(pg.ENV_MODEL, raising=False)
+    calls = patch_runtime(monkeypatch, report())
+    result = call()
+    assert result.handled is False and result.reason == pg.MODEL_NOT_CONFIGURED
+    assert calls == []
+
+
 # ── Once the route is taken ──────────────────────────────────────────────────
 
 
@@ -157,6 +179,7 @@ def test_a_permitted_turn_is_run_with_the_verified_scope_and_the_recorded_conver
     assert passed["inbound_text"] == "عندكم حذاء؟"
     assert passed["instructions"].strip()              # the existing instructions, not composed here
     assert passed["budget"].max_steps <= pg.MAX_STEPS_CEILING
+    assert passed["model"] == MODEL                    # the configured one, not a resolved default
     assert passed["context_preamble"]["verified_customer_name"] == "نورة عبدالله"
     # The prior turns, with the message being answered not shown twice.
     assert passed["history"] == [{"role": "user", "text": "سؤال سابق"},
@@ -179,18 +202,18 @@ def test_a_failure_after_the_route_was_taken_never_hands_the_customer_back(enabl
 def test_an_unavailable_history_does_not_stop_the_turn(enabled, monkeypatch):
     calls = patch_runtime(monkeypatch, report())
 
-    class _Broken:
-        @staticmethod
-        def load_history(*args: Any, **kwargs: Any):
-            raise RuntimeError("no history")
+    def _broken(*args: Any, **kwargs: Any):
+        raise RuntimeError("no history")
 
+    class _StateManager:
         @staticmethod
         def save_message(*args: Any, **kwargs: Any) -> int:
             return 1
 
     import core.conversation_engine as engine_module
 
-    monkeypatch.setattr(engine_module, "StateManager", _Broken, raising=True)
+    monkeypatch.setattr(engine_module, "StateManager", _StateManager, raising=True)
+    monkeypatch.setattr(seam, "_history_rows", _broken, raising=True)
     result = call()
     assert result.handled is True
     assert calls[0]["history"] == []
@@ -211,7 +234,11 @@ def test_an_identified_acceptance_is_traced_and_persisted_with_its_provenance(
     meta = row["extra_metadata"]
     assert meta["compose_source"] == "llm"
     assert meta["chosen_path"] == "commerce_runtime_pilot"
-    assert meta["final_text_transformed"] is False and meta["final_transform_reasons"] == []
+    # The transport never ran here, so the transmitted text was not observed and
+    # is recorded as unverified rather than certified unchanged.
+    assert meta["final_text_transformed"] is True
+    assert meta["final_transform_reasons"] == [seam.WIRE_UNOBSERVED]
+    assert meta["commerce_runtime_wire_observed"] is False
     assert meta["provider_message_id"] == "wamid.OK"
     assert meta["commerce_runtime_turn_id"] == 7
     assert meta["evidence_refs"] == ["catalog:product:1"]
@@ -241,14 +268,116 @@ def test_an_accepted_send_whose_text_cannot_be_read_back_persists_no_row(
     assert saved == []                                 # the send happened; no message is invented
 
 
+# ── The history belongs to this conversation (F7) ────────────────────────────
+
+
+def test_the_history_is_read_for_the_conversation_being_answered(enabled, monkeypatch, saved):
+    """Not resolved from the phone number: one tenant can hold several."""
+    patch_runtime(monkeypatch, report())
+    call()
+    assert len(read) == 1
+    assert read[0]["conversation_id"] == _Convo.id
+    assert read[0]["tenant_id"] == TENANT
+
+
+# ── What was transmitted, not what was reserved (F11) ────────────────────────
+
+
+def wire_send(monkeypatch: pytest.MonkeyPatch, *, transmitted: Optional[str] = None,
+              duplicate: bool = False) -> List[Dict[str, Any]]:
+    """Double the webhook's sender, observing the wire exactly as ``_post_wa`` does."""
+    seen: List[Dict[str, Any]] = []
+
+    async def _send(*, phone_id: str, to: str, text: str, _tenant_id: int, _db: Any,
+                    _blocked_path: str, _result_sink: Dict[str, Any]) -> bool:
+        from core.outbound_wire_audit import observe_wire_payload
+
+        body = text if transmitted is None else transmitted
+        payload = {"to": to, "type": "text", "text": {"body": body}}
+        observe_wire_payload(_tenant_id, payload, "outbound_payload_sanitizer")
+        seen.append({"to": to, "handed": text, "transmitted": body})
+        _result_sink.update({"classification": "ok", "wamid": "wamid.WIRE", "http_status": 200,
+                             "duplicate_suppressed": duplicate})
+        return True
+
+    import routers.whatsapp_webhook as webhook
+
+    monkeypatch.setattr(webhook, "_send_whatsapp_message", _send, raising=True)
+    return seen
+
+
+def run_through_transport(monkeypatch: pytest.MonkeyPatch, intent: str) -> None:
+    """Patch the runtime so it dispatches the reserved intent through the real seam."""
+    def run_turn(**kwargs: Any) -> Any:
+        response = kwargs["transport"]({"text": intent})
+        assert response.http_status == 200
+        return report(reply_text=intent, provider_message_id="wamid.WIRE")
+
+    monkeypatch.setattr(entry, "run_commerce_runtime_turn", run_turn, raising=True)
+
+
+def test_an_unchanged_wire_is_recorded_as_untransformed(enabled, monkeypatch, saved):
+    wire_send(monkeypatch)
+    run_through_transport(monkeypatch, "النص المرسل")
+    call()
+    meta = saved[0]["extra_metadata"]
+    assert saved[0]["body"] == "النص المرسل"
+    assert meta["final_text_transformed"] is False and meta["final_transform_reasons"] == []
+    assert meta["commerce_runtime_wire_observed"] is True
+    assert meta["final_customer_text_source"] == "llm"
+
+
+def test_a_send_path_that_rewrote_the_body_stores_what_was_transmitted(
+        enabled, monkeypatch, saved):
+    """The customer saw the sanitiser's text; the conversation must say so."""
+    sent = wire_send(monkeypatch, transmitted="النص بعد التنقية")
+    run_through_transport(monkeypatch, "النص المرسل")
+    trace = _Trace()
+    call(trace=trace)
+    assert sent[0]["handed"] == "النص المرسل"
+    row = saved[0]
+    assert row["body"] == "النص بعد التنقية"
+    meta = row["extra_metadata"]
+    assert meta["final_text_transformed"] is True
+    assert "outbound_payload_sanitizer" in meta["final_transform_reasons"]
+    assert meta["final_customer_text_source"] == "llm_postprocess"
+    assert trace.marked == [{"source": seam.TRACE_SOURCE, "length": len("النص بعد التنقية")}]
+
+
+def test_the_reserved_intent_stays_identifiable_beside_the_transmitted_text(
+        enabled, monkeypatch, saved):
+    import hashlib
+
+    wire_send(monkeypatch, transmitted="النص بعد التنقية")
+    run_through_transport(monkeypatch, "النص المرسل")
+    call()
+    meta = saved[0]["extra_metadata"]
+    assert meta["commerce_runtime_intent_sha256"] == hashlib.sha256(
+        "النص المرسل".encode("utf-8")).hexdigest()
+    assert meta["commerce_runtime_delivery_sequence_id"] == 3   # the ledger keeps the intent
+
+
+def test_a_duplicate_suppressed_send_says_so_rather_than_claiming_this_transmission(
+        enabled, monkeypatch, saved):
+    wire_send(monkeypatch, duplicate=True)
+    run_through_transport(monkeypatch, "النص المرسل")
+    call()
+    assert saved[0]["extra_metadata"]["commerce_runtime_wire_duplicate_suppressed"] is True
+
+
+def test_an_observation_never_writes_to_any_row_by_itself(enabled, monkeypatch, saved):
+    """The audit is unbound: it reads the wire, it does not persist attempts."""
+    wire_send(monkeypatch)
+    run_through_transport(monkeypatch, "النص المرسل")
+    call()
+    assert len(saved) == 1                     # exactly the one row this module writes
+    assert "wire_attempts" not in saved[0]["extra_metadata"]
+
+
 def test_a_persistence_failure_does_not_undo_a_send_that_already_happened(enabled, monkeypatch):
     patch_runtime(monkeypatch, report())
 
     class _Failing:
-        @staticmethod
-        def load_history(*args: Any, **kwargs: Any):
-            return []
-
         @staticmethod
         def save_message(*args: Any, **kwargs: Any):
             raise RuntimeError("store unavailable")
@@ -256,5 +385,6 @@ def test_a_persistence_failure_does_not_undo_a_send_that_already_happened(enable
     import core.conversation_engine as engine_module
 
     monkeypatch.setattr(engine_module, "StateManager", _Failing, raising=True)
+    monkeypatch.setattr(seam, "_history_rows", lambda db, **kwargs: [], raising=True)
     result = call()
     assert result.handled is True and result.reason == entry.HANDLED

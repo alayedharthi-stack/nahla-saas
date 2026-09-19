@@ -14,10 +14,13 @@ from __future__ import annotations
 import concurrent.futures
 import dataclasses
 import json
-from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
+import logging
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import contracts as c
+
+logger = logging.getLogger("nahla.commerce_runtime.agent_tools")
 
 _MAX_QUERY_LENGTH = 200
 _MAX_RESULTS = 5
@@ -71,6 +74,11 @@ ToolFunction = Callable[[ToolScope, Mapping[str, Any]], ToolResult]
 class RegisteredTool:
     definition: ac.ToolDefinition
     function: ToolFunction
+    # Called the moment the registry stops waiting for this tool, with the
+    # reason. It is how the owner of whatever the tool is using — a database
+    # session, a connection — learns that a thread it cannot see is still
+    # holding those resources. It must not raise and must not block.
+    on_abandoned: Optional[Callable[[str], None]] = None
 
 
 # ── Argument validation against the declared schema (closed, small) ──────────
@@ -249,8 +257,13 @@ class ToolRegistry:
             try:
                 outcome = future.result(timeout=timeout_seconds)
             except concurrent.futures.TimeoutError:
-                return self._refusal(request, ac.ToolErrorCode.TIMEOUT.value,
-                                     f"the tool did not answer within {timeout_seconds}s; its result is discarded")
+                message = (f"the tool did not answer within {timeout_seconds}s; "
+                           "its result is discarded")
+                # Tell the resource owner now, not when something next asks.
+                # Between here and the end of the turn the abandoned thread may
+                # still be using whatever this tool was given.
+                self._notify_abandoned(tool, request.tool_name, message)
+                return self._refusal(request, ac.ToolErrorCode.TIMEOUT.value, message)
             except ac.ToolError as exc:
                 return self._refusal(request, exc.code, str(exc))
             except Exception as exc:  # noqa: BLE001 - a tool bug is an observation, never a crash of the loop
@@ -263,6 +276,16 @@ class ToolRegistry:
         refs = tuple(ac.validate_evidence_ref(r) for r in outcome.evidence_refs)
         return ac.ToolObservation(call_id=request.call_id, tool_name=request.tool_name, ok=True, result=result,
                                   error_code=None, error=None, evidence_refs=refs)
+
+    @staticmethod
+    def _notify_abandoned(tool: RegisteredTool, tool_name: str, message: str) -> None:
+        if tool.on_abandoned is None:
+            return
+        try:
+            tool.on_abandoned(message)
+        except Exception as exc:  # noqa: BLE001 - the observation is owed either way
+            logger.warning("[COMMERCE_RUNTIME] abandonment notice failed tool=%s error=%s",
+                           tool_name, type(exc).__name__)
 
     @staticmethod
     def _refusal(request: ac.ToolRequest, code: str, message: str) -> ac.ToolObservation:

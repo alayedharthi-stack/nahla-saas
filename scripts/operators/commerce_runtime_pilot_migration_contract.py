@@ -76,9 +76,33 @@ EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
 EXIT_FAILED = 4
 
-# Local databases are never the pilot database. A URL pointing at one is a
-# misconfiguration, not a target.
-FORBIDDEN_HOST_MARKERS: Tuple[str, ...] = ("@localhost", "@127.0.0.1", "@::1", "@0.0.0.0")
+# The only dialects this job knows how to migrate. A URL naming anything else
+# is refused rather than handed to Alembic to find out.
+SUPPORTED_DIALECTS: Tuple[str, ...] = ("postgresql", "postgres")
+
+# Hostnames that are never the pilot database, whatever they are spelled like.
+# The numeric forms are matched as addresses, not as text, so the whole
+# 127.0.0.0/8 range and every spelling of the IPv6 loopback are covered.
+LOOPBACK_HOSTNAMES: Tuple[str, ...] = ("localhost", "localhost.localdomain", "ip6-localhost")
+
+# The operator names the database this run is allowed to touch. Without it the
+# job refuses: ``DATABASE_URL`` alone says which database is *configured*, never
+# which one was *authorised*.
+TARGET_ENV = "NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET"
+
+
+def expected_relations_at(revisions: frozenset) -> Tuple[str, ...]:
+    """The relations a database at an accepted starting revision must already have.
+
+    ``0107`` predates the runtime entirely, so none of the nine may exist.
+    ``0108`` *is* the foundation revision, so exactly its three must exist and
+    none of the ledger six. Without this the two rules contradicted each other:
+    ``0108`` was an accepted start, and a database at ``0108`` was then refused
+    as a partial schema, so that start could never proceed.
+    """
+    if FOUNDATION_REVISION in revisions:
+        return FOUNDATION_RELATIONS
+    return ()
 
 
 def start_state_accepted(revisions: frozenset) -> bool:
@@ -107,9 +131,11 @@ def clamp_timeout(seconds: object) -> int:
 __all__ = [
     "ACCEPTED_START_REVISIONS", "ALREADY_APPLIED_REVISIONS", "CONFIRMATION_ENV",
     "CONFIRMATION_TOKEN", "DEFAULT_TIMEOUT_SEC", "EXIT_FAILED", "EXIT_PRECONDITION",
-    "EXIT_SUCCESS", "EXIT_USAGE", "FORBIDDEN_HOST_MARKERS", "FOUNDATION_RELATIONS",
-    "FOUNDATION_REVISION", "LEDGER_RELATIONS", "LOG_PREFIX", "MAX_TIMEOUT_SEC",
+    "EXIT_SUCCESS", "EXIT_USAGE", "FOUNDATION_RELATIONS",
+    "FOUNDATION_REVISION", "LEDGER_RELATIONS", "LOG_PREFIX", "LOOPBACK_HOSTNAMES",
+    "MAX_TIMEOUT_SEC",
     "MIN_TIMEOUT_SEC", "RESULT_ALREADY_APPLIED", "RESULT_FAILED", "RESULT_FAILED_PRECONDITION",
-    "RESULT_SUCCESS", "RUNTIME_RELATIONS", "TARGET_REVISION", "already_applied",
-    "build_upgrade_argv", "clamp_timeout", "start_state_accepted",
+    "RESULT_SUCCESS", "RUNTIME_RELATIONS", "SUPPORTED_DIALECTS", "TARGET_ENV",
+    "TARGET_REVISION", "already_applied",
+    "build_upgrade_argv", "clamp_timeout", "expected_relations_at", "start_state_accepted",
 ]

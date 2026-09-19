@@ -165,6 +165,32 @@ class CommerceRuntimeRepository:
             ).all()
         return [_turn(r) for r in rows]
 
+    def find_admitted_turn(
+        self, *, tenant_id: int, namespace: Any, channel_connection_ref: str,
+        provider_message_id: str,
+    ) -> Optional[c.AdmittedTurn]:
+        """The turn admitted under one inbound identity, or ``None``.
+
+        The identity is the same four-part one :meth:`admit_turn` enforces, so
+        this answers exactly "did this runtime already admit this inbound
+        message" without admitting anything. Read-only, one statement.
+        """
+        tenant_id = c.validate_tenant_id(tenant_id)
+        ns = c.validate_namespace(namespace).value
+        channel = c.validate_ref(channel_connection_ref, field="channel_connection_ref",
+                                 max_length=c.MAX_REF_LENGTH)
+        pmid = c.validate_ref(provider_message_id, field="provider_message_id",
+                              max_length=c.MAX_PROVIDER_MESSAGE_ID_LENGTH)
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                select(TURN).where(
+                    TURN.c.tenant_id == tenant_id, TURN.c.namespace == ns,
+                    TURN.c.channel_connection_ref == channel,
+                    TURN.c.provider_message_id == pmid,
+                )
+            ).one_or_none()
+        return _turn(row, duplicate=True) if row is not None else None
+
     def get_terminal(self, *, tenant_id: int, namespace: Any, turn_id: int) -> Optional[c.TerminalRecord]:
         tenant_id = c.validate_tenant_id(tenant_id)
         ns = c.validate_namespace(namespace).value

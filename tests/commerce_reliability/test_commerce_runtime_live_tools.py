@@ -18,6 +18,7 @@ import pytest
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_live_tools as alt
 from core.commerce_runtime import agent_tools as at
+from core.commerce_runtime import conversation_link as cl
 
 TENANT = 77
 CONVERSATION = 501
@@ -54,9 +55,16 @@ def result(status: str = "ok", **fields: Any) -> Snapshot:
     return Snapshot(status=status, **fields)
 
 
+LINK = cl.TrustedConversationLink(
+    tenant_id=TENANT, namespace="live", channel="wa",
+    app_conversation_id=77_000,              # deliberately not equal to the runtime id
+    runtime_conversation_id=CONVERSATION, conversation_ref="wa:v1:conv:77000",
+)
+
+
 @pytest.fixture()
 def binding() -> alt.LiveToolBinding:
-    return alt.LiveToolBinding(context=object(), tenant_id=TENANT, conversation_id=CONVERSATION)
+    return alt.LiveToolBinding(context=object(), link=LINK)
 
 
 def patch_impl(monkeypatch: pytest.MonkeyPatch, module: str, name: str, fn: Any) -> None:
@@ -86,8 +94,8 @@ def run(binding: alt.LiveToolBinding, tool: str, arguments: Dict[str, Any], *,
 def test_the_registry_exposes_exactly_the_six_read_tools(binding):
     registry = alt.build_live_registry(binding)
     assert tuple(d.name for d in registry.definitions) == alt.LIVE_TOOL_NAMES
-    assert alt.LIVE_TOOL_NAMES == ("catalog_search", "product_lookup", "merchant_knowledge_lookup",
-                                   "order_lookup", "order_details", "shipment_lookup")
+    assert alt.LIVE_TOOL_NAMES == ("search_products", "get_product_details", "search_merchant_knowledge",
+                                   "resolve_customer_order", "get_order_details", "get_order_shipment")
 
 
 def test_every_exposed_tool_is_declared_read_only(binding):
@@ -118,7 +126,7 @@ def test_a_call_for_another_scope_is_refused_and_the_implementation_never_runs(b
     patch_impl(monkeypatch, "catalog", "search_products_impl",
                async_returning(result("ok", products=[product()], evidence=[Record("catalog:product:1")],
                                       knowledge_sections=[]), record=seen))
-    observation = run(binding, "catalog_search", {"query": "حذاء"}, scope=OTHER_SCOPE)
+    observation = run(binding, "search_products", {"query": "حذاء"}, scope=OTHER_SCOPE)
     assert observation.ok is False
     assert observation.error_code == ac.ToolErrorCode.SCOPE_OVERRIDE_REFUSED.value
     assert seen == []
@@ -128,7 +136,7 @@ def test_a_call_for_another_scope_is_refused_and_the_implementation_never_runs(b
 def test_scope_arguments_cannot_be_supplied_by_the_model(binding, monkeypatch, argument):
     seen: List[Any] = []
     patch_impl(monkeypatch, "catalog", "search_products_impl", async_returning(result("ok"), record=seen))
-    observation = run(binding, "catalog_search", {"query": "حذاء", argument: 1})
+    observation = run(binding, "search_products", {"query": "حذاء", argument: 1})
     assert observation.error_code == ac.ToolErrorCode.SCOPE_OVERRIDE_REFUSED.value
     assert seen == []
 
@@ -137,7 +145,7 @@ def test_the_trusted_context_and_only_it_reaches_the_implementation(binding, mon
     seen: List[Any] = []
     patch_impl(monkeypatch, "catalog", "search_products_impl",
                async_returning(result("ok", products=[], evidence=[], knowledge_sections=[]), record=seen))
-    run(binding, "catalog_search", {"query": "حذاء"})
+    run(binding, "search_products", {"query": "حذاء"})
     context, kwargs = seen[0]
     assert context is binding.context
     assert set(kwargs) == {"query", "limit"}
@@ -151,7 +159,7 @@ def test_a_catalog_hit_keeps_its_evidence_references_and_its_grounded_fields(bin
                async_returning(result("ok", products=[product(1), product(2)],
                                       evidence=[Record("catalog:product:1"), Record("catalog:product:2")],
                                       knowledge_sections=[])))
-    observation = run(binding, "catalog_search", {"query": "حذاء"})
+    observation = run(binding, "search_products", {"query": "حذاء"})
     assert observation.ok is True
     assert observation.evidence_refs == ("catalog:product:1", "catalog:product:2")
     assert observation.result["found"] is True
@@ -163,7 +171,7 @@ def test_a_catalog_hit_keeps_its_evidence_references_and_its_grounded_fields(bin
 def test_a_search_that_matched_nothing_is_an_honest_empty_answer_with_no_evidence(binding, monkeypatch):
     patch_impl(monkeypatch, "catalog", "search_products_impl",
                async_returning(result("not_found", failure_reason="no_catalog_product_matched")))
-    observation = run(binding, "catalog_search", {"query": "زرافة"})
+    observation = run(binding, "search_products", {"query": "زرافة"})
     assert observation.ok is True                       # the lookup ran; it simply found nothing
     assert observation.result == {"status": "not_found", "found": False,
                                   "reason": "no_catalog_product_matched"}
@@ -174,7 +182,7 @@ def test_a_denied_read_says_it_was_denied_rather_than_reporting_nothing_found(bi
     patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
                async_returning(result("denied", failure_reason="order_reads_disabled",
                                       selection_reason=None)))
-    observation = run(binding, "order_lookup", {})
+    observation = run(binding, "resolve_customer_order", {})
     assert observation.result["status"] == "denied" and observation.result["found"] is False
     assert observation.result["reason"] == "order_reads_disabled"
 
@@ -184,7 +192,7 @@ def test_merchant_knowledge_keeps_the_section_body_and_its_reference(binding, mo
                        evidence_ref="knowledge:section:3")
     patch_impl(monkeypatch, "knowledge", "search_merchant_knowledge_impl",
                async_returning(result("ok", sections=[section], evidence=[Record("knowledge:section:3")])))
-    observation = run(binding, "merchant_knowledge_lookup", {"query": "التوصيل"})
+    observation = run(binding, "search_merchant_knowledge", {"query": "التوصيل"})
     assert observation.evidence_refs == ("knowledge:section:3",)
     assert observation.result["sections"][0]["body"] == "التوصيل خلال ٣ أيام"
 
@@ -195,7 +203,7 @@ def test_an_order_lookup_keeps_the_status_label_and_the_selection_reason(binding
     patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
                async_returning(result("ok", order=summary, selection_reason="latest_open_order",
                                       evidence=[Record("order:summary:12")])))
-    observation = run(binding, "order_lookup", {"purpose": "status"})
+    observation = run(binding, "resolve_customer_order", {"purpose": "status"})
     assert observation.evidence_refs == ("order:summary:12",)
     assert observation.result["order"]["status_label"] == "تم الشحن"
     assert observation.result["selection_reason"] == "latest_open_order"
@@ -207,7 +215,7 @@ def test_shipment_facts_keep_the_carrier_and_tracking_exactly_as_read(binding, m
                         carrier="Aramex", tracking_number="TRK-1", tracking_url="https://track.test/1")
     patch_impl(monkeypatch, "orders", "get_order_shipment_impl",
                async_returning(result("ok", shipment=shipment, evidence=[Record("order:shipment:12")])))
-    observation = run(binding, "shipment_lookup", {"order_id": 12})
+    observation = run(binding, "get_order_shipment", {"order_id": 12})
     body = observation.result["shipment"]
     assert body["carrier"] == "Aramex" and body["tracking_number"] == "TRK-1"
     assert body["shipment_status_label"] == "في الطريق"
@@ -219,7 +227,7 @@ def test_order_details_keep_the_line_items_within_the_declared_bound(binding, mo
                        total=399, currency="SAR", line_items=items)
     patch_impl(monkeypatch, "orders", "get_order_details_impl",
                async_returning(result("ok", order=details, evidence=[Record("order:details:12")])))
-    observation = run(binding, "order_details", {"order_id": 12})
+    observation = run(binding, "get_order_details", {"order_id": 12})
     assert len(observation.result["order"]["line_items"]) == alt.MAX_LINE_ITEMS
     assert observation.result["order"]["total"] == 399
 
@@ -232,7 +240,7 @@ def test_a_full_search_result_stays_inside_the_loop_s_observation_bound(binding,
     patch_impl(monkeypatch, "catalog", "search_products_impl",
                async_returning(result("ok", products=products, knowledge_sections=sections,
                                       evidence=[Record(f"catalog:product:{i}") for i in range(1, 6)])))
-    observation = run(binding, "catalog_search", {"query": "حذاء", "limit": alt.MAX_SEARCH_LIMIT})
+    observation = run(binding, "search_products", {"query": "حذاء", "limit": alt.MAX_SEARCH_LIMIT})
     assert observation.ok is True and observation.error_code is None
     assert len(observation.result["products"]) == alt.MAX_SEARCH_LIMIT
     assert len(observation.result["product_knowledge"]) == alt.MAX_KNOWLEDGE_SECTIONS
@@ -245,7 +253,7 @@ def test_a_purpose_outside_the_closed_set_is_refused_before_any_read(binding, mo
     seen: List[Any] = []
     patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
                async_returning(result("ok"), record=seen))
-    observation = run(binding, "order_lookup", {"purpose": "cancel"})
+    observation = run(binding, "resolve_customer_order", {"purpose": "cancel"})
     assert observation.error_code == ac.ToolErrorCode.INVALID_ARGUMENTS.value
     assert seen == []
 
@@ -253,14 +261,14 @@ def test_a_purpose_outside_the_closed_set_is_refused_before_any_read(binding, mo
 def test_a_limit_beyond_the_declared_maximum_is_refused_by_the_registry(binding, monkeypatch):
     seen: List[Any] = []
     patch_impl(monkeypatch, "catalog", "search_products_impl", async_returning(result("ok"), record=seen))
-    observation = run(binding, "catalog_search", {"limit": alt.MAX_SEARCH_LIMIT + 1})
+    observation = run(binding, "search_products", {"limit": alt.MAX_SEARCH_LIMIT + 1})
     assert observation.error_code == ac.ToolErrorCode.INVALID_ARGUMENTS.value
     assert seen == []
 
 
 def test_an_unknown_argument_is_refused_rather_than_ignored(binding, monkeypatch):
     patch_impl(monkeypatch, "catalog", "search_products_impl", async_returning(result("ok")))
-    observation = run(binding, "catalog_search", {"category": "shoes"})
+    observation = run(binding, "search_products", {"category": "shoes"})
     assert observation.error_code == ac.ToolErrorCode.INVALID_ARGUMENTS.value
 
 
@@ -270,7 +278,7 @@ def test_an_unknown_argument_is_refused_rather_than_ignored(binding, monkeypatch
 def test_a_failing_read_becomes_an_observation_not_a_crash(binding, monkeypatch):
     patch_impl(monkeypatch, "catalog", "search_products_impl",
                async_returning(RuntimeError("catalog_service_returned_out_of_scope_product")))
-    observation = run(binding, "catalog_search", {"query": "حذاء"})
+    observation = run(binding, "search_products", {"query": "حذاء"})
     assert observation.ok is False
     assert observation.error_code == ac.ToolErrorCode.TOOL_FAILURE.value
     assert observation.evidence_refs == ()
@@ -280,13 +288,13 @@ def test_a_refusal_releases_the_binding_so_the_next_read_still_runs(binding, mon
     patch_impl(monkeypatch, "catalog", "search_products_impl",
                async_returning(RuntimeError("boom")))
     registry = alt.build_live_registry(binding)
-    first = registry.execute(SCOPE, ac.ToolRequest(call_id="a", tool_name="catalog_search",
+    first = registry.execute(SCOPE, ac.ToolRequest(call_id="a", tool_name="search_products",
                                                    arguments={"query": "x"}), timeout_seconds=5.0)
     patch_impl(monkeypatch, "catalog", "search_products_impl",
                async_returning(result("ok", products=[product()], evidence=[Record("catalog:product:1")],
                                       knowledge_sections=[])))
     registry = alt.build_live_registry(binding)
-    second = registry.execute(SCOPE, ac.ToolRequest(call_id="b", tool_name="catalog_search",
+    second = registry.execute(SCOPE, ac.ToolRequest(call_id="b", tool_name="search_products",
                                                     arguments={"query": "y"}), timeout_seconds=5.0)
     assert first.ok is False and binding.poisoned is None
     assert second.ok is True
@@ -303,7 +311,7 @@ def test_a_call_the_loop_abandoned_closes_the_binding_for_every_later_read(bindi
 
     patch_impl(monkeypatch, "catalog", "search_products_impl", slow)
     registry = alt.build_live_registry(binding)
-    abandoned = registry.execute(SCOPE, ac.ToolRequest(call_id="a", tool_name="catalog_search",
+    abandoned = registry.execute(SCOPE, ac.ToolRequest(call_id="a", tool_name="search_products",
                                                        arguments={"query": "x"}), timeout_seconds=0.2)
     assert abandoned.error_code == ac.ToolErrorCode.TIMEOUT.value
     assert started.is_set()
@@ -311,7 +319,7 @@ def test_a_call_the_loop_abandoned_closes_the_binding_for_every_later_read(bindi
     patch_impl(monkeypatch, "knowledge", "search_merchant_knowledge_impl",
                async_returning(result("ok", sections=[], evidence=[])))
     later = alt.build_live_registry(binding).execute(
-        SCOPE, ac.ToolRequest(call_id="b", tool_name="merchant_knowledge_lookup", arguments={"query": "x"}),
+        SCOPE, ac.ToolRequest(call_id="b", tool_name="search_merchant_knowledge", arguments={"query": "x"}),
         timeout_seconds=5.0)
     assert later.ok is False and later.error_code == ac.ToolErrorCode.TOOL_FAILURE.value
     assert binding.poisoned is not None and "abandoned" in binding.poisoned
@@ -321,10 +329,89 @@ def test_a_call_the_loop_abandoned_closes_the_binding_for_every_later_read(bindi
     assert binding.poisoned is not None
 
 
+def test_one_timed_out_tool_marks_abandonment_immediately_with_no_second_call(binding,
+                                                                                monkeypatch):
+    """The turn may end right there. Nothing later is guaranteed to notice."""
+    started = threading.Event()
+    release = threading.Event()
+
+    async def slow(context: Any, **kwargs: Any) -> Any:
+        started.set()
+        release.wait(5.0)
+        return result("ok", products=[], evidence=[], knowledge_sections=[])
+
+    patch_impl(monkeypatch, "catalog", "search_products_impl", slow)
+    abandoned = alt.build_live_registry(binding).execute(
+        SCOPE, ac.ToolRequest(call_id="a", tool_name="search_products", arguments={"query": "x"}),
+        timeout_seconds=0.2)
+    assert abandoned.error_code == ac.ToolErrorCode.TIMEOUT.value
+    assert started.is_set()
+    # No further tool call is made. The binding already knows.
+    assert binding.abandoned_calls == 1
+    assert binding.poisoned is not None and "abandoned" in binding.poisoned
+    assert binding.session_may_be_in_use is True
+    assert binding.wait_until_idle(0.1) is False
+    release.set()
+    assert binding.wait_until_idle(5.0) is True
+    assert binding.session_may_be_in_use is False
+
+
+def test_the_abandonment_notice_carries_what_the_registry_observed(binding, monkeypatch):
+    async def slow(context: Any, **kwargs: Any) -> Any:
+        time.sleep(1.0)
+        return result("ok", products=[], evidence=[], knowledge_sections=[])
+
+    patch_impl(monkeypatch, "catalog", "search_products_impl", slow)
+    alt.build_live_registry(binding).execute(
+        SCOPE, ac.ToolRequest(call_id="a", tool_name="search_products", arguments={"query": "x"}),
+        timeout_seconds=0.2)
+    assert "did not answer within 0.2s" in (binding.poisoned or "")
+
+
+def test_a_registry_without_an_abandonment_owner_still_answers_the_loop():
+    """The hook is optional: the fixture tools have none and time out normally."""
+    from core.commerce_runtime import agent_tools as at
+
+    def slow(scope: Any, arguments: Any) -> at.ToolResult:
+        time.sleep(1.0)
+        return at.ToolResult(result={}, evidence_refs=())
+
+    registry = at.ToolRegistry([at.RegisteredTool(
+        definition=ac.ToolDefinition(name="slow_read", description="d",
+                                     input_schema={"type": "object", "properties": {}},
+                                     result_kind="product", read_only=True),
+        function=slow)])
+    observation = registry.execute(
+        at.ToolScope(tenant_id=TENANT, namespace="live", conversation_id=CONVERSATION, turn_id=1),
+        ac.ToolRequest(call_id="a", tool_name="slow_read", arguments={}), timeout_seconds=0.2)
+    assert observation.ok is False and observation.error_code == ac.ToolErrorCode.TIMEOUT.value
+
+
+def test_an_abandonment_owner_that_raises_never_costs_the_loop_its_observation(monkeypatch):
+    from core.commerce_runtime import agent_tools as at
+
+    def slow(scope: Any, arguments: Any) -> at.ToolResult:
+        time.sleep(1.0)
+        return at.ToolResult(result={}, evidence_refs=())
+
+    def explode(_reason: str) -> None:
+        raise RuntimeError("the owner is broken too")
+
+    registry = at.ToolRegistry([at.RegisteredTool(
+        definition=ac.ToolDefinition(name="slow_read", description="d",
+                                     input_schema={"type": "object", "properties": {}},
+                                     result_kind="product", read_only=True),
+        function=slow, on_abandoned=explode)])
+    observation = registry.execute(
+        at.ToolScope(tenant_id=TENANT, namespace="live", conversation_id=CONVERSATION, turn_id=1),
+        ac.ToolRequest(call_id="a", tool_name="slow_read", arguments={}), timeout_seconds=0.2)
+    assert observation.ok is False and observation.error_code == ac.ToolErrorCode.TIMEOUT.value
+
+
 def test_an_explicitly_poisoned_binding_refuses_every_read(binding, monkeypatch):
     patch_impl(monkeypatch, "catalog", "search_products_impl", async_returning(result("ok")))
     binding.poison("the runtime closed this binding")
-    observation = run(binding, "catalog_search", {"query": "x"})
+    observation = run(binding, "search_products", {"query": "x"})
     assert observation.ok is False
     assert observation.error_code == ac.ToolErrorCode.TOOL_FAILURE.value
     assert "closed this binding" in (observation.error or "")
@@ -333,6 +420,6 @@ def test_an_explicitly_poisoned_binding_refuses_every_read(binding, monkeypatch)
 def test_no_execution_time_left_refuses_before_touching_the_merchant_s_data(binding, monkeypatch):
     seen: List[Any] = []
     patch_impl(monkeypatch, "catalog", "search_products_impl", async_returning(result("ok"), record=seen))
-    observation = run(binding, "catalog_search", {"query": "x"}, timeout=0.0)
+    observation = run(binding, "search_products", {"query": "x"}, timeout=0.0)
     assert observation.error_code == ac.ToolErrorCode.TIMEOUT.value
     assert seen == []

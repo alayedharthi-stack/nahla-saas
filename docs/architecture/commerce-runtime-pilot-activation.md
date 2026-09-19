@@ -97,8 +97,14 @@ Three rules this table encodes:
 ## 3. The routing decision
 
 `core.commerce_runtime.pilot_guard.evaluate_pilot_route` is asked **once**, in
-`_handle_merchant_message`, immediately before the Merchant Brain. Its answer is
-exclusive:
+`_handle_merchant_message`, at the one point that makes it a routing decision:
+**after** every gate that can silence the turn — the AI pause / handoff /
+blocklist gate, the billing guard and the conversation quota guard — and
+**before** every path that can answer it: the Commerce Agent V2 owner,
+OrderFlowV2, checkout routing, the pre-brain routers (branch trigger, location,
+arrival contact, staff contact, Layer 0) and the Merchant Brain. Asked any later
+it would not route anything; it would only see the turns no other owner wanted.
+Its answer is exclusive:
 
 * not permitted → the legacy path runs exactly as it does today;
 * permitted → the handler returns after the commerce runtime's turn, so the
@@ -112,6 +118,9 @@ a second reply.
 
 The only exception is a failure to *ask* — if the guard itself cannot be reached
 the legacy path continues, which is the same behaviour as the pilot being off.
+Once `handled` is true the return is unconditional: the observability sync that
+runs after it is caught, so a failure there cannot reopen the legacy path for a
+message the runtime may already have answered.
 
 ### 3.1 Fail closed
 
@@ -120,13 +129,22 @@ Every condition must hold, and the first that does not decides the outcome:
 | Refusal | Meaning |
 | --- | --- |
 | `pilot_disabled` | the switch is off; nothing is even looked up |
+| `pilot_draining` | the pilot is handing back: new turns go to the legacy path, its own unfinished turns are still finished |
 | `tenant_not_allowlisted` | the tenant is not in an explicit, non-empty list |
 | `recipient_missing` / `recipient_unnormalizable` / `recipient_not_allowlisted` | the conversation is not in an explicit, non-empty list |
+| `model_not_configured` | no model was chosen for this pilot; nothing is looked up |
 | `connection_not_verified` | the database does not agree that this WhatsApp connection is that tenant's |
 | `legacy_already_answered` | an outbound reply was already sent for this inbound message |
 | `ai_gate_skipped` | pause, handoff, blocklist or another existing gate told us to skip |
 | `empty_inbound` | there is no customer text to answer |
 | `guard_error` | the guard could not decide, so it refuses |
+
+The model is part of that list on purpose. The loop is model-neutral and selects
+nothing: `COMMERCE_RUNTIME_PILOT_MODEL` is read with **no default**, carried on
+the decision, threaded through the entry and handed to the provider call, and
+the entry refuses (`model_not_configured`) before admitting anything when it is
+absent. Inheriting the legacy path's `CLAUDE_MODEL` or the repository fallback
+would mean activating a pilot on a model nobody chose for it.
 
 An empty allowlist permits nothing, and **a tenant is never enabled wholesale**:
 the recipient list is required as well, so the runtime reaches the owner's own
@@ -161,14 +179,39 @@ never widen what one turn may spend.
 
 ---
 
+### 3.5 Handover
+
+Switching the pilot off decides who takes **new** turns; it says nothing about
+the turns the runtime already admitted. `COMMERCE_RUNTIME_PILOT_DRAINING=true`
+is the handover state between on and off: new turns go to the legacy path
+immediately (`pilot_draining`), and a turn this runtime admitted and has not
+finished is still finished when its inbound message is redelivered. Draining
+waives that one rule and nothing else — every other condition above still has to
+pass, including the allowlists, the verified connection and the model.
+
+`scripts/operators/commerce_runtime_pilot_handover.py` reads, per allowlisted
+tenant, how much is still in flight: admitted turns with no terminal, reserved
+intents nothing dispatched, and attempts with no established outcome. It exits 0
+only when all three are zero, which is the evidence the decision to switch off
+is taken against. The emergency stop — switching the pilot off outright — remains
+available and stops recovery too; the same job then reports what it left behind.
+
+---
+
 ## 3.4 The conversation so far
 
-A follow-up needs what came before it. The pilot reads the prior turns through
-the same `StateManager.load_history` the legacy path uses, so both runtimes see
-one conversation, and hands them to the adapter as chat turns. The inbound
-message being answered is dropped when the store has already persisted it, so
-the model is never shown the same customer turn twice, and a history read that
-fails yields no history rather than a guess.
+A follow-up needs what came before it. The pilot reads the prior turns **bound
+to the conversation the runtime admitted this turn under**, not resolved from the
+phone number: one tenant can hold several conversations for one number, and a
+phone lookup answers with the most recent of them, which is not necessarily this
+one. Rows written before conversation linking carry no conversation id and are
+admitted only while that number names exactly one conversation in the tenant;
+otherwise they belong to an unknown one of them and are left out rather than
+guessed in. An outbound row contributes what the wire audit recorded as
+transmitted when it has that, so the model is shown the message the customer
+received rather than a draft that was later changed. The inbound message being
+answered is dropped when the store has already persisted it, and a history read
+that fails yields no history rather than a guess.
 
 ---
 
@@ -210,15 +253,48 @@ otherwise be printed for every message on the platform.
 
 Revisions `0108` and `0109` create the runtime's tables but are not part of the
 normal bootstrap target, so a database may legitimately not have them. The
-runtime probes once per engine and treats **absent or partial** as unavailable:
+runtime probes **all nine** relations it uses — the three foundation relations
+and the six ledger relations — and treats *absent* or *partial* as unavailable:
 it refuses the turn (`runtime_schema_unavailable`) rather than running
-half-present. The probe is cached so a disabled pilot costs nothing per turn.
+half-present. Checking fewer would pass on a foundation-only database that has
+no terminals table, which is exactly the shape revision `0108` leaves behind.
+
+The probe is cached per engine so a disabled pilot costs nothing per turn. That
+cache is per process and is not invalidated by applying the migration, so the
+service is restarted after it; until then every turn refuses, which is the safe
+direction.
+
+---
+
+## 6.1 Recovery
+
+A turn is left unfinished when the worker holding it stopped between admitting
+it and recording its terminal. The turn is keyed by the inbound provider message
+id, so the redelivery carrying that id is the one event that can reach it — and
+deduplication is what normally stops that redelivery, correctly, because a
+duplicate must never produce a second answer.
+
+`core.commerce_runtime.recovery` answers one question at that boundary: is there
+an admitted commerce-runtime turn for this exact inbound identity with no
+terminal? A duplicate carrying such a turn reaches the handler; a duplicate of
+*finished* work is dropped exactly as before; and anything the lookup cannot
+establish is dropped as well. The question is only asked for a tenant and a
+recipient the pilot is explicitly configured for, and only while the pilot owns
+open work (on, or draining).
+
+Letting the retry through resends nothing. The delivery ledger still refuses to
+dispatch an attempt whose outcome is pending, accepted or unknown; a refused
+redispatch now reports the outcome that reservation already **established** —
+reusing an accepted send's own provider message id rather than reporting
+`not_attempted` and completing the turn as failed while the customer holds the
+message. The row for a recovered acceptance is written once: a re-entry that
+finds that provider message id already in the conversation persists nothing.
 
 ---
 
 ## 7. Proven, and not proven
 
-The sixteen PostgreSQL proofs in
+The PostgreSQL proofs in
 `tests/commerce_reliability/test_commerce_runtime_pilot_pg.py` run the real
 entry point — real admission, ownership, loop, adapter, trusted read context and
 ledger — with only the model's HTTP call and the WhatsApp transport scripted.
@@ -245,8 +321,13 @@ customer readiness. Those need the live trial.
   `unknown` until a delivery or read receipt is recorded, and nothing records
   those yet.
 * A turn left open because its delivery was reserved but never dispatched is
-  resumed only by the next inbound message for the same identity; there is no
-  reconciliation worker.
+  resumed only by a redelivery of the same inbound identity; there is no
+  reconciliation worker, so a turn whose retry never arrives is finished by an
+  operator, and the handover job is what surfaces it.
+* The transmitted text is observed through the platform's wire audit. When that
+  observation is unavailable the persisted row records
+  `final_text_transformed=true` with `wire_text_unobserved` — unverified, never
+  certified unchanged.
 * The pilot route is synchronous inside the webhook request, bounded by the turn
   deadline.
 * Verification remains structural, as the loop contract states.

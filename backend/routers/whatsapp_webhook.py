@@ -3245,22 +3245,36 @@ async def _dispatch_message(
         try:
             from core.inbound_dedup import is_duplicate_inbound  # noqa: PLC0415
             if is_duplicate_inbound(phone_number_id=phone_number_id, msg_id=msg_id):
-                logger.info(
-                    "[Idempotency] DROP duplicate inbound (early/in-memory) "
-                    "msg_id=%s phone_number_id=%s from=%s — provider retry, "
-                    "skipping conversation lock + DB",
-                    msg_id, phone_number_id, sender,
-                )
-                try:
-                    from core.inbound_lifecycle import (  # noqa: PLC0415
-                        EVENT_DEDUP_DROP_MEMORY, EVENT_END_DROPPED,
-                        record_lifecycle,
+                if _duplicate_is_unfinished_runtime_work(
+                    phone_number_id=phone_number_id, sender=sender, msg_id=msg_id,
+                ):
+                    # Not a second answer: the commerce runtime admitted this
+                    # exact inbound message and never finished it, and this
+                    # retry is the only event that can reach that turn. Nothing
+                    # is resent — the delivery ledger still refuses to dispatch
+                    # an attempt whose outcome is pending, accepted or unknown.
+                    logger.warning(
+                        "[Idempotency] ALLOW duplicate inbound for commerce-runtime recovery "
+                        "msg_id=%s phone_number_id=%s from=%s",
+                        msg_id, phone_number_id, sender,
                     )
-                    record_lifecycle(EVENT_DEDUP_DROP_MEMORY)
-                    record_lifecycle(EVENT_END_DROPPED)
-                except Exception:
-                    pass
-                return
+                else:
+                    logger.info(
+                        "[Idempotency] DROP duplicate inbound (early/in-memory) "
+                        "msg_id=%s phone_number_id=%s from=%s — provider retry, "
+                        "skipping conversation lock + DB",
+                        msg_id, phone_number_id, sender,
+                    )
+                    try:
+                        from core.inbound_lifecycle import (  # noqa: PLC0415
+                            EVENT_DEDUP_DROP_MEMORY, EVENT_END_DROPPED,
+                            record_lifecycle,
+                        )
+                        record_lifecycle(EVENT_DEDUP_DROP_MEMORY)
+                        record_lifecycle(EVENT_END_DROPPED)
+                    except Exception:
+                        pass
+                    return
         except Exception as _early_dedup_exc:
             # Never block real traffic on a dedup hiccup — fall through to
             # the slower DB-backed guard, which has the same behaviour.
@@ -3508,21 +3522,33 @@ async def _dispatch_message(
                     db, phone=sender, tenant_id=resolved_tenant_id,
                 )
                 if IdempotencyGuard.is_duplicate(inbound_dedup_state, msg_id):
-                    logger.info(
-                        "[Idempotency] DROP duplicate inbound msg_id=%s "
-                        "tenant=%s from=%s — Meta webhook retry",
-                        msg_id, resolved_tenant_id, sender,
-                    )
-                    try:
-                        from core.inbound_lifecycle import (  # noqa: PLC0415
-                            EVENT_DEDUP_DROP_DB, EVENT_END_DROPPED,
-                            record_lifecycle,
+                    if _duplicate_is_unfinished_runtime_work(
+                        phone_number_id=phone_number_id, sender=sender, msg_id=msg_id,
+                    ):
+                        # See the in-memory guard above: this retry is the only
+                        # event that can finish a commerce-runtime turn nobody
+                        # closed, and letting it through resends nothing.
+                        logger.warning(
+                            "[Idempotency] ALLOW duplicate inbound for commerce-runtime recovery "
+                            "msg_id=%s tenant=%s from=%s",
+                            msg_id, resolved_tenant_id, sender,
                         )
-                        record_lifecycle(EVENT_DEDUP_DROP_DB)
-                        record_lifecycle(EVENT_END_DROPPED)
-                    except Exception:
-                        pass
-                    return
+                    else:
+                        logger.info(
+                            "[Idempotency] DROP duplicate inbound msg_id=%s "
+                            "tenant=%s from=%s — Meta webhook retry",
+                            msg_id, resolved_tenant_id, sender,
+                        )
+                        try:
+                            from core.inbound_lifecycle import (  # noqa: PLC0415
+                                EVENT_DEDUP_DROP_DB, EVENT_END_DROPPED,
+                                record_lifecycle,
+                            )
+                            record_lifecycle(EVENT_DEDUP_DROP_DB)
+                            record_lifecycle(EVENT_END_DROPPED)
+                        except Exception:
+                            pass
+                        return
                 IdempotencyGuard.mark_processed(inbound_dedup_state, msg_id)
                 StateManager.save(
                     db, inbound_dedup_state, tenant_id=resolved_tenant_id,
@@ -7901,6 +7927,65 @@ async def _handle_merchant_message(
             _sync_persona_observability()
             return
 
+        # ── Commerce runtime (owner pilot) ────────────────────────────────
+        # THE routing decision, asked once, here: after every gate that may
+        # silence this turn (AI pause / handoff / blocklist above, billing and
+        # conversation quota just above) and before every path that may answer
+        # it — the Commerce Agent V2 owner below, OrderFlowV2, checkout
+        # routing, the pre-brain routers and MerchantBrain. Asking later would
+        # not be a routing decision at all: it would only see the turns no
+        # other owner wanted.
+        #
+        # The answer is exclusive. ``handled`` means this handler returns and
+        # nothing below runs for that inbound message, so the two runtimes can
+        # never both answer it. Fail-closed: a refusal, or an error asking,
+        # leaves the legacy path exactly as it is.
+        _commerce_runtime_owns_turn = False
+        try:
+            from services.commerce_runtime_pilot import (  # noqa: PLC0415
+                maybe_handle_with_commerce_runtime,
+            )
+
+            _pilot = await maybe_handle_with_commerce_runtime(
+                db=db,
+                tenant_id=tenant_id,
+                phone_id=phone_id,
+                to=to,
+                text=text or "",
+                convo=convo,
+                wa_msg_id=wa_msg_id,
+                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
+                trace=_trace,
+                legacy_already_answered=not _trace.outbound_lock_acquired(),
+                ai_gate_skipped=bool(_skip),
+            )
+            _commerce_runtime_owns_turn = bool(_pilot.handled)
+        except Exception as _pilot_exc:  # noqa: BLE001
+            # The route was never taken, so nothing was sent by it. A failure to
+            # even ask must not cost the customer their reply.
+            logger.warning(
+                "[COMMERCE_RUNTIME_PILOT] route check failed tenant=%s err=%s — legacy continues",
+                tenant_id,
+                type(_pilot_exc).__name__,
+            )
+
+        if _commerce_runtime_owns_turn:
+            # From here the turn belongs to the commerce runtime, which may
+            # already have answered the customer. Nothing after this point may
+            # hand it back — observability is not allowed to reopen the legacy
+            # path by raising, so it is caught here and the return is
+            # unconditional.
+            try:
+                _sync_persona_observability()
+            except Exception as _pilot_observe_exc:  # noqa: BLE001
+                logger.warning(
+                    "[COMMERCE_RUNTIME_PILOT] observability failed tenant=%s err=%s "
+                    "v1_bypassed=true silent_v1_fallback=false",
+                    tenant_id,
+                    type(_pilot_observe_exc).__name__,
+                )
+            return
+
         # ── Commerce Agent V2 tenant-scoped outbound owner ───────────────
         # This seam intentionally precedes OrderFlowV2, checkout routing,
         # MerchantBrain, legacy compose, and all legacy response delivery.
@@ -9361,42 +9446,6 @@ async def _handle_merchant_message(
                 "falling through to Brain",
                 tenant_id,
                 _l0_exc,
-            )
-
-        # ── Commerce runtime (owner pilot) ────────────────────────────────────
-        # THE routing decision. It is asked once, and its answer is exclusive:
-        # when the commerce runtime takes the turn this handler returns, so the
-        # Merchant Brain below never runs for that inbound message and the two
-        # runtimes can never both answer it. Fail-closed: any refusal, including
-        # an error inside the guard, leaves the legacy path exactly as it is.
-        try:
-            from services.commerce_runtime_pilot import (  # noqa: PLC0415
-                maybe_handle_with_commerce_runtime,
-            )
-
-            _pilot = await maybe_handle_with_commerce_runtime(
-                db=db,
-                tenant_id=tenant_id,
-                phone_id=phone_id,
-                to=to,
-                text=text or "",
-                convo=convo,
-                wa_msg_id=wa_msg_id,
-                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
-                trace=_trace,
-                legacy_already_answered=not _trace.outbound_lock_acquired(),
-                ai_gate_skipped=bool(_skip),
-            )
-            if _pilot.handled:
-                _sync_persona_observability()
-                return
-        except Exception as _pilot_exc:  # noqa: BLE001
-            # The pilot is additive. A failure to even ask must never cost the
-            # customer their reply, so the legacy path continues below.
-            logger.warning(
-                "[COMMERCE_RUNTIME_PILOT] route check failed tenant=%s err=%s — legacy continues",
-                tenant_id,
-                type(_pilot_exc).__name__,
             )
 
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
@@ -15594,6 +15643,34 @@ def _resolve_wa_conn_by_phone_id(_db, phone_id: str):
     except Exception as exc:  # noqa: BLE001
         logger.debug("[WA] phone_id lookup failed: %s", exc)
     return None, None
+
+
+def _duplicate_is_unfinished_runtime_work(
+    *, phone_number_id: Optional[str], sender: Optional[str], msg_id: Optional[str],
+) -> bool:
+    """Whether a duplicate the platform is about to drop must be let through.
+
+    The commerce runtime keys a turn by the inbound provider message id, so a
+    turn it admitted and never finished can only be reached by the retry that
+    carries that id. This asks whether such a turn exists, and nothing else: it
+    sends nothing, writes nothing, and answers ``False`` for anything it cannot
+    establish, which leaves deduplication exactly as it is today.
+    """
+    try:
+        from core.commerce_runtime.recovery import (  # noqa: PLC0415
+            duplicate_carries_unfinished_work,
+        )
+
+        return duplicate_carries_unfinished_work(
+            phone_number_id=phone_number_id, customer_phone=sender,
+            provider_message_id=msg_id,
+        ) is not None
+    except Exception as exc:  # noqa: BLE001 - a duplicate stays a duplicate
+        logger.warning(
+            "[COMMERCE_RUNTIME_RECOVERY] duplicate check failed msg_id=%s err=%s",
+            msg_id, type(exc).__name__,
+        )
+        return False
 
 
 async def _post_wa(

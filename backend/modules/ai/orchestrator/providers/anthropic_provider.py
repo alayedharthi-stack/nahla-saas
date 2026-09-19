@@ -247,11 +247,16 @@ class AnthropicProvider(BaseAIProvider):
         for block in getattr(response, "content", None) or []:
             kind = getattr(block, "type", "")
             if kind == "tool_use":
+                # The input is reported exactly as it arrived. Coercing a
+                # falsy value to {} would turn None, [], "" or 0 into a
+                # well-formed request to run the tool with its defaults; the
+                # caller has to be able to tell malformed output apart from a
+                # genuine no-argument call.
                 blocks.append({
                     "type": "tool_use",
                     "id": getattr(block, "id", "") or "",
                     "name": getattr(block, "name", "") or "",
-                    "input": getattr(block, "input", None) or {},
+                    "input": getattr(block, "input", None),
                 })
             elif kind == "text":
                 text = getattr(block, "text", "") or ""

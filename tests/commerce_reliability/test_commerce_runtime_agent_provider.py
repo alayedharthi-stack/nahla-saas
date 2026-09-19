@@ -648,3 +648,66 @@ def test_the_history_never_displaces_the_tool_result_replay():
     roles = [m["role"] for m in double.calls[1]["messages"]]
     assert roles == ["user", "assistant", "user", "assistant", "user"]
     assert double.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+# ── Malformed tool input at the SDK boundary ─────────────────────────────────
+
+
+class _Block:
+    def __init__(self, type_: str, **fields: Any) -> None:
+        self.type = type_
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+
+class _MalformedResponse:
+    id = "msg_x"
+    stop_reason = "tool_use"
+    usage = None
+
+    def __init__(self, raw_input: Any) -> None:
+        self.content = [_Block("tool_use", id="toolu_1", name="search_products", input=raw_input)]
+
+
+@pytest.mark.parametrize("raw_input", [None, [], {}, "", 0, False, "query=shoes",
+                                       ["query", "shoes"], 7, True])
+def test_the_sdk_entry_point_reports_tool_input_exactly_as_it_arrived(anthropic_double, monkeypatch,
+                                                                      raw_input):
+    class Client(_FakeClient):
+        def create(self, **kwargs: Any):
+            return _MalformedResponse(raw_input)
+
+    monkeypatch.setattr(_FakeSDK, "Anthropic", Client, raising=True)
+    answer = anthropic_double.AnthropicProvider().call_single_step(
+        messages=[{"role": "user", "content": "hi"}], system="p")
+    assert answer["blocks"][0]["input"] is raw_input or answer["blocks"][0]["input"] == raw_input
+
+
+@pytest.mark.parametrize("raw_input", [None, [], "", 0, False, "query=shoes",
+                                       ["query", "shoes"], 7, True])
+def test_a_malformed_tool_input_never_becomes_an_executable_default_argument_call(
+        anthropic_double, monkeypatch, raw_input):
+    """A falsy or wrongly-shaped input used to arrive as {} — a runnable request."""
+    class Client(_FakeClient):
+        def create(self, **kwargs: Any):
+            return _MalformedResponse(raw_input)
+
+    monkeypatch.setattr(_FakeSDK, "Anthropic", Client, raising=True)
+    provider = ap.AnthropicReasoningProvider(
+        instructions=INSTRUCTIONS, tools_provider=anthropic_double.AnthropicProvider())
+    result = provider.step(request())
+    assert isinstance(result, ac.ProviderInvalid)
+    assert result.reason == "tool_use_arguments_not_an_object"
+
+
+def test_a_genuine_no_argument_call_is_still_a_runnable_request(anthropic_double, monkeypatch):
+    class Client(_FakeClient):
+        def create(self, **kwargs: Any):
+            return _MalformedResponse({})
+
+    monkeypatch.setattr(_FakeSDK, "Anthropic", Client, raising=True)
+    provider = ap.AnthropicReasoningProvider(
+        instructions=INSTRUCTIONS, tools_provider=anthropic_double.AnthropicProvider())
+    result = provider.step(request())
+    assert isinstance(result, ac.ProviderToolRequests)
+    assert dict(result.requests[0].arguments) == {}

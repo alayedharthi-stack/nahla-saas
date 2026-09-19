@@ -15,6 +15,10 @@ from scripts.operators import commerce_runtime_pilot_migration as job
 from scripts.operators import commerce_runtime_pilot_migration_contract as k
 
 
+TARGET = "db.railway/nahla"
+TARGET_URL = "postgresql://u:p@db.railway:5432/nahla"
+
+
 def observation(*, revisions=("0107",), present=()) -> Dict[str, Any]:
     return {
         "alembic_version": tuple(sorted(revisions)),
@@ -94,6 +98,7 @@ def test_the_timeout_is_clamped_into_its_declared_range(value, expected):
 
 def test_the_job_does_not_run_without_its_explicit_confirmation(monkeypatch, capsys):
     monkeypatch.delenv(k.CONFIRMATION_ENV, raising=False)
+    monkeypatch.setenv(k.TARGET_ENV, "db.internal/nahla")
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.internal:5432/nahla")
     assert job.main([]) == k.EXIT_USAGE
     out = capsys.readouterr().out
@@ -112,20 +117,68 @@ def test_a_wrong_confirmation_token_is_not_a_confirmation(monkeypatch):
     ("", "DATABASE_URL_unresolved"),
     ("   ", "DATABASE_URL_unresolved"),
     ("postgresql://u:p@localhost:5432/nahla", "DATABASE_URL_is_local"),
+    ("postgresql://u:p@localhost.localdomain:5432/nahla", "DATABASE_URL_is_local"),
     ("postgresql://u:p@127.0.0.1:5433/nahla", "DATABASE_URL_is_local"),
+    ("postgresql://u:p@127.1.2.3:5433/nahla", "DATABASE_URL_is_local"),
+    ("postgresql://u:p@[::1]:5432/nahla", "DATABASE_URL_is_local"),
+    ("postgresql://u:p@[::ffff:127.0.0.1]:5432/nahla", "DATABASE_URL_is_local"),
+    ("postgresql://u:p@0.0.0.0:5432/nahla", "DATABASE_URL_is_local"),
+    ("sqlite:////tmp/nahla.db", "DATABASE_URL_unsupported_dialect"),
+    ("mysql://u:p@db.railway:3306/nahla", "DATABASE_URL_unsupported_dialect"),
+    ("db.railway:5432/nahla", "DATABASE_URL_unsupported_dialect"),
+    ("postgresql:///nahla", "DATABASE_URL_host_missing"),
+    ("postgresql://u:p@db.railway:5432/", "DATABASE_URL_database_missing"),
+    ("postgresql://u:p@db.railway:not-a-port/nahla", "DATABASE_URL_unparsable"),
 ])
-def test_a_local_or_missing_database_url_is_never_the_pilot_database(url, reason):
-    resolved, refusal = job.database_url({"DATABASE_URL": url})
+def test_a_url_that_is_not_a_remote_postgres_database_is_refused_by_reason(url, reason):
+    resolved, refusal = job.database_url({"DATABASE_URL": url, k.TARGET_ENV: TARGET})
     assert resolved is None and refusal == reason
 
 
-def test_a_remote_database_url_is_accepted_as_given():
-    resolved, refusal = job.database_url({"DATABASE_URL": "postgresql://u:p@db.railway:5432/n"})
-    assert refusal is None and resolved.endswith("/n")
+@pytest.mark.parametrize("url", [
+    "postgresql://u:localhost@db.railway:5432/nahla",       # password, not host
+    "postgresql+psycopg2://u:p@db.railway:5432/nahla",      # a driver, same dialect
+    "postgres://u:p@db.railway:5432/nahla",                 # the other spelling
+    "postgresql://u:p@DB.RAILWAY:5432/nahla",               # host case is not identity
+])
+def test_a_remote_database_url_is_accepted_however_it_is_spelled(url):
+    resolved, refusal = job.database_url({"DATABASE_URL": url, k.TARGET_ENV: TARGET})
+    assert refusal is None and resolved == url
+
+
+def test_a_url_naming_a_host_that_merely_contains_localhost_is_not_local():
+    parsed, refusal = job.parse_database_url("postgresql://u:p@localhostings.example/nahla")
+    assert refusal is None and parsed["host"] == "localhostings.example"
+
+
+def test_the_job_will_not_run_without_an_explicitly_authorized_target(monkeypatch, capsys):
+    monkeypatch.setenv(k.CONFIRMATION_ENV, k.CONFIRMATION_TOKEN)
+    monkeypatch.setenv("DATABASE_URL", TARGET_URL)
+    monkeypatch.delenv(k.TARGET_ENV, raising=False)
+    assert job.main([]) == k.EXIT_USAGE
+    assert "authorized_target_not_declared" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("declared", ["", "   ", "db.railway", "db.railway/nahla/extra",
+                                      "/nahla", "db.railway/"])
+def test_a_target_that_does_not_name_one_host_and_one_database_is_refused(declared):
+    resolved, refusal = job.database_url({"DATABASE_URL": TARGET_URL, k.TARGET_ENV: declared})
+    assert resolved is None and refusal in {"authorized_target_not_declared",
+                                            "authorized_target_malformed"}
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql://u:p@other.railway:5432/nahla",            # another host
+    "postgresql://u:p@db.railway:5432/nahla_staging",       # another database
+])
+def test_a_database_that_is_not_the_authorized_one_is_refused(url):
+    resolved, refusal = job.database_url({"DATABASE_URL": url, k.TARGET_ENV: TARGET})
+    assert resolved is None and refusal == "DATABASE_URL_is_not_the_authorized_target"
 
 
 def test_the_job_refuses_a_local_database_even_when_confirmed(monkeypatch, capsys):
     monkeypatch.setenv(k.CONFIRMATION_ENV, k.CONFIRMATION_TOKEN)
+    monkeypatch.setenv(k.TARGET_ENV, "localhost/nahla")
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@localhost:5432/nahla")
     assert job.main([]) == k.EXIT_USAGE
     assert "DATABASE_URL_is_local" in capsys.readouterr().out
@@ -137,16 +190,49 @@ def test_the_job_refuses_a_local_database_even_when_confirmed(monkeypatch, capsy
 @pytest.mark.parametrize("present, shape", [
     ((), "fresh"),
     (k.RUNTIME_RELATIONS, "complete"),
-    (k.FOUNDATION_RELATIONS, "partial"),
+    (k.FOUNDATION_RELATIONS, "foundation"),
     (k.RUNTIME_RELATIONS[:1], "partial"),
+    (k.LEDGER_RELATIONS, "partial"),
 ])
 def test_the_runtime_schema_shape_is_classified_exactly(present, shape):
     assert job.classify(observation(present=present)) == shape
 
 
+@pytest.mark.parametrize("revisions, expected", [
+    (frozenset({"0107"}), ()),
+    (frozenset({"0088", "0107"}), ()),
+    (frozenset({"0108"}), k.FOUNDATION_RELATIONS),
+    (frozenset({"0088", "0108"}), k.FOUNDATION_RELATIONS),
+])
+def test_every_accepted_start_declares_the_schema_it_must_already_have(revisions, expected):
+    assert k.start_state_accepted(revisions) is True
+    assert k.expected_relations_at(revisions) == expected
+
+
+def test_the_foundation_revision_is_a_startable_state_and_not_a_refused_one(monkeypatch, capsys):
+    """``0108`` creates exactly the three foundation relations, so a database at
+    ``0108`` holding them is on its way to the target, not half-applied."""
+    calls = _prepare(monkeypatch,
+                     observation(revisions=("0108",), present=k.FOUNDATION_RELATIONS),
+                     observation(revisions=("0109",), present=k.RUNTIME_RELATIONS))
+    assert job.main([]) == k.EXIT_SUCCESS
+    assert len(calls) == 1
+    assert f"RESULT={k.RESULT_SUCCESS}" in capsys.readouterr().out
+
+
+def test_a_database_holding_relations_its_revision_did_not_create_is_refused(monkeypatch, capsys):
+    calls = _prepare(monkeypatch,
+                     observation(revisions=("0107",), present=k.FOUNDATION_RELATIONS))
+    assert job.main([]) == k.EXIT_PRECONDITION
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "unexpected_runtime_schema_for_revision" in out
+
+
 def _prepare(monkeypatch, before, after=None, rc=0):
     monkeypatch.setenv(k.CONFIRMATION_ENV, k.CONFIRMATION_TOKEN)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.railway:5432/nahla")
+    monkeypatch.setenv(k.TARGET_ENV, TARGET)
+    monkeypatch.setenv("DATABASE_URL", TARGET_URL)
     monkeypatch.setattr(job, "database_directory", lambda: "/tmp")
     states = [before] + ([after] if after is not None else [])
     monkeypatch.setattr(job, "observe", lambda url: states.pop(0) if states else before)
@@ -174,11 +260,13 @@ def test_an_already_migrated_database_is_a_no_op_and_runs_nothing(monkeypatch, c
 
 
 def test_a_partial_schema_is_refused_rather_than_repaired(monkeypatch, capsys):
-    calls = _prepare(monkeypatch, observation(revisions=("0107",), present=k.FOUNDATION_RELATIONS))
+    calls = _prepare(monkeypatch,
+                     observation(revisions=("0107",), present=k.RUNTIME_RELATIONS[:1]))
     assert job.main([]) == k.EXIT_PRECONDITION
     assert calls == []
     out = capsys.readouterr().out
-    assert "partial_runtime_schema" in out and f"RESULT={k.RESULT_FAILED_PRECONDITION}" in out
+    assert "unexpected_runtime_schema_for_revision" in out
+    assert f"RESULT={k.RESULT_FAILED_PRECONDITION}" in out
 
 
 def test_an_unexpected_starting_revision_is_refused_with_what_was_observed(monkeypatch, capsys):

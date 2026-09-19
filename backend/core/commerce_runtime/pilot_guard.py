@@ -31,8 +31,10 @@ from typing import Any, FrozenSet, Optional, Tuple
 logger = logging.getLogger("nahla.commerce_runtime.pilot_guard")
 
 ENV_ENABLED = "COMMERCE_RUNTIME_PILOT_ENABLED"
+ENV_DRAINING = "COMMERCE_RUNTIME_PILOT_DRAINING"
 ENV_TENANT_ALLOWLIST = "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST"
 ENV_RECIPIENT_ALLOWLIST = "COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST"
+ENV_MODEL = "COMMERCE_RUNTIME_PILOT_MODEL"
 ENV_MAX_STEPS = "COMMERCE_RUNTIME_PILOT_MAX_STEPS"
 ENV_MAX_TOOL_CALLS = "COMMERCE_RUNTIME_PILOT_MAX_TOOL_CALLS"
 ENV_DEADLINE_SECONDS = "COMMERCE_RUNTIME_PILOT_DEADLINE_SECONDS"
@@ -42,11 +44,13 @@ ENV_TOOL_TIMEOUT_SECONDS = "COMMERCE_RUNTIME_PILOT_TOOL_TIMEOUT_SECONDS"
 # Closed reasons. Exactly one is reported per decision.
 PERMITTED = "permitted"
 PILOT_DISABLED = "pilot_disabled"
+PILOT_DRAINING = "pilot_draining"
 TENANT_NOT_ALLOWLISTED = "tenant_not_allowlisted"
 RECIPIENT_MISSING = "recipient_missing"
 RECIPIENT_UNNORMALIZABLE = "recipient_unnormalizable"
 RECIPIENT_NOT_ALLOWLISTED = "recipient_not_allowlisted"
 CONNECTION_NOT_VERIFIED = "connection_not_verified"
+MODEL_NOT_CONFIGURED = "model_not_configured"
 LEGACY_ALREADY_ANSWERED = "legacy_already_answered"
 AI_GATE_SKIPPED = "ai_gate_skipped"
 EMPTY_INBOUND = "empty_inbound"
@@ -76,6 +80,7 @@ class PilotDecision:
     recipient: Optional[str] = None
     connection_ref: Optional[str] = None   # the runtime's opaque channel reference
     connection_id: Optional[str] = None    # the verified WhatsAppConnection row id
+    model: Optional[str] = None            # the explicitly configured pilot model
 
     @property
     def legacy_owns_turn(self) -> bool:
@@ -87,6 +92,27 @@ def _flag(name: str, default: str = "false") -> bool:
 
 
 def pilot_enabled() -> bool:
+    return _flag(ENV_ENABLED)
+
+
+def pilot_draining() -> bool:
+    """Whether the pilot is handing back: no new turns, its own work finished.
+
+    Draining is the step a rollback goes through instead of switching the pilot
+    off underneath work it has not finished. While it is set, every new inbound
+    turn goes to the legacy path immediately, and the turns this runtime already
+    admitted stay reachable until they have a terminal.
+    """
+    return _flag(ENV_ENABLED) and _flag(ENV_DRAINING)
+
+
+def pilot_owns_open_work() -> bool:
+    """Whether unfinished runtime work may still be finished by this deployment.
+
+    True while the pilot is on, and while it is draining. It is only false once
+    the pilot is fully off, which is why switching it off is a step the handover
+    procedure takes *after* draining reports nothing left.
+    """
     return _flag(ENV_ENABLED)
 
 
@@ -130,6 +156,21 @@ def _phone_allowlist(name: str) -> FrozenSet[str]:
         if normalized:
             allowed.add(normalized)
     return frozenset(allowed)
+
+
+def normalize_recipient(phone: Any) -> str:
+    """The platform's own normalisation of a recipient, or ``""``."""
+    return _normalize(phone)
+
+
+def pilot_model() -> str:
+    """The model this pilot is configured to use, or ``""``.
+
+    There is deliberately no default. The loop is model-neutral and the
+    repository's own fallback exists for the legacy path; inheriting it here
+    would mean activating a pilot on a model nobody chose for it.
+    """
+    return str(os.environ.get(ENV_MODEL, "") or "").strip()
 
 
 def tenant_allowlist() -> FrozenSet[int]:
@@ -203,6 +244,7 @@ def evaluate_pilot_route(
     inbound_text: Any,
     legacy_already_answered: bool = False,
     ai_gate_skipped: bool = False,
+    finishing_open_work: bool = False,
 ) -> PilotDecision:
     """Decide, once, whether the commerce runtime owns this inbound turn.
 
@@ -214,6 +256,14 @@ def evaluate_pilot_route(
     try:
         if not pilot_enabled():
             return _refused(PILOT_DISABLED, tenant_id)
+        if pilot_draining() and not finishing_open_work:
+            # Handing back. New turns are the legacy path's from this moment.
+            # ``finishing_open_work`` is the caller stating it has already
+            # established that this exact inbound message is a turn this runtime
+            # admitted and never finished; draining finishes those, which is
+            # what makes it a handover rather than an abandonment. Every other
+            # condition below still has to pass.
+            return _refused(PILOT_DRAINING, tenant_id)
         tenants = tenant_allowlist()
         try:
             tenant = int(tenant_id)
@@ -232,6 +282,10 @@ def evaluate_pilot_route(
         if not recipients or recipient not in recipients:
             return _refused(RECIPIENT_NOT_ALLOWLISTED, tenant, recipient)
 
+        model = pilot_model()
+        if not model:
+            return _refused(MODEL_NOT_CONFIGURED, tenant, recipient)
+
         verified = verified_connection(db, tenant_id=tenant, phone_number_id=phone_number_id)
         if verified is None:
             return _refused(CONNECTION_NOT_VERIFIED, tenant, recipient)
@@ -246,7 +300,7 @@ def evaluate_pilot_route(
 
         return PilotDecision(permitted=True, reason=PERMITTED, tenant_id=tenant,
                              recipient=recipient, connection_ref=connection_ref,
-                             connection_id=connection_id)
+                             connection_id=connection_id, model=model)
     except Exception as exc:  # noqa: BLE001 - a guard that cannot decide refuses
         logger.warning("[COMMERCE_RUNTIME_PILOT] guard error tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
@@ -286,9 +340,12 @@ def verified_connection(db: Any, *, tenant_id: int,
 
 __all__ = [
     "AI_GATE_SKIPPED", "CONNECTION_NOT_VERIFIED", "DEADLINE_CEILING_SECONDS", "EMPTY_INBOUND",
+    "ENV_DRAINING", "PILOT_DRAINING", "pilot_draining", "pilot_owns_open_work",
     "ENV_ENABLED", "ENV_RECIPIENT_ALLOWLIST", "ENV_TENANT_ALLOWLIST", "GUARD_ERROR",
-    "LEGACY_ALREADY_ANSWERED", "MAX_STEPS_CEILING", "MAX_TOOL_CALLS_CEILING", "PERMITTED",
+    "ENV_MODEL", "LEGACY_ALREADY_ANSWERED", "MAX_STEPS_CEILING", "MAX_TOOL_CALLS_CEILING",
+    "MODEL_NOT_CONFIGURED", "PERMITTED", "normalize_recipient",
     "PILOT_DISABLED", "PilotDecision", "RECIPIENT_MISSING", "RECIPIENT_NOT_ALLOWLISTED",
     "RECIPIENT_UNNORMALIZABLE", "TENANT_NOT_ALLOWLISTED", "evaluate_pilot_route", "pilot_budget",
-    "pilot_enabled", "recipient_allowlist", "tenant_allowlist", "verified_connection",
+    "pilot_enabled", "pilot_model", "recipient_allowlist", "tenant_allowlist",
+    "verified_connection",
 ]
