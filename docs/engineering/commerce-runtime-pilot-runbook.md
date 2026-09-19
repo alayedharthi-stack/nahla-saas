@@ -336,6 +336,18 @@ Buffered work is never acknowledged and dropped. Settlement is blocked until
 each entry carries a disposition, and the note is required — `--note` missing is
 `RESULT=FAILED_PRECONDITION`, exit 2.
 
+One case the counts cannot show: if the barrier itself could not be written when
+an inbound was refused, that message was withheld from every owner but never
+recorded. It is logged, once, at error level:
+
+```text
+[COMMERCE_RUNTIME_HANDOVER] could not buffer inbound tenant=… provider_message_id=…
+  error=… — withheld but UNRECORDED; account for it by hand before settling
+```
+
+Grep for `UNRECORDED` over the drain window before settling. A hit is a message
+an operator has to account for; `settle` cannot see it and will not block on it.
+
 **Step 5 — settle.**
 
 ```bash

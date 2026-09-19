@@ -26,7 +26,8 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 
 from sqlalchemy import JSON, create_engine, event  # noqa: E402
 from sqlalchemy.dialects.postgresql import JSONB  # noqa: E402
-from sqlalchemy.orm import sessionmaker  # noqa: E402
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from core.commerce_runtime import handover  # noqa: E402
 from core.commerce_runtime import pilot_guard as pg  # noqa: E402
@@ -47,7 +48,11 @@ def _remap_jsonb(target: Any, connection: Any, **kw: Any) -> None:
 
 @pytest.fixture()
 def db() -> Any:
-    engine = create_engine("sqlite:///:memory:")
+    # StaticPool: one in-memory database shared by every connection, so a
+    # second session (the handover barrier opens its own) sees the same rows
+    # instead of a fresh empty database.
+    engine = create_engine("sqlite:///:memory:", poolclass=StaticPool,
+                           connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
     tenant = Tenant(name="متجر تجريبي عام", is_active=True)

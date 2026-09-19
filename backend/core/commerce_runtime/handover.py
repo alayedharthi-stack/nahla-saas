@@ -36,6 +36,7 @@ anything.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as _dt
 import logging
@@ -304,30 +305,54 @@ def barrier_admits_new_work(db: Any, *, tenant_id: int) -> bool:
 # ── Writing ──────────────────────────────────────────────────────────────────
 
 
+@contextlib.contextmanager
+def _own_session(db: Any) -> Any:
+    """A short transaction of the barrier's own, on the caller's bind.
+
+    A barrier write has to be durable the instant it is made: a drain every
+    replica can see, a buffered inbound that outlives the request that was
+    refused. Committing the *caller's* session to get that would commit whatever
+    else it had staged and end a transaction it still owns, so the write is made
+    on a session of its own and the caller's is left exactly as it was.
+    """
+    from sqlalchemy.orm import Session  # noqa: PLC0415
+
+    bind = db.get_bind() if hasattr(db, "get_bind") else db
+    session = Session(bind=bind)
+    try:
+        yield session
+    finally:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001
+            logger.warning("[COMMERCE_RUNTIME_HANDOVER] barrier session close failed")
+
+
 def _mutate(db: Any, tenant_id: int, change: Any) -> Optional[Barrier]:
     """Apply ``change`` to the tenant's barrier under a row lock. Commits."""
     from database.models import TenantSettings  # noqa: PLC0415
     from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
 
-    _take_advisory_lock(db, tenant_id=int(tenant_id), exclusive=True)
-    row = (db.query(TenantSettings)
-           .filter(TenantSettings.tenant_id == int(tenant_id))
-           .with_for_update()
-           .first())
-    if row is None:
-        row = TenantSettings(tenant_id=int(tenant_id), extra_metadata={})
-        db.add(row)
-        db.flush()
-    metadata = dict(row.extra_metadata or {})
-    updated = change(_from_payload(tenant_id, metadata.get(SETTINGS_KEY)))
-    if updated is None:
-        db.rollback()
-        return None
-    metadata[SETTINGS_KEY] = _to_payload(updated)
-    row.extra_metadata = metadata
-    flag_modified(row, "extra_metadata")
-    db.commit()
-    return updated
+    with _own_session(db) as session:
+        _take_advisory_lock(session, tenant_id=int(tenant_id), exclusive=True)
+        row = (session.query(TenantSettings)
+               .filter(TenantSettings.tenant_id == int(tenant_id))
+               .with_for_update()
+               .first())
+        if row is None:
+            row = TenantSettings(tenant_id=int(tenant_id), extra_metadata={})
+            session.add(row)
+            session.flush()
+        metadata = dict(row.extra_metadata or {})
+        updated = change(_from_payload(tenant_id, metadata.get(SETTINGS_KEY)))
+        if updated is None:
+            session.rollback()
+            return None
+        metadata[SETTINGS_KEY] = _to_payload(updated)
+        row.extra_metadata = metadata
+        flag_modified(row, "extra_metadata")
+        session.commit()
+        return updated
 
 
 def open_drain(db: Any, *, tenant_id: int) -> Barrier:
@@ -405,8 +430,14 @@ def buffer_inbound(db: Any, *, tenant_id: int, provider_message_id: str, recipie
     try:
         return _mutate(db, tenant_id, change) is not None
     except Exception as exc:  # noqa: BLE001
+        # The inbound is still withheld — releasing it to another owner while a
+        # send may be in flight is the worse failure — but it is now withheld
+        # *unrecorded*, so settlement cannot see it. This line is the record:
+        # an operator must account for this message by hand.
         logger.error("[COMMERCE_RUNTIME_HANDOVER] could not buffer inbound tenant=%s "
-                     "provider_message_id=%s error=%s", tenant_id, identity, type(exc).__name__)
+                     "provider_message_id=%s error=%s — withheld but UNRECORDED; "
+                     "account for it by hand before settling",
+                     tenant_id, identity, type(exc).__name__)
         return False
 
 
