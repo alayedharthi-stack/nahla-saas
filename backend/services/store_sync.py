@@ -3508,8 +3508,21 @@ class StoreSyncService:
     def _resolve_customer_for_address_attachment(
         self,
         ext_id: str,
+        *,
+        integration_connection_id: int | None = None,
     ) -> tuple[Optional[Any], str]:
-        """Strict identity binding for address attachment only."""
+        """Strict identity binding for address attachment only.
+
+        ``(tenant, salla_customer_id)`` alone is not a binding: the same
+        provider customer reference can exist under two stores of one
+        tenant, and resolving on it let store B attach an address to a
+        customer store A had linked. So when the caller knows which store
+        connection authorises the import, that connection must independently
+        know this reference — an ``ExternalCustomerProfile`` mapped to it.
+        Whether a profile record exists at all is checked separately, so a
+        tenant with no A1 profiles behaves exactly as before rather than
+        losing address import.
+        """
         ref = str(ext_id or "").strip()
         if not ref:
             return None, "missing_salla_customer_id"
@@ -3532,7 +3545,44 @@ class StoreSyncService:
             return None, "conflicting_customer_identity"
         if not getattr(customer, "id", None):
             return None, "customer_not_persisted"
+        if integration_connection_id is not None:
+            owner = self._external_profile_owner_for_ref(ref)
+            if owner is not None and int(owner) != int(integration_connection_id):
+                return None, "customer_owned_by_another_connection"
         return customer, "ok"
+
+    def _external_profile_owner_for_ref(self, ext_id: str) -> Optional[int]:
+        """Which store connection this tenant maps the reference under.
+
+        ``None`` means no mapping is recorded for this reference — nothing
+        is asserted then, so tenants without A1 profiles are unaffected. A
+        reference mapped to more than one connection is ambiguous and
+        returns the conflicting one, which refuses the attachment.
+        """
+        try:
+            from models import ExternalCustomerProfile  # noqa: PLC0415
+
+            owners = {
+                int(row.integration_connection_id)
+                for row in (
+                    self.db.query(ExternalCustomerProfile)
+                    .filter(
+                        ExternalCustomerProfile.tenant_id == self.tenant_id,
+                        ExternalCustomerProfile.external_customer_ref == str(ext_id),
+                    )
+                    .all()
+                )
+                if getattr(row, "integration_connection_id", None) is not None
+            }
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable mapping asserts nothing and leaves the existing binding in force
+            return None
+        if not owners:
+            return None
+        if len(owners) > 1:
+            # Mapped under several stores: no single owner, so no store may
+            # claim this reference for an address attachment.
+            return -1
+        return owners.pop()
 
     def _resolve_address_integration_connection_id(
         self,
@@ -3597,16 +3647,10 @@ class StoreSyncService:
             )
 
             ext_id = str((payload or {}).get("id") or "").strip()
-            customer, reason = self._resolve_customer_for_address_attachment(ext_id)
-            if customer is None:
-                logger.debug(
-                    "tenant=%s address candidate skipped ext_id=%s reason=%s",
-                    self.tenant_id, ext_id or "-", reason,
-                )
-                return reason
-            # The connection is checked BEFORE any write: an unverified
-            # store binding must stop the attachment, not merely go
-            # unrecorded.
+            # The connection is resolved FIRST and checked before any write:
+            # an unverified store binding must stop the attachment, not
+            # merely go unrecorded — and the customer lookup itself is
+            # bound to the connection that came back.
             conn_id, conn_reason = self._resolve_address_integration_connection_id(
                 integration_connection_id,
             )
@@ -3616,6 +3660,15 @@ class StoreSyncService:
                     self.tenant_id, ext_id or "-", conn_reason,
                 )
                 return conn_reason
+            customer, reason = self._resolve_customer_for_address_attachment(
+                ext_id, integration_connection_id=conn_id,
+            )
+            if customer is None:
+                logger.debug(
+                    "tenant=%s address candidate skipped ext_id=%s reason=%s",
+                    self.tenant_id, ext_id or "-", reason,
+                )
+                return reason
             components = components_from_salla_customer_payload(payload)
             if components.is_empty():
                 return "no_supported_address_components"
@@ -3633,6 +3686,11 @@ class StoreSyncService:
                 "[SALLA_ADDRESS_CANDIDATE] tenant=%s customer=%s action=%s reason=%s",
                 self.tenant_id, customer.id, result.action, result.reason,
             )
+            if result.action == "skipped":
+                # A refusal reports WHY, like every other refusal on this
+                # path. "skipped" alone hides an ownership conflict behind
+                # the same word as "nothing to do".
+                return result.reason or result.action
             return result.action
         except Exception as exc:  # noqa: BLE001
             logger.warning(

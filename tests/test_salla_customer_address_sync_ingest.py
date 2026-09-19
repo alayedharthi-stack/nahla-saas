@@ -384,3 +384,143 @@ def test_out_of_order_webhook_events_keep_the_newer_address(db):
     rows = db.query(CustomerAddress).all()
     assert len(rows) == 1
     assert rows[0].address_text == "عنوان جديد"
+
+
+# ── R3: the store that owns the customer owns its address ───────────────
+
+def _second_store(db, *, external_store_id="STORE-B1", enabled=True):
+    intg = Integration(
+        tenant_id=1, provider="salla", external_store_id=external_store_id,
+        config={"api_key": "k", "store_id": external_store_id}, enabled=enabled,
+    )
+    db.add(intg)
+    db.flush()
+    return intg
+
+
+def test_a_second_store_cannot_rewrite_the_first_stores_address(db):
+    """Two enabled connections, one tenant, the same provider reference.
+
+    An enabled connection existing is not the same as that connection
+    owning this customer. Without ownership, store B's import silently
+    became store A's address — one row, B's content, B's connection id.
+    """
+    store_a = _seed_integration(db)
+    store_b = _second_store(db)
+    _linked_customer(db)
+
+    first = StoreSyncService(db, tenant_id=1, integration_connection_id=store_a.id)
+    assert first._persist_salla_profile_address_candidate(
+        _customer_payload(location="حي النرجس، شارع 10")
+    ) == "created"
+    db.commit()
+
+    second = StoreSyncService(db, tenant_id=1, integration_connection_id=store_b.id)
+    assert second._persist_salla_profile_address_candidate(
+        _customer_payload(city="جدة", location="حي الشاطئ، شارع 7",
+                          updated_at="2026-09-09T10:00:00Z")
+    ) == "source_owned_by_another_connection"
+    db.commit()
+
+    rows = db.query(CustomerAddress).all()
+    assert len(rows) == 1
+    assert rows[0].address_text == "حي النرجس، شارع 10"
+    prov = db.query(CustomerAddressProvenance).one()
+    assert prov.integration_connection_id == store_a.id
+
+
+def test_the_owning_store_keeps_refreshing_its_own_address(db):
+    """The positive side: ownership must not freeze the real owner out."""
+    store_a = _seed_integration(db)
+    _second_store(db)
+    _linked_customer(db)
+
+    service = StoreSyncService(db, tenant_id=1, integration_connection_id=store_a.id)
+    assert service._persist_salla_profile_address_candidate(
+        _customer_payload(location="حي النرجس، شارع 10")
+    ) == "created"
+    db.commit()
+    assert service._persist_salla_profile_address_candidate(
+        _customer_payload(location="حي النرجس، شارع 12",
+                          updated_at="2026-09-09T10:00:00Z")
+    ) == "updated"
+    db.commit()
+
+    rows = db.query(CustomerAddress).all()
+    assert len(rows) == 1
+    assert rows[0].address_text == "حي النرجس، شارع 12"
+
+
+def test_ownership_transfers_when_the_previous_store_is_disconnected(db):
+    """Replacement and reconnection still work — explicitly, not silently."""
+    store_a = _seed_integration(db)
+    store_b = _second_store(db)
+    _linked_customer(db)
+
+    first = StoreSyncService(db, tenant_id=1, integration_connection_id=store_a.id)
+    assert first._persist_salla_profile_address_candidate(
+        _customer_payload(location="حي النرجس، شارع 10")
+    ) == "created"
+    db.commit()
+
+    store_a.enabled = False
+    db.add(store_a)
+    db.commit()
+
+    second = StoreSyncService(db, tenant_id=1, integration_connection_id=store_b.id)
+    assert second._persist_salla_profile_address_candidate(
+        _customer_payload(city="جدة", location="حي الشاطئ، شارع 7",
+                          updated_at="2026-09-09T10:00:00Z")
+    ) == "created"
+    db.commit()
+
+    # The previous store's approved content is preserved, not overwritten.
+    texts = {r.address_text for r in db.query(CustomerAddress).all()}
+    assert texts == {"حي النرجس، شارع 10", "حي الشاطئ، شارع 7"}
+    owners = {
+        p.integration_connection_id
+        for p in db.query(CustomerAddressProvenance).all()
+    }
+    assert owners == {store_a.id, store_b.id}
+
+
+def test_a_customer_mapped_to_another_store_is_never_attached(db):
+    """The mapping, not the reference, decides whose customer this is."""
+    from models import ExternalCustomerProfile  # noqa: PLC0415
+
+    store_a = _seed_integration(db)
+    store_b = _second_store(db)
+    _linked_customer(db)
+    db.add(ExternalCustomerProfile(
+        tenant_id=1, identity_namespace="salla",
+        integration_connection_id=store_a.id,
+        external_customer_ref=SALLA_ID,
+    ))
+    db.commit()
+
+    service = StoreSyncService(db, tenant_id=1, integration_connection_id=store_b.id)
+    assert service._persist_salla_profile_address_candidate(
+        _customer_payload()
+    ) == "customer_owned_by_another_connection"
+    db.commit()
+    assert db.query(CustomerAddress).count() == 0
+
+
+def test_the_mapped_store_still_attaches_normally(db):
+    from models import ExternalCustomerProfile  # noqa: PLC0415
+
+    store_a = _seed_integration(db)
+    _linked_customer(db)
+    db.add(ExternalCustomerProfile(
+        tenant_id=1, identity_namespace="salla",
+        integration_connection_id=store_a.id,
+        external_customer_ref=SALLA_ID,
+    ))
+    db.commit()
+
+    service = StoreSyncService(db, tenant_id=1, integration_connection_id=store_a.id)
+    assert service._persist_salla_profile_address_candidate(
+        _customer_payload()
+    ) == "created"
+    db.commit()
+    assert db.query(CustomerAddress).count() == 1

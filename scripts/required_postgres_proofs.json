@@ -247,7 +247,9 @@
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_selection_committed_between_refresh_read_and_write_is_preserved",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_after_the_race",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_rejected_provenance_insert_still_commits_the_confirmed_address",
-        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_failed_optional_read_leaves_the_caller_transaction_usable"
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_failed_optional_read_leaves_the_caller_transaction_usable",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_revision_constraint_is_scoped_to_the_store_connection",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_same_store_still_cannot_duplicate_one_revision"
       ]
     }
   ]

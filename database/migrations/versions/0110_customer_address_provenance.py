@@ -21,7 +21,12 @@ choice of a previously approved address becomes current again.
 
 ``uq_customer_address_provenance_source_revision``
 ==================================================
-One row per ``(tenant, customer, source, source_ref, content_fingerprint)``.
+One row per
+``(tenant, customer, integration_connection_id, source, source_ref,
+content_fingerprint)``. The store connection is part of the key because the
+same provider customer reference can exist under two stores, and without it
+one store's import would collide with — and be deduplicated into — another
+store's row.
 Two concurrent first imports of the same payload cannot both commit: the
 loser receives an IntegrityError and re-reads the winner. Different
 revisions of the same source still coexist, so a historical selected
@@ -164,13 +169,33 @@ def _create_fresh() -> None:
         _TABLE,
         *_columns(),
         sa.UniqueConstraint("tenant_id", "customer_address_id", name=_UNIQUE),
-        sa.UniqueConstraint(
-            "tenant_id", "customer_id", "source", "source_ref", "content_fingerprint",
-            name=_UNIQUE_SOURCE_REVISION,
-        ),
     )
+    _create_source_revision_unique_index()
     op.create_index(
         _INDEX, _TABLE, ["tenant_id", "customer_id", "source", "source_ref"],
+    )
+
+
+def _create_source_revision_unique_index() -> None:
+    """One row per (customer, store connection, source, ref, revision).
+
+    An expression index over ``COALESCE(integration_connection_id, -1)``,
+    not a plain unique constraint: rows written before a verified
+    connection existed hold NULL there, and SQL treats NULLs as distinct,
+    so a bare unique key would stop deduplicating exactly those rows.
+    """
+    op.create_index(
+        _UNIQUE_SOURCE_REVISION,
+        _TABLE,
+        [
+            "tenant_id",
+            "customer_id",
+            sa.text("COALESCE(integration_connection_id, -1)"),
+            "source",
+            "source_ref",
+            "content_fingerprint",
+        ],
+        unique=True,
     )
 
 
@@ -248,12 +273,10 @@ def _reconcile_existing(bind) -> None:
         op.create_unique_constraint(
             _UNIQUE, _TABLE, ["tenant_id", "customer_address_id"],
         )
-    if not has_unique_constraint(bind, _TABLE, _UNIQUE_SOURCE_REVISION):
-        op.create_unique_constraint(
-            _UNIQUE_SOURCE_REVISION,
-            _TABLE,
-            ["tenant_id", "customer_id", "source", "source_ref", "content_fingerprint"],
-        )
+    if not has_unique_constraint(bind, _TABLE, _UNIQUE_SOURCE_REVISION) and not has_index(
+        bind, _TABLE, _UNIQUE_SOURCE_REVISION
+    ):
+        _create_source_revision_unique_index()
     if not has_index(bind, _TABLE, _INDEX):
         op.create_index(
             _INDEX, _TABLE, ["tenant_id", "customer_id", "source", "source_ref"],

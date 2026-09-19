@@ -425,7 +425,14 @@ def _provenance_rows(
     customer_id: int,
     source: str,
     source_ref: str,
+    integration_connection_id: Optional[int] = None,
 ) -> List[Any]:
+    """Source history for this customer, optionally scoped to one store.
+
+    Freshness, idempotency and the update decision are all judged against
+    this list, so leaving the store out of it let one connection's revision
+    silence or overwrite another's.
+    """
     from models import CustomerAddressProvenance  # noqa: PLC0415
 
     query = db.query(CustomerAddressProvenance).filter_by(
@@ -435,6 +442,11 @@ def _provenance_rows(
     )
     if source_ref:
         query = query.filter(CustomerAddressProvenance.source_ref == source_ref)
+    if integration_connection_id is not None:
+        query = query.filter(
+            CustomerAddressProvenance.integration_connection_id
+            == int(integration_connection_id)
+        )
     return list(query.order_by(CustomerAddressProvenance.id.asc()).all())
 
 
@@ -481,13 +493,26 @@ def upsert_imported_address_candidate(
 
     now = observed_at or _utcnow()
     fingerprint = address_content_fingerprint(components)
-    rows = _provenance_rows(
+    # ONE read of the whole source scope. Ownership is decided against all
+    # of it; freshness, idempotency and the update decision are then judged
+    # against this store's own rows only. Reading twice would also widen
+    # the window a concurrent writer can land in.
+    all_rows = _provenance_rows(
         db,
         tenant_id=tenant_id,
         customer_id=customer_id,
         source=source,
         source_ref=source_ref,
     )
+    ownership = _source_connection_ownership(
+        db,
+        tenant_id=tenant_id,
+        rows=all_rows,
+        integration_connection_id=integration_connection_id,
+    )
+    if ownership == "source_owned_by_another_connection":
+        return CandidateUpsertResult(action=ACTION_SKIPPED, reason=ownership)
+    rows = _rows_for_connection(all_rows, integration_connection_id)
 
     # 0. Freshness is judged against the WHOLE source history, selected rows
     #    included. Judging it only against a mutable row let an older payload
@@ -698,6 +723,7 @@ def _create_new_candidate(
             source=source,
             source_ref=source_ref,
             fingerprint=fingerprint,
+            integration_connection_id=integration_connection_id,
         )
         if existing is None:
             raise
@@ -748,20 +774,119 @@ def _find_provenance_by_revision(
     source: str,
     source_ref: str,
     fingerprint: str,
+    integration_connection_id: Optional[int] = None,
 ) -> Any:
+    """Locate the row a uniqueness conflict collided with.
+
+    Scoped to the same store connection the conflicting insert used, so
+    the lookup mirrors the constraint exactly. Matching without it would
+    hand back another store's row as "the one we just wrote".
+    """
     from models import CustomerAddressProvenance  # noqa: PLC0415
 
-    return (
-        db.query(CustomerAddressProvenance)
-        .filter_by(
-            tenant_id=int(tenant_id),
-            customer_id=int(customer_id),
-            source=source,
-            source_ref=source_ref or None,
-            content_fingerprint=fingerprint,
-        )
-        .first()
+    query = db.query(CustomerAddressProvenance).filter_by(
+        tenant_id=int(tenant_id),
+        customer_id=int(customer_id),
+        source=source,
+        source_ref=source_ref or None,
+        content_fingerprint=fingerprint,
     )
+    if integration_connection_id is None:
+        query = query.filter(
+            CustomerAddressProvenance.integration_connection_id.is_(None)
+        )
+    else:
+        query = query.filter(
+            CustomerAddressProvenance.integration_connection_id
+            == int(integration_connection_id)
+        )
+    return query.first()
+
+
+def _rows_for_connection(
+    rows: List[Any],
+    integration_connection_id: Optional[int],
+) -> List[Any]:
+    """This store's own history, plus rows no store ever claimed.
+
+    A row written before a connection was recorded belongs to nobody, so
+    the verified store may adopt and refresh it rather than duplicating it.
+    Another store's rows are never in here.
+    """
+    if integration_connection_id is None:
+        return list(rows)
+    return [
+        row
+        for row in rows
+        if getattr(row, "integration_connection_id", None) is None
+        or int(row.integration_connection_id) == int(integration_connection_id)
+    ]
+
+
+def _source_connection_ownership(
+    db: Any,
+    *,
+    tenant_id: int,
+    rows: List[Any],
+    integration_connection_id: Optional[int],
+) -> str:
+    """Whether THIS store connection may write this customer's source scope.
+
+    One provider customer reference under one tenant is owned by one store
+    connection at a time. Without this, a second enabled connection could
+    import the same reference and rewrite the first store's address —
+    "an enabled connection exists" is not the same as "this connection
+    owns this customer".
+
+    Ownership does transfer, but only when the previous owner is no longer
+    a usable connection (replaced, removed or disabled). That transition is
+    explicit and logged, never a silent overwrite.
+    """
+    if integration_connection_id is None:
+        return "ok"
+    owners = {
+        int(row.integration_connection_id)
+        for row in rows
+        if getattr(row, "integration_connection_id", None) is not None
+    }
+    foreign = owners - {int(integration_connection_id)}
+    if not foreign:
+        return "ok"
+    if _any_connection_still_usable(db, tenant_id=tenant_id, connection_ids=foreign):
+        return "source_owned_by_another_connection"
+    logger.info(
+        "[CUSTOMER_ADDRESS] source ownership transferred tenant=%s from=%s to=%s",
+        tenant_id,
+        sorted(foreign),
+        integration_connection_id,
+    )
+    return "ownership_transferred"
+
+
+def _any_connection_still_usable(
+    db: Any,
+    *,
+    tenant_id: int,
+    connection_ids: Any,
+) -> bool:
+    """True when at least one of these connections still exists and is enabled."""
+    from models import Integration  # noqa: PLC0415
+
+    ids = [int(c) for c in connection_ids if c]
+    if not ids:
+        return False
+    try:
+        rows = (
+            db.query(Integration)
+            .filter(
+                Integration.tenant_id == int(tenant_id),
+                Integration.id.in_(ids),
+            )
+            .all()
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable connection table is treated as "still owned", which refuses the write rather than overwriting another store's address
+        return True
+    return any(bool(getattr(row, "enabled", False)) for row in rows)
 
 
 @dataclass(frozen=True)

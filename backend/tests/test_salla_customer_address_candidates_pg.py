@@ -80,6 +80,7 @@ from models import (  # noqa: E402
     Customer,
     CustomerAddress,
     CustomerAddressProvenance,
+    Integration,
     Tenant,
 )
 from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # noqa: E402
@@ -1118,5 +1119,136 @@ def test_a_failed_optional_read_leaves_the_caller_transaction_usable(
         db.commit()
         assert db.query(CustomerAddress).filter_by(
             tenant_id=tenant_id, customer_id=customer_id).count() == 2
+    finally:
+        db.close()
+
+
+# ── R3: the store connection is part of the identity, in the schema ─────
+
+def test_the_revision_constraint_is_scoped_to_the_store_connection(
+    pg_at_0110: Engine,
+) -> None:
+    """Two stores, one provider reference, one revision — two rows.
+
+    Without the connection in the key, store B's import collided with
+    store A's row and was deduplicated into it, which is how one store
+    came to own another store's address.
+    """
+    insp = inspect(pg_at_0110)
+    index = next(
+        i for i in insp.get_indexes(_TABLE)
+        if i["name"] == "uq_customer_address_provenance_source_revision"
+    )
+    assert index["unique"] is True
+    # COALESCE, so rows with no recorded connection still deduplicate.
+    assert any(
+        "integration_connection_id" in str(col or "")
+        for col in index.get("column_names") or []
+    ) or "integration_connection_id" in str(index.get("expressions") or "")
+
+    db = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            db, salla_id="SC-PG-TWOSTORE", phone="+966500000921")
+        connections = []
+        for store in ("STORE-PG-A", "STORE-PG-B"):
+            row = Integration(
+                tenant_id=tenant_id, provider="salla", external_store_id=store,
+                config={"store_id": store}, enabled=True,
+            )
+            db.add(row)
+            db.flush()
+            connections.append(int(row.id))
+        db.commit()
+
+        components = AddressComponents(city=CITY, short_address_code=SHORT_CODE)
+        created = []
+        for connection_id in connections:
+            result = upsert_imported_address_candidate(
+                db, tenant_id=tenant_id, customer_id=customer_id,
+                components=components, source=SOURCE_SALLA_CUSTOMER_PROFILE,
+                source_ref="SC-PG-TWOSTORE",
+                integration_connection_id=connection_id,
+                source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            )
+            db.commit()
+            created.append(result)
+
+        # The service refuses the second store outright; the constraint is
+        # the backstop behind that refusal.
+        assert created[0].action == ACTION_CREATED
+        assert created[1].reason == "source_owned_by_another_connection"
+
+        # And the constraint itself keeps the two stores apart: a direct
+        # write under the second connection is a DIFFERENT row, not a
+        # duplicate of the first.
+        first = db.query(CustomerAddressProvenance).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).one()
+        address = CustomerAddress(
+            tenant_id=tenant_id, customer_id=customer_id, city=CITY,
+            address_type="imported_profile_candidate",
+        )
+        db.add(address)
+        db.flush()
+        db.add(CustomerAddressProvenance(
+            tenant_id=tenant_id, customer_id=customer_id,
+            customer_address_id=address.id,
+            source=SOURCE_SALLA_CUSTOMER_PROFILE, source_ref="SC-PG-TWOSTORE",
+            integration_connection_id=connections[1],
+            content_fingerprint=first.content_fingerprint,
+            source_observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            selection_state="candidate",
+        ))
+        db.commit()
+        assert db.query(CustomerAddressProvenance).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).count() == 2
+    finally:
+        db.close()
+
+
+def test_the_same_store_still_cannot_duplicate_one_revision(
+    pg_at_0110: Engine,
+) -> None:
+    """Widening the key must not weaken it for the store that owns the row."""
+    db = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            db, salla_id="SC-PG-ONESTORE", phone="+966500000922")
+        connection = Integration(
+            tenant_id=tenant_id, provider="salla", external_store_id="STORE-PG-C",
+            config={"store_id": "STORE-PG-C"}, enabled=True,
+        )
+        db.add(connection)
+        db.commit()
+        connection_id = int(connection.id)
+
+        first = upsert_imported_address_candidate(
+            db, tenant_id=tenant_id, customer_id=customer_id,
+            components=AddressComponents(city=CITY, short_address_code=SHORT_CODE),
+            source=SOURCE_SALLA_CUSTOMER_PROFILE, source_ref="SC-PG-ONESTORE",
+            integration_connection_id=connection_id,
+            source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+        db.commit()
+        assert first.action == ACTION_CREATED
+
+        address = CustomerAddress(
+            tenant_id=tenant_id, customer_id=customer_id, city=CITY,
+            address_type="imported_profile_candidate",
+        )
+        db.add(address)
+        db.flush()
+        db.add(CustomerAddressProvenance(
+            tenant_id=tenant_id, customer_id=customer_id,
+            customer_address_id=address.id,
+            source=SOURCE_SALLA_CUSTOMER_PROFILE, source_ref="SC-PG-ONESTORE",
+            integration_connection_id=connection_id,
+            content_fingerprint=first.fingerprint,
+            source_observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+            selection_state="candidate",
+        ))
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
     finally:
         db.close()

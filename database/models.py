@@ -1056,14 +1056,29 @@ class CustomerAddressProvenance(Base):
             'tenant_id', 'customer_address_id',
             name='uq_customer_address_provenance_address',
         ),
-        # One row per (customer, source, source ref, content revision). Two
-        # concurrent first imports of the same payload therefore cannot both
-        # commit: the loser gets an IntegrityError and re-reads the winner.
-        # Different revisions still coexist, so a historical selected
-        # revision is never displaced by a refresh.
-        UniqueConstraint(
-            'tenant_id', 'customer_id', 'source', 'source_ref', 'content_fingerprint',
-            name='uq_customer_address_provenance_source_revision',
+        # One row per (customer, STORE CONNECTION, source, source ref,
+        # content revision). Two concurrent first imports of the same
+        # payload therefore cannot both commit: the loser gets an
+        # IntegrityError and re-reads the winner. Different revisions still
+        # coexist, so a historical selected revision is never displaced by
+        # a refresh.
+        #
+        # The connection is part of the key because the same provider
+        # customer reference can exist under two stores: without it, one
+        # store's import would collide with — and be deduplicated into —
+        # another store's row.
+        #
+        # COALESCE, not the bare column, because an import that predates a
+        # verified connection stores NULL there and SQL treats NULLs as
+        # distinct: a plain unique key on the column would stop
+        # deduplicating exactly those rows, which is the guarantee the
+        # concurrent-import recovery depends on.
+        Index(
+            'uq_customer_address_provenance_source_revision',
+            'tenant_id', 'customer_id',
+            sa.text('COALESCE(integration_connection_id, -1)'),
+            'source', 'source_ref', 'content_fingerprint',
+            unique=True,
         ),
         Index(
             'ix_customer_address_provenance_source',
