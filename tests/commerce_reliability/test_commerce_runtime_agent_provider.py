@@ -409,3 +409,148 @@ def test_an_incomplete_tool_result_set_is_never_sent_as_a_partial_pair():
     assert all(m["role"] == "user" for m in messages)
     joined = "".join(b.get("text", "") for m in messages for b in m["content"])
     assert "earlier_tool_observations" in joined
+
+
+# ── The repository's own Anthropic entry point ───────────────────────────────
+
+
+class _FakeUsage:
+    input_tokens = 11
+    output_tokens = 3
+    cache_read_input_tokens = None
+    cache_creation_input_tokens = None
+
+
+class _FakeText:
+    type = "text"
+    text = "hello"
+
+
+class _FakeResponse:
+    id = "msg_1"
+    stop_reason = "end_turn"
+    usage = _FakeUsage()
+    content = [_FakeText()]
+
+
+class _FakeClient:
+    created: List[Dict[str, Any]] = []
+    constructed: List[Dict[str, Any]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        _FakeClient.constructed.append(kwargs)
+        self.messages = self
+
+    def create(self, **kwargs: Any) -> _FakeResponse:
+        _FakeClient.created.append(kwargs)
+        return _FakeResponse()
+
+
+class _FakeSDK:
+    Anthropic = _FakeClient
+
+    class AuthenticationError(Exception):
+        pass
+
+    class RateLimitError(Exception):
+        pass
+
+    class APITimeoutError(Exception):
+        pass
+
+    class APIConnectionError(Exception):
+        pass
+
+    class APIStatusError(Exception):
+        status_code = 500
+
+
+@pytest.fixture()
+def anthropic_double(monkeypatch):
+    from modules.ai.orchestrator.providers import anthropic_provider as module
+
+    _FakeClient.created.clear()
+    _FakeClient.constructed.clear()
+    monkeypatch.setattr(module, "_API_KEY", "test-key", raising=True)
+    monkeypatch.setattr(module, "_SDK_AVAILABLE", True, raising=True)
+    monkeypatch.setattr(module, "_anthropic_sdk", _FakeSDK, raising=True)
+    monkeypatch.setattr(module, "emit_llm_cost_audit", lambda **kwargs: None, raising=True)
+    monkeypatch.setattr(module, "record_ai_usage_from_anthropic", lambda **kwargs: None, raising=True)
+    return module
+
+
+def test_the_single_step_call_resolves_the_same_model_as_the_legacy_path(anthropic_double, monkeypatch):
+    """The new entry point must never become a second model-selection surface."""
+    seen: List[tuple] = []
+
+    def resolver(audit_context, *, provider, default):
+        seen.append((audit_context, provider, default))
+        return "claude-resolved"
+
+    monkeypatch.setattr(anthropic_double, "resolve_model_for_provider", resolver, raising=True)
+    monkeypatch.setattr(anthropic_double, "resolve_anthropic_model", lambda: "claude-default", raising=True)
+    provider = anthropic_double.AnthropicProvider()
+    audit = {"tenant_id": 4}
+    legacy = provider.call(message="hi", prompt="p", audit_context=audit)
+    single = provider.call_single_step(messages=[{"role": "user", "content": "hi"}], system="p",
+                                       audit_context=audit)
+    assert legacy["model"] == single["model"] == "claude-resolved"
+    assert seen[0] == seen[1] == (audit, "anthropic", "claude-default")
+
+
+def test_the_single_step_call_disables_library_retries_and_uses_the_caller_s_timeout(anthropic_double):
+    provider = anthropic_double.AnthropicProvider()
+    provider.call_single_step(messages=[{"role": "user", "content": "hi"}], system="p",
+                              timeout_seconds=12.5)
+    assert _FakeClient.constructed[-1]["max_retries"] == 0
+    assert _FakeClient.constructed[-1]["timeout"] == 12.5
+
+
+def test_the_single_step_call_reports_blocks_stop_reason_and_usage_the_legacy_path_drops(anthropic_double):
+    provider = anthropic_double.AnthropicProvider()
+    answer = provider.call_single_step(messages=[{"role": "user", "content": "hi"}], system="p")
+    assert answer["status"] == "ok" and answer["stop_reason"] == "end_turn"
+    assert answer["blocks"] == [{"type": "text", "text": "hello"}]
+    assert answer["usage"]["input_tokens"] == 11 and answer["usage"]["output_tokens"] == 3
+    assert answer["request_id"] == "msg_1"
+
+
+@pytest.mark.parametrize("error, status", [
+    (_FakeSDK.AuthenticationError, "auth_error"),
+    (_FakeSDK.RateLimitError, "rate_limited"),
+    (_FakeSDK.APITimeoutError, "timeout"),
+    (_FakeSDK.APIConnectionError, "connection_error"),
+])
+def test_each_sdk_error_becomes_a_named_status_and_never_raises(anthropic_double, monkeypatch, error, status):
+    class Failing(_FakeClient):
+        def create(self, **kwargs: Any):
+            raise error("x")
+
+    monkeypatch.setattr(_FakeSDK, "Anthropic", Failing, raising=True)
+    answer = anthropic_double.AnthropicProvider().call_single_step(
+        messages=[{"role": "user", "content": "hi"}], system="p")
+    assert answer["status"] == status and answer["blocks"] == []
+
+
+def test_an_overloaded_api_status_is_named_apart_from_other_api_errors(anthropic_double, monkeypatch):
+    class Overloaded(_FakeClient):
+        def create(self, **kwargs: Any):
+            error = _FakeSDK.APIStatusError("overloaded")
+            error.status_code = 529
+            raise error
+
+    monkeypatch.setattr(_FakeSDK, "Anthropic", Overloaded, raising=True)
+    answer = anthropic_double.AnthropicProvider().call_single_step(
+        messages=[{"role": "user", "content": "hi"}], system="p")
+    assert answer["status"] == "overloaded"
+
+
+def test_a_missing_key_or_sdk_is_reported_rather_than_falling_back_to_another_path(anthropic_double,
+                                                                                   monkeypatch):
+    monkeypatch.setattr(anthropic_double, "_API_KEY", "", raising=True)
+    assert anthropic_double.AnthropicProvider().call_single_step(
+        messages=[], system="p")["status"] == "no_api_key"
+    monkeypatch.setattr(anthropic_double, "_API_KEY", "k", raising=True)
+    monkeypatch.setattr(anthropic_double, "_SDK_AVAILABLE", False, raising=True)
+    assert anthropic_double.AnthropicProvider().call_single_step(
+        messages=[], system="p")["status"] == "sdk_unavailable"

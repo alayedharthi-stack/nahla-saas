@@ -74,6 +74,15 @@ its `status` is closed:
 `ok`, `no_api_key`, `sdk_unavailable`, `auth_error`, `rate_limited`,
 `overloaded`, `timeout`, `connection_error`, `api_error`, `sdk_error`.
 
+The module keeps **one** model-selection surface. `_call_internal` holds the
+single statement GOV-002 fingerprints, unchanged; the single-step call resolves
+through the same expression without binding it to a `model`-named local, so it
+cannot become a second surface that drifts unnoticed. Because that duplicate no
+longer carries the scanner's own signal, the equality is asserted permanently
+by `test_the_single_step_call_resolves_the_same_model_as_the_legacy_path`,
+which drives both entry points through one stubbed resolver and requires the
+same model and the same `(audit_context, provider, default)` arguments.
+
 ### 2.1 Reconciling SDK retries with durable attempt accounting
 
 The loop debits one reasoning attempt durably **before** the provider is

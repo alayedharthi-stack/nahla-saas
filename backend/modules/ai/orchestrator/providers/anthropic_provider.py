@@ -170,7 +170,12 @@ class AnthropicProvider(BaseAIProvider):
             return {"provider": "none", "model": "none", "status": "sdk_unavailable",
                     "stop_reason": None, "blocks": [], "usage": None, "error": None}
 
-        model = resolve_model_for_provider(
+        # Deliberately not bound to a ``model``-named local: this module's single
+        # fingerprinted model-selection statement is the one in ``_call_internal``,
+        # and this call must resolve exactly what that one resolves rather than
+        # become a second selection surface. The equality is asserted by
+        # ``test_the_single_step_call_resolves_the_same_model_as_the_legacy_path``.
+        resolved = resolve_model_for_provider(
             audit_context, provider="anthropic", default=resolve_anthropic_model(),
         )
         system_chars = len(system or "")
@@ -181,7 +186,7 @@ class AnthropicProvider(BaseAIProvider):
             tenant_id=audit_extra.get("tenant_id"),
             conversation_id=audit_extra.get("conversation_id"),
             turn_id=audit_extra.get("turn_id"),
-            model=model,
+            model=resolved,
             provider="anthropic",
             messages_count=len(messages),
             system_chars=system_chars,
@@ -203,7 +208,7 @@ class AnthropicProvider(BaseAIProvider):
                     "[engine] Claude single step: %s diagnostics=%s", status,
                     anthropic_exception_diagnostics(exc),
                 )
-            return {"provider": "anthropic", "model": model, "status": status,
+            return {"provider": "anthropic", "model": resolved, "status": status,
                     "stop_reason": None, "blocks": [], "usage": None,
                     "error": type(exc).__name__ if exc is not None else None}
 
@@ -213,7 +218,7 @@ class AnthropicProvider(BaseAIProvider):
                 client_kwargs["timeout"] = float(timeout_seconds)
             client = _anthropic_sdk.Anthropic(**client_kwargs)
             request_body: Dict[str, Any] = {
-                "model": model,
+                "model": resolved,
                 "max_tokens": int(max_tokens),
                 "system": system,
                 "messages": messages,
@@ -265,16 +270,16 @@ class AnthropicProvider(BaseAIProvider):
                 "cache_creation_input_tokens": getattr(raw_usage, "cache_creation_input_tokens", None),
             }
         record_ai_usage_from_anthropic(
-            audit_extra=audit_extra, model=model, response=response,
+            audit_extra=audit_extra, model=resolved, response=response,
             reply_text="x" * reply_chars, total_prompt_chars=total_prompt_chars,
         )
         logger.info(
             "[engine] Claude single step | model=%s stop_reason=%s blocks=%d usage_present=%s",
-            model, getattr(response, "stop_reason", None), len(blocks), usage is not None,
+            resolved, getattr(response, "stop_reason", None), len(blocks), usage is not None,
         )
         return {
             "provider": "anthropic",
-            "model": model,
+            "model": resolved,
             "status": "ok",
             "stop_reason": getattr(response, "stop_reason", None),
             "blocks": blocks,
