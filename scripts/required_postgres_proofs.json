@@ -88,6 +88,72 @@
       ]
     },
     {
+      "id": "commerce_runtime_ledgers",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py",
+      "origin": "Ledger PR \u2014 dormant effect and delivery ledgers: business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit and ledger-derived terminals; L1 completion boundary on both terminal entry points and L2 distinct business identities; schema-state completion guard (standalone 0108 kept, partial schema fails closed on both entry points, complete schema ledger-aware) and the reservation/completion race in both lock orders",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_migration_0109_applies_on_0108_and_is_reversible",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_ledger_metadata_and_migration_declare_the_same_schema",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_concurrent_duplicate_reservations_produce_one_logical_action",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_same_key_with_a_different_action_payload_or_conversation_is_rejected_explicitly",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_reservations_and_lookups_are_isolated_by_tenant_namespace_conversation_and_turn",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_stale_lease_fence_and_epoch_are_rejected_for_intent_and_dispatch",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_ownership_change_between_intent_and_dispatch_requires_fresh_authorization",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_concurrent_dispatch_reservations_create_exactly_one_attempt",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_confirmed_mutation_is_reused_without_a_second_execution",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_unknown_outcome_blocks_replay_and_provider_failover",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_crash_before_commit_leaves_no_partial_intent_state_or_terminal",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_crash_after_durable_dispatch_reservation_blocks_blind_redispatch",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_late_evidence_attaches_only_to_its_existing_attempt",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_definitive_rejection_permits_one_bounded_recovery_attempt",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_timeout_or_missing_provider_message_id_prevents_fallback[script0]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_timeout_or_missing_provider_message_id_prevents_fallback[script1]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_timeout_or_missing_provider_message_id_prevents_fallback[script2]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_acceptance_delivery_and_read_receipts_remain_distinct",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_illegal_or_contradictory_transitions_fail_explicitly",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_commit_turn_decision_is_atomic_and_finalize_derives_transport_and_reach",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_handoff_request_is_not_human_ownership_transfer",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_reserved_intents_block_premature_completion_on_both_entry_points",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_dispatching_attempts_cannot_be_completed_through_the_foundation_entry_point",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_foundation_terminal_remains_available_for_turns_without_ledger_records",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_distinct_business_identities_stay_distinct_with_equal_payloads",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_every_ledger_operation_closes_its_transaction_before_returning",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_partial_ledger_schema_fails_closed_while_effect_obligations_remain",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_partial_ledger_schema_fails_closed_while_delivery_obligations_remain",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_standalone_0108_schema_keeps_the_foundation_terminal_available",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_reservation_and_completion_race_in_both_lock_orders"
+      ]
+    },
+    {
+      "id": "commerce_runtime_ledgers_migration",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py",
+      "origin": "Ledger PR \u2014 revision 0109 reconciliation: fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_fresh_and_compatible_precreation_pass_the_verifier",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_key_uniqueness-ALTER TABLE commerce_runtime_effects DROP CONSTRAINT uq_commerce_runtime_effects_key-constraint uq_commerce_runtime_effects_key absent]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[wrong_default-ALTER TABLE commerce_runtime_effects ALTER COLUMN status SET DEFAULT 'confirmed'-commerce_runtime_effects.status]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[disabled_trigger-ALTER TABLE commerce_runtime_effect_results DISABLE TRIGGER trg_commerce_runtime_ledger_immutable-is not enabled]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[narrowed_column-ALTER TABLE commerce_runtime_delivery_receipts ALTER COLUMN provider_message_id TYPE varchar(64)-commerce_runtime_delivery_receipts.provider_message_id]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_check-ALTER TABLE commerce_runtime_delivery_receipts DROP CONSTRAINT ck_commerce_runtime_delivery_receipts_accepted_id-constraint ck_commerce_runtime_delivery_receipts_accepted_id absent]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_confirmed_pair-ALTER TABLE commerce_runtime_effects DROP CONSTRAINT ck_commerce_runtime_effects_confirmed_pair-constraint ck_commerce_runtime_effects_confirmed_pair absent]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[extra_column-ALTER TABLE commerce_runtime_delivery_sequences ADD COLUMN legacy_flag boolean-commerce_runtime_delivery_sequences.legacy_flag: unexpected column]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_same_named_trigger_on_an_unrelated_table_does_not_satisfy_the_verifier",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_same_named_function_with_a_different_body_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_missing_ledger_index_is_reconciled",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_0109_requires_the_foundation_tables"
+      ]
+    },
+    {
       "id": "runner_connection_regressions",
       "kind": "runner_regression",
       "module": "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py",

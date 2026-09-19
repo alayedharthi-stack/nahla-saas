@@ -41,7 +41,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine, Row
 from sqlalchemy.exc import IntegrityError
@@ -52,6 +52,23 @@ from core.commerce_runtime.models import RuntimeConversation, RuntimeTurn, Runti
 CONV = RuntimeConversation.__table__
 TURN = RuntimeTurn.__table__
 TERM = RuntimeTurnTerminal.__table__
+
+# Ledger relations of revision 0109, consulted by name only when they exist,
+# so the foundation keeps working on the standalone 0108 schema.
+LEDGER_EFFECTS_TABLE = "commerce_runtime_effects"
+LEDGER_SEQUENCES_TABLE = "commerce_runtime_delivery_sequences"
+# Every relation of the revision 0109 ledger schema. The completion guard
+# classifies the database by their presence: none present is the standalone
+# 0108 foundation schema, all present applies the ledger-aware completion
+# rules, anything in between fails closed.
+LEDGER_RELATIONS: Tuple[str, ...] = (
+    LEDGER_EFFECTS_TABLE,
+    "commerce_runtime_effect_attempts",
+    "commerce_runtime_effect_results",
+    LEDGER_SEQUENCES_TABLE,
+    "commerce_runtime_delivery_attempts",
+    "commerce_runtime_delivery_receipts",
+)
 
 
 def _db_now(conn: Connection) -> _dt.datetime:
@@ -421,44 +438,11 @@ class CommerceRuntimeRepository:
             state_body = c.validate_payload(state_transition.payload, field="payload", max_bytes=c.MAX_PAYLOAD_BYTES)
         try:
             with self._engine.begin() as conn:
-                turn = conn.execute(
-                    select(TURN).where(TURN.c.id == turn_id, TURN.c.tenant_id == tenant_id, TURN.c.namespace == ns)
-                ).one_or_none()
-                if turn is None:
-                    raise c.TurnNotFound(f"turn not found in tenant {tenant_id}/{ns}")
-                conversation_id = int(turn._mapping["conversation_id"])
-                c.require_token_scope(token, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id)
-                snap = self._lock(conn, tenant_id, ns, conversation_id)
-                self._require(snap, token, expected_revision=expected_revision)
-                existing = conn.execute(select(TERM).where(TERM.c.turn_id == turn_id)).one_or_none()
-                if existing is not None:
-                    raise c.TerminalAlreadyRecorded(_terminal(existing))
-                if snap.eligible_turn_id != turn_id:
-                    raise c.OwnershipRejected(c.RejectReason.TURN_NOT_ELIGIBLE, snap)
-                if state_body is not None:
-                    applied = self._apply_state(conn, conversation_id, tenant_id, ns, token,
-                                                expected_revision, state_body)
-                    if applied is None:
-                        self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token,
-                                                        expected_revision=expected_revision)
-                else:
-                    touched = conn.execute(
-                        self._guarded_update(conversation_id, tenant_id, ns, token)
-                        .values(updated_at=func.clock_timestamp())
-                    )
-                    if touched.rowcount != 1:
-                        self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token)
-                row = conn.execute(
-                    insert(TERM).values(
-                        turn_id=turn_id, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id,
-                        processing_outcome=processing, transport_outcome=transport, customer_reach=reach,
-                        recorded_fence=token.fence, recorded_epoch=token.epoch, recorded_by=token.owner_id,
-                        details=body,
-                    ).returning(TERM)
-                ).one()
-                if _fault_before_commit is not None:
-                    _fault_before_commit()
-                return _terminal(row)
+                return self._record_terminal_in(
+                    conn, tenant_id=tenant_id, ns=ns, turn_id=turn_id, token=token, processing=processing,
+                    transport=transport, reach=reach, details=body, expected_revision=expected_revision,
+                    state_body=state_body, fault_before_commit=_fault_before_commit,
+                )
         except IntegrityError:
             # Two completion attempts raced past the existence check: the
             # primary key kept exactly one, this write transaction rolled back
@@ -467,6 +451,148 @@ class CommerceRuntimeRepository:
             if existing is None:
                 raise
             raise c.TerminalAlreadyRecorded(existing) from None
+
+    def _record_terminal_in(
+        self, conn: Connection, *, tenant_id: int, ns: str, turn_id: int, token: c.OwnershipToken,
+        processing: str, transport: Optional[str], reach: Optional[str], details: Dict[str, Any],
+        expected_revision: Optional[int] = None, state_body: Optional[Dict[str, Any]] = None,
+        fault_before_commit: Optional[Callable[[], None]] = None,
+        resolve: Optional[Callable[[Connection, c.ConversationSnapshot], Tuple[Any, Any, Mapping[str, Any]]]] = None,
+    ) -> c.TerminalRecord:
+        """Insert the terminal of the eligible turn inside the caller's transaction.
+
+        Inputs are already validated. ``resolve``, when given, runs after the
+        conversation lock, the ownership guard, the existence check and the
+        eligibility check, and returns the transport outcome, the customer
+        reach and the details to record; the ledgers use it to derive those
+        facts from rows read under the same lock. Without ``resolve`` the
+        given ``transport`` and ``reach`` are recorded as they are.
+        """
+        turn = conn.execute(
+            select(TURN).where(TURN.c.id == turn_id, TURN.c.tenant_id == tenant_id, TURN.c.namespace == ns)
+        ).one_or_none()
+        if turn is None:
+            raise c.TurnNotFound(f"turn not found in tenant {tenant_id}/{ns}")
+        conversation_id = int(turn._mapping["conversation_id"])
+        c.require_token_scope(token, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id)
+        snap = self._lock(conn, tenant_id, ns, conversation_id)
+        self._require(snap, token, expected_revision=expected_revision)
+        existing = conn.execute(select(TERM).where(TERM.c.turn_id == turn_id)).one_or_none()
+        if existing is not None:
+            raise c.TerminalAlreadyRecorded(_terminal(existing))
+        if snap.eligible_turn_id != turn_id:
+            raise c.OwnershipRejected(c.RejectReason.TURN_NOT_ELIGIBLE, snap)
+        self._enforce_ledger_completion(conn, tenant_id, ns, turn_id, derived=resolve is not None)
+        if resolve is not None:
+            transport, reach, resolved_details = resolve(conn, snap)
+            transport = c.validate_enum(transport, c.TransportOutcome, field="transport_outcome")
+            reach = c.validate_enum(reach, c.CustomerReach, field="customer_reach")
+            details = c.validate_payload(resolved_details, field="details", max_bytes=c.MAX_DETAILS_BYTES)
+        if transport is None or reach is None:
+            raise c.ValidationError("transport_outcome and customer_reach are required")
+        if state_body is not None:
+            applied = self._apply_state(conn, conversation_id, tenant_id, ns, token,
+                                        expected_revision, state_body)
+            if applied is None:
+                self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token,
+                                                expected_revision=expected_revision)
+        else:
+            touched = conn.execute(
+                self._guarded_update(conversation_id, tenant_id, ns, token)
+                .values(updated_at=func.clock_timestamp())
+            )
+            if touched.rowcount != 1:
+                self._reject_after_failed_guard(conn, tenant_id, ns, conversation_id, token)
+        row = conn.execute(
+            insert(TERM).values(
+                turn_id=turn_id, tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id,
+                processing_outcome=processing, transport_outcome=transport, customer_reach=reach,
+                recorded_fence=token.fence, recorded_epoch=token.epoch, recorded_by=token.owner_id,
+                details=details,
+            ).returning(TERM)
+        ).one()
+        if fault_before_commit is not None:
+            fault_before_commit()
+        return _terminal(row)
+
+    # ── Ledger-aware completion (enforced for every terminal entry point) ────
+
+    @staticmethod
+    def _ledger_schema_state(conn: Connection) -> Tuple[str, Tuple[str, ...], Tuple[str, ...]]:
+        """Classify the ledger schema as ``absent``, ``complete`` or ``partial``.
+
+        Every relation of ``LEDGER_RELATIONS`` is resolved by name in one
+        statement; the state is returned with the present and the missing
+        relation names.
+        """
+        clauses = " UNION ALL ".join(
+            f"SELECT :name{i} AS relation, to_regclass(:qualified{i}) IS NOT NULL AS present"
+            for i in range(len(LEDGER_RELATIONS))
+        )
+        params: Dict[str, Any] = {}
+        for i, name in enumerate(LEDGER_RELATIONS):
+            params[f"name{i}"] = name
+            params[f"qualified{i}"] = f"public.{name}"
+        rows = conn.execute(text(clauses), params).all()
+        present = tuple(str(r[0]) for r in rows if r[1])
+        missing = tuple(str(r[0]) for r in rows if not r[1])
+        if not present:
+            return "absent", present, missing
+        if not missing:
+            return "complete", present, missing
+        return "partial", present, missing
+
+    @staticmethod
+    def _enforce_ledger_completion(conn: Connection, tenant_id: int, ns: str, turn_id: int, *, derived: bool) -> None:
+        """Refuse a terminal that would strand or misstate the turn's ledgers.
+
+        Runs under the conversation lock before any write. The ledger schema
+        of revision ``0109`` is classified first: **absent** (no ledger
+        relation at all) is the standalone foundation schema and there is
+        nothing to consult; **partial** (some relations missing) cannot
+        establish whether the turn's obligations are complete, so the
+        terminal is refused (``LedgerSchemaIncomplete``) for every turn and
+        both entry points, with no automatic repair; **complete** applies the
+        rules below. When the turn has effect or delivery records, completion
+        is refused while an intent is reserved but not dispatched or an
+        attempt has no established outcome; and the foundation entry point,
+        which records caller-supplied transport and reach, is refused
+        outright for such a turn (``derived`` is False): ledger-bearing turns
+        complete only through the ledger-derived path.
+        """
+        state, present, missing = CommerceRuntimeRepository._ledger_schema_state(conn)
+        if state == "absent":
+            return
+        if state == "partial":
+            raise c.LedgerSchemaIncomplete(missing=missing, present=present)
+        scope = {"tenant_id": tenant_id, "namespace": ns, "turn_id": turn_id}
+        counts = {str(row[0]): int(row[1]) for row in conn.execute(text(
+            f"SELECT status, count(*) FROM {LEDGER_EFFECTS_TABLE} "
+            "WHERE tenant_id = :tenant_id AND namespace = :namespace AND turn_id = :turn_id GROUP BY status"
+        ), scope).all()}
+        sequence = conn.execute(text(
+            f"SELECT attempt_count, outcome FROM {LEDGER_SEQUENCES_TABLE} "
+            "WHERE tenant_id = :tenant_id AND namespace = :namespace AND turn_id = :turn_id"
+        ), scope).one_or_none()
+        if not counts and sequence is None:
+            return
+        if not derived:
+            raise c.CompletionBlocked("ledger_bearing_turn", [
+                f"turn {turn_id} has effect or delivery records; its terminal is recorded through the "
+                "ledger-derived path (LedgerRepository.finalize_turn), not with caller-supplied outcomes",
+            ])
+        blockers: List[str] = []
+        if counts.get("reserved"):
+            blockers.append(f"{counts['reserved']} effect intent(s) reserved but not dispatched")
+        if counts.get("dispatching"):
+            blockers.append(f"{counts['dispatching']} effect attempt(s) without an established outcome")
+        if sequence is not None:
+            if int(sequence[0]) == 0:
+                blockers.append("delivery intent reserved but not dispatched")
+            elif str(sequence[1]) == "pending":
+                blockers.append("delivery attempt without an established outcome")
+        if blockers:
+            raise c.CompletionBlocked("actionable_work_remains", blockers)
 
     # ── Internals ────────────────────────────────────────────────────────────
 

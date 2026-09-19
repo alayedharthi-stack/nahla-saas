@@ -2,7 +2,7 @@
 
 Status: prepared 2026-09-18 for review; corrected 2026-09-18 (explicit
 target authority at the connection boundary, report freshness, inventory
-kinds). This document describes the strict runner, its inventory and the
+kinds); extended 2026-09-19 with the effect and delivery ledger proofs. This document describes the strict runner, its inventory and the
 proposed CI invocation. Nothing here changes the commerce reliability gate,
 its manifest, its allowances or its acceptance.
 
@@ -19,9 +19,10 @@ service (Variant B).
 
 The inventory distinguishes two kinds of suite:
 
-* `proof` — the **42 PostgreSQL proofs** of the dormant commerce runtime
-  foundation, its migration and global customer identity. These are the
-  proofs the owner asked to make required.
+* `proof` — the **80 PostgreSQL proofs** of the dormant commerce runtime
+  foundation, its migration, global customer identity, and the effect and
+  delivery ledgers with their migration. These are the proofs the owner asked
+  to make required.
 * `runner_regression` — **2 regressions of the strict harness itself** (the
   runner and the shared PostgreSQL fixture's connection selection). They run
   on the same service and are equally required, but they prove that the
@@ -33,6 +34,8 @@ The inventory distinguishes two kinds of suite:
 | `commerce_runtime_foundation` | proof | `tests/commerce_reliability/test_commerce_runtime_foundation_pg.py` | PR #1089, dormant commerce runtime foundation, including the lock-wait, scope-binding and ordered-processing regressions | 27 |
 | `commerce_runtime_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_migration_pg.py` | PR #1089, revision 0108 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation) | 10 |
 | `global_customer_identity` | proof | `backend/tests/test_global_customer_display_identity_pg.py` | PR #1087 (merged), 0107 persistence cases | 5 |
+| `commerce_runtime_ledgers` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py` | ledger PR, dormant effect and delivery ledgers (business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit, ledger-derived terminals, completion boundary on both terminal entry points, distinct business identities, schema-state completion guard with the standalone-0108 control, reservation/completion race in both lock orders) | 30 |
+| `commerce_runtime_ledgers_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py` | ledger PR, revision 0109 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required) | 12 |
 | `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
 
 The counts above are informational. Nothing in the runner or its self-test
@@ -67,14 +70,14 @@ process with `--junitxml` and judges the JUnit output:
 | Any skip, failure or error | exit **1**, the node id and reason are listed; a skip is never a pass |
 | Leaf `testsuite` counts differ from the inventory or show skips, failures or errors | exit **1** |
 | Non-zero pytest exit | exit **1** |
-| Everything above satisfied for every suite | exit **0**, `PROVEN (44/44 required tests passed: 42/42 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
+| Everything above satisfied for every suite | exit **0**, `PROVEN (86/86 required tests passed: 84/84 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
 
 The runner is pure standard library, imports no application code and carries
 no allowances. `tests/commerce_reliability/test_required_postgres_proofs_runner.py`
 proves every rule with a negative control on synthetic suites, proves that
 a test added to a module without an inventory update is refused, proves the
 report freshness rule below, and pins the committed inventory to pytest's
-own collection of the four inventoried modules, so an added or removed test
+own collection of the six inventoried modules, so an added or removed test
 is a reviewed inventory change, never a silent drift.
 
 ### 2.1 Report freshness
@@ -142,7 +145,7 @@ Regressions:
 
 ### Fixture contracts
 
-* Foundation, migration and runner regression suites:
+* Foundation, migration, ledger and runner regression suites:
   `NAHLA_RELIABILITY_REQUIRE_PG=1` with `NAHLA_RELIABILITY_PG_ADMIN_DSN` set.
   The harness fixture fails (never skips) when the flag is set without the
   DSN; without the flag it skips, which ordinary local runs report as
@@ -175,7 +178,7 @@ Inside `lint-and-test`: a `postgres:16` service (user `nahla`, database
             --report /tmp/required-postgres-proofs/report.json
 ```
 
-The step executes the whole inventory: the 42 proofs and the 2 runner/fixture
+The step executes the whole inventory: the 80 proofs and the 2 runner/fixture
 regressions. The environment is **step-scoped**. No job-level variable is
 added, so the root `python -m pytest -q --maxfail=1` step and every later
 step see exactly the environment they see today.
@@ -233,6 +236,9 @@ failure, substitutes diagnostic mode or creates an allowance.
 4. `ci.yml`-only PR — the service and the step above, nothing else. Based on
    the runner PR so its CI run exercises the new step with the new runner;
    it carries no fixture, runner or test edits of its own.
+5. Ledger PR (after the four above merged) — revision `0109`, the ledger
+   modules, their proofs and the two inventory entries above. The step's
+   `ci.yml` is unchanged; the inventory file alone extends what it proves.
 
 ## 6. Local usage
 
@@ -269,3 +275,25 @@ PROVEN (39/44: 37/42 proofs + 2/2 regressions), the identity suite reports
 live service recorded zero connections from the identity suite during that
 run (the positive control, explicit live and alternates dead, recorded its
 connections on the explicit target only).
+
+Recorded on 2026-09-19 (PostgreSQL 16.13, Python 3.11), ledger head: PROVEN
+78/78 (27 + 10 + 5 + 22 + 12 proofs, 2 runner/fixture regressions), 0 skipped,
+132 s, 0 databases left behind. The root suite with the service reachable
+and no step variables gave 6797 passed, 118 skipped, 7 xfailed, exit 0; the
+34 additional skips are exactly the two new PostgreSQL modules (22 + 12)
+skipping without the step variables, and the additional passes are the new
+pure ledger contract tests. No existing test found and used the service.
+
+Recorded on 2026-09-19 (PostgreSQL 16.13, Python 3.11), corrected ledger
+head: PROVEN 82/82 (27 + 10 + 5 + 26 + 12 proofs, 2 runner/fixture
+regressions), 0 skipped, 122 s, 0 databases left behind. The root suite with
+the service reachable and no step variables gave 6798 passed, 122 skipped,
+7 xfailed, exit 0; the four additional skips are the four new PostgreSQL
+completion-boundary and identity proofs skipping without the step variables.
+
+Recorded on 2026-09-19 (PostgreSQL 16.13, Python 3.11), final bounded
+completion correction head: PROVEN 86/86 (27 + 10 + 5 + 30 + 12 proofs, 2
+runner/fixture regressions), 0 skipped, 136 s, 0 databases left behind. The
+four additional ledger proofs are the partial-schema fail-closed cases in
+both directions, the standalone-0108 positive control and the
+reservation/completion race in both lock orders.
