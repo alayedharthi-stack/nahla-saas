@@ -1,0 +1,8 @@
+# gitleaks fingerprints of reviewed false positives (commit:file:rule:line).
+# Each line binds one historical finding; it suppresses nothing else.
+#
+# PR #1093, commit c3a49028: the generic-api-key rule captured the Python keyword
+# argument "attempt_no=seq.attempt_count" (entropy 3.507) that followed the
+# parameter named "token" in reserve_delivery_recovery; a column reference, not a
+# credential. The line no longer exists on that branch's head.
+c3a49028e25281203694340a4da9355483bc91ff:backend/core/commerce_runtime/ledgers.py:generic-api-key:434
