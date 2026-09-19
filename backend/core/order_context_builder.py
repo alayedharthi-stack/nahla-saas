@@ -86,6 +86,16 @@ class ShippingContext:
     locked_by_merchant: bool = False
     missing_mode: str = "ask"
     requires_merchant_review: bool = False
+    # Set only on ``known_previous_address``: whether this exact address
+    # revision was explicitly selected by the customer (as opposed to an
+    # imported candidate that has only been offered).
+    explicitly_selected: bool = False
+    # Identity of the stored row + the revision it was read at, so a
+    # selection can be bound to precisely what was reviewed.
+    address_id: Optional[int] = None
+    content_fingerprint: str = ""
+    sufficient: bool = False
+    missing_requirements: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -130,6 +140,11 @@ class OrderContext:
     known_previous_address: Optional[ShippingContext] = None
     shadow_missing_modes: Optional[dict] = None
     missing_fields_result: Optional[Any] = None
+    # Every durable address this customer has, as read projections. Present
+    # even when ``known_previous_address`` is None because several
+    # unselected candidates exist — several candidates never produce an
+    # implicit default, they require an explicit selection.
+    known_address_candidates: Tuple[Dict[str, Any], ...] = ()
 
 
 def _prep_dict(brain_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -483,54 +498,95 @@ def _load_catalog_order_snapshot(
     )
 
 
+def _resolved_address_to_shipping_context(resolved: Any) -> ShippingContext:
+    components = resolved.components
+    return ShippingContext(
+        city=components.city,
+        district=components.district,
+        street="",
+        address_line=components.address_line,
+        maps_url=components.maps_url,
+        short_address=components.short_address_code,
+        latitude=_to_float(components.lat),
+        longitude=_to_float(components.lng),
+        source="customer_addresses",
+        confidence=0.95 if resolved.selected else 0.5,
+        accepted_delivery_address=resolved.has_delivery_evidence,
+        explicitly_selected=bool(resolved.selected),
+        address_id=int(resolved.address_id),
+        content_fingerprint=str(resolved.fingerprint or ""),
+        sufficient=bool(resolved.sufficient),
+        missing_requirements=tuple(resolved.missing_requirements),
+    )
+
+
+def load_customer_address_resolution(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: Optional[int],
+) -> Any:
+    """Tenant-scoped address resolution, or ``None`` when unavailable."""
+    if not customer_id:
+        return None
+    try:
+        from core.customer_address_candidates import (  # noqa: PLC0415
+            resolve_customer_address_selection,
+        )
+
+        return resolve_customer_address_selection(
+            db,
+            tenant_id=int(tenant_id),
+            customer_id=int(customer_id),
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "[ORDER_CONTEXT] address resolution unavailable tenant=%s",
+            tenant_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _known_previous_from_resolution(resolution: Any) -> Optional[ShippingContext]:
+    """The one address this context may reuse.
+
+    Ordering is by explicit selection, never by row id, latest import or
+    latest order: an explicitly selected revision wins; a single unselected
+    candidate may be surfaced for a brief confirmation; several unselected
+    candidates yield nothing, because an implicit default is exactly what
+    this must not create.
+    """
+    if resolution is None:
+        return None
+    reusable = resolution.reusable
+    if reusable is None:
+        return None
+    return _resolved_address_to_shipping_context(reusable)
+
+
+def _known_address_candidates(resolution: Any) -> Tuple[Dict[str, Any], ...]:
+    if resolution is None:
+        return ()
+    rows = list(resolution.candidates)
+    if resolution.selected is not None:
+        rows.insert(0, resolution.selected)
+    return tuple(row.as_dict() for row in rows)
+
+
 def _load_known_previous_address(
     db: Any,
     *,
     tenant_id: int,
     customer_id: Optional[int],
 ) -> Optional[ShippingContext]:
-    if not customer_id:
-        return None
-    try:
-        from models import CustomerAddress  # noqa: PLC0415
-
-        addr = (
-            db.query(CustomerAddress)
-            .filter_by(tenant_id=tenant_id, customer_id=int(customer_id))
-            .order_by(CustomerAddress.id.desc())
-            .first()
+    return _known_previous_from_resolution(
+        load_customer_address_resolution(
+            db,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
         )
-        if addr is None:
-            return None
-        from core.customer_shipping_address_writer import customer_address_to_snapshot  # noqa: PLC0415
-
-        snap = customer_address_to_snapshot(addr)
-        lat = _to_float(snap.get("lat"))
-        lng = _to_float(snap.get("lng"))
-        return ShippingContext(
-            city=str(snap.get("city") or "").strip(),
-            district=str(snap.get("district") or "").strip(),
-            street="",
-            address_line=str(snap.get("address_line") or "").strip(),
-            maps_url=str(snap.get("google_maps_url") or "").strip(),
-            short_address=str(snap.get("short_address_code") or "").strip(),
-            latitude=lat,
-            longitude=lng,
-            source="customer_addresses",
-            confidence=0.5,
-            accepted_delivery_address=bool(
-                snap.get("google_maps_url")
-                or snap.get("short_address_code")
-                or snap.get("whatsapp_location")
-            ),
-        )
-    except Exception:  # noqa: BLE001
-        logger.debug(
-            "[ORDER_CONTEXT] known_previous_address unavailable tenant=%s",
-            tenant_id,
-            exc_info=True,
-        )
-        return None
+    )
 
 
 def _has_product_signal(
@@ -827,13 +883,16 @@ def build_order_context_for_order(
         conversation_id=int(conversation_id) if conversation_id else None,
         inbound_metadata=None,
     )
-    known_previous = _load_known_previous_address(
+    _address_customer_id = identity.customer_id or (
+        getattr(conversation, "customer_id", None) if conversation else None
+    )
+    _address_resolution = load_customer_address_resolution(
         db,
         tenant_id=tenant_id,
-        customer_id=identity.customer_id or (
-            getattr(conversation, "customer_id", None) if conversation else None
-        ),
+        customer_id=_address_customer_id,
     )
+    known_previous = _known_previous_from_resolution(_address_resolution)
+    known_candidates = _known_address_candidates(_address_resolution)
 
     legacy_missing = list(meta.get("missing_fields") or [])
 
@@ -904,6 +963,7 @@ def build_order_context_for_order(
         divergence_flags=divergence,
         prefill=prefill,
         known_previous_address=known_previous,
+        known_address_candidates=known_candidates,
         shadow_missing_modes=dict(prefill.shadow_missing_modes),
         missing_fields_result=None,
     )
@@ -925,6 +985,7 @@ def build_order_context_for_order(
         divergence_flags=ctx_with_legacy.divergence_flags,
         prefill=ctx_with_legacy.prefill,
         known_previous_address=ctx_with_legacy.known_previous_address,
+        known_address_candidates=ctx_with_legacy.known_address_candidates,
         shadow_missing_modes=ctx_with_legacy.shadow_missing_modes,
         missing_fields_result=missing_result,
     )
@@ -988,11 +1049,14 @@ def build_order_context(
         conversation_id=conversation_id,
         inbound_metadata=inbound_metadata,
     )
-    known_previous = _load_known_previous_address(
+    _address_customer_id = identity.customer_id or getattr(conversation, "customer_id", None)
+    _address_resolution = load_customer_address_resolution(
         db,
         tenant_id=tenant_id,
-        customer_id=identity.customer_id or getattr(conversation, "customer_id", None),
+        customer_id=_address_customer_id,
     )
+    known_previous = _known_previous_from_resolution(_address_resolution)
+    known_candidates = _known_address_candidates(_address_resolution)
 
     legacy_missing = _resolve_legacy_missing_fields(
         prep,
@@ -1061,6 +1125,7 @@ def build_order_context(
         divergence_flags={},
         prefill=prefill,
         known_previous_address=known_previous,
+        known_address_candidates=known_candidates,
         shadow_missing_modes=dict(prefill.shadow_missing_modes),
     )
 
@@ -1085,6 +1150,7 @@ def build_order_context(
         divergence_flags=divergence,
         prefill=ctx.prefill,
         known_previous_address=ctx.known_previous_address,
+        known_address_candidates=ctx.known_address_candidates,
         shadow_missing_modes=ctx.shadow_missing_modes,
         missing_fields_result=None,
     )
@@ -1106,6 +1172,7 @@ def build_order_context(
         divergence_flags=ctx_with_legacy.divergence_flags,
         prefill=ctx_with_legacy.prefill,
         known_previous_address=ctx_with_legacy.known_previous_address,
+        known_address_candidates=ctx_with_legacy.known_address_candidates,
         shadow_missing_modes=ctx_with_legacy.shadow_missing_modes,
         missing_fields_result=missing_result,
     )

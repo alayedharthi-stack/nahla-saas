@@ -567,6 +567,56 @@ def run_post_compose_truth_guards(
             )
         )
 
+    # ── customer_address_save_claim_guard ────────────────────────────────
+    guard_name = "customer_address_save_claim_guard"
+    try:
+        from modules.ai.brain.postprocess.customer_address_save_claim_guard import (
+            resolve_and_apply_customer_address_save_claim_guard,
+        )
+
+        before_guard = reply
+        casg_result = resolve_and_apply_customer_address_save_claim_guard(
+            db=db,
+            reply=reply,
+            tenant_id=tenant_id,
+            customer_id=getattr(convo, "customer_id", None),
+            conversation_id=conv_id,
+        )
+        modified = bool(casg_result.replaced)
+        if modified:
+            reply = casg_result.reply
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token=guard_name,
+                before=before_guard,
+                after=reply,
+            )
+        events.append(
+            _log_guard_event(
+                tenant_id=tenant_id,
+                conversation_id=conv_id,
+                layer=layer,
+                guard=guard_name,
+                acted=True,
+                modified=modified,
+                suppressed_send=False,
+                reason=casg_result.reason,
+            )
+        )
+    except Exception:  # noqa: silent-ok — address save claim guard is fail-open
+        events.append(
+            _log_guard_event(
+                tenant_id=tenant_id,
+                conversation_id=conv_id,
+                layer=layer,
+                guard=guard_name,
+                acted=False,
+                modified=False,
+                suppressed_send=False,
+                reason="guard_exception",
+            )
+        )
+
     # ── staff_escalation_truth_guard ─────────────────────────────────────
     guard_name = "staff_escalation_truth_guard"
     suppressed_send = False

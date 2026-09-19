@@ -52,6 +52,7 @@ from tests.commerce_reliability.test_commerce_runtime_foundation_pg import (
 
 FOUNDATION_REVISION = "0108"
 THIS_REVISION = "0109"
+CHAIN_HEAD = "0110"      # later revisions extend the same chain linearly
 TABLES = tuple(t.name for t in lm.LEDGER_TABLES)
 WORKER_A, WORKER_B = "worker-a", "worker-b"
 
@@ -266,7 +267,7 @@ def ledgers(pg_admin_dsn: str):
 
 
 def test_migration_0109_applies_on_0108_and_is_reversible(pg_admin_dsn: str) -> None:
-    assert _script_heads() == {OTHER_HEAD, THIS_REVISION}, "0109 must extend 0108 and leave 0092 untouched"
+    assert _script_heads() == {OTHER_HEAD, CHAIN_HEAD}, "the chain must extend 0108 and leave 0092 untouched"
     name, dsn = _create_database(pg_admin_dsn)
     try:
         _alembic(dsn, FOUNDATION_REVISION)

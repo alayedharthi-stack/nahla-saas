@@ -19,13 +19,69 @@ class CheckoutReplyContext:
 
 
 def _shipping_context_dict(previous: Any) -> Dict[str, str]:
+    """Project the saved address for the reply layer.
+
+    ``short_address`` is the national SHORT address and stays its own key —
+    it is never merged with, or rendered as, a postal code.
+    """
     if previous is None:
         return {}
     return {
         "city": str(getattr(previous, "city", "") or "").strip(),
+        "district": str(getattr(previous, "district", "") or "").strip(),
+        "address_line": str(getattr(previous, "address_line", "") or "").strip(),
         "short_address": str(getattr(previous, "short_address", "") or "").strip(),
         "maps_url": str(getattr(previous, "maps_url", "") or "").strip(),
+        "selection_state": (
+            "selected"
+            if bool(getattr(previous, "explicitly_selected", False))
+            else "candidate"
+        ),
+        "sufficient": "true" if bool(getattr(previous, "sufficient", False)) else "false",
     }
+
+
+def _record_selection_for_confirmed_address(
+    db: Any,
+    *,
+    tenant_id: int,
+    previous: Any,
+    selection_source: str,
+) -> bool:
+    """Persist the customer's explicit choice of THIS address revision.
+
+    Bound to the exact revision that was just reviewed: if the stored
+    content changed since it was read, nothing is written and the caller
+    treats the address as unconfirmed. Idempotent — confirming the same
+    revision twice writes once.
+    """
+    address_id = getattr(previous, "address_id", None)
+    if not address_id:
+        return False
+    try:
+        from core.customer_address_candidates import (  # noqa: PLC0415
+            record_explicit_address_selection,
+        )
+        from models import CustomerAddress  # noqa: PLC0415
+
+        row = (
+            db.query(CustomerAddress)
+            .filter_by(tenant_id=int(tenant_id), id=int(address_id))
+            .first()
+        )
+        if row is None or not getattr(row, "customer_id", None):
+            return False
+        result = record_explicit_address_selection(
+            db,
+            tenant_id=int(tenant_id),
+            customer_id=int(row.customer_id),
+            address_id=int(address_id),
+            selection_source=selection_source,
+            expected_fingerprint=str(getattr(previous, "content_fingerprint", "") or ""),
+        )
+        return bool(result.selected)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _identity_first_name(ctx: Any) -> str:
@@ -202,13 +258,31 @@ def apply_previous_address_confirmation(
         return {}
 
     if edit.previous_address_confirmed:
+        from core.customer_address_candidates import (  # noqa: PLC0415
+            SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+        )
         from core.order_context_prefill import _shipping_context_to_prep_patch  # noqa: PLC0415
 
         if bool(getattr(ctx.shipping, "locked_by_merchant", False)):
             return {}
         if has_accepted_delivery_address(dict(order_prep or {})):
             return {}
-        patch = _shipping_context_to_prep_patch(ctx.known_previous_address)
+        previous = ctx.known_previous_address
+        # The customer confirming this address IS the selection. Record it
+        # durably, bound to the revision they were shown, so the choice
+        # survives a state reset and a new conversation.
+        recorded = _record_selection_for_confirmed_address(
+            db,
+            tenant_id=int(tenant_id),
+            previous=previous,
+            selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+        )
+        if not recorded and not bool(getattr(previous, "explicitly_selected", False)):
+            # The reviewed revision changed, or it could not be bound to a
+            # customer. Adopting it anyway would confirm something other
+            # than what the customer saw.
+            return {}
+        patch = _shipping_context_to_prep_patch(previous)
         patch["customer_confirmed_previous_address"] = True
         patch["shipping_source"] = "customer_confirmed_previous_address"
         return patch
@@ -251,11 +325,21 @@ def apply_delivery_continuation_address_patch(
         message="",
         build_source="order_flow_v2_delivery_continuation",
     )
-    if ctx.known_previous_address is None:
+    previous = ctx.known_previous_address
+    if previous is None:
         return patch
     if bool(getattr(ctx.shipping, "locked_by_merchant", False)):
         return patch
-    saved = _shipping_context_to_prep_patch(ctx.known_previous_address)
+
+    saved = _shipping_context_to_prep_patch(previous)
+    if not bool(getattr(previous, "explicitly_selected", False)):
+        # An imported candidate the customer has never selected is offered,
+        # never adopted: the known fields are carried so nothing already
+        # known is asked again, but no confirmation is claimed.
+        saved.pop("shipping_source", None)
+        patch.update(saved)
+        return patch
+
     saved["customer_confirmed_previous_address"] = True
     saved["shipping_source"] = "delivery_continuation_saved_address"
     patch.update(saved)

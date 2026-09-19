@@ -81,6 +81,7 @@ jobs:
           NAHLA_RELIABILITY_REQUIRE_PG: "1"
           NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
           CUSTOMER_NAME_PROVENANCE_PG_REQUIRED: "1"
+          CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED: "1"
           LEGACY_MIG_PG_TEST_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
         run: |
           set -euo pipefail
@@ -164,6 +165,23 @@ jobs:
             backend/tests/test_salla_realtime_commerce.py \
             -v --tb=short --maxfail=1 \
             --junitxml=/tmp/salla-pr888-remediation.xml
+
+      # backend/tests is not in pytest.ini's testpaths, so the root unit run
+      # does not collect these. test_order_context_builder.py is deliberately
+      # left out: one of its cases fails on main already (the active-draft
+      # query filters Order.source == "whatsapp", which its fixture never
+      # sets) and that debt is not this slice's to carry.
+      - name: Salla customer address candidate tests
+        run: |
+          python -m pytest \
+            backend/tests/test_salla_customer_address_candidates.py \
+            backend/tests/test_salla_customer_address_sync_ingest.py \
+            backend/tests/test_order_missing_fields_engine.py \
+            backend/tests/test_ai_commerce_known_customer_address_regression.py \
+            backend/tests/test_catalog_checkout_address_continuation.py \
+            backend/tests/test_p1b_post_compose_guard_consolidation.py \
+            -q --tb=short --maxfail=1 \
+            --junitxml=/tmp/salla-customer-address-candidates.xml
 
       - name: Customer conditional coupon Layer 0 consumer tests
         run: |

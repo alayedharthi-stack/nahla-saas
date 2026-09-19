@@ -91,8 +91,8 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert 'down_revision = "0102"' in source
     assert "down_revision = (\"0092\"" not in source
     assert "down_revision = ('0092'" not in source
-    assert APPLICATION_ALEMBIC_HEAD == "0109"
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0109"})
+    assert APPLICATION_ALEMBIC_HEAD == "0110"
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0110"})
     assert INTEGRATION_BOOTSTRAP_TARGET == "0093"
     prev = os.getcwd()
     try:
@@ -106,9 +106,10 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         rev_0107 = script.get_revision("0107")
         rev_0108 = script.get_revision("0108")
         rev_0109 = script.get_revision("0109")
+        rev_0110 = script.get_revision("0110")
     finally:
         os.chdir(prev)
-    assert heads == frozenset({"0092", "0109"})
+    assert heads == frozenset({"0092", "0110"})
     assert rev.down_revision == _PARENT
     assert not isinstance(rev.down_revision, tuple)
     assert rev_0104 is not None
@@ -132,6 +133,11 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert rev_0109 is not None
     assert rev_0109.down_revision == "0108"
     assert not isinstance(rev_0109.down_revision, tuple)
+    # 0110 (customer address provenance) extends 0109 linearly — it must not
+    # merge the abandoned 0092 branch or open a new head.
+    assert rev_0110 is not None
+    assert rev_0110.down_revision == "0109"
+    assert not isinstance(rev_0110.down_revision, tuple)
 
 
 def _pg_required() -> bool:
