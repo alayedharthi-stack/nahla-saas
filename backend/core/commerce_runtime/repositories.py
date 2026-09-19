@@ -41,7 +41,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine, Row
 from sqlalchemy.exc import IntegrityError
@@ -52,6 +52,11 @@ from core.commerce_runtime.models import RuntimeConversation, RuntimeTurn, Runti
 CONV = RuntimeConversation.__table__
 TURN = RuntimeTurn.__table__
 TERM = RuntimeTurnTerminal.__table__
+
+# Ledger relations of revision 0109, consulted by name only when they exist,
+# so the foundation keeps working on the standalone 0108 schema.
+LEDGER_EFFECTS_TABLE = "commerce_runtime_effects"
+LEDGER_SEQUENCES_TABLE = "commerce_runtime_delivery_sequences"
 
 
 def _db_now(conn: Connection) -> _dt.datetime:
@@ -465,6 +470,7 @@ class CommerceRuntimeRepository:
             raise c.TerminalAlreadyRecorded(_terminal(existing))
         if snap.eligible_turn_id != turn_id:
             raise c.OwnershipRejected(c.RejectReason.TURN_NOT_ELIGIBLE, snap)
+        self._enforce_ledger_completion(conn, tenant_id, ns, turn_id, derived=resolve is not None)
         if resolve is not None:
             transport, reach, resolved_details = resolve(conn, snap)
             transport = c.validate_enum(transport, c.TransportOutcome, field="transport_outcome")
@@ -496,6 +502,55 @@ class CommerceRuntimeRepository:
         if fault_before_commit is not None:
             fault_before_commit()
         return _terminal(row)
+
+    # ── Ledger-aware completion (enforced for every terminal entry point) ────
+
+    @staticmethod
+    def _enforce_ledger_completion(conn: Connection, tenant_id: int, ns: str, turn_id: int, *, derived: bool) -> None:
+        """Refuse a terminal that would strand or misstate the turn's ledgers.
+
+        Runs under the conversation lock before any write. When the ledger
+        tables of revision ``0109`` are absent (standalone foundation schema)
+        there is nothing to consult. When the turn has effect or delivery
+        records, completion is refused while an intent is reserved but not
+        dispatched or an attempt has no established outcome; and the
+        foundation entry point, which records caller-supplied transport and
+        reach, is refused outright for such a turn (``derived`` is False):
+        ledger-bearing turns complete only through the ledger-derived path.
+        """
+        present = conn.execute(text(
+            "SELECT to_regclass(:effects) IS NOT NULL AND to_regclass(:sequences) IS NOT NULL"
+        ), {"effects": f"public.{LEDGER_EFFECTS_TABLE}", "sequences": f"public.{LEDGER_SEQUENCES_TABLE}"}).scalar()
+        if not present:
+            return
+        scope = {"tenant_id": tenant_id, "namespace": ns, "turn_id": turn_id}
+        counts = {str(row[0]): int(row[1]) for row in conn.execute(text(
+            f"SELECT status, count(*) FROM {LEDGER_EFFECTS_TABLE} "
+            "WHERE tenant_id = :tenant_id AND namespace = :namespace AND turn_id = :turn_id GROUP BY status"
+        ), scope).all()}
+        sequence = conn.execute(text(
+            f"SELECT attempt_count, outcome FROM {LEDGER_SEQUENCES_TABLE} "
+            "WHERE tenant_id = :tenant_id AND namespace = :namespace AND turn_id = :turn_id"
+        ), scope).one_or_none()
+        if not counts and sequence is None:
+            return
+        if not derived:
+            raise c.CompletionBlocked("ledger_bearing_turn", [
+                f"turn {turn_id} has effect or delivery records; its terminal is recorded through the "
+                "ledger-derived path (LedgerRepository.finalize_turn), not with caller-supplied outcomes",
+            ])
+        blockers: List[str] = []
+        if counts.get("reserved"):
+            blockers.append(f"{counts['reserved']} effect intent(s) reserved but not dispatched")
+        if counts.get("dispatching"):
+            blockers.append(f"{counts['dispatching']} effect attempt(s) without an established outcome")
+        if sequence is not None:
+            if int(sequence[0]) == 0:
+                blockers.append("delivery intent reserved but not dispatched")
+            elif str(sequence[1]) == "pending":
+                blockers.append("delivery attempt without an established outcome")
+        if blockers:
+            raise c.CompletionBlocked("actionable_work_remains", blockers)
 
     # ── Internals ────────────────────────────────────────────────────────────
 

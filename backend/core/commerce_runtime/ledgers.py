@@ -589,9 +589,13 @@ class LedgerRepository:
         transport outcome and customer reach derived from the ledgers, in the
         same transaction, atomically with an optional state transition.
 
-        Refused (``CompletionBlocked``) while any attempt of the turn has no
-        established outcome. Evidence recorded later updates the ledgers
-        only; the terminal never changes.
+        Refused (``CompletionBlocked``) while an effect or delivery intent of
+        the turn is reserved but not dispatched, or while an attempt has no
+        established outcome; the supported order is prepare → reserve dispatch
+        → record outcome → finalize. A recorded ``unknown`` does not block:
+        it is retained in the terminal's summary as unknown, never as success.
+        Evidence recorded later updates the ledgers only; the terminal never
+        changes.
         """
         tenant_id = c.validate_tenant_id(tenant_id)
         ns = c.validate_namespace(namespace).value
@@ -610,13 +614,9 @@ class LedgerRepository:
             state_body = c.validate_payload(state_transition.payload, field="payload", max_bytes=c.MAX_PAYLOAD_BYTES)
 
         def resolve(conn: Connection, snap: c.ConversationSnapshot) -> Tuple[str, str, Mapping[str, Any]]:
+            # The foundation's terminal path has already refused reserved-but-undispatched
+            # intents and attempts without an established outcome under this lock.
             summary = self._summary_in(conn, tenant_id, ns, turn_id)
-            if summary.pending_effect_attempts:
-                raise lc.CompletionBlocked(
-                    f"{summary.pending_effect_attempts} effect attempt(s) of turn {turn_id} have no established outcome"
-                )
-            if summary.delivery_pending:
-                raise lc.CompletionBlocked(f"the delivery attempt of turn {turn_id} has no established outcome")
             merged = dict(body)
             merged["ledger"] = dataclasses.asdict(summary)
             return summary.transport_outcome, summary.customer_reach, merged

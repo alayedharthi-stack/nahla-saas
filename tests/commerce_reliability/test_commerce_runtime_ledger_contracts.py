@@ -61,11 +61,11 @@ def test_delivery_transitions_permit_no_fallback_after_accepted_or_unknown() -> 
 
 def test_business_key_derives_from_business_identifiers_not_tool_call_ids() -> None:
     key = lc.derive_business_key(lc.ActionType.ORDER_CANCEL, "tenant-7", "SO-1001")
-    assert key == "order_cancel:tenant-7:SO-1001"
+    assert key == "order_cancel:k1:tenant-7:SO-1001"
     assert lc.derive_business_key("order_cancel", "tenant-7", "SO-1001") == key   # retry reproduces it
-    assert lc.derive_business_key(lc.ActionType.ORDER_CANCEL, "tenant-7", 1001) == "order_cancel:tenant-7:1001"
+    assert lc.derive_business_key(lc.ActionType.ORDER_CANCEL, "tenant-7", 1001) == "order_cancel:k1:tenant-7:1001"
     long_key = lc.derive_business_key(lc.ActionType.COUPON_APPLY, "x" * 120, "y" * 120)
-    assert long_key.startswith("coupon_apply:sha256:") and len(long_key) <= lc.MAX_IDEMPOTENCY_KEY_LENGTH
+    assert long_key.startswith("coupon_apply:k1#sha256:") and len(long_key) <= lc.MAX_IDEMPOTENCY_KEY_LENGTH
     with pytest.raises(c.ValidationError):
         lc.derive_business_key("not_an_action", "a")
     with pytest.raises(c.ValidationError):
@@ -74,6 +74,45 @@ def test_business_key_derives_from_business_identifiers_not_tool_call_ids() -> N
         lc.derive_business_key(lc.ActionType.ORDER_CANCEL, "has space")
     with pytest.raises(c.ValidationError):
         lc.derive_business_key(lc.ActionType.ORDER_CANCEL, None)
+
+
+def test_business_key_encoding_is_unambiguous() -> None:
+    derive = lc.derive_business_key
+    assert lc.KEY_ENCODING_VERSION == "k1"
+    # A delimiter inside a component is escaped, so the split point is part of the identity.
+    assert derive("order_cancel", "a:b", "c") == "order_cancel:k1:a%3Ab:c"
+    assert derive("order_cancel", "a", "b:c") == "order_cancel:k1:a:b%3Ac"
+    assert derive("order_cancel", "a:b", "c") != derive("order_cancel", "a", "b:c")
+    assert derive("order_cancel", "a:b:c") not in {derive("order_cancel", "a:b", "c"), derive("order_cancel", "a", "b:c")}
+    # Escaped text and the raw character stay distinct; the escape character is itself escaped.
+    assert derive("order_cancel", "a%3Ab") == "order_cancel:k1:a%253Ab" != derive("order_cancel", "a:b")
+    assert derive("order_cancel", "50%") == "order_cancel:k1:50%25"
+    # Different component counts never coincide.
+    assert derive("order_cancel", "ab") != derive("order_cancel", "a", "b")
+    assert derive("order_cancel", "a", "b") != derive("order_cancel", "a", "b", "c")
+    assert derive("order_cancel", "a", "b") != derive("order_cancel", "a", "b", 0)
+    # Empty components are refused explicitly rather than silently collapsed.
+    with pytest.raises(c.ValidationError):
+        derive("order_cancel", "")
+    with pytest.raises(c.ValidationError):
+        derive("order_cancel", "a", "")
+    # Unicode components are carried as they are (printable, no whitespace).
+    assert derive("order_cancel", "طلب-١٢٣", "متجر") == "order_cancel:k1:طلب-١٢٣:متجر"
+    with pytest.raises(c.ValidationError):
+        derive("order_cancel", "طلب ١٢٣")
+    # Long keys hash the unambiguous encoding, deterministically, and stay within the bound.
+    long_a = derive("coupon_apply", "x" * 100, "y" * 100)
+    long_b = derive("coupon_apply", "x" * 100 + ":" + "y" * 20)      # one component, still over the bound
+    with pytest.raises(c.ValidationError):
+        derive("coupon_apply", "x" * (lc.MAX_IDEMPOTENCY_KEY_LENGTH + 1))   # a component is bounded too
+    assert long_a == derive("coupon_apply", "x" * 100, "y" * 100)
+    assert long_a != long_b
+    assert long_a.startswith("coupon_apply:k1#sha256:") and len(long_a) <= lc.MAX_IDEMPOTENCY_KEY_LENGTH
+    assert lc.validate_idempotency_key(long_a) == long_a
+    # The plain form always has ':' after the version, so it can never look like the hashed form.
+    assert derive("order_cancel", "#sha256", "abc") == "order_cancel:k1:#sha256:abc"
+    # Identical components always reproduce the identical key.
+    assert derive("payment_link_create", "SO-1", 2, "SAR") == derive("payment_link_create", "SO-1", 2, "SAR")
 
 
 def test_payload_hash_is_canonical_and_intents_are_validated() -> None:

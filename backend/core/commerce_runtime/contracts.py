@@ -11,7 +11,7 @@ import dataclasses
 import datetime as _dt
 import enum
 import json
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 # ── Bounds (closed; changing one is a reviewed contract change) ──────────────
 
@@ -157,6 +157,26 @@ class TerminalAlreadyRecorded(CommerceRuntimeError):
     def __init__(self, existing: "TerminalRecord") -> None:
         self.existing = existing
         super().__init__(f"terminal already recorded for turn {existing.turn_id}")
+
+
+class CompletionBlocked(CommerceRuntimeError):
+    """A terminal may not be recorded for this turn yet, or not by this path.
+
+    Raised under the conversation lock, before anything is written, when the
+    turn's ledgers (revision ``0109`` tables, when present) hold effect or
+    delivery intents that were reserved but never dispatched, or attempts
+    whose outcome is not established (``actionable_work_remains``); or when
+    a ledger-bearing turn is completed through the foundation entry point,
+    which cannot derive transport and reach from the ledgers
+    (``ledger_bearing_turn``). Turns without ledger records, and databases
+    without the ledger tables, are unaffected.
+    """
+
+    def __init__(self, reason: str, blockers: Sequence[str] = ()) -> None:
+        self.reason = reason
+        self.blockers = tuple(blockers)
+        detail = "; ".join(self.blockers)
+        super().__init__(f"{reason}: {detail}" if detail else reason)
 
 
 # ── Records ──────────────────────────────────────────────────────────────────
@@ -386,7 +406,7 @@ def classify_rejection(
 
 
 __all__ = [
-    "AdmissionConflict", "AdmittedTurn", "CommerceRuntimeError", "ConversationNotFound",
+    "AdmissionConflict", "AdmittedTurn", "CommerceRuntimeError", "CompletionBlocked", "ConversationNotFound",
     "ConversationSnapshot", "CustomerReach", "Lease", "MAX_DETAILS_BYTES", "MAX_LEASE_SECONDS",
     "MAX_OWNER_ID_LENGTH", "MAX_PAYLOAD_BYTES", "MAX_PROVIDER_MESSAGE_ID_LENGTH", "MAX_REF_LENGTH",
     "MIN_LEASE_SECONDS", "Namespace", "OwnershipRejected", "OwnershipToken", "ProcessingOutcome",

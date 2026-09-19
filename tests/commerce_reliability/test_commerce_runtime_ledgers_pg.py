@@ -609,6 +609,12 @@ def test_crash_after_durable_dispatch_reservation_blocks_blind_redispatch(ledger
     record = L.finalize(turn, lease_b, processing="failed")
     assert (record.transport_outcome, record.customer_reach) == ("unknown", "unknown")
     assert record.details["ledger"]["effects_by_status"]["unknown"] == 1
+    # Completion did not turn the unknown into success, and it did not authorise a redispatch either.
+    with pytest.raises(c.OwnershipRejected) as closed:
+        L.dispatch(turn, lease_b, reserved.effect.effect_id)
+    assert closed.value.reason is c.RejectReason.TURN_NOT_ELIGIBLE
+    assert L.effect(turn, reserved.effect.effect_id).status == "unknown"
+    assert len(L.attempts(turn, reserved.effect.effect_id)) == 1
 
 
 def test_late_evidence_attaches_only_to_its_existing_attempt(ledgers: Ledgers) -> None:
@@ -822,18 +828,29 @@ def test_commit_turn_decision_is_atomic_and_finalize_derives_transport_and_reach
         L.repo.commit_turn_decision(
             tenant_id=L.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, token=lease.token,
             turn_id=turn.turn_id, effect_intents=[intents[0], intents[0]])
-    # Completion is refused while an attempt is open, then derives transport and reach from the ledgers.
+    # Completion is refused while an attempt is open or an intent is undispatched, then derives
+    # transport and reach from the ledgers once every intent went through the supported lifecycle.
     attempt = L.dispatch(turn, lease, decision.effects[0].effect.effect_id)
-    with pytest.raises(lc.CompletionBlocked):
+    with pytest.raises(lc.CompletionBlocked) as pending:
         L.finalize(turn, lease)
+    assert pending.value.reason == "actionable_work_remains"
     L.result(turn, attempt.attempt_id, "confirmed", {"ok": True})
+    with pytest.raises(lc.CompletionBlocked) as undispatched:
+        L.finalize(turn, lease)
+    assert set(undispatched.value.blockers) == {"1 effect intent(s) reserved but not dispatched",
+                                                "delivery intent reserved but not dispatched"}
+    second = L.dispatch(turn, lease, decision.effects[1].effect.effect_id)
+    L.result(turn, second.attempt_id, "confirmed", {"ok": True})
+    with pytest.raises(lc.CompletionBlocked) as delivery_undispatched:
+        L.finalize(turn, lease)
+    assert delivery_undispatched.value.blockers == ("delivery intent reserved but not dispatched",)
     _, receipt = L.send(turn, lease, decision.delivery, ScriptedTransport(("accepted", "wamid.final")))
     L.receipt(turn, receipt.attempt_id, "delivered", pmid="wamid.final")
     record = L.finalize(turn, lease, details={"note": "done"},
                         state=c.StateTransition(expected_revision=2, payload={"stage": "closed"}))
     assert (record.processing_outcome, record.transport_outcome, record.customer_reach) == ("completed", "accepted", "reached")
     assert record.details["note"] == "done"
-    assert record.details["ledger"]["effects_by_status"] == {"reserved": 1, "dispatching": 0, "confirmed": 1,
+    assert record.details["ledger"]["effects_by_status"] == {"reserved": 0, "dispatching": 0, "confirmed": 2,
                                                              "rejected": 0, "unknown": 0}
     assert record.details["ledger"]["delivery_outcome"] == "accepted"
     assert L.snapshot(turn.conversation_id).state_revision == 3
@@ -861,6 +878,122 @@ def test_handoff_request_is_not_human_ownership_transfer(ledgers: Ledgers) -> No
     L.result(turn, proven_attempt.attempt_id, "confirmed",
              {"transfer": {"human_owner_ref": "agent:42", "accepted_at": "2026-09-19T12:00:00Z"}})
     assert lc.human_transfer_established(L.effect(turn, proven.effect.effect_id)) is True
+
+
+# ── L1: completion boundary (both terminal entry points) ─────────────────────
+
+
+def test_reserved_intents_block_premature_completion_on_both_entry_points(ledgers: Ledgers) -> None:
+    L = ledgers
+    turn, lease = L.start()
+    intent = L.intent(payload={"order": "SO-31"})
+    decision = L.repo.commit_turn_decision(
+        tenant_id=L.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, token=lease.token,
+        turn_id=turn.turn_id, state_transition=c.StateTransition(expected_revision=0, payload={"decided": True}),
+        effect_intents=[intent], delivery_intent=lc.DeliveryIntent("rich", {"body": "card"}))
+    assert decision.state.revision == 1
+    before = L.snapshot(turn.conversation_id)
+    # Ledger-derived path: refused while the intents were never dispatched; nothing is written.
+    with pytest.raises(lc.CompletionBlocked) as blocked:
+        L.finalize(turn, lease, state=c.StateTransition(expected_revision=1, payload={"stage": "premature"}))
+    assert blocked.value.reason == "actionable_work_remains"
+    assert set(blocked.value.blockers) == {"1 effect intent(s) reserved but not dispatched",
+                                           "delivery intent reserved but not dispatched"}
+    # Foundation path: a ledger-bearing turn cannot be completed with caller-supplied outcomes at all.
+    with pytest.raises(c.CompletionBlocked) as bypass:
+        L.repo.foundation.record_terminal(
+            tenant_id=L.tenant_a, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
+            processing_outcome="completed", transport_outcome="accepted", customer_reach="reached",
+            state_transition=c.StateTransition(expected_revision=1, payload={"stage": "bypass"}))
+    assert bypass.value.reason == "ledger_bearing_turn"
+    after = L.snapshot(turn.conversation_id)
+    assert (after.state_revision, after.state_payload, after.eligible_turn_id) == (1, {"decided": True}, turn.turn_id)
+    assert dataclasses.replace(after, db_now=before.db_now) == before
+    assert L.terminal(turn) is None and L.open_transactions() == 0
+    # The retained work proceeds through the supported lifecycle: dispatch, outcome, then completion.
+    attempt = L.dispatch(turn, lease, decision.effects[0].effect.effect_id)
+    L.result(turn, attempt.attempt_id, "confirmed", {"provider_ref": "cancel-31"})
+    with pytest.raises(lc.CompletionBlocked) as still:
+        L.finalize(turn, lease)
+    assert still.value.blockers == ("delivery intent reserved but not dispatched",)
+    sent, receipt = L.send(turn, lease, decision.delivery, ScriptedTransport(("accepted", "wamid.31")))
+    assert receipt.kind == "accepted"
+    record = L.finalize(turn, lease, state=c.StateTransition(expected_revision=1, payload={"stage": "closed"}))
+    assert (record.transport_outcome, record.customer_reach) == ("accepted", "unknown")
+    assert record.details["ledger"]["effects_by_status"]["confirmed"] == 1
+    assert L.snapshot(turn.conversation_id).state_revision == 2
+    # A later turn reusing the business key gets the confirmed effect back, never a stranded one.
+    later = L.admit(ref=L.snapshot(turn.conversation_id).conversation_ref)
+    reuse = L.repo.reserve_effect(tenant_id=L.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id,
+                                  token=lease.token, turn_id=later.turn_id, intent=intent)
+    assert not reuse.created and reuse.effect.status == "confirmed"
+
+
+def test_dispatching_attempts_cannot_be_completed_through_the_foundation_entry_point(ledgers: Ledgers) -> None:
+    L = ledgers
+    turn, lease = L.start()
+    reserved = L.reserve(turn, lease)
+    attempt = L.dispatch(turn, lease, reserved.effect.effect_id)
+    with pytest.raises(c.CompletionBlocked) as bypass:
+        L.repo.foundation.record_terminal(
+            tenant_id=L.tenant_a, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
+            processing_outcome="completed", transport_outcome="not_attempted", customer_reach="not_applicable")
+    assert bypass.value.reason == "ledger_bearing_turn"
+    with pytest.raises(lc.CompletionBlocked) as pending:
+        L.finalize(turn, lease)
+    assert pending.value.reason == "actionable_work_remains"
+    assert pending.value.blockers == ("1 effect attempt(s) without an established outcome",)
+    assert L.terminal(turn) is None and L.snapshot(turn.conversation_id).eligible_turn_id == turn.turn_id
+    # A recorded unknown is an established (uncertain) outcome: completion may proceed through the
+    # ledger-derived path only, the unknown stays distinct from success, and nothing redispatches.
+    L.result(turn, attempt.attempt_id, "unknown", {"timeout_seconds": 30})
+    with pytest.raises(c.CompletionBlocked) as still_bypass:
+        L.repo.foundation.record_terminal(
+            tenant_id=L.tenant_a, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
+            processing_outcome="completed", transport_outcome="accepted", customer_reach="reached")
+    assert still_bypass.value.reason == "ledger_bearing_turn"
+    record = L.finalize(turn, lease, processing="failed")
+    assert (record.processing_outcome, record.transport_outcome, record.customer_reach) == (
+        "failed", "not_attempted", "not_applicable")
+    assert record.details["ledger"]["effects_by_status"]["unknown"] == 1
+    assert L.effect(turn, reserved.effect.effect_id).status == "unknown"
+    with pytest.raises(c.OwnershipRejected) as closed:
+        L.dispatch(turn, lease, reserved.effect.effect_id)
+    assert closed.value.reason is c.RejectReason.TURN_NOT_ELIGIBLE
+    assert len(L.attempts(turn, reserved.effect.effect_id)) == 1
+
+
+def test_foundation_terminal_remains_available_for_turns_without_ledger_records(ledgers: Ledgers) -> None:
+    L = ledgers
+    turn, lease = L.start()
+    assert L.summary(turn).delivery_outcome == "not_attempted"
+    record = L.repo.foundation.record_terminal(
+        tenant_id=L.tenant_a, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
+        processing_outcome="completed", transport_outcome="accepted", customer_reach="reached",
+        details={"legacy_path": True})
+    assert (record.transport_outcome, record.customer_reach) == ("accepted", "reached")
+    other, other_lease = L.start()
+    ledger_record = L.finalize(other, other_lease)
+    assert (ledger_record.transport_outcome, ledger_record.customer_reach) == ("not_attempted", "not_applicable")
+
+
+# ── L2: distinct business identities ─────────────────────────────────────────
+
+
+def test_distinct_business_identities_stay_distinct_with_equal_payloads(ledgers: Ledgers) -> None:
+    L = ledgers
+    turn, lease = L.start()
+    payload = {"order": "SO-1"}
+    salt = uuid.uuid4().hex[:6]
+    components = [("a:b" + salt, "c"), ("a" + salt, "b:c"), ("ab" + salt,), ("a" + salt, "b"), ("a" + salt, "b", "c")]
+    keys = [lc.derive_business_key("order_cancel", *parts) for parts in components]
+    assert len(set(keys)) == len(keys)
+    reservations = [L.reserve(turn, lease, lc.EffectIntent("order_cancel", key, payload)) for key in keys]
+    assert all(r.created for r in reservations)
+    assert len({r.effect.effect_id for r in reservations}) == len(keys)
+    # Identical components reproduce the identical key and the identical effect on a retry.
+    again = L.reserve(turn, lease, lc.EffectIntent("order_cancel", lc.derive_business_key("order_cancel", "a:b" + salt, "c"), payload))
+    assert not again.created and again.effect.effect_id == reservations[0].effect.effect_id
 
 
 def test_every_ledger_operation_closes_its_transaction_before_returning(ledgers: Ledgers) -> None:

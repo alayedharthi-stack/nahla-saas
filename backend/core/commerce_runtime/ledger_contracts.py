@@ -44,6 +44,7 @@ MAX_EVIDENCE_BYTES = 16 * 1024          # result / receipt evidence, canonical J
 MAX_EFFECT_ATTEMPTS = 1                 # an effect is dispatched at most once; a rejection is final
 MAX_DELIVERY_ATTEMPTS = 2               # one attempt plus one bounded rich-to-text recovery
 PAYLOAD_HASH_LENGTH = 64                # sha256 hex
+KEY_ENCODING_VERSION = "k1"             # business-key encoding; a new encoding is a new version, never a silent change
 
 
 # ── Closed vocabularies ──────────────────────────────────────────────────────
@@ -224,8 +225,9 @@ class RecoveryNotPermitted(LedgerError):
         super().__init__(f"recovery not permitted: {reason.value} (sequence {sequence.sequence_id})")
 
 
-class CompletionBlocked(LedgerError):
-    """A terminal cannot be recorded while an attempt of the turn has no established outcome."""
+# Completion is enforced by the foundation's terminal path for every entry
+# point; the error class lives in ``contracts`` and is re-exported here.
+CompletionBlocked = c.CompletionBlocked
 
 
 # ── Intents and records ──────────────────────────────────────────────────────
@@ -387,12 +389,27 @@ def payload_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _encode_component(part: str) -> str:
+    """Escape the two characters that carry structure so a component can never
+    be read as two components or as part of the prefix."""
+    return part.replace("%", "%25").replace(":", "%3A")
+
+
 def derive_business_key(action_type: Any, *parts: Any) -> str:
-    """A deterministic business idempotency key from business identifiers.
+    """A deterministic business idempotency key from ordered business identifiers.
 
     Callers derive keys from what the action *is* (order reference, coupon
     code, payment reference), never from a provider tool-call id, so a
     reasoning retry or a provider failover reproduces the same key.
+
+    Encoding ``k1``: ``<action>:k1:<c1>:<c2>...`` where every string component
+    is percent-escaped (``%`` → ``%25``, ``:`` → ``%3A``) before joining, so
+    ``["a:b", "c"]`` and ``["a", "b:c"]`` differ and so do different component
+    counts. Integers render as decimal digits; empty strings, booleans and
+    ``None`` are refused. When the encoded key exceeds the bound it becomes
+    ``<action>:k1#sha256:<hex>`` over the *encoded* string; the ``#`` after the
+    version cannot be produced by the plain form, so the two forms never
+    collide. Identical components always yield the identical key.
     """
     action = validate_action_type(action_type)
     if not parts:
@@ -404,14 +421,15 @@ def derive_business_key(action_type: Any, *parts: Any) -> str:
         if isinstance(part, int):
             rendered.append(str(part))
         elif isinstance(part, str):
-            rendered.append(c.validate_ref(part, field="business identifier", max_length=MAX_IDEMPOTENCY_KEY_LENGTH))
+            rendered.append(_encode_component(
+                c.validate_ref(part, field="business identifier", max_length=MAX_IDEMPOTENCY_KEY_LENGTH)))
         else:
             raise c.ValidationError("business identifiers must be strings or integers")
-    key = action + ":" + ":".join(rendered)
-    if len(key) > MAX_IDEMPOTENCY_KEY_LENGTH:
-        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        key = f"{action}:sha256:{digest}"
-    return key
+    encoded = f"{action}:{KEY_ENCODING_VERSION}:" + ":".join(rendered)
+    if len(encoded) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        return f"{action}:{KEY_ENCODING_VERSION}#sha256:{digest}"
+    return encoded
 
 
 def validate_action_type(value: Any) -> str:
@@ -535,7 +553,8 @@ __all__ = [
     "EffectAttemptRecord", "EffectConflict", "EffectIntent", "EffectNotFound", "EffectOutcome", "EffectRecord",
     "EffectReservation", "EffectResultRecord", "EffectStatus", "IllegalTransition", "LedgerError",
     "MAX_ACTION_TYPE_LENGTH", "MAX_DELIVERY_ATTEMPTS", "MAX_DISPATCH_KEY_LENGTH", "MAX_EFFECT_ATTEMPTS",
-    "MAX_EVIDENCE_BYTES", "MAX_IDEMPOTENCY_KEY_LENGTH", "OUTCOME_RECEIPTS", "PAYLOAD_HASH_LENGTH", "REACH_RECEIPTS",
+    "KEY_ENCODING_VERSION", "MAX_EVIDENCE_BYTES", "MAX_IDEMPOTENCY_KEY_LENGTH", "OUTCOME_RECEIPTS",
+    "PAYLOAD_HASH_LENGTH", "REACH_RECEIPTS",
     "ReceiptKind", "RecoveryNotPermitted", "RecoveryRefusal", "SendResponse", "SequenceNotFound", "TurnDecision",
     "TurnLedgerSummary", "canonical_json", "classify_send_response", "customer_reach_for",
     "delivery_transition_allowed", "derive_business_key", "effect_transition_allowed", "human_transfer_established",

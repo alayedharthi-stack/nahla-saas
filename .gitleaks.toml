@@ -11,8 +11,4 @@ paths = [
 regexes = [
   # Historical PR #888 H11 test canary; not a live credential.
   '''tok_H11_SECRET_CANARY''',
-  # Commerce runtime ledgers, commit c3a49028: the generic-api-key rule captured the
-  # Python keyword argument "attempt_no=seq.attempt_count" after the parameter named
-  # "token"; it is a column reference, not a credential. Exact match on that text only.
-  '''^attempt_no=seq\.attempt_count$''',
 ]

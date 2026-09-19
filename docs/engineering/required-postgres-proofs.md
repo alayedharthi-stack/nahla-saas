@@ -19,7 +19,7 @@ service (Variant B).
 
 The inventory distinguishes two kinds of suite:
 
-* `proof` — the **76 PostgreSQL proofs** of the dormant commerce runtime
+* `proof` — the **80 PostgreSQL proofs** of the dormant commerce runtime
   foundation, its migration, global customer identity, and the effect and
   delivery ledgers with their migration. These are the proofs the owner asked
   to make required.
@@ -34,7 +34,7 @@ The inventory distinguishes two kinds of suite:
 | `commerce_runtime_foundation` | proof | `tests/commerce_reliability/test_commerce_runtime_foundation_pg.py` | PR #1089, dormant commerce runtime foundation, including the lock-wait, scope-binding and ordered-processing regressions | 27 |
 | `commerce_runtime_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_migration_pg.py` | PR #1089, revision 0108 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation) | 10 |
 | `global_customer_identity` | proof | `backend/tests/test_global_customer_display_identity_pg.py` | PR #1087 (merged), 0107 persistence cases | 5 |
-| `commerce_runtime_ledgers` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py` | ledger PR, dormant effect and delivery ledgers (business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit, ledger-derived terminals) | 22 |
+| `commerce_runtime_ledgers` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py` | ledger PR, dormant effect and delivery ledgers (business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit, ledger-derived terminals, completion boundary on both terminal entry points, distinct business identities) | 26 |
 | `commerce_runtime_ledgers_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py` | ledger PR, revision 0109 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required) | 12 |
 | `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
 
@@ -70,7 +70,7 @@ process with `--junitxml` and judges the JUnit output:
 | Any skip, failure or error | exit **1**, the node id and reason are listed; a skip is never a pass |
 | Leaf `testsuite` counts differ from the inventory or show skips, failures or errors | exit **1** |
 | Non-zero pytest exit | exit **1** |
-| Everything above satisfied for every suite | exit **0**, `PROVEN (78/78 required tests passed: 76/76 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
+| Everything above satisfied for every suite | exit **0**, `PROVEN (82/82 required tests passed: 80/80 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
 
 The runner is pure standard library, imports no application code and carries
 no allowances. `tests/commerce_reliability/test_required_postgres_proofs_runner.py`
@@ -178,7 +178,7 @@ Inside `lint-and-test`: a `postgres:16` service (user `nahla`, database
             --report /tmp/required-postgres-proofs/report.json
 ```
 
-The step executes the whole inventory: the 76 proofs and the 2 runner/fixture
+The step executes the whole inventory: the 80 proofs and the 2 runner/fixture
 regressions. The environment is **step-scoped**. No job-level variable is
 added, so the root `python -m pytest -q --maxfail=1` step and every later
 step see exactly the environment they see today.
@@ -283,3 +283,10 @@ and no step variables gave 6797 passed, 118 skipped, 7 xfailed, exit 0; the
 34 additional skips are exactly the two new PostgreSQL modules (22 + 12)
 skipping without the step variables, and the additional passes are the new
 pure ledger contract tests. No existing test found and used the service.
+
+Recorded on 2026-09-19 (PostgreSQL 16.13, Python 3.11), corrected ledger
+head: PROVEN 82/82 (27 + 10 + 5 + 26 + 12 proofs, 2 runner/fixture
+regressions), 0 skipped, 122 s, 0 databases left behind. The root suite with
+the service reachable and no step variables gave 6798 passed, 122 skipped,
+7 xfailed, exit 0; the four additional skips are the four new PostgreSQL
+completion-boundary and identity proofs skipping without the step variables.
