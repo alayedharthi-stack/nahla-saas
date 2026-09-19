@@ -15,7 +15,10 @@ one provider execution.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import threading
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +30,7 @@ from core.commerce_runtime import contracts as c
 from core.commerce_runtime import ledger_contracts as lc
 from core.commerce_runtime import ledger_models as lm
 from core.commerce_runtime.ledgers import LedgerRepository
+from core.commerce_runtime.repositories import CommerceRuntimeRepository
 from tests.commerce_reliability import commerce_runtime_ledger_workers as w
 from tests.commerce_reliability.test_commerce_runtime_foundation_pg import (
     CHANNEL,
@@ -1017,3 +1021,224 @@ def test_every_ledger_operation_closes_its_transaction_before_returning(ledgers:
     L.finalize(turn, lease)
     assert L.open_transactions() == 0 and receipt.kind == "rejected"
     assert L.engine.pool.checkedout() == 0
+
+
+# ── Schema-state completion guard: standalone 0108 / partial / complete ─────
+
+
+@contextlib.contextmanager
+def _relation_unavailable(engine, relation: str):
+    """Hide one ledger relation behind another name so that its expected name
+    resolves to nothing, then restore it. Rows, constraints, indexes and
+    triggers survive the rename, so retained work is still there afterwards."""
+    hidden = f"{relation}__unavailable"
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE public.{relation} RENAME TO {hidden}"))
+    try:
+        yield
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE public.{hidden} RENAME TO {relation}"))
+
+
+def _relation_present(engine, relation: str) -> bool:
+    with engine.connect() as conn:
+        return bool(conn.execute(text("SELECT to_regclass(:r) IS NOT NULL"), {"r": f"public.{relation}"}).scalar())
+
+
+def _assert_completion_refused_without_writes(L: Ledgers, turn: c.AdmittedTurn, lease: c.Lease, before,
+                                              *, missing: Tuple[str, ...]) -> None:
+    """Both terminal entry points refuse with the exact missing relations; the
+    state transition they carried is not applied and no terminal exists."""
+    transition = c.StateTransition(expected_revision=before.state_revision, payload={"stage": "partial"})
+    with pytest.raises(c.LedgerSchemaIncomplete) as derived:
+        L.finalize(turn, lease, state=transition)
+    assert derived.value.missing == missing
+    assert set(derived.value.present) == set(TABLES) - set(missing)
+    with pytest.raises(c.LedgerSchemaIncomplete) as foundation:
+        L.repo.foundation.record_terminal(
+            tenant_id=L.tenant_a, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
+            processing_outcome="completed", transport_outcome="not_attempted", customer_reach="not_applicable",
+            state_transition=transition)
+    assert foundation.value.missing == missing
+    after = L.snapshot(turn.conversation_id)
+    assert dataclasses.replace(after, db_now=before.db_now) == before
+    assert after.eligible_turn_id == turn.turn_id
+    assert L.terminal(turn) is None and L.open_transactions() == 0
+
+
+def test_partial_ledger_schema_fails_closed_while_effect_obligations_remain(ledgers: Ledgers) -> None:
+    """Delivery parent relation unavailable while a reserved and a dispatching effect remain."""
+    L = ledgers
+    turn, lease = L.start()
+    decision = L.repo.commit_turn_decision(
+        tenant_id=L.tenant_a, namespace=LIVE, conversation_id=turn.conversation_id, token=lease.token,
+        turn_id=turn.turn_id, state_transition=c.StateTransition(expected_revision=0, payload={"decided": True}),
+        effect_intents=[L.intent(payload={"order": "SO-41"}), L.intent(payload={"order": "SO-42"})])
+    first, second = (e.effect.effect_id for e in decision.effects)
+    open_attempt = L.dispatch(turn, lease, first)
+    assert (L.effect(turn, first).status, L.effect(turn, second).status) == ("dispatching", "reserved")
+    before = L.snapshot(turn.conversation_id)
+    with _relation_unavailable(L.engine, lm.DELIVERY_SEQUENCES_TABLE):
+        assert not _relation_present(L.engine, lm.DELIVERY_SEQUENCES_TABLE)
+        _assert_completion_refused_without_writes(L, turn, lease, before, missing=(lm.DELIVERY_SEQUENCES_TABLE,))
+    # Restored: the complete schema applies the ledger-aware rules to the retained obligations ...
+    assert _relation_present(L.engine, lm.DELIVERY_SEQUENCES_TABLE)
+    with pytest.raises(lc.CompletionBlocked) as blocked:
+        L.finalize(turn, lease)
+    assert set(blocked.value.blockers) == {"1 effect intent(s) reserved but not dispatched",
+                                           "1 effect attempt(s) without an established outcome"}
+    # ... and the work completes through the supported lifecycle: outcome, dispatch, outcome, finalize.
+    L.result(turn, open_attempt.attempt_id, "confirmed", {"provider_ref": "cancel-41"})
+    L.result(turn, L.dispatch(turn, lease, second).attempt_id, "confirmed", {"provider_ref": "cancel-42"})
+    record = L.finalize(turn, lease, state=c.StateTransition(expected_revision=1, payload={"stage": "closed"}))
+    assert record.details["ledger"]["effects_by_status"] == {"reserved": 0, "dispatching": 0, "confirmed": 2,
+                                                             "rejected": 0, "unknown": 0}
+    assert (record.transport_outcome, record.customer_reach) == ("not_attempted", "not_applicable")
+    assert L.snapshot(turn.conversation_id).state_revision == 2 and L.open_transactions() == 0
+
+
+def test_partial_ledger_schema_fails_closed_while_delivery_obligations_remain(ledgers: Ledgers) -> None:
+    """Effects parent relation unavailable while the reserved delivery sequence remains."""
+    L = ledgers
+    turn, lease = L.start()
+    seq = L.delivery(turn, lease)
+    assert (seq.attempt_count, seq.outcome) == (0, "pending")
+    before = L.snapshot(turn.conversation_id)
+    with _relation_unavailable(L.engine, lm.EFFECTS_TABLE):
+        assert not _relation_present(L.engine, lm.EFFECTS_TABLE)
+        _assert_completion_refused_without_writes(L, turn, lease, before, missing=(lm.EFFECTS_TABLE,))
+    # A missing child relation is partial as well: complete means every ledger relation.
+    with _relation_unavailable(L.engine, lm.DELIVERY_RECEIPTS_TABLE):
+        _assert_completion_refused_without_writes(L, turn, lease, before, missing=(lm.DELIVERY_RECEIPTS_TABLE,))
+    assert all(_relation_present(L.engine, t) for t in TABLES)
+    with pytest.raises(lc.CompletionBlocked) as blocked:
+        L.finalize(turn, lease)
+    assert blocked.value.blockers == ("delivery intent reserved but not dispatched",)
+    _, receipt = L.send(turn, lease, seq, ScriptedTransport(("accepted", "wamid.partial-1")))
+    assert receipt.kind == "accepted"
+    record = L.finalize(turn, lease)
+    assert (record.transport_outcome, record.customer_reach) == ("accepted", "unknown")
+    assert record.details["ledger"]["delivery_outcome"] == "accepted" and L.open_transactions() == 0
+
+
+def test_standalone_0108_schema_keeps_the_foundation_terminal_available(pg_admin_dsn: str) -> None:
+    """Positive control: a database with no ledger relation at all is the standalone
+    foundation schema, not a partial one; the foundation terminal path is unchanged."""
+    name, dsn = _create_database(pg_admin_dsn)
+    engine = None
+    try:
+        _alembic(dsn, FOUNDATION_REVISION)
+        engine = create_engine(dsn, pool_pre_ping=True)
+        assert _current_revisions(engine) == {FOUNDATION_REVISION}
+        assert not any(_relation_present(engine, t) for t in TABLES)
+        foundation = CommerceRuntimeRepository(engine)
+        tenant = _seed_tenant(engine, "S")
+        turn = foundation.admit_turn(tenant_id=tenant, namespace=LIVE, conversation_ref=_ref(),
+                                     channel_connection_ref=CHANNEL, provider_message_id=_pmid(),
+                                     payload={"kind": "text"})
+        lease = foundation.claim(tenant_id=tenant, namespace=LIVE, conversation_id=turn.conversation_id,
+                                 owner_id=WORKER_A, lease_seconds=60)
+        record = foundation.record_terminal(
+            tenant_id=tenant, namespace=LIVE, turn_id=turn.turn_id, token=lease.token,
+            processing_outcome="completed", transport_outcome="accepted", customer_reach="reached",
+            state_transition=c.StateTransition(expected_revision=0, payload={"stage": "closed"}))
+        assert (record.transport_outcome, record.customer_reach) == ("accepted", "reached")
+        snapshot = foundation.get_conversation(tenant_id=tenant, namespace=LIVE, conversation_id=turn.conversation_id)
+        assert (snapshot.state_revision, snapshot.eligible_turn_id) == (1, None)
+        assert foundation.get_terminal(tenant_id=tenant, namespace=LIVE, turn_id=turn.turn_id) == record
+    finally:
+        if engine is not None:
+            engine.dispose()
+        _drop_database(pg_admin_dsn, name)
+
+
+# ── Reservation / completion race on independent connections ────────────────
+
+
+def _wait_for_lock_waiters(engine, expected: int) -> None:
+    """Return once exactly ``expected`` other backends of this database wait on
+    a lock. Synchronisation is on observed backend state, never on elapsed
+    time; the deadline only turns a hang into a failure."""
+    deadline = time.monotonic() + 30
+    with engine.connect() as conn:
+        while True:
+            waiting = int(conn.execute(text(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                "AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'")).scalar())
+            if waiting == expected:
+                return
+            assert time.monotonic() < deadline, f"expected {expected} lock waiter(s), observed {waiting}"
+            time.sleep(0.01)
+
+
+def _race_reservation_against_completion(L: Ledgers, turn: c.AdmittedTurn, lease: c.Lease, *,
+                                         first: str) -> Dict[str, Any]:
+    """Queue a reservation and a completion, on independent connections, behind
+    a held conversation row lock in the given arrival order. Each contender is
+    observed waiting before the next one starts, and PostgreSQL grants the row
+    lock to the waiters in arrival order once the holder commits."""
+    outcomes: Dict[str, Any] = {}
+
+    def reservation() -> None:
+        try:
+            outcomes["reservation"] = L.reserve(turn, lease, L.intent(payload={"order": "SO-race"}))
+        except c.CommerceRuntimeError as exc:
+            outcomes["reservation"] = exc
+
+    def completion() -> None:
+        try:
+            outcomes["completion"] = L.finalize(turn, lease)
+        except c.CommerceRuntimeError as exc:
+            outcomes["completion"] = exc
+
+    contenders = {"reservation": reservation, "completion": completion}
+    order = [first, "completion" if first == "reservation" else "reservation"]
+    holder = L.engine.connect()
+    threads: List[threading.Thread] = []
+    try:
+        holder_tx = holder.begin()
+        holder.execute(text("SELECT id FROM commerce_runtime_conversations WHERE id = :id FOR UPDATE"),
+                       {"id": turn.conversation_id})
+        for arrived, name in enumerate(order, start=1):
+            thread = threading.Thread(target=contenders[name], name=name, daemon=True)
+            thread.start()
+            threads.append(thread)
+            _wait_for_lock_waiters(L.engine, expected=arrived)
+        holder_tx.commit()
+    finally:
+        holder.close()
+    for thread in threads:
+        thread.join(timeout=60)
+        assert not thread.is_alive(), f"{thread.name} did not finish"
+    assert set(outcomes) == {"reservation", "completion"}, outcomes
+    return outcomes
+
+
+def test_reservation_and_completion_race_in_both_lock_orders(ledgers: Ledgers) -> None:
+    L = ledgers
+    # Reservation first in the lock queue: completion then sees the new obligation and is refused.
+    turn, lease = L.start()
+    outcomes = _race_reservation_against_completion(L, turn, lease, first="reservation")
+    reservation, completion = outcomes["reservation"], outcomes["completion"]
+    assert isinstance(reservation, lc.EffectReservation) and reservation.created, reservation
+    assert isinstance(completion, lc.CompletionBlocked), completion
+    assert completion.reason == "actionable_work_remains"
+    assert completion.blockers == ("1 effect intent(s) reserved but not dispatched",)
+    assert L.terminal(turn) is None and L.snapshot(turn.conversation_id).eligible_turn_id == turn.turn_id
+    assert L.effect(turn, reservation.effect.effect_id).status == "reserved"
+    L.result(turn, L.dispatch(turn, lease, reservation.effect.effect_id).attempt_id, "confirmed",
+             {"provider_ref": "race-1"})
+    assert L.finalize(turn, lease).details["ledger"]["effects_by_status"]["confirmed"] == 1
+    # Completion first in the lock queue: the waiting reservation finds a completed turn and inserts nothing.
+    turn, lease = L.start()
+    outcomes = _race_reservation_against_completion(L, turn, lease, first="completion")
+    reservation, completion = outcomes["reservation"], outcomes["completion"]
+    assert isinstance(completion, c.TerminalRecord), completion
+    assert (completion.transport_outcome, completion.customer_reach) == ("not_attempted", "not_applicable")
+    assert isinstance(reservation, c.OwnershipRejected), reservation
+    assert reservation.reason is c.RejectReason.TURN_NOT_ELIGIBLE
+    summary = L.summary(turn)
+    assert sum(summary.effects_by_status.values()) == 0 and summary.delivery_outcome == "not_attempted"
+    assert L.terminal(turn) == completion and L.snapshot(turn.conversation_id).eligible_turn_id is None
+    assert L.open_transactions() == 0

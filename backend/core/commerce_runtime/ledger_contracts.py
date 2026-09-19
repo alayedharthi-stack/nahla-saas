@@ -228,6 +228,7 @@ class RecoveryNotPermitted(LedgerError):
 # Completion is enforced by the foundation's terminal path for every entry
 # point; the error class lives in ``contracts`` and is re-exported here.
 CompletionBlocked = c.CompletionBlocked
+LedgerSchemaIncomplete = c.LedgerSchemaIncomplete
 
 
 # ── Intents and records ──────────────────────────────────────────────────────
@@ -551,7 +552,7 @@ __all__ = [
     "DeliveryConflict", "DeliveryDispatchBlocked", "DeliveryIntent", "DeliveryKind", "DeliveryOutcome",
     "DeliveryReceiptRecord", "DeliverySequenceRecord", "DispatchBlock", "DispatchBlocked", "EFFECT_TRANSITIONS",
     "EffectAttemptRecord", "EffectConflict", "EffectIntent", "EffectNotFound", "EffectOutcome", "EffectRecord",
-    "EffectReservation", "EffectResultRecord", "EffectStatus", "IllegalTransition", "LedgerError",
+    "EffectReservation", "EffectResultRecord", "EffectStatus", "IllegalTransition", "LedgerSchemaIncomplete", "LedgerError",
     "MAX_ACTION_TYPE_LENGTH", "MAX_DELIVERY_ATTEMPTS", "MAX_DISPATCH_KEY_LENGTH", "MAX_EFFECT_ATTEMPTS",
     "KEY_ENCODING_VERSION", "MAX_EVIDENCE_BYTES", "MAX_IDEMPOTENCY_KEY_LENGTH", "OUTCOME_RECEIPTS",
     "PAYLOAD_HASH_LENGTH", "REACH_RECEIPTS",

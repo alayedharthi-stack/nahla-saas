@@ -57,6 +57,18 @@ TERM = RuntimeTurnTerminal.__table__
 # so the foundation keeps working on the standalone 0108 schema.
 LEDGER_EFFECTS_TABLE = "commerce_runtime_effects"
 LEDGER_SEQUENCES_TABLE = "commerce_runtime_delivery_sequences"
+# Every relation of the revision 0109 ledger schema. The completion guard
+# classifies the database by their presence: none present is the standalone
+# 0108 foundation schema, all present applies the ledger-aware completion
+# rules, anything in between fails closed.
+LEDGER_RELATIONS: Tuple[str, ...] = (
+    LEDGER_EFFECTS_TABLE,
+    "commerce_runtime_effect_attempts",
+    "commerce_runtime_effect_results",
+    LEDGER_SEQUENCES_TABLE,
+    "commerce_runtime_delivery_attempts",
+    "commerce_runtime_delivery_receipts",
+)
 
 
 def _db_now(conn: Connection) -> _dt.datetime:
@@ -506,23 +518,53 @@ class CommerceRuntimeRepository:
     # ── Ledger-aware completion (enforced for every terminal entry point) ────
 
     @staticmethod
+    def _ledger_schema_state(conn: Connection) -> Tuple[str, Tuple[str, ...], Tuple[str, ...]]:
+        """Classify the ledger schema as ``absent``, ``complete`` or ``partial``.
+
+        Every relation of ``LEDGER_RELATIONS`` is resolved by name in one
+        statement; the state is returned with the present and the missing
+        relation names.
+        """
+        clauses = " UNION ALL ".join(
+            f"SELECT :name{i} AS relation, to_regclass(:qualified{i}) IS NOT NULL AS present"
+            for i in range(len(LEDGER_RELATIONS))
+        )
+        params: Dict[str, Any] = {}
+        for i, name in enumerate(LEDGER_RELATIONS):
+            params[f"name{i}"] = name
+            params[f"qualified{i}"] = f"public.{name}"
+        rows = conn.execute(text(clauses), params).all()
+        present = tuple(str(r[0]) for r in rows if r[1])
+        missing = tuple(str(r[0]) for r in rows if not r[1])
+        if not present:
+            return "absent", present, missing
+        if not missing:
+            return "complete", present, missing
+        return "partial", present, missing
+
+    @staticmethod
     def _enforce_ledger_completion(conn: Connection, tenant_id: int, ns: str, turn_id: int, *, derived: bool) -> None:
         """Refuse a terminal that would strand or misstate the turn's ledgers.
 
-        Runs under the conversation lock before any write. When the ledger
-        tables of revision ``0109`` are absent (standalone foundation schema)
-        there is nothing to consult. When the turn has effect or delivery
-        records, completion is refused while an intent is reserved but not
-        dispatched or an attempt has no established outcome; and the
-        foundation entry point, which records caller-supplied transport and
-        reach, is refused outright for such a turn (``derived`` is False):
-        ledger-bearing turns complete only through the ledger-derived path.
+        Runs under the conversation lock before any write. The ledger schema
+        of revision ``0109`` is classified first: **absent** (no ledger
+        relation at all) is the standalone foundation schema and there is
+        nothing to consult; **partial** (some relations missing) cannot
+        establish whether the turn's obligations are complete, so the
+        terminal is refused (``LedgerSchemaIncomplete``) for every turn and
+        both entry points, with no automatic repair; **complete** applies the
+        rules below. When the turn has effect or delivery records, completion
+        is refused while an intent is reserved but not dispatched or an
+        attempt has no established outcome; and the foundation entry point,
+        which records caller-supplied transport and reach, is refused
+        outright for such a turn (``derived`` is False): ledger-bearing turns
+        complete only through the ledger-derived path.
         """
-        present = conn.execute(text(
-            "SELECT to_regclass(:effects) IS NOT NULL AND to_regclass(:sequences) IS NOT NULL"
-        ), {"effects": f"public.{LEDGER_EFFECTS_TABLE}", "sequences": f"public.{LEDGER_SEQUENCES_TABLE}"}).scalar()
-        if not present:
+        state, present, missing = CommerceRuntimeRepository._ledger_schema_state(conn)
+        if state == "absent":
             return
+        if state == "partial":
+            raise c.LedgerSchemaIncomplete(missing=missing, present=present)
         scope = {"tenant_id": tenant_id, "namespace": ns, "turn_id": turn_id}
         counts = {str(row[0]): int(row[1]) for row in conn.execute(text(
             f"SELECT status, count(*) FROM {LEDGER_EFFECTS_TABLE} "

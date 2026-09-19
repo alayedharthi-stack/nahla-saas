@@ -198,3 +198,19 @@ def test_handoff_request_is_not_human_ownership_transfer() -> None:
     assert lc.human_transfer_established(_effect(confirmed_result={
         "transfer": {"human_owner_ref": "agent:1", "accepted_at": "2026-09-19T12:00:00Z"},
     })) is True
+
+
+def test_completion_guard_relation_registry_matches_the_ledger_schema() -> None:
+    """The foundation's completion guard classifies the schema over every ledger
+    relation: its registry must name exactly the tables the ledger models declare,
+    and the partial-schema refusal carries the missing and present names."""
+    from core.commerce_runtime import ledger_models as lm
+    from core.commerce_runtime import repositories as r
+
+    assert set(r.LEDGER_RELATIONS) == {t.name for t in lm.LEDGER_TABLES}
+    assert len(r.LEDGER_RELATIONS) == len(lm.LEDGER_TABLES) == 6
+    assert {r.LEDGER_EFFECTS_TABLE, r.LEDGER_SEQUENCES_TABLE} <= set(r.LEDGER_RELATIONS)
+    err = lc.LedgerSchemaIncomplete(missing=(lm.EFFECTS_TABLE,), present=(lm.DELIVERY_SEQUENCES_TABLE,))
+    assert isinstance(err, c.CommerceRuntimeError) and lc.LedgerSchemaIncomplete is c.LedgerSchemaIncomplete
+    assert (err.missing, err.present) == ((lm.EFFECTS_TABLE,), (lm.DELIVERY_SEQUENCES_TABLE,))
+    assert f"missing {lm.EFFECTS_TABLE}" in str(err) and f"present {lm.DELIVERY_SEQUENCES_TABLE}" in str(err)

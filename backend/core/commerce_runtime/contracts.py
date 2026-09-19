@@ -179,6 +179,28 @@ class CompletionBlocked(CommerceRuntimeError):
         super().__init__(f"{reason}: {detail}" if detail else reason)
 
 
+class LedgerSchemaIncomplete(CommerceRuntimeError):
+    """The ledger schema of revision ``0109`` is only partly present.
+
+    Raised under the conversation lock, before anything is written, when
+    some but not all ledger relations resolve. A database with none of them
+    is the standalone ``0108`` foundation schema and keeps the foundation's
+    behaviour; a database with all of them applies the ledger-aware
+    completion rules; a database in between cannot establish whether the
+    turn's obligations are complete, so every terminal write on it is
+    refused, on both entry points, until the schema is restored. Nothing
+    repairs the schema automatically.
+    """
+
+    def __init__(self, missing: Sequence[str], present: Sequence[str]) -> None:
+        self.missing = tuple(missing)
+        self.present = tuple(present)
+        super().__init__(
+            "ledger schema incomplete: missing " + ", ".join(self.missing)
+            + "; present " + ", ".join(self.present)
+        )
+
+
 # ── Records ──────────────────────────────────────────────────────────────────
 
 
@@ -407,6 +429,7 @@ def classify_rejection(
 
 __all__ = [
     "AdmissionConflict", "AdmittedTurn", "CommerceRuntimeError", "CompletionBlocked", "ConversationNotFound",
+    "LedgerSchemaIncomplete",
     "ConversationSnapshot", "CustomerReach", "Lease", "MAX_DETAILS_BYTES", "MAX_LEASE_SECONDS",
     "MAX_OWNER_ID_LENGTH", "MAX_PAYLOAD_BYTES", "MAX_PROVIDER_MESSAGE_ID_LENGTH", "MAX_REF_LENGTH",
     "MIN_LEASE_SECONDS", "Namespace", "OwnershipRejected", "OwnershipToken", "ProcessingOutcome",

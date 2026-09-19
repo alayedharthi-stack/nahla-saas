@@ -595,7 +595,8 @@ class LedgerRepository:
         → record outcome → finalize. A recorded ``unknown`` does not block:
         it is retained in the terminal's summary as unknown, never as success.
         Evidence recorded later updates the ledgers only; the terminal never
-        changes.
+        changes. On a database whose ledger schema is only partly present the
+        terminal is refused (``LedgerSchemaIncomplete``) before any write.
         """
         tenant_id = c.validate_tenant_id(tenant_id)
         ns = c.validate_namespace(namespace).value

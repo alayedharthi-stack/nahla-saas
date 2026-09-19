@@ -91,7 +91,7 @@
       "id": "commerce_runtime_ledgers",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py",
-      "origin": "Ledger PR \u2014 dormant effect and delivery ledgers: business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit and ledger-derived terminals; L1 completion boundary on both terminal entry points and L2 distinct business identities",
+      "origin": "Ledger PR \u2014 dormant effect and delivery ledgers: business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit and ledger-derived terminals; L1 completion boundary on both terminal entry points and L2 distinct business identities; schema-state completion guard (standalone 0108 kept, partial schema fails closed on both entry points, complete schema ledger-aware) and the reservation/completion race in both lock orders",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -122,7 +122,11 @@
         "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_dispatching_attempts_cannot_be_completed_through_the_foundation_entry_point",
         "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_foundation_terminal_remains_available_for_turns_without_ledger_records",
         "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_distinct_business_identities_stay_distinct_with_equal_payloads",
-        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_every_ledger_operation_closes_its_transaction_before_returning"
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_every_ledger_operation_closes_its_transaction_before_returning",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_partial_ledger_schema_fails_closed_while_effect_obligations_remain",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_partial_ledger_schema_fails_closed_while_delivery_obligations_remain",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_standalone_0108_schema_keeps_the_foundation_terminal_available",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py::test_reservation_and_completion_race_in_both_lock_orders"
       ]
     },
     {
