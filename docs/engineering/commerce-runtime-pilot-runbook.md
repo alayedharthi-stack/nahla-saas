@@ -19,9 +19,39 @@ below is set. Contract: `docs/architecture/commerce-runtime-pilot-activation.md`
 Revisions `0108` and `0109` are merged and validated, but the normal bootstrap
 target is pinned at `0093`, so a database that has never had them applied will
 report `runtime_schema_unavailable` and the pilot will answer nothing. Applying
-them is a deliberate operator step (`alembic upgrade 0109`), taken with the
-owner's knowledge, and it creates only new tables — it alters no existing table
-and backfills no data.
+them is a deliberate operator step, taken with the owner's knowledge; §1.2 is
+the job that does it. It creates only new tables — it alters no existing table,
+changes no existing index or constraint, and reads, writes or backfills no
+existing data.
+
+### 1.2 Applying the schema (owner-approved, one-off)
+
+`scripts/operators/commerce_runtime_pilot_migration.py` is the job, run the way
+this repository already applies a production migration: a dedicated Railway
+one-off service built from a pinned `ops/…` branch, `restartPolicyType: NEVER`,
+whose only variables are the pilot database's `DATABASE_URL` and the
+confirmation token.
+
+```bash
+NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0109 \
+  python -m scripts.operators.commerce_runtime_pilot_migration
+```
+
+It is fail-closed at both ends and refuses rather than repairs:
+
+| Situation | Outcome |
+| --- | --- |
+| no confirmation token, or the wrong one | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
+| `DATABASE_URL` missing, or pointing at localhost | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
+| current revision is not one the contract accepts | `RESULT=FAILED_PRECONDITION`, exit 3, the observed value is printed |
+| some but not all nine relations exist | `RESULT=FAILED_PRECONDITION`, exit 3 — a half-present schema is never repaired |
+| all nine exist and the revision is already `0109` | `RESULT=ALREADY_APPLIED`, exit 0, Alembic is not run |
+| `alembic upgrade 0109` ran and all nine relations and the revision are verified | `RESULT=SUCCESS`, exit 0 |
+| anything else after the upgrade | `RESULT=FAILED`, exit 4, with what was observed |
+
+Every line is prefixed `[commerce-runtime-0109]`. Rolling the schema back is
+`alembic downgrade 0107`, which the revision's own reversibility proofs cover;
+it is only safe while the pilot is off and no runtime rows exist.
 
 ### 1.1 Reading the verified tenant and connection
 
