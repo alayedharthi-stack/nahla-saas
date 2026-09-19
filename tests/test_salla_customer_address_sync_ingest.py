@@ -280,21 +280,94 @@ def test_another_tenants_customer_is_never_attached(db):
     assert db.query(CustomerAddress).count() == 0
 
 
-def test_connection_from_another_tenant_is_not_recorded(db):
+def _linked_customer(db):
+    db.add(Customer(tenant_id=1, phone="966500000200",
+                    normalized_phone="+966500000200", salla_customer_id=SALLA_ID))
+    db.commit()
+
+
+def test_connection_from_another_tenant_refuses_the_write(db):
+    """A verified Salla connection is a PREREQUISITE, not optional provenance.
+
+    Importing anyway and merely leaving ``integration_connection_id`` NULL
+    would let a payload borrow authority its store binding never granted.
+    """
     _seed_integration(db)
     db.add(Tenant(id=2, name="متجر آخر"))
     db.flush()
     foreign = Integration(tenant_id=2, provider="salla", external_store_id="STORE-B",
                           config={}, enabled=True)
     db.add(foreign)
-    db.add(Customer(tenant_id=1, phone="966500000200",
-                    normalized_phone="+966500000200", salla_customer_id=SALLA_ID))
-    db.commit()
+    _linked_customer(db)
     service = StoreSyncService(db, tenant_id=1, integration_connection_id=foreign.id)
-    service._persist_salla_profile_address_candidate(_customer_payload())
+    reason = service._persist_salla_profile_address_candidate(_customer_payload())
     db.commit()
+    assert reason == "connection_not_found_for_tenant"
+    assert db.query(CustomerAddress).count() == 0
+    assert db.query(CustomerAddressProvenance).count() == 0
+
+
+def test_absent_connection_refuses_the_write(db):
+    _linked_customer(db)
+    service = StoreSyncService(db, tenant_id=1, integration_connection_id=None)
+    reason = service._persist_salla_profile_address_candidate(_customer_payload())
+    db.commit()
+    assert reason == "no_active_salla_connection"
+    assert db.query(CustomerAddress).count() == 0
+
+
+def test_disabled_connection_refuses_the_write(db):
+    intg = Integration(tenant_id=1, provider="salla", external_store_id="STORE-D",
+                       config={}, enabled=False)
+    db.add(intg)
+    db.flush()
+    _linked_customer(db)
+    service = StoreSyncService(db, tenant_id=1, integration_connection_id=intg.id)
+    reason = service._persist_salla_profile_address_candidate(_customer_payload())
+    db.commit()
+    assert reason == "connection_disabled"
+    assert db.query(CustomerAddress).count() == 0
+
+
+def test_non_salla_connection_refuses_the_write(db):
+    intg = Integration(tenant_id=1, provider="shopify", external_store_id="STORE-S",
+                       config={}, enabled=True)
+    db.add(intg)
+    db.flush()
+    _linked_customer(db)
+    service = StoreSyncService(db, tenant_id=1, integration_connection_id=intg.id)
+    reason = service._persist_salla_profile_address_candidate(_customer_payload())
+    db.commit()
+    assert reason == "connection_provider_mismatch"
+    assert db.query(CustomerAddress).count() == 0
+
+
+def test_verified_connection_is_recorded_on_the_write(db):
+    intg = _seed_integration(db)
+    _linked_customer(db)
+    service = StoreSyncService(db, tenant_id=1, integration_connection_id=intg.id)
+    reason = service._persist_salla_profile_address_candidate(_customer_payload())
+    db.commit()
+    assert reason == "created"
     prov = db.query(CustomerAddressProvenance).one()
-    assert prov.integration_connection_id is None
+    assert prov.integration_connection_id == intg.id
+
+
+def test_same_provider_identity_cannot_borrow_another_store_context(db):
+    """One Salla customer id under a store this tenant does not own."""
+    _seed_integration(db)
+    db.add(Tenant(id=2, name="متجر آخر"))
+    db.flush()
+    other_store = Integration(tenant_id=2, provider="salla", external_store_id="STORE-Z",
+                              config={}, enabled=True)
+    db.add(other_store)
+    _linked_customer(db)
+    service = StoreSyncService(db, tenant_id=1, integration_connection_id=other_store.id)
+    assert service._persist_salla_profile_address_candidate(
+        _customer_payload()
+    ) == "connection_not_found_for_tenant"
+    db.commit()
+    assert db.query(CustomerAddress).count() == 0
 
 
 def test_out_of_order_webhook_events_keep_the_newer_address(db):

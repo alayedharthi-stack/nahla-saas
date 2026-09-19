@@ -53,6 +53,9 @@ from core.customer_address_candidates import (  # noqa: E402
     upsert_imported_address_candidate,
 )
 from core.customer_address_persistence_evidence import (  # noqa: E402
+    NO_OPERATION,
+    AddressOperation,
+    AddressOperationAttempt,
     AddressPersistenceScope,
     no_evidence,
     resolve_customer_address_persistence_evidence,
@@ -68,7 +71,10 @@ from models import (  # noqa: E402
     Tenant,
 )
 from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # noqa: E402
+    CLAIM_KIND_ADOPTED,
+    CLAIM_KIND_SAVED,
     apply_customer_address_save_claim_guard,
+    detect_address_save_claim_kinds,
 )
 from modules.ai.order_flow_v2.checkout_context import (  # noqa: E402
     apply_delivery_continuation_address_patch,
@@ -570,29 +576,106 @@ def test_skipped_writer_and_unavailable_capability_yield_no_evidence():
         assert evidence.allows_adopted_address_claim() is False
 
 
-def test_failed_commit_yields_no_durable_save_evidence():
-    db, _ = _make_db()
-    tenant, customer = _seed(db)
-    _import(db, tenant, customer, _payload())
-    db.rollback()  # the transaction never commits
-    evidence = resolve_customer_address_persistence_evidence(
-        db, tenant_id=tenant.id, customer_id=customer.id,
+def _save_attempt(tenant, customer, result, operation=AddressOperation.SAVE_CANDIDATE):
+    return AddressOperationAttempt(
+        operation=operation, tenant_id=tenant.id, customer_id=customer.id,
+        address_id=result.address_id, fingerprint=result.fingerprint,
     )
-    assert evidence.scope is AddressPersistenceScope.NONE
-    assert evidence.allows_saved_address_claim() is False
 
 
-def test_committed_candidate_supports_saved_but_not_adopted_claim():
+def test_no_operation_in_the_turn_supports_no_save_claim():
+    """An address that was already on file proves nothing about a new save."""
     db, _ = _make_db()
     tenant, customer = _seed(db)
     _import(db, tenant, customer, _payload())
     db.commit()
     evidence = resolve_customer_address_persistence_evidence(
+        db, tenant_id=tenant.id, customer_id=customer.id, attempt=NO_OPERATION,
+    )
+    assert evidence.scope is AddressPersistenceScope.NONE
+    assert evidence.reason == "no_address_operation_in_turn"
+    assert evidence.allows_saved_address_claim() is False
+
+
+def test_operation_for_another_customer_or_tenant_is_refused():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    attempt = AddressOperationAttempt(
+        operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant.id,
+        customer_id=customer.id + 999, address_id=imported.address_id,
+        fingerprint=imported.fingerprint,
+    )
+    evidence = resolve_customer_address_persistence_evidence(
+        db, tenant_id=tenant.id, customer_id=customer.id, attempt=attempt,
+    )
+    assert evidence.scope is AddressPersistenceScope.NONE
+    assert evidence.reason == "operation_scope_mismatch"
+
+
+def test_operation_on_an_unknown_address_supports_nothing():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    attempt = AddressOperationAttempt(
+        operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant.id,
+        customer_id=customer.id, address_id=999_999, fingerprint="whatever",
+    )
+    evidence = resolve_customer_address_persistence_evidence(
+        db, tenant_id=tenant.id, customer_id=customer.id, attempt=attempt,
+    )
+    assert evidence.scope is AddressPersistenceScope.NONE
+    assert evidence.allows_saved_address_claim() is False
+
+
+def test_mismatched_revision_supports_nothing():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    attempt = AddressOperationAttempt(
+        operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant.id,
+        customer_id=customer.id, address_id=imported.address_id,
+        fingerprint="a-revision-that-was-never-committed",
+    )
+    evidence = resolve_customer_address_persistence_evidence(
+        db, tenant_id=tenant.id, customer_id=customer.id, attempt=attempt,
+    )
+    assert evidence.scope is AddressPersistenceScope.NONE
+    assert evidence.reason == "committed_revision_mismatch"
+
+
+def test_committed_candidate_supports_saved_but_not_adopted_claim():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    evidence = resolve_customer_address_persistence_evidence(
         db, tenant_id=tenant.id, customer_id=customer.id,
+        attempt=_save_attempt(tenant, customer, imported),
     )
     assert evidence.scope is AddressPersistenceScope.IMPORTED_CANDIDATE
     assert evidence.allows_saved_address_claim() is True
     assert evidence.allows_adopted_address_claim() is False
+
+
+def test_adoption_that_did_not_commit_cannot_claim_adoption():
+    """The row is there, but it is not the selected delivery address."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    evidence = resolve_customer_address_persistence_evidence(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        attempt=_save_attempt(tenant, customer, imported,
+                              operation=AddressOperation.ADOPT_SELECTION),
+    )
+    assert evidence.scope is AddressPersistenceScope.IMPORTED_CANDIDATE
+    assert evidence.reason == "adoption_not_committed"
+    assert evidence.allows_adopted_address_claim() is False
+    assert evidence.allows_saved_address_claim() is False
 
 
 def test_committed_selection_supports_adopted_claim():
@@ -609,6 +692,8 @@ def test_committed_selection_supports_adopted_claim():
     db.commit()
     evidence = resolve_customer_address_persistence_evidence(
         db, tenant_id=tenant.id, customer_id=customer.id,
+        attempt=_save_attempt(tenant, customer, imported,
+                              operation=AddressOperation.ADOPT_SELECTION),
     )
     assert evidence.scope is AddressPersistenceScope.SELECTED_DELIVERY_ADDRESS
     assert evidence.allows_adopted_address_claim() is True
@@ -651,6 +736,7 @@ def test_adopted_claim_is_removed_when_only_a_candidate_is_committed():
 
 
 def test_committed_selection_lets_the_claim_through_unchanged():
+    """A legitimate, committed adoption is still permitted."""
     db, _ = _make_db()
     tenant, customer = _seed(db)
     imported = _import(db, tenant, customer, _payload())
@@ -664,12 +750,142 @@ def test_committed_selection_lets_the_claim_through_unchanged():
     db.commit()
     evidence = resolve_customer_address_persistence_evidence(
         db, tenant_id=tenant.id, customer_id=customer.id,
+        attempt=_save_attempt(tenant, customer, imported,
+                              operation=AddressOperation.ADOPT_SELECTION),
     )
     result = apply_customer_address_save_claim_guard(
         reply=ADOPT_CLAIM, evidence=evidence,
     )
     assert result.action == "allowed"
     assert result.reply == ADOPT_CLAIM
+
+
+def test_an_old_address_never_authorizes_a_claim_about_a_new_one():
+    """Riyadh on file does not make "saved your new Jeddah address" true."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    record_explicit_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        address_id=imported.address_id,
+        selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+        expected_fingerprint=imported.fingerprint,
+    )
+    db.commit()
+    evidence = resolve_customer_address_persistence_evidence(
+        db, tenant_id=tenant.id, customer_id=customer.id, attempt=NO_OPERATION,
+    )
+    result = apply_customer_address_save_claim_guard(
+        reply="تم حفظ عنوانك الجديد في جدة واعتماده كعنوان افتراضي.",
+        evidence=evidence,
+    )
+    assert result.action == "blocked_unsupported_address_save_claim"
+    assert "جدة" not in result.reply
+
+
+def test_truthful_negative_is_never_deleted():
+    """"Your address was NOT saved" is honest text, not a false claim."""
+    for reply in (
+        "لم يتم حفظ عنوانك بعد.",
+        "ما حفظنا عنوانك. ارسل لي الرمز المختصر.",
+        "عنوانك غير محفوظ عندنا حالياً.",
+    ):
+        result = apply_customer_address_save_claim_guard(reply=reply, evidence=None)
+        assert result.action == "allowed", reply
+        assert result.reply == reply
+
+
+def test_a_question_is_never_treated_as_a_completed_action():
+    for reply in (
+        "هل تريد اعتماد عنوانك كعنوان افتراضي؟",
+        "هل نحفظ عنوانك للطلبات الجاية؟",
+    ):
+        result = apply_customer_address_save_claim_guard(reply=reply, evidence=None)
+        assert result.action == "allowed", reply
+        assert result.reply == reply
+
+
+def test_combined_save_and_adoption_claim_is_detected_as_both():
+    """The adoption rides an attached pronoun rather than repeating the noun."""
+    reply = "تم حفظ عنوانك واعتماده للتوصيل يا تركي"
+    kinds = detect_address_save_claim_kinds(reply)
+    assert CLAIM_KIND_SAVED in kinds
+    assert CLAIM_KIND_ADOPTED in kinds
+
+
+@pytest.mark.parametrize("reply", [
+    "عنوانك محفوظ عندنا",
+    "عنوانك مسجل لدينا",
+    "اعتمدنا عنوانك الافتراضي",
+    "سجلنا لك العنوان",
+])
+def test_unseen_phrasings_of_the_same_two_claims_are_detected(reply):
+    assert detect_address_save_claim_kinds(reply)
+    result = apply_customer_address_save_claim_guard(reply=reply, evidence=None)
+    assert result.action == "blocked_unsupported_address_save_claim"
+
+
+def test_only_the_unsupported_sentence_is_removed():
+    reply = "تم حفظ عنوانك عندنا. وش الكمية اللي تبيها؟"
+    result = apply_customer_address_save_claim_guard(reply=reply, evidence=None)
+    assert result.action == "blocked_unsupported_address_save_claim"
+    assert "تم حفظ عنوانك" not in result.reply
+    assert "وش الكمية اللي تبيها؟" in result.reply
+    assert result.scrubbed_empty is False
+
+
+def test_full_removal_is_reported_so_the_send_can_be_suppressed():
+    """Neither the false claim nor an empty message may be delivered."""
+    reply = "تم حفظ عنوانك واعتماده للتوصيل يا تركي"
+    result = apply_customer_address_save_claim_guard(reply=reply, evidence=None)
+    assert result.action == "blocked_unsupported_address_save_claim"
+    assert result.scrubbed_empty is True
+    assert result.reply.strip() == ""
+
+
+def test_pipeline_suppresses_the_send_when_nothing_truthful_remains():
+    from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
+        run_post_compose_truth_guards,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    convo = _conversation(db, tenant, customer)
+    result = run_post_compose_truth_guards(
+        db=db, tenant_id=tenant.id, to=CUSTOMER_PHONE, text="وين توصلون؟",
+        reply="تم حفظ عنوانك واعتماده للتوصيل يا تركي", convo=convo,
+        inbound_metadata={}, brain_handoff=False, brain_nc_block=False,
+        brain_nc_category="", br_action="", brain_persona_compose_event=None,
+        mode="primary", conversation_id=convo.id,
+    )
+    event = next(
+        e for e in result.events if e.guard == "customer_address_save_claim_guard"
+    )
+    assert event.modified is True
+    # Audited, not silent: the send is suppressed rather than delivering an
+    # empty string or restoring the unsupported claim.
+    assert event.suppressed_send is True
+    assert "scrubbed_empty" in (event.reason or "")
+    assert result.reply.strip() == ""
+
+
+def test_pipeline_leaves_a_truthful_negative_intact():
+    from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
+        run_post_compose_truth_guards,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    convo = _conversation(db, tenant, customer)
+    reply = "لم يتم حفظ عنوانك"
+    result = run_post_compose_truth_guards(
+        db=db, tenant_id=tenant.id, to=CUSTOMER_PHONE, text="هل حفظتم عنواني؟",
+        reply=reply, convo=convo, inbound_metadata={}, brain_handoff=False,
+        brain_nc_block=False, brain_nc_category="", br_action="",
+        brain_persona_compose_event=None, mode="primary", conversation_id=convo.id,
+    )
+    assert result.reply == reply
 
 
 def test_guard_leaves_replies_without_save_claims_alone():
@@ -809,6 +1025,21 @@ def test_partial_candidate_keeps_known_fields_and_asks_only_what_is_missing():
     assert result.address_id is not None
 
 
+def _offer_then_confirm(db, tenant, customer, convo, message="نفس العنوان السابق"):
+    """The real lifecycle: the address is OFFERED, then confirmed."""
+    load_checkout_reply_context(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={}, brain_state={},
+    )
+    db.commit()
+    patch = apply_previous_address_confirmation(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={}, message=message,
+    )
+    db.commit()
+    return patch
+
+
 def test_confirmation_path_records_the_selection_exactly_once():
     db, _ = _make_db()
     tenant, customer = _seed(db)
@@ -822,18 +1053,206 @@ def test_confirmation_path_records_the_selection_exactly_once():
     convo = _conversation(db, tenant, customer)
 
     for _ in range(2):
-        patch = apply_previous_address_confirmation(
-            db, tenant_id=tenant.id, conversation=convo,
-            customer_phone=CUSTOMER_PHONE, order_prep={},
-            message="نفس العنوان السابق",
-        )
-        db.commit()
+        patch = _offer_then_confirm(db, tenant, customer, convo)
         assert patch.get("customer_confirmed_previous_address") is True
 
     rows = db.query(CustomerAddressProvenance).all()
     assert len(rows) == 1
     assert rows[0].selection_state == "selected"
     assert db.query(CustomerAddress).count() == 1
+
+
+def test_confirmation_without_a_prior_offer_selects_nothing():
+    """Consent is consent about an offer. An inquiry is not an offer."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    upsert_imported_address_candidate(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        components=AddressComponents(city=CITY, short_address_code=SHORT_CODE),
+        source_ref=SALLA_CUSTOMER_ID,
+        source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    patch = apply_previous_address_confirmation(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={},
+        message="هل عنواني محفوظ عندكم؟",
+    )
+    db.commit()
+    assert patch == {}
+    assert resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected is None
+
+
+def test_confirmation_refuses_a_revision_the_customer_never_saw():
+    """A refresh between the offer and the reply invalidates the consent."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = upsert_imported_address_candidate(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        components=AddressComponents(city=CITY, address_line=STREET,
+                                     short_address_code=SHORT_CODE),
+        source_ref=SALLA_CUSTOMER_ID,
+        source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    load_checkout_reply_context(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={}, brain_state={},
+    )
+    db.commit()
+
+    row = db.query(CustomerAddress).filter_by(id=imported.address_id).one()
+    row.address_text = "شارع لم يره العميل"
+    db.add(row)
+    db.commit()
+
+    patch = apply_previous_address_confirmation(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={},
+        message="نفس العنوان السابق",
+    )
+    db.commit()
+    assert patch == {}
+    assert resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected is None
+
+
+def test_reselecting_a_previously_approved_address_makes_it_current_again():
+    """A historical approval is not the current selection."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a = upsert_imported_address_candidate(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        components=AddressComponents(city=CITY, short_address_code=SHORT_CODE),
+        source_ref="SC-A", source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    b = upsert_imported_address_candidate(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        components=AddressComponents(city="جدة", short_address_code="JJJD5678"),
+        source_ref="SC-B", source_updated_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+    )
+    db.commit()
+    for target in (a, b, a):
+        record_explicit_address_selection(
+            db, tenant_id=tenant.id, customer_id=customer.id,
+            address_id=target.address_id,
+            selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+            expected_fingerprint=target.fingerprint,
+        )
+        db.commit()
+    resolution = resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    )
+    assert resolution.selected.address_id == a.address_id
+    # B remains durable history, not a candidate and not lost.
+    assert [x.address_id for x in resolution.superseded_selections] == [b.address_id]
+    assert {x.address_id for x in resolution.addresses} == {a.address_id, b.address_id}
+
+
+def test_one_selection_operation_delivered_twice_is_idempotent():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    for _ in range(2):
+        record_explicit_address_selection(
+            db, tenant_id=tenant.id, customer_id=customer.id,
+            address_id=imported.address_id,
+            selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+            expected_fingerprint=imported.fingerprint,
+            operation_ref="offer-2026-09-01T10:00:00Z",
+        )
+        db.commit()
+    row = db.query(CustomerAddressProvenance).one()
+    first_selected_at = row.selected_at
+    record_explicit_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        address_id=imported.address_id,
+        selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+        expected_fingerprint=imported.fingerprint,
+        operation_ref="offer-2026-09-01T10:00:00Z",
+    )
+    db.commit()
+    assert db.query(CustomerAddressProvenance).one().selected_at == first_selected_at
+
+
+def test_unselected_candidate_never_makes_checkout_address_accepted():
+    from core.wa_order_lifecycle import has_accepted_delivery_address  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    upsert_imported_address_candidate(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        components=AddressComponents(city=CITY, short_address_code=SHORT_CODE),
+        source_ref=SALLA_CUSTOMER_ID,
+        source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    patch = apply_delivery_continuation_address_patch(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={},
+    )
+    assert patch.get("city") == CITY
+    assert "customer_confirmed_previous_address" not in patch
+    # The locating artefact is withheld, so nothing downstream reads the
+    # order as already having an accepted delivery address.
+    assert has_accepted_delivery_address(patch) is False
+
+
+def test_stale_source_event_is_refused_even_after_selection():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    fresh = _import(db, tenant, customer, _payload(updated_at="2026-09-09T10:00:00Z"))
+    db.commit()
+    record_explicit_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        address_id=fresh.address_id,
+        selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+        expected_fingerprint=fresh.fingerprint,
+    )
+    db.commit()
+    stale = _import(
+        db, tenant, customer,
+        _payload(location="عنوان قديم", updated_at="2026-09-01T10:00:00Z"),
+    )
+    db.commit()
+    assert stale.action == ACTION_SKIPPED
+    assert stale.reason == "stale_source_event"
+    assert db.query(CustomerAddress).count() == 1
+
+
+def test_provenance_read_failure_never_promotes_a_candidate():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+
+    real_query = db.query
+
+    def _broken(*entities, **kwargs):
+        if entities and getattr(entities[0], "__name__", "") == "CustomerAddressProvenance":
+            raise RuntimeError("provenance unavailable")
+        return real_query(*entities, **kwargs)
+
+    db.query = _broken
+    try:
+        resolution = resolve_customer_address_selection(
+            db, tenant_id=tenant.id, customer_id=customer.id,
+        )
+    finally:
+        db.query = real_query
+    # A failed read says provenance is unknown — never that the row was
+    # a pre-slice confirmed address.
+    assert resolution.selected is None
+    assert len(resolution.candidates) == 1
+    assert resolution.candidates[0].provenance_known is False
 
 
 # ── Guard wiring ────────────────────────────────────────────────────────

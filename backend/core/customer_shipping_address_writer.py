@@ -233,14 +233,22 @@ def _record_confirmed_shipping_selection(
             attach_selection_provenance_for_new_address,
         )
 
-        attach_selection_provenance_for_new_address(
-            db,
-            tenant_id=int(tenant_id),
-            customer_id=int(customer_id),
-            address_row=row,
-            selection_source=SELECTION_SOURCE_ORDER_CONFIRMED_SHIPPING,
-            source=SOURCE_ORDER_CONFIRMED_SHIPPING,
+        from core.customer_address_candidates import (  # noqa: PLC0415
+            _nested_or_passthrough,
         )
+
+        # Contained: on a backend with savepoints a failure rolls back only
+        # the provenance insert, never the confirmed-shipping address the
+        # caller is committing.
+        with _nested_or_passthrough(db):
+            attach_selection_provenance_for_new_address(
+                db,
+                tenant_id=int(tenant_id),
+                customer_id=int(customer_id),
+                address_row=row,
+                selection_source=SELECTION_SOURCE_ORDER_CONFIRMED_SHIPPING,
+                source=SOURCE_ORDER_CONFIRMED_SHIPPING,
+            )
     # noqa: silent-ok — provenance only LABELS an address the confirmed-shipping
     # write already made; failing to label it must not roll that address back,
     # and a row without provenance reads as a legacy selection.

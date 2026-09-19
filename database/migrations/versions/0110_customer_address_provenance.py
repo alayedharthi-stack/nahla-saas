@@ -15,6 +15,33 @@ the customer explicitly selected the address as their delivery address
 
 ``source_country`` round-trips the observed country, which
 ``customer_addresses`` has no column for.
+``selection_operation_ref`` records which selection OPERATION produced the
+current selection, so a redelivered confirmation is idempotent while a new
+choice of a previously approved address becomes current again.
+
+``uq_customer_address_provenance_source_revision``
+==================================================
+One row per ``(tenant, customer, source, source_ref, content_fingerprint)``.
+Two concurrent first imports of the same payload cannot both commit: the
+loser receives an IntegrityError and re-reads the winner. Different
+revisions of the same source still coexist, so a historical selected
+revision is never displaced by a refresh. PostgreSQL treats NULLs as
+distinct, so rows with no ``source_ref`` (confirmed-shipping provenance)
+are not deduplicated by this constraint; that path deduplicates on address
+content in ``core.customer_shipping_address_writer`` instead.
+
+Activation boundary (explicit)
+==============================
+``backend/main.py`` calls ``Base.metadata.create_all(engine)`` at startup,
+so a deployment that ships these ORM models MATERIALIZES this table even
+without ``alembic upgrade 0110``. "No explicit alembic run" is therefore
+NOT a guarantee of dormancy, and this revision does not claim one. What the
+pinned bootstrap target (``0093``) does guarantee is that no *existing*
+table is altered by Alembic here. The address readers and writers degrade
+safely when the table is absent (reads classify rows from
+``customer_addresses`` alone; writes attempt provenance inside a SAVEPOINT
+so a missing table cannot abort the caller's transaction) — but the
+feature is live wherever the models are deployed.
 
 Rows that predate this revision have no provenance row. They are read as
 legacy selections (they were only ever written on confirmed shipping
@@ -61,6 +88,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 _TABLE = "customer_address_provenance"
 _UNIQUE = "uq_customer_address_provenance_address"
+_UNIQUE_SOURCE_REVISION = "uq_customer_address_provenance_source_revision"
 _INDEX = "ix_customer_address_provenance_source"
 
 # Foreign keys as (column, referred table, referred column, constraint name).
@@ -118,6 +146,7 @@ def _columns() -> list:
         sa.Column("selected_fingerprint", sa.String, nullable=True),
         sa.Column("selected_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("selection_source", sa.String, nullable=True),
+        sa.Column("selection_operation_ref", sa.String, nullable=True),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False,
             server_default=sa.func.now(),
@@ -135,6 +164,10 @@ def _create_fresh() -> None:
         _TABLE,
         *_columns(),
         sa.UniqueConstraint("tenant_id", "customer_address_id", name=_UNIQUE),
+        sa.UniqueConstraint(
+            "tenant_id", "customer_id", "source", "source_ref", "content_fingerprint",
+            name=_UNIQUE_SOURCE_REVISION,
+        ),
     )
     op.create_index(
         _INDEX, _TABLE, ["tenant_id", "customer_id", "source", "source_ref"],
@@ -214,6 +247,12 @@ def _reconcile_existing(bind) -> None:
     if not has_unique_constraint(bind, _TABLE, _UNIQUE):
         op.create_unique_constraint(
             _UNIQUE, _TABLE, ["tenant_id", "customer_address_id"],
+        )
+    if not has_unique_constraint(bind, _TABLE, _UNIQUE_SOURCE_REVISION):
+        op.create_unique_constraint(
+            _UNIQUE_SOURCE_REVISION,
+            _TABLE,
+            ["tenant_id", "customer_id", "source", "source_ref", "content_fingerprint"],
         )
     if not has_index(bind, _TABLE, _INDEX):
         op.create_index(

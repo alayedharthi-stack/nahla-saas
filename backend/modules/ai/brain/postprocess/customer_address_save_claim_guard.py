@@ -48,18 +48,25 @@ def _norm(text: str) -> str:
     return _WS.sub(" ", value).strip().lower()
 
 
-# "the address is saved / stored / registered with us"
+# Two semantic classes, deliberately kept to two. These are not a phrase
+# blacklist to grow: each pattern covers a verb family plus the Arabic
+# attached-pronoun forms of "address" (عنوان / عنوانك / عنوانكم / العنوان),
+# which is why the earlier, narrower versions missed "عنوانك محفوظ" and the
+# combined "…واعتماده…".
+_ADDRESS = r"(?:ال)?عنوان(?:ك|كم|نا|هم|ه|ها)?"
+
+# Class 1 — "the address was saved / stored / registered".
 _SAVED_RES: Tuple[re.Pattern, ...] = (
     re.compile(
-        r"(?:تم|تمت)\s*(?:حفظ|تسجيل|تخزين|اضافه|إضافة)\s*(?:ال)?عنوان",
+        rf"(?:تم|تمت)\s*(?:حفظ|تسجيل|تخزين|اضافه|اضافة)\s*{_ADDRESS}",
         re.UNICODE | re.IGNORECASE,
     ),
     re.compile(
-        r"(?:حفظنا|سجلنا|خزنا|خزننا|اضفنا|أضفنا)\s*(?:لك|لكم)?\s*(?:ال)?عنوان",
+        rf"(?:حفظنا|سجلنا|خزنا|خزننا|اضفنا)\s*(?:لك|لكم)?\s*{_ADDRESS}",
         re.UNICODE | re.IGNORECASE,
     ),
     re.compile(
-        r"(?:ال)?عنوان\s*(?:محفوظ|مسجل|مخزن|انحفظ|اتسجل)",
+        rf"{_ADDRESS}\s*(?:محفوظ|مسجل|مخزن|انحفظ|اتسجل)",
         re.UNICODE | re.IGNORECASE,
     ),
     re.compile(
@@ -69,18 +76,25 @@ _SAVED_RES: Tuple[re.Pattern, ...] = (
     re.compile(r"saved\s+(?:your\s+)?address", re.UNICODE | re.IGNORECASE),
 )
 
-# "…as your default / permanent delivery address"
+# Class 2 — "…adopted / set as the delivery or default address".
 _ADOPTED_RES: Tuple[re.Pattern, ...] = (
     re.compile(
-        r"(?:عنوان(?:ك|كم)?)\s*(?:ال)?(?:افتراضي|اساسي|أساسي|الدائم|دائم)",
+        rf"{_ADDRESS}\s*(?:ال)?(?:افتراضي|اساسي|الدائم|دائم)",
         re.UNICODE | re.IGNORECASE,
     ),
     re.compile(
-        r"(?:ال)?عنوان\s*(?:ال)?(?:افتراضي|اساسي|أساسي)\s*(?:عندنا|لديكم|لك|لكم)?",
+        rf"(?:تم|تمت)\s*(?:اعتماد|تثبيت|اختيار)\s*{_ADDRESS}",
+        re.UNICODE | re.IGNORECASE,
+    ),
+    # "…واعتماده للتوصيل" — the adoption rides an attached pronoun rather
+    # than repeating the noun, which the noun-anchored patterns miss.
+    re.compile(
+        r"(?:و)?(?:اعتماد|تثبيت|اختيار)(?:ه|ها|هم)\s*(?:ك|ل)?\s*"
+        rf"(?:{_ADDRESS}|للتوصيل|كعنوان)",
         re.UNICODE | re.IGNORECASE,
     ),
     re.compile(
-        r"(?:تم|تمت)\s*(?:اعتماد|إعتماد|تثبيت)\s*(?:ال)?عنوان",
+        rf"(?:اعتمدنا|ثبتنا)\s*(?:لك|لكم)?\s*{_ADDRESS}",
         re.UNICODE | re.IGNORECASE,
     ),
     re.compile(
@@ -89,18 +103,59 @@ _ADOPTED_RES: Tuple[re.Pattern, ...] = (
     ),
 )
 
+# A successful-action ASSERTION is the only thing this guard judges. A
+# question ("do you want us to…?") and a negation ("your address was NOT
+# saved") are truthful LLM text that happen to contain the same words;
+# deleting them was the guard turning honest wording into silence.
+_INTERROGATIVE_RES: Tuple[re.Pattern, ...] = (
+    re.compile(r"[?؟]", re.UNICODE),
+    re.compile(r"(?:^|\s)(?:هل|وش|ايش|كيف|متي|وين|هل\s*تريد)(?:\s|$)", re.UNICODE),
+    re.compile(r"(?:^|\s)(?:do|did|would|shall|can|should)\s+(?:you|we)\b", re.IGNORECASE),
+)
+
+_NEGATION_RES: Tuple[re.Pattern, ...] = (
+    re.compile(r"(?:^|\s)(?:لم|لن|ما|مو|مب|ليس|بدون|غير)(?:\s|$)", re.UNICODE),
+    re.compile(r"(?:^|\s)لا\s*(?:يوجد|يمكن|نستطيع|زال)", re.UNICODE),
+    re.compile(r"\b(?:not|no|never|cannot|can't|couldn't|didn't|won't)\b", re.IGNORECASE),
+)
+
+
+def is_successful_action_assertion(text: str) -> bool:
+    """False for questions and negations — they assert no completed action."""
+    norm = _norm(text)
+    if not norm:
+        return False
+    if any(p.search(norm) for p in _INTERROGATIVE_RES):
+        return False
+    if any(p.search(norm) for p in _NEGATION_RES):
+        return False
+    return True
+
 
 def detect_address_save_claim_kinds(reply: str) -> Tuple[str, ...]:
+    """Claim kinds asserted as COMPLETED actions, per sentence.
+
+    Judged sentence by sentence: one sentence asking a question does not
+    excuse another one asserting a save, and a negated sentence is not a
+    claim at all.
+    """
     text = (reply or "").strip()
     if not text:
         return ()
-    norm = _norm(text)
     kinds: list[str] = []
-    if any(pattern.search(norm) for pattern in _SAVED_RES):
-        kinds.append(CLAIM_KIND_SAVED)
-    if any(pattern.search(norm) for pattern in _ADOPTED_RES):
-        kinds.append(CLAIM_KIND_ADOPTED)
+    for sentence in _sentences(text):
+        if not is_successful_action_assertion(sentence):
+            continue
+        norm = _norm(sentence)
+        if CLAIM_KIND_SAVED not in kinds and any(p.search(norm) for p in _SAVED_RES):
+            kinds.append(CLAIM_KIND_SAVED)
+        if CLAIM_KIND_ADOPTED not in kinds and any(p.search(norm) for p in _ADOPTED_RES):
+            kinds.append(CLAIM_KIND_ADOPTED)
     return tuple(kinds)
+
+
+def _sentences(text: str) -> list:
+    return [c.strip() for c in re.split(r"(?<=[.!?؟،])\s+|\n+", text) if c.strip()]
 
 
 def _chunk_has_claim(chunk: str, kinds: Tuple[str, ...]) -> bool:
@@ -215,16 +270,21 @@ def resolve_and_apply_customer_address_save_claim_guard(
     tenant_id: Optional[int],
     customer_id: Optional[int],
     conversation_id: Optional[int] = None,
+    attempt: Any = None,
 ) -> AddressSaveClaimGuardResult:
-    """Resolve committed evidence for the customer, then guard the reply.
+    """Resolve committed evidence for THIS turn's operation, then guard.
 
-    The evidence is read from the database, never from the turn's own state
-    or from what a writer claimed to have done.
+    ``attempt`` names the save/adoption the turn actually performed. It is
+    the only thing that can support a save claim: the evidence is read back
+    from the database on an independent connection, bound to that operation's
+    address and revision. With no attempt — the normal turn, which performs
+    no address save — nothing supports such a claim, so one is removed.
     """
     if not detect_address_save_claim_kinds(reply):
         return AddressSaveClaimGuardResult(reply=str(reply or ""), action="allowed")
 
     from core.customer_address_persistence_evidence import (  # noqa: PLC0415
+        NO_OPERATION,
         resolve_customer_address_persistence_evidence,
     )
 
@@ -232,6 +292,7 @@ def resolve_and_apply_customer_address_save_claim_guard(
         db,
         tenant_id=tenant_id,
         customer_id=customer_id,
+        attempt=attempt if attempt is not None else NO_OPERATION,
     )
     return apply_customer_address_save_claim_guard(
         reply=reply,

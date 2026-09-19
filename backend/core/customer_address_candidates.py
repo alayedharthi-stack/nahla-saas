@@ -32,9 +32,62 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from sqlalchemy.exc import IntegrityError
+
 logger = logging.getLogger("nahla.customer_address_candidates")
+
+
+def _supports_savepoints(db: Any) -> bool:
+    """True only where a SAVEPOINT behaves like one.
+
+    Restricted to PostgreSQL on purpose. pysqlite does not emit BEGIN the
+    way SQLAlchemy's SAVEPOINT support needs, so releasing a nested
+    transaction there makes the write durable and a later outer rollback no
+    longer undoes it — the opposite of what this wrapper is for. On any
+    other dialect the block runs inline, which is exactly the behaviour
+    these paths had before.
+    """
+    if getattr(db, "begin_nested", None) is None:
+        return False
+    try:
+        return db.get_bind().dialect.name == "postgresql"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unidentifiable bind is treated as "no savepoints", the conservative branch
+        return False
+
+
+@contextmanager
+def _nested_or_passthrough(db: Any):
+    """Run a write inside a SAVEPOINT when the session supports one.
+
+    A SAVEPOINT keeps a failed write from poisoning the caller's
+    transaction: only the nested block rolls back, so work the caller had
+    already done — an address row it is committing, for instance —
+    survives. Where savepoints are unavailable the block runs inline and
+    the caller's own transaction semantics apply unchanged.
+    """
+    if not _supports_savepoints(db):
+        yield None
+        return
+    begin_nested = db.begin_nested
+    nested = begin_nested()
+    try:
+        yield nested
+    except Exception:
+        try:
+            if getattr(nested, "is_active", False):
+                nested.rollback()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — the original exception below is the one that matters
+            pass
+        raise
+    else:
+        try:
+            if getattr(nested, "is_active", False):
+                nested.commit()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — a session without real SAVEPOINT support (test doubles) needs no release
+            pass
 
 # ── Source labels (closed vocabulary for this slice) ────────────────────
 SOURCE_SALLA_CUSTOMER_PROFILE = "salla_customer_profile"
@@ -81,6 +134,9 @@ _COMPONENT_KEYS: Tuple[str, ...] = (
     "lat",
     "lng",
 )
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _utcnow() -> datetime:
@@ -407,6 +463,22 @@ def upsert_imported_address_candidate(
         source_ref=source_ref,
     )
 
+    # 0. Freshness is judged against the WHOLE source history, selected rows
+    #    included. Judging it only against a mutable row let an older payload
+    #    slip in as a new candidate once the newer revision had been selected.
+    if source_updated_at is not None and rows:
+        known_revisions = [
+            rev for rev in (_as_utc(r.source_updated_at) for r in rows) if rev is not None
+        ]
+        if known_revisions and source_updated_at < max(known_revisions):
+            newest = max(rows, key=lambda r: (_as_utc(r.source_updated_at) or _EPOCH, r.id))
+            return CandidateUpsertResult(
+                action=ACTION_SKIPPED,
+                reason="stale_source_event",
+                address_id=int(newest.customer_address_id),
+                fingerprint=str(newest.content_fingerprint or ""),
+            )
+
     # 1. Same content already stored for this source → idempotent no-op.
     for prov in rows:
         if prov.content_fingerprint == fingerprint:
@@ -432,6 +504,8 @@ def upsert_imported_address_candidate(
     if mutable:
         prov = mutable[0]
         stored_rev = _as_utc(prov.source_updated_at)
+        # Redundant after the source-wide check above, kept as a local guard
+        # so this branch stays correct if called with narrower inputs.
         if (
             source_updated_at is not None
             and stored_rev is not None
@@ -498,39 +572,91 @@ def upsert_imported_address_candidate(
     #    content becomes a NEW candidate; the approved revision is never
     #    silently rewritten.
     reason = "selected_revision_preserved" if rows else "first_import"
-    row = CustomerAddress(
-        tenant_id=int(tenant_id),
-        customer_id=int(customer_id),
-        address_type=ADDRESS_TYPE_IMPORTED_CANDIDATE,
-    )
-    _apply_components_to_row(row, components)
-    db.add(row)
-    db.flush()
-    prov = CustomerAddressProvenance(
-        tenant_id=int(tenant_id),
-        customer_id=int(customer_id),
-        customer_address_id=int(row.id),
-        source=source,
-        source_ref=source_ref or None,
-        integration_connection_id=(
-            int(integration_connection_id) if integration_connection_id is not None else None
-        ),
-        source_country=components.country or None,
-        content_fingerprint=fingerprint,
-        source_updated_at=source_updated_at,
-        source_observed_at=now,
-        selection_state=SELECTION_STATE_CANDIDATE,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(prov)
-    db.flush()
+    # The insert races another importer of the same payload. The
+    # (tenant, customer, source, source_ref, content_fingerprint) unique
+    # constraint lets exactly one of them commit; the loser rolls its
+    # SAVEPOINT back and re-reads the winner, so one source revision is one
+    # address row no matter how many callers arrive together.
+    try:
+        with _nested_or_passthrough(db):
+            row = CustomerAddress(
+                tenant_id=int(tenant_id),
+                customer_id=int(customer_id),
+                address_type=ADDRESS_TYPE_IMPORTED_CANDIDATE,
+            )
+            _apply_components_to_row(row, components)
+            db.add(row)
+            db.flush()
+            prov = CustomerAddressProvenance(
+                tenant_id=int(tenant_id),
+                customer_id=int(customer_id),
+                customer_address_id=int(row.id),
+                source=source,
+                source_ref=source_ref or None,
+                integration_connection_id=(
+                    int(integration_connection_id)
+                    if integration_connection_id is not None
+                    else None
+                ),
+                source_country=components.country or None,
+                content_fingerprint=fingerprint,
+                source_updated_at=source_updated_at,
+                source_observed_at=now,
+                selection_state=SELECTION_STATE_CANDIDATE,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(prov)
+            db.flush()
+            address_id = int(row.id)
+    except IntegrityError:
+        existing = _find_provenance_by_revision(
+            db,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            source=source,
+            source_ref=source_ref,
+            fingerprint=fingerprint,
+        )
+        if existing is None:
+            raise
+        return CandidateUpsertResult(
+            action=ACTION_UNCHANGED,
+            reason="concurrent_import_deduplicated",
+            address_id=int(existing.customer_address_id),
+            fingerprint=fingerprint,
+            components=components,
+        )
     return CandidateUpsertResult(
         action=ACTION_CREATED,
         reason=reason,
-        address_id=int(row.id),
+        address_id=address_id,
         fingerprint=fingerprint,
         components=components,
+    )
+
+
+def _find_provenance_by_revision(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    source: str,
+    source_ref: str,
+    fingerprint: str,
+) -> Any:
+    from models import CustomerAddressProvenance  # noqa: PLC0415
+
+    return (
+        db.query(CustomerAddressProvenance)
+        .filter_by(
+            tenant_id=int(tenant_id),
+            customer_id=int(customer_id),
+            source=source,
+            source_ref=source_ref or None,
+            content_fingerprint=fingerprint,
+        )
+        .first()
     )
 
 
@@ -555,6 +681,7 @@ def record_explicit_address_selection(
     selection_source: str,
     expected_fingerprint: str = "",
     source: str = "",
+    operation_ref: str = "",
     selected_at: Optional[datetime] = None,
 ) -> SelectionResult:
     """Bind an explicit customer selection to one exact address revision.
@@ -606,14 +733,31 @@ def record_explicit_address_selection(
         )
         db.add(prov)
 
-    if (
+    # Retry identity, NOT "is already selected". A row that was selected
+    # before and then superseded is a HISTORICAL approval: choosing it again
+    # is a new selection and must become the current one. Only the same
+    # operation delivered twice is a no-op — otherwise re-selecting A after
+    # B silently left B current.
+    ref = str(operation_ref or "").strip()
+    already_selected = (
         prov.selection_state == SELECTION_STATE_SELECTED
         and prov.selected_fingerprint == fingerprint
-    ):
-        # Idempotent: the same selection never writes twice.
+    )
+    if already_selected and ref and str(prov.selection_operation_ref or "") == ref:
         return SelectionResult(
             action=ACTION_UNCHANGED,
-            reason="already_selected",
+            reason="duplicate_selection_operation",
+            address_id=int(address_id),
+            fingerprint=fingerprint,
+        )
+    if already_selected and not ref and _is_current_selection(
+        db, tenant_id=int(tenant_id), customer_id=int(customer_id), provenance=prov
+    ):
+        # No operation identity supplied and this row is already the current
+        # selection: nothing changes.
+        return SelectionResult(
+            action=ACTION_UNCHANGED,
+            reason="already_current_selection",
             address_id=int(address_id),
             fingerprint=fingerprint,
         )
@@ -623,6 +767,7 @@ def record_explicit_address_selection(
     prov.selected_fingerprint = fingerprint
     prov.selected_at = now
     prov.selection_source = selection_source
+    prov.selection_operation_ref = ref or None
     prov.updated_at = now
     db.add(prov)
     db.flush()
@@ -632,6 +777,34 @@ def record_explicit_address_selection(
         address_id=int(address_id),
         fingerprint=fingerprint,
     )
+
+
+def _is_current_selection(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    provenance: Any,
+) -> bool:
+    """True when this row is the selection resolution would return today."""
+    from models import CustomerAddressProvenance  # noqa: PLC0415
+
+    try:
+        rows = (
+            db.query(CustomerAddressProvenance)
+            .filter_by(
+                tenant_id=int(tenant_id),
+                customer_id=int(customer_id),
+                selection_state=SELECTION_STATE_SELECTED,
+            )
+            .all()
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — falls back to "not current", which re-writes the selection rather than silently keeping another one
+        return False
+    if not rows:
+        return False
+    newest = max(rows, key=lambda r: (_as_utc(r.selected_at) or _EPOCH, r.id))
+    return int(newest.id) == int(getattr(provenance, "id", 0) or 0)
 
 
 def attach_selection_provenance_for_new_address(
@@ -656,6 +829,12 @@ def attach_selection_provenance_for_new_address(
     from models import CustomerAddressProvenance  # noqa: PLC0415
 
     if not tenant_id or not customer_id or address_row is None:
+        return None
+    if not provenance_table_available(db):
+        # Declared migration-optional behaviour, made real: with no table
+        # there is nothing to attach, and queueing an insert that the
+        # CALLER's commit would raise on — outside this function's try —
+        # would roll the address write back with it.
         return None
     resolved = components if components is not None else components_from_address_row(address_row)
     if resolved.is_empty():
@@ -682,6 +861,30 @@ def attach_selection_provenance_for_new_address(
     return prov
 
 
+def provenance_table_available(db: Any) -> bool:
+    """Probe for the provenance table on the SESSION'S OWN connection.
+
+    Deliberately not ``inspect(db.get_bind())``: reflecting on the engine
+    checks out a second connection, and closing it again ends a
+    transaction the caller is still using — under SQLite's shared
+    in-memory connection that silently discarded the caller's pending
+    work. Reflecting on ``db.connection()`` reuses the connection the
+    session already holds, so the caller's transaction is untouched.
+    """
+    try:
+        conn = db.connection()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unusable connection is treated as "unavailable", the conservative branch
+        return False
+    if conn is None:
+        return False
+    try:
+        from sqlalchemy import inspect as sa_inspect  # noqa: PLC0415
+
+        return bool(sa_inspect(conn).has_table("customer_address_provenance"))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — probe failure is treated as "unavailable" so nothing is queued
+        return False
+
+
 def _legacy_source_for_row(row: Any) -> str:
     address_type = clean_source_value(getattr(row, "address_type", None))
     if address_type == ADDRESS_TYPE_IMPORTED_CANDIDATE:
@@ -701,6 +904,10 @@ class ResolvedAddress:
     selection_source: str = ""
     selected_at: Optional[datetime] = None
     legacy: bool = False
+    # False when the provenance read failed. The row is then classified from
+    # its own address_type alone, and callers can tell "known candidate"
+    # apart from "provenance unknown".
+    provenance_known: bool = True
     # A WhatsApp location pin on the stored row, independent of whether it
     # yielded usable coordinates. Pre-slice rows relied on its presence.
     location_pin: bool = False
@@ -732,6 +939,7 @@ class ResolvedAddress:
             "fingerprint": self.fingerprint,
             "source": self.source,
             "selection_state": self.selection_state,
+            "provenance_known": self.provenance_known,
             "location_pin": self.location_pin,
             "selection_source": self.selection_source,
             "selected": self.selected,
@@ -748,6 +956,19 @@ class AddressResolution:
     reason: str
     selected: Optional[ResolvedAddress] = None
     candidates: Tuple[ResolvedAddress, ...] = ()
+    # Addresses the customer selected earlier that a later selection
+    # superseded. They remain durable history, not candidates.
+    superseded_selections: Tuple[ResolvedAddress, ...] = ()
+    # Every durable address, whatever its state — the full inventory the
+    # read projection advertises.
+    addresses: Tuple[ResolvedAddress, ...] = ()
+
+    @property
+    def selectable(self) -> Tuple[ResolvedAddress, ...]:
+        """Everything the customer may explicitly choose between."""
+        return self.addresses or tuple(
+            x for x in ((self.selected,) if self.selected else ()) + self.candidates
+        )
 
     @property
     def reusable(self) -> Optional[ResolvedAddress]:
@@ -799,6 +1020,7 @@ def resolve_customer_address_selection(
         return AddressResolution(reason=REASON_NO_ADDRESS)
 
     provenance: Dict[int, Any] = {}
+    provenance_readable = True
     try:
         for prov in (
             db.query(CustomerAddressProvenance)
@@ -806,15 +1028,17 @@ def resolve_customer_address_selection(
             .all()
         ):
             provenance[int(prov.customer_address_id)] = prov
-    except Exception:  # noqa: BLE001
-        # The provenance table is read-optional: without it every row keeps
-        # its historical behaviour (legacy selection) instead of failing.
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — a provenance read failure degrades the projection conservatively (below); it must not fail the caller's read path
+        # Read-optional, but NOT proof of anything: a failed read says only
+        # that provenance is unknown. Rows are classified from what the
+        # address row itself states (see below), never upgraded.
         logger.debug(
             "[CUSTOMER_ADDRESS] provenance unavailable tenant=%s",
             tenant_id,
             exc_info=True,
         )
         provenance = {}
+        provenance_readable = False
 
     selected: List[ResolvedAddress] = []
     candidates: List[ResolvedAddress] = []
@@ -826,19 +1050,31 @@ def resolve_customer_address_selection(
             continue
         fingerprint = address_content_fingerprint(components)
         if prov is None:
-            # Pre-slice row: an address only ever written on confirmed
-            # shipping evidence. Keep reading it as a selection so existing
-            # reuse is unchanged.
+            # No provenance row. Only a POSITIVELY identified pre-slice
+            # confirmed-shipping row is read as a legacy selection — those
+            # were written solely on confirmed shipping evidence, so
+            # existing reuse is unchanged. An imported candidate, or any
+            # row whose own type does not say "confirmed", stays a
+            # candidate. A failed provenance read (provenance_readable
+            # False) is not evidence either: it says provenance is unknown,
+            # and unknown must never promote a candidate to selected.
+            legacy_selected = (
+                clean_source_value(getattr(row, "address_type", None))
+                == ADDRESS_TYPE_CONFIRMED_SHIPPING
+            )
             resolved = ResolvedAddress(
                 address_id=int(row.id),
                 components=components,
                 fingerprint=fingerprint,
                 source=_legacy_source_for_row(row),
-                selection_state=SELECTION_STATE_SELECTED,
+                selection_state=(
+                    SELECTION_STATE_SELECTED if legacy_selected else SELECTION_STATE_CANDIDATE
+                ),
                 legacy=True,
+                provenance_known=provenance_readable,
                 location_pin=location_pin,
             )
-            selected.append(resolved)
+            (selected if legacy_selected else candidates).append(resolved)
             continue
         is_selected = (
             prov.selection_state == SELECTION_STATE_SELECTED
@@ -854,26 +1090,37 @@ def resolve_customer_address_selection(
             ),
             selection_source=str(prov.selection_source or "") if is_selected else "",
             selected_at=prov.selected_at if is_selected else None,
+            provenance_known=True,
             location_pin=location_pin,
         )
         (selected if is_selected else candidates).append(resolved)
 
+    everything = tuple(sorted(selected + candidates, key=lambda r: r.address_id))
     if selected:
-        winner = sorted(selected, key=_selection_sort_key)[-1]
+        ordered = sorted(selected, key=_selection_sort_key)
+        winner = ordered[-1]
+        # Selections that are no longer current are historical approvals,
+        # not candidates — they stay in the inventory rather than vanishing
+        # from a projection that advertises every durable address.
+        superseded = tuple(ordered[:-1])
         return AddressResolution(
             reason=REASON_SELECTED_ADDRESS,
             selected=winner,
             candidates=tuple(candidates),
+            superseded_selections=superseded,
+            addresses=everything,
         )
     if len(candidates) == 1:
         return AddressResolution(
             reason=REASON_SINGLE_CANDIDATE,
             candidates=tuple(candidates),
+            addresses=everything,
         )
     if candidates:
         return AddressResolution(
             reason=REASON_MULTIPLE_CANDIDATES,
             candidates=tuple(candidates),
+            addresses=everything,
         )
     return AddressResolution(reason=REASON_NO_ADDRESS)
 
@@ -910,6 +1157,7 @@ __all__ = [
     "merge_components",
     "missing_address_requirements",
     "parse_source_timestamp",
+    "provenance_table_available",
     "has_delivery_address_evidence",
     "record_explicit_address_selection",
     "resolve_customer_address_selection",

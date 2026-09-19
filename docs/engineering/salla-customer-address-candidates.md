@@ -118,16 +118,37 @@ revision until an owner runs `alembic upgrade 0110` deliberately.
 
 ## 5. Identity binding
 
-Address attachment is authorised by the provider customer identity alone:
-`(tenant, active store connection, salla_customer_id)` resolving to exactly
-one local `Customer`. Name matching and phone fallback are explicitly not
-accepted for attachment — they resolve customers, they do not prove whose
-address a payload describes. Global name resolution is untouched.
+Address attachment needs **both** a provider customer identity and a
+verified store connection, and both are checked before any write.
+
+* Customer: `salla_customer_id` resolving to exactly one local `Customer`
+  in this tenant. Name matching and phone fallback are explicitly not
+  accepted — they resolve customers, they do not prove whose address a
+  payload describes. Global name resolution is untouched.
+* Connection: a Salla `Integration` that exists, belongs to this tenant and
+  is enabled. A verified connection is a **prerequisite**, not optional
+  provenance: recording `integration_connection_id=None` and importing
+  anyway would let a payload borrow authority its store binding never
+  granted, so a missing, foreign, disabled or wrong-provider connection
+  writes nothing at all.
 
 Refusal reasons, all writing nothing: `missing_salla_customer_id`,
 `customer_not_linked`, `ambiguous_customer_identity`, `tenant_mismatch`,
-`conflicting_customer_identity`, `customer_not_persisted`. An
-`integration_connection_id` from another tenant is not recorded.
+`conflicting_customer_identity`, `customer_not_persisted`,
+`no_active_salla_connection`, `connection_not_found_for_tenant`,
+`connection_tenant_mismatch`, `connection_provider_mismatch`,
+`connection_disabled`.
+
+### Offer-bound confirmation
+
+Confirmation means "yes, *that* address". The address surfaced to the
+customer is recorded as an offer on the conversation; a later confirmation
+is accepted only when an offer exists for this conversation and customer,
+names the same address, and its fingerprint still matches the stored row.
+A refresh between the offer and the reply therefore refuses rather than
+recording approval of content the customer never saw, and an inquiry with
+no prior offer selects nothing. No intent detection, keyword router or
+customer regex was changed to achieve this.
 
 ## 6. Save and adoption evidence
 
@@ -152,6 +173,20 @@ pipeline (between `shipment_truth_guard` and
 — never from the turn's own state — and removes any save/adoption claim the
 evidence cannot carry, leaving the rest of the reply intact. It authors no
 customer-facing prose and adds no template.
+
+It judges **completed-action assertions only**, sentence by sentence. A
+question ("shall we adopt your address as the default?") and a negation
+("your address was *not* saved") contain the same words but assert no
+completed action, so they are truthful LLM text and are preserved — the
+earlier version deleted both. The two semantic classes (saved / adopted)
+cover the Arabic attached-pronoun forms of "address" rather than being a
+phrase list to extend.
+
+When removing the unsupported claim leaves nothing usable, the send is
+**suppressed and audited** (`suppressed_send=True`, reason
+`…:scrubbed_empty`) — the same mechanic `shipment_truth_guard` uses via
+`resolve_outbound_after_shipment_scrub`. Neither the false claim nor an
+empty message is delivered.
 
 ## 7. Test discovery (no workflow change)
 

@@ -443,11 +443,32 @@ def test_committed_selection_is_the_only_adoption_evidence(
         tenant_id, customer_id = _seed(db, salla_id="SC-PG-ADOPT")
         imported = _import(db, tenant_id, customer_id, _payload(id="SC-PG-ADOPT"))
         db.commit()
+        from core.customer_address_persistence_evidence import (  # noqa: PLC0415
+            AddressOperation,
+            AddressOperationAttempt,
+        )
+
+        save_attempt = AddressOperationAttempt(
+            operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant_id,
+            customer_id=customer_id, address_id=imported.address_id,
+            fingerprint=imported.fingerprint,
+        )
+        adopt_attempt = AddressOperationAttempt(
+            operation=AddressOperation.ADOPT_SELECTION, tenant_id=tenant_id,
+            customer_id=customer_id, address_id=imported.address_id,
+            fingerprint=imported.fingerprint,
+        )
         candidate_evidence = resolve_customer_address_persistence_evidence(
-            db, tenant_id=tenant_id, customer_id=customer_id,
+            db, tenant_id=tenant_id, customer_id=customer_id, attempt=save_attempt,
         )
         assert candidate_evidence.scope is AddressPersistenceScope.IMPORTED_CANDIDATE
         assert candidate_evidence.allows_adopted_address_claim() is False
+        # An adoption that has not committed cannot claim adoption either.
+        not_adopted = resolve_customer_address_persistence_evidence(
+            db, tenant_id=tenant_id, customer_id=customer_id, attempt=adopt_attempt,
+        )
+        assert not_adopted.reason == "adoption_not_committed"
+        assert not_adopted.allows_adopted_address_claim() is False
 
         record_explicit_address_selection(
             db, tenant_id=tenant_id, customer_id=customer_id,
@@ -461,8 +482,18 @@ def test_committed_selection_is_the_only_adoption_evidence(
 
     check = _session(pg_at_0110)
     try:
+        from core.customer_address_persistence_evidence import (  # noqa: PLC0415
+            AddressOperation,
+            AddressOperationAttempt,
+        )
+
         evidence = resolve_customer_address_persistence_evidence(
             check, tenant_id=tenant_id, customer_id=customer_id,
+            attempt=AddressOperationAttempt(
+                operation=AddressOperation.ADOPT_SELECTION, tenant_id=tenant_id,
+                customer_id=customer_id, address_id=imported.address_id,
+                fingerprint=imported.fingerprint,
+            ),
         )
         assert evidence.scope is AddressPersistenceScope.SELECTED_DELIVERY_ADDRESS
         assert evidence.allows_adopted_address_claim() is True
@@ -603,3 +634,192 @@ def test_orm_metadata_matches_the_migrated_schema(pg_at_0110: Engine) -> None:
     after = set(inspect(pg_at_0110).get_table_names())
     assert _TABLE in before
     assert after >= before
+
+
+# ── Review corrections R1/R4/R6/R7 — real PostgreSQL closure ─────────────
+#
+# These need PostgreSQL specifically: durability judged from a connection
+# that cannot see the writer's open transaction, two genuinely concurrent
+# sessions racing one unique constraint, and a failing statement aborting a
+# real transaction.
+
+def test_evidence_is_absent_before_commit_present_after_and_gone_after_rollback(
+    pg_at_0110: Engine,
+) -> None:
+    """R1: durability is read on a connection that cannot see open work."""
+    from core.customer_address_persistence_evidence import (  # noqa: PLC0415
+        AddressOperation,
+        AddressOperationAttempt,
+    )
+
+    writer = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(writer, salla_id="SC-PG-EV")
+        imported = _import(writer, tenant_id, customer_id, _payload(id="SC-PG-EV"))
+        attempt = AddressOperationAttempt(
+            operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant_id,
+            customer_id=customer_id, address_id=imported.address_id,
+            fingerprint=imported.fingerprint,
+        )
+
+        # Flushed, not committed: the writer's own session can see it, an
+        # independent reader cannot, and the claim depends on the latter.
+        before = resolve_customer_address_persistence_evidence(
+            writer, tenant_id=tenant_id, customer_id=customer_id, attempt=attempt,
+        )
+        assert before.scope is AddressPersistenceScope.NONE
+        assert before.allows_saved_address_claim() is False
+
+        writer.commit()
+        after = resolve_customer_address_persistence_evidence(
+            writer, tenant_id=tenant_id, customer_id=customer_id, attempt=attempt,
+        )
+        assert after.scope is AddressPersistenceScope.IMPORTED_CANDIDATE
+        assert after.allows_saved_address_claim() is True
+    finally:
+        writer.close()
+
+    rolled_back = _session(pg_at_0110)
+    try:
+        tenant_id2, customer_id2 = _seed(rolled_back, salla_id="SC-PG-EV-RB",
+                                         phone="+966500000901")
+        imported2 = _import(rolled_back, tenant_id2, customer_id2,
+                            _payload(id="SC-PG-EV-RB"))
+        attempt2 = AddressOperationAttempt(
+            operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant_id2,
+            customer_id=customer_id2, address_id=imported2.address_id,
+            fingerprint=imported2.fingerprint,
+        )
+        rolled_back.rollback()
+        evidence = resolve_customer_address_persistence_evidence(
+            rolled_back, tenant_id=tenant_id2, customer_id=customer_id2,
+            attempt=attempt2,
+        )
+        assert evidence.scope is AddressPersistenceScope.NONE
+        guarded = apply_customer_address_save_claim_guard(
+            reply="تم حفظ عنوانك عندنا.", evidence=evidence,
+        )
+        assert guarded.action == "blocked_unsupported_address_save_claim"
+    finally:
+        rolled_back.close()
+
+
+def test_two_concurrent_first_imports_commit_one_address(pg_at_0110: Engine) -> None:
+    """R7: two independent sessions race the source-revision constraint."""
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(setup, salla_id="SC-PG-RACE",
+                                       phone="+966500000902")
+        setup.commit()
+    finally:
+        setup.close()
+
+    payload = _payload(id="SC-PG-RACE")
+    one, two = _session(pg_at_0110), _session(pg_at_0110)
+    outcomes = []
+    try:
+        # Both read an empty history, then both insert: exactly what a real
+        # simultaneous sync and webhook do.
+        for session in (one, two):
+            assert not resolve_customer_address_selection(
+                session, tenant_id=tenant_id, customer_id=customer_id,
+            ).addresses
+        for session in (one, two):
+            try:
+                outcomes.append(_import(session, tenant_id, customer_id, payload).action)
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                outcomes.append("integrity_error")
+    finally:
+        one.close()
+        two.close()
+
+    check = _session(pg_at_0110)
+    try:
+        assert check.query(CustomerAddress).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id,
+        ).count() == 1
+        assert check.query(CustomerAddressProvenance).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id,
+        ).count() == 1
+    finally:
+        check.close()
+    assert outcomes, "both callers must report an outcome"
+
+
+def test_absent_provenance_table_still_commits_the_confirmed_address(
+    pg_at_0109: Engine,
+) -> None:
+    """R6: the migration-optional contract, made transaction-safe."""
+    from core.customer_shipping_address_writer import (  # noqa: PLC0415
+        persist_customer_shipping_address_if_confirmed,
+    )
+
+    assert _TABLE not in inspect(pg_at_0109).get_table_names()
+    db = _session(pg_at_0109)
+    try:
+        tenant_id, customer_id = _seed(db, salla_id="SC-PG-NOPROV",
+                                       phone="+966500000903")
+        persisted, _row = persist_customer_shipping_address_if_confirmed(
+            db, tenant_id=tenant_id, customer_id=customer_id, order_id=None,
+            snapshot={"city": CITY, "short_address_code": SHORT_CODE},
+            order_prep={"customer_confirmed_previous_address": True},
+            confirmed_reason="pg_absent_provenance",
+        )
+        assert persisted is True
+        db.commit()
+    finally:
+        db.close()
+
+    check = _session(pg_at_0109)
+    try:
+        # The address survived: a missing provenance table must not take the
+        # confirmed-shipping write down with it.
+        assert check.query(CustomerAddress).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id,
+        ).count() == 1
+    finally:
+        check.close()
+
+
+def test_a_concurrent_refresh_between_offer_and_selection_is_refused(
+    pg_at_0110: Engine,
+) -> None:
+    """R4: consent is bound to the revision the customer was shown."""
+    db = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(db, salla_id="SC-PG-OFFER",
+                                       phone="+966500000904")
+        imported = _import(db, tenant_id, customer_id, _payload(id="SC-PG-OFFER"))
+        db.commit()
+        offered_fingerprint = imported.fingerprint
+    finally:
+        db.close()
+
+    # Another session refreshes the row after the offer was made.
+    other = _session(pg_at_0110)
+    try:
+        row = other.query(CustomerAddress).filter_by(id=imported.address_id).one()
+        row.address_text = "شارع لم يره العميل"
+        other.add(row)
+        other.commit()
+    finally:
+        other.close()
+
+    confirming = _session(pg_at_0110)
+    try:
+        result = record_explicit_address_selection(
+            confirming, tenant_id=tenant_id, customer_id=customer_id,
+            address_id=imported.address_id,
+            selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+            expected_fingerprint=offered_fingerprint,
+        )
+        confirming.commit()
+        assert result.action == "skipped"
+        assert result.reason == "address_revision_changed"
+        assert resolve_customer_address_selection(
+            confirming, tenant_id=tenant_id, customer_id=customer_id,
+        ).selected is None
+    finally:
+        confirming.close()

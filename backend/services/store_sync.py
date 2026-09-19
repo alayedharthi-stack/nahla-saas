@@ -3537,23 +3537,49 @@ class StoreSyncService:
     def _resolve_address_integration_connection_id(
         self,
         integration_connection_id: int | None = None,
-    ) -> Optional[int]:
-        """Verify the store connection belongs to this tenant."""
+    ) -> tuple[Optional[int], str]:
+        """Resolve the Salla store connection that AUTHORISES this import.
+
+        A verified connection is a prerequisite for attaching an address,
+        not optional provenance. It must exist, belong to this tenant, be a
+        Salla connection and be enabled. Anything else — missing, foreign,
+        disabled, wrong provider — returns no connection and the caller
+        writes nothing. Recording ``integration_connection_id=None`` and
+        importing anyway would let a payload borrow authority it never had.
+
+        Returns ``(connection_id, reason)``; ``reason`` is ``"ok"`` only
+        when the connection is verified.
+        """
+        from models import Integration  # noqa: PLC0415
+        from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+
         conn_id = (
             integration_connection_id
             if integration_connection_id is not None
             else self._integration_connection_id
         )
         if conn_id is None:
-            return None
-        from models import Integration  # noqa: PLC0415
+            # No explicit connection on this call path: fall back to the
+            # tenant's own active Salla connection, never to "no check".
+            intg = pick_active_salla_integration(self.db, self.tenant_id)
+            if intg is None:
+                return None, "no_active_salla_connection"
+        else:
+            intg = (
+                self.db.query(Integration)
+                .filter_by(id=int(conn_id), tenant_id=self.tenant_id)
+                .first()
+            )
+            if intg is None:
+                return None, "connection_not_found_for_tenant"
 
-        intg = (
-            self.db.query(Integration)
-            .filter_by(id=int(conn_id), tenant_id=self.tenant_id)
-            .first()
-        )
-        return int(intg.id) if intg is not None else None
+        if int(getattr(intg, "tenant_id", 0) or 0) != int(self.tenant_id):
+            return None, "connection_tenant_mismatch"
+        if str(getattr(intg, "provider", "") or "").strip().lower() != "salla":
+            return None, "connection_provider_mismatch"
+        if not bool(getattr(intg, "enabled", False)):
+            return None, "connection_disabled"
+        return int(intg.id), "ok"
 
     def _persist_salla_profile_address_candidate(
         self,
@@ -3578,6 +3604,18 @@ class StoreSyncService:
                     self.tenant_id, ext_id or "-", reason,
                 )
                 return reason
+            # The connection is checked BEFORE any write: an unverified
+            # store binding must stop the attachment, not merely go
+            # unrecorded.
+            conn_id, conn_reason = self._resolve_address_integration_connection_id(
+                integration_connection_id,
+            )
+            if conn_reason != "ok":
+                logger.debug(
+                    "tenant=%s address candidate refused ext_id=%s reason=%s",
+                    self.tenant_id, ext_id or "-", conn_reason,
+                )
+                return conn_reason
             components = components_from_salla_customer_payload(payload)
             if components.is_empty():
                 return "no_supported_address_components"
@@ -3588,9 +3626,7 @@ class StoreSyncService:
                 components=components,
                 source=SOURCE_SALLA_CUSTOMER_PROFILE,
                 source_ref=ext_id,
-                integration_connection_id=self._resolve_address_integration_connection_id(
-                    integration_connection_id,
-                ),
+                integration_connection_id=conn_id,
                 source_updated_at=source_updated_at_from_salla_customer_payload(payload),
             )
             logger.info(

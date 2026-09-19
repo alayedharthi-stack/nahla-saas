@@ -1056,6 +1056,15 @@ class CustomerAddressProvenance(Base):
             'tenant_id', 'customer_address_id',
             name='uq_customer_address_provenance_address',
         ),
+        # One row per (customer, source, source ref, content revision). Two
+        # concurrent first imports of the same payload therefore cannot both
+        # commit: the loser gets an IntegrityError and re-reads the winner.
+        # Different revisions still coexist, so a historical selected
+        # revision is never displaced by a refresh.
+        UniqueConstraint(
+            'tenant_id', 'customer_id', 'source', 'source_ref', 'content_fingerprint',
+            name='uq_customer_address_provenance_source_revision',
+        ),
         Index(
             'ix_customer_address_provenance_source',
             'tenant_id', 'customer_id', 'source', 'source_ref',
@@ -1091,6 +1100,10 @@ class CustomerAddressProvenance(Base):
     selected_fingerprint = Column(String, nullable=True)
     selected_at = Column(DateTime(timezone=True), nullable=True)
     selection_source = Column(String, nullable=True)
+    # Identity of the selection OPERATION, so a redelivered confirmation is
+    # a no-op while a genuinely new choice of a previously approved address
+    # becomes the current selection.
+    selection_operation_ref = Column(String, nullable=True)
 
     created_at = Column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now(),

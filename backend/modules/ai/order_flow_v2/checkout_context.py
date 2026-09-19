@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.order_context_prefill import MODE_CONFIRM
@@ -41,12 +42,87 @@ def _shipping_context_dict(previous: Any) -> Dict[str, str]:
     }
 
 
+# ── Offered-address lifecycle (R4) ──────────────────────────────────────
+#
+# Confirmation has to mean "yes, THAT address". Re-reading whatever the row
+# holds at confirmation time and trusting its fresh fingerprint proves
+# nothing: the row may have been refreshed between the offer and the reply,
+# and the customer would be recorded as approving content they never saw.
+# So the offer is recorded when it is made, and the confirmation is checked
+# against it.
+_OFFER_KEY = "address_offer"
+
+
+def _conversation_metadata(conversation: Any) -> Dict[str, Any]:
+    raw = getattr(conversation, "extra_metadata", None)
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def record_offered_address(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+    previous: Any,
+) -> None:
+    """Remember which address revision was put in front of the customer."""
+    if conversation is None or previous is None:
+        return
+    address_id = getattr(previous, "address_id", None)
+    fingerprint = str(getattr(previous, "content_fingerprint", "") or "")
+    if not address_id or not fingerprint:
+        return
+    meta = _conversation_metadata(conversation)
+    current = meta.get(_OFFER_KEY)
+    offer = {
+        "address_id": int(address_id),
+        "fingerprint": fingerprint,
+        "customer_id": int(getattr(conversation, "customer_id", 0) or 0),
+        "tenant_id": int(tenant_id),
+        "offered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if isinstance(current, dict) and all(
+        current.get(k) == offer[k] for k in ("address_id", "fingerprint", "customer_id", "tenant_id")
+    ):
+        return
+    meta[_OFFER_KEY] = offer
+    try:
+        conversation.extra_metadata = meta
+        db.add(conversation)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — the offer is an aid to a later confirmation; failing to record it makes confirmation refuse, which is the safe direction
+        return
+
+
+def read_offered_address(
+    *,
+    tenant_id: int,
+    conversation: Any,
+) -> Optional[Dict[str, Any]]:
+    """The address revision this conversation last offered, if any."""
+    offer = _conversation_metadata(conversation).get(_OFFER_KEY)
+    if not isinstance(offer, dict):
+        return None
+    try:
+        if int(offer.get("tenant_id") or 0) != int(tenant_id):
+            return None
+        conversation_customer = int(getattr(conversation, "customer_id", 0) or 0)
+        if conversation_customer and int(offer.get("customer_id") or 0) != conversation_customer:
+            return None
+        if not int(offer.get("address_id") or 0) or not str(offer.get("fingerprint") or ""):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return dict(offer)
+
+
 def _record_selection_for_confirmed_address(
     db: Any,
     *,
     tenant_id: int,
     previous: Any,
     selection_source: str,
+    expected_fingerprint: str = "",
+    operation_ref: str = "",
 ) -> bool:
     """Persist the customer's explicit choice of THIS address revision.
 
@@ -77,11 +153,39 @@ def _record_selection_for_confirmed_address(
             customer_id=int(row.customer_id),
             address_id=int(address_id),
             selection_source=selection_source,
-            expected_fingerprint=str(getattr(previous, "content_fingerprint", "") or ""),
+            expected_fingerprint=(
+                expected_fingerprint
+                or str(getattr(previous, "content_fingerprint", "") or "")
+            ),
+            operation_ref=operation_ref,
         )
         return bool(result.selected)
     except Exception:  # noqa: BLE001
         return False
+
+
+# Fields that, on their own, make ``has_accepted_delivery_address`` true.
+# An unselected candidate must never contribute them.
+_ACCEPTING_PREP_FIELDS = (
+    "short_address_code",
+    "google_maps_url",
+    "delivery_address_url",
+    "latitude",
+    "longitude",
+    "delivery_location_lat",
+    "delivery_location_lng",
+    "delivery_address_status",
+    "pending_delivery_location",
+    "whatsapp_location",
+)
+
+
+def _candidate_context_only(patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip everything that would mark the order's address as accepted."""
+    out = {k: v for k, v in patch.items() if k not in _ACCEPTING_PREP_FIELDS}
+    out.pop("shipping_source", None)
+    out["address_candidate_only"] = True
+    return out
 
 
 def _identity_first_name(ctx: Any) -> str:
@@ -163,7 +267,15 @@ def load_checkout_reply_context(
             inbound_metadata=inbound_metadata,
             build_source="order_flow_v2_reply",
         )
-        known_previous = _shipping_context_dict(getattr(ctx, "known_previous_address", None))
+        previous_ctx = getattr(ctx, "known_previous_address", None)
+        known_previous = _shipping_context_dict(previous_ctx)
+        if known_previous:
+            # This is the moment the address is put in front of the
+            # customer; a later confirmation is checked against it.
+            record_offered_address(
+                db, tenant_id=int(tenant_id), conversation=conversation,
+                previous=previous_ctx,
+            )
         _, engine_result = resolve_flow_missing_fields(
             prep,
             brain_state=bs,
@@ -268,19 +380,34 @@ def apply_previous_address_confirmation(
         if has_accepted_delivery_address(dict(order_prep or {})):
             return {}
         previous = ctx.known_previous_address
-        # The customer confirming this address IS the selection. Record it
-        # durably, bound to the revision they were shown, so the choice
-        # survives a state reset and a new conversation.
+        # Consent is only consent about a specific offer. Without one, a
+        # phrase that merely REFERS to an address on file — an inquiry, for
+        # instance — cannot become a durable selection.
+        offer = read_offered_address(tenant_id=int(tenant_id), conversation=conversation)
+        if offer is None:
+            return {}
+        if int(offer["address_id"]) != int(getattr(previous, "address_id", 0) or 0):
+            # A different address is current than the one offered.
+            return {}
+        if str(offer["fingerprint"]) != str(getattr(previous, "content_fingerprint", "") or ""):
+            # The row changed between the offer and this reply: confirming
+            # it would record approval of content the customer never saw.
+            return {}
+
+        # The customer confirming THAT address is the selection. Record it
+        # durably, bound to the offered revision, so the choice survives a
+        # state reset and a new conversation.
         recorded = _record_selection_for_confirmed_address(
             db,
             tenant_id=int(tenant_id),
             previous=previous,
             selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+            expected_fingerprint=str(offer["fingerprint"]),
+            operation_ref=str(offer.get("offered_at") or ""),
         )
-        if not recorded and not bool(getattr(previous, "explicitly_selected", False)):
-            # The reviewed revision changed, or it could not be bound to a
-            # customer. Adopting it anyway would confirm something other
-            # than what the customer saw.
+        if not recorded:
+            # A failed revision check is never waved through because an
+            # older projection happens to say the address was selected.
             return {}
         patch = _shipping_context_to_prep_patch(previous)
         patch["customer_confirmed_previous_address"] = True
@@ -334,9 +461,14 @@ def apply_delivery_continuation_address_patch(
     saved = _shipping_context_to_prep_patch(previous)
     if not bool(getattr(previous, "explicitly_selected", False)):
         # An imported candidate the customer has never selected is offered,
-        # never adopted: the known fields are carried so nothing already
-        # known is asked again, but no confirmation is claimed.
-        saved.pop("shipping_source", None)
+        # never adopted. Withholding only the confirmation flag is not
+        # enough: copying the locating artefacts alone already makes
+        # ``has_accepted_delivery_address`` true, so the order would be
+        # treated as having an accepted delivery address the customer never
+        # chose. Carry only the context fields, which re-ask nothing the
+        # candidate already answers, and leave acceptance to an explicit
+        # selection.
+        saved = _candidate_context_only(saved)
         patch.update(saved)
         return patch
 

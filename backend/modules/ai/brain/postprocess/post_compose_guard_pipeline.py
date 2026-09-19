@@ -583,6 +583,13 @@ def run_post_compose_truth_guards(
             conversation_id=conv_id,
         )
         modified = bool(casg_result.replaced)
+        # Removing the unsupported claim can leave nothing behind. Three
+        # outcomes are possible and only one of them is acceptable:
+        # restoring the original would send the false claim; sending an
+        # empty string would be delivering nothing silently. So the send is
+        # SUPPRESSED and audited, the same mechanic the shipment guard uses
+        # (``resolve_outbound_after_shipment_scrub``).
+        scrubbed_empty = bool(modified and casg_result.scrubbed_empty)
         if modified:
             reply = casg_result.reply
             _note_live_text_mutation(
@@ -599,8 +606,12 @@ def run_post_compose_truth_guards(
                 guard=guard_name,
                 acted=True,
                 modified=modified,
-                suppressed_send=False,
-                reason=casg_result.reason,
+                suppressed_send=scrubbed_empty,
+                reason=(
+                    f"{casg_result.reason}:scrubbed_empty"
+                    if scrubbed_empty
+                    else casg_result.reason
+                ),
             )
         )
     except Exception:  # noqa: silent-ok — address save claim guard is fail-open
