@@ -433,9 +433,12 @@ def test_the_claim_is_made_for_a_configured_tenant_and_recipient(configured, db)
     from services import commerce_runtime_pilot as seam
 
     with patch.object(pg, "verified_connection", lambda _db, **kwargs: (f"wa:{PHONE_ID}", "17")):
-        assert seam.commerce_runtime_claims_inbound(
+        claim = seam.commerce_runtime_claims_inbound(
             db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="مرحبا",
-            wa_msg_id="wamid.x") is True
+            wa_msg_id="wamid.x")
+    assert claim is not None and claim.basis == "configured"
+    assert (claim.tenant_id, claim.recipient, claim.provider_message_id) == (
+        db.tenant_id, NORMALIZED, "wamid.x")
 
 
 @pytest.mark.parametrize("unset", [pg.ENV_ENABLED, pg.ENV_MODEL, pg.ENV_RECIPIENT_ALLOWLIST])
@@ -448,7 +451,7 @@ def test_nothing_the_pilot_is_not_configured_for_is_ever_claimed(configured, mon
     with patch.object(pg, "verified_connection", lambda _db, **kwargs: (f"wa:{PHONE_ID}", "17")):
         assert seam.commerce_runtime_claims_inbound(
             db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="مرحبا",
-            wa_msg_id="wamid.x") is False
+            wa_msg_id="wamid.x") is None
 
 
 def test_an_inbound_the_runtime_already_owns_is_claimed_even_while_draining(configured,
@@ -458,19 +461,49 @@ def test_an_inbound_the_runtime_already_owns_is_claimed_even_while_draining(conf
 
     monkeypatch.setenv(pg.ENV_DRAINING, "true")
     monkeypatch.setattr(recovery, "admitted_turn_for", lambda **kwargs: unfinished(db.tenant_id))
-    assert seam.commerce_runtime_claims_inbound(
+    claim = seam.commerce_runtime_claims_inbound(
         db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="وين طلبي؟",
-        wa_msg_id="wamid.retry") is True
+        wa_msg_id="wamid.retry")
+    assert claim is not None and claim.basis == "admitted_open"
 
 
-def test_a_draining_pilot_claims_nothing_new(configured, monkeypatch, db):
+def test_a_draining_pilot_takes_no_new_turn_and_gives_it_to_nobody(configured, monkeypatch, db):
+    """Draining stops new work. It does not hand the conversation to legacy.
+
+    The runtime being drained may still have a send in flight, so releasing the
+    next inbound to another owner is how a handover produces the second answer
+    it exists to prevent. The inbound is claimed, buffered for the operator, and
+    answered by nobody.
+    """
+    from core.commerce_runtime import handover
+    from services import commerce_runtime_pilot as seam
+
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    monkeypatch.setattr(recovery, "admitted_turn_for", lambda **kwargs: None)
+    claim = seam.commerce_runtime_claims_inbound(
+        db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="سؤال جديد",
+        wa_msg_id="wamid.new")
+    assert claim is not None and claim.basis == "drain_buffered"
+    buffered = handover.read_barrier(db, tenant_id=db.tenant_id).undisposed_buffered
+    assert [e["provider_message_id"] for e in buffered] == ["wamid.new"]
+    assert buffered[0]["reason"] == "process_draining"
+
+
+def test_a_drained_process_still_leaves_traffic_it_never_owned_alone(configured, monkeypatch, db):
+    """A recipient outside the allowlist keeps exactly today's behaviour.
+
+    Draining is scoped to the conversations this pilot would otherwise own.
+    Buffering anything else would silence a customer the runtime never touched.
+    """
+    from core.commerce_runtime import handover
     from services import commerce_runtime_pilot as seam
 
     monkeypatch.setenv(pg.ENV_DRAINING, "true")
     monkeypatch.setattr(recovery, "admitted_turn_for", lambda **kwargs: None)
     assert seam.commerce_runtime_claims_inbound(
-        db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="سؤال جديد",
-        wa_msg_id="wamid.new") is False
+        db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to="966500009999", text="سؤال",
+        wa_msg_id="wamid.stranger") is None
+    assert handover.read_barrier(db, tenant_id=db.tenant_id).buffered == ()
 
 
 def test_a_claim_check_that_raises_is_not_a_claim(configured, monkeypatch, db):
@@ -482,7 +515,7 @@ def test_a_claim_check_that_raises_is_not_a_claim(configured, monkeypatch, db):
     monkeypatch.setattr(pg, "evaluate_pilot_route", explode)
     assert seam.commerce_runtime_claims_inbound(
         db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="مرحبا",
-        wa_msg_id="wamid.x") is False
+        wa_msg_id="wamid.x") is None
 
 
 # ── The dispatcher's own owners no longer act first (F2, re-review) ──────────
@@ -544,7 +577,7 @@ def test_a_claimed_inbound_never_reaches_the_payment_short_circuit(configured, d
     assert seen["short_circuit"] == []                     # not even asked
     assert seen["patched"] == []                           # no state mutated
     assert len(seen["handled"]) == 1
-    assert seen["handled"][0]["commerce_runtime_claimed"] is True
+    assert seen["handled"][0]["commerce_runtime_claim"] is not None
 
 
 def test_a_recovering_retry_never_reaches_the_payment_short_circuit(configured, monkeypatch,
@@ -556,12 +589,19 @@ def test_a_recovering_retry_never_reaches_the_payment_short_circuit(configured, 
                                claimed=lambda **kwargs: unfinished(db.tenant_id))
     assert seen["short_circuit"] == [] and seen["patched"] == []
     assert len(seen["handled"]) == 1
-    assert seen["handled"][0]["commerce_runtime_claimed"] is True
+    assert seen["handled"][0]["commerce_runtime_claim"] is not None
 
 
-def test_a_draining_pilot_with_no_open_work_leaves_the_short_circuit_alone(configured,
-                                                                           monkeypatch, db):
+def test_a_draining_pilot_with_no_open_work_still_withholds_the_short_circuit(configured,
+                                                                              monkeypatch, db):
+    """Even with nothing open, a drained conversation is not the short circuit's.
+
+    The short circuit mutates order state and answers. Letting it run for a
+    conversation the runtime is handing over is the same second answer, from a
+    different owner.
+    """
     monkeypatch.setenv(pg.ENV_DRAINING, "true")
     seen = drive_payment_claim(db, msg_id="wamid.pay.drained")
-    assert len(seen["short_circuit"]) == 1                 # legacy owns it again
-    assert seen["handled"] == []
+    assert seen["short_circuit"] == []
+    assert len(seen["handled"]) == 1
+    assert seen["handled"][0]["commerce_runtime_claim"].basis == "drain_buffered"

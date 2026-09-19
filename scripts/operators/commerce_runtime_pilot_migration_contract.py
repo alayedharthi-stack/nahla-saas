@@ -105,6 +105,17 @@ TARGET_OVERRIDE_QUERY_KEYS: Tuple[str, ...] = (
     "passfile", "target_session_attrs",
 )
 
+# libpq reads these from the process environment and they change where a
+# connection goes when the URL leaves the corresponding part out — an omitted
+# port with ``PGPORT=6543`` connects to 6543, ``PGHOSTADDR`` overrides the host
+# it resolves to, and a service file can redirect all of it. They are inherited
+# by this job and by the Alembic subprocess alike, so they are refused rather
+# than reconciled, and removed from the environment the subprocess runs in.
+LIBPQ_TARGET_ENV_VARS: Tuple[str, ...] = (
+    "PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGSERVICE", "PGSERVICEFILE",
+    "PGOPTIONS", "PGTARGETSESSIONATTRS", "PGPASSFILE", "PGCONNECT_TIMEOUT",
+)
+
 
 def expected_relations_at(revisions: frozenset) -> Tuple[str, ...]:
     """The relations a database at an accepted starting revision must already have.
@@ -149,6 +160,7 @@ __all__ = [
     "EXIT_SUCCESS", "EXIT_USAGE", "FOUNDATION_RELATIONS",
     "FOUNDATION_REVISION", "LEDGER_RELATIONS", "LOG_PREFIX", "LOOPBACK_HOSTNAMES",
     "MAX_TIMEOUT_SEC",
+    "LIBPQ_TARGET_ENV_VARS", "TARGET_OVERRIDE_QUERY_KEYS",
     "MIN_TIMEOUT_SEC", "RESULT_ALREADY_APPLIED", "RESULT_FAILED", "RESULT_FAILED_PRECONDITION",
     "RESULT_SUCCESS", "RUNTIME_RELATIONS", "SUPPORTED_DIALECTS", "TARGET_ENV",
     "TARGET_REVISION", "already_applied",

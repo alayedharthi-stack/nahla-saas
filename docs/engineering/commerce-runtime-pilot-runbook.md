@@ -16,6 +16,17 @@ below is set. Contract: `docs/architecture/commerce-runtime-pilot-activation.md`
 | 4 | The test conversations' phone numbers are known | the owner's own test handsets, nothing else |
 | 5 | The deployed revision contains the pilot | the merge commit of the pilot PR is the deployed commit |
 
+Choosing the model closes one precondition, not the activation. Every row above
+is a separate prerequisite, and the owner's own authorisation of the tenant, the
+verified connection, the recipient handsets and — where §1.2 applies — the exact
+shared migration target are separate again. A pilot with an approved model and
+any one of those missing is not ready to activate.
+
+The provider integration is **Anthropic-specific**. The agent loop is
+model-neutral in its contracts, but the adapter, the tool-call shape and the
+error handling the pilot ships are written against Anthropic's API; running this
+pilot on another provider is not a configuration change.
+
 The runtime requires all nine relations together and stays unavailable on a
 partial schema, so the preflight must check all nine — a turns-plus-sequences
 check passes on a foundation-only database that has no terminals table:
@@ -112,7 +123,7 @@ misroutes.
 | Variable | Meaning | Pilot value |
 | --- | --- | --- |
 | `COMMERCE_RUNTIME_PILOT_ENABLED` | the switch | `true` |
-| `COMMERCE_RUNTIME_PILOT_DRAINING` | hand back: no new turns, finish our own | unset during the trial; `true` during a rollback (§5) |
+| `COMMERCE_RUNTIME_PILOT_DRAINING` | take **this process** out of rotation: no new turns, finish our own. Not the handover mechanism (§5) | unset; a handover uses the shared barrier |
 | `COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST` | comma-separated tenant ids | the one test store's id |
 | `COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST` | comma-separated phone numbers | the owner's test handsets only |
 | `COMMERCE_RUNTIME_PILOT_MODEL` | the model this pilot runs on | **required** — the approved model, named explicitly |
@@ -152,15 +163,29 @@ the bounded default.
 5. Send one message from a **non**-allowlisted handset in the same store and
    confirm a `route=legacy` line with `recipient_not_allowlisted`, and that the
    legacy brain answered it as before.
-6. Run the handover check once, with nothing in flight, and confirm
-   `RESULT=SETTLED`:
+6. Run the handover **status** command once, with nothing in flight, and read
+   what it reports. This is the state §3 has just produced — the pilot on, the
+   barrier open — so `status` is the command that runs here; `settle` is a step
+   of the handover itself and refuses while the barrier is open (§5).
 
    ```bash
-   python -m scripts.operators.commerce_runtime_pilot_handover
+   COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST=<the pilot's tenant id> \
+     python -m scripts.operators.commerce_runtime_pilot_handover status
    ```
 
-   Knowing it reports SETTLED while healthy is what makes its answer meaningful
-   during a rollback.
+   Expect, for each configured tenant:
+
+   ```text
+   [COMMERCE_RUNTIME_HANDOVER] tenant=<id> barrier=open generation=0 converged=False …
+   [COMMERCE_RUNTIME_HANDOVER] tenant_id=<id> open_turns=0 reserved_undispatched=0
+     unresolved_attempts=0 unknown_outcomes=0 settled=True
+   [COMMERCE_RUNTIME_HANDOVER] tenant=<id> blockers=['barrier_is_open_not_draining']
+   [COMMERCE_RUNTIME_HANDOVER] RESULT=REPORTED tenants=1
+   ```
+
+   All four counts zero while healthy is what makes a non-zero count meaningful
+   later. `barrier_is_open_not_draining` is the expected — and only — blocker
+   here: a tenant that is serving has not been drained, which is correct.
 
 ---
 
@@ -179,7 +204,7 @@ One line per routed turn:
 
 | Signal | Reading |
 | --- | --- |
-| `replied=True` with a `provider_message_id` | the only shape that means a message reached WhatsApp |
+| `replied=True` with a `provider_message_id` | the only shape that means the provider **accepted** the send. Acceptance is not confirmed delivery to the customer: no delivery or read receipt is recorded, so `customer_reach` stays `unknown` |
 | `dispatch_status=unknown` | the send is uncertain; it is **not** retried, and the turn is `failed` |
 | `dispatch_status=rejected` | the provider refused; nothing was sent |
 | `loop_status=stopped` | no reply was accepted; `stop_reason` says why and nothing was sent |
@@ -190,7 +215,8 @@ One line per routed turn:
 | `reason=model_not_configured` | `COMMERCE_RUNTIME_PILOT_MODEL` is unset; nothing routed |
 | `reason=conversation_link_unverified` | the runtime conversation is not the one this application conversation owns; nothing ran |
 | `reason=ownership_unavailable` | another invocation holds the turn, or an earlier turn in that conversation is still open |
-| `reason=pilot_draining` | handing back (§5): new turns go to the legacy path |
+| `reason=pilot_draining` | this process is out of rotation: no new turn, and the conversation is released to nobody (§5) |
+| `reason=handover_barrier_closed` | the tenant's shared barrier is draining; no turn was admitted and nothing was written |
 | `reason=unfinished_…` | the guard refused a turn this runtime has **not finished**; it was kept from the legacy path and answered nothing |
 | `reason=owned_…` | the guard refused a turn this runtime admitted and already finished; it was kept from the legacy path, which must not answer it a second time |
 | `route=commerce_runtime_claim` | ownership was claimed at the dispatcher, so none of the dispatcher's own short circuits ran for this turn |
@@ -204,13 +230,16 @@ Two further lines matter:
 | `[Idempotency] ALLOW duplicate inbound for commerce-runtime recovery` | a provider retry was let through because it carries an unfinished turn; nothing is resent, the ledger still decides |
 | `[COMMERCE_RUNTIME] tool session handed to the reaper` | a tool call was abandoned on its timeout and its database session is being closed by the reaper once that call returns |
 
-What was persisted for an accepted send says where its text came from:
-`final_text_transformed` with `final_transform_reasons`, plus
-`commerce_runtime_intent_sha256` — the digest of the text the ledger reserved —
-so a divergence between what was reserved and what was transmitted is visible
-rather than silently resolved. `wire_text_unobserved` means the send path's
-transmitted text could not be read back; it is recorded as *unverified*, never
-as unchanged.
+**The model's reply and the text on the wire are two different things.** The
+LLM composes the reply intent; the platform's own send path may postprocess it,
+so the text WhatsApp receives is not always the text the model produced. What
+was persisted for an accepted send records that distinction rather than hiding
+it: `commerce_runtime_intent_sha256` is the digest of the text the ledger
+*reserved*, and `final_text_transformed` with `final_transform_reasons` says
+whether — and why — what was *transmitted* differs from it. A divergence is
+therefore visible in the row rather than silently resolved.
+`wire_text_unobserved` means the send path's transmitted text could not be read
+back at all; it is recorded as *unverified*, never as unchanged.
 
 Durable evidence for one turn:
 
@@ -228,64 +257,166 @@ SELECT r.* FROM commerce_runtime_delivery_receipts r
 
 Switching the pilot off decides who takes **new** turns. It says nothing about
 the turns the runtime already admitted, and flipping it while work is in flight
-abandons three things at once: an admitted turn with no terminal (a customer
-owed an answer or an honest record), a reply the loop reserved that nothing
-dispatched, and a send with no receipt. So the supported rollback is a handover,
-in three steps.
+abandons four things at once: an admitted turn with no terminal (a customer owed
+an answer or an honest record), a reply the loop reserved that nothing
+dispatched, a send with no receipt, and a send whose recorded outcome is
+`unknown` — which is not evidence it did not arrive.
 
-**Step 1 — drain.** Set `COMMERCE_RUNTIME_PILOT_DRAINING=true` and leave
-`COMMERCE_RUNTIME_PILOT_ENABLED=true`. From that moment every **new** inbound
-turn goes to the legacy path (`reason=pilot_draining`), and the turns this
-runtime already admitted stay reachable and are finished as their inbound
-messages are redelivered. Draining waives only the "no new turns" rule: every
-other condition — the allowlists, the verified connection, the configured model
-— still has to pass.
+So the supported rollback is a **handover**, performed against a shared barrier
+in the database that every replica reads and this job writes. A per-process
+environment flag cannot be the mechanism: it cannot say the same word to every
+replica at the same moment, it cannot be observed from outside the process that
+holds it, and it changes at a moment nobody can name.
 
-**Step 2 — quiesce ingress, and check that it happened.** Both flags are read
-per process. Setting them in the service's configuration changes nothing in a
-replica that is already running, so redeploy or restart every replica and
-confirm each one actually came back on the new configuration. Nothing in the
-codebase can verify this for you: the handover check reads one database and
-cannot see another process about to admit a turn.
+The barrier lives in the tenant's own `tenant_settings` row under one namespaced
+key, so it needs no migration and no new infrastructure. Its states are
+`open → draining → settled → open`.
 
-**Step 3 — verify.** Run the handover check, attesting step 2:
+**Draining is not "new turns go to legacy."** While a tenant is draining, an
+inbound for an affected recipient is *buffered*: recorded durably, answered by
+nobody, and left for the operator to dispose of. Releasing it to the legacy path
+is the one thing a handover must not do — it would answer, on a second runtime,
+a conversation whose first runtime may still have a send in flight. Traffic the
+pilot would not have owned anyway (a recipient outside the allowlist, another
+tenant) is untouched and behaves exactly as it does today.
+
+### 5.1 The procedure
+
+Every step is a command, and every refusal names what is blocking it.
+
+**Step 1 — drain.**
 
 ```bash
-NAHLA_COMMERCE_RUNTIME_HANDOVER_INGRESS_QUIESCED=INGRESS_DRAINED_ALL_REPLICAS \
-  python -m scripts.operators.commerce_runtime_pilot_handover
+COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST=<tenant ids> \
+  python -m scripts.operators.commerce_runtime_pilot_handover drain
 ```
 
-| Result | Meaning |
+Closes the barrier for every allowlisted tenant, fleet-wide, from that instant,
+and bumps the generation so a replica still running the previous one is visibly
+behind rather than indistinguishable from a converged fleet. Exits 0 with
+`RESULT=DRAINING`.
+
+From this moment:
+
+* no replica admits a new turn for those tenants — the barrier is read on the
+  admission transaction's own connection, under a tenant-scoped advisory lock,
+  so an invocation that selected the runtime *before* the drain either commits
+  its turn before the drain does (and is therefore visible to every count taken
+  afterwards) or is refused (`reason=handover_barrier_closed`, nothing written);
+* affected inbounds are buffered, not released;
+* a redelivery of a turn this runtime already admitted still re-enters and is
+  finished — that is what makes this a handover rather than an abandonment.
+
+**Step 2 — converge.** Let every replica read the new barrier. A worker records
+the generation it is running the first time it evaluates a route after the
+change, so convergence is **observed** here rather than asserted. No restart is
+required for this; a replica reports as soon as it sees one inbound for that
+tenant. `status` names the workers still behind or silent, and settlement
+refuses while any of them are.
+
+**Step 3 — status.**
+
+```bash
+python -m scripts.operators.commerce_runtime_pilot_handover status
+```
+
+Reports, per tenant: barrier state and generation, worker convergence,
+outstanding work including `unknown` outcomes, buffered inbounds awaiting
+disposition, and the list of blockers. Exits 0 with `RESULT=REPORTED`; it is a
+report, not a verdict.
+
+**Step 4 — dispose of the buffered work.**
+
+```bash
+python -m scripts.operators.commerce_runtime_pilot_handover dispose \
+    --note "replayed by hand on <date>" --by "<operator>"
+```
+
+Buffered work is never acknowledged and dropped. Settlement is blocked until
+each entry carries a disposition, and the note is required — `--note` missing is
+`RESULT=FAILED_PRECONDITION`, exit 2.
+
+**Step 5 — settle.**
+
+```bash
+python -m scripts.operators.commerce_runtime_pilot_handover settle
+```
+
+| Result | Exit | Meaning |
+| --- | --- | --- |
+| `RESULT=SETTLED` | 0 | the barrier is draining, every live worker is on the current generation, every count is zero, and nothing buffered is undisposed. The evidence snapshot has been written |
+| `RESULT=BLOCKED` | 1 | at least one concrete reason, named per tenant (below) |
+| `RESULT=FAILED_PRECONDITION` | 2 | no tenant allowlist, or more tenants configured than it will inspect |
+| `RESULT=FAILED` | 3 | the database could not be read — never read as "settled" |
+
+Blocker names, each actionable:
+
+| Blocker | What to do |
 | --- | --- |
-| `RESULT=SETTLED`, exit 0 | every count is zero **and** ingress was attested; it is safe to switch off |
-| `RESULT=IN_FLIGHT`, exit 1 | `open_turns` / `reserved_undispatched` / `unresolved_attempts` / `unknown_outcomes` say what remains; keep draining and run it again |
-| `RESULT=UNVERIFIED_INGRESS`, exit 1 | every count is zero, but nobody has attested step 2 — the counts alone cannot say it is safe |
-| `RESULT=FAILED`, exit 3 | the database could not be read — never read as "settled" |
-| `RESULT=FAILED_PRECONDITION`, exit 2 | not draining, no tenant allowlist, or more tenants configured than it will inspect |
+| `barrier_is_open_not_draining` | run `drain` first |
+| `no_worker_has_reported_this_generation` | wait for step 2; nothing has confirmed the drain reached the fleet |
+| `workers_behind:<ids>` | those replicas are still running the previous generation |
+| `workers_not_seen_since_drain:<ids>` | alive within the liveness window but not heard from since the drain — disposition unknown, which is a reason to stay blocked, not to assume they are gone |
+| `open_turns=N` | admitted turns with no terminal |
+| `reserved_undispatched=N` | replies reserved that nothing dispatched |
+| `unresolved_attempts=N` | sends with no receipt at all |
+| `unknown_outcomes=N` | sends whose recorded outcome is `unknown`; establish what the provider actually did and record it on that attempt |
+| `buffered_awaiting_disposition=N` | run `dispose` |
+| `work_counts_unavailable` | the runtime relations could not be counted |
 
-`unknown_outcomes` counts sends whose recorded outcome is `unknown` and which no
-later acceptance resolved. An unknown send may still be with the provider and
-may still deliver, so it is **not** settled: establish what actually happened
-and record it on that attempt (an accepted receipt with the provider's own
-message id) before switching off.
+`settle` writes the evidence snapshot — generation, convergence, counts, buffered
+dispositions — **before** anything reopens, so what the decision rested on
+survives the handover.
 
-The job is read-only: it sends nothing, writes nothing and changes no
-configuration. It runs only while draining — in `on` the counts are a moving
-target, and in `off` recovery has already stopped — and it refuses rather than
-inspecting a subset when more tenants are configured than it will look at.
+**Step 6 — stop.** Only after step 5 exits 0:
 
-**Step 4 — stop.** Set `COMMERCE_RUNTIME_PILOT_ENABLED=false`. The rollback is
-complete when a message from a previously allowlisted handset produces a
-`route=legacy` line and the legacy brain's own trace source.
+```bash
+COMMERCE_RUNTIME_PILOT_ENABLED=false
+```
+
+The rollback is complete when a message from a previously allowlisted handset
+produces a `route=legacy` line and the legacy brain's own trace source.
+
+**Later — reopen.** When the pilot is being turned back on:
+
+```bash
+python -m scripts.operators.commerce_runtime_pilot_handover reopen
+```
+
+Admits new work again on a fresh generation, keeping the audit trail. It refuses
+unless the barrier is settled, because reopening before settlement would discard
+the evidence.
+
+### 5.2 What this proves, and what it does not
+
+Convergence is evidence from the workers themselves, not a statement that they
+were restarted. Counts are the database's account of recorded work. Neither can
+see a request already on the wire to the provider, which is why an `unknown`
+outcome **blocks** settlement rather than ageing out of it: elapsed time and a
+cancelled wait are not proof of non-delivery, and nothing here treats them as
+such.
+
+There is no attestation step and no attestation variable. A handover depends on
+the procedure above actually having been executed — a drain that is recorded,
+a convergence that workers reported, counts that are zero and buffered work that
+has a disposition — not on anyone asserting that the fleet is quiesced.
+
+The job is read-only apart from the barrier itself: it sends no message, answers
+no customer and changes no runtime configuration.
 
 **Emergency stop.** `COMMERCE_RUNTIME_PILOT_ENABLED=false` stops **this process**
 from taking new turns and from recovering. It is the right move when the pilot
 is actively misbehaving, and it is worth being exact about what it is not: it is
 not instantaneous across a fleet — each replica stops when it picks the change
-up — and it does not stop an HTTP send already in flight. Afterwards, drain,
-quiesce and run the handover check to see exactly what it left behind, and
-finish those turns deliberately (below) before considering the rollback
-complete.
+up — and it does not stop an HTTP send already in flight. Afterwards, run the
+handover procedure to see exactly what it left behind, and finish those turns
+deliberately (below) before considering the rollback complete.
+
+**`COMMERCE_RUNTIME_PILOT_DRAINING=true`** takes one process out of rotation. It
+is not the handover: it is per process, it is invisible to the job, and the
+barrier is what a handover is performed against. Where it is set, it behaves the
+same way the barrier does — it takes no new turn and it releases nothing to
+another owner; an affected inbound is buffered with `reason=process_draining`.
 
 **Narrower:** remove one number from
 `COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST`, or empty it entirely. An empty

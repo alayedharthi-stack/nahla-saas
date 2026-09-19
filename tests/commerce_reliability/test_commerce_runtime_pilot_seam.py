@@ -26,17 +26,37 @@ class _Connection:
     id = 17
 
 
+class _Settings:
+    """The tenant's settings row, carrying whatever handover barrier a case sets."""
+
+    def __init__(self, payload: Dict[str, Any]) -> None:
+        self.tenant_id = TENANT
+        self.extra_metadata = dict(payload)
+
+
+# The barrier this tenant's settings row carries. Empty is an open barrier,
+# which is the state every case but the handover ones runs in.
+BARRIER: Dict[str, Any] = {}
+
+
 class _Query:
+    def __init__(self, row: Any) -> None:
+        self._row = row
+
     def filter(self, *_a: Any) -> "_Query":
         return self
 
-    def first(self) -> _Connection:
-        return _Connection()
+    def first(self) -> Any:
+        return self._row
 
 
 class _Db:
-    def query(self, _model: Any) -> _Query:
-        return _Query()
+    """The two rows this seam actually reads: the connection and the barrier."""
+
+    def query(self, model: Any) -> _Query:
+        if str(getattr(model, "__name__", "")) == "TenantSettings":
+            return _Query(_Settings(dict(BARRIER)) if BARRIER else None)
+        return _Query(_Connection())
 
 
 class _Convo:
@@ -104,6 +124,15 @@ read: List[Dict[str, Any]] = []
 @pytest.fixture(autouse=True)
 def _clear_reads() -> None:
     read.clear()
+    BARRIER.clear()
+
+
+def draining_barrier() -> Dict[str, Any]:
+    """The payload a drained tenant's settings row carries, in its real shape."""
+    from core.commerce_runtime import handover
+
+    return {handover.SETTINGS_KEY: {"state": handover.STATE_DRAINING, "generation": 3,
+                                    "opened_at": "2026-09-19T00:00:00+00:00"}}
 
 
 def call(*, trace: Optional[_Trace] = None, text: str = "عندكم حذاء؟",

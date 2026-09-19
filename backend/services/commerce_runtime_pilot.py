@@ -323,6 +323,44 @@ def _send_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
     return send
 
 
+@dataclasses.dataclass(frozen=True)
+class RuntimeClaim:
+    """One inbound message this runtime has positively established it owns.
+
+    Scoped on purpose. A bare "the runtime owns something" boolean cannot be
+    checked later, and a stale or mis-plumbed one would silence a turn that was
+    never claimed; this names the tenant, the normalised recipient and the
+    provider message id it was established for, so whoever honours it can first
+    confirm it is about the turn in front of them.
+    """
+
+    tenant_id: int
+    recipient: str                 # normalised, as the guard normalises it
+    provider_message_id: str
+    basis: str                     # configured | admitted_open | admitted_finished
+
+    def applies_to(self, *, tenant_id: Any, recipient: Any, provider_message_id: Any) -> bool:
+        """Whether this claim is about that turn. Never raises.
+
+        A claim that cannot be checked is **held**, not dropped: it was
+        established positively, and the one outcome that must not follow from a
+        failure here is handing the turn to another owner.
+        """
+        try:
+            if int(tenant_id) != self.tenant_id:
+                return False
+            if str(provider_message_id or "").strip() != self.provider_message_id:
+                return False
+            from core.commerce_runtime import pilot_guard  # noqa: PLC0415
+
+            normalized = pilot_guard.normalize_recipient(recipient)
+            return not normalized or normalized == self.recipient
+        except Exception:  # noqa: BLE001 - an uncheckable claim still holds
+            logger.warning("[COMMERCE_RUNTIME_PILOT] claim scope could not be checked; "
+                           "holding it rather than releasing the turn")
+            return True
+
+
 def commerce_runtime_claims_inbound(
     db: Any,
     *,
@@ -331,7 +369,7 @@ def commerce_runtime_claims_inbound(
     to: str,
     text: str,
     wa_msg_id: Optional[str],
-) -> bool:
+) -> Optional[RuntimeClaim]:
     """Whether the commerce runtime owns this inbound message, asked early.
 
     The dispatcher has owners of its own — the payment-receipt, payment-evidence,
@@ -354,34 +392,81 @@ def commerce_runtime_claims_inbound(
     It decides **ownership**, not whether anything is answered. Every gate that
     can silence the turn — pause, handoff, blocklist, billing, conversation
     quota — still runs inside the handler and still decides. Never raises: a
-    question that cannot be answered is answered ``False``, which leaves the
+    question that cannot be answered yields no claim, which leaves the
     dispatcher exactly as it is today.
     """
     from core.commerce_runtime import pilot_guard  # noqa: PLC0415
 
     try:
+        recipient = pilot_guard.normalize_recipient(to)
+        identity = str(wa_msg_id or "").strip()
+        if not recipient or not identity:
+            # Nothing to scope a claim to. The dispatcher keeps its own owners.
+            return None
+
+        def claim(basis: str) -> RuntimeClaim:
+            return RuntimeClaim(tenant_id=int(tenant_id), recipient=recipient,
+                                provider_message_id=identity, basis=basis)
+
         decision = pilot_guard.evaluate_pilot_route(
             db, tenant_id=tenant_id, customer_phone=to, phone_number_id=phone_id,
             inbound_text=text,
         )
-        if decision.permitted:
-            return True
         if decision.reason in NO_RUNTIME_WORK_POSSIBLE:
-            return False
-        owned = _admitted_runtime_turn(
-            tenant_id=int(tenant_id), phone_id=phone_id, wa_msg_id=wa_msg_id,
-            refusal=decision.reason)
-        if owned is None:
-            return False
-        logger.warning(
-            "[COMMERCE_RUNTIME_PILOT] claiming inbound the runtime already owns "
-            "turn=%s finished=%s tenant=%s guard_reason=%s",
-            owned.turn_id, owned.finished, tenant_id, decision.reason)
-        return True
+            return None
+
+        # This tenant's shared barrier, not this process's flag. It is the only
+        # thing that can say the same word to every replica at the same moment.
+        from core.commerce_runtime import handover  # noqa: PLC0415
+
+        barrier = handover.read_barrier(db, tenant_id=int(tenant_id))
+        handover.note_worker(db, tenant_id=int(tenant_id), state=barrier.state)
+
+        # Only a conversation this pilot would otherwise own is affected by a
+        # handover. Everything else — a recipient outside the allowlist, an
+        # unverified connection, an empty inbound — was never the runtime's and
+        # keeps exactly the behaviour it has today, drain or no drain.
+        process_draining = decision.reason == pilot_guard.PILOT_DRAINING
+        affected = decision.permitted or process_draining
+        draining = affected and (barrier.draining or process_draining)
+
+        # A turn this runtime already admitted is never new work, so a drain
+        # does not buffer it: draining is what finishes outstanding work, and
+        # withholding a redelivery of it from its own runtime is how it would be
+        # abandoned instead.
+        owned = None
+        if draining or not decision.permitted:
+            owned = _admitted_runtime_turn(
+                tenant_id=int(tenant_id), phone_id=phone_id, wa_msg_id=wa_msg_id,
+                refusal=decision.reason)
+        if owned is not None:
+            logger.warning(
+                "[COMMERCE_RUNTIME_PILOT] claiming inbound the runtime already owns "
+                "turn=%s finished=%s tenant=%s guard_reason=%s",
+                owned.turn_id, owned.finished, tenant_id, decision.reason)
+            return claim("admitted_finished" if owned.finished else "admitted_open")
+
+        if draining:
+            # Draining does not release this conversation to the legacy path:
+            # the runtime it is handing over from may still have a send in
+            # flight, and a second answer is exactly what must not happen. The
+            # inbound is recorded and answered by nobody.
+            handover.buffer_inbound(
+                db, tenant_id=int(tenant_id), provider_message_id=identity,
+                recipient=recipient,
+                reason="handover_draining" if barrier.draining else "process_draining")
+            logger.warning("[COMMERCE_RUNTIME_PILOT] buffered during handover tenant=%s "
+                           "generation=%s barrier=%s process_draining=%s",
+                           tenant_id, barrier.generation, barrier.state, process_draining)
+            return claim("drain_buffered")
+
+        if decision.permitted:
+            return claim("configured")
+        return None
     except Exception:  # noqa: BLE001 - an undecidable claim is not a claim
         logger.warning("[COMMERCE_RUNTIME_PILOT] ownership claim check failed tenant=%s",
                        tenant_id)
-        return False
+        return None
 
 
 async def maybe_handle_with_commerce_runtime(
@@ -455,6 +540,19 @@ async def maybe_handle_with_commerce_runtime(
                         tenant_id, decision.reason)
         return PilotResult(handled=False, reason=decision.reason)
 
+    # The tenant's shared barrier. A drain stops new work everywhere at once,
+    # so a turn refused by it is refused here rather than built and then thrown
+    # away at admission. A re-entry that finishes a turn this runtime already
+    # admitted is *not* new work and still runs: that is what a drain is for.
+    if not _barrier_admits_new_work(db, tenant_id=int(tenant_id)):
+        owned = admitted()
+        if owned is None or not owned.unfinished:
+            logger.warning("[COMMERCE_RUNTIME_PILOT] handover barrier closed tenant=%s — "
+                           "no new turn, and the turn is given to nobody else", tenant_id)
+            from core.commerce_runtime import runtime_entry as _entry  # noqa: PLC0415
+
+            return PilotResult(handled=True, reason=_entry.HANDOVER_BARRIER)
+
     # From here the commerce runtime owns the turn. Nothing below may raise back
     # to the caller: if it did, the legacy brain would run for an inbound message
     # this runtime has already (possibly) answered.
@@ -468,6 +566,13 @@ async def maybe_handle_with_commerce_runtime(
         logger.exception("[COMMERCE_RUNTIME_PILOT] turn failed after the route was taken tenant=%s",
                          tenant_id)
         return PilotResult(handled=True, reason="internal_error")
+
+
+def _barrier_admits_new_work(db: Any, *, tenant_id: int) -> bool:
+    """Whether this tenant's shared barrier still admits new work. Fails closed."""
+    from core.commerce_runtime import handover  # noqa: PLC0415
+
+    return handover.barrier_admits_new_work(db, tenant_id=int(tenant_id))
 
 
 async def _own_turn(
@@ -494,6 +599,18 @@ async def _own_turn(
     wire = WireObservation()
     send = _send_factory(phone_id, int(tenant_id), db, loop, wire)
 
+    def admission_barrier(conn: Any) -> bool:
+        """Read the shared barrier on the admission transaction's own connection.
+
+        The claim was taken a moment ago on the request thread; this is asked
+        again where it can be *ordered* against a drain rather than merely
+        raced with one. It runs only for a new admission — a re-entry that
+        finishes work this runtime already owns never reaches it.
+        """
+        from core.commerce_runtime import handover  # noqa: PLC0415
+
+        return handover.admits_new_work_on(conn, tenant_id=int(tenant_id))
+
     def run() -> Any:
         return entry.run_commerce_runtime_turn(
             engine=engine,
@@ -510,6 +627,7 @@ async def _own_turn(
             transport=entry.whatsapp_text_transport(send, recipient=str(decision.recipient)),
             instructions=_instructions(),
             model=str(decision.model or ""),
+            admission_barrier=admission_barrier,
             budget=pilot_guard.pilot_budget(),
             context_preamble=_context_preamble(convo, customer_name),
             history=_prior_turns(db, tenant_id=int(tenant_id), conversation_id=conversation_id,
@@ -639,5 +757,6 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
 
 
 __all__ = ["BLOCKED_PATH", "HISTORY_LIMIT", "NO_RUNTIME_WORK_POSSIBLE", "OWNED_PREFIX",
-           "PilotResult", "SEND_WAIT_SECONDS", "TRACE_SOURCE", "UNFINISHED_PREFIX",
-           "WIRE_UNOBSERVED", "WireObservation", "maybe_handle_with_commerce_runtime"]
+           "PilotResult", "RuntimeClaim", "SEND_WAIT_SECONDS", "TRACE_SOURCE",
+           "UNFINISHED_PREFIX", "WIRE_UNOBSERVED", "WireObservation",
+           "commerce_runtime_claims_inbound", "maybe_handle_with_commerce_runtime"]

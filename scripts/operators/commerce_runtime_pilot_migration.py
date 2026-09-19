@@ -75,7 +75,35 @@ def _is_loopback(host: str) -> bool:
     return bool(mapped is not None and (mapped.is_loopback or mapped.is_unspecified))
 
 
-def parse_database_url(url: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def libpq_environment_overrides(environ: Optional[Dict[str, str]] = None) -> Tuple[str, ...]:
+    """Inherited libpq variables that would move the connection's target.
+
+    These are read by the driver, not by the URL parser, so they are invisible
+    to any amount of URL checking — and they are inherited identically by this
+    process and by the Alembic subprocess.
+    """
+    env = environ if environ is not None else os.environ
+    return tuple(name for name in k.LIBPQ_TARGET_ENV_VARS
+                 if str(env.get(name, "") or "").strip())
+
+
+def sanitized_environment(url: str, environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The environment the Alembic subprocess runs in.
+
+    Every target-affecting libpq variable is removed and ``DATABASE_URL`` is
+    replaced with the fully explicit validated URL, so the subprocess connects
+    to the target this job validated and cannot be redirected by something it
+    inherited. Nothing else about the environment is changed, and no credential
+    is logged.
+    """
+    env = dict(environ if environ is not None else os.environ)
+    for name in k.LIBPQ_TARGET_ENV_VARS:
+        env.pop(name, None)
+    env["DATABASE_URL"] = url
+    return env
+
+
+def parse_database_url(url: str, environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """``(target, refusal_reason)`` for one database URL, as the driver reads it.
 
     The URL's authority is not the connection's target. A PostgreSQL URL may
@@ -94,6 +122,13 @@ def parse_database_url(url: str) -> Tuple[Optional[Dict[str, Any]], Optional[str
     raw = str(url or "").strip()
     if not raw:
         return None, "DATABASE_URL_unresolved"
+    inherited = libpq_environment_overrides(environ)
+    if inherited:
+        # Not reconciled: an inherited PGPORT and an explicit URL port disagree
+        # silently, and the operator's intent is unknowable from here. The URL
+        # must say what it means.
+        emit(f"inherited_libpq_target_variables={list(inherited)!r}")
+        return None, "DATABASE_URL_environment_override"
     try:
         from sqlalchemy.engine import make_url  # noqa: PLC0415
     except Exception:  # noqa: BLE001 - without the driver's own parser, nothing is established
@@ -128,12 +163,16 @@ def parse_database_url(url: str) -> Tuple[Optional[Dict[str, Any]], Optional[str
     except Exception:  # noqa: BLE001 - a URL the driver cannot turn into a connection
         return None, "DATABASE_URL_unparsable"
 
-    host = str(connect.get("host") or "").strip()
+    # Neither part is stripped. Whitespace in a host is a broken configuration
+    # and must fail the comparison rather than be tidied into a match, and a
+    # PostgreSQL database may genuinely be named with leading or trailing
+    # whitespace — trimming `` pilot`` to ``pilot`` authorises a different one.
+    host = str(connect.get("host") or "")
     if not host:
         return None, "DATABASE_URL_host_missing"
     if _is_loopback(host):
         return None, "DATABASE_URL_is_local"
-    database = str(connect.get("dbname") or "").strip()
+    database = str(connect.get("dbname") or "")
     if not database:
         return None, "DATABASE_URL_database_missing"
     try:
@@ -160,7 +199,9 @@ def authorized_target(environ: Optional[Dict[str, str]] = None) -> Tuple[Optiona
     if declared.count("/") != 1:
         return None, "authorized_target_malformed"
     authority, database = declared.split("/", 1)
-    authority, database = authority.strip(), database.strip()
+    # The database name is NOT stripped: PostgreSQL allows a name with leading
+    # or trailing whitespace, and quietly authorising ``pilot`` for a declared
+    # `` pilot`` would authorise a different database.
     if not authority or not database:
         return None, "authorized_target_malformed"
     port = k.DEFAULT_PORT
@@ -192,15 +233,41 @@ def authorized_target(environ: Optional[Dict[str, str]] = None) -> Tuple[Optiona
     return {"host": host.lower(), "port": port, "database": database}, None
 
 
+def explicit_url(url: str, target: Dict[str, Any]) -> Optional[str]:
+    """``url`` with host, port and database bound explicitly, credentials intact.
+
+    Nothing downstream may be left to infer a part of the target from its own
+    environment, so every part of it is written into the URL that both the
+    inspection engine and the Alembic subprocess are given.
+    """
+    try:
+        from sqlalchemy.engine import make_url  # noqa: PLC0415
+
+        parsed = make_url(url)
+        bound = parsed.set(host=target["host"], port=int(target["port"]),
+                           database=target["database"])
+        return bound.render_as_string(hide_password=False)
+    except Exception as exc:  # noqa: BLE001 - a URL that cannot be rebound is not usable
+        # The type only. The URL carries credentials and is never printed.
+        emit(f"explicit_url_failed={type(exc).__name__!r}")
+        return None
+
+
 def _target_label(target: Dict[str, Any]) -> str:
     return f"{target['host']}:{target['port']}/{target['database']}"
 
 
 def database_url(environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[str]]:
-    """``(url, refusal_reason)``. The **effective** target must be the authorised one."""
+    """``(explicit_url, refusal_reason)``.
+
+    The effective target must be the authorised one, and what comes back is the
+    **fully explicit** URL — host, port and database all written in — so the
+    inspection engine and the Alembic subprocess are given the same target and
+    neither can infer a part of it from anywhere else.
+    """
     env = environ if environ is not None else os.environ
     url = str(env.get("DATABASE_URL", "") or "").strip()
-    target, refusal = parse_database_url(url)
+    target, refusal = parse_database_url(url, env)
     if target is None:
         return None, refusal
     declared, refusal = authorized_target(env)
@@ -213,8 +280,11 @@ def database_url(environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[str
         emit(f"authorized_target={_target_label(declared)!r} "
              f"effective_target={_target_label(target)!r}")
         return None, "DATABASE_URL_is_not_the_authorized_target"
+    bound = explicit_url(url, target)
+    if bound is None:
+        return None, "DATABASE_URL_unparsable"
     emit(f"effective_target={_target_label(target)!r}")
-    return url, None
+    return bound, None
 
 
 def confirmed(environ: Optional[Dict[str, str]] = None) -> bool:
@@ -271,11 +341,18 @@ def classify(observation: Dict[str, Any]) -> str:
     return "partial"
 
 
-def run_alembic(*, timeout_seconds: int, cwd: str) -> int:
+def run_alembic(*, timeout_seconds: int, cwd: str, env: Dict[str, str]) -> int:
+    """Run the one pinned upgrade, against the validated target and nothing else.
+
+    ``env`` is the sanitized environment: the validated explicit ``DATABASE_URL``
+    and no inherited libpq target variable. Alembic resolves its own connection,
+    so handing it the same explicit URL this job inspected is what makes the two
+    paths the same target rather than two guesses that usually agree.
+    """
     command = k.build_upgrade_argv(python_executable=sys.executable)
     emit(f"running: {' '.join(command)} (cwd={cwd}, timeout={timeout_seconds}s)")
     try:
-        completed = subprocess.run(command, cwd=cwd, check=False, env=os.environ.copy(),
+        completed = subprocess.run(command, cwd=cwd, check=False, env=env,
                                    timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         emit(f"alembic upgrade {k.TARGET_REVISION} TIMED OUT after {timeout_seconds}s")
@@ -336,7 +413,8 @@ def main(argv: Optional[list] = None) -> int:
                present=before["present"], expected=list(expected))
         return k.EXIT_PRECONDITION
 
-    rc = run_alembic(timeout_seconds=timeout_seconds, cwd=directory)
+    rc = run_alembic(timeout_seconds=timeout_seconds, cwd=directory,
+                     env=sanitized_environment(url))
 
     after = observe(url)
     emit(f"AFTER alembic_version={after['alembic_version']} shape={classify(after)} "

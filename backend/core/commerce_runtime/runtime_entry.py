@@ -60,6 +60,7 @@ OWNERSHIP_UNAVAILABLE = "ownership_unavailable"
 CONTEXT_UNAVAILABLE = "trusted_context_unavailable"
 LINK_UNVERIFIED = "conversation_link_unverified"
 MODEL_UNCONFIGURED = "model_not_configured"
+HANDOVER_BARRIER = "handover_barrier_closed"
 ADMISSION_CONFLICT = "admission_conflict"
 INTERNAL_ERROR = "internal_error"
 
@@ -234,6 +235,52 @@ def _close_quietly(session: Any) -> None:
         logger.warning("[COMMERCE_RUNTIME] tool session could not be closed cleanly")
 
 
+class ExclusiveCloser:
+    """One session, one close, whoever gets there first.
+
+    Two owners race for an abandoned session: the thread that finishes the
+    abandoned call, and the reaper. Deciding with a check-then-set on a flag —
+    read it, see it unset, set it — is not arbitration: both threads can read it
+    unset before either writes, and both then close. A session closed twice is a
+    connection returned to the pool twice.
+
+    The claim is therefore taken under a mutex and is the only thing the mutex
+    guards: closing itself happens outside it, so a slow or hanging ``close``
+    never blocks the loser, which has nothing left to do anyway.
+
+    ``lock`` exists so a test can drive a chosen interleaving through the very
+    code production runs, rather than a copy of it. Production supplies none.
+    """
+
+    def __init__(self, session: Any, *, turn_id: Optional[int] = None,
+                 lock: Optional[Any] = None) -> None:
+        self._session = session
+        self._turn_id = turn_id
+        self._lock = lock if lock is not None else threading.Lock()
+        self._claimed = False
+
+    def claim(self) -> bool:
+        """``True`` for exactly one caller, ever."""
+        with self._lock:
+            if self._claimed:
+                return False
+            self._claimed = True
+            return True
+
+    @property
+    def claimed(self) -> bool:
+        return self._claimed
+
+    def close(self, source: str) -> bool:
+        """Close the session if this caller won the claim. Never raises."""
+        if not self.claim():
+            return False
+        _close_quietly(self._session)
+        logger.info("[COMMERCE_RUNTIME] tool session closed by %s turn=%s",
+                    source, self._turn_id)
+        return True
+
+
 def _retire_tool_session(binding: alt.LiveToolBinding, session: Any, *,
                          turn_id: Optional[int] = None,
                          reap_seconds: float = ABANDONED_SESSION_REAP_SECONDS) -> Optional[Any]:
@@ -260,14 +307,10 @@ def _retire_tool_session(binding: alt.LiveToolBinding, session: Any, *,
     Returns the reaper thread so a caller can observe it; ``None`` when the
     session was closed here.
     """
-    closed = threading.Event()
+    closer = ExclusiveCloser(session, turn_id=turn_id)
 
     def close_once(source: str) -> None:
-        if closed.is_set():
-            return
-        closed.set()
-        _close_quietly(session)
-        logger.info("[COMMERCE_RUNTIME] tool session closed by %s turn=%s", source, turn_id)
+        closer.close(source)
 
     if binding.on_idle(lambda: close_once("the abandoned call's own thread")):
         # Nothing held it: closed synchronously, on this turn's thread.
@@ -305,6 +348,7 @@ def run_commerce_runtime_turn(
     transport: dd.Transport,
     instructions: str,
     model: str,
+    admission_barrier: Optional[Any] = None,
     budget: Optional[ac.LoopBudget] = None,
     context_preamble: Optional[Mapping[str, Any]] = None,
     history: Optional[Any] = None,
@@ -321,6 +365,11 @@ def run_commerce_runtime_turn(
     ``model`` is the caller's explicit choice and has no default: this entry
     refuses rather than let an unconfigured pilot inherit whatever the legacy
     path happens to resolve.
+
+    ``admission_barrier`` is an optional veto on taking **new** work, called
+    with the admission transaction's own connection. It is the handover's
+    mechanism: see the ``AdmissionRefused`` branch below for why it is asked
+    there and nowhere else.
     """
     started = time.monotonic()
     base = {"tenant_id": int(tenant_id), "conversation_id": int(conversation_id)}
@@ -345,7 +394,20 @@ def run_commerce_runtime_turn(
             tenant_id=tenant_id, namespace=NAMESPACE, conversation_ref=conversation_ref,
             channel_connection_ref=connection_ref, provider_message_id=provider_message_id,
             payload={"text": inbound_text, "metadata": dict(inbound_metadata or {})},
+            admission_guard=admission_barrier,
         )
+    except c.AdmissionRefused:
+        # The window between selecting this route and writing the turn is where
+        # a handover loses work: a drain can land inside it, and a turn admitted
+        # after that is one the settlement check already counted as absent. The
+        # barrier is read on this transaction's own connection, so the database
+        # orders the two: either the turn is visible to the drain, or the drain
+        # is visible here and nothing is written. A re-entry for a turn already
+        # admitted never reaches the barrier, which is what lets a draining
+        # runtime still finish its own work.
+        logger.warning("[COMMERCE_RUNTIME] admission refused by the handover barrier "
+                       "tenant=%s", tenant_id)
+        return TurnReport(reason=HANDOVER_BARRIER, **base)
     except c.CommerceRuntimeError as exc:
         logger.warning("[COMMERCE_RUNTIME] admission refused tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
@@ -561,8 +623,9 @@ def whatsapp_text_transport(send: Any, *, recipient: str) -> dd.Transport:
 
 __all__ = [
     "ADMISSION_CONFLICT", "ALREADY_TERMINAL", "CHANNEL", "CONTEXT_UNAVAILABLE", "HANDLED",
+    "HANDOVER_BARRIER",
     "INTERNAL_ERROR", "LINK_UNVERIFIED", "MODEL_UNCONFIGURED", "REQUIRED_RELATIONS",
-    "ABANDONED_SESSION_REAP_SECONDS",
+    "ABANDONED_SESSION_REAP_SECONDS", "ExclusiveCloser",
     "LEASE_SECONDS", "NAMESPACE", "OWNERSHIP_UNAVAILABLE", "SCHEMA_UNAVAILABLE", "TurnReport",
     "build_trusted_binding", "reset_schema_probe", "run_commerce_runtime_turn",
     "runtime_schema_available", "whatsapp_text_transport",

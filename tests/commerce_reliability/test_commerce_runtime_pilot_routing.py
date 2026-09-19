@@ -268,3 +268,232 @@ def test_the_turn_after_a_failed_sync_is_still_processed(pilot_on):
             "modules.ai.brain.persona_ownership.sync_persona_to_turn_trace",
             side_effect=always_explode)])
         assert len(seen.runtime_turns) == 1, event_id
+
+
+# ── A claim is sticky: it silences, it never transfers (F2/F3, re-review) ────
+
+
+def draining_barrier(harness: Any, *, generation: int = 4) -> None:
+    """Give this tenant's settings row a drained barrier, in its real shape.
+
+    Only the row lookup is a double — the payload, and every line that reads it,
+    are production. The durable barrier itself is proved on real PostgreSQL in
+    ``test_commerce_runtime_pilot_handover_controls_pg.py``.
+    """
+    from unittest.mock import MagicMock
+
+    from core.commerce_runtime import handover
+
+    class _Row:
+        tenant_id = TENANT
+        extra_metadata = {handover.SETTINGS_KEY: {
+            "state": handover.STATE_DRAINING, "generation": generation,
+            "opened_at": "2026-09-19T00:00:00+00:00"}}
+
+    ordinary = harness.db.query
+
+    def _query(model: Any, *rest: Any) -> Any:
+        if str(getattr(model, "__name__", "")) == "TenantSettings":
+            chain = MagicMock()
+            chain.filter.return_value.first.return_value = _Row()
+            chain.filter.return_value.with_for_update.return_value.first.return_value = _Row()
+            return chain
+        return ordinary(model, *rest)
+
+    harness.db.query = MagicMock(side_effect=_query)
+
+
+def composed(seen: Seen, *, event_id: str, seam_outcome: Any,
+             text: str = "عندكم فستان؟", gates: Any = (), barrier: bool = False) -> Any:
+    """The dispatcher's real claim, carried into the real merchant handler.
+
+    The claim is established by the production function, against the real guard
+    and the real admitted-turn lookup, and handed to the real
+    ``_handle_merchant_message`` the way ``_dispatch_message`` hands it — so the
+    two halves are composed, not simulated. Only the seam's own answer is
+    scripted, which is the thing each case is about. (The dispatcher's *other*
+    half — that a claim skips its short circuits — is proved on the real
+    ``_dispatch_message`` in ``test_commerce_runtime_pilot_recovery.py``.)
+    """
+    import asyncio
+
+    from core.inbound_lifecycle import EVENT_MESSAGE_SAVED, inbound_lifecycle_trace, \
+        record_lifecycle
+    import routers.whatsapp_webhook as webhook
+    import services.commerce_runtime_pilot as seam
+
+    claims: List[Any] = []
+
+    async def _seam(**kwargs: Any) -> Any:
+        seen.pilot_asked.append(kwargs)
+        if isinstance(seam_outcome, BaseException):
+            raise seam_outcome
+        return seam_outcome
+
+    with ExitStack() as stack:
+        harness = stack.enter_context(H.incident_ctx(
+            brain_return=H._brain_return(reply=H.GROUNDED_TEXT), script=H._script_accept_all))
+        competing(stack, seen)
+        for gate in gates:
+            stack.enter_context(gate)
+        if barrier:
+            draining_barrier(harness)
+
+        # The production claim, established for real.
+        claims.append(seam.commerce_runtime_claims_inbound(
+            harness.db, tenant_id=TENANT, phone_id=H.PHONE_ID, to=CUSTOMER, text=text,
+            wa_msg_id=event_id))
+
+        stack.enter_context(patch.object(seam, "maybe_handle_with_commerce_runtime", _seam))
+        with inbound_lifecycle_trace(
+            provider="meta", phone_number_id=H.PHONE_ID,
+            msg={"id": event_id, "type": "text", "text": {"body": text}, "from": CUSTOMER},
+        ):
+            record_lifecycle(EVENT_MESSAGE_SAVED, conversation_id=42)
+            asyncio.run(webhook._handle_merchant_message(
+                phone_id=H.PHONE_ID, to=CUSTOMER, text=text, tenant_id=TENANT,
+                db=harness.db, wa_msg_id=event_id,
+                commerce_runtime_claim=claims[0],
+            ))
+    harness.claims = claims                              # type: ignore[attr-defined]
+    return harness
+
+
+def assert_withheld(seen: Seen, harness: Any) -> None:
+    """Claimed, not executed, and given to nobody else."""
+    assert harness.claims and harness.claims[0] is not None      # positively established
+    assert seen.v2_owner == []                                   # zero competing executions
+    assert legacy_rows(harness) == [] and pilot_rows(harness) == []
+    assert harness.provider.calls == [] and harness.catalog_sends == []
+
+
+def test_a_claim_followed_by_a_guard_exception_silences_rather_than_transfers(pilot_on):
+    seen = Seen()
+    harness = composed(seen, event_id="wamid.sticky.1",
+                       seam_outcome=RuntimeError("the guard exploded"))
+    assert_withheld(seen, harness)
+
+
+def test_a_claim_followed_by_a_guard_refusal_silences_rather_than_transfers(pilot_on):
+    import services.commerce_runtime_pilot as seam
+
+    seen = Seen()
+    harness = composed(seen, event_id="wamid.sticky.2",
+                       seam_outcome=seam.PilotResult(handled=False,
+                                                     reason=pg.CONNECTION_NOT_VERIFIED))
+    assert_withheld(seen, harness)
+
+
+def test_a_finished_runtime_turn_whose_lookup_then_fails_is_still_not_transferred(pilot_on,
+                                                                                   monkeypatch):
+    """Positively identified as finished at the dispatcher; the later lookup
+    raises. The turn stays the runtime's and nobody else answers it."""
+    from core.commerce_runtime import recovery
+    import services.commerce_runtime_pilot as seam
+
+    # Claimed on the strength of a finished admitted turn…
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    lookups: List[int] = []
+
+    def _lookup(**kwargs: Any) -> Any:
+        lookups.append(1)
+        if len(lookups) == 1:
+            return recovery.AdmittedInbound(tenant_id=TENANT, turn_id=7, conversation_id=3,
+                                            provider_message_id="wamid.sticky.3", finished=True)
+        raise RuntimeError("the ledger became unreadable")
+
+    monkeypatch.setattr(recovery, "admitted_turn_for", _lookup)
+    seen = Seen()
+    harness = composed(seen, event_id="wamid.sticky.3",
+                       seam_outcome=seam.PilotResult(handled=False,
+                                                     reason=pg.PILOT_DRAINING))
+    assert harness.claims[0].basis == "admitted_finished"
+    assert_withheld(seen, harness)
+
+
+def test_non_allowlisted_traffic_keeps_its_existing_behaviour(pilot_on, monkeypatch):
+    """No claim, so the competing owner runs exactly as it does today."""
+    monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")
+    seen = Seen()
+    harness = composed(seen, event_id="wamid.sticky.4",
+                       seam_outcome=None)                        # never reached
+    assert harness.claims == [None]
+    assert len(seen.v2_owner) == 1                               # legacy owner answered
+
+
+def test_a_silencing_gate_still_decides_before_the_claim_is_honoured(pilot_on):
+    """The claim withholds the turn from other owners; it does not override a
+    gate that says this conversation must not be answered at all."""
+    seen = Seen()
+    harness = composed(seen, event_id="wamid.sticky.5", seam_outcome=None,
+                       gates=[patch("core.ai_pause_guard.should_skip_ai",
+                                    return_value=(True, "manual_takeover"))])
+    assert seen.pilot_asked == []                                # the gate returned first
+    assert seen.v2_owner == []
+    assert harness.outbound_rows == []
+
+
+def test_a_drained_tenant_answers_with_nobody_rather_than_with_the_legacy_path(pilot_on):
+    """Control B on the real handler: a handover never invites a second owner.
+
+    The barrier is draining and a competing owner is switched on. The dispatcher
+    claims the inbound, buffers it, and the handler returns — so the customer is
+    not answered by a second runtime while the first may still have a send on
+    the wire. Nothing about this is silence *chosen* over an answer: the inbound
+    is recorded, and the operator disposes of it before the handover settles.
+    """
+    import services.commerce_runtime_pilot as seam
+
+    seen = Seen()
+    harness = composed(seen, event_id="wamid.drained.1", barrier=True,
+                       seam_outcome=seam.PilotResult(
+                           handled=True, reason=entry.HANDOVER_BARRIER))
+    assert harness.claims[0] is not None
+    assert harness.claims[0].basis == "drain_buffered"
+    assert_withheld(seen, harness)
+
+
+def test_a_drain_does_not_change_what_happens_to_traffic_it_never_owned(pilot_on, monkeypatch):
+    """The same drained barrier, a recipient outside the allowlist: unchanged."""
+    monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")
+    seen = Seen()
+    harness = composed(seen, event_id="wamid.drained.2", barrier=True, seam_outcome=None)
+    assert harness.claims == [None]
+    assert len(seen.v2_owner) == 1                               # exactly today's behaviour
+
+
+def test_a_claim_established_for_another_turn_is_not_honoured(pilot_on):
+    """Scope is checked: a claim is about one inbound message, not a mood."""
+    import routers.whatsapp_webhook as webhook
+    import services.commerce_runtime_pilot as seam
+
+    other = seam.RuntimeClaim(tenant_id=TENANT, recipient="+966500000099",
+                              provider_message_id="wamid.someone.else", basis="configured")
+    assert webhook._commerce_runtime_claim_holds(
+        other, tenant_id=TENANT, to=CUSTOMER, wa_msg_id="wamid.this.one") is False
+    assert webhook._commerce_runtime_claim_holds(
+        other, tenant_id=TENANT + 1, to=CUSTOMER, wa_msg_id="wamid.someone.else") is False
+    assert webhook._commerce_runtime_claim_holds(None, tenant_id=TENANT, to=CUSTOMER,
+                                                 wa_msg_id="x") is False
+    assert webhook._commerce_runtime_claim_holds(object(), tenant_id=TENANT, to=CUSTOMER,
+                                                 wa_msg_id="x") is False
+
+
+def test_a_claim_for_this_turn_is_honoured_and_an_uncheckable_one_is_held():
+    import routers.whatsapp_webhook as webhook
+    import services.commerce_runtime_pilot as seam
+
+    mine = seam.RuntimeClaim(tenant_id=TENANT, recipient="+966500000099",
+                             provider_message_id="wamid.mine", basis="configured")
+    assert webhook._commerce_runtime_claim_holds(
+        mine, tenant_id=TENANT, to=CUSTOMER, wa_msg_id="wamid.mine") is True
+
+    class _Uncheckable:
+        def applies_to(self, **_kwargs: Any) -> bool:
+            raise RuntimeError("cannot check")
+
+    # Establishing a claim is positive; failing to re-check it is not a release.
+    assert webhook._commerce_runtime_claim_holds(
+        seam.RuntimeClaim(tenant_id=TENANT, recipient="x", provider_message_id="y",
+                          basis="configured"),
+        tenant_id=TENANT, to=CUSTOMER, wa_msg_id="y") is False   # recipient really differs

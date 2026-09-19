@@ -4805,13 +4805,15 @@ async def _dispatch_message(
             # A claim routes the turn straight to the merchant handler, where
             # the commerce runtime seam runs and where every gate that can
             # silence a turn still decides. It answers nothing by itself.
-            if _commerce_runtime_claims_inbound(
+            _runtime_claim = _commerce_runtime_claims_inbound(
                 db, tenant_id=resolved_tenant_id, phone_id=used_pid, to=sender,
                 text=text or "", wa_msg_id=msg_id,
-            ):
+            )
+            if _runtime_claim is not None:
                 logger.info(
-                    "[WEBHOOK_ROUTE] route=commerce_runtime_claim tenant=%s from=%s msg_id=%s",
-                    resolved_tenant_id, sender, msg_id,
+                    "[WEBHOOK_ROUTE] route=commerce_runtime_claim tenant=%s from=%s "
+                    "msg_id=%s basis=%s",
+                    resolved_tenant_id, sender, msg_id, _runtime_claim.basis,
                 )
                 await _handle_merchant_message(
                     phone_id=used_pid, to=sender, text=text,
@@ -4820,7 +4822,7 @@ async def _dispatch_message(
                     inbound_persist_body=persist_body,
                     wa_message_ts=_wa_msg_ts,
                     wa_msg_id=msg_id or None,
-                    commerce_runtime_claimed=True,
+                    commerce_runtime_claim=_runtime_claim,
                 )
                 return
 
@@ -6321,7 +6323,7 @@ async def _handle_merchant_message(
     inbound_persist_body: Optional[str] = None,
     wa_message_ts: Optional[datetime] = None,
     wa_msg_id: Optional[str] = None,
-    commerce_runtime_claimed: bool = False,
+    commerce_runtime_claim: Optional[Any] = None,
 ) -> None:
     """
     For merchant tenants (tenant_id > 1): reply using the store's own AI context.
@@ -7972,6 +7974,16 @@ async def _handle_merchant_message(
         # never both answer it. Fail-closed: a refusal, or an error asking,
         # leaves the legacy path exactly as it is.
         _commerce_runtime_owns_turn = False
+        _pilot_outcome = "not_asked"
+        # A claim established at the dispatcher is **sticky**. The dispatcher
+        # withheld this turn from its own owners on the strength of it, so from
+        # here a refusal, a lookup failure or an exception may stop the runtime
+        # executing — but none of them may hand the turn to the legacy path,
+        # which would answer a message this runtime owns and may already have
+        # answered. The claim is scoped, and is honoured only for the turn it
+        # was established for.
+        _claim_holds = _commerce_runtime_claim_holds(
+            commerce_runtime_claim, tenant_id=tenant_id, to=to, wa_msg_id=wa_msg_id)
         try:
             from services.commerce_runtime_pilot import (  # noqa: PLC0415
                 maybe_handle_with_commerce_runtime,
@@ -7991,32 +8003,32 @@ async def _handle_merchant_message(
                 ai_gate_skipped=bool(_skip),
             )
             _commerce_runtime_owns_turn = bool(_pilot.handled)
-            if commerce_runtime_claimed and not _commerce_runtime_owns_turn:
-                # The dispatcher withheld this turn from its own owners because
-                # the commerce runtime claimed it, and the seam has now declined
-                # it. That can only mean the configuration or the verified
-                # connection moved between the two, so say so plainly: the
-                # legacy path answers below, which is one answer, but not the
-                # one the claim predicted.
-                logger.warning(
-                    "[COMMERCE_RUNTIME_PILOT] claimed at dispatch but declined at the seam "
-                    "tenant=%s reason=%s — the legacy path answers this turn",
-                    tenant_id, _pilot.reason,
-                )
+            _pilot_outcome = str(_pilot.reason)
         except Exception as _pilot_exc:  # noqa: BLE001
-            # The route was never taken, so nothing was sent by it. A failure to
-            # even ask must not cost the customer their reply.
+            # Without a claim the route was never taken and nothing was sent by
+            # it, so a failure to even ask must not cost the customer a reply.
+            # With one, the turn stays ours and is silenced below.
+            _pilot_outcome = f"seam_error:{type(_pilot_exc).__name__}"
             logger.warning(
-                "[COMMERCE_RUNTIME_PILOT] route check failed tenant=%s err=%s — legacy continues",
+                "[COMMERCE_RUNTIME_PILOT] route check failed tenant=%s err=%s claim=%s",
                 tenant_id,
                 type(_pilot_exc).__name__,
+                bool(_claim_holds),
             )
 
-        if _commerce_runtime_owns_turn:
-            # From here the turn belongs to the commerce runtime, which may
-            # already have answered the customer. Nothing after this point may
-            # hand it back — observability is not allowed to reopen the legacy
-            # path by raising, so it is caught here and the return is
+        if _claim_holds and not _commerce_runtime_owns_turn:
+            logger.error(
+                "[COMMERCE_RUNTIME_PILOT] claimed turn was not executed tenant=%s "
+                "outcome=%s — withheld from the legacy path, nothing was answered",
+                tenant_id, _pilot_outcome,
+            )
+
+        if _commerce_runtime_owns_turn or _claim_holds:
+            # From here the turn belongs to the commerce runtime — because it
+            # answered, or because it claimed the turn and did not. Either way
+            # it may already have answered the customer, and nothing after this
+            # point may hand it back: observability is not allowed to reopen the
+            # legacy path by raising, so it is caught and the return is
             # unconditional.
             try:
                 _sync_persona_observability()
@@ -15723,6 +15735,31 @@ def _commerce_runtime_claims_inbound(db, *, tenant_id, phone_id: str, to: str,
             tenant_id, type(exc).__name__,
         )
         return False
+
+
+def _commerce_runtime_claim_holds(claim: Any, *, tenant_id: Any, to: str,
+                                  wa_msg_id: Any) -> bool:
+    """Whether a claim carried from the dispatcher is about *this* turn.
+
+    A claim is an assertion that one specific inbound message belongs to the
+    commerce runtime, so it is honoured only for that message. Anything that is
+    not a claim, or is a claim about a different tenant, recipient or provider
+    message id, holds nothing.
+    """
+    if claim is None:
+        return False
+    applies = getattr(claim, "applies_to", None)
+    if not callable(applies):
+        logger.error("[COMMERCE_RUNTIME_PILOT] ignoring an unscoped ownership claim tenant=%s",
+                     tenant_id)
+        return False
+    held = bool(applies(tenant_id=tenant_id, recipient=to, provider_message_id=wa_msg_id))
+    if not held:
+        logger.error(
+            "[COMMERCE_RUNTIME_PILOT] ignoring a claim established for another turn tenant=%s",
+            tenant_id,
+        )
+    return held
 
 
 def _duplicate_is_unfinished_runtime_work(

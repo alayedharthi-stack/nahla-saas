@@ -96,12 +96,23 @@ def pilot_enabled() -> bool:
 
 
 def pilot_draining() -> bool:
-    """Whether the pilot is handing back: no new turns, its own work finished.
+    """Whether *this process* is handing back: no new turns, its own work finished.
 
     Draining is the step a rollback goes through instead of switching the pilot
-    off underneath work it has not finished. While it is set, every new inbound
-    turn goes to the legacy path immediately, and the turns this runtime already
-    admitted stay reachable until they have a terminal.
+    off underneath work it has not finished. While it is set this process takes
+    no new turn, and the turns this runtime already admitted stay reachable
+    until they have a terminal.
+
+    It does **not** mean the affected conversations go to the legacy path. A
+    runtime that is handing over may still have a send in flight, and a second
+    answer from a second runtime is the one outcome a handover must not
+    produce; ``commerce_runtime_claims_inbound`` therefore withholds such an
+    inbound from every owner and records it for the operator instead.
+
+    This flag is per process. It cannot say the same word to every replica at
+    the same moment, so it is not the mechanism a handover is performed with —
+    ``core.commerce_runtime.handover``'s shared barrier is. It remains here so a
+    single process can be taken out of rotation without releasing anything.
     """
     return _flag(ENV_ENABLED) and _flag(ENV_DRAINING)
 
@@ -256,14 +267,6 @@ def evaluate_pilot_route(
     try:
         if not pilot_enabled():
             return _refused(PILOT_DISABLED, tenant_id)
-        if pilot_draining() and not finishing_open_work:
-            # Handing back. New turns are the legacy path's from this moment.
-            # ``finishing_open_work`` is the caller stating it has already
-            # established that this exact inbound message is a turn this runtime
-            # admitted and never finished; draining finishes those, which is
-            # what makes it a handover rather than an abandonment. Every other
-            # condition below still has to pass.
-            return _refused(PILOT_DRAINING, tenant_id)
         tenants = tenant_allowlist()
         try:
             tenant = int(tenant_id)
@@ -281,6 +284,18 @@ def evaluate_pilot_route(
         recipients = recipient_allowlist()
         if not recipients or recipient not in recipients:
             return _refused(RECIPIENT_NOT_ALLOWLISTED, tenant, recipient)
+
+        if pilot_draining() and not finishing_open_work:
+            # Handing back: this process takes no new turn. Asked *after* the
+            # allowlists on purpose — ``PILOT_DRAINING`` then names only traffic
+            # this pilot would otherwise own, so the caller can tell an affected
+            # conversation (which must not be released to another owner) from
+            # traffic that was never the runtime's and keeps the behaviour it
+            # has today. ``finishing_open_work`` is the caller stating it has
+            # already established that this exact inbound message is a turn this
+            # runtime admitted and never finished; draining finishes those,
+            # which is what makes it a handover rather than an abandonment.
+            return _refused(PILOT_DRAINING, tenant, recipient)
 
         model = pilot_model()
         if not model:

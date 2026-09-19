@@ -146,12 +146,119 @@ def test_a_url_that_is_not_a_remote_postgres_database_is_refused_by_reason(url, 
 ])
 def test_a_remote_database_url_is_accepted_however_it_is_spelled(url):
     resolved, refusal = job.database_url({"DATABASE_URL": url, k.TARGET_ENV: TARGET})
-    assert refusal is None and resolved == url
+    assert refusal is None
+    # What comes back is the validated target bound explicitly, not the spelling
+    # that was handed in: both paths are given the same fully specified URL.
+    rebound = job.parse_database_url(resolved, {})[0]
+    assert (rebound["host"], rebound["port"], rebound["database"]) == (
+        "db.railway", 5432, "nahla")
 
 
 def test_a_url_naming_a_host_that_merely_contains_localhost_is_not_local():
     parsed, refusal = job.parse_database_url("postgresql://u:p@localhostings.example/nahla")
     assert refusal is None and parsed["host"] == "localhostings.example"
+
+
+# ── One validated target for inspection and for Alembic ─────────────────────
+
+
+@pytest.mark.parametrize("name, value", [
+    ("PGPORT", "6543"),
+    ("PGHOSTADDR", "10.0.0.9"),
+    ("PGHOST", "other.internal"),
+    ("PGDATABASE", "other_database"),
+    ("PGSERVICE", "elsewhere"),
+    ("PGSERVICEFILE", "/tmp/pgservice.conf"),
+    ("PGOPTIONS", "-c search_path=other"),
+])
+def test_an_inherited_libpq_target_variable_is_refused(name, value):
+    """The driver reads these, not the URL parser: an omitted URL port with
+    PGPORT=6543 connects to 6543 while every URL check still passes."""
+    resolved, refusal = job.database_url(
+        {"DATABASE_URL": "postgresql://u:p@db.railway/nahla", k.TARGET_ENV: TARGET, name: value})
+    assert resolved is None and refusal == "DATABASE_URL_environment_override"
+
+
+def test_the_refusal_names_every_inherited_variable_it_found():
+    found = job.libpq_environment_overrides({"PGPORT": "6543", "PGHOSTADDR": "10.0.0.9",
+                                             "PGSSLMODE": "require", "PGUSER": "u"})
+    assert found == ("PGHOSTADDR", "PGPORT")        # target-affecting ones only
+
+
+def test_an_empty_libpq_variable_is_not_an_override():
+    assert job.libpq_environment_overrides({"PGPORT": "", "PGHOST": "   "}) == ()
+
+
+def test_the_alembic_subprocess_runs_with_the_validated_target_and_no_inherited_override():
+    resolved, refusal = job.database_url({"DATABASE_URL": TARGET_URL, k.TARGET_ENV: TARGET})
+    assert refusal is None
+    env = job.sanitized_environment(resolved, {"PGPORT": "6543", "PGHOSTADDR": "10.0.0.9",
+                                               "PGSERVICE": "elsewhere", "PATH": "/usr/bin",
+                                               "DATABASE_URL": "postgresql://u:p@evil/other"})
+    for name in k.LIBPQ_TARGET_ENV_VARS:
+        assert name not in env, name
+    assert env["DATABASE_URL"] == resolved
+    assert env["PATH"] == "/usr/bin"                # nothing else is disturbed
+
+
+def test_the_subprocess_and_the_inspection_engine_are_given_the_same_target(monkeypatch):
+    """Not two URLs that usually agree: the same validated string."""
+    import sqlalchemy as sa
+
+    seen: Dict[str, Any] = {}
+    monkeypatch.setenv(k.CONFIRMATION_ENV, k.CONFIRMATION_TOKEN)
+    monkeypatch.setenv(k.TARGET_ENV, TARGET)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.railway/nahla")   # no port
+    monkeypatch.setattr(job, "database_directory", lambda: "/tmp")
+    for name in k.LIBPQ_TARGET_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    def _run(**kwargs: Any) -> int:
+        seen["env"] = kwargs["env"]
+        return 0
+
+    states = [observation(revisions=("0107",), present=()),
+              observation(revisions=("0109",), present=k.RUNTIME_RELATIONS)]
+
+    def _observe(url: str) -> Dict[str, Any]:
+        seen.setdefault("observed", url)
+        return states.pop(0)
+
+    monkeypatch.setattr(job, "run_alembic", _run)
+    monkeypatch.setattr(job, "observe", _observe)
+    assert job.main([]) == k.EXIT_SUCCESS
+    assert seen["env"]["DATABASE_URL"] == seen["observed"]
+    # …and that one string names the port explicitly, so nothing infers it.
+    engine = sa.create_engine(seen["observed"])
+    try:
+        _args, connect = engine.dialect.create_connect_args(engine.url)
+    finally:
+        engine.dispose()
+    assert connect["port"] == 5432 and connect["host"] == "db.railway"
+    assert connect["dbname"] == "nahla"
+
+
+def test_a_database_name_with_leading_whitespace_is_a_different_database():
+    """PostgreSQL allows it, so authorising the stripped name authorises another."""
+    declared, refusal = job.authorized_target({k.TARGET_ENV: "db.railway:5432/ nahla"})
+    assert refusal is None and declared["database"] == " nahla"
+    # The declared ' nahla' does not authorise 'nahla'…
+    resolved, refusal = job.database_url(
+        {"DATABASE_URL": TARGET_URL, k.TARGET_ENV: "db.railway:5432/ nahla"})
+    assert resolved is None and refusal == "DATABASE_URL_is_not_the_authorized_target"
+    # …and it does authorise the database actually called ' nahla'. SQLAlchemy
+    # does not unquote the path, so that name is written literally.
+    resolved, refusal = job.database_url(
+        {"DATABASE_URL": "postgresql://u:p@db.railway:5432/ nahla",
+         k.TARGET_ENV: "db.railway:5432/ nahla"})
+    assert refusal is None and resolved is not None
+    assert job.parse_database_url(resolved, {})[0]["database"] == " nahla"
+
+
+def test_the_explicit_url_keeps_the_credentials_it_was_given():
+    bound = job.explicit_url("postgresql://u:s3cret@db.railway/nahla",
+                             {"host": "db.railway", "port": 5432, "database": "nahla"})
+    assert "s3cret" in bound and ":5432/" in bound
 
 
 def test_the_job_will_not_run_without_an_explicitly_authorized_target(monkeypatch, capsys):
@@ -297,6 +404,8 @@ def _prepare(monkeypatch, before, after=None, rc=0):
     monkeypatch.setenv(k.CONFIRMATION_ENV, k.CONFIRMATION_TOKEN)
     monkeypatch.setenv(k.TARGET_ENV, TARGET)
     monkeypatch.setenv("DATABASE_URL", TARGET_URL)
+    for name in k.LIBPQ_TARGET_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(job, "database_directory", lambda: "/tmp")
     states = [before] + ([after] if after is not None else [])
     monkeypatch.setattr(job, "observe", lambda url: states.pop(0) if states else before)

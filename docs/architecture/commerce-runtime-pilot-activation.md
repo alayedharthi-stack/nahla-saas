@@ -109,6 +109,18 @@ image, payment claim, address and payment method all mutate order state and send
 *before* the handler is entered, so a decision taken only inside the handler
 never sees those turns at all. The claim answers nothing by itself.
 
+**The claim is sticky, and it is scoped.** It is carried into the handler and
+honoured only for the exact turn it was established for — tenant, normalised
+recipient and provider message id all have to match, and a claim that cannot be
+re-checked is held rather than released. The dispatcher withheld this turn from
+its own owners on the strength of that claim, so from there a guard refusal, a
+ledger lookup that fails, or an exception asking may stop the runtime
+*executing*; none of them may hand the turn to the legacy path, which would
+answer a message this runtime owns and may already have answered. Withholding is
+not silence chosen over an answer: every gate that can silence a turn still
+decides first, and a claimed turn that was not executed is logged as exactly
+that.
+
 **In the handler**, `pilot_guard.evaluate_pilot_route` is asked **once**, at the
 one point that makes it a routing decision: **after** every gate that can
 silence the turn — the AI pause / handoff / blocklist gate, the billing guard and
@@ -144,7 +156,7 @@ Every condition must hold, and the first that does not decides the outcome:
 | Refusal | Meaning |
 | --- | --- |
 | `pilot_disabled` | the switch is off; nothing is even looked up |
-| `pilot_draining` | the pilot is handing back: new turns go to the legacy path, its own unfinished turns are still finished |
+| `pilot_draining` | this process is out of rotation: it takes no new turn, its own unfinished turns are still finished, and the conversation is released to nobody (§3.5) |
 | `tenant_not_allowlisted` | the tenant is not in an explicit, non-empty list |
 | `recipient_missing` / `recipient_unnormalizable` / `recipient_not_allowlisted` | the conversation is not in an explicit, non-empty list |
 | `model_not_configured` | no model was chosen for this pilot; nothing is looked up |
@@ -197,30 +209,65 @@ never widen what one turn may spend.
 ### 3.5 Handover
 
 Switching the pilot off decides who takes **new** turns; it says nothing about
-the turns the runtime already admitted. `COMMERCE_RUNTIME_PILOT_DRAINING=true`
-is the handover state between on and off: new turns go to the legacy path
-immediately (`pilot_draining`), and a turn this runtime admitted and has not
-finished is still finished when its inbound message is redelivered. Draining
-waives that one rule and nothing else — every other condition above still has to
-pass, including the allowlists, the verified connection and the model.
+the turns the runtime already admitted. A handover is therefore a procedure, not
+a flag, and it is performed against a **shared barrier** in the database —
+`core.commerce_runtime.handover`, stored under one namespaced key in the
+tenant's own `tenant_settings` row, so it needs no migration. Its states are
+`open → draining → settled → open`.
 
-`scripts/operators/commerce_runtime_pilot_handover.py` reads, per allowlisted
-tenant, how much is still in flight: admitted turns with no terminal, reserved
-intents nothing dispatched, attempts with no established outcome, and attempts
-whose established outcome is `unknown`. The last of those counts because an
-unknown send may still be with the provider and may still deliver; treating a
-recorded unknown as resolved would be claiming non-delivery on no evidence.
+A per-process environment flag cannot be the mechanism. It cannot say the same
+word to every replica at the same moment, it cannot be observed from outside the
+process holding it, and it changes at a moment nobody can name; a handover
+decided on one is a handover decided on nothing. `COMMERCE_RUNTIME_PILOT_DRAINING`
+remains, and takes one process out of rotation, but it is not the handover.
 
-What that job can prove is bounded, and it says so rather than overstating it.
-It reads one database, so it is authoritative about *recorded* work and silent
-about what another process is about to do: an admission decided but not yet
-written is invisible, and both flags are read per process, so a replica that has
-not picked up the draining configuration is still admitting while the counts read
-zero. No count can close that gap, so the verdict requires the operator to attest
-that ingress is quiesced across every replica; without it the job reports
-`UNVERIFIED_INGRESS` even when every count is zero. It also refuses an allowlist
-larger than it will inspect, rather than reporting on a silent subset, and runs
-only while draining.
+**Draining withholds; it does not release.** While a tenant is draining, an
+inbound for a conversation this pilot would otherwise own is *buffered* —
+recorded durably, answered by nobody — and settlement is blocked until each
+buffered entry carries a recorded disposition. Releasing such a conversation to
+the legacy path is the one thing a handover must not do: the runtime being
+handed over from may still have a send in flight, and a second answer from a
+second runtime is precisely the outcome being prevented. Traffic the pilot would
+not have owned is untouched: the drain is evaluated after the tenant and
+recipient allowlists, so a recipient outside them keeps exactly the behaviour it
+has today.
+
+**No turn is admitted that a post-drain check cannot see.** The barrier is read
+on the admission transaction's **own connection**, under a tenant-scoped
+advisory lock which the drain takes exclusively. The database therefore orders
+the two, and there are only two orderings: the admission got the shared lock
+first, so the drain waits and the turn is visible to every count taken
+afterwards; or the drain committed first, so the read sees `draining` and the
+admission is refused with nothing written (`handover_barrier_closed`). An
+invocation that selected the runtime *before* the drain cannot slip between a
+zero count and a settlement. A re-entry for a turn already admitted never
+reaches the barrier, which is what lets a draining runtime still finish its own
+work.
+
+`scripts/operators/commerce_runtime_pilot_handover.py` is the executable
+procedure — `status | drain | dispose | settle | reopen`. `settle` exits 0 only
+when the barrier is draining, every live worker has reported the current
+generation, every count is zero, and nothing buffered is undisposed; otherwise
+it exits 1 and names each blocker. The counts are admitted turns with no
+terminal, reserved intents nothing dispatched, attempts with no established
+outcome, and attempts whose established outcome is `unknown`. The last counts
+because an unknown send may still be with the provider and may still deliver;
+treating a recorded unknown as resolved would be claiming non-delivery on no
+evidence, so it blocks rather than ageing out. `settle` writes its evidence
+snapshot before anything reopens, and `reopen` refuses unless the barrier is
+settled.
+
+What the job can prove is bounded, and it says so rather than overstating it.
+Convergence is evidence from the workers themselves — each records the barrier
+generation it is running the first time it evaluates a route after the change —
+not a statement that they were restarted; a worker last seen before the drain
+and still inside the liveness window has an *unknown* disposition and blocks
+settlement by name. Counts are the database's account of recorded work. Neither
+can see a request already on the wire to the provider. There is no attestation
+step and no attestation variable: the verdict rests on the procedure having been
+executed, never on an assertion that the fleet is quiesced. The job also refuses
+an allowlist larger than it will inspect, rather than reporting on a silent
+subset.
 
 The emergency stop — switching the pilot off outright — remains available. It
 stops this process from taking new turns and from recovering; it is not
@@ -357,13 +404,37 @@ They establish:
 They establish **no** model quality, **no** real WhatsApp delivery and **no**
 customer readiness. Those need the live trial.
 
+The handover controls the closure review reproduced are in
+`tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py`,
+each in two arms — the reviewed shape and the corrected one — on the same real
+database, the real admission path, the real ledger and the real operator job.
+
 ### Remaining limitations
 
 * One reply per turn: the pilot sends text, not rich or interactive messages,
   and the bounded rich→text recovery path is not used.
-* A reply the transport accepted is not proof the customer read it; reach stays
+* **Provider acceptance is not confirmed customer delivery.** `replied=True`
+  with a `provider_message_id` means the provider accepted the send; reach stays
   `unknown` until a delivery or read receipt is recorded, and nothing records
-  those yet.
+  those yet. Nothing in the pilot may be read as evidence a customer received or
+  saw a message.
+* **The reply the model composed and the text on the wire are two different
+  things.** The send path may postprocess the LLM's reply intent, so what
+  WhatsApp receives is not always what the model produced. The persisted row
+  keeps the distinction — `commerce_runtime_intent_sha256` for the reserved
+  intent, `final_text_transformed` with `final_transform_reasons` for what was
+  transmitted — rather than presenting one as the other.
+* **The integration is Anthropic-specific.** The loop's contracts are
+  model-neutral, but the shipped adapter, tool-call shape and error handling are
+  written against Anthropic's API; another provider is not a configuration
+  change. Choosing the model is likewise one activation prerequisite among
+  several — the tenant, the verified connection, the recipient handsets, the
+  schema and, where it applies, the authorised shared migration target are each
+  separate and each still required.
+* **A handover depends on the procedure in §3.5 actually being executed** — a
+  recorded drain, convergence the workers themselves reported, zero counts and a
+  disposition for every buffered inbound. It does not depend on, and cannot be
+  satisfied by, an assertion that the fleet is quiesced.
 * A turn left open because its delivery was reserved but never dispatched is
   resumed only by a redelivery of the same inbound identity; there is no
   reconciliation worker, so a turn whose retry never arrives is finished by an

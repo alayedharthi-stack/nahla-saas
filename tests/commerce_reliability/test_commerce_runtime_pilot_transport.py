@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import threading
+import time
 from typing import Any, List, Optional, Tuple
 
 import pytest
@@ -399,3 +400,134 @@ def test_an_acceptance_outranks_a_later_failure_receipt():
         _receipt(lc_.ReceiptKind.FAILED.value, attempt=1, receipt_id=2),
     ]))
     assert outcome.status == dd_.SENT_ACCEPTED and outcome.provider_message_id == "wamid.X"
+
+
+# ── The cleanup claim is arbitration, not a check then a set (F8, re-review) ──
+
+
+class _CheckThenSetCloser:
+    """The arbitration this code used before: an Event, read then set.
+
+    Reproduced here exactly so the regression can show the defect it is about,
+    rather than asserting the corrected behaviour against nothing.
+    """
+
+    def __init__(self, session: Any, *, between: Any) -> None:
+        self._session = session
+        self._closed = threading.Event()
+        self._between = between
+
+    def close(self, _source: str) -> bool:
+        if self._closed.is_set():                   # read …
+            return False
+        self._between()                             # … and the window in between
+        self._closed.set()                          # … then write
+        self._session.close()
+        return True
+
+
+class _Interleaved:
+    """A lock whose critical section both threads try to enter together.
+
+    Entering waits at a two-party barrier. With real mutual exclusion the second
+    thread cannot arrive — the first holds the lock and does not yield inside it
+    — so the barrier times out, and that timeout is the proof. Without mutual
+    exclusion both threads enter and the damaging interleaving is forced rather
+    than hoped for.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.barrier = threading.Barrier(2)
+        self.both_entered = False
+
+    def __enter__(self) -> "_Interleaved":
+        self._inner.__enter__()
+        try:
+            self.barrier.wait(timeout=0.5)
+            self.both_entered = True
+        except threading.BrokenBarrierError:
+            pass
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return bool(self._inner.__exit__(*exc))
+
+
+def _race(closer: Any) -> List[bool]:
+    """Two threads, released together, both closing the same session."""
+    won: List[bool] = []
+    lock = threading.Lock()
+    start = threading.Barrier(2)
+
+    def contend(name: str) -> None:
+        start.wait(5.0)
+        outcome = closer.close(name)
+        with lock:
+            won.append(outcome)
+
+    threads = [threading.Thread(target=contend, args=(name,)) for name in ("idle", "reaper")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10.0)
+        assert not thread.is_alive()
+    return won
+
+
+def test_check_then_set_arbitration_really_does_close_the_session_twice():
+    """The harness is sensitive: the previous arbitration loses this race."""
+    session = _Session()
+    window = threading.Barrier(2)
+
+    def both_have_read() -> None:
+        # Deterministic: neither thread writes until both have read.
+        try:
+            window.wait(timeout=2.0)
+        except threading.BrokenBarrierError:        # pragma: no cover - would be a hang
+            pass
+
+    won = _race(_CheckThenSetCloser(session, between=both_have_read))
+    assert won == [True, True]                      # both believed they had won
+    assert session.closes == 2                      # and the session was closed twice
+
+
+def test_the_corrected_claim_admits_exactly_one_closer_under_the_same_interleaving():
+    session = _Session()
+    interleaved = _Interleaved(threading.Lock())
+    won = _race(entry.ExclusiveCloser(session, turn_id=99, lock=interleaved))
+    # The second thread could not reach the critical section while the first held
+    # it, so the barrier never completed — that is the mutual exclusion.
+    assert interleaved.both_entered is False
+    assert sorted(won) == [False, True]
+    assert session.closes == 1
+
+
+def test_a_claim_is_won_once_however_many_times_it_is_asked():
+    closer = entry.ExclusiveCloser(_Session(), turn_id=1)
+    assert [closer.claim() for _ in range(5)] == [True, False, False, False, False]
+    assert closer.claimed is True
+
+
+def test_the_loser_is_never_blocked_by_a_winner_that_hangs():
+    """Closing happens outside the claim, so a hanging close blocks nobody."""
+    released = threading.Event()
+
+    class _Hanging(_Session):
+        def close(self) -> None:
+            super().close()
+            released.wait(5.0)
+
+    closer = entry.ExclusiveCloser(_Hanging(), turn_id=2)
+    winner = threading.Thread(target=lambda: closer.close("winner"))
+    winner.start()
+    try:
+        for _ in range(200):                        # wait until the winner is inside close()
+            if closer.claimed:
+                break
+            time.sleep(0.01)
+        assert closer.close("loser") is False       # returns at once, does not block
+    finally:
+        released.set()
+        winner.join(10.0)
+    assert not winner.is_alive()
