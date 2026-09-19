@@ -4214,6 +4214,14 @@ async def _dispatch_message(
                         tenant_id=resolved_tenant_id, db=db,
                         wa_message_ts=_wa_msg_ts,
                         wa_msg_id=msg_id or None,
+                        # The reply id is the structured half of a list tap.
+                        # Forwarding only the title would leave the turn with
+                        # words alone, which cannot carry an unambiguous
+                        # choice of a specific row.
+                        inbound_metadata={
+                            "list_reply_id": lr_id,
+                            "list_reply_title": lr_title,
+                        },
                     )
             return
 

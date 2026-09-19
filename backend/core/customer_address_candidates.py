@@ -1101,6 +1101,10 @@ class ResolvedAddress:
     source: str
     selection_state: str
     selection_source: str = ""
+    # The selection operation that approved this revision. It is what lets
+    # a later claim be tied to THE operation a turn performed, rather than
+    # to any selection that happens to exist.
+    selection_operation_ref: str = ""
     selected_at: Optional[datetime] = None
     legacy: bool = False
     # False when the provenance read failed. The row is then classified from
@@ -1141,6 +1145,7 @@ class ResolvedAddress:
             "provenance_known": self.provenance_known,
             "location_pin": self.location_pin,
             "selection_source": self.selection_source,
+            "selection_operation_ref": self.selection_operation_ref,
             "selected": self.selected,
             "sufficient": self.sufficient,
             "missing_requirements": list(self.missing_requirements),
@@ -1289,6 +1294,9 @@ def resolve_customer_address_selection(
                 SELECTION_STATE_SELECTED if is_selected else SELECTION_STATE_CANDIDATE
             ),
             selection_source=str(prov.selection_source or "") if is_selected else "",
+            selection_operation_ref=(
+                str(prov.selection_operation_ref or "") if is_selected else ""
+            ),
             selected_at=prov.selected_at if is_selected else None,
             provenance_known=True,
             location_pin=location_pin,

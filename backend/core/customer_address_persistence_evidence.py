@@ -62,13 +62,24 @@ _RANK = {
 
 @dataclass(frozen=True)
 class AddressOperationAttempt:
-    """The specific save/adoption a turn performed, and on what."""
+    """The specific save/adoption a turn performed, and on what.
+
+    Produced by the writer that performed it — never assembled by the
+    caller that wants to make a claim. Both the revision and the operation
+    reference are required: without the revision an older row would
+    authorize a claim about new content, and without the operation
+    reference any pre-existing selection would authorize a claim that this
+    turn did something.
+    """
 
     operation: AddressOperation = AddressOperation.NONE
     tenant_id: Optional[int] = None
     customer_id: Optional[int] = None
     address_id: Optional[int] = None
     fingerprint: str = ""
+    # Durable identity of the operation, written with the selection and
+    # read back from it. Correlation, not decoration.
+    operation_ref: str = ""
 
     @property
     def is_actionable(self) -> bool:
@@ -77,6 +88,51 @@ class AddressOperationAttempt:
             and bool(self.tenant_id)
             and bool(self.customer_id)
             and bool(self.address_id)
+            and bool(str(self.fingerprint or "").strip())
+            and bool(str(self.operation_ref or "").strip())
+        )
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "operation": self.operation.value,
+            "tenant_id": self.tenant_id,
+            "customer_id": self.customer_id,
+            "address_id": self.address_id,
+            "fingerprint": self.fingerprint,
+            "operation_ref": self.operation_ref,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> "AddressOperationAttempt":
+        """Rebuild a turn-scoped attempt from transported state.
+
+        An unrecognised operation, or a payload that is not a mapping,
+        yields ``NO_OPERATION`` — the refusing direction.
+        """
+        if not isinstance(payload, dict):
+            return NO_OPERATION
+        raw = str(payload.get("operation") or "").strip()
+        try:
+            operation = AddressOperation(raw)
+        except ValueError:
+            return NO_OPERATION
+        if operation is AddressOperation.NONE:
+            return NO_OPERATION
+
+        def _int(key: str) -> Optional[int]:
+            try:
+                value = int(payload.get(key) or 0)
+            except (TypeError, ValueError):
+                return None
+            return value or None
+
+        return cls(
+            operation=operation,
+            tenant_id=_int("tenant_id"),
+            customer_id=_int("customer_id"),
+            address_id=_int("address_id"),
+            fingerprint=str(payload.get("fingerprint") or ""),
+            operation_ref=str(payload.get("operation_ref") or ""),
         )
 
 
@@ -205,8 +261,19 @@ def resolve_customer_address_persistence_evidence(
     target_id = int(attempt.address_id or 0)
     selected = resolution.selected
     if selected is not None and selected.address_id == target_id:
-        if attempt.fingerprint and attempt.fingerprint != selected.fingerprint:
+        # The revision is always checked — ``is_actionable`` guarantees one
+        # is present, so an unknown revision can never reach this branch
+        # and be waved through.
+        if attempt.fingerprint != selected.fingerprint:
             return no_evidence("committed_revision_mismatch")
+        if (
+            attempt.operation is AddressOperation.ADOPT_SELECTION
+            and selected.selection_operation_ref
+            and attempt.operation_ref != selected.selection_operation_ref
+        ):
+            # This selection was committed by a DIFFERENT operation. A
+            # standing selection is not proof that this turn adopted it.
+            return no_evidence("committed_operation_mismatch")
         return CustomerAddressPersistenceEvidence(
             scope=AddressPersistenceScope.SELECTED_DELIVERY_ADDRESS,
             reason="explicit_selection_committed",
@@ -219,7 +286,7 @@ def resolve_customer_address_persistence_evidence(
     for candidate in resolution.selectable:
         if candidate.address_id != target_id:
             continue
-        if attempt.fingerprint and attempt.fingerprint != candidate.fingerprint:
+        if attempt.fingerprint != candidate.fingerprint:
             return no_evidence("committed_revision_mismatch")
         if attempt.operation is AddressOperation.ADOPT_SELECTION:
             # The adoption did not take: the row is there, but it is not

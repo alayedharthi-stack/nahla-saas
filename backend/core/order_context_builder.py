@@ -566,11 +566,26 @@ def _known_previous_from_resolution(resolution: Any) -> Optional[ShippingContext
 
 
 def _known_address_candidates(resolution: Any) -> Tuple[Dict[str, Any], ...]:
+    """Every durable address, current selection first.
+
+    The COMPLETE inventory, not ``candidates + selected``: an address the
+    customer selected and then superseded is still theirs, and dropping it
+    here made "use my Riyadh address again" impossible after they had
+    switched to Jeddah — the agent could no longer see it, so it could no
+    longer be offered or chosen.
+    """
     if resolution is None:
         return ()
-    rows = list(resolution.candidates)
-    if resolution.selected is not None:
-        rows.insert(0, resolution.selected)
+    rows = [row for row in (resolution.addresses or ())]
+    if not rows:
+        rows = list(resolution.candidates)
+        if resolution.selected is not None:
+            rows.insert(0, resolution.selected)
+        return tuple(row.as_dict() for row in rows)
+    selected_id = (
+        resolution.selected.address_id if resolution.selected is not None else None
+    )
+    rows.sort(key=lambda r: (0 if r.address_id == selected_id else 1, r.address_id))
     return tuple(row.as_dict() for row in rows)
 
 

@@ -985,9 +985,19 @@ def _serialize_customer_addresses(
     except Exception:  # noqa: BLE001
         return empty
 
-    rows = list(resolution.candidates)
-    if resolution.selected is not None:
-        rows.insert(0, resolution.selected)
+    # The COMPLETE inventory. Assembling it from ``candidates + selected``
+    # dropped every address the customer had selected and then superseded,
+    # so this read said those addresses did not exist.
+    rows = list(resolution.addresses)
+    if not rows:
+        rows = list(resolution.candidates)
+        if resolution.selected is not None:
+            rows.insert(0, resolution.selected)
+    else:
+        selected_id = (
+            resolution.selected.address_id if resolution.selected is not None else None
+        )
+        rows.sort(key=lambda r: (0 if r.address_id == selected_id else 1, r.address_id))
     return {
         "addresses": [row.as_dict() for row in rows],
         "selected_address": (

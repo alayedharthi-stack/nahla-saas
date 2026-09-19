@@ -100,6 +100,7 @@ SALLA_ID = "SC-PG-1"
 CITY = "الرياض"
 SHORT_CODE = "RRRD1234"
 STREET = "حي النرجس، شارع 10"
+PG_OPERATION_REF = "pg-op-1"
 
 
 def _pg_required() -> bool:
@@ -454,12 +455,12 @@ def test_committed_selection_is_the_only_adoption_evidence(
         save_attempt = AddressOperationAttempt(
             operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant_id,
             customer_id=customer_id, address_id=imported.address_id,
-            fingerprint=imported.fingerprint,
+            fingerprint=imported.fingerprint, operation_ref=PG_OPERATION_REF,
         )
         adopt_attempt = AddressOperationAttempt(
             operation=AddressOperation.ADOPT_SELECTION, tenant_id=tenant_id,
             customer_id=customer_id, address_id=imported.address_id,
-            fingerprint=imported.fingerprint,
+            fingerprint=imported.fingerprint, operation_ref=PG_OPERATION_REF,
         )
         candidate_evidence = resolve_customer_address_persistence_evidence(
             db, tenant_id=tenant_id, customer_id=customer_id, attempt=save_attempt,
@@ -478,6 +479,7 @@ def test_committed_selection_is_the_only_adoption_evidence(
             address_id=imported.address_id,
             selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
             expected_fingerprint=imported.fingerprint,
+            operation_ref=PG_OPERATION_REF,
         )
         db.commit()
     finally:
@@ -495,7 +497,7 @@ def test_committed_selection_is_the_only_adoption_evidence(
             attempt=AddressOperationAttempt(
                 operation=AddressOperation.ADOPT_SELECTION, tenant_id=tenant_id,
                 customer_id=customer_id, address_id=imported.address_id,
-                fingerprint=imported.fingerprint,
+                fingerprint=imported.fingerprint, operation_ref=PG_OPERATION_REF,
             ),
         )
         assert evidence.scope is AddressPersistenceScope.SELECTED_DELIVERY_ADDRESS
@@ -662,7 +664,7 @@ def test_evidence_is_absent_before_commit_present_after_and_gone_after_rollback(
         attempt = AddressOperationAttempt(
             operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant_id,
             customer_id=customer_id, address_id=imported.address_id,
-            fingerprint=imported.fingerprint,
+            fingerprint=imported.fingerprint, operation_ref=PG_OPERATION_REF,
         )
 
         # Flushed, not committed: the writer's own session can see it, an
@@ -691,7 +693,7 @@ def test_evidence_is_absent_before_commit_present_after_and_gone_after_rollback(
         attempt2 = AddressOperationAttempt(
             operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant_id2,
             customer_id=customer_id2, address_id=imported2.address_id,
-            fingerprint=imported2.fingerprint,
+            fingerprint=imported2.fingerprint, operation_ref=PG_OPERATION_REF,
         )
         rolled_back.rollback()
         evidence = resolve_customer_address_persistence_evidence(

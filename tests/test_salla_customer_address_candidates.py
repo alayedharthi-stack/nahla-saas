@@ -80,7 +80,11 @@ from modules.ai.order_flow_v2.checkout_context import (  # noqa: E402
     apply_delivery_continuation_address_patch,
     apply_explicit_address_selection,
     apply_previous_address_confirmation,
+    apply_structured_address_consent,
+    consent_action_id,
     load_checkout_reply_context,
+    read_offered_address,
+    record_presented_address_offer,
 )
 
 # Neutral generic commerce fixture — no merchant-specific assumptions.
@@ -577,10 +581,15 @@ def test_skipped_writer_and_unavailable_capability_yield_no_evidence():
         assert evidence.allows_adopted_address_claim() is False
 
 
-def _save_attempt(tenant, customer, result, operation=AddressOperation.SAVE_CANDIDATE):
+OPERATION_REF = "op-test-1"
+
+
+def _save_attempt(tenant, customer, result, operation=AddressOperation.SAVE_CANDIDATE,
+                  operation_ref=OPERATION_REF):
     return AddressOperationAttempt(
         operation=operation, tenant_id=tenant.id, customer_id=customer.id,
         address_id=result.address_id, fingerprint=result.fingerprint,
+        operation_ref=operation_ref,
     )
 
 
@@ -606,7 +615,7 @@ def test_operation_for_another_customer_or_tenant_is_refused():
     attempt = AddressOperationAttempt(
         operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant.id,
         customer_id=customer.id + 999, address_id=imported.address_id,
-        fingerprint=imported.fingerprint,
+        fingerprint=imported.fingerprint, operation_ref=OPERATION_REF,
     )
     evidence = resolve_customer_address_persistence_evidence(
         db, tenant_id=tenant.id, customer_id=customer.id, attempt=attempt,
@@ -623,6 +632,7 @@ def test_operation_on_an_unknown_address_supports_nothing():
     attempt = AddressOperationAttempt(
         operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant.id,
         customer_id=customer.id, address_id=999_999, fingerprint="whatever",
+        operation_ref=OPERATION_REF,
     )
     evidence = resolve_customer_address_persistence_evidence(
         db, tenant_id=tenant.id, customer_id=customer.id, attempt=attempt,
@@ -640,6 +650,7 @@ def test_mismatched_revision_supports_nothing():
         operation=AddressOperation.SAVE_CANDIDATE, tenant_id=tenant.id,
         customer_id=customer.id, address_id=imported.address_id,
         fingerprint="a-revision-that-was-never-committed",
+        operation_ref=OPERATION_REF,
     )
     evidence = resolve_customer_address_persistence_evidence(
         db, tenant_id=tenant.id, customer_id=customer.id, attempt=attempt,
@@ -689,6 +700,7 @@ def test_committed_selection_supports_adopted_claim():
         address_id=imported.address_id,
         selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
         expected_fingerprint=imported.fingerprint,
+        operation_ref=OPERATION_REF,
     )
     db.commit()
     evidence = resolve_customer_address_persistence_evidence(
@@ -747,6 +759,7 @@ def test_committed_selection_lets_the_claim_through_unchanged():
         address_id=imported.address_id,
         selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
         expected_fingerprint=imported.fingerprint,
+        operation_ref=OPERATION_REF,
     )
     db.commit()
     evidence = resolve_customer_address_persistence_evidence(
@@ -845,7 +858,11 @@ def test_full_removal_is_reported_so_the_send_can_be_suppressed():
     assert result.reply.strip() == ""
 
 
-def test_pipeline_suppresses_the_send_when_nothing_truthful_remains():
+def test_pipeline_recovers_truthfully_when_nothing_is_left_to_send():
+    """Whole removal must not become silence — a guard corrects, never mutes."""
+    from core.fallback_policy import (  # noqa: PLC0415
+        is_compose_failure_fallback,
+    )
     from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
         run_post_compose_truth_guards,
     )
@@ -853,9 +870,10 @@ def test_pipeline_suppresses_the_send_when_nothing_truthful_remains():
     db, _ = _make_db()
     tenant, customer = _seed(db)
     convo = _conversation(db, tenant, customer)
+    unsupported = "تم حفظ عنوانك واعتماده للتوصيل يا تركي"
     result = run_post_compose_truth_guards(
         db=db, tenant_id=tenant.id, to=CUSTOMER_PHONE, text="وين توصلون؟",
-        reply="تم حفظ عنوانك واعتماده للتوصيل يا تركي", convo=convo,
+        reply=unsupported, convo=convo,
         inbound_metadata={}, brain_handoff=False, brain_nc_block=False,
         brain_nc_category="", br_action="", brain_persona_compose_event=None,
         mode="primary", conversation_id=convo.id,
@@ -864,11 +882,84 @@ def test_pipeline_suppresses_the_send_when_nothing_truthful_remains():
         e for e in result.events if e.guard == "customer_address_save_claim_guard"
     )
     assert event.modified is True
-    # Audited, not silent: the send is suppressed rather than delivering an
-    # empty string or restoring the unsupported claim.
-    assert event.suppressed_send is True
     assert "scrubbed_empty" in (event.reason or "")
-    assert result.reply.strip() == ""
+    # Something truthful is still delivered…
+    assert result.reply.strip()
+    assert is_compose_failure_fallback(result.reply)
+    assert event.suppressed_send is False
+    # …and the removed claim is not restored anywhere in it.
+    assert "تم حفظ عنوانك" not in result.reply
+    assert "اعتماده" not in result.reply
+
+
+def test_pipeline_lets_a_committed_acknowledgement_through():
+    """The positive runtime case: a real, committed selection may be stated.
+
+    This goes through the shared pipeline, not the guard helper, because
+    that is where the evidence used to be lost.
+    """
+    from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
+        run_post_compose_truth_guards,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+
+    consent = _consent_meta(imported.address_id, turn_ref="wamid.in-ack")
+    patch = apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=consent,
+    )
+    db.commit()
+    assert patch.get("customer_confirmed_previous_address") is True
+
+    reply = "تم حفظ عنوانك واعتماده للتوصيل."
+    result = run_post_compose_truth_guards(
+        db=db, tenant_id=tenant.id, to=CUSTOMER_PHONE, text="نعم",
+        reply=reply, convo=convo, inbound_metadata=consent,
+        brain_handoff=False, brain_nc_block=False, brain_nc_category="",
+        br_action="", brain_persona_compose_event=None, mode="primary",
+        conversation_id=convo.id,
+    )
+    assert result.reply == reply
+    event = next(
+        e for e in result.events if e.guard == "customer_address_save_claim_guard"
+    )
+    assert event.modified is False
+
+
+def test_pipeline_refuses_an_acknowledgement_from_an_earlier_turn():
+    """Last turn's operation is not this turn's; the claim goes."""
+    from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
+        run_post_compose_truth_guards,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+    apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(imported.address_id, turn_ref="wamid.in-1"),
+    )
+    db.commit()
+
+    result = run_post_compose_truth_guards(
+        db=db, tenant_id=tenant.id, to=CUSTOMER_PHONE, text="كم السعر؟",
+        reply="تم حفظ عنوانك واعتماده للتوصيل. كم كمية الطلب؟", convo=convo,
+        inbound_metadata={"wa_message_id": "wamid.in-2"},
+        brain_handoff=False, brain_nc_block=False, brain_nc_category="",
+        br_action="", brain_persona_compose_event=None, mode="primary",
+        conversation_id=convo.id,
+    )
+    assert "تم حفظ عنوانك" not in result.reply
+    assert "كم كمية الطلب؟" in result.reply
 
 
 def test_pipeline_leaves_a_truthful_negative_intact():
@@ -1026,70 +1117,112 @@ def test_partial_candidate_keeps_known_fields_and_asks_only_what_is_missing():
     assert result.address_id is not None
 
 
-def _offer_then_confirm(db, tenant, customer, convo, message="نفس العنوان السابق"):
-    """The real lifecycle: the address is OFFERED, then confirmed."""
-    load_checkout_reply_context(
+def _load_ctx(db, tenant, convo, order_prep=None):
+    ctx = load_checkout_reply_context(
         db, tenant_id=tenant.id, conversation=convo,
-        customer_phone=CUSTOMER_PHONE, order_prep={}, brain_state={},
+        customer_phone=CUSTOMER_PHONE, order_prep=dict(order_prep or {}),
+        brain_state={},
     )
     db.commit()
-    patch = apply_previous_address_confirmation(
+    return ctx
+
+
+def _present(db, tenant, convo, reply_ctx, delivery_ref="wamid.out-1"):
+    """The DELIVERY boundary: a reply carrying the address was sent."""
+    recorded = record_presented_address_offer(
         db, tenant_id=tenant.id, conversation=convo,
-        customer_phone=CUSTOMER_PHONE, order_prep={}, message=message,
+        presentation=reply_ctx.presentation, delivery_ref=delivery_ref,
     )
     db.commit()
-    return patch
+    return recorded
 
 
-def test_confirmation_path_records_the_selection_exactly_once():
+def _consent_meta(address_id, turn_ref="wamid.in-1"):
+    """A structured customer action naming exactly one address."""
+    return {"button_id": consent_action_id(address_id), "wa_message_id": turn_ref}
+
+
+def test_a_context_read_alone_never_records_an_offer():
+    """Reading the customer's addresses is not showing them to anyone."""
     db, _ = _make_db()
     tenant, customer = _seed(db)
-    upsert_imported_address_candidate(
-        db, tenant_id=tenant.id, customer_id=customer.id,
-        components=AddressComponents(city=CITY, short_address_code=SHORT_CODE),
-        source_ref=SALLA_CUSTOMER_ID,
-        source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
-    )
+    imported = _import(db, tenant, customer, _payload())
     db.commit()
     convo = _conversation(db, tenant, customer)
 
-    for _ in range(2):
-        patch = _offer_then_confirm(db, tenant, customer, convo)
-        assert patch.get("customer_confirmed_previous_address") is True
-
-    rows = db.query(CustomerAddressProvenance).all()
-    assert len(rows) == 1
-    assert rows[0].selection_state == "selected"
-    assert db.query(CustomerAddress).count() == 1
-
-
-def test_confirmation_without_a_prior_offer_selects_nothing():
-    """Consent is consent about an offer. An inquiry is not an offer."""
-    db, _ = _make_db()
-    tenant, customer = _seed(db)
-    upsert_imported_address_candidate(
-        db, tenant_id=tenant.id, customer_id=customer.id,
-        components=AddressComponents(city=CITY, short_address_code=SHORT_CODE),
-        source_ref=SALLA_CUSTOMER_ID,
-        source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
-    )
-    db.commit()
-    convo = _conversation(db, tenant, customer)
-
-    patch = apply_previous_address_confirmation(
-        db, tenant_id=tenant.id, conversation=convo,
-        customer_phone=CUSTOMER_PHONE, order_prep={},
-        message="هل عنواني محفوظ عندكم؟",
-    )
-    db.commit()
-    assert patch == {}
+    reply_ctx = _load_ctx(db, tenant, convo)
+    # The revision is PREPARED for a reply that may or may not be sent…
+    assert reply_ctx.presentation.address_id == imported.address_id
+    # …but nothing was recorded, so a structured consent has nothing to
+    # bind to yet.
+    assert read_offered_address(tenant_id=tenant.id, conversation=convo) is None
+    assert apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(imported.address_id),
+    ) == {}
     assert resolve_customer_address_selection(
         db, tenant_id=tenant.id, customer_id=customer.id,
     ).selected is None
 
 
-def test_confirmation_refuses_a_revision_the_customer_never_saw():
-    """A refresh between the offer and the reply invalidates the consent."""
+def test_structured_consent_after_a_real_presentation_selects_once():
+    """The positive outcome: a customer who taps the choice gets it saved."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    assert _present(db, tenant, convo, _load_ctx(db, tenant, convo)) is True
+
+    for turn in ("wamid.in-1", "wamid.in-2"):
+        patch = apply_structured_address_consent(
+            db, tenant_id=tenant.id, conversation=convo, order_prep={},
+            inbound_metadata=_consent_meta(imported.address_id, turn_ref=turn),
+        )
+        db.commit()
+        assert patch["customer_confirmed_previous_address"] is True
+        assert patch["shipping_source"] == "customer_selected_address"
+
+    rows = db.query(CustomerAddressProvenance).all()
+    assert len(rows) == 1
+    assert rows[0].selection_state == "selected"
+    assert db.query(CustomerAddress).count() == 1
+    assert resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected.address_id == imported.address_id
+
+
+@pytest.mark.parametrize("message", [
+    "هل عنواني محفوظ عندكم؟",
+    "نفس العنوان السابق",
+])
+def test_free_text_never_writes_a_durable_selection(message):
+    """A question and a confirmation phrase are indistinguishable to words.
+
+    Both read as ``previous_address_confirmed`` by the platform's intent
+    detector, so neither may write the durable act. The turn's checkout
+    still continues — only the durable selection needs a durable signal.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+
+    patch = apply_previous_address_confirmation(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={}, message=message,
+    )
+    db.commit()
+    assert patch.get("address_selection_durable") is False
+    assert resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected is None
+
+
+def test_consent_refuses_a_revision_the_customer_never_saw():
+    """A refresh between the presentation and the tap invalidates consent."""
     db, _ = _make_db()
     tenant, customer = _seed(db)
     imported = upsert_imported_address_candidate(
@@ -1101,24 +1234,71 @@ def test_confirmation_refuses_a_revision_the_customer_never_saw():
     )
     db.commit()
     convo = _conversation(db, tenant, customer)
-    load_checkout_reply_context(
-        db, tenant_id=tenant.id, conversation=convo,
-        customer_phone=CUSTOMER_PHONE, order_prep={}, brain_state={},
-    )
-    db.commit()
+    _present(db, tenant, convo, _load_ctx(db, tenant, convo))
 
     row = db.query(CustomerAddress).filter_by(id=imported.address_id).one()
     row.address_text = "شارع لم يره العميل"
     db.add(row)
     db.commit()
 
-    patch = apply_previous_address_confirmation(
-        db, tenant_id=tenant.id, conversation=convo,
-        customer_phone=CUSTOMER_PHONE, order_prep={},
-        message="نفس العنوان السابق",
-    )
+    assert apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(imported.address_id),
+    ) == {}
     db.commit()
-    assert patch == {}
+    assert resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected is None
+
+
+def test_a_second_context_read_never_advances_the_recorded_offer():
+    """A refreshed, unpresented revision must not become the live offer."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    first = _load_ctx(db, tenant, convo)
+    _present(db, tenant, convo, first)
+    offered = read_offered_address(tenant_id=tenant.id, conversation=convo)
+
+    # The source refreshes the row, then context is read again — without
+    # anything being sent to the customer.
+    row = db.query(CustomerAddress).filter_by(id=imported.address_id).one()
+    row.address_text = "شارع لم يره العميل"
+    db.add(row)
+    db.commit()
+    _load_ctx(db, tenant, convo)
+
+    still = read_offered_address(tenant_id=tenant.id, conversation=convo)
+    assert still["fingerprint"] == offered["fingerprint"]
+    # And the consent now refuses, because the live row is not what was shown.
+    assert apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(imported.address_id),
+    ) == {}
+
+
+def test_consent_from_another_customers_conversation_is_refused():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+
+    other = Customer(tenant_id=tenant.id, phone="+966500000777",
+                     normalized_phone="+966500000777")
+    db.add(other)
+    db.commit()
+    convo.customer_id = other.id
+    db.add(convo)
+    db.commit()
+
+    assert apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(imported.address_id),
+    ) == {}
     assert resolve_customer_address_selection(
         db, tenant_id=tenant.id, customer_id=customer.id,
     ).selected is None
@@ -1337,19 +1517,16 @@ def test_several_candidates_are_offered_for_explicit_selection():
     a, b = _two_candidates(db, tenant, customer)
     convo = _conversation(db, tenant, customer)
 
-    reply_ctx = load_checkout_reply_context(
-        db, tenant_id=tenant.id, conversation=convo,
-        customer_phone=CUSTOMER_PHONE, order_prep={}, brain_state={},
-    )
-    db.commit()
+    reply_ctx = _load_ctx(db, tenant, convo)
     assert reply_ctx.known_previous == {}
     assert {c["address_id"] for c in reply_ctx.address_choices} == {
         a.address_id, b.address_id
     }
+    _present(db, tenant, convo, reply_ctx)
 
-    patch = apply_explicit_address_selection(
-        db, tenant_id=tenant.id, conversation=convo, address_id=b.address_id,
-        order_prep={},
+    patch = apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(b.address_id),
     )
     db.commit()
     assert patch["city"] == "جدة"
@@ -1358,6 +1535,43 @@ def test_several_candidates_are_offered_for_explicit_selection():
         db, tenant_id=tenant.id, customer_id=customer.id,
     )
     assert resolution.selected.address_id == b.address_id
+
+
+def test_checkout_level_a_then_b_then_a_selection_round_trip():
+    """R5: the customer may go back to an address they selected before.
+
+    Every step goes through the public checkout helpers, so a projection
+    that quietly drops superseded selections fails here rather than only
+    in the core resolver.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+
+    chosen = []
+    for target in (a, b, a):
+        reply_ctx = _load_ctx(db, tenant, convo)
+        # The full inventory stays offerable, whatever is selected now.
+        assert {c["address_id"] for c in reply_ctx.address_choices} == {
+            a.address_id, b.address_id
+        }
+        _present(db, tenant, convo, reply_ctx)
+        patch = apply_structured_address_consent(
+            db, tenant_id=tenant.id, conversation=convo, order_prep={},
+            inbound_metadata=_consent_meta(target.address_id,
+                                           turn_ref=f"wamid.in-{target.address_id}-{len(chosen)}"),
+        )
+        db.commit()
+        assert patch.get("customer_confirmed_previous_address") is True
+        resolution = resolve_customer_address_selection(
+            db, tenant_id=tenant.id, customer_id=customer.id,
+        )
+        assert resolution.selected.address_id == target.address_id
+        chosen.append(resolution.selected.address_id)
+
+    assert chosen == [a.address_id, b.address_id, a.address_id]
+    assert db.query(CustomerAddress).filter_by(tenant_id=tenant.id).count() == 2
 
 
 def test_selecting_an_address_that_was_never_offered_is_refused():
@@ -1411,3 +1625,158 @@ def test_another_conversation_offer_cannot_select_for_this_customer():
         db, tenant_id=other_tenant.id, conversation=convo, address_id=a.address_id,
         order_prep={},
     ) == {}
+
+
+# ── R2: grounded recovery, at the boundary that still has a composer ─────
+
+def test_whole_removal_asks_for_one_natural_recomposition():
+    """Composition is attempted BEFORE any deterministic line.
+
+    The composer is stubbed; no provider is called. What is under test is
+    the contract: one more natural candidate is requested, revalidated,
+    and used when it is truthful.
+    """
+    import asyncio  # noqa: PLC0415
+
+    from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # noqa: PLC0415
+        apply_customer_address_save_claim_guard,
+        finalize_address_claim_after_authorized_recompose,
+        invoke_authorized_address_claim_recompose,
+    )
+
+    first = apply_customer_address_save_claim_guard(
+        reply="تم حفظ عنوانك واعتماده للتوصيل", evidence=None,
+    )
+    assert first.scrubbed_empty is True
+    assert first.requires_grounded_recompose is True
+
+    class _Composer:
+        def __init__(self):
+            self.calls = 0
+
+        async def compose(self, decision, result, ctx):
+            self.calls += 1
+            return "وش تحب نكمل فيه؟"
+
+    composer = _Composer()
+    text, failed, calls = asyncio.run(
+        invoke_authorized_address_claim_recompose(composer, None, None, None)
+    )
+    assert calls == 1 and composer.calls == 1 and failed is False
+
+    second = apply_customer_address_save_claim_guard(
+        reply=text, evidence=None, allow_recompose=False,
+    )
+    data = {}
+    final = finalize_address_claim_after_authorized_recompose(
+        second_pass=second, recomposed_reply=text, result_data=data,
+        compose_failed=failed,
+    )
+    # The LLM's own words are delivered — no template, no fallback.
+    assert final == "وش تحب نكمل فيه؟"
+    assert data.get("compose_source") != "fallback_deterministic"
+
+
+def test_a_failed_recomposition_falls_back_with_auditable_metadata():
+    """Only after a genuine compose failure, and it must be measurable."""
+    import asyncio  # noqa: PLC0415
+
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+    from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # noqa: PLC0415
+        ADDRESS_CLAIM_FALLBACK_ACTION,
+        ADDRESS_CLAIM_FALLBACK_REASON,
+        apply_customer_address_save_claim_guard,
+        finalize_address_claim_after_authorized_recompose,
+        invoke_authorized_address_claim_recompose,
+    )
+
+    class _BrokenComposer:
+        async def compose(self, decision, result, ctx):
+            raise RuntimeError("provider unavailable")
+
+    text, failed, _calls = asyncio.run(
+        invoke_authorized_address_claim_recompose(_BrokenComposer(), None, None, None)
+    )
+    assert failed is True and not text.strip()
+
+    second = apply_customer_address_save_claim_guard(
+        reply=text, evidence=None, allow_recompose=False,
+    )
+    data = {}
+    final = finalize_address_claim_after_authorized_recompose(
+        second_pass=second, recomposed_reply=text, result_data=data,
+        compose_failed=failed,
+    )
+    assert final.strip()
+    assert is_compose_failure_fallback(final)
+    assert data["compose_source"] == "fallback_deterministic"
+    assert data["fallback_reason"] == ADDRESS_CLAIM_FALLBACK_REASON
+    assert data["fallback_action_type"] == ADDRESS_CLAIM_FALLBACK_ACTION
+    assert data["chosen_path"] == ADDRESS_CLAIM_FALLBACK_ACTION
+    assert data["llm_candidate_present"] is True
+    assert data["final_text_transformed"] is True
+    assert "customer_address_save_claim_guard" in data["final_transform_reasons"]
+
+
+def test_a_recomposition_that_repeats_the_claim_is_not_restored():
+    """A second candidate carrying the same false claim never ships."""
+    from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # noqa: PLC0415
+        apply_customer_address_save_claim_guard,
+        finalize_address_claim_after_authorized_recompose,
+    )
+
+    repeated = "تم حفظ عنوانك واعتماده للتوصيل"
+    second = apply_customer_address_save_claim_guard(
+        reply=repeated, evidence=None, allow_recompose=False,
+    )
+    data = {}
+    final = finalize_address_claim_after_authorized_recompose(
+        second_pass=second, recomposed_reply=repeated, result_data=data,
+        compose_failed=False,
+    )
+    assert "تم حفظ عنوانك" not in final
+    assert final.strip()
+    assert data["compose_source"] == "fallback_deterministic"
+
+
+def test_the_brain_pipeline_runs_the_address_claim_stage_with_a_composer():
+    """The stage lives where a composer is still reachable."""
+    from pathlib import Path  # noqa: PLC0415
+
+    source = Path("backend/modules/ai/brain/pipeline.py").read_text(encoding="utf-8")
+    assert "invoke_authorized_address_claim_recompose" in source
+    assert "read_turn_address_operation_for_conversation" in source
+    assert "finalize_address_claim_after_authorized_recompose" in source
+
+
+@pytest.mark.parametrize("reply,blocked", [
+    # A question about something else never exempts a completed assertion.
+    ("تم حفظ عنوانك هل تريد إكمال الطلب؟", True),
+    ("تم حفظ عنوانك. هل تريد إكمال الطلب؟", True),
+    # "without any problem" is not a denial that saving happened.
+    ("عنوانك محفوظ بدون أي مشكلة", True),
+    # Genuine negatives and questions stay untouched.
+    ("لم يتم حفظ عنوانك", False),
+    ("ما تم حفظ عنوانك بعد، هل ترغب بإرساله؟", False),
+    ("هل تريد اعتماد عنوانك؟", False),
+    ("عنوانك غير محفوظ عندنا", False),
+    ("لا يمكننا حفظ عنوانك حالياً", False),
+])
+def test_clause_level_truth_without_a_phrase_blacklist(reply, blocked):
+    result = apply_customer_address_save_claim_guard(reply=reply, evidence=None)
+    if blocked:
+        assert result.action == "blocked_unsupported_address_save_claim"
+        assert "تم حفظ عنوانك" not in result.reply
+        assert "عنوانك محفوظ" not in result.reply
+    else:
+        assert result.action == "allowed"
+        assert result.reply == reply
+
+
+def test_the_honest_half_of_a_mixed_reply_survives():
+    """Clause granularity: only the unsupported assertion is removed."""
+    result = apply_customer_address_save_claim_guard(
+        reply="تم حفظ عنوانك هل تريد إكمال الطلب؟", evidence=None,
+    )
+    assert result.reply.strip() == "هل تريد إكمال الطلب؟"
+    assert result.scrubbed_empty is False
