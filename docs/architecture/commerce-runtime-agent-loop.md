@@ -101,7 +101,12 @@ arguments) terminates the loop rather than looping. Cancellation is checked
 between steps. Every stop is explicit and named: `budget_exhausted`,
 `deadline_exceeded`, `cancelled`, `repeated_tool_request`,
 `verification_failed`, `provider_*`, `unsupported_capability`,
-`ownership_lost`, `turn_not_eligible`, `turn_completed`.
+`ownership_lost`, `turn_not_eligible`, `turn_completed`. The vocabulary is
+closed **and** exhaustive: every declared reason is one the loop raises. A
+refused or timed-out tool is an *observation*, not a stop, so the loop reports
+it and keeps its budget; a provider call that runs long is caught by the
+deadline, and a per-call provider timeout belongs to a future adapter, which
+reports it as `ProviderFailure`.
 
 Budget information is **persisted** in the conversation's versioned state
 under the reserved key `agent_loop` (steps used, tool calls used, elapsed

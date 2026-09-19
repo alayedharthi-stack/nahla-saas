@@ -192,6 +192,15 @@ def test_progress_lives_in_the_versioned_state_payload_and_fits_its_bound() -> N
 # ── Scripted provider ────────────────────────────────────────────────────────
 
 
+def test_every_declared_stop_reason_is_one_the_loop_can_actually_raise() -> None:
+    """The stop vocabulary is closed *and* exhaustive: no member is decorative."""
+    import pathlib  # noqa: PLC0415
+
+    source = pathlib.Path("backend/core/commerce_runtime/agent_loop.py").read_text(encoding="utf-8")
+    unraisable = [reason.name for reason in ac.StopReason if f"StopReason.{reason.name}.value" not in source]
+    assert unraisable == []
+
+
 def test_the_scripted_provider_is_deterministic_and_fails_explicitly_when_exhausted() -> None:
     provider = sp.ScriptedReasoningProvider([sp.reply("مرحبًا")])
     request = ac.ProviderRequest(step_no=1, context=ac.AuthorizedContext(1, "live", 1, 1, {}, {}), tools=(),

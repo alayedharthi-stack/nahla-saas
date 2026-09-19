@@ -83,11 +83,13 @@ class StopReason(str, enum.Enum):
     PROVIDER_FAILURE = "provider_failure"
     PROVIDER_BLOCKED = "provider_blocked"
     PROVIDER_INVALID = "provider_invalid"
-    PROVIDER_TIMEOUT = "provider_timeout"
     UNSUPPORTED_CAPABILITY = "unsupported_capability"
     VERIFICATION_FAILED = "verification_failed"
     REPEATED_TOOL_REQUEST = "repeated_tool_request"
-    TOOL_REFUSED = "tool_refused"
+    # A refused or timed-out tool is an *observation*, not a stop: the loop
+    # reports it to the provider and keeps its budget. A provider call that
+    # runs long is caught by the loop's deadline; a per-call provider timeout
+    # belongs to a future adapter, which reports it as ProviderFailure.
 
 
 class LoopStatus(str, enum.Enum):
