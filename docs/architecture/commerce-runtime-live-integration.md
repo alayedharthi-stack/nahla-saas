@@ -1,7 +1,9 @@
 # Commerce runtime — live reasoning provider and real read tools (contract)
 
-Status: merged behind no flag and reachable from no runtime path yet. This
-document covers the first half of the owner-authorised pilot integration:
+Status: merged. It was reachable from no runtime path when written; the pilot
+change that follows it connects delivery and adds the one fail-closed routing
+decision (`commerce-runtime-pilot-activation.md`). This document covers the
+first half of the owner-authorised pilot integration:
 items 1, 2 and 4 of *What a real reasoning adapter still needs* in
 `commerce-runtime-agent-loop.md`. Delivery, routing, the pilot allowlist and
 activation are a separate change and are **not** described here.
