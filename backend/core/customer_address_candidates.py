@@ -52,9 +52,14 @@ def _supports_savepoints(db: Any) -> bool:
     """
     if getattr(db, "begin_nested", None) is None:
         return False
+    return _is_postgres(db)
+
+
+def _is_postgres(db: Any) -> bool:
+    """True when this session speaks to PostgreSQL."""
     try:
         return db.get_bind().dialect.name == "postgresql"
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unidentifiable bind is treated as "no savepoints", the conservative branch
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unidentifiable bind is treated as "not PostgreSQL", the conservative branch for every caller
         return False
 
 
@@ -492,7 +497,7 @@ def _acquire_customer_address_scope_lock(
     """
     from sqlalchemy import text  # noqa: PLC0415
 
-    if not _supports_savepoints(db):
+    if not _is_postgres(db):
         return LOCK_UNSUPPORTED
     statement = text(
         "SELECT pg_try_advisory_xact_lock(:k, hashtext(:scope))"
