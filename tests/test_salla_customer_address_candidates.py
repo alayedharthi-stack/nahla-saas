@@ -1767,8 +1767,15 @@ def test_the_brain_pipeline_runs_the_address_claim_stage_with_a_composer():
     ("تم حفظ عنوانك. هل تريد إكمال الطلب؟", True),
     # "without any problem" is not a denial that saving happened.
     ("عنوانك محفوظ بدون أي مشكلة", True),
+    # A negation that governs a DIFFERENT statement exempts nothing. The
+    # attached "و" marks where that other statement ends…
+    ("لا يوجد أي مشكلة وتم حفظ عنوانك", True),
+    # …and an adversative connective starts a new clause outright.
+    ("لم نغير طلبك لكن تم حفظ عنوانك", True),
+    ("لم نغير طلبك بس تم حفظ عنوانك", True),
     # Genuine negatives and questions stay untouched.
     ("لم يتم حفظ عنوانك", False),
+    ("لم يسبق أن تم حفظ عنوانك", False),
     ("ما تم حفظ عنوانك بعد، هل ترغب بإرساله؟", False),
     ("هل تريد اعتماد عنوانك؟", False),
     ("عنوانك غير محفوظ عندنا", False),
@@ -2143,3 +2150,110 @@ def test_the_webhook_sends_address_choices_on_the_interactive_surface():
     # Recorded from the SEND result, never from the inbound turn.
     assert 'delivery_ref=str(_of2_sink.get("wamid") or "")' in source
     assert 'duplicate_suppressed=bool(' in source
+
+
+# ── I6 / I7: identity of the committed operation, provenance of the text ─
+
+def test_an_unidentified_committed_selection_supports_no_new_claim():
+    """I6: a real selection that cannot say WHICH operation made it.
+
+    The confirmed-shipping writer records a genuine, reusable selection
+    with no operation reference. That row is not evidence that this turn
+    adopted anything — an arbitrary attempt naming the same row and
+    revision used to receive both claim permissions.
+    """
+    from core.customer_shipping_address_writer import (  # noqa: PLC0415
+        persist_customer_shipping_address_if_confirmed,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    persisted, row = persist_customer_shipping_address_if_confirmed(
+        db, tenant_id=tenant.id, customer_id=customer.id, order_id=None,
+        snapshot={"city": "جدة", "short_address_code": "JJJD5678"},
+        order_prep={"customer_confirmed_previous_address": True},
+        confirmed_reason="test")
+    db.commit()
+    assert persisted is True
+
+    resolution = resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id)
+    # It IS a selection, and reuse of it is unchanged.
+    assert resolution.selected is not None
+    assert resolution.selected.selection_operation_ref == ""
+
+    evidence = resolve_customer_address_persistence_evidence(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        attempt=AddressOperationAttempt(
+            operation=AddressOperation.ADOPT_SELECTION, tenant_id=tenant.id,
+            customer_id=customer.id, address_id=row.id,
+            fingerprint=resolution.selected.fingerprint,
+            operation_ref="an-operation-that-never-ran"),
+    )
+    assert evidence.reason == "committed_operation_unknown"
+    assert evidence.allows_adopted_address_claim() is False
+    assert evidence.allows_saved_address_claim() is False
+
+
+def test_the_last_line_fallback_declares_its_own_provenance():
+    """I7: the audit trail must not say the customer read the model's words.
+
+    This boundary runs after composition and substitutes the platform's
+    line directly. Leaving ``compose_source=llm`` on the tracker was the
+    same class of untruth the guard exists to remove, one layer down.
+    """
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+    from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
+        run_post_compose_truth_guards,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    convo = _conversation(db, tenant, customer)
+    tracker = {"compose_source": "llm", "response_mode": "llm",
+               "chosen_path": "probe_llm", "llm_candidate_present": True}
+    compose_event = dict(tracker)
+
+    result = run_post_compose_truth_guards(
+        db=db, tenant_id=tenant.id, to=CUSTOMER_PHONE, text="وين توصلون؟",
+        reply="تم حفظ عنوانك واعتماده للتوصيل.", convo=convo, inbound_metadata={},
+        brain_handoff=False, brain_nc_block=False, brain_nc_category="", br_action="",
+        brain_persona_compose_event=compose_event, mode="primary",
+        conversation_id=convo.id, live_provenance_tracker=tracker)
+
+    assert result.reply.strip()
+    assert is_compose_failure_fallback(result.reply)
+    for sink in (tracker, compose_event):
+        assert sink["compose_source"] == "fallback_deterministic"
+        assert sink["response_mode"] == "fallback_deterministic"
+        assert sink["final_customer_text_source"] == "fallback_deterministic"
+        assert sink["chosen_path"] == "address_save_claim_failed_compose"
+        assert sink["fallback_action_type"] == "address_save_claim_failed_compose"
+        assert "scrubbed_empty" in sink["fallback_reason"]
+        assert sink["llm_candidate_present"] is True
+        assert sink["final_text_transformed"] is True
+
+
+def test_an_allowed_reply_leaves_the_provenance_untouched():
+    """The counterpart: nothing is restamped when nothing is substituted."""
+    from modules.ai.brain.postprocess.post_compose_guard_pipeline import (  # noqa: PLC0415
+        run_post_compose_truth_guards,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    convo = _conversation(db, tenant, customer)
+    tracker = {"compose_source": "llm", "response_mode": "llm",
+               "chosen_path": "probe_llm", "llm_candidate_present": True}
+
+    reply = "لم يتم حفظ عنوانك"
+    result = run_post_compose_truth_guards(
+        db=db, tenant_id=tenant.id, to=CUSTOMER_PHONE, text="هل حفظتم عنواني؟",
+        reply=reply, convo=convo, inbound_metadata={}, brain_handoff=False,
+        brain_nc_block=False, brain_nc_category="", br_action="",
+        brain_persona_compose_event=None, mode="primary", conversation_id=convo.id,
+        live_provenance_tracker=tracker)
+
+    assert result.reply == reply
+    assert tracker["compose_source"] == "llm"
+    assert "fallback_reason" not in tracker
