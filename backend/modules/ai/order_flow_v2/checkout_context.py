@@ -1,7 +1,7 @@
 """Bridge OrderContext saved-address truth into OrderFlowV2 deterministic replies."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +17,10 @@ class CheckoutReplyContext:
     field_modes: Dict[str, str]
     known_previous: Dict[str, str]
     identity_first_name: str = ""
+    # Every durable address the customer may explicitly choose between.
+    # Populated whatever the resolution, so several candidates are visible
+    # and selectable instead of simply absent.
+    address_choices: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _shipping_context_dict(previous: Any) -> Dict[str, str]:
@@ -51,6 +55,7 @@ def _shipping_context_dict(previous: Any) -> Dict[str, str]:
 # So the offer is recorded when it is made, and the confirmation is checked
 # against it.
 _OFFER_KEY = "address_offer"
+_OFFER_SET_KEY = "address_offer_set"
 
 
 def _conversation_metadata(conversation: Any) -> Dict[str, Any]:
@@ -91,6 +96,112 @@ def record_offered_address(
         db.add(conversation)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — the offer is an aid to a later confirmation; failing to record it makes confirmation refuse, which is the safe direction
         return
+
+
+def record_offered_address_set(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+    candidates: Any,
+) -> None:
+    """Remember the set of addresses offered for an explicit choice.
+
+    With several candidates there is deliberately no reusable default, so
+    the only way forward is the customer naming one. Recording what was
+    offered is what makes that naming bindable.
+    """
+    if conversation is None or not candidates:
+        return
+    offered = [
+        {"address_id": int(c["address_id"]), "fingerprint": str(c["fingerprint"])}
+        for c in candidates
+        if c.get("address_id") and c.get("fingerprint")
+    ]
+    if not offered:
+        return
+    meta = _conversation_metadata(conversation)
+    payload = {
+        "customer_id": int(getattr(conversation, "customer_id", 0) or 0),
+        "tenant_id": int(tenant_id),
+        "offered_at": datetime.now(timezone.utc).isoformat(),
+        "addresses": offered,
+    }
+    if meta.get(_OFFER_SET_KEY, {}).get("addresses") == offered:
+        return
+    meta[_OFFER_SET_KEY] = payload
+    try:
+        conversation.extra_metadata = meta
+        db.add(conversation)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — failing to record the offer makes a later selection refuse, which is the safe direction
+        return
+
+
+def apply_explicit_address_selection(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+    address_id: int,
+    order_prep: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Select one of the addresses this conversation offered, by id.
+
+    The bounded structured selection path for the several-candidates case.
+    It accepts only an address that was actually offered here, at the
+    revision it was offered at, and returns the ordinary confirmed-address
+    patch so checkout continues exactly as it does after any confirmation.
+    """
+    from core.customer_address_candidates import (  # noqa: PLC0415
+        SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+        resolve_customer_address_selection,
+    )
+    from core.order_context_prefill import _shipping_context_to_prep_patch  # noqa: PLC0415
+    from core.order_context_builder import _resolved_address_to_shipping_context  # noqa: PLC0415
+
+    meta = _conversation_metadata(conversation)
+    offer_set = meta.get(_OFFER_SET_KEY)
+    if not isinstance(offer_set, dict):
+        return {}
+    if int(offer_set.get("tenant_id") or 0) != int(tenant_id):
+        return {}
+    customer_id = int(getattr(conversation, "customer_id", 0) or 0)
+    if customer_id and int(offer_set.get("customer_id") or 0) != customer_id:
+        return {}
+    offered = {
+        int(o["address_id"]): str(o["fingerprint"])
+        for o in (offer_set.get("addresses") or [])
+        if o.get("address_id")
+    }
+    if int(address_id) not in offered:
+        return {}
+    if has_accepted_delivery_address(dict(order_prep or {})):
+        return {}
+
+    resolution = resolve_customer_address_selection(
+        db, tenant_id=int(tenant_id), customer_id=customer_id,
+    )
+    chosen = next(
+        (a for a in resolution.selectable if a.address_id == int(address_id)), None
+    )
+    if chosen is None or chosen.fingerprint != offered[int(address_id)]:
+        # Not offered, or changed since it was offered.
+        return {}
+
+    previous = _resolved_address_to_shipping_context(chosen)
+    if not _record_selection_for_confirmed_address(
+        db,
+        tenant_id=int(tenant_id),
+        previous=previous,
+        selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+        expected_fingerprint=chosen.fingerprint,
+        operation_ref=str(offer_set.get("offered_at") or ""),
+    ):
+        return {}
+    patch = _shipping_context_to_prep_patch(previous)
+    patch["customer_confirmed_previous_address"] = True
+    patch["shipping_source"] = "customer_selected_address"
+    return patch
 
 
 def read_offered_address(
@@ -253,6 +364,7 @@ def load_checkout_reply_context(
 
     ctx = None
     known_previous: Dict[str, str] = {}
+    address_choices: List[Dict[str, Any]] = []
     field_modes: Dict[str, str] = {}
     try:
         from core.order_context_builder import build_order_context  # noqa: PLC0415
@@ -269,12 +381,21 @@ def load_checkout_reply_context(
         )
         previous_ctx = getattr(ctx, "known_previous_address", None)
         known_previous = _shipping_context_dict(previous_ctx)
+        address_choices = [dict(c) for c in getattr(ctx, "known_address_candidates", ()) or ()]
         if known_previous:
             # This is the moment the address is put in front of the
             # customer; a later confirmation is checked against it.
             record_offered_address(
                 db, tenant_id=int(tenant_id), conversation=conversation,
                 previous=previous_ctx,
+            )
+        if address_choices:
+            # Several candidates produce no reusable default on purpose.
+            # Recording what was offered is what lets the customer choose
+            # one explicitly instead of retyping the address.
+            record_offered_address_set(
+                db, tenant_id=int(tenant_id), conversation=conversation,
+                candidates=address_choices,
             )
         _, engine_result = resolve_flow_missing_fields(
             prep,
@@ -308,6 +429,7 @@ def load_checkout_reply_context(
         field_modes=field_modes,
         known_previous=known_previous,
         identity_first_name=first_name,
+        address_choices=address_choices,
     )
 
 

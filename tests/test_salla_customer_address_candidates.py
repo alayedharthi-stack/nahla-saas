@@ -78,6 +78,7 @@ from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # 
 )
 from modules.ai.order_flow_v2.checkout_context import (  # noqa: E402
     apply_delivery_continuation_address_patch,
+    apply_explicit_address_selection,
     apply_previous_address_confirmation,
     load_checkout_reply_context,
 )
@@ -1310,3 +1311,103 @@ def test_address_save_claim_guard_resolver_reads_committed_evidence():
     assert result.action == "blocked_unsupported_address_save_claim"
     assert "تم حفظ عنوانك" not in result.reply
     assert result.evidence_scope == "none"
+
+
+# ── R5: several candidates stay visible and explicitly selectable ────────
+
+def _two_candidates(db, tenant, customer):
+    a = upsert_imported_address_candidate(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        components=AddressComponents(city=CITY, short_address_code=SHORT_CODE),
+        source_ref="SC-A", source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    b = upsert_imported_address_candidate(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        components=AddressComponents(city="جدة", short_address_code="JJJD5678"),
+        source_ref="SC-B", source_updated_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+    )
+    db.commit()
+    return a, b
+
+
+def test_several_candidates_are_offered_for_explicit_selection():
+    """No implicit default, but no dead end either."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+
+    reply_ctx = load_checkout_reply_context(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={}, brain_state={},
+    )
+    db.commit()
+    assert reply_ctx.known_previous == {}
+    assert {c["address_id"] for c in reply_ctx.address_choices} == {
+        a.address_id, b.address_id
+    }
+
+    patch = apply_explicit_address_selection(
+        db, tenant_id=tenant.id, conversation=convo, address_id=b.address_id,
+        order_prep={},
+    )
+    db.commit()
+    assert patch["city"] == "جدة"
+    assert patch["customer_confirmed_previous_address"] is True
+    resolution = resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    )
+    assert resolution.selected.address_id == b.address_id
+
+
+def test_selecting_an_address_that_was_never_offered_is_refused():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, _b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    # No offer was recorded for this conversation.
+    assert apply_explicit_address_selection(
+        db, tenant_id=tenant.id, conversation=convo, address_id=a.address_id,
+        order_prep={},
+    ) == {}
+    assert resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected is None
+
+
+def test_explicit_selection_refuses_a_revision_changed_since_the_offer():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, _b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    load_checkout_reply_context(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={}, brain_state={},
+    )
+    db.commit()
+    row = db.query(CustomerAddress).filter_by(id=a.address_id).one()
+    row.city = "مدينة أخرى"
+    db.add(row)
+    db.commit()
+    assert apply_explicit_address_selection(
+        db, tenant_id=tenant.id, conversation=convo, address_id=a.address_id,
+        order_prep={},
+    ) == {}
+
+
+def test_another_conversation_offer_cannot_select_for_this_customer():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    other_tenant, other_customer = _seed(db, phone="+966500000777", salla_id="SC-OTHER")
+    a, _b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    load_checkout_reply_context(
+        db, tenant_id=tenant.id, conversation=convo,
+        customer_phone=CUSTOMER_PHONE, order_prep={}, brain_state={},
+    )
+    db.commit()
+    # The same conversation object, judged for a different tenant.
+    assert apply_explicit_address_selection(
+        db, tenant_id=other_tenant.id, conversation=convo, address_id=a.address_id,
+        order_prep={},
+    ) == {}
