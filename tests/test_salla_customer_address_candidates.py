@@ -1884,15 +1884,27 @@ def test_the_outbound_payload_carries_the_choices_the_customer_taps():
 
     actions = address_choice_actions(reply_ctx.presentation)
     assert {a.address_id, b.address_id} == {
-        structured_consent_action({"button_id": action["id"]})[1] for action in actions
+        structured_consent_action({"button_id": action["reply"]["id"]})[1]
+        for action in actions
     }
     # Every action names THIS showing, and carries a title built from the
     # address's own stored facts — no composed prose.
     for action in actions:
-        offer_id, _address_id = structured_consent_action({"button_id": action["id"]})
+        assert action["type"] == "reply"
+        offer_id, _address_id = structured_consent_action(
+            {"button_id": action["reply"]["id"]})
         assert offer_id == reply_ctx.presentation.offer_id
-        assert action["title"] and len(action["title"]) <= 20
-    assert {"الرياض", "جدة"} & {t["title"].split()[0] for t in actions}
+        assert action["reply"]["title"] and len(action["reply"]["title"]) <= 20
+    assert {"الرياض", "جدة"} & {a["reply"]["title"].split()[0] for a in actions}
+
+    # The wire sanitizer must keep them intact — a flat {id, title} would
+    # survive it as an empty, untappable button.
+    from core.wa_link_buttons import whatsapp_reply_buttons_payload  # noqa: PLC0415
+
+    wire = whatsapp_reply_buttons_payload(actions)
+    assert len(wire) == len(actions)
+    assert all(w["reply"]["id"] and w["reply"]["title"] for w in wire)
+    assert {w["reply"]["id"] for w in wire} == {a["reply"]["id"] for a in actions}
 
 
 def test_an_action_from_a_superseded_showing_approves_nothing():
@@ -2082,7 +2094,7 @@ def test_a_reply_that_confirms_the_address_carries_the_choices():
 
     assert result.address_presentation is not None
     ids = {
-        structured_consent_action({"button_id": action["id"]})[1]
+        structured_consent_action({"button_id": action["reply"]["id"]})[1]
         for action in result.address_choice_actions
     }
     assert ids == {a.address_id, b.address_id}

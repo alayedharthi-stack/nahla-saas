@@ -131,43 +131,67 @@ def consent_action_id(offer_id: Any, address_id: Any) -> str:
 
 
 def address_choice_actions(presentation: Any) -> List[Dict[str, Any]]:
-    """Structured choices for the outbound surface, or nothing.
+    """Structured choices in WhatsApp reply-button shape, or nothing.
 
     Platform-owned CTA payload built from trusted stored facts — the id is
     the offer/address identity, the title is the address's own city and
     short code. It composes no conversational prose.
+
+    The shape is ``{"type": "reply", "reply": {"id", "title"}}`` because
+    that is what the final wire sanitizer
+    (``core.wa_link_buttons.whatsapp_reply_buttons_payload``) reads. A flat
+    ``{"id", "title"}`` survives that sanitizer as an EMPTY button, which
+    would reach the customer as an untappable choice.
     """
     if presentation is None or getattr(presentation, "is_empty", True):
         return []
     offer_id = str(getattr(presentation, "offer_id", "") or "")
     if not offer_id:
         return []
+
+    def _button(address_id: Any, choice: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        action_id = consent_action_id(offer_id, address_id)
+        if not action_id:
+            return None
+        return {
+            "type": "reply",
+            "reply": {"id": action_id, "title": _choice_title(choice)},
+        }
+
     rows: List[Dict[str, Any]] = []
     for choice in getattr(presentation, "choices", ()) or ():
-        action_id = consent_action_id(offer_id, choice.get("address_id"))
-        if not action_id:
-            continue
-        rows.append({"id": action_id, "title": _choice_title(choice)})
+        button = _button(choice.get("address_id"), choice)
+        if button is not None:
+            rows.append(button)
     if not rows and getattr(presentation, "address_id", 0):
-        action_id = consent_action_id(offer_id, presentation.address_id)
-        if action_id:
-            rows.append({
-                "id": action_id,
-                "title": _choice_title({"city": "", "short_address_code": ""}),
-            })
+        button = _button(presentation.address_id, {})
+        if button is not None:
+            rows.append(button)
     return rows[:3]
 
 
+# WhatsApp rejects a reply button whose title is empty or over 20
+# characters, and rejects the whole payload on duplicate titles.
+_BUTTON_TITLE_LIMIT = 20
+_BUTTON_TITLE_FALLBACK = "العنوان المحفوظ"
+
+
 def _choice_title(choice: Dict[str, Any]) -> str:
-    """A short label from the address's own stored facts."""
+    """A short label from the address's own stored facts.
+
+    Never empty: a button with no title is rejected at the provider, and
+    an address always has at least its row id to distinguish it.
+    """
     city = str((choice or {}).get("city") or "").strip()
     code = str((choice or {}).get("short_address_code") or "").strip()
     label = " ".join(part for part in (city, code) if part).strip()
     if not label:
         label = str((choice or {}).get("address_line") or "").strip()
     if not label:
-        label = str((choice or {}).get("address_id") or "")
-    return label[:20]
+        address_id = str((choice or {}).get("address_id") or "").strip()
+        label = f"{_BUTTON_TITLE_FALLBACK} {address_id}".strip() if address_id \
+            else _BUTTON_TITLE_FALLBACK
+    return label[:_BUTTON_TITLE_LIMIT]
 
 
 def structured_consent_action(inbound_metadata: Any) -> Optional[Tuple[str, int]]:
