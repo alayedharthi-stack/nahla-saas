@@ -274,6 +274,7 @@ class LedgerRepository:
         self, *, tenant_id: int, namespace: Any, conversation_id: int, token: c.OwnershipToken, turn_id: int,
         state_transition: Optional[c.StateTransition] = None,
         effect_intents: Sequence[lc.EffectIntent] = (), delivery_intent: Optional[lc.DeliveryIntent] = None,
+        precondition: Optional[Callable[[Connection, c.ConversationSnapshot], None]] = None,
         _fault_before_commit: Optional[Callable[[], None]] = None,
     ) -> lc.TurnDecision:
         """Persist a validated state transition together with the effect and
@@ -283,7 +284,17 @@ class LedgerRepository:
         leaves no state change, no effect and no delivery sequence. The
         terminal is *not* part of this operation; ``finalize_turn`` records it
         once every dispatched attempt has an established outcome.
-        ``_fault_before_commit`` is a test-only fault-injection point.
+
+        ``precondition`` is an optional, additive caller check evaluated
+        **after** the conversation row lock, the ownership guard and the
+        eligibility check, and **before** any write of this transaction. It
+        receives the locked connection and the snapshot read under that lock,
+        whose ``db_now`` is the database clock after every lock wait, so a
+        caller can refuse a reservation that became invalid while it waited
+        (for example an expired turn deadline). Raising from it aborts the
+        whole transaction and nothing is written. Omitting it keeps the
+        previous behaviour exactly. ``_fault_before_commit`` is a test-only
+        fault-injection point.
         """
         tenant_id, ns, conversation_id, token = self._foundation._scoped(tenant_id, namespace, conversation_id, token)
         turn_id = c.validate_counter(turn_id, field="turn_id")
@@ -303,6 +314,9 @@ class LedgerRepository:
             snap = self._foundation._lock(conn, tenant_id, ns, conversation_id)
             self._foundation._require(snap, token, expected_revision=expected_revision)
             self._require_eligible(snap, turn_id)
+            if precondition is not None:
+                # Evaluated on the database clock after the lock wait, before any write.
+                precondition(conn, snap)
             state_commit: Optional[c.StateCommit] = None
             if state_body is not None:
                 applied = self._foundation._apply_state(conn, conversation_id, tenant_id, ns, token,
