@@ -13,7 +13,7 @@
       "id": "commerce_runtime_foundation",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_foundation_pg.py",
-      "origin": "PR #1089 \u2014 dormant commerce runtime foundation proofs, including the lock-wait, scope-binding and ordered-processing regressions",
+      "origin": "PR #1089 — dormant commerce runtime foundation proofs, including the lock-wait, scope-binding and ordered-processing regressions",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -52,7 +52,7 @@
       "id": "commerce_runtime_migration",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_migration_pg.py",
-      "origin": "PR #1089 \u2014 revision 0108 reconciliation: fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation",
+      "origin": "PR #1089 — revision 0108 reconciliation: fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -74,7 +74,7 @@
       "id": "global_customer_identity",
       "kind": "proof",
       "module": "backend/tests/test_global_customer_display_identity_pg.py",
-      "origin": "PR #1087 (merged) \u2014 global customer display identity, 0107 persistence cases",
+      "origin": "PR #1087 (merged) — global customer display identity, 0107 persistence cases",
       "required_env": {
         "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED": "1",
         "LEGACY_MIG_PG_TEST_DATABASE_URL": null
@@ -91,7 +91,7 @@
       "id": "commerce_runtime_ledgers",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py",
-      "origin": "Ledger PR \u2014 dormant effect and delivery ledgers: business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit and ledger-derived terminals; L1 completion boundary on both terminal entry points and L2 distinct business identities; schema-state completion guard (standalone 0108 kept, partial schema fails closed on both entry points, complete schema ledger-aware) and the reservation/completion race in both lock orders",
+      "origin": "Ledger PR — dormant effect and delivery ledgers: business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit and ledger-derived terminals; L1 completion boundary on both terminal entry points and L2 distinct business identities; schema-state completion guard (standalone 0108 kept, partial schema fails closed on both entry points, complete schema ledger-aware) and the reservation/completion race in both lock orders",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -133,7 +133,7 @@
       "id": "commerce_runtime_ledgers_migration",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py",
-      "origin": "Ledger PR \u2014 revision 0109 reconciliation: fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required",
+      "origin": "Ledger PR — revision 0109 reconciliation: fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -157,7 +157,7 @@
       "id": "commerce_runtime_agent_loop",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py",
-      "origin": "Agent loop PR \u2014 dormant agent loop core and its durable guarantees: one turn through reasoning, read-only fixture tools and observations feeding the next decision; durable ownership- and revision-guarded attempt debits with concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; repeat policy: duplicates inside one bundle refused before the first tool runs, and a durable crash-safe recovery allowance of one original attempt plus one repeat",
+      "origin": "Agent loop PR — dormant agent loop core and its durable guarantees: one turn through reasoning, read-only fixture tools and observations feeding the next decision; durable ownership- and revision-guarded attempt debits with concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; repeat policy: duplicates inside one bundle refused before the first tool runs, and a durable crash-safe recovery allowance of one original attempt plus one repeat",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -205,10 +205,39 @@
       ]
     },
     {
+      "id": "commerce_runtime_pilot",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py",
+      "origin": "Pilot integration PR — the owner pilot end to end on real PostgreSQL with the real admission, ownership, agent loop, Anthropic adapter, trusted read context and delivery ledger, and only the model's HTTP call and the WhatsApp transport scripted: one inbound message answered at most once (redelivery, re-entry reusing the reserved intent, two concurrent invocations sending once), never a success the send does not support (rejected, unknown, a transport that raises, a provider failure, a model refusal, a draft citing unobserved evidence), no blind retry of an uncertain send, a follow-up answered from the conversation the platform already recorded, tenant and conversation scope, and refusal when the runtime schema is not present",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_owner_turn_reasons_dispatches_and_completes_on_an_identified_send",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_text_that_is_sent_is_the_text_the_ledger_reserved",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_real_read_tools_reach_the_merchant_s_own_catalogue",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_follow_up_sees_the_conversation_the_platform_already_recorded",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_draft_citing_evidence_that_was_never_observed_is_refused_before_any_send",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_redelivered_inbound_message_never_answers_twice",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_re_entry_reuses_the_reserved_intent_instead_of_composing_a_second_reply",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_two_concurrent_invocations_of_one_turn_send_exactly_once",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_rejected_send_is_recorded_as_a_failed_turn_that_reached_nobody",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_unknown_send_is_never_success_and_is_never_blindly_retried",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_unknown_send_blocks_a_second_dispatch_of_the_same_live_reservation",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_transport_that_raises_is_unknown_rather_than_a_proven_rejection",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_provider_failure_sends_nothing_and_is_not_dressed_as_an_answer",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_model_refusal_sends_nothing_and_says_why",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_turn_admitted_for_one_tenant_is_invisible_to_another",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_conversation_outside_the_tenant_yields_no_trusted_context_and_no_send",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_runtime_refuses_when_its_schema_is_not_present"
+      ]
+    },
+    {
       "id": "runner_connection_regressions",
       "kind": "runner_regression",
       "module": "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py",
-      "origin": "Runner PR \u2014 explicit-target authority at the shared fixture's connection boundary (R1): an unreachable explicit URL fails the proof with no fallback and no test database on an alternate service; a reachable explicit URL is used while every alternate is dead",
+      "origin": "Runner PR — explicit-target authority at the shared fixture's connection boundary (R1): an unreachable explicit URL fails the proof with no fallback and no test database on an alternate service; a reachable explicit URL is used while every alternate is dead",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null

@@ -75,14 +75,18 @@ def _result_from_rows(
     return KnowledgeSearchResult(status="ok", sections=snapshots, evidence=evidence)
 
 
-@commerce_read_tool("search_merchant_knowledge", is_enabled=_merchant_knowledge_enabled)
-async def search_merchant_knowledge(
-    run_context: RunContextWrapper[CommerceAgentContext],
+async def search_merchant_knowledge_impl(
+    context: CommerceAgentContext,
     query: str,
     limit: int,
 ) -> KnowledgeSearchResult:
-    """Search only global, AI-visible knowledge for the current merchant."""
-    context = run_context.context
+    """SDK-free implementation of the ``search_merchant_knowledge`` read tool.
+
+    The model-visible name, signature and description stay on the
+    decorated wrapper below; this body is unchanged and is the single
+    implementation shared by the Agents-SDK tool and by the commerce
+    runtime's own loop, which passes the trusted context directly.
+    """
     context.assert_scope()
     text = str(query or "") or context.run_user_input
     record = run_knowledge_lookup(
@@ -101,15 +105,19 @@ async def search_merchant_knowledge(
     )
 
 
-@commerce_read_tool("search_product_knowledge", is_enabled=_catalog_search_enabled)
-async def search_product_knowledge(
-    run_context: RunContextWrapper[CommerceAgentContext],
+async def search_product_knowledge_impl(
+    context: CommerceAgentContext,
     product_id: int,
     query: str,
     limit: int,
 ) -> KnowledgeSearchResult:
-    """Search AI-visible knowledge linked to an earlier discovered product."""
-    context = run_context.context
+    """SDK-free implementation of the ``search_product_knowledge`` read tool.
+
+    The model-visible name, signature and description stay on the
+    decorated wrapper below; this body is unchanged and is the single
+    implementation shared by the Agents-SDK tool and by the commerce
+    runtime's own loop, which passes the trusted context directly.
+    """
     context.assert_scope()
     context.require_authorized_product(product_id)
     # Anchor the model's own query the same way the deterministic catalog
@@ -144,3 +152,24 @@ async def search_product_knowledge(
         source="product_knowledge",
         required_product_id=int(product_id),
     )
+
+
+@commerce_read_tool("search_merchant_knowledge", is_enabled=_merchant_knowledge_enabled)
+async def search_merchant_knowledge(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    query: str,
+    limit: int,
+) -> KnowledgeSearchResult:
+    """Search only global, AI-visible knowledge for the current merchant."""
+    return await search_merchant_knowledge_impl(run_context.context, query=query, limit=limit)
+
+
+@commerce_read_tool("search_product_knowledge", is_enabled=_catalog_search_enabled)
+async def search_product_knowledge(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    product_id: int,
+    query: str,
+    limit: int,
+) -> KnowledgeSearchResult:
+    """Search AI-visible knowledge linked to an earlier discovered product."""
+    return await search_product_knowledge_impl(run_context.context, product_id=product_id, query=query, limit=limit)

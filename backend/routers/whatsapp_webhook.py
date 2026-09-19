@@ -9371,6 +9371,42 @@ async def _handle_merchant_message(
                 _l0_exc,
             )
 
+        # ── Commerce runtime (owner pilot) ────────────────────────────────────
+        # THE routing decision. It is asked once, and its answer is exclusive:
+        # when the commerce runtime takes the turn this handler returns, so the
+        # Merchant Brain below never runs for that inbound message and the two
+        # runtimes can never both answer it. Fail-closed: any refusal, including
+        # an error inside the guard, leaves the legacy path exactly as it is.
+        try:
+            from services.commerce_runtime_pilot import (  # noqa: PLC0415
+                maybe_handle_with_commerce_runtime,
+            )
+
+            _pilot = await maybe_handle_with_commerce_runtime(
+                db=db,
+                tenant_id=tenant_id,
+                phone_id=phone_id,
+                to=to,
+                text=text or "",
+                convo=convo,
+                wa_msg_id=wa_msg_id,
+                inbound_metadata=inbound_metadata if isinstance(inbound_metadata, dict) else None,
+                trace=_trace,
+                legacy_already_answered=not _trace.outbound_lock_acquired(),
+                ai_gate_skipped=bool(_skip),
+            )
+            if _pilot.handled:
+                _sync_persona_observability()
+                return
+        except Exception as _pilot_exc:  # noqa: BLE001
+            # The pilot is additive. A failure to even ask must never cost the
+            # customer their reply, so the legacy path continues below.
+            logger.warning(
+                "[COMMERCE_RUNTIME_PILOT] route check failed tenant=%s err=%s — legacy continues",
+                tenant_id,
+                type(_pilot_exc).__name__,
+            )
+
         # ── Merchant Brain (Phase 1) ──────────────────────────────────────────
         # Active when: global flag is on OR this tenant is in the per-tenant list
         _brain_active = MERCHANT_BRAIN_ENABLED or (tenant_id in MERCHANT_BRAIN_TENANT_IDS)

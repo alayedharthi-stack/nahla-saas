@@ -12,6 +12,13 @@ allowance). Extends
 closed findings of either. Authority for the implementation in
 `backend/core/commerce_runtime/{agent_contracts,agent_tools,agent_scripted,agent_loop}.py`.
 
+The loop core itself is unchanged by what came after it. Its provider boundary
+is now also implemented against a live model, its fixture tools now have real
+read-only counterparts, and its reserved delivery intents are now dispatched —
+each in its own contract: `commerce-runtime-live-integration.md` and
+`commerce-runtime-pilot-activation.md`. "Dormant" in this document's title
+describes the slice as it was merged, not the package today.
+
 ## 1. Purpose and boundary
 
 One loop accepts one eligible conversation turn, obtains a reasoning
@@ -293,6 +300,9 @@ completion.
 | Durable checkpoints | revision-bound debits, per-signature allowances, checkpointed context, atomic decision commit | `test_a_crash_after_the_tool_ran_keeps_the_debits_and_leaves_no_reservation`, `test_a_crash_right_after_the_tool_debit_keeps_the_identity_and_the_charge`, `test_re_entry_restores_the_authoritative_limits_and_cannot_enlarge_them` | One checkpoint shape per turn; no mid-tool-call resume; a charge can outlive the proof that the tool ran |
 
 ## 9. Out of scope (unchanged decisions)
+
+*Recorded as of this slice. Items 1, 2, 4 and 5 of §10 were delivered by the two
+pilot-integration changes that followed; the rest still stand.*
 
 No real reasoning adapter, no live model call, no prompt, persona or model
 selection; no dispatch, transport adapter or reconciliation worker; no
