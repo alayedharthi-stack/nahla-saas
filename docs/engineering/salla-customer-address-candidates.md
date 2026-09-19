@@ -69,10 +69,17 @@ synchronisation.
 | Only supported information is persisted; city alone is not a complete delivery address | `is_sufficient_delivery_address` (city **and** one locating component) |
 | A sufficient explicitly selected address is reusable without re-collecting the address | `AddressResolution.reusable` → `known_previous_address.explicitly_selected` |
 | An unselected candidate may be presented for brief confirmation | checkout `field_modes` stay `confirm`; no `customer_confirmed_previous_address` |
+| A showing is recorded only when a message carrying it was actually sent | `record_presented_address_offer` at the successful-send boundary, with the outbound `wamid` (§5a) |
+| A customer action answers ONE showing | the action id carries that showing's opaque `offer_id` |
+| Free text never accepts the delivery address | `apply_previous_address_confirmation` returns a context-only patch |
+| Nothing durable is written outside a live turn | the consent writer is gated on `live` in `order_flow_v2/owner.py` |
 | Multiple candidates require an explicit valid selection | `AddressResolution.reusable` is `None`; candidates are listed instead |
 | Missing required fields prompt only for those fields | `missing_address_requirements` |
 | A Salla refresh must not silently replace a newer customer selection | a selected row is never content-mutated; changed content becomes a new candidate |
-| A selection landing between a refresh's read and its write still wins | the refresh re-reads the provenance row under a write lock with `populate_existing` and revalidates before mutating |
+| A selection and a refresh never interleave at all | both take the same `(tenant, customer)` scope authority **before** reading, so each one's decision and write rest on the same state (§5a) |
+| A refresh that arrives after a newer one is refused, not applied | freshness is re-derived under authority, never from a read taken before it |
+| A selection whose revision changed before it was recorded is refused | the revision check happens under authority, so the content cannot move underneath it |
+| A writer that cannot take authority writes nothing | bounded wait, then `address_scope_busy` — an import repeats, so refusing costs nothing |
 | A superseded selection stays visible and re-selectable | `AddressResolution.addresses` is what the agent context and customer API project, not `candidates + selected` |
 | One store's import never rewrites another store's address | §5 store ownership, plus the store connection in the revision key |
 
