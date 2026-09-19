@@ -554,3 +554,97 @@ def test_a_missing_key_or_sdk_is_reported_rather_than_falling_back_to_another_pa
     monkeypatch.setattr(anthropic_double, "_SDK_AVAILABLE", False, raising=True)
     assert anthropic_double.AnthropicProvider().call_single_step(
         messages=[], system="p")["status"] == "sdk_unavailable"
+
+
+# ── The prior conversation ───────────────────────────────────────────────────
+
+
+def history(*turns) -> list:
+    return [{"role": role, "text": text} for role, text in turns]
+
+
+def test_the_prior_conversation_is_presented_as_real_chat_turns():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=history(("user", "عندكم أحذية؟"), ("assistant", "نعم، عندنا")))
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert messages[0]["content"][0]["text"] == "عندكم أحذية؟"
+    assert messages[1]["content"][0]["text"] == "نعم، عندنا"
+    assert messages[-1]["content"][-1]["text"] == "عندكم حذاء رياضي؟"
+
+
+def test_a_history_ending_with_the_customer_joins_the_current_turn_rather_than_inventing_a_reply():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=history(("user", "أول سؤال"), ("assistant", "جواب"),
+                                             ("user", "سؤال متأخر")))
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    texts = [block["text"] for block in messages[-1]["content"]]
+    assert texts == ["سؤال متأخر", "عندكم حذاء رياضي؟"]
+    # Nothing was fabricated on the assistant's behalf.
+    assert messages[1]["content"][0]["text"] == "جواب"
+
+
+def test_a_history_that_opens_with_the_assistant_drops_that_opening():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=history(("assistant", "أهلاً"), ("user", "سؤال"),
+                                             ("assistant", "جواب")))
+    provider.step(request())
+    roles = [m["role"] for m in double.calls[0]["messages"]]
+    assert roles == ["user", "assistant", "user"]
+
+
+def test_consecutive_turns_from_one_side_are_merged_so_the_transcript_alternates():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=history(("user", "واحد"), ("user", "اثنان"),
+                                             ("assistant", "أ"), ("assistant", "ب")))
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert messages[0]["content"][0]["text"] == "واحد\nاثنان"
+    assert messages[1]["content"][0]["text"] == "أ\nب"
+
+
+def test_empty_and_malformed_history_entries_are_dropped_not_rendered():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[{"role": "user", "text": "  "}, "not-a-mapping",
+                                      {"role": "user", "text": "سؤال"},
+                                      {"role": "assistant", "text": None}])
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user"]
+    assert [b["text"] for b in messages[0]["content"]] == ["سؤال", "عندكم حذاء رياضي؟"]
+
+
+def test_the_history_is_bounded_in_turns_and_in_characters():
+    long_turn = "ط" * (ap.MAX_HISTORY_CHARS + 500)
+    turns = []
+    for index in range(ap.MAX_HISTORY_MESSAGES * 3):
+        turns.append(("user" if index % 2 == 0 else "assistant", f"{long_turn}{index}"))
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=history(*turns))
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert len(messages) <= ap.MAX_HISTORY_MESSAGES + 1
+    for message in messages[:-1]:
+        assert len(message["content"][0]["text"]) <= ap.MAX_HISTORY_CHARS
+
+
+def test_no_history_is_the_same_single_turn_transcript_as_before():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])])
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert len(messages) == 1 and messages[0]["role"] == "user"
+
+
+def test_the_history_never_displaces_the_tool_result_replay():
+    provider, double = build([ok([tool_use("toolu_a", "catalog_search", query="حذاء")]),
+                              ok([reply_block(text="متوفر", claims_commerce_facts=False)])],
+                             history=history(("user", "سؤال سابق"), ("assistant", "جواب سابق")))
+    provider.step(request(step_no=1))
+    provider.step(request(step_no=2, observations=(observation("toolu_a"),)))
+    roles = [m["role"] for m in double.calls[1]["messages"]]
+    assert roles == ["user", "assistant", "user", "assistant", "user"]
+    assert double.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"

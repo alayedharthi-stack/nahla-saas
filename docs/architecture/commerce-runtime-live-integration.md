@@ -1,7 +1,9 @@
 # Commerce runtime — live reasoning provider and real read tools (contract)
 
-Status: merged behind no flag and reachable from no runtime path yet. This
-document covers the first half of the owner-authorised pilot integration:
+Status: merged. It was reachable from no runtime path when written; the pilot
+change that follows it connects delivery and adds the one fail-closed routing
+decision (`commerce-runtime-pilot-activation.md`). This document covers the
+first half of the owner-authorised pilot integration:
 items 1, 2 and 4 of *What a real reasoning adapter still needs* in
 `commerce-runtime-agent-loop.md`. Delivery, routing, the pilot allowlist and
 activation are a separate change and are **not** described here.
@@ -145,6 +147,13 @@ step present native `tool_use` / `tool_result` pairs:
   `earlier_tool_observations` data block, marked `restored_from_earlier_attempt`
   and, where the checkpoint bound dropped a body,
   `result_body_dropped_by_checkpoint_bound`. No pair is fabricated for them.
+- The **prior conversation**, when the caller supplies it, opens the transcript
+  as ordinary alternating chat turns before the current customer message. It is
+  bounded to the twelve most recent turns and 1200 characters each; consecutive
+  turns from one side are merged, a leading assistant turn is dropped, and turns
+  the customer sent last join the current message as earlier blocks of it — so
+  the transcript alternates without a single word being invented on the
+  assistant's behalf.
 
 Tool results are **data**, never instructions: each is a JSON document of the
 observation, including its error code when the tool refused or failed.

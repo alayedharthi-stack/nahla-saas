@@ -37,6 +37,7 @@ The inventory distinguishes two kinds of suite:
 | `commerce_runtime_ledgers` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py` | ledger PR, dormant effect and delivery ledgers (business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit, ledger-derived terminals, completion boundary on both terminal entry points, distinct business identities, schema-state completion guard with the standalone-0108 control, reservation/completion race in both lock orders) | 30 |
 | `commerce_runtime_ledgers_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py` | ledger PR, revision 0109 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required) | 12 |
 | `commerce_runtime_agent_loop` | proof | `tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py` | agent loop PR, dormant agent loop core and its durable guarantees (reasoning with read-only fixture tools and observations feeding the next decision; revision-bound attempt debits, concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; bundle-duplicate refusal and the durable crash-safe recovery allowance) | 39 |
+| `commerce_runtime_pilot` | proof | `tests/commerce_reliability/test_commerce_runtime_pilot_pg.py` | pilot integration PR, the owner pilot end to end with the real admission, ownership, agent loop, Anthropic adapter, trusted read context and delivery ledger and only the model's HTTP call and the WhatsApp transport scripted (one inbound message answered at most once across redelivery, re-entry and concurrency; never a success the send does not support; no blind retry of an uncertain send; a follow-up answered from the conversation the platform already recorded; tenant and conversation scope; refusal when the runtime schema is absent) | 17 |
 | `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
 
 The counts above are informational. Nothing in the runner or its self-test
@@ -71,7 +72,7 @@ process with `--junitxml` and judges the JUnit output:
 | Any skip, failure or error | exit **1**, the node id and reason are listed; a skip is never a pass |
 | Leaf `testsuite` counts differ from the inventory or show skips, failures or errors | exit **1** |
 | Non-zero pytest exit | exit **1** |
-| Everything above satisfied for every suite | exit **0**, `PROVEN (125/125 required tests passed: 123/123 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
+| Everything above satisfied for every suite | exit **0**, `PROVEN (142/142 required tests passed: 140/140 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
 
 The runner is pure standard library, imports no application code and carries
 no allowances. `tests/commerce_reliability/test_required_postgres_proofs_runner.py`
