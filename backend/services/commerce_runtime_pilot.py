@@ -20,6 +20,7 @@ it to the established WhatsApp transport and records what the transport said.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import dataclasses
 import logging
 from typing import Any, Dict, Optional, Tuple
@@ -29,6 +30,10 @@ from services.turn_trace import SOURCE_COMMERCE_RUNTIME as TRACE_SOURCE
 logger = logging.getLogger("nahla.commerce_runtime.pilot")
 
 BLOCKED_PATH = "commerce_runtime_pilot"
+
+# The transport has its own timeout; this is the outer bound on waiting for it,
+# so one turn can never hold the webhook request open indefinitely.
+SEND_WAIT_SECONDS = 45.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -107,7 +112,15 @@ def _send_factory(phone_id: str, tenant_id: int, db: Any, loop: Any) -> Any:
             ),
             loop,
         )
-        ok = bool(future.result())
+        try:
+            ok = bool(future.result(timeout=SEND_WAIT_SECONDS))
+        except concurrent.futures.TimeoutError:
+            # The send is still in flight and may well reach the provider. That
+            # is an unknown outcome, never a rejection, and the ledger will
+            # refuse to retry it.
+            logger.warning("[COMMERCE_RUNTIME_PILOT] send did not answer within %ss",
+                           SEND_WAIT_SECONDS)
+            return "timeout", None, None
         classification = str(sink.get("classification") or ("ok" if ok else "blocked"))
         wamid = sink.get("wamid")
         status = sink.get("http_status")
@@ -252,4 +265,5 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
         logger.exception("[COMMERCE_RUNTIME_PILOT] outbound persist failed turn=%s", report.turn_id)
 
 
-__all__ = ["BLOCKED_PATH", "PilotResult", "TRACE_SOURCE", "maybe_handle_with_commerce_runtime"]
+__all__ = ["BLOCKED_PATH", "PilotResult", "SEND_WAIT_SECONDS", "TRACE_SOURCE",
+           "maybe_handle_with_commerce_runtime"]
