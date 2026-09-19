@@ -43,6 +43,15 @@ def _scripted(script: str):
         ])
     if script == "direct_reply":
         return sp.ScriptedReasoningProvider([sp.reply("أهلاً! كيف أقدر أساعدك؟")])
+    if script == "search_perfume_then_reply":
+        # One tool call with a fixed execution signature: two invocations asking
+        # for it compete for the same repeat allowance.
+        return sp.ScriptedReasoningProvider([
+            sp.tools(sp.tool_call("c1", "catalog_search", query="عطر")),
+            lambda request: sp.reply("عطر ورد متوفر.",
+                                     refs=[r for o in request.observations for r in o.evidence_refs][:1],
+                                     commerce=True),
+        ])
     if script == "search_then_reply_slow":
         # One tool call, then a reply: used by the crash worker so a durable
         # tool debit exists before the process dies at the accept boundary.
@@ -111,4 +120,22 @@ def crash_accept_worker(dsn: str, label: str, args: Dict[str, Any], out) -> None
     engine.dispose()
 
 
-__all__ = ["crash_accept_worker", "run_turn_worker"]
+def crash_after_tool_debit_worker(dsn: str, label: str, args: Dict[str, Any], out) -> None:
+    """Debit the tool attempt durably, then die before the tool can run."""
+    _bootstrap()
+    engine, loop = _loop(dsn, args.get("budget"), args.get("tenants"))
+    provider = _scripted(args["script"])
+    kwargs = {k: v for k, v in args.items() if k in {"tenant_id", "namespace", "conversation_id", "turn_id"}}
+    kwargs["token"] = _token(args["token"])
+
+    def _die() -> None:
+        out.put({"label": label, "status": "dying_after_tool_debit"})
+        out.close()
+        out.join_thread()
+        os._exit(9)
+
+    _run(out, label, lambda: _outcome(loop.run_turn(**kwargs, provider=provider, _fault_after_tool_debit=_die)))
+    engine.dispose()
+
+
+__all__ = ["crash_accept_worker", "crash_after_tool_debit_worker", "run_turn_worker"]

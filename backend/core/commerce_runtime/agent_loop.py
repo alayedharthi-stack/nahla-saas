@@ -10,9 +10,9 @@ to the delivery ledger as a durable delivery intent. It never sends anything.
 Guarantees this module upholds:
 
 * **Durable attempt accounting.** Before any provider call and before any tool
-  call, the consumed attempt is written to the conversation's versioned state
-  under a compare-and-set bound to the revision the counters were computed
-  from. A crash after the provider or tool ran leaves that debit behind, and
+  call, the consumed attempt — and, for tools, the execution signature it is
+  charged to — is written to the conversation's versioned state under a
+  compare-and-set bound to the revision the counters were computed from. A crash after the provider or tool ran leaves that debit behind, and
   two invocations can never proceed on the same debit: the loser of the
   compare-and-set stops with ``concurrent_invocation``. Re-entry restores the
   authoritative limits, deadline, consumed attempts, observations, feedback
@@ -45,7 +45,7 @@ import concurrent.futures
 import datetime as _dt
 import json
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from sqlalchemy.engine import Connection
 
@@ -92,7 +92,8 @@ class AgentLoop:
     def run_turn(self, *, tenant_id: int, namespace: Any, conversation_id: int, turn_id: int,
                  token: c.OwnershipToken, provider: Any,
                  cancelled: Optional[Callable[[], bool]] = None,
-                 _fault_before_commit: Optional[Callable[[], None]] = None) -> ac.LoopOutcome:
+                 _fault_before_commit: Optional[Callable[[], None]] = None,
+                 _fault_after_tool_debit: Optional[Callable[[], None]] = None) -> ac.LoopOutcome:
         tenant_id, ns, conversation_id, token = self._foundation._scoped(tenant_id, namespace, conversation_id, token)
         turn_id = c.validate_counter(turn_id, field="turn_id")
         session = _Session(scope=_Scope(tenant_id, ns, conversation_id, turn_id), token=token,
@@ -115,7 +116,7 @@ class AgentLoop:
             )
             scope = at.ToolScope(tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id, turn_id=turn_id)
             session.capabilities = self._capabilities(provider)
-            draft = self._reason(provider, context, scope, session, cancelled)
+            draft = self._reason(provider, context, scope, session, cancelled, _fault_after_tool_debit)
             return self._accept(session, draft, fault_before_commit=_fault_before_commit)
         except _Stop as stop:
             return self._stop(session, stop)
@@ -123,7 +124,8 @@ class AgentLoop:
     # ── Reasoning / acting / observing ───────────────────────────────────────
 
     def _reason(self, provider: Any, context: ac.AuthorizedContext, scope: at.ToolScope, session: "_Session",
-                cancelled: Optional[Callable[[], bool]]) -> ac.ReplyDraft:
+                cancelled: Optional[Callable[[], bool]],
+                fault_after_tool_debit: Optional[Callable[[], None]] = None) -> ac.ReplyDraft:
         while True:
             session.check_cancelled(cancelled)
             # F1: the attempt is debited durably, under ownership and revision
@@ -153,7 +155,7 @@ class AgentLoop:
                 continue
 
             if isinstance(result, ac.ProviderToolRequests):
-                self._run_tools(result, scope, session)
+                self._run_tools(result, scope, session, fault_after_tool_debit)
                 continue
 
             raise self._provider_stop(result)          # pragma: no cover - validation narrows the union
@@ -181,24 +183,47 @@ class AgentLoop:
             raise self._provider_stop(result)
         return result
 
-    def _run_tools(self, result: ac.ProviderToolRequests, scope: at.ToolScope, session: "_Session") -> None:
-        """Every request in the bundle is already validated; authorize, debit, run."""
+    def _run_tools(self, result: ac.ProviderToolRequests, scope: at.ToolScope, session: "_Session",
+                   fault_after_tool_debit: Optional[Callable[[], None]] = None) -> None:
+        """Authorize the whole bundle, debit it once, then run it.
+
+        The bundle is preflighted against the signatures this invocation has
+        already debited **and** against the signatures seen earlier in the same
+        bundle, so distinct correlation ids cannot make identical tool and
+        argument work distinct. A refused bundle executes no tool and consumes
+        no tool attempt; the reasoning attempt already paid for obtaining the
+        result stays paid.
+        """
         requests = list(result.requests)
+        admitted: List[Tuple[ac.ToolRequest, str, bool]] = []
+        seen_in_bundle: Dict[str, str] = {}
         for request in requests:
             signature = session.signature(request)
-            if signature in session.executed_here:
-                raise _Stop(ac.StopReason.REPEATED_TOOL_REQUEST.value,
-                            tool=request.tool_name, repeats=session.executed_here[signature] + 1)
-        if session.progress.tool_calls_used + len(requests) > session.limits.max_tool_calls:
+            first = seen_in_bundle.get(signature)
+            if first is not None:
+                raise _Stop(ac.StopReason.REPEATED_TOOL_REQUEST.value, tool=request.tool_name,
+                            repeat="duplicate_in_bundle", call_id=request.call_id, first_call_id=first)
+            seen_in_bundle[signature] = request.call_id
+            if signature in session.debited_here:
+                raise _Stop(ac.StopReason.REPEATED_TOOL_REQUEST.value, tool=request.tool_name,
+                            repeat="repeat_in_invocation", call_id=request.call_id)
+            spent = session.attempts(signature)
+            if spent >= ac.MAX_TOOL_ATTEMPTS_PER_SIGNATURE:
+                raise _Stop(ac.StopReason.REPEATED_TOOL_REQUEST.value, tool=request.tool_name,
+                            repeat="allowance_exhausted", attempts=spent,
+                            allowance=ac.MAX_TOOL_ATTEMPTS_PER_SIGNATURE)
+            admitted.append((request, signature, spent >= 1))
+        if session.progress.tool_calls_used + len(admitted) > session.limits.max_tool_calls:
             raise _Stop(ac.StopReason.BUDGET_EXHAUSTED.value, limit="max_tool_calls",
-                        requested=len(requests),
+                        requested=len(admitted),
                         remaining=session.limits.max_tool_calls - session.progress.tool_calls_used)
-        # F1: the tool attempts are debited durably before any tool runs.
-        self._debit(session, tool_calls=len(requests), phase=ac.LoopPhase.REASONING.value)
-        for request in requests:
-            signature = session.signature(request)
-            recovery = signature in session.executed_before
-            session.executed_here[signature] = session.executed_here.get(signature, 0) + 1
+        # F1: the tool attempts and the identities they are charged to are
+        # debited durably, in one compare-and-set, before any tool runs.
+        self._debit(session, tool_calls=len(admitted), phase=ac.LoopPhase.REASONING.value,
+                    admitted=[signature for _, signature, _ in admitted])
+        if fault_after_tool_debit is not None:
+            fault_after_tool_debit()
+        for request, signature, recovery in admitted:
             wait = session.wait_for(session.limits.tool_timeout_seconds)
             observation = self._registry.execute(scope, request, timeout_seconds=wait)
             session.observations.append(observation)
@@ -228,14 +253,21 @@ class AgentLoop:
 
     # ── Durable progress ─────────────────────────────────────────────────────
 
-    def _debit(self, session: "_Session", *, steps: int = 0, tool_calls: int = 0, phase: str) -> None:
+    def _debit(self, session: "_Session", *, steps: int = 0, tool_calls: int = 0, phase: str,
+               admitted: Sequence[str] = ()) -> None:
         """Persist the consumed attempts before the work they pay for runs.
 
         Read, judge and write are bound to one revision: the counters are
         computed from the progress found at revision *R* and written with a
-        compare-and-set on *R*. A concurrent invocation that advanced the turn
-        is detected (its progress differs from what this session last wrote) or
-        loses the compare-and-set; either way it cannot share this debit.
+        compare-and-set on *R*. A concurrent invocation whose turn and counters
+        are not the ones this session last wrote is detected, or loses the
+        compare-and-set; either way it cannot share this debit, nor spend a
+        repeat allowance this one is spending.
+
+        ``admitted`` names the execution signatures this debit charges. Their
+        attempt counts are written in the **same** compare-and-set as the
+        counters, so a crash between the debit and the execution leaves the
+        identity recorded and the allowance spent.
         """
         snap = self._snapshot(session)                       # re-validates ownership after any wait
         persisted = self._restore(snap, session.scope.turn_id)
@@ -249,7 +281,7 @@ class AgentLoop:
         if steps and session.progress.steps_used + steps > session.limits.max_steps:
             raise _Stop(ac.StopReason.BUDGET_EXHAUSTED.value, limit="max_steps",
                         steps_used=session.progress.steps_used)
-        advanced = session.advanced(steps=steps, tool_calls=tool_calls, phase=phase)
+        advanced = session.advanced(steps=steps, tool_calls=tool_calls, phase=phase, admitted=admitted)
         payload = ac.public_copy(snap.state_payload)
         payload[ac.AGENT_LOOP_STATE_KEY] = advanced.to_payload()
         try:
@@ -263,9 +295,11 @@ class AgentLoop:
         except c.OwnershipRejected as exc:
             raise _Stop(ac.StopReason.OWNERSHIP_LOST.value, rejection=exc.reason.value) from exc
         session.commit_progress(advanced, commit.revision)
+        session.debited_here.update(admitted)
         session.record("attempt_debited", {"steps_used": advanced.steps_used,
                                            "tool_calls_used": advanced.tool_calls_used,
-                                           "revision": commit.revision})
+                                           "revision": commit.revision,
+                                           **({"charged": list(admitted)} if admitted else {})})
 
     # ── Durable outcomes ─────────────────────────────────────────────────────
 
@@ -507,8 +541,7 @@ class _Session:
         self.revision: Optional[int] = None
         self.observations: List[ac.ToolObservation] = []
         self.feedback: List[ac.VerificationFeedback] = []
-        self.executed_before: Dict[str, int] = {}
-        self.executed_here: Dict[str, int] = {}
+        self.debited_here: Set[str] = set()      # signatures this invocation has already charged
         self.events: List[ac.LoopEvent] = []
         self.capabilities = ac.ProviderCapabilities(provider_name="unknown")
         self._clock = clock
@@ -531,7 +564,6 @@ class _Session:
             self.feedback = [ac.VerificationFeedback(step, tuple(ac.VerificationProblem(code, "restored")
                                                                 for code in codes))
                              for step, codes in restored.feedback]
-            self.executed_before = {signature: 1 for signature in restored.executed}
             self.record("resumed", {"steps_used": restored.steps_used,
                                     "tool_calls_used": restored.tool_calls_used, "phase": restored.phase,
                                     "limits_restored": True,
@@ -546,7 +578,14 @@ class _Session:
         self.revision = snap.state_revision
 
     def advanced(self, *, steps: int = 0, tool_calls: int = 0, phase: Optional[str] = None,
-                 stop_reason: Optional[str] = None) -> ac.LoopProgress:
+                 stop_reason: Optional[str] = None, admitted: Sequence[str] = ()) -> ac.LoopProgress:
+        """The next durable progress: the counters advanced and one attempt
+        charged to each admitted signature.
+
+        The repeat record is carried forward from the durable one and only ever
+        incremented; it is never rebuilt from this invocation's memory, so a
+        restored allowance stays spent.
+        """
         base = self.progress
         assert base is not None
         return ac.LoopProgress(
@@ -554,9 +593,13 @@ class _Session:
             steps_used=base.steps_used + steps, tool_calls_used=base.tool_calls_used + tool_calls,
             observations=ac.checkpoint_observations(self.observations),
             feedback=tuple((f.step_no, tuple(p.code for p in f.problems)) for f in self.feedback),
-            executed=tuple(sorted(set(self.executed_before) | set(self.executed_here))),
+            executed=base.with_attempts(admitted),
             stop_reason=stop_reason,
         )
+
+    def attempts(self, signature: str) -> int:
+        """The durable attempts already charged to ``signature`` for this turn."""
+        return self.progress.attempts(signature) if self.progress is not None else 0
 
     def commit_progress(self, progress: ac.LoopProgress, revision: int) -> None:
         self.progress = progress

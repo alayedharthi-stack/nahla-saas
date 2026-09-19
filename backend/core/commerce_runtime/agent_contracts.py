@@ -34,9 +34,17 @@ MAX_TOOL_REQUESTS_PER_STEP = 8
 MAX_ARGUMENTS_BYTES = 8 * 1024
 MAX_OBSERVATION_BYTES = 16 * 1024
 AGENT_LOOP_STATE_KEY = "agent_loop"        # reserved key inside the conversation's versioned state payload
-AGENT_LOOP_STATE_VERSION = 2
+AGENT_LOOP_STATE_VERSION = 3
+# Version 2 wrote ``executed`` as a bare list of signatures, which recorded that
+# work had run but not how much of its repeat allowance was left. Such a payload
+# is still readable and is read **conservatively**: every signature in it counts
+# as having used its whole allowance, so missing history can never be mistaken
+# for permission to repeat again. No shared-data migration or backfill exists.
+READABLE_STATE_VERSIONS = (2, AGENT_LOOP_STATE_VERSION)
 MAX_CHECKPOINT_BYTES = 12 * 1024           # the agent_loop portion of the state payload
-MAX_CHECKPOINT_OBSERVATIONS = 16
+MAX_CHECKPOINT_OBSERVATIONS = 16           # only the most recent observations are retained at all
+# One original attempt plus at most one recovery repeat, per execution signature.
+MAX_TOOL_ATTEMPTS_PER_SIGNATURE = 2
 
 _CALL_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -347,9 +355,11 @@ def checkpoint_observations(observations: Sequence[ToolObservation], *,
                             budget_bytes: int = MAX_CHECKPOINT_BYTES) -> Tuple[ObservationCheckpoint, ...]:
     """Project observations for durable storage, newest bodies kept first.
 
-    The projection is bounded: identities, outcomes and evidence references are
-    always kept, bodies are dropped oldest-first until the payload fits. Only
-    the most recent ``MAX_CHECKPOINT_OBSERVATIONS`` observations are kept at all.
+    The projection is bounded twice over. Only the most recent
+    ``MAX_CHECKPOINT_OBSERVATIONS`` observations are retained at all; an older
+    one is dropped whole, references included. For each **retained**
+    observation the identity, outcome and evidence references are always kept,
+    and bodies are dropped oldest-first until the payload fits its bound.
     """
     kept = list(observations)[-MAX_CHECKPOINT_OBSERVATIONS:]
     projections: List[ObservationCheckpoint] = [
@@ -369,6 +379,31 @@ def checkpoint_observations(observations: Sequence[ToolObservation], *,
             break
         projections[index] = dataclasses.replace(projections[index], body=None)
     return tuple(projections)
+
+
+def _read_executed(raw: Any) -> Tuple[Tuple[str, int], ...]:
+    """Read the repeat record from either payload shape.
+
+    Version 3 stores ``[signature, attempts]`` pairs. A version 2 payload stores
+    bare signatures, which say that work ran but not how much allowance it left;
+    each is therefore read as having spent its **whole** allowance, never as an
+    unused one.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    charged: Dict[str, int] = {}
+    for item in raw:
+        if isinstance(item, str):
+            charged[item] = MAX_TOOL_ATTEMPTS_PER_SIGNATURE
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            signature, attempts = item
+            try:
+                charged[str(signature)] = max(charged.get(str(signature), 0), int(attempts))
+            except (TypeError, ValueError):
+                charged[str(signature)] = MAX_TOOL_ATTEMPTS_PER_SIGNATURE
+        else:
+            continue
+    return tuple(sorted(charged.items()))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -391,8 +426,25 @@ class LoopProgress:
     tool_calls_used: int
     observations: Tuple[ObservationCheckpoint, ...] = ()
     feedback: Tuple[Tuple[int, Tuple[str, ...]], ...] = ()      # (step_no, problem codes)
-    executed: Tuple[str, ...] = ()                              # repeat-detection signatures
+    # (execution signature, attempts already charged to it). The attempts are the
+    # repeat allowance: they are written with the pre-execution debit, so a crash
+    # before the tool runs still shows the attempt as spent.
+    executed: Tuple[Tuple[str, int], ...] = ()
     stop_reason: Optional[str] = None
+
+    def attempts(self, signature: str) -> int:
+        """How much of ``signature``'s repeat allowance the durable record has spent."""
+        for recorded, count in self.executed:
+            if recorded == signature:
+                return count
+        return 0
+
+    def with_attempts(self, signatures: Sequence[str]) -> Tuple[Tuple[str, int], ...]:
+        """This record's attempts with one more charged to each of ``signatures``."""
+        charged: Dict[str, int] = {recorded: count for recorded, count in self.executed}
+        for signature in signatures:
+            charged[signature] = charged.get(signature, 0) + 1
+        return tuple(sorted(charged.items()))
 
     def to_payload(self) -> Dict[str, Any]:
         return {
@@ -402,14 +454,14 @@ class LoopProgress:
             "stop_reason": self.stop_reason,
             "observations": [o.to_payload() for o in self.observations],
             "feedback": [[step, list(codes)] for step, codes in self.feedback],
-            "executed": list(self.executed),
+            "executed": [[signature, attempts] for signature, attempts in self.executed],
         }
 
     @classmethod
     def from_payload(cls, raw: Any, *, turn_id: int) -> Optional["LoopProgress"]:
         """The durable progress of *this* turn, or None when absent, for another
         turn, of another version, or not readable. Never a partial restore."""
-        if not isinstance(raw, Mapping) or raw.get("version") != AGENT_LOOP_STATE_VERSION:
+        if not isinstance(raw, Mapping) or raw.get("version") not in READABLE_STATE_VERSIONS:
             return None
         if raw.get("turn_id") != turn_id:
             return None
@@ -428,14 +480,18 @@ class LoopProgress:
                 turn_id=turn_id, phase=str(raw["phase"]), limits=limits, deadline_at=deadline_at,
                 steps_used=int(raw["steps_used"]), tool_calls_used=int(raw["tool_calls_used"]),
                 observations=observations, feedback=feedback,
-                executed=tuple(str(sig) for sig in raw.get("executed") or ()),
+                executed=_read_executed(raw.get("executed")),
                 stop_reason=raw.get("stop_reason"),
             )
         except (KeyError, TypeError, ValueError):
             return None
 
     def same_debits(self, other: Optional["LoopProgress"]) -> bool:
-        """Whether ``other`` carries exactly this progress's consumed attempts."""
+        """Whether ``other`` is this turn with exactly these consumed counters.
+
+        It compares the turn id and the two counters only, not the whole
+        checkpoint: those counters are what a debit is bound to.
+        """
         if other is None:
             return False
         return (other.turn_id, other.steps_used, other.tool_calls_used) == (
@@ -667,12 +723,12 @@ __all__ = [
     "AGENT_LOOP_STATE_KEY", "AGENT_LOOP_STATE_VERSION", "AgentLoopError", "AuthorizedContext", "BudgetView",
     "LoopBudget", "LoopEvent", "LoopOutcome", "LoopPhase", "LoopProgress", "LoopStatus", "MAX_ARGUMENTS_BYTES",
     "MAX_CHECKPOINT_BYTES", "MAX_CHECKPOINT_OBSERVATIONS", "MAX_OBSERVATION_BYTES", "MAX_REPLY_TEXT_LENGTH",
-    "MAX_TOOL_REQUESTS_PER_STEP", "ObservationCheckpoint", "ProviderBlocked", "ProviderCapabilities",
-    "ProviderFailure", "ProviderInvalid", "ProviderReply", "ProviderRequest", "ProviderResult",
-    "ProviderToolRequests", "RESERVED_SCOPE_ARGUMENTS", "ReplyDraft", "StopReason", "ToolDefinition", "ToolError",
-    "ToolErrorCode", "ToolObservation", "ToolRequest", "UnsupportedCapability", "VerificationFeedback",
-    "VerificationProblem", "checkpoint_observations", "evidence_index", "observation_digest", "public_copy",
-    "validate_budget", "validate_call_id", "validate_capabilities", "validate_evidence_ref",
-    "validate_provider_result", "validate_reply_draft", "validate_tool_name", "validate_tool_request",
-    "verify_reply_draft"
+    "MAX_TOOL_ATTEMPTS_PER_SIGNATURE", "MAX_TOOL_REQUESTS_PER_STEP", "ObservationCheckpoint", "ProviderBlocked",
+    "ProviderCapabilities", "ProviderFailure", "ProviderInvalid", "ProviderReply", "ProviderRequest",
+    "ProviderResult", "ProviderToolRequests", "READABLE_STATE_VERSIONS", "RESERVED_SCOPE_ARGUMENTS", "ReplyDraft",
+    "StopReason", "ToolDefinition", "ToolError", "ToolErrorCode", "ToolObservation", "ToolRequest",
+    "UnsupportedCapability", "VerificationFeedback", "VerificationProblem", "checkpoint_observations",
+    "evidence_index", "observation_digest", "public_copy", "validate_budget", "validate_call_id",
+    "validate_capabilities", "validate_evidence_ref", "validate_provider_result", "validate_reply_draft",
+    "validate_tool_name", "validate_tool_request", "verify_reply_draft"
 ]

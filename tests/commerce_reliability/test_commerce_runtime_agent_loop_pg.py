@@ -657,7 +657,7 @@ def test_repeated_tool_requests_terminate_explicitly(agent: Harness) -> None:
     ])
     outcome = agent.run(turn, lease, provider)
     assert outcome.stop_reason == ac.StopReason.REPEATED_TOOL_REQUEST.value
-    assert outcome.detail == {"tool": "catalog_search", "repeats": 2}
+    assert outcome.detail["tool"] == "catalog_search" and outcome.detail["repeat"] == "repeat_in_invocation"
     assert outcome.tool_calls_used == 1 and agent.sequences(turn) == 0
 
 
@@ -930,7 +930,8 @@ def test_checkpointed_observations_and_repeat_history_survive_re_entry(agent: Ha
     assert persisted is not None
     assert [o.call_id for o in persisted.observations] == ["c1"]
     assert persisted.observations[0].evidence_refs == ("product:blue_cotton_shirt",)
-    assert persisted.executed and persisted.executed[0].startswith("catalog_search:")
+    assert [signature for signature, _ in persisted.executed][0].startswith("catalog_search:")
+    assert [attempts for _, attempts in persisted.executed] == [1], "the original attempt is charged once"
 
     restored: List[ac.ToolObservation] = []
 
@@ -945,26 +946,162 @@ def test_checkpointed_observations_and_repeat_history_survive_re_entry(agent: Ha
     assert restored[0].evidence_refs == ("product:blue_cotton_shirt",)
 
 
-def test_a_recovery_repeat_of_a_read_only_tool_consumes_budget(agent: Harness) -> None:
+def test_duplicate_requests_inside_one_bundle_execute_no_tool(agent: Harness) -> None:
+    """Distinct correlation ids do not make identical tool and argument work distinct."""
     turn, lease = agent.start()
-    budget = ac.LoopBudget(max_steps=4, max_tool_calls=4, deadline_seconds=300)
-    agent.run(turn, lease, sp.ScriptedReasoningProvider([
-        sp.tools(sp.tool_call("c1", "catalog_search", query="عطر")),
-        ac.ProviderFailure("upstream"),
-    ]), loop=agent.loop(budget=budget))
-    before = agent.progress(turn)
-    assert before is not None and before.tool_calls_used == 1
+    provider = sp.ScriptedReasoningProvider([ac.ProviderToolRequests(requests=(
+        ac.ToolRequest("c1", "catalog_search", {"query": "قميص"}),
+        ac.ToolRequest("c2", "catalog_search", {"query": "قميص"}),      # same work, different call id
+    ))])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.stop_reason == ac.StopReason.REPEATED_TOOL_REQUEST.value
+    assert outcome.detail["repeat"] == "duplicate_in_bundle"
+    assert (outcome.detail["call_id"], outcome.detail["first_call_id"]) == ("c2", "c1")
+    assert "tool_observation" not in _kinds(outcome), "not even the first request ran"
+    assert outcome.tool_calls_used == 0 and agent.sequences(turn) == 0
+    progress = agent.progress(turn)
+    # The reasoning attempt that produced the bundle stays paid; no tool attempt
+    # is charged, and no signature is recorded for work never admitted.
+    assert progress is not None and (progress.steps_used, progress.tool_calls_used) == (1, 0)
+    assert progress.executed == ()
+
+
+def test_a_bundle_of_distinct_requests_still_runs(agent: Harness) -> None:
+    """The duplicate guard does not disturb a valid multi-request bundle."""
+    turn, lease = agent.start()
+    provider = sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="قميص"),
+                 sp.tool_call("c2", "catalog_search", query="عطر"),
+                 sp.tool_call("c3", "merchant_knowledge_lookup", topic="returns")),
+        lambda request: sp.reply("تمام.", refs=[request.observations[0].evidence_refs[0]], commerce=True),
+    ])
+    outcome = agent.run(turn, lease, provider,
+                        loop=agent.loop(budget=ac.LoopBudget(max_steps=3, max_tool_calls=3)))
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert _kinds(outcome).count("tool_observation") == 3 and outcome.tool_calls_used == 3
+    progress = agent.progress(turn)
+    assert progress is not None and len(progress.executed) == 3
+    assert {attempts for _, attempts in progress.executed} == {1}
+
+
+def test_the_recovery_allowance_is_one_repeat_and_then_refused(agent: Harness) -> None:
+    """Original, one later recovery, then refusal — each admitted attempt charged."""
+    turn, lease = agent.start()
+    budget = ac.LoopBudget(max_steps=6, max_tool_calls=6, deadline_seconds=300)
+    perfume = sp.tool_call("c1", "catalog_search", query="عطر")
+
+    agent.run(turn, lease, sp.ScriptedReasoningProvider([sp.tools(perfume), ac.ProviderFailure("upstream")]),
+              loop=agent.loop(budget=budget))
+    first = agent.progress(turn)
+    assert first is not None and first.tool_calls_used == 1
+    signature = first.executed[0][0]
+    assert first.executed == ((signature, 1),), "the original attempt is charged once"
 
     second = agent.run(turn, lease, sp.ScriptedReasoningProvider([
-        sp.tools(sp.tool_call("c9", "catalog_search", query="عطر")),      # the same read-only work again
-        lambda request: sp.reply("عطر ورد متوفر.",
-                                 refs=[sp.observed(request, "c9").result["products"][0]["ref"]], commerce=True),
+        sp.tools(sp.tool_call("c9", "catalog_search", query="عطر")),   # same work, new correlation id
+        ac.ProviderFailure("upstream again"),
     ]), loop=agent.loop(budget=budget))
-    assert second.status == ac.LoopStatus.PENDING_DELIVERY.value
-    recovery = [e for e in second.events if e.detail.get("recovery_repeat")]
-    assert len(recovery) == 1, "the repeat after re-entry is marked as a recovery repeat"
+    assert [e for e in second.events if e.detail.get("recovery_repeat")], "marked as a recovery repeat"
     after = agent.progress(turn)
-    assert after is not None and after.tool_calls_used == 2, "the repeated attempt consumed budget"
+    assert after is not None and after.tool_calls_used == 2
+    assert after.executed == ((signature, 2),), "the recovery attempt is charged to the same signature"
+
+    third_provider = sp.ScriptedReasoningProvider([sp.tools(sp.tool_call("cX", "catalog_search", query="عطر"))])
+    third = agent.run(turn, lease, third_provider, loop=agent.loop(budget=budget))
+    assert third.stop_reason == ac.StopReason.REPEATED_TOOL_REQUEST.value
+    assert third.detail["repeat"] == "allowance_exhausted" and third.detail["attempts"] == 2
+    exhausted = agent.progress(turn)
+    assert exhausted is not None and exhausted.tool_calls_used == 2, "the refused attempt ran and charged nothing"
+    assert exhausted.executed == ((signature, 2),)
+    assert agent.sequences(turn) == 0
+
+
+def test_different_signatures_keep_independent_allowances(agent: Harness) -> None:
+    turn, lease = agent.start()
+    budget = ac.LoopBudget(max_steps=6, max_tool_calls=6, deadline_seconds=300)
+    agent.run(turn, lease, sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="عطر")), ac.ProviderFailure("upstream")],
+    ), loop=agent.loop(budget=budget))
+    agent.run(turn, lease, sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c2", "catalog_search", query="عطر")), ac.ProviderFailure("upstream")],
+    ), loop=agent.loop(budget=budget))
+    exhausted = dict(agent.progress(turn).executed)
+    assert list(exhausted.values()) == [2], "the perfume signature is spent"
+
+    # A different argument is a different signature with its own untouched allowance.
+    outcome = agent.run(turn, lease, sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c3", "catalog_search", query="قميص")),
+        lambda request: sp.reply("قميص قطني أزرق متوفر.",
+                                 refs=[sp.observed(request, "c3").result["products"][0]["ref"]], commerce=True),
+    ]), loop=agent.loop(budget=budget))
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value, "an independent signature still executes"
+    charged = dict(agent.progress(turn).executed)
+    assert len(charged) == 2 and sorted(charged.values()) == [1, 2]
+
+
+def test_a_crash_right_after_the_tool_debit_keeps_the_identity_and_the_charge(agent: Harness) -> None:
+    """The allowance is spent by the debit, even when the crash prevents proof the tool ran."""
+    turn, lease = agent.start()
+    args = agent.worker_args(turn, lease, "search_perfume_then_reply")
+    exit_code, messages = _run_crash_worker(w.crash_after_tool_debit_worker, (agent.dsn, "crash-1", args))
+    assert exit_code == 9 and any(m.get("status") == "dying_after_tool_debit" for m in messages), messages
+    after = agent.progress(turn)
+    assert after is not None, "the durable debit survived the crash"
+    assert after.tool_calls_used == 1 and len(after.executed) == 1
+    signature, attempts = after.executed[0]
+    assert signature.startswith("catalog_search:") and attempts == 1
+    assert after.observations == (), "the tool never ran, so there is no observation"
+    assert agent.sequences(turn) == 0
+
+    # The identity survived, so the next request for it is the one permitted recovery.
+    second = agent.run(turn, lease, sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="عطر")),
+        lambda request: sp.reply("عطر ورد متوفر.",
+                                 refs=[sp.observed(request, "c1").result["products"][0]["ref"]], commerce=True),
+    ]), loop=agent.loop(budget=ac.LoopBudget(max_steps=6, max_tool_calls=6, deadline_seconds=300)))
+    assert second.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert dict(agent.progress(turn).executed)[signature] == 2
+
+
+def test_a_crash_right_after_the_recovery_debit_leaves_the_allowance_exhausted(agent: Harness) -> None:
+    turn, lease = agent.start()
+    args = agent.worker_args(turn, lease, "search_perfume_then_reply")
+    for label in ("original", "recovery"):
+        exit_code, messages = _run_crash_worker(w.crash_after_tool_debit_worker, (agent.dsn, label, args))
+        assert exit_code == 9, (label, messages)
+    after = agent.progress(turn)
+    assert after is not None and len(after.executed) == 1
+    signature, attempts = after.executed[0]
+    assert attempts == ac.MAX_TOOL_ATTEMPTS_PER_SIGNATURE, "both crashes spent the allowance"
+    assert after.tool_calls_used == 2
+
+    refused = sp.ScriptedReasoningProvider([sp.tools(sp.tool_call("cZ", "catalog_search", query="عطر"))])
+    outcome = agent.run(turn, lease, refused,
+                        loop=agent.loop(budget=ac.LoopBudget(max_steps=8, max_tool_calls=8, deadline_seconds=300)))
+    assert outcome.stop_reason == ac.StopReason.REPEATED_TOOL_REQUEST.value
+    assert outcome.detail["repeat"] == "allowance_exhausted"
+    assert dict(agent.progress(turn).executed)[signature] == ac.MAX_TOOL_ATTEMPTS_PER_SIGNATURE
+
+
+def test_concurrent_invocations_cannot_spend_the_same_recovery_allowance_twice(agent: Harness) -> None:
+    turn, lease = agent.start()
+    budget = ac.LoopBudget(max_steps=8, max_tool_calls=8, deadline_seconds=300)
+    agent.run(turn, lease, sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="عطر")), ac.ProviderFailure("upstream")],
+    ), loop=agent.loop(budget=budget))
+    signature = agent.progress(turn).executed[0][0]
+    assert dict(agent.progress(turn).executed)[signature] == 1, "one recovery remains"
+
+    args = agent.worker_args(turn, lease, "search_perfume_then_reply")
+    results = _run_workers([(w.run_turn_worker, (agent.dsn, f"r{i}", args)) for i in range(2)])
+    assert [r["status"] for r in results] == ["ok", "ok"], results
+    outcomes = [r["result"] for r in results]
+    refused = [o for o in outcomes if o["status"] == ac.LoopStatus.STOPPED.value]
+    assert len(refused) == 1, outcomes
+    assert refused[0]["stop_reason"] in {ac.StopReason.CONCURRENT_INVOCATION.value,
+                                         ac.StopReason.REPEATED_TOOL_REQUEST.value}, refused[0]
+    final = dict(agent.progress(turn).executed)
+    assert final[signature] == ac.MAX_TOOL_ATTEMPTS_PER_SIGNATURE, "the allowance was spent exactly once more"
 
 
 def test_existing_pending_and_unknown_ledger_work_neither_resends_nor_completes(agent: Harness) -> None:

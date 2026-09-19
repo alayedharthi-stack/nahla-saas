@@ -157,7 +157,7 @@
       "id": "commerce_runtime_agent_loop",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py",
-      "origin": "Agent loop PR \u2014 dormant agent loop core and its durable guarantees: one turn through reasoning, read-only fixture tools and observations feeding the next decision; durable ownership- and revision-guarded attempt debits with concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes",
+      "origin": "Agent loop PR \u2014 dormant agent loop core and its durable guarantees: one turn through reasoning, read-only fixture tools and observations feeding the next decision; durable ownership- and revision-guarded attempt debits with concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; repeat policy: duplicates inside one bundle refused before the first tool runs, and a durable crash-safe recovery allowance of one original attempt plus one repeat",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -192,7 +192,13 @@
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_re_entry_restores_the_authoritative_limits_and_cannot_enlarge_them",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_re_entry_reuses_the_existing_delivery_intent_and_never_creates_a_second",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_checkpointed_observations_and_repeat_history_survive_re_entry",
-        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_recovery_repeat_of_a_read_only_tool_consumes_budget",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_duplicate_requests_inside_one_bundle_execute_no_tool",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_bundle_of_distinct_requests_still_runs",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_the_recovery_allowance_is_one_repeat_and_then_refused",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_different_signatures_keep_independent_allowances",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_crash_right_after_the_tool_debit_keeps_the_identity_and_the_charge",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_crash_right_after_the_recovery_debit_leaves_the_allowance_exhausted",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_concurrent_invocations_cannot_spend_the_same_recovery_allowance_twice",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_existing_pending_and_unknown_ledger_work_neither_resends_nor_completes",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_completed_turn_is_never_reasoned_about_again",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_loop_run_closes_its_transactions_and_holds_none_across_reasoning"

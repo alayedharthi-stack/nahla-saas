@@ -241,8 +241,11 @@ each safe, duplicate rules; neither ever downgrades an established outcome.
   lock wait, so a caller whose work has a deadline can refuse a reservation
   that became invalid while it waited; raising aborts the transaction and
   writes nothing. Omitting it preserves the previous behaviour exactly, and it
-  weakens no ledger rule: the ownership, eligibility, revision and
-  one-sequence-per-turn guarantees are unchanged and still enforced first.
+  weakens no ledger rule: the ownership, revision and eligibility guards run
+  **before** it and are unchanged, and the one-sequence-per-turn guarantee is
+  enforced **after** it, by the reservation and the unique constraint on the
+  turn, so a hook that raises simply leaves the transaction with nothing
+  written.
 
 ## 8. Schema (revision 0109, revises 0108)
 

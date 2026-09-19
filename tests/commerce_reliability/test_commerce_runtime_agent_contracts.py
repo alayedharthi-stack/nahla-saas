@@ -234,7 +234,7 @@ def test_a_full_progress_payload_fits_the_state_payload_bound() -> None:
     progress = ac.LoopProgress(
         turn_id=1, phase=ac.LoopPhase.REASONING.value, limits=ac.LoopBudget(), deadline_at=NOW,
         steps_used=4, tool_calls_used=6, observations=ac.checkpoint_observations(observations),
-        feedback=((1, ("unknown_evidence",)),), executed=tuple(f"catalog_search:{i}" for i in range(8)),
+        feedback=((1, ("unknown_evidence",)),), executed=tuple((f"catalog_search:{i}", 1) for i in range(8)),
     )
     assert len(progress.observations) == ac.MAX_CHECKPOINT_OBSERVATIONS
     payload = {ac.AGENT_LOOP_STATE_KEY: progress.to_payload()}

@@ -4,7 +4,9 @@ Status: recorded 2026-09-19 as the contract of the third dormant slice;
 corrected the same day after the independent review of PR #1095 (durable
 attempt accounting, enforced waits and the reservation deadline, scope and
 eligibility boundaries, complete boundary validation, isolation of
-authoritative data, closed ownership-loss outcomes). Extends
+authoritative data, closed ownership-loss outcomes), and again for the repeat
+policy (duplicates inside one bundle; a durable, crash-safe recovery
+allowance). Extends
 `commerce-runtime-foundation-contract.md` and
 `commerce-runtime-effect-and-delivery-ledgers.md`; nothing here reopens the
 closed findings of either. Authority for the implementation in
@@ -135,29 +137,63 @@ attempts into the conversation's versioned state under the reserved key
   reads a fresh revision and overwrites it with counters derived from an older
   snapshot.
 * **Arbitration, including within one ownership epoch.** A debit is refused
-  (`concurrent_invocation`) when the durable progress is not exactly what this
-  invocation last wrote, or when the compare-and-set loses. Two callers
-  holding the same token therefore cannot execute on the same debit; the
-  loser's conclusions are discarded and the winner's progress is preserved.
+  (`concurrent_invocation`) when the durable progress is not the one this
+  invocation last wrote, or when the compare-and-set loses. The comparison is
+  narrow and deliberate: it matches the **turn id and the two consumed
+  counters**, which are what a debit is bound to, not the whole checkpoint.
+  Two callers holding the same token therefore cannot execute on the same
+  debit, nor spend the same repeat allowance; the loser's conclusions are
+  discarded and the winner's progress is preserved.
 * **Survives a crash.** A process that dies after a provider or tool call but
   before the acceptance commit leaves its debits behind and leaves no reply
   state and no delivery sequence.
 * **Restored on re-entry, never enlarged.** A later invocation restores the
   authoritative limits, the absolute deadline, the consumed attempts, the
-  checkpointed observations, the verification feedback and the repeat history.
-  A caller that passes a different budget does not change the stored one; the
-  difference is recorded in the `resumed` event.
-* **Checkpoint bound.** Observation identities, outcomes and evidence
-  references are always checkpointed; result **bodies** are dropped
-  oldest-first when the checkpoint would exceed its bound, and only the most
-  recent observations are kept at all. A restored observation says plainly
-  that it was restored and whether its body was dropped. Verification stays
-  exact because references always survive.
-* **Recovery repeats.** Repeating a read-only tool call that a *previous*
-  invocation made is permitted once and is marked `recovery_repeat`; it
-  consumes budget like any other attempt. Repeating a call within the *same*
-  invocation is refused (`repeated_tool_request`). Nothing here claims
-  exactly-once provider or tool execution: an abandoned call may have run.
+  checkpointed observations, the verification feedback and the per-signature
+  repeat allowances. A caller that passes a different budget does not change
+  the stored one; the difference is recorded in the `resumed` event.
+* **Progress format.** The durable payload is version 3. A version 2 payload,
+  which recorded signatures without their attempt counts, is still readable and
+  is read **conservatively**: each of its signatures counts as having spent its
+  whole allowance, so absent history is never mistaken for permission to repeat
+  again. An unknown version is not partially restored. No shared-data
+  migration and no production backfill exist; the slice is dormant and no
+  environment holds such a payload.
+* **Checkpoint bound.** The projection is bounded twice. Only the most recent
+  16 observations are **retained** at all; an older one is dropped whole, its
+  evidence references included. For each retained observation the identity,
+  outcome and evidence references always survive, and result **bodies** are
+  dropped oldest-first when the checkpoint would exceed its byte bound. A
+  restored observation says plainly that it was restored and whether its body
+  was dropped. Verification is therefore exact for the references of retained
+  observations; a reference whose observation fell outside the retention
+  window is no longer citable and a draft citing it is refused.
+* **Repeat policy, durably enforced.** A tool call's identity is its
+  **execution signature**: the tool name with its validated arguments. The
+  correlation id plays no part, so two requests with different call ids and
+  identical work are the same signature. Each signature has an allowance of
+  **one original attempt plus at most one recovery repeat across later
+  invocations**; a third request for it is refused
+  (`repeated_tool_request`, `allowance_exhausted`).
+  * A bundle is preflighted whole, against the signatures this invocation has
+    already charged **and** against the signatures seen earlier in the same
+    bundle. A bundle containing a duplicate is refused before its **first**
+    tool runs (`duplicate_in_bundle`), and no tool attempt is charged for work
+    never admitted. The reasoning attempt already spent to obtain that bundle
+    stays spent.
+  * Repeating a signature already charged within the *same* invocation is
+    refused (`repeat_in_invocation`).
+  * The attempt count for each admitted signature is written in the **same**
+    compare-and-set as the consumed counters, before any tool runs. A crash
+    between that debit and the execution therefore leaves the identity
+    recorded and the allowance spent. That is deliberate and is the honest
+    reading: **a debit can consume an allowance even when the crash prevents
+    any proof that the tool actually ran.** Read-only repetition is a bounded
+    recovery policy, not exactly-once execution; an abandoned or crashed call
+    may have run.
+  * The allowance is restored from the durable record and only ever
+    incremented. It is never rebuilt from an invocation's memory, so a spent
+    allowance stays spent.
 
 ## 6. Enforced waits, deadlines and cancellation
 
@@ -225,11 +261,15 @@ attempts into the conversation's versioned state under the reserved key
 ### 7.1 Narrow dependency extension
 
 `LedgerRepository.commit_turn_decision` gained one optional parameter,
-`precondition(conn, snapshot)`, evaluated after the conversation row lock, the
-ownership guard and the eligibility check, and before any write of that
-transaction; raising from it aborts the transaction and writes nothing.
-Omitting it reproduces the previous behaviour exactly, so every existing
-caller and every ledger guarantee is unchanged. The loop uses it for the
+`precondition(conn, snapshot)`, evaluated after the conversation row lock and
+after the **ownership, revision and eligibility** checks, and before any write
+of that transaction; raising from it aborts the transaction and writes
+nothing. Those three checks therefore still run first and are unaffected. The
+**one-sequence-per-turn** guarantee is not one of them: it is enforced later
+in the same transaction, by the reservation itself and the unique constraint
+on the turn, so the hook sits between the guards and that enforcement and
+weakens neither. Omitting the parameter reproduces the previous behaviour
+exactly, so every existing caller is unchanged. The loop uses it for the
 deadline recheck of section 6. The change is recorded in the ledger contract
 and exercised by the reservation-deadline regression.
 
@@ -250,7 +290,7 @@ completion.
 | Bounded stopping conditions | enforced waits, absolute deadline, step and tool budgets, repeat detection, cancellation | `test_a_hanging_provider_is_abandoned_at_its_enforced_wait`, `test_a_tool_wait_is_capped_by_the_remaining_overall_deadline`, `test_budget_exhaustion_and_cancellation_stop_without_false_success` | Fixed budgets; no adaptive effort or token accounting; cancellation is local |
 | Guardrails at the action boundary | allowlist, read-only registration, scope refusal, complete result validation | `test_unknown_tools_invalid_arguments_and_forged_scope_cannot_execute_work`, `test_a_bundle_mixing_a_valid_and_a_malformed_request_executes_no_tool` | Guards the tool boundary; the provider's wording is not policed |
 | Transparency of steps | `LoopEvent` stream, named `stop_reason`, durable progress | event-sequence assertions in the path tests | No secrets and no private model reasoning are recorded, by design |
-| Durable checkpoints | revision-bound debits, checkpointed context, atomic decision commit | `test_a_crash_after_the_tool_ran_keeps_the_debits_and_leaves_no_reservation`, `test_re_entry_restores_the_authoritative_limits_and_cannot_enlarge_them` | One checkpoint shape per turn; no mid-tool-call resume |
+| Durable checkpoints | revision-bound debits, per-signature allowances, checkpointed context, atomic decision commit | `test_a_crash_after_the_tool_ran_keeps_the_debits_and_leaves_no_reservation`, `test_a_crash_right_after_the_tool_debit_keeps_the_identity_and_the_charge`, `test_re_entry_restores_the_authoritative_limits_and_cannot_enlarge_them` | One checkpoint shape per turn; no mid-tool-call resume; a charge can outlive the proof that the tool ran |
 
 ## 9. Out of scope (unchanged decisions)
 
