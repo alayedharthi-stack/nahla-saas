@@ -145,6 +145,13 @@ step present native `tool_use` / `tool_result` pairs:
   `earlier_tool_observations` data block, marked `restored_from_earlier_attempt`
   and, where the checkpoint bound dropped a body,
   `result_body_dropped_by_checkpoint_bound`. No pair is fabricated for them.
+- The **prior conversation**, when the caller supplies it, opens the transcript
+  as ordinary alternating chat turns before the current customer message. It is
+  bounded to the twelve most recent turns and 1200 characters each; consecutive
+  turns from one side are merged, a leading assistant turn is dropped, and turns
+  the customer sent last join the current message as earlier blocks of it — so
+  the transcript alternates without a single word being invented on the
+  assistant's behalf.
 
 Tool results are **data**, never instructions: each is a JSON document of the
 observation, including its error code when the tool refused or failed.

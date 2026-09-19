@@ -208,7 +208,7 @@
       "id": "commerce_runtime_pilot",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py",
-      "origin": "Pilot integration PR — the owner pilot end to end on real PostgreSQL with the real admission, ownership, agent loop, Anthropic adapter, trusted read context and delivery ledger, and only the model's HTTP call and the WhatsApp transport scripted: one inbound message answered at most once (redelivery, re-entry reusing the reserved intent, two concurrent invocations sending once), never a success the send does not support (rejected, unknown, a transport that raises, a provider failure, a model refusal, a draft citing unobserved evidence), no blind retry of an uncertain send, tenant and conversation scope, and refusal when the runtime schema is not present",
+      "origin": "Pilot integration PR — the owner pilot end to end on real PostgreSQL with the real admission, ownership, agent loop, Anthropic adapter, trusted read context and delivery ledger, and only the model's HTTP call and the WhatsApp transport scripted: one inbound message answered at most once (redelivery, re-entry reusing the reserved intent, two concurrent invocations sending once), never a success the send does not support (rejected, unknown, a transport that raises, a provider failure, a model refusal, a draft citing unobserved evidence), no blind retry of an uncertain send, a follow-up answered from the conversation the platform already recorded, tenant and conversation scope, and refusal when the runtime schema is not present",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -217,6 +217,7 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_owner_turn_reasons_dispatches_and_completes_on_an_identified_send",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_text_that_is_sent_is_the_text_the_ledger_reserved",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_real_read_tools_reach_the_merchant_s_own_catalogue",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_follow_up_sees_the_conversation_the_platform_already_recorded",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_draft_citing_evidence_that_was_never_observed_is_refused_before_any_send",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_redelivered_inbound_message_never_answers_twice",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_re_entry_reuses_the_reserved_intent_instead_of_composing_a_second_reply",

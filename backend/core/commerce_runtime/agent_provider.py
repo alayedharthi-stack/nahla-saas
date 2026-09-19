@@ -130,6 +130,37 @@ def _observation_payload(observation: ac.ToolObservation) -> Dict[str, Any]:
     return payload
 
 
+MAX_HISTORY_MESSAGES = 12
+MAX_HISTORY_CHARS = 1200
+
+
+def _clean_history(history: Optional[Sequence[Mapping[str, Any]]]) -> List[Dict[str, str]]:
+    """The prior conversation as bounded, alternating chat turns.
+
+    The platform owns what the earlier turns *were*; this only shapes them into
+    messages the model can read. Empty entries are dropped, consecutive turns
+    from the same side are merged so the transcript stays alternating, a leading
+    assistant turn is dropped because the conversation must open with the
+    customer, and only the most recent ``MAX_HISTORY_MESSAGES`` survive.
+    """
+    cleaned: List[Dict[str, str]] = []
+    for entry in list(history or [])[-(MAX_HISTORY_MESSAGES * 2):]:
+        if not isinstance(entry, Mapping):
+            continue
+        role = "assistant" if str(entry.get("role") or "") == "assistant" else "user"
+        text = str(entry.get("text") or "").strip()[:MAX_HISTORY_CHARS]
+        if not text:
+            continue
+        if cleaned and cleaned[-1]["role"] == role:
+            merged = (cleaned[-1]["text"] + "\n" + text)[:MAX_HISTORY_CHARS]
+            cleaned[-1] = {"role": role, "text": merged}
+            continue
+        cleaned.append({"role": role, "text": text})
+    while cleaned and cleaned[0]["role"] == "assistant":
+        cleaned.pop(0)
+    return cleaned[-MAX_HISTORY_MESSAGES:]
+
+
 def _inbound_text(inbound: Mapping[str, Any]) -> str:
     for key in ("text", "body", "message"):
         value = inbound.get(key)
@@ -150,6 +181,7 @@ class AnthropicReasoningProvider:
         max_output_tokens: int = MAX_OUTPUT_TOKENS,
         audit_context: Optional[Mapping[str, Any]] = None,
         context_preamble: Optional[Mapping[str, Any]] = None,
+        history: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> None:
         self._instructions = str(instructions or "").strip()
         if not self._instructions:
@@ -159,6 +191,7 @@ class AnthropicReasoningProvider:
         self._max_output_tokens = int(max_output_tokens)
         self._audit_context = dict(audit_context or {})
         self._context_preamble = dict(context_preamble or {})
+        self._history = _clean_history(history)
         # Per-invocation transcript: one entry per step, holding the raw
         # assistant blocks, the tool_use ids that step emitted (in order) and
         # whether the step was read requests or the reply channel.
@@ -306,7 +339,19 @@ class AnthropicReasoningProvider:
         if self._context_preamble:
             opening.insert(0, {"type": "text",
                                "text": _json_block("conversation_context", self._context_preamble)})
-        messages: List[Dict[str, Any]] = [{"role": "user", "content": opening}]
+        earlier = list(self._history)
+        # The current turn is the customer's. A history ending in a customer turn
+        # would put two user messages in a row, so those trailing turns join the
+        # current one as earlier blocks of the same message: nothing is invented
+        # and nothing is dropped.
+        trailing: List[Dict[str, Any]] = []
+        while earlier and earlier[-1]["role"] == "user":
+            trailing.insert(0, {"type": "text", "text": earlier.pop()["text"]})
+        messages: List[Dict[str, Any]] = [
+            {"role": entry["role"], "content": [{"type": "text", "text": entry["text"]}]}
+            for entry in earlier
+        ]
+        messages.append({"role": "user", "content": trailing + opening})
 
         problems_by_step = {f.step_no: f for f in request.feedback}
         replayed: set = set()
@@ -368,6 +413,6 @@ class AnthropicReasoningProvider:
 
 
 __all__ = [
-    "AnthropicReasoningProvider", "MAX_OUTPUT_TOKENS", "REPLY_TOOL_DESCRIPTION", "REPLY_TOOL_NAME",
+    "AnthropicReasoningProvider", "MAX_HISTORY_CHARS", "MAX_HISTORY_MESSAGES", "MAX_OUTPUT_TOKENS", "REPLY_TOOL_DESCRIPTION", "REPLY_TOOL_NAME",
     "REPLY_TOOL_SCHEMA", "StepUsage",
 ]

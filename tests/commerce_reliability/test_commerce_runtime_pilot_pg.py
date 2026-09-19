@@ -318,6 +318,30 @@ def test_the_real_read_tools_reach_the_merchant_s_own_catalogue(pilot):
     assert report.input_tokens == 200 and report.output_tokens == 40
 
 
+def test_a_follow_up_sees_the_conversation_the_platform_already_recorded(pilot):
+    """The model is given the prior turns as chat turns, not asked to guess them."""
+    transport = Transport([accepted("wamid.FOLLOWUP")])
+    scripted = ScriptedAnthropic([step([reply("تسعة وتسعون ريال", call_id="r1")])])
+    report = entry.run_commerce_runtime_turn(
+        engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+        conversation_id=pilot.conversation_id,
+        conversation_ref=f"wa:{PHONE}:{pilot.conversation_id}",
+        connection_ref=f"wa:{pilot.connection_id}", connection_id=str(pilot.connection_id),
+        customer_id=pilot.customer_id, normalized_customer_phone=PHONE,
+        provider_message_id="wamid." + uuid.uuid4().hex, inbound_text="وكم سعره؟",
+        inbound_metadata={}, transport=transport, instructions="EXISTING-INSTRUCTIONS",
+        history=[{"role": "user", "text": QUESTION},
+                 {"role": "assistant", "text": "نعم، متوفر"}],
+        anthropic_provider=scripted,
+    )
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    messages = scripted.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert messages[0]["content"][0]["text"] == QUESTION
+    assert messages[1]["content"][0]["text"] == "نعم، متوفر"
+    assert messages[-1]["content"][-1]["text"] == "وكم سعره؟"
+
+
 def test_a_draft_citing_evidence_that_was_never_observed_is_refused_before_any_send(pilot):
     transport = Transport([])
     report = pilot.run(

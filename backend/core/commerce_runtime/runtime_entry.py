@@ -203,6 +203,7 @@ def run_commerce_runtime_turn(
     instructions: str,
     budget: Optional[ac.LoopBudget] = None,
     context_preamble: Optional[Mapping[str, Any]] = None,
+    history: Optional[Any] = None,
     anthropic_provider: Optional[Any] = None,
 ) -> TurnReport:
     """Run one admitted inbound turn to a recorded transport outcome."""
@@ -281,6 +282,7 @@ def run_commerce_runtime_turn(
                            "turn_id": int(turn_id), "channel": "whatsapp",
                            "reason": "commerce_runtime_pilot"},
             context_preamble=context_preamble,
+            history=history,
         )
         loop = AgentLoop(ledgers, registry, budget=budget)
         outcome = loop.run_turn(

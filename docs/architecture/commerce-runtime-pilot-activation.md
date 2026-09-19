@@ -161,6 +161,17 @@ never widen what one turn may spend.
 
 ---
 
+## 3.4 The conversation so far
+
+A follow-up needs what came before it. The pilot reads the prior turns through
+the same `StateManager.load_history` the legacy path uses, so both runtimes see
+one conversation, and hands them to the adapter as chat turns. The inbound
+message being answered is dropped when the store has already persisted it, so
+the model is never shown the same customer turn twice, and a history read that
+fails yields no history rather than a guess.
+
+---
+
 ## 4. What is written, and where
 
 A turn that ends in an identified acceptance persists one outbound message row

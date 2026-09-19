@@ -56,6 +56,36 @@ def _context_preamble(convo: Any, customer_name: str) -> Dict[str, Any]:
     return preamble
 
 
+def _prior_turns(db: Any, *, tenant_id: int, phone: str, current_text: str) -> list:
+    """The conversation so far, as the platform already records it.
+
+    Read through the same ``StateManager.load_history`` the legacy path uses, so
+    the two runtimes see the same conversation. The inbound message being
+    answered now is dropped when the store has already persisted it, so the
+    model is not shown the same customer turn twice. A read that fails yields no
+    history rather than a guess.
+    """
+    try:
+        from core.conversation_engine import StateManager  # noqa: PLC0415
+
+        events = StateManager.load_history(db, phone=phone, tenant_id=int(tenant_id)) or []
+    except Exception:  # noqa: BLE001 - missing history is never invented
+        logger.warning("[COMMERCE_RUNTIME_PILOT] history unavailable tenant=%s", tenant_id)
+        return []
+    turns = []
+    for event in events:
+        direction = str((event or {}).get("direction") or "")
+        body = str((event or {}).get("body") or "").strip()
+        if not body:
+            continue
+        role = "assistant" if direction in {"out", "outbound"} else "user"
+        turns.append({"role": role, "text": body})
+    current = str(current_text or "").strip()
+    while turns and turns[-1]["role"] == "user" and turns[-1]["text"] == current:
+        turns.pop()
+    return turns
+
+
 def _send_factory(phone_id: str, tenant_id: int, db: Any, loop: Any) -> Any:
     """A synchronous view of the established WhatsApp text sender.
 
@@ -177,6 +207,7 @@ async def _own_turn(
             instructions=_instructions(),
             budget=pilot_guard.pilot_budget(),
             context_preamble=_context_preamble(convo, customer_name),
+            history=_prior_turns(db, tenant_id=int(tenant_id), phone=to, current_text=text),
         )
 
     report = await asyncio.to_thread(run)
