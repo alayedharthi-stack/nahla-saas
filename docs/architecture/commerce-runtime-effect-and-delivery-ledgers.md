@@ -234,6 +234,18 @@ each safe, duplicate rules; neither ever downgrades an established outcome.
 * Every other operation runs one write transaction; `finalize_turn` may open
   one read-only transaction after a terminal primary-key race, exactly like
   the foundation's `record_terminal`.
+* **Caller precondition (additive).** `commit_turn_decision` accepts an
+  optional `precondition(conn, snapshot)` evaluated after the conversation row
+  lock, the ownership guard and the eligibility check, and before any write of
+  that transaction. Its snapshot carries the database clock read after every
+  lock wait, so a caller whose work has a deadline can refuse a reservation
+  that became invalid while it waited; raising aborts the transaction and
+  writes nothing. Omitting it preserves the previous behaviour exactly, and it
+  weakens no ledger rule: the ownership, revision and eligibility guards run
+  **before** it and are unchanged, and the one-sequence-per-turn guarantee is
+  enforced **after** it, by the reservation and the unique constraint on the
+  turn, so a hook that raises simply leaves the transaction with nothing
+  written.
 
 ## 8. Schema (revision 0109, revises 0108)
 

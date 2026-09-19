@@ -47,10 +47,15 @@ What it does not provide (accurate boundaries)
   guarantee: the ledgers record intents, attempts and evidence; nothing here
   performs an external call.
 * No search replacement, callbacks, activation flags or live state writes.
+* No live reasoning provider: the agent loop core (``agent_contracts``,
+  ``agent_tools``, ``agent_scripted``, ``agent_loop``) orchestrates one turn
+  against a typed single-step provider interface and read-only fixture tools.
+  It calls no model, sends no message and is wired into nothing.
 
 Contracts: ``docs/architecture/commerce-runtime-foundation-contract.md`` and
 ``docs/architecture/commerce-runtime-effect-and-delivery-ledgers.md``.
 """
 from __future__ import annotations
 
-__all__ = ["contracts", "ledger_contracts", "ledger_models", "ledgers", "models", "repositories"]
+__all__ = ["agent_contracts", "agent_loop", "agent_scripted", "agent_tools", "contracts",
+           "ledger_contracts", "ledger_models", "ledgers", "models", "repositories"]
