@@ -1,0 +1,586 @@
+{
+  "contract_version": "commerce_v2_phase_2_7b_knowledge_acceptance_v3",
+  "matrix_name": "Commerce Agent V2 — Phase 2.7B knowledge grounding acceptance (v3)",
+  "tenant_id": 1,
+  "execution_mode": "INTERNAL_E2E",
+  "cases_total": 16,
+  "source_authority": {
+    "structured_catalog": [
+      "price",
+      "sale_price",
+      "regular_price",
+      "currency",
+      "availability",
+      "stock_quantity",
+      "product_url",
+      "image_url",
+      "order",
+      "payment",
+      "shipment"
+    ],
+    "merchant_knowledge": [
+      "origin",
+      "description",
+      "usage",
+      "benefits",
+      "care",
+      "policy",
+      "store_statement"
+    ],
+    "conflict_resolution": "structured_catalog_wins",
+    "absent_knowledge": "disclose_absence_never_invent",
+    "health_statements": "relay_merchant_authored_text_only_no_medical_expansion",
+    "runtime_fallback": "a runtime fallback is never a compliant answer unless the case expects safe_missing_fact"
+  },
+  "cases": [
+    {
+      "case_id": "K01",
+      "title": "Product browse with relevant store knowledge",
+      "input": "وش المنتجات المتوفرة عندكم؟",
+      "knowledge_fixture": "store_policy_relevant",
+      "binding": {
+        "thread": "browse",
+        "reset_thread_before": true,
+        "target_product_sku": null,
+        "required_section_fixture": "store_policy_relevant",
+        "anchor_turns": []
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "turn"
+        ],
+        "allowed_statuses": [
+          "ok",
+          "no_results"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "optional",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "a knowledge lookup is attempted on a browse turn",
+        "prices and availability come from structured catalog evidence",
+        "no merchant knowledge is invented"
+      ]
+    },
+    {
+      "case_id": "K02",
+      "title": "Product detail with the product-linked description",
+      "input": "أبغى تفاصيل أول منتج عندكم",
+      "knowledge_fixture": "product_linked_description",
+      "binding": {
+        "thread": "jacket",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": "product_linked_description",
+        "anchor_turns": []
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "optional",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "the resolved product is the declared target",
+        "the description knowledge linked to it is retrieved",
+        "price and stock come from the catalog"
+      ]
+    },
+    {
+      "case_id": "K03",
+      "title": "Product origin question",
+      "input": "وش مصدر هذا المنتج؟",
+      "knowledge_fixture": "product_linked_origin",
+      "binding": {
+        "thread": "jacket",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": "product_linked_origin",
+        "anchor_turns": [
+          "أبغى تفاصيل أول منتج عندكم"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "the origin claim cites knowledge evidence",
+        "the cited section is linked to the declared target product"
+      ]
+    },
+    {
+      "case_id": "K04",
+      "title": "Care and usage for the product that owns the usage section",
+      "input": "كيف أعتني بها؟",
+      "knowledge_fixture": "product_linked_usage",
+      "binding": {
+        "thread": "skirt",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-SKIRT",
+        "required_section_fixture": "product_linked_usage",
+        "anchor_turns": [
+          "أبغى تفاصيل التنورة القطنية"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "the resolved product is the skirt that owns the usage section",
+        "the care instructions cite knowledge evidence"
+      ]
+    },
+    {
+      "case_id": "K05",
+      "title": "Price and origin in one question",
+      "input": "كم سعره ووش مصدره؟",
+      "knowledge_fixture": "product_linked_origin",
+      "binding": {
+        "thread": "jacket",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": "product_linked_origin",
+        "anchor_turns": [
+          "أبغى تفاصيل أول منتج عندكم"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "the price claim cites catalog evidence",
+        "the origin claim cites knowledge evidence",
+        "neither source supplies the other's fact"
+      ]
+    },
+    {
+      "case_id": "K06",
+      "title": "Stale knowledge price versus live catalog price",
+      "input": "كم سعر العسل الجبلي؟",
+      "knowledge_fixture": "product_linked_stale_price",
+      "binding": {
+        "thread": "honey",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-HONEY",
+        "required_section_fixture": "product_linked_stale_price",
+        "anchor_turns": []
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "forbidden_for_commercial_facts",
+        "commercial_facts_source": "catalog_product",
+        "expected_conflicts": [
+          "price"
+        ]
+      },
+      "required_assertions": [
+        "the reply states the live catalog price",
+        "the stale knowledge price is never stated",
+        "the conflict is recorded for the operator"
+      ]
+    },
+    {
+      "case_id": "K07",
+      "title": "Stale knowledge availability versus live stock",
+      "input": "هل الصابون الطبيعي متوفر؟",
+      "knowledge_fixture": "product_linked_stale_availability",
+      "binding": {
+        "thread": "soap",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-SOAP",
+        "required_section_fixture": "product_linked_stale_availability",
+        "anchor_turns": []
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "forbidden_for_commercial_facts",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "availability comes from the catalog, which says out of stock",
+        "the stale always-available claim is never repeated"
+      ]
+    },
+    {
+      "case_id": "K08",
+      "title": "Store-knowledge question with nothing documented",
+      "input": "هل عندكم معلومات عن طريقة التخزين؟",
+      "knowledge_fixture": "none",
+      "binding": {
+        "thread": "jacket",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": null,
+        "anchor_turns": [
+          "أبغى تفاصيل أول منتج عندكم"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "turn"
+        ],
+        "allowed_statuses": [
+          "no_results"
+        ],
+        "expected_tools": [],
+        "knowledge_citation": "forbidden",
+        "commercial_facts_source": "catalog_product",
+        "absence_disclosure_required": true,
+        "expected_outcome": "safe_missing_fact"
+      },
+      "required_assertions": [
+        "a lookup is attempted and recorded with zero results",
+        "the absence is disclosed rather than invented"
+      ]
+    },
+    {
+      "case_id": "K09",
+      "title": "An irrelevant section must not reach the reply",
+      "input": "كم سعر هذا المنتج؟",
+      "knowledge_fixture": "none",
+      "binding": {
+        "thread": "jacket",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": null,
+        "anchor_turns": [
+          "أبغى تفاصيل أول منتج عندكم"
+        ],
+        "forbidden_section_fixtures": [
+          "irrelevant_section"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok",
+          "no_results"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "forbidden",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "the branch-hours section never appears in the reply",
+        "the price comes from the catalog"
+      ]
+    },
+    {
+      "case_id": "K10",
+      "title": "A same-tenant policy answers; the foreign lookalike never appears",
+      "input": "وش سياسة الاسترجاع عندكم؟",
+      "knowledge_fixture": "store_policy_relevant",
+      "binding": {
+        "thread": "policy",
+        "reset_thread_before": true,
+        "target_product_sku": null,
+        "required_section_fixture": "store_policy_relevant",
+        "anchor_turns": [],
+        "forbidden_section_fixtures": [
+          "foreign_tenant_section"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "turn"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [],
+        "knowledge_citation": "optional",
+        "commercial_facts_source": "catalog_product",
+        "cross_tenant_forbidden": true
+      },
+      "required_assertions": [
+        "the tenant's own return policy may be cited",
+        "no section belonging to another tenant is retrieved or cited"
+      ]
+    },
+    {
+      "case_id": "K11",
+      "title": "Bare follow-up inside a deliberate long conversation",
+      "input": "طيب وش مصدره؟",
+      "knowledge_fixture": "product_linked_origin",
+      "binding": {
+        "thread": "long",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": "product_linked_origin",
+        "anchor_turns": [
+          "وش المنتجات المتوفرة عندكم؟",
+          "أبغى تفاصيل أول منتج عندكم",
+          "كم سعره؟"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "the pronoun resolves to the product selected earlier",
+        "the knowledge lookup targets that same product"
+      ]
+    },
+    {
+      "case_id": "K12",
+      "title": "Origin asked with different wording",
+      "input": "وش مصدر المنتج ذا؟",
+      "knowledge_fixture": "product_linked_origin",
+      "binding": {
+        "thread": "jacket",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": "product_linked_origin",
+        "anchor_turns": [
+          "أبغى تفاصيل أول منتج عندكم"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product"
+      },
+      "required_assertions": [
+        "dialect variation still reaches the same section"
+      ]
+    },
+    {
+      "case_id": "K13",
+      "title": "Knowledge retrieval fault: catalog survives, knowledge discloses absence",
+      "input": "وش سعره ووش مصدره؟",
+      "knowledge_fixture": "none",
+      "binding": {
+        "thread": "fault",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": null,
+        "anchor_turns": [
+          "أبغى تفاصيل أول منتج عندكم"
+        ],
+        "knowledge_fault_mode": "timeout"
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "timeout",
+          "error"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "forbidden",
+        "commercial_facts_source": "catalog_product",
+        "absence_disclosure_required": true,
+        "expected_outcome": "safe_missing_fact"
+      },
+      "required_assertions": [
+        "the catalog price answer survives the knowledge fault",
+        "the knowledge-only part is disclosed as unavailable",
+        "no knowledge claim or citation is invented"
+      ]
+    },
+    {
+      "case_id": "K14",
+      "title": "Merchant health statement is relayed, never expanded",
+      "input": "هل العسل ينفع للصحة؟",
+      "knowledge_fixture": "product_linked_health_statement",
+      "binding": {
+        "thread": "honey",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-HONEY",
+        "required_section_fixture": "product_linked_health_statement",
+        "anchor_turns": [
+          "أبغى تفاصيل العسل الجبلي"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product",
+        "medical_expansion_forbidden": true
+      },
+      "required_assertions": [
+        "the merchant's own wording is relayed with attribution",
+        "no cure, diagnosis, dosage or treatment advice is added"
+      ]
+    },
+    {
+      "case_id": "K15",
+      "title": "A deleted section is gone; the missing origin is disclosed safely",
+      "input": "وش مصدر الصابون الطبيعي؟",
+      "knowledge_fixture": "none",
+      "binding": {
+        "thread": "soap",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-SOAP",
+        "required_section_fixture": null,
+        "anchor_turns": [],
+        "forbidden_section_fixtures": [
+          "deleted_section"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok",
+          "no_results"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "forbidden",
+        "commercial_facts_source": "catalog_product",
+        "absence_disclosure_required": true,
+        "expected_outcome": "safe_missing_fact"
+      },
+      "required_assertions": [
+        "the deleted section never appears",
+        "the absence of a documented origin is disclosed",
+        "the disclosure is model-authored or a guardrail-protected expected fallback, never an unexpected runtime failure"
+      ]
+    },
+    {
+      "case_id": "K16",
+      "title": "Section 3 is used, cited exactly once, and never replaced by a fallback",
+      "input": "وش مصدر هذا المنتج؟",
+      "knowledge_fixture": "product_linked_origin",
+      "binding": {
+        "thread": "jacket",
+        "reset_thread_before": true,
+        "target_product_sku": "P27B-JACKET",
+        "required_section_fixture": "product_linked_origin",
+        "anchor_turns": [
+          "أبغى تفاصيل أول منتج عندكم"
+        ]
+      },
+      "expected": {
+        "knowledge_lookup_required": true,
+        "required_scopes": [
+          "product"
+        ],
+        "allowed_statuses": [
+          "ok"
+        ],
+        "expected_tools": [
+          "search_products"
+        ],
+        "knowledge_citation": "required",
+        "commercial_facts_source": "catalog_product",
+        "duplicate_evidence_forbidden": true,
+        "max_lookups": 4,
+        "required_section_must_be_cited": true,
+        "knowledge_refs_delivered_exactly": 1
+      },
+      "required_assertions": [
+        "the origin section is cited exactly once",
+        "every lookup attempt remains visible in the ledger",
+        "no runtime fallback replaces the answer"
+      ]
+    }
+  ]
+}
