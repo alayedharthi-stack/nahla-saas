@@ -18,10 +18,11 @@ from scripts.operators import commerce_runtime_pilot_handover as job
 
 
 def state(tenant_id: int, *, open_turns: int = 0, reserved: int = 0,
-          unresolved: int = 0) -> recovery.HandoverState:
+          unresolved: int = 0, unknown: int = 0) -> recovery.HandoverState:
     return recovery.HandoverState(tenant_id=tenant_id, open_turns=open_turns,
                                   reserved_undispatched=reserved,
-                                  unresolved_attempts=unresolved)
+                                  unresolved_attempts=unresolved,
+                                  unknown_outcomes=unknown)
 
 
 @pytest.fixture()
@@ -29,6 +30,7 @@ def configured(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(pg.ENV_ENABLED, "true")
     monkeypatch.setenv(pg.ENV_DRAINING, "true")
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, "4242")
+    monkeypatch.setenv(job.QUIESCED_ENV, job.QUIESCED_TOKEN)
 
 
 def observing(monkeypatch: pytest.MonkeyPatch, states: Any) -> List[List[int]]:
@@ -84,6 +86,7 @@ def test_a_tenant_with_nothing_in_flight_is_safe_to_stop(configured, monkeypatch
     {"open_turns": 1},
     {"reserved": 1},
     {"unresolved": 1},
+    {"unknown": 1},
 ])
 def test_any_one_kind_of_work_in_flight_is_not_safe_to_stop(configured, monkeypatch, capsys,
                                                             counts):
@@ -119,14 +122,72 @@ def test_only_the_allowlisted_tenants_are_ever_inspected(configured, monkeypatch
     assert asked == [[4242]]
 
 
-def test_a_pilot_still_taking_new_turns_is_told_to_drain_first(monkeypatch, capsys):
-    monkeypatch.setenv(pg.ENV_ENABLED, "true")
-    monkeypatch.delenv(pg.ENV_DRAINING, raising=False)
+@pytest.mark.parametrize("env, mode_name", [
+    ({pg.ENV_ENABLED: "true"}, "on"),
+    ({}, "off"),
+])
+def test_only_a_draining_pilot_can_be_asked_whether_it_is_safe_to_stop(monkeypatch, capsys,
+                                                                       env, mode_name):
+    """In ``on`` the counts are a moving target; in ``off`` recovery has already
+    stopped. Neither can answer the question, so neither gets exit 0."""
+    for name in (pg.ENV_ENABLED, pg.ENV_DRAINING):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, "4242")
-    observing(monkeypatch, [state(4242)])
-    job.main([])
+    monkeypatch.setenv(job.QUIESCED_ENV, job.QUIESCED_TOKEN)
+    asked = observing(monkeypatch, [state(4242)])
+    assert job.main([]) == job.EXIT_USAGE
     out = capsys.readouterr().out
-    assert "mode=on" in out and "COMMERCE_RUNTIME_PILOT_DRAINING=true" in out
+    assert f"mode={mode_name}" in out
+    assert f"mode_is_{mode_name}_not_draining" in out
+    assert asked == []                                   # nothing was even counted
+
+
+# ── What the counts cannot prove ─────────────────────────────────────────────
+
+
+def test_zero_counts_alone_are_not_safe_to_stop(monkeypatch, capsys):
+    """One database cannot see another replica about to admit a turn."""
+    monkeypatch.setenv(pg.ENV_ENABLED, "true")
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, "4242")
+    monkeypatch.delenv(job.QUIESCED_ENV, raising=False)
+    observing(monkeypatch, [state(4242)])
+    assert job.main([]) == job.EXIT_IN_FLIGHT
+    out = capsys.readouterr().out
+    assert f"RESULT={job.RESULT_UNVERIFIED_INGRESS}" in out
+    assert job.QUIESCED_ENV in out
+
+
+def test_a_wrong_attestation_token_is_not_an_attestation(monkeypatch):
+    assert job.ingress_quiesced({job.QUIESCED_ENV: "yes"}) is False
+    assert job.ingress_quiesced({job.QUIESCED_ENV: job.QUIESCED_TOKEN}) is True
+
+
+def test_the_attestation_never_overrides_work_that_is_actually_outstanding(configured,
+                                                                            monkeypatch):
+    observing(monkeypatch, [state(4242, open_turns=1)])
+    assert job.main([]) == job.EXIT_IN_FLIGHT
+
+
+def test_more_tenants_than_it_inspects_is_refused_rather_than_truncated(monkeypatch, capsys):
+    monkeypatch.setenv(pg.ENV_ENABLED, "true")
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST,
+                       ",".join(str(n) for n in range(1, recovery.MAX_TENANTS_CONSIDERED + 2)))
+    monkeypatch.setenv(job.QUIESCED_ENV, job.QUIESCED_TOKEN)
+    asked = observing(monkeypatch, [state(1)])
+    assert job.main([]) == job.EXIT_USAGE
+    out = capsys.readouterr().out
+    assert "tenant_allowlist_too_large" in out
+    assert asked == []                                   # no subset was inspected
+
+
+def test_the_state_reader_refuses_an_oversized_scope_as_well():
+    with pytest.raises(recovery.TooManyTenants):
+        recovery.handover_state(tenant_ids=list(range(1, recovery.MAX_TENANTS_CONSIDERED + 2)),
+                                engine=object())
 
 
 def test_every_line_the_job_prints_is_grep_able_under_one_prefix(configured, monkeypatch,
@@ -140,11 +201,13 @@ def test_every_line_the_job_prints_is_grep_able_under_one_prefix(configured, mon
 # ── The state object itself ──────────────────────────────────────────────────
 
 
-def test_settled_means_all_three_counts_are_zero():
+def test_settled_means_every_count_is_zero():
     assert state(1).settled is True
     assert state(1, open_turns=1).settled is False
     assert state(1, reserved=1).settled is False
     assert state(1, unresolved=1).settled is False
+    # A recorded 'unknown' is not proof the send did not reach the customer.
+    assert state(1, unknown=1).settled is False
 
 
 def test_an_empty_set_of_tenants_is_never_settled():

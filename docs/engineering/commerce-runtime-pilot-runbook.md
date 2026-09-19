@@ -57,15 +57,22 @@ token, and the database the operator is authorising this run to touch.
 
 ```bash
 NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0109 \
-NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET=<host>/<database> \
+NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET=<host>[:<port>]/<database> \
   python -m scripts.operators.commerce_runtime_pilot_migration
 ```
 
 `DATABASE_URL` says which database this service is *configured* for; it can
-never say which one was *authorised*. The job parses the URL properly — dialect,
-host and database name, with loopback matched as an address rather than as text
-— and refuses unless host and database are exactly the ones named in
-`NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET`.
+never say which one was *authorised*. The target is `host[:port]/database`
+(port defaults to 5432), and the job compares it against the **effective**
+connection parameters — the ones SQLAlchemy's own dialect hands the driver —
+not against the URL's authority. Those are not the same thing: a PostgreSQL URL
+may carry `host`, `hostaddr`, `port`, `dbname` or `service` as query parameters
+and the driver honours them over the authority, so
+`postgresql://u:p@approved.internal/pilot?host=other.internal` connects to
+`other.internal`. Any such parameter is refused outright, loopback is matched as
+an address rather than as text, the port is part of the comparison, and the
+database name is compared with its case intact because PostgreSQL treats
+`Pilot` and `pilot` as different databases.
 
 It is fail-closed at both ends and refuses rather than repairs:
 
@@ -73,7 +80,8 @@ It is fail-closed at both ends and refuses rather than repairs:
 | --- | --- |
 | no confirmation token, or the wrong one | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
 | `DATABASE_URL` missing, unparsable, not PostgreSQL, or a loopback address | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
-| `NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET` unset, malformed, or not the database in `DATABASE_URL` | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
+| `NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET` unset, malformed, or not the effective host/port/database | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
+| `DATABASE_URL` carries a target-changing query parameter (`host`, `hostaddr`, `port`, `dbname`, `service`, …) | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
 | current revision is not one the contract accepts | `RESULT=FAILED_PRECONDITION`, exit 3, the observed value is printed |
 | the relations present are not the ones the current revision creates | `RESULT=FAILED_PRECONDITION`, exit 3 — a schema that does not match its revision is never repaired |
 | revision `0108` with exactly its three foundation relations | accepted: that is what `0108` creates, and the job upgrades it to `0109` |
@@ -184,6 +192,8 @@ One line per routed turn:
 | `reason=ownership_unavailable` | another invocation holds the turn, or an earlier turn in that conversation is still open |
 | `reason=pilot_draining` | handing back (§5): new turns go to the legacy path |
 | `reason=unfinished_…` | the guard refused a turn this runtime has **not finished**; it was kept from the legacy path and answered nothing |
+| `reason=owned_…` | the guard refused a turn this runtime admitted and already finished; it was kept from the legacy path, which must not answer it a second time |
+| `route=commerce_runtime_claim` | ownership was claimed at the dispatcher, so none of the dispatcher's own short circuits ran for this turn |
 
 The customer's text never appears in the log line; only `reply_chars`.
 
@@ -231,31 +241,51 @@ messages are redelivered. Draining waives only the "no new turns" rule: every
 other condition — the allowlists, the verified connection, the configured model
 — still has to pass.
 
-**Step 2 — verify.** Run the handover check. It exits 0 only when every
-allowlisted tenant has nothing outstanding:
+**Step 2 — quiesce ingress, and check that it happened.** Both flags are read
+per process. Setting them in the service's configuration changes nothing in a
+replica that is already running, so redeploy or restart every replica and
+confirm each one actually came back on the new configuration. Nothing in the
+codebase can verify this for you: the handover check reads one database and
+cannot see another process about to admit a turn.
+
+**Step 3 — verify.** Run the handover check, attesting step 2:
 
 ```bash
-python -m scripts.operators.commerce_runtime_pilot_handover
+NAHLA_COMMERCE_RUNTIME_HANDOVER_INGRESS_QUIESCED=INGRESS_DRAINED_ALL_REPLICAS \
+  python -m scripts.operators.commerce_runtime_pilot_handover
 ```
 
 | Result | Meaning |
 | --- | --- |
-| `RESULT=SETTLED`, exit 0 | nothing in flight; it is safe to switch off |
-| `RESULT=IN_FLIGHT`, exit 1 | `open_turns` / `reserved_undispatched` / `unresolved_attempts` say what remains; keep draining and run it again |
+| `RESULT=SETTLED`, exit 0 | every count is zero **and** ingress was attested; it is safe to switch off |
+| `RESULT=IN_FLIGHT`, exit 1 | `open_turns` / `reserved_undispatched` / `unresolved_attempts` / `unknown_outcomes` say what remains; keep draining and run it again |
+| `RESULT=UNVERIFIED_INGRESS`, exit 1 | every count is zero, but nobody has attested step 2 — the counts alone cannot say it is safe |
 | `RESULT=FAILED`, exit 3 | the database could not be read — never read as "settled" |
-| `RESULT=FAILED_PRECONDITION`, exit 2 | no tenant allowlist to check |
+| `RESULT=FAILED_PRECONDITION`, exit 2 | not draining, no tenant allowlist, or more tenants configured than it will inspect |
 
-It is read-only: it sends nothing, writes nothing and changes no configuration.
+`unknown_outcomes` counts sends whose recorded outcome is `unknown` and which no
+later acceptance resolved. An unknown send may still be with the provider and
+may still deliver, so it is **not** settled: establish what actually happened
+and record it on that attempt (an accepted receipt with the provider's own
+message id) before switching off.
 
-**Step 3 — stop.** Set `COMMERCE_RUNTIME_PILOT_ENABLED=false`. The rollback is
+The job is read-only: it sends nothing, writes nothing and changes no
+configuration. It runs only while draining — in `on` the counts are a moving
+target, and in `off` recovery has already stopped — and it refuses rather than
+inspecting a subset when more tenants are configured than it will look at.
+
+**Step 4 — stop.** Set `COMMERCE_RUNTIME_PILOT_ENABLED=false`. The rollback is
 complete when a message from a previously allowlisted handset produces a
 `route=legacy` line and the legacy brain's own trace source.
 
-**Emergency stop.** `COMMERCE_RUNTIME_PILOT_ENABLED=false` on its own, at any
-time, stops everything immediately — including recovery of unfinished work. That
-is the right move when the pilot is actively misbehaving. Afterwards, run the
-handover check to see exactly what it left behind, and finish those turns
-deliberately (below) before considering the rollback complete.
+**Emergency stop.** `COMMERCE_RUNTIME_PILOT_ENABLED=false` stops **this process**
+from taking new turns and from recovering. It is the right move when the pilot
+is actively misbehaving, and it is worth being exact about what it is not: it is
+not instantaneous across a fleet — each replica stops when it picks the change
+up — and it does not stop an HTTP send already in flight. Afterwards, drain,
+quiesce and run the handover check to see exactly what it left behind, and
+finish those turns deliberately (below) before considering the rollback
+complete.
 
 **Narrower:** remove one number from
 `COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST`, or empty it entirely. An empty
@@ -298,3 +328,12 @@ as well as through the ledger.
   than resolved automatically.
 * It claims nothing about a saved or adopted address; that work is separate and
   separately approved.
+* While it owns a conversation it owns **every** inbound turn in it, including
+  ones the dispatcher's payment-receipt, payment-evidence, map-image and
+  payment-claim short circuits would otherwise take. Those are skipped for an
+  allowlisted recipient rather than racing the runtime; the pilot's read-only
+  tools include no payment evidence, so it answers such a turn from what it can
+  actually observe.
+* A recovered send whose transmitted text could not be read back is kept in the
+  store for the operator and is **not** shown to the model as a prior assistant
+  turn: its body is the reserved intent, which the send path may have rewritten.

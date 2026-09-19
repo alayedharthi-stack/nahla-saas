@@ -237,29 +237,49 @@ def _close_quietly(session: Any) -> None:
 def _retire_tool_session(binding: alt.LiveToolBinding, session: Any, *,
                          turn_id: Optional[int] = None,
                          reap_seconds: float = ABANDONED_SESSION_REAP_SECONDS) -> Optional[Any]:
-    """Close the tool session, or give it an owner that will.
+    """Close the tool session, or give it an owner that will — with no deadline.
 
     The common case is that every tool call returned and the session closes
     here, on the turn's own thread. When a call was abandoned and has not come
-    back, the session is still in use by a thread nobody is waiting for: closing
-    it now would pull a connection out from under a live statement. One daemon
-    thread then owns it — it waits for the binding to go idle and closes it, and
-    if the call never finishes it says so and lets the pool reclaim the
-    connection. Returns that thread, so a caller can observe it; ``None`` when
-    the session was closed here.
+    back, the session is still in use by a thread nobody is waiting for, and
+    closing it now would pull a connection out from under a live statement.
+
+    Two things then own it, and they are not the same thing:
+
+    * an **idle callback** on the binding, which the thread finishing the
+      abandoned call runs. This is the owner, and it does not expire: however
+      long that call takes, the session is closed when it ends.
+    * a bounded **reaper** thread, so the ordinary case — a call that finishes
+      seconds later — is closed promptly and observably rather than only when
+      something else happens to look.
+
+    Whichever gets there first closes it; closing is idempotent. When the
+    reaper's wait runs out it says so and stops waiting, but it does not hand
+    the responsibility back to nobody: the callback is still registered.
+
+    Returns the reaper thread so a caller can observe it; ``None`` when the
+    session was closed here.
     """
-    if not binding.session_may_be_in_use:
+    closed = threading.Event()
+
+    def close_once(source: str) -> None:
+        if closed.is_set():
+            return
+        closed.set()
         _close_quietly(session)
+        logger.info("[COMMERCE_RUNTIME] tool session closed by %s turn=%s", source, turn_id)
+
+    if binding.on_idle(lambda: close_once("the abandoned call's own thread")):
+        # Nothing held it: closed synchronously, on this turn's thread.
         return None
 
     def reap() -> None:
         if binding.wait_until_idle(reap_seconds):
-            _close_quietly(session)
-            logger.info("[COMMERCE_RUNTIME] abandoned tool session closed after the call returned "
-                        "turn=%s", turn_id)
+            close_once("the reaper")
             return
-        logger.warning("[COMMERCE_RUNTIME] abandoned tool call has not returned within %ss; its "
-                       "session is left to the pool turn=%s", reap_seconds, turn_id)
+        logger.warning("[COMMERCE_RUNTIME] abandoned tool call has not returned within %ss "
+                       "turn=%s; its session stays open and is closed by the call itself "
+                       "when it ends", reap_seconds, turn_id)
 
     thread = threading.Thread(target=reap, name=f"commerce-runtime-session-reaper-{turn_id}",
                               daemon=True)

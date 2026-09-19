@@ -126,6 +126,21 @@ def test_the_addendum_corrects_the_two_statements_that_are_false_for_the_pilot()
     assert "shadow" in addendum
 
 
+def test_no_declaration_refers_to_a_tool_that_is_not_exposed():
+    """A description naming a tool the model cannot call is an instruction to
+    call something that does not exist."""
+    declared = {tool["name"] for tool in declared_tools()}
+    for tool in declared_tools():
+        text = f"{tool['name']} {tool['description']}"
+        for word in text.replace(",", " ").replace(".", " ").split():
+            token = word.strip("`'\"()")
+            if "_" in token and token.islower() and token.replace("_", "").isalpha():
+                if token in {"order_number", "product_id", "order_id", "evidence_ref",
+                             "evidence_refs", "claims_commerce_facts", "input_schema"}:
+                    continue
+                assert token in declared, (tool["name"], token)
+
+
 def test_the_addendum_adds_no_customer_facing_wording():
     """It describes a channel and a fact. It supplies no sentence to send."""
     addendum = pi.PILOT_REPLY_ADDENDUM

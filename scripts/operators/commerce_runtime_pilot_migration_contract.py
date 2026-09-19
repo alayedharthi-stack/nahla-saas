@@ -76,19 +76,34 @@ EXIT_USAGE = 2
 EXIT_PRECONDITION = 3
 EXIT_FAILED = 4
 
-# The only dialects this job knows how to migrate. A URL naming anything else
-# is refused rather than handed to Alembic to find out.
-SUPPORTED_DIALECTS: Tuple[str, ...] = ("postgresql", "postgres")
+# The only dialect this job knows how to migrate. A URL naming anything else is
+# refused rather than handed to Alembic to find out. The legacy ``postgres://``
+# spelling is deliberately not here: SQLAlchemy 2 refuses it outright, so
+# accepting it would only move the failure later and less clearly.
+SUPPORTED_DIALECTS: Tuple[str, ...] = ("postgresql",)
 
 # Hostnames that are never the pilot database, whatever they are spelled like.
 # The numeric forms are matched as addresses, not as text, so the whole
 # 127.0.0.0/8 range and every spelling of the IPv6 loopback are covered.
 LOOPBACK_HOSTNAMES: Tuple[str, ...] = ("localhost", "localhost.localdomain", "ip6-localhost")
 
-# The operator names the database this run is allowed to touch. Without it the
-# job refuses: ``DATABASE_URL`` alone says which database is *configured*, never
-# which one was *authorised*.
+# The operator names the database this run is allowed to touch, as
+# ``host[:port]/database``. Without it the job refuses: ``DATABASE_URL`` alone
+# says which database is *configured*, never which one was *authorised*.
 TARGET_ENV = "NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET"
+
+DEFAULT_PORT = 5432
+
+# Query parameters the driver reads as connection parameters. Any one of them
+# silently moves the connection somewhere other than the URL's own authority —
+# ``?host=other.internal`` on a URL naming ``approved.internal`` connects to
+# ``other.internal`` — so a URL carrying one is refused outright rather than
+# reconciled. The effective parameters are checked as well; this makes the
+# intent explicit and closes the ones a check could model wrongly.
+TARGET_OVERRIDE_QUERY_KEYS: Tuple[str, ...] = (
+    "host", "hostaddr", "port", "dbname", "database", "service", "servicefile",
+    "passfile", "target_session_attrs",
+)
 
 
 def expected_relations_at(revisions: frozenset) -> Tuple[str, ...]:

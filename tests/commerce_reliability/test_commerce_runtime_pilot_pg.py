@@ -52,6 +52,9 @@ PRODUCT_TITLE = "حذاء رياضي أبيض"
 # The pilot's model is an owner configuration decision. These cases pass an
 # explicit placeholder so what is proved is the threading, never a choice.
 MODEL = "model-configured-for-this-pilot"
+# A number no customer row carries, so it names conversations only through
+# ``external_id`` and establishes no association at all.
+UNLINKED_PHONE = "+966500007777"
 
 
 # ── Doubles ──────────────────────────────────────────────────────────────────
@@ -740,8 +743,9 @@ def _messages(pilot: "Pilot") -> Any:
     written: List[int] = []
 
     def say(*, conversation_id: Optional[int], direction: str, body: str,
-            phone: Optional[str] = None, wire: Optional[List[Dict[str, Any]]] = None) -> int:
-        meta: Dict[str, Any] = {}
+            phone: Optional[str] = None, wire: Optional[List[Dict[str, Any]]] = None,
+            metadata: Optional[Dict[str, Any]] = None) -> int:
+        meta: Dict[str, Any] = dict(metadata or {})
         if phone:
             meta["phone"] = phone
         if wire is not None:
@@ -838,6 +842,86 @@ def test_the_message_being_answered_now_is_not_shown_to_the_model_twice(pilot):
         say(conversation_id=pilot.conversation_id, direction="inbound", body="سابق")
         say(conversation_id=pilot.conversation_id, direction="inbound", body=QUESTION)
         assert _history(pilot, current_text=QUESTION) == [{"role": "user", "text": "سابق"}]
+
+
+def test_a_number_that_names_no_conversation_at_all_does_not_admit_unlinked_rows(pilot):
+    """Zero associations is not proof of a unique one. A conversation whose
+    number lives only in ``external_id`` produces no association row."""
+    with pilot.engine.begin() as conn:
+        orphan = int(conn.execute(
+            text("INSERT INTO conversations (tenant_id, customer_id, external_id, status) "
+                 "VALUES (:t, NULL, :e, 'active') RETURNING id"),
+            {"t": pilot.tenant_a, "e": UNLINKED_PHONE}).scalar_one())
+        conn.execute(
+            text("INSERT INTO conversations (tenant_id, customer_id, external_id, status) "
+                 "VALUES (:t, NULL, :e, 'active')"),
+            {"t": pilot.tenant_a, "e": UNLINKED_PHONE})
+    try:
+        session = pilot.session_factory()
+        try:
+            from services import commerce_runtime_pilot as seam
+
+            assert seam._phone_is_unambiguous(
+                session, tenant_id=pilot.tenant_a, conversation_id=orphan,
+                phones=seam._phone_variants(UNLINKED_PHONE)) is False
+        finally:
+            session.close()
+    finally:
+        with pilot.engine.begin() as conn:
+            conn.execute(text("DELETE FROM conversations WHERE tenant_id = :t AND external_id = :e"),
+                         {"t": pilot.tenant_a, "e": UNLINKED_PHONE})
+
+
+def test_the_established_association_must_be_exactly_this_conversation(pilot):
+    """The linked conversation is unambiguous; the same query for any other id is not."""
+    from services import commerce_runtime_pilot as seam
+
+    session = pilot.session_factory()
+    try:
+        phones = seam._phone_variants(PHONE)
+        assert seam._phone_is_unambiguous(
+            session, tenant_id=pilot.tenant_a, conversation_id=pilot.conversation_id,
+            phones=phones) is True
+        assert seam._phone_is_unambiguous(
+            session, tenant_id=pilot.tenant_a, conversation_id=pilot.conversation_id + 9_000,
+            phones=phones) is False
+    finally:
+        session.close()
+
+
+def test_an_unobserved_outbound_row_is_kept_for_the_operator_and_withheld_from_the_model(pilot):
+    """A recovered send's body is the reserved intent, which the send path may
+    have rewritten. It stays in the store; it is not shown as what was said."""
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="inbound", body="سؤال")
+        row = say(conversation_id=pilot.conversation_id, direction="outbound",
+                  body="النية المحجوزة", metadata={
+                      "chosen_path": "commerce_runtime_pilot",
+                      "commerce_runtime_wire_observed": False,
+                      "final_text_transformed": True,
+                      "final_transform_reasons": ["wire_text_unobserved"]})
+        with pilot.engine.connect() as conn:
+            stored = conn.execute(text("SELECT body FROM message_events WHERE id = :i"),
+                                  {"i": row}).scalar_one()
+        assert stored == "النية المحجوزة"            # the operator still has it
+        assert _history(pilot) == [{"role": "user", "text": "سؤال"}]
+
+
+def test_an_observed_outbound_row_is_still_shown_to_the_model(pilot):
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="ما أرسلناه",
+            metadata={"chosen_path": "commerce_runtime_pilot",
+                      "commerce_runtime_wire_observed": True,
+                      "final_text_transformed": False, "final_transform_reasons": []})
+        assert _history(pilot) == [{"role": "assistant", "text": "ما أرسلناه"}]
+
+
+def test_another_path_s_row_is_never_judged_by_this_runtime_s_marker(pilot):
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="رد المسار القديم",
+            metadata={"chosen_path": "merchant_brain",
+                      "commerce_runtime_wire_observed": False})
+        assert _history(pilot) == [{"role": "assistant", "text": "رد المسار القديم"}]
 
 
 def test_another_tenant_s_rows_are_never_part_of_this_conversation_s_history(pilot):
@@ -1149,6 +1233,57 @@ def _pmid_of(pilot: "Pilot", turn_id: int) -> str:
         return str(conn.execute(
             text("SELECT provider_message_id FROM commerce_runtime_turns WHERE id = :i"),
             {"i": turn_id}).scalar_one())
+
+
+def test_a_send_whose_outcome_is_unknown_is_never_settled(pilot):
+    """The reviewer's wrapper-timeout shape: the send wrapper gave up, the
+    receipt says unknown, the turn was completed honestly as failed — and the
+    request may still be with the provider. "Nothing in flight" is not true."""
+    before = _in_flight(pilot)
+    reservation = pilot.reserve_reply("مصير غير معروف")
+    with pilot.owned(turn_id=reservation.turn_id) as token:
+        outcome = dd.dispatch_reserved_delivery(
+            ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+            conversation_id=pilot.runtime_conversation_id, token=token,
+            sequence_id=reservation.sequence_id, transport=Transport([timed_out()]),
+            recorded_by="pilot")
+        terminal = dd.complete_turn(
+            ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+            turn_id=reservation.turn_id, token=token,
+            processing_outcome=outcome.processing_outcome)
+    assert outcome.status == dd.SENT_UNKNOWN
+    # The turn itself is finished and honest about what it does not know…
+    assert terminal is not None
+    assert terminal.transport_outcome == c.TransportOutcome.UNKNOWN.value
+    state = _handover(pilot)
+    assert state.open_turns == before[0]                  # nothing is left open
+    # …and the handover still refuses to call the tenant settled.
+    assert state.unknown_outcomes >= 1 and state.settled is False
+
+
+def test_an_acceptance_after_an_unknown_resolves_it(pilot):
+    """An unknown the provider later identified is no longer unknown."""
+    reservation = pilot.reserve_reply("مؤكدة بعد الغموض")
+    with pilot.owned(turn_id=reservation.turn_id) as token:
+        first = dd.dispatch_reserved_delivery(
+            ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+            conversation_id=pilot.runtime_conversation_id, token=token,
+            sequence_id=reservation.sequence_id, transport=Transport([timed_out()]),
+            recorded_by="pilot")
+        assert first.status == dd.SENT_UNKNOWN
+        unknown_now = _handover(pilot).unknown_outcomes
+        # The operator establishes what the provider did and records it on the
+        # same attempt; nothing is re-sent.
+        pilot.ledgers.record_delivery_receipt(
+            tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+            conversation_id=pilot.runtime_conversation_id, attempt_id=first.attempt_id,
+            kind=lc.ReceiptKind.ACCEPTED, provider_message_id="wamid.RESOLVED",
+            evidence={"established_by": "operator"}, recorded_by="operator")
+        assert _handover(pilot).unknown_outcomes == unknown_now - 1
+        dd.complete_turn(
+            ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+            turn_id=reservation.turn_id, token=token,
+            processing_outcome=c.ProcessingOutcome.COMPLETED.value)
 
 
 def test_another_tenant_s_work_is_never_part_of_this_tenant_s_handover(pilot):

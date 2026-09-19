@@ -19,17 +19,40 @@ So the supported rollback is a handover, in three steps:
                   this runtime already admitted stay reachable and are finished
                   as their inbound messages are redelivered.
 
-    2. VERIFY     python -m scripts.operators.commerce_runtime_pilot_handover
-                  Exits 0 only when every allowlisted tenant has nothing in
-                  flight. Any other exit means work remains; run it again.
+    2. QUIESCE    Confirm every replica is running the draining configuration —
+                  redeploy or restart them, and check each one actually
+                  restarted. This job cannot see other processes and does not
+                  claim to; see below.
 
-    3. STOP       COMMERCE_RUNTIME_PILOT_ENABLED=false
-                  Only after step 2 exits 0.
+    3. VERIFY     NAHLA_COMMERCE_RUNTIME_HANDOVER_INGRESS_QUIESCED=INGRESS_DRAINED_ALL_REPLICAS \
+                      python -m scripts.operators.commerce_runtime_pilot_handover
+                  Exits 0 only when every allowlisted tenant has nothing in
+                  flight **and** the operator has attested step 2. Any other
+                  exit means it is not safe to stop; fix and run it again.
+
+    4. STOP       COMMERCE_RUNTIME_PILOT_ENABLED=false
+                  Only after step 3 exits 0.
+
+What this job can and cannot prove
+----------------------------------
+It reads one database. That tells it what work is **recorded** as outstanding,
+and it is authoritative about that. It tells it nothing about what another
+process is about to do: a replica that has selected a route but not yet written
+its admission is invisible here, and the draining flag is per-process, so a
+replica that has not picked up the new configuration is still admitting new
+turns while this reports zero.
+
+That gap is not something a count can close, so the job does not pretend to
+close it. It requires the operator to attest that ingress is quiesced across
+every replica, and reports ``UNVERIFIED_INGRESS`` without that attestation even
+when every count is zero. The attestation is the operator's statement about the
+fleet; the counts are the database's statement about the work.
 
 An emergency stop is still available and is still one flag: setting
-``COMMERCE_RUNTIME_PILOT_ENABLED=false`` immediately stops everything, including
-recovery. This job then reports exactly what that left behind, so the decision
-is taken against evidence either way.
+``COMMERCE_RUNTIME_PILOT_ENABLED=false`` stops this process from taking new
+turns and from recovering. It is not instantaneous across a fleet, and it does
+not stop a send already in flight. This job then reports exactly what that left
+behind, so the decision is taken against evidence either way.
 
 Read-only. It sends nothing, writes nothing and changes no configuration.
 """
@@ -50,6 +73,7 @@ LOG_PREFIX = "[COMMERCE_RUNTIME_HANDOVER]"
 
 RESULT_SETTLED = "SETTLED"
 RESULT_IN_FLIGHT = "IN_FLIGHT"
+RESULT_UNVERIFIED_INGRESS = "UNVERIFIED_INGRESS"
 RESULT_FAILED_PRECONDITION = "FAILED_PRECONDITION"
 RESULT_FAILED = "FAILED"
 
@@ -57,6 +81,12 @@ EXIT_SETTLED = 0
 EXIT_IN_FLIGHT = 1
 EXIT_USAGE = 2
 EXIT_FAILED = 3
+
+# The operator's statement that every replica is running the draining
+# configuration. This job cannot observe other processes; it will not report
+# "safe to stop" on a fleet nobody has said is quiesced.
+QUIESCED_ENV = "NAHLA_COMMERCE_RUNTIME_HANDOVER_INGRESS_QUIESCED"
+QUIESCED_TOKEN = "INGRESS_DRAINED_ALL_REPLICAS"
 
 
 def emit(message: str) -> None:
@@ -66,6 +96,12 @@ def emit(message: str) -> None:
 def result(marker: str, **observations: Any) -> None:
     body = " ".join(f"{name}={value!r}" for name, value in observations.items())
     emit(f"RESULT={marker} {body}".rstrip())
+
+
+def ingress_quiesced(environ: Optional[dict] = None) -> bool:
+    """Whether the operator has attested that no replica is still admitting."""
+    env = environ if environ is not None else os.environ
+    return str(env.get(QUIESCED_ENV, "") or "").strip() == QUIESCED_TOKEN
 
 
 def configured_tenants(environ: Optional[dict] = None) -> List[int]:
@@ -110,17 +146,31 @@ def observe(tenants: Sequence[int]) -> tuple:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     del argv
+    from core.commerce_runtime import recovery
+
     current = mode()
     emit(f"mode={current}")
+    if current != "draining":
+        # In ``on`` the counts are a moving target, and in ``off`` the pilot has
+        # already stopped recovering whatever they show. Neither can answer
+        # "is it safe to stop": one is too early, the other is too late.
+        result(RESULT_FAILED_PRECONDITION, reason=f"mode_is_{current}_not_draining",
+               next_step=("set COMMERCE_RUNTIME_PILOT_DRAINING=true with "
+                          "COMMERCE_RUNTIME_PILOT_ENABLED=true, then run this again"))
+        return EXIT_USAGE
+
     tenants = configured_tenants()
     if not tenants:
         result(RESULT_FAILED_PRECONDITION, reason="no_tenant_allowlist",
                hint="COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST names the tenants to check")
         return EXIT_USAGE
+    if len(tenants) > recovery.MAX_TENANTS_CONSIDERED:
+        # Never inspect a subset and report on the whole: the tenants left out
+        # are exactly the ones whose work would be abandoned unseen.
+        result(RESULT_FAILED_PRECONDITION, reason="tenant_allowlist_too_large",
+               configured=len(tenants), inspected_maximum=recovery.MAX_TENANTS_CONSIDERED)
+        return EXIT_USAGE
     emit(f"tenants={','.join(str(t) for t in tenants)}")
-    if current == "on":
-        emit("note=the pilot is still taking new turns; set "
-             "COMMERCE_RUNTIME_PILOT_DRAINING=true before relying on this count")
 
     try:
         states = observe(tenants)
@@ -129,20 +179,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_FAILED
 
     for state in states:
-        emit(" ".join(f"{k}={v}" for k, v in state.as_log_fields().items()))
+        emit(" ".join(f"{key}={value}" for key, value in state.as_log_fields().items()))
 
-    from core.commerce_runtime import recovery
+    if not recovery.handover_settled(states):
+        result(RESULT_IN_FLIGHT,
+               open_turns=sum(s.open_turns for s in states),
+               reserved_undispatched=sum(s.reserved_undispatched for s in states),
+               unresolved_attempts=sum(s.unresolved_attempts for s in states),
+               unknown_outcomes=sum(s.unknown_outcomes for s in states),
+               next_step="keep draining and run this again")
+        return EXIT_IN_FLIGHT
 
-    if recovery.handover_settled(states):
-        result(RESULT_SETTLED, tenants=len(states),
-               next_step="COMMERCE_RUNTIME_PILOT_ENABLED=false")
-        return EXIT_SETTLED
-    result(RESULT_IN_FLIGHT,
-           open_turns=sum(s.open_turns for s in states),
-           reserved_undispatched=sum(s.reserved_undispatched for s in states),
-           unresolved_attempts=sum(s.unresolved_attempts for s in states),
-           next_step="keep draining and run this again")
-    return EXIT_IN_FLIGHT
+    if not ingress_quiesced():
+        # Every recorded count is zero. That is the database's answer, and it is
+        # not the whole question.
+        result(RESULT_UNVERIFIED_INGRESS, tenants=len(states),
+               reason="no attestation that every replica is draining",
+               next_step=f"{QUIESCED_ENV}={QUIESCED_TOKEN} once every replica runs "
+                         f"the draining configuration, then run this again")
+        return EXIT_IN_FLIGHT
+
+    result(RESULT_SETTLED, tenants=len(states), ingress_quiesced_by="operator_attestation",
+           next_step="COMMERCE_RUNTIME_PILOT_ENABLED=false")
+    return EXIT_SETTLED
 
 
 if __name__ == "__main__":  # pragma: no cover - operator entry point

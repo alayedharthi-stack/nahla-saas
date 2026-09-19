@@ -96,15 +96,26 @@ Three rules this table encodes:
 
 ## 3. The routing decision
 
-`core.commerce_runtime.pilot_guard.evaluate_pilot_route` is asked **once**, in
-`_handle_merchant_message`, at the one point that makes it a routing decision:
-**after** every gate that can silence the turn — the AI pause / handoff /
-blocklist gate, the billing guard and the conversation quota guard — and
-**before** every path that can answer it: the Commerce Agent V2 owner,
-OrderFlowV2, checkout routing, the pre-brain routers (branch trigger, location,
-arrival contact, staff contact, Layer 0) and the Merchant Brain. Asked any later
-it would not route anything; it would only see the turns no other owner wanted.
-Its answer is exclusive:
+Ownership is decided in two places, because the paths that can answer a turn
+live in two places.
+
+**At the dispatcher**, in `_dispatch_message`, before any of its own owners:
+`commerce_runtime_claims_inbound` asks whether this runtime owns the inbound —
+either because the pilot is configured for this tenant and recipient on a
+verified connection, or because this runtime already admitted this exact inbound
+message. A claim routes the turn straight to `_handle_merchant_message` and none
+of the dispatcher's short circuits run: payment receipt, payment evidence, map
+image, payment claim, address and payment method all mutate order state and send
+*before* the handler is entered, so a decision taken only inside the handler
+never sees those turns at all. The claim answers nothing by itself.
+
+**In the handler**, `pilot_guard.evaluate_pilot_route` is asked **once**, at the
+one point that makes it a routing decision: **after** every gate that can
+silence the turn — the AI pause / handoff / blocklist gate, the billing guard and
+the conversation quota guard — and **before** every path that can answer it: the
+Commerce Agent V2 owner, OrderFlowV2, checkout routing, the pre-brain routers
+(branch trigger, location, arrival contact, staff contact, Layer 0) and the
+Merchant Brain. Its answer is exclusive:
 
 * not permitted → the legacy path runs exactly as it does today;
 * permitted → the handler returns after the commerce runtime's turn, so the
@@ -120,7 +131,11 @@ The only exception is a failure to *ask* — if the guard itself cannot be reach
 the legacy path continues, which is the same behaviour as the pilot being off.
 Once `handled` is true the return is unconditional: the observability sync that
 runs after it is caught, so a failure there cannot reopen the legacy path for a
-message the runtime may already have answered.
+message the runtime may already have answered. The handler's own teardown sync is
+caught too — not to protect this turn, which is already finished, but because
+both provider entry points acknowledge the webhook before processing it, so an
+exception escaping the handler abandons the rest of an acknowledged batch: the
+next message in it and the status receipts after it.
 
 ### 3.1 Fail closed
 
@@ -191,10 +206,26 @@ pass, including the allowlists, the verified connection and the model.
 
 `scripts/operators/commerce_runtime_pilot_handover.py` reads, per allowlisted
 tenant, how much is still in flight: admitted turns with no terminal, reserved
-intents nothing dispatched, and attempts with no established outcome. It exits 0
-only when all three are zero, which is the evidence the decision to switch off
-is taken against. The emergency stop — switching the pilot off outright — remains
-available and stops recovery too; the same job then reports what it left behind.
+intents nothing dispatched, attempts with no established outcome, and attempts
+whose established outcome is `unknown`. The last of those counts because an
+unknown send may still be with the provider and may still deliver; treating a
+recorded unknown as resolved would be claiming non-delivery on no evidence.
+
+What that job can prove is bounded, and it says so rather than overstating it.
+It reads one database, so it is authoritative about *recorded* work and silent
+about what another process is about to do: an admission decided but not yet
+written is invisible, and both flags are read per process, so a replica that has
+not picked up the draining configuration is still admitting while the counts read
+zero. No count can close that gap, so the verdict requires the operator to attest
+that ingress is quiesced across every replica; without it the job reports
+`UNVERIFIED_INGRESS` even when every count is zero. It also refuses an allowlist
+larger than it will inspect, rather than reporting on a silent subset, and runs
+only while draining.
+
+The emergency stop — switching the pilot off outright — remains available. It
+stops this process from taking new turns and from recovering; it is not
+instantaneous across a fleet and does not stop a send already in flight. The same
+job then reports what it left behind.
 
 ---
 
@@ -205,11 +236,18 @@ to the conversation the runtime admitted this turn under**, not resolved from th
 phone number: one tenant can hold several conversations for one number, and a
 phone lookup answers with the most recent of them, which is not necessarily this
 one. Rows written before conversation linking carry no conversation id and are
-admitted only while that number names exactly one conversation in the tenant;
-otherwise they belong to an unknown one of them and are left out rather than
-guessed in. An outbound row contributes what the wire audit recorded as
-transmitted when it has that, so the model is shown the message the customer
-received rather than a draft that was later changed. The inbound message being
+admitted only where the number is *established* to name this one conversation
+and no other. Two answers are both "not established" and both exclude them:
+several conversations carry the number, or none does — a conversation whose
+number lives only in `external_id` produces no association row at all, and
+finding no evidence of an association is not evidence of a unique one.
+
+An outbound row contributes only text established to have been transmitted: the
+wire audit's own record of it, or a body written while the wire was observed. A
+row this runtime wrote while the wire was *unobserved* holds the reserved intent,
+which the send path may have rewritten before it went out — it stays in the store
+for the operator and is left out of the model's history, because showing it would
+present a draft as the thing that was said. The inbound message being
 answered is dropped when the store has already persisted it, and a history read
 that fails yields no history rather than a guess.
 
@@ -274,11 +312,17 @@ id, so the redelivery carrying that id is the one event that can reach it — an
 deduplication is what normally stops that redelivery, correctly, because a
 duplicate must never produce a second answer.
 
-`core.commerce_runtime.recovery` answers one question at that boundary: is there
-an admitted commerce-runtime turn for this exact inbound identity with no
-terminal? A duplicate carrying such a turn reaches the handler; a duplicate of
-*finished* work is dropped exactly as before; and anything the lookup cannot
-establish is dropped as well. The question is only asked for a tenant and a
+`core.commerce_runtime.recovery` answers two questions about one inbound
+identity, and the difference matters. *Is there unfinished work* decides
+deduplication: a duplicate carrying an admitted turn with no terminal reaches the
+handler, a duplicate of finished work is dropped exactly as before, and anything
+the lookup cannot establish is dropped as well. *Did this runtime admit it at
+all* decides ownership, and is deliberately wider: a turn can be completed by
+another invocation between deduplication letting the retry through and routing
+looking at it, and asking only about unfinished work then answers no — handing an
+inbound this runtime owns and has already answered to the legacy path as if it
+were new. Both an open and a finished turn are withheld from legacy; only an open
+one is resumed. The question is only asked for a tenant and a
 recipient the pilot is explicitly configured for, and only while the pilot owns
 open work (on, or draining).
 

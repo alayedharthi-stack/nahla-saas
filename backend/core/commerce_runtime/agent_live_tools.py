@@ -77,6 +77,7 @@ class LiveToolBinding:
     _poisoned: Optional[str] = None
     _in_flight: int = 0
     _abandoned: int = 0
+    _on_idle: List[Callable[[], None]] = dataclasses.field(default_factory=list, repr=False)
 
     @property
     def tenant_id(self) -> int:
@@ -157,13 +158,40 @@ class LiveToolBinding:
                 raise ac.ToolError(ac.ToolErrorCode.TOOL_FAILURE.value, self._poisoned)
             self._in_flight += 1
 
+    def on_idle(self, callback: Callable[[], None]) -> bool:
+        """Run ``callback`` once no call holds this binding.
+
+        If nothing holds it now, the callback runs immediately on the calling
+        thread and this returns ``True``. Otherwise it is kept and runs on
+        whichever thread releases the last call — which is what gives an
+        abandoned call's resources an owner that does not expire. Returns
+        ``False`` when the callback was deferred.
+        """
+        with self._gate:
+            if self._in_flight > 0:
+                self._on_idle.append(callback)
+                return False
+        callback()
+        return True
+
     def leave(self) -> None:
         """Release the binding. A refusal releases it exactly like a result does:
         this thread is finished either way."""
+        due: List[Callable[[], None]] = []
         with self._gate:
             self._in_flight = max(0, self._in_flight - 1)
             if self._in_flight == 0:
+                due = list(self._on_idle)
+                self._on_idle.clear()
                 self._gate.notify_all()
+        for callback in due:
+            # The turn is long gone; a broken callback must not take down the
+            # thread that happened to finish the abandoned call.
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                logger.warning("[COMMERCE_RUNTIME] idle callback failed after an "
+                               "abandoned tool call returned")
 
     def wait_until_idle(self, timeout: float) -> bool:
         """Block until no call holds the session, or the bound elapses.
@@ -420,7 +448,7 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
     ),
     (
         "get_product_details",
-        "Exact details for one product already returned by catalog_search in this turn.",
+        "Exact details for one product already returned by search_products in this turn.",
         {"type": "object", "properties": {"product_id": _ID}, "required": ["product_id"]},
         "product",
         _product_lookup,
@@ -447,14 +475,15 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
     ),
     (
         "get_order_details",
-        "Total and line items for an order returned by order_lookup in this turn.",
+        "Total and line items for an order returned by resolve_customer_order in this turn.",
         {"type": "object", "properties": {"order_id": _ID}, "required": ["order_id"]},
         "get_order_details",
         _order_details,
     ),
     (
         "get_order_shipment",
-        "Shipment, carrier and tracking facts for an order returned by order_lookup in this turn.",
+        "Shipment, carrier and tracking facts for an order returned by resolve_customer_order "
+        "in this turn.",
         {"type": "object", "properties": {"order_id": _ID}, "required": ["order_id"]},
         "shipment",
         _shipment_lookup,

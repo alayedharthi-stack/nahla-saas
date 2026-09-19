@@ -4794,6 +4794,36 @@ async def _dispatch_message(
         # production environment that hasn't explicitly enabled the
         # platform-brain workspace.
         if not _is_platform_tenant(db, resolved_tenant_id):
+            # ── Commerce runtime ownership claim ──────────────────────
+            # THE ownership decision, taken here because this is the last
+            # point at which it can be exclusive. Every short circuit below —
+            # payment receipt, payment evidence, map image, payment claim,
+            # address, payment method — mutates order state and sends before
+            # the merchant handler is entered. Asking inside that handler
+            # therefore never sees those turns at all.
+            #
+            # A claim routes the turn straight to the merchant handler, where
+            # the commerce runtime seam runs and where every gate that can
+            # silence a turn still decides. It answers nothing by itself.
+            if _commerce_runtime_claims_inbound(
+                db, tenant_id=resolved_tenant_id, phone_id=used_pid, to=sender,
+                text=text or "", wa_msg_id=msg_id,
+            ):
+                logger.info(
+                    "[WEBHOOK_ROUTE] route=commerce_runtime_claim tenant=%s from=%s msg_id=%s",
+                    resolved_tenant_id, sender, msg_id,
+                )
+                await _handle_merchant_message(
+                    phone_id=used_pid, to=sender, text=text,
+                    tenant_id=resolved_tenant_id, db=db,
+                    inbound_metadata=normalized_inbound.metadata,
+                    inbound_persist_body=persist_body,
+                    wa_message_ts=_wa_msg_ts,
+                    wa_msg_id=msg_id or None,
+                    commerce_runtime_claimed=True,
+                )
+                return
+
             # ── Payment-receipt short-circuit ─────────────────────────
             # Before calling the brain, check if this inbound is a
             # payment receipt arriving during an active order. If
@@ -6291,6 +6321,7 @@ async def _handle_merchant_message(
     inbound_persist_body: Optional[str] = None,
     wa_message_ts: Optional[datetime] = None,
     wa_msg_id: Optional[str] = None,
+    commerce_runtime_claimed: bool = False,
 ) -> None:
     """
     For merchant tenants (tenant_id > 1): reply using the store's own AI context.
@@ -7960,6 +7991,18 @@ async def _handle_merchant_message(
                 ai_gate_skipped=bool(_skip),
             )
             _commerce_runtime_owns_turn = bool(_pilot.handled)
+            if commerce_runtime_claimed and not _commerce_runtime_owns_turn:
+                # The dispatcher withheld this turn from its own owners because
+                # the commerce runtime claimed it, and the seam has now declined
+                # it. That can only mean the configuration or the verified
+                # connection moved between the two, so say so plainly: the
+                # legacy path answers below, which is one answer, but not the
+                # one the claim predicted.
+                logger.warning(
+                    "[COMMERCE_RUNTIME_PILOT] claimed at dispatch but declined at the seam "
+                    "tenant=%s reason=%s — the legacy path answers this turn",
+                    tenant_id, _pilot.reason,
+                )
         except Exception as _pilot_exc:  # noqa: BLE001
             # The route was never taken, so nothing was sent by it. A failure to
             # even ask must not cost the customer their reply.
@@ -15548,7 +15591,20 @@ async def _handle_merchant_message(
             clear_trusted_context()
         except Exception:  # noqa: BLE001  # noqa: silent-ok — context cleanup must not block emit
             pass
-        _sync_persona_observability()
+        # This runs however the function exited, and the comment above is the
+        # contract: observability must not take down the response path. It was
+        # the one call here that could, and an exception escaping this handler
+        # does not stay local — both provider entry points acknowledge before
+        # processing, so it abandons the rest of an already-acknowledged batch:
+        # the next message in a Meta batch, and the status receipts after it.
+        try:
+            _sync_persona_observability()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — observability never fails a turn
+            logger.warning(
+                "[PERSONA_OBSERVABILITY] final sync failed tenant=%s to=%s — "
+                "the turn and the rest of its batch continue",
+                tenant_id, to,
+            )
         try:
             # Finalize turn_timing snapshot onto the trace for metadata merge.
             from core.turn_latency import get_turn_latency  # noqa: PLC0415
@@ -15643,6 +15699,30 @@ def _resolve_wa_conn_by_phone_id(_db, phone_id: str):
     except Exception as exc:  # noqa: BLE001
         logger.debug("[WA] phone_id lookup failed: %s", exc)
     return None, None
+
+
+def _commerce_runtime_claims_inbound(db, *, tenant_id, phone_id: str, to: str,
+                                     text: str, wa_msg_id) -> bool:
+    """Whether the commerce runtime owns this inbound, asked before any owner acts.
+
+    Thin, fail-closed wrapper: anything it cannot establish is ``False``, which
+    leaves the dispatcher's own short circuits exactly as they are today.
+    """
+    try:
+        from services.commerce_runtime_pilot import (  # noqa: PLC0415
+            commerce_runtime_claims_inbound,
+        )
+
+        return commerce_runtime_claims_inbound(
+            db, tenant_id=tenant_id, phone_id=phone_id, to=to, text=text,
+            wa_msg_id=wa_msg_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - an undecidable claim is not a claim
+        logger.warning(
+            "[COMMERCE_RUNTIME_PILOT] ownership claim unavailable tenant=%s err=%s",
+            tenant_id, type(exc).__name__,
+        )
+        return False
 
 
 def _duplicate_is_unfinished_runtime_work(

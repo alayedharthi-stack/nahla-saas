@@ -210,12 +210,14 @@ def test_a_database_missing_only_the_terminals_table_is_refused():
 
 
 class _Session:
-    """A session that says whether it was closed, and when."""
+    """A session that says whether it was closed, when, and how often."""
 
     def __init__(self) -> None:
         self.closed = threading.Event()
+        self.closes = 0
 
     def close(self) -> None:
+        self.closes += 1
         self.closed.set()
 
 
@@ -260,6 +262,46 @@ def test_a_call_that_never_returns_leaves_the_session_alone_rather_than_breaking
     thread.join(5.0)
     assert not thread.is_alive()
     assert not session.closed.is_set()
+
+
+def test_the_session_is_still_closed_after_the_reaper_has_given_up_waiting():
+    """The reaper is a timely closer, not the owner. Its deadline passing must
+    not leave the session with nobody responsible for it."""
+    binding, session = _binding(), _Session()
+    binding.enter()
+    binding.abandon("the tool did not answer within 1.0s")
+    thread = entry._retire_tool_session(binding, session, turn_id=5, reap_seconds=0.2)
+    thread.join(5.0)
+    assert not thread.is_alive()                 # the bounded wait is over
+    assert not session.closed.is_set()           # and the call still holds it
+
+    binding.leave()                              # the abandoned call finally ends
+    assert session.closed.wait(5.0)              # and closing it is still someone's job
+
+
+def test_a_session_is_closed_exactly_once_however_the_two_owners_race():
+    binding, session = _binding(), _Session()
+    binding.enter()
+    binding.abandon("timeout")
+    thread = entry._retire_tool_session(binding, session, turn_id=6, reap_seconds=5.0)
+    binding.leave()
+    assert session.closed.wait(5.0)
+    thread.join(5.0)
+    assert session.closes == 1
+
+
+def test_a_broken_close_never_takes_down_the_thread_that_finished_the_call():
+    class _Angry(_Session):
+        def close(self) -> None:
+            super().close()
+            raise RuntimeError("the pool is gone")
+
+    binding, session = _binding(), _Angry()
+    binding.enter()
+    binding.abandon("timeout")
+    entry._retire_tool_session(binding, session, turn_id=7, reap_seconds=0.1)
+    binding.leave()                              # must not raise
+    assert session.closed.wait(5.0)
 
 
 def test_the_reaper_runs_as_a_daemon_so_it_can_never_hold_the_process_open():

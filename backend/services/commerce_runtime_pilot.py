@@ -43,9 +43,11 @@ HISTORY_LIMIT = 15
 # never recorded as *unchanged*: an unobserved wire is unknown, not clean.
 WIRE_UNOBSERVED = "wire_text_unobserved"
 
-# Prefixes the reason when a refused turn is nevertheless kept, because the
-# runtime has unfinished work for that exact inbound message.
+# Prefixes the reason when a refused turn is nevertheless kept, because this
+# runtime owns that exact inbound message: ``unfinished_`` when it still has
+# work to do on it, ``owned_`` when it already finished it.
 UNFINISHED_PREFIX = "unfinished_"
+OWNED_PREFIX = "owned_"
 
 # Refusals that mean the runtime was never in this conversation at all. Asking
 # whether it holds unfinished work would be a query for every inbound message
@@ -117,6 +119,21 @@ def _context_preamble(convo: Any, customer_name: str) -> Dict[str, Any]:
     return preamble
 
 
+def _wire_unobserved(metadata: Any) -> bool:
+    """Whether this runtime recorded that it could not read the wire back.
+
+    Only rows this runtime wrote carry the marker. Anything else — a legacy
+    row, another path's row — is not this runtime's to judge and is left alone.
+    """
+    meta = metadata if isinstance(metadata, dict) else {}
+    if meta.get("chosen_path") != BLOCKED_PATH:
+        return False
+    if meta.get("commerce_runtime_wire_observed") is False:
+        return True
+    reasons = meta.get("final_transform_reasons")
+    return isinstance(reasons, list) and WIRE_UNOBSERVED in reasons
+
+
 def _phone_variants(phone: str) -> Tuple[str, ...]:
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 
@@ -131,9 +148,12 @@ def _phone_is_unambiguous(db: Any, *, tenant_id: int, conversation_id: int,
 
     Messages written before conversation linking carry no conversation id and
     can only be attributed by the number they were delivered to. That is safe
-    only while the number names one conversation; where a tenant holds several
-    for the same number, an unlinked message belongs to an unknown one of them
-    and is left out rather than guessed into this one.
+    only where the number is *established* to name this one conversation and no
+    other. Two other answers are both "not established" and both exclude the
+    unlinked rows: several conversations carry the number, or — just as
+    important — none does, because a conversation whose number lives only in
+    ``external_id`` produces no association row at all. Finding no evidence of
+    an association is not evidence of a unique one.
     """
     if not phones:
         return False
@@ -155,7 +175,7 @@ def _phone_is_unambiguous(db: Any, *, tenant_id: int, conversation_id: int,
         .all()
     )
     ids = {int(row[0]) for row in rows}
-    return ids in ({int(conversation_id)}, set())
+    return ids == {int(conversation_id)}
 
 
 def _history_rows(db: Any, *, tenant_id: int, conversation_id: int,
@@ -193,12 +213,16 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
                  current_text: str) -> list:
     """The conversation so far, bound to the conversation being answered.
 
-    An outbound row records what was actually transmitted when the wire audit
-    saw it, so the model is shown the message the customer received rather than
-    a draft that was later changed. The inbound message being answered now is
-    dropped when the store has already persisted it, so the model is not shown
-    the same customer turn twice. A read that fails yields no history rather
-    than a guess.
+    An outbound row contributes only text that is **established** to have been
+    transmitted: the wire audit's own record of it, or a body written while the
+    wire was observed. A row whose wire was never observed holds the reserved
+    intent, which the send path may have rewritten before it went out — it stays
+    in the store for the operator, and it is left out of here, because showing
+    it to the model would present a draft as the thing that was said.
+
+    The inbound message being answered now is dropped when the store has already
+    persisted it, so the model is not shown the same customer turn twice. A read
+    that fails yields no history rather than a guess.
     """
     try:
         rows = _history_rows(db, tenant_id=int(tenant_id),
@@ -213,9 +237,18 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
     for direction, body, metadata in rows:
         outbound = direction in {"out", "outbound"}
         if outbound:
-            wire_body = wire_transcript_text((metadata or {}).get("wire_attempts"))
+            meta = metadata or {}
+            wire_body = wire_transcript_text(meta.get("wire_attempts"))
             if wire_body is not None:
                 body = wire_body
+            elif _wire_unobserved(meta):
+                # This runtime wrote the row and said, at the time, that it
+                # could not read back what the send path transmitted. The body
+                # is the reserved intent, not established wire text.
+                logger.info("[COMMERCE_RUNTIME_PILOT] omitting an unobserved outbound "
+                            "row from the model's history tenant=%s conversation=%s",
+                            tenant_id, conversation_id)
+                continue
         text = str(body or "").strip()
         if not text:
             continue
@@ -290,6 +323,67 @@ def _send_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
     return send
 
 
+def commerce_runtime_claims_inbound(
+    db: Any,
+    *,
+    tenant_id: int,
+    phone_id: str,
+    to: str,
+    text: str,
+    wa_msg_id: Optional[str],
+) -> bool:
+    """Whether the commerce runtime owns this inbound message, asked early.
+
+    The dispatcher has owners of its own — the payment-receipt, payment-evidence,
+    map-image and payment-claim short circuits — that mutate order state and send
+    a reply *before* the merchant handler is ever entered. A routing decision
+    made inside that handler therefore never sees those turns: for an
+    allowlisted recipient the short circuit answers and the runtime is not asked,
+    and a redelivery let through to recover a runtime turn is answered a second
+    time by a different owner.
+
+    This is the same decision, asked where it can still be exclusive. It answers
+    ``True`` in two cases:
+
+    * the pilot is configured to own this tenant and recipient, and the
+      connection is verified — the ordinary case;
+    * this runtime already admitted this exact inbound message — the recovery
+      case, which holds even while draining, because a turn this runtime owns is
+      never another owner's to answer.
+
+    It decides **ownership**, not whether anything is answered. Every gate that
+    can silence the turn — pause, handoff, blocklist, billing, conversation
+    quota — still runs inside the handler and still decides. Never raises: a
+    question that cannot be answered is answered ``False``, which leaves the
+    dispatcher exactly as it is today.
+    """
+    from core.commerce_runtime import pilot_guard  # noqa: PLC0415
+
+    try:
+        decision = pilot_guard.evaluate_pilot_route(
+            db, tenant_id=tenant_id, customer_phone=to, phone_number_id=phone_id,
+            inbound_text=text,
+        )
+        if decision.permitted:
+            return True
+        if decision.reason in NO_RUNTIME_WORK_POSSIBLE:
+            return False
+        owned = _admitted_runtime_turn(
+            tenant_id=int(tenant_id), phone_id=phone_id, wa_msg_id=wa_msg_id,
+            refusal=decision.reason)
+        if owned is None:
+            return False
+        logger.warning(
+            "[COMMERCE_RUNTIME_PILOT] claiming inbound the runtime already owns "
+            "turn=%s finished=%s tenant=%s guard_reason=%s",
+            owned.turn_id, owned.finished, tenant_id, decision.reason)
+        return True
+    except Exception:  # noqa: BLE001 - an undecidable claim is not a claim
+        logger.warning("[COMMERCE_RUNTIME_PILOT] ownership claim check failed tenant=%s",
+                       tenant_id)
+        return False
+
+
 async def maybe_handle_with_commerce_runtime(
     *,
     db: Any,
@@ -316,35 +410,46 @@ async def maybe_handle_with_commerce_runtime(
         )
 
     decision = route()
-    open_work: List[Any] = []
+    looked_up: List[Any] = []
 
-    def unfinished_work() -> Optional[Any]:
-        """The runtime's unfinished turn for this inbound message, asked once."""
-        if not open_work:
-            open_work.append(_unfinished_runtime_work(
+    def admitted() -> Optional[Any]:
+        """Any turn this runtime admitted for this inbound message, asked once.
+
+        Deliberately the *ownership* question, not the recovery one: a turn can
+        be completed by another invocation between deduplication letting this
+        retry through and this lookup, and an inbound the runtime already owns
+        must not become new work for the legacy path just because it finished
+        in the meantime.
+        """
+        if not looked_up:
+            looked_up.append(_admitted_runtime_turn(
                 tenant_id=tenant_id, phone_id=phone_id, wa_msg_id=wa_msg_id,
                 refusal=decision.reason))
-        return open_work[0]
+        return looked_up[0]
 
     if not decision.permitted and decision.reason == pilot_guard.PILOT_DRAINING:
         # A draining pilot takes no new turns and finishes its own. Only a turn
         # this runtime actually admitted and never finished re-enters here.
-        if unfinished_work() is not None:
+        owned = admitted()
+        if owned is not None and owned.unfinished:
             logger.warning("[COMMERCE_RUNTIME_PILOT] draining: finishing turn=%s tenant=%s",
-                           getattr(unfinished_work(), "turn_id", None), tenant_id)
+                           owned.turn_id, tenant_id)
             decision = route(finishing_open_work=True)
 
     if not decision.permitted:
-        unfinished = unfinished_work()
-        if unfinished is not None:
-            # The runtime admitted this exact inbound message and has not
-            # finished it. Whatever now makes the guard refuse, the legacy path
-            # must not answer a message this runtime may already have answered.
+        owned = admitted()
+        if owned is not None:
+            # This runtime admitted this exact inbound message. Whatever now
+            # makes the guard refuse, and whether or not the turn has since been
+            # finished, the legacy path must not answer a message this runtime
+            # owns and may already have answered.
+            state = "finished" if owned.finished else "unfinished"
             logger.error(
-                "[COMMERCE_RUNTIME_PILOT] refused turn=%s the runtime has not finished "
+                "[COMMERCE_RUNTIME_PILOT] refused turn=%s this runtime owns (%s) "
                 "tenant=%s reason=%s — the legacy path is not given it",
-                unfinished.turn_id, tenant_id, decision.reason)
-            return PilotResult(handled=True, reason=f"{UNFINISHED_PREFIX}{decision.reason}")
+                owned.turn_id, state, tenant_id, decision.reason)
+            prefix = OWNED_PREFIX if owned.finished else UNFINISHED_PREFIX
+            return PilotResult(handled=True, reason=f"{prefix}{decision.reason}")
         if decision.reason not in {pilot_guard.PILOT_DISABLED, pilot_guard.TENANT_NOT_ALLOWLISTED}:
             logger.info("[COMMERCE_RUNTIME_PILOT] route=legacy tenant=%s reason=%s",
                         tenant_id, decision.reason)
@@ -418,9 +523,9 @@ async def _own_turn(
     return PilotResult(handled=True, reason=report.reason, report=report)
 
 
-def _unfinished_runtime_work(*, tenant_id: int, phone_id: str, wa_msg_id: Optional[str],
-                             refusal: str) -> Optional[Any]:
-    """The runtime's unfinished turn for this inbound message, if it has one.
+def _admitted_runtime_turn(*, tenant_id: int, phone_id: str, wa_msg_id: Optional[str],
+                           refusal: str) -> Optional[Any]:
+    """Any turn this runtime admitted for this inbound message, finished or not.
 
     Asked only on a refusal, and only for a tenant the pilot is configured for,
     so an ordinary platform turn never pays for it. Never raises: a question
@@ -431,10 +536,10 @@ def _unfinished_runtime_work(*, tenant_id: int, phone_id: str, wa_msg_id: Option
     try:
         from core.commerce_runtime import recovery  # noqa: PLC0415
 
-        return recovery.unfinished_turn_for(
+        return recovery.admitted_turn_for(
             tenant_id=int(tenant_id), phone_number_id=phone_id, provider_message_id=wa_msg_id)
     except Exception:  # noqa: BLE001 - an unreadable ledger establishes nothing
-        logger.warning("[COMMERCE_RUNTIME_PILOT] unfinished-work check failed tenant=%s",
+        logger.warning("[COMMERCE_RUNTIME_PILOT] admitted-turn check failed tenant=%s",
                        tenant_id)
         return None
 
@@ -515,7 +620,7 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
             extra_metadata={
                 "compose_source": "llm",
                 "response_mode": "grounded",
-                "chosen_path": "commerce_runtime_pilot",
+                "chosen_path": BLOCKED_PATH,
                 "llm_candidate_present": True,
                 "final_text_transformed": transformed,
                 "final_transform_reasons": reasons,
@@ -533,6 +638,6 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
         logger.exception("[COMMERCE_RUNTIME_PILOT] outbound persist failed turn=%s", report.turn_id)
 
 
-__all__ = ["BLOCKED_PATH", "HISTORY_LIMIT", "NO_RUNTIME_WORK_POSSIBLE", "PilotResult",
-           "SEND_WAIT_SECONDS", "TRACE_SOURCE", "UNFINISHED_PREFIX", "WIRE_UNOBSERVED",
-           "WireObservation", "maybe_handle_with_commerce_runtime"]
+__all__ = ["BLOCKED_PATH", "HISTORY_LIMIT", "NO_RUNTIME_WORK_POSSIBLE", "OWNED_PREFIX",
+           "PilotResult", "SEND_WAIT_SECONDS", "TRACE_SOURCE", "UNFINISHED_PREFIX",
+           "WIRE_UNOBSERVED", "WireObservation", "maybe_handle_with_commerce_runtime"]

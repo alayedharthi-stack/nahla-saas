@@ -15,7 +15,7 @@ from scripts.operators import commerce_runtime_pilot_migration as job
 from scripts.operators import commerce_runtime_pilot_migration_contract as k
 
 
-TARGET = "db.railway/nahla"
+TARGET = "db.railway:5432/nahla"
 TARGET_URL = "postgresql://u:p@db.railway:5432/nahla"
 
 
@@ -125,9 +125,11 @@ def test_a_wrong_confirmation_token_is_not_a_confirmation(monkeypatch):
     ("postgresql://u:p@0.0.0.0:5432/nahla", "DATABASE_URL_is_local"),
     ("sqlite:////tmp/nahla.db", "DATABASE_URL_unsupported_dialect"),
     ("mysql://u:p@db.railway:3306/nahla", "DATABASE_URL_unsupported_dialect"),
-    ("db.railway:5432/nahla", "DATABASE_URL_unsupported_dialect"),
+    ("db.railway:5432/nahla", "DATABASE_URL_unparsable"),      # not a URL at all
+    ("postgres://u:p@db.railway:5432/nahla", "DATABASE_URL_unsupported_dialect"),
     ("postgresql:///nahla", "DATABASE_URL_host_missing"),
     ("postgresql://u:p@db.railway:5432/", "DATABASE_URL_database_missing"),
+    ("postgresql://", "DATABASE_URL_host_missing"),
     ("postgresql://u:p@db.railway:not-a-port/nahla", "DATABASE_URL_unparsable"),
 ])
 def test_a_url_that_is_not_a_remote_postgres_database_is_refused_by_reason(url, reason):
@@ -138,8 +140,9 @@ def test_a_url_that_is_not_a_remote_postgres_database_is_refused_by_reason(url, 
 @pytest.mark.parametrize("url", [
     "postgresql://u:localhost@db.railway:5432/nahla",       # password, not host
     "postgresql+psycopg2://u:p@db.railway:5432/nahla",      # a driver, same dialect
-    "postgres://u:p@db.railway:5432/nahla",                 # the other spelling
     "postgresql://u:p@DB.RAILWAY:5432/nahla",               # host case is not identity
+    "postgresql://u:p@db.railway:5432/nahla?connect_timeout=5",   # harmless parameter
+    "postgresql://u:p@db.railway:5432/nahla?sslmode=require",     # harmless parameter
 ])
 def test_a_remote_database_url_is_accepted_however_it_is_spelled(url):
     resolved, refusal = job.database_url({"DATABASE_URL": url, k.TARGET_ENV: TARGET})
@@ -160,11 +163,72 @@ def test_the_job_will_not_run_without_an_explicitly_authorized_target(monkeypatc
 
 
 @pytest.mark.parametrize("declared", ["", "   ", "db.railway", "db.railway/nahla/extra",
-                                      "/nahla", "db.railway/"])
+                                      "/nahla", "db.railway/", "db.railway:abc/nahla",
+                                      "[::1/nahla"])
 def test_a_target_that_does_not_name_one_host_and_one_database_is_refused(declared):
     resolved, refusal = job.database_url({"DATABASE_URL": TARGET_URL, k.TARGET_ENV: declared})
     assert resolved is None and refusal in {"authorized_target_not_declared",
                                             "authorized_target_malformed"}
+
+
+def test_a_target_without_a_port_means_the_postgres_default():
+    assert job.authorized_target({k.TARGET_ENV: "db.railway/nahla"})[0] == {
+        "host": "db.railway", "port": k.DEFAULT_PORT, "database": "nahla"}
+
+
+def test_an_ipv6_target_keeps_its_colons_out_of_the_port():
+    assert job.authorized_target({k.TARGET_ENV: "[2001:db8::1]:6543/nahla"})[0] == {
+        "host": "2001:db8::1", "port": 6543, "database": "nahla"}
+
+
+# ── The effective target, not the URL's authority ────────────────────────────
+
+
+@pytest.mark.parametrize("url", [
+    # The driver honours these over the authority: the URL says approved, the
+    # connection goes elsewhere.
+    "postgresql://u:p@db.railway:5432/nahla?host=other.internal",
+    "postgresql://u:p@db.railway:5432/nahla?hostaddr=10.0.0.9",
+    "postgresql://u:p@db.railway:5432/nahla?dbname=other_database",
+    "postgresql://u:p@db.railway:5432/nahla?port=6543",
+    "postgresql://u:p@db.railway:5432/nahla?host=127.0.0.1",
+    "postgresql://u:p@db.railway:5432/nahla?service=elsewhere",
+])
+def test_a_url_that_redirects_itself_through_a_query_parameter_is_refused(url):
+    resolved, refusal = job.database_url({"DATABASE_URL": url, k.TARGET_ENV: TARGET})
+    assert resolved is None and refusal == "DATABASE_URL_carries_a_target_override"
+
+
+def test_the_parameters_checked_are_the_ones_the_driver_is_handed():
+    """Not a second parse of the URL: the dialect's own connect arguments."""
+    import sqlalchemy as sa
+
+    parsed, refusal = job.parse_database_url(TARGET_URL)
+    assert refusal is None
+    engine = sa.create_engine(TARGET_URL)
+    try:
+        _args, connect = engine.dialect.create_connect_args(engine.url)
+    finally:
+        engine.dispose()
+    assert (parsed["host"], parsed["port"], parsed["database"]) == (
+        str(connect["host"]).lower(), int(connect["port"]), connect["dbname"])
+
+
+def test_a_different_port_on_the_authorized_host_is_a_different_database():
+    resolved, refusal = job.database_url(
+        {"DATABASE_URL": "postgresql://u:p@db.railway:6543/nahla", k.TARGET_ENV: TARGET})
+    assert resolved is None and refusal == "DATABASE_URL_is_not_the_authorized_target"
+
+
+def test_the_database_name_is_compared_with_its_case_intact():
+    """PostgreSQL treats ``Nahla`` and ``nahla`` as different databases."""
+    resolved, refusal = job.database_url(
+        {"DATABASE_URL": "postgresql://u:p@db.railway:5432/Nahla", k.TARGET_ENV: TARGET})
+    assert resolved is None and refusal == "DATABASE_URL_is_not_the_authorized_target"
+    resolved, refusal = job.database_url(
+        {"DATABASE_URL": "postgresql://u:p@db.railway:5432/Nahla",
+         k.TARGET_ENV: "db.railway:5432/Nahla"})
+    assert refusal is None and resolved is not None
 
 
 @pytest.mark.parametrize("url", [

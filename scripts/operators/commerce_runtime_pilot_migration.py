@@ -76,49 +76,77 @@ def _is_loopback(host: str) -> bool:
 
 
 def parse_database_url(url: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """``(target, refusal_reason)`` for one database URL, parsed as a URL.
+    """``(target, refusal_reason)`` for one database URL, as the driver reads it.
 
-    Substring matching cannot answer any of the questions that matter here —
-    which dialect this is, which host it names, whether that host is this
-    machine — and gets each of them wrong in a different way: a password
-    containing ``localhost`` refuses a real target, ``[::1]`` passes as a remote
-    one, and ``sqlite:///x`` passes as a database this job can migrate.
+    The URL's authority is not the connection's target. A PostgreSQL URL may
+    carry ``host``, ``dbname`` and friends as query parameters, and the driver
+    honours those over the authority — so
+    ``postgresql://u:p@approved.internal/pilot?host=other.internal`` connects to
+    ``other.internal``. A check that reads the authority authorises one database
+    while the migration runs against another.
+
+    So the parameters checked here are the ones the driver is actually handed:
+    SQLAlchemy's own ``create_connect_args`` for this URL, the same call the
+    engine makes. Any target-changing query parameter is refused before that,
+    because a URL that needs reconciling is a URL nobody should be running a
+    migration from.
     """
-    from urllib.parse import unquote, urlsplit  # noqa: PLC0415
-
     raw = str(url or "").strip()
     if not raw:
         return None, "DATABASE_URL_unresolved"
     try:
-        parts = urlsplit(raw)
-    except Exception:  # noqa: BLE001 - an unparsable URL names no database
+        from sqlalchemy.engine import make_url  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - without the driver's own parser, nothing is established
         return None, "DATABASE_URL_unparsable"
-    scheme = (parts.scheme or "").lower()
-    dialect = scheme.split("+", 1)[0]
+    try:
+        parsed = make_url(raw)
+    except Exception:  # noqa: BLE001
+        return None, "DATABASE_URL_unparsable"
+
+    dialect = str(parsed.get_backend_name() or "").lower()
     if not dialect:
         return None, "DATABASE_URL_unparsable"
     if dialect not in k.SUPPORTED_DIALECTS:
         return None, "DATABASE_URL_unsupported_dialect"
+
+    overrides = sorted(key for key in (parsed.query or {})
+                       if key.lower() in k.TARGET_OVERRIDE_QUERY_KEYS)
+    if overrides:
+        emit(f"target_changing_query_parameters={overrides!r}")
+        return None, "DATABASE_URL_carries_a_target_override"
+
     try:
-        host = parts.hostname or ""
-    except ValueError:
+        import sqlalchemy as sa  # noqa: PLC0415
+
+        # Lazy: constructing an engine opens no connection. This asks the very
+        # dialect the migration would use what it would connect with.
+        engine = sa.create_engine(parsed)
+        try:
+            _args, connect = engine.dialect.create_connect_args(parsed)
+        finally:
+            engine.dispose()
+    except Exception:  # noqa: BLE001 - a URL the driver cannot turn into a connection
         return None, "DATABASE_URL_unparsable"
+
+    host = str(connect.get("host") or "").strip()
     if not host:
         return None, "DATABASE_URL_host_missing"
     if _is_loopback(host):
         return None, "DATABASE_URL_is_local"
-    database = unquote((parts.path or "").lstrip("/"))
+    database = str(connect.get("dbname") or "").strip()
     if not database:
         return None, "DATABASE_URL_database_missing"
     try:
-        port = parts.port
-    except ValueError:
+        port = int(connect.get("port") or k.DEFAULT_PORT)
+    except (TypeError, ValueError):
         return None, "DATABASE_URL_unparsable"
+    # The host is an address or a name, so case carries no meaning; a database
+    # name is case-sensitive in PostgreSQL and is kept exactly as given.
     return {"dialect": dialect, "host": host.lower(), "port": port, "database": database}, None
 
 
-def authorized_target(environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[str]]:
-    """``("<host>/<database>", None)`` — the one database this run may touch.
+def authorized_target(environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """The one database this run may touch, as ``host[:port]/database``.
 
     The operator states it explicitly. ``DATABASE_URL`` says which database is
     *configured* in this service; it can never say which one was *authorised*,
@@ -129,13 +157,47 @@ def authorized_target(environ: Optional[Dict[str, str]] = None) -> Tuple[Optiona
     declared = str(env.get(k.TARGET_ENV, "") or "").strip()
     if not declared:
         return None, "authorized_target_not_declared"
-    if declared.count("/") != 1 or declared.startswith("/") or declared.endswith("/"):
+    if declared.count("/") != 1:
         return None, "authorized_target_malformed"
-    return declared.lower(), None
+    authority, database = declared.split("/", 1)
+    authority, database = authority.strip(), database.strip()
+    if not authority or not database:
+        return None, "authorized_target_malformed"
+    port = k.DEFAULT_PORT
+    host = authority
+    # ``host:port``, and an IPv6 literal in brackets so its colons are not read
+    # as a port separator.
+    if authority.startswith("["):
+        closing = authority.find("]")
+        if closing < 0:
+            return None, "authorized_target_malformed"
+        host, rest = authority[1:closing], authority[closing + 1:]
+        if rest.startswith(":"):
+            rest = rest[1:]
+        elif rest:
+            return None, "authorized_target_malformed"
+        if rest:
+            try:
+                port = int(rest)
+            except ValueError:
+                return None, "authorized_target_malformed"
+    elif ":" in authority:
+        host, _, raw_port = authority.rpartition(":")
+        try:
+            port = int(raw_port)
+        except ValueError:
+            return None, "authorized_target_malformed"
+    if not host:
+        return None, "authorized_target_malformed"
+    return {"host": host.lower(), "port": port, "database": database}, None
+
+
+def _target_label(target: Dict[str, Any]) -> str:
+    return f"{target['host']}:{target['port']}/{target['database']}"
 
 
 def database_url(environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[str]]:
-    """``(url, refusal_reason)``. The URL is parsed, and it must be the target."""
+    """``(url, refusal_reason)``. The **effective** target must be the authorised one."""
     env = environ if environ is not None else os.environ
     url = str(env.get("DATABASE_URL", "") or "").strip()
     target, refusal = parse_database_url(url)
@@ -144,10 +206,14 @@ def database_url(environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[str
     declared, refusal = authorized_target(env)
     if declared is None:
         return None, refusal
-    observed = f"{target['host']}/{target['database']}".lower()
-    if observed != declared:
-        emit(f"authorized_target={declared!r} observed_target={observed!r}")
+    # Host and port identify the server; the database name is compared exactly,
+    # because PostgreSQL treats ``Pilot`` and ``pilot`` as different databases.
+    if (target["host"] != declared["host"] or target["port"] != declared["port"]
+            or target["database"] != declared["database"]):
+        emit(f"authorized_target={_target_label(declared)!r} "
+             f"effective_target={_target_label(target)!r}")
         return None, "DATABASE_URL_is_not_the_authorized_target"
+    emit(f"effective_target={_target_label(target)!r}")
     return url, None
 
 

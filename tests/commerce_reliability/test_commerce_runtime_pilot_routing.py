@@ -233,3 +233,38 @@ def test_a_turn_the_runtime_refused_before_running_goes_to_the_legacy_owner(pilo
     drive(seen, event_id="wamid.route.9")
     assert seen.runtime_turns == []
     assert len(seen.v2_owner) == 1
+
+
+# ── Observability cannot abandon an acknowledged batch (re-review) ───────────
+
+
+def test_a_persistently_failing_observability_sync_does_not_escape_the_handler(pilot_on):
+    """Both provider entry points acknowledge before processing, so an exception
+    escaping this handler does not stay local: it abandons the rest of the
+    batch — the next message, and the status receipts after it."""
+    seen = Seen()
+
+    def always_explode(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("observability is down")
+
+    harness = drive(seen, event_id="wamid.route.10", gates=[patch(
+        "modules.ai.brain.persona_ownership.sync_persona_to_turn_trace",
+        side_effect=always_explode)])
+    # The turn still ran and still belongs to the runtime…
+    assert len(seen.runtime_turns) == 1
+    assert seen.v2_owner == []
+    # …and the handler returned rather than raising out of it.
+    assert legacy_rows(harness) == []
+
+
+def test_the_turn_after_a_failed_sync_is_still_processed(pilot_on):
+    """One turn's telemetry failure must not take the next turn with it."""
+    def always_explode(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("observability is down")
+
+    for event_id in ("wamid.route.11a", "wamid.route.11b"):
+        seen = Seen()
+        drive(seen, event_id=event_id, gates=[patch(
+            "modules.ai.brain.persona_ownership.sync_persona_to_turn_trace",
+            side_effect=always_explode)])
+        assert len(seen.runtime_turns) == 1, event_id

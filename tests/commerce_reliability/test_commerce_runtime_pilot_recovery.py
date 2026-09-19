@@ -83,9 +83,15 @@ def configured(monkeypatch: pytest.MonkeyPatch, db: Any) -> None:
     monkeypatch.setenv(pg.ENV_MODEL, MODEL)
 
 
-def unfinished(tenant_id: int, turn_id: int = 7) -> recovery.UnfinishedTurn:
-    return recovery.UnfinishedTurn(tenant_id=tenant_id, turn_id=turn_id, conversation_id=3,
-                                   provider_message_id="wamid.retry")
+def unfinished(tenant_id: int, turn_id: int = 7) -> recovery.AdmittedInbound:
+    return recovery.AdmittedInbound(tenant_id=tenant_id, turn_id=turn_id, conversation_id=3,
+                                    provider_message_id="wamid.retry", finished=False)
+
+
+def finished(tenant_id: int, turn_id: int = 7) -> recovery.AdmittedInbound:
+    """The same turn, after some other invocation completed it."""
+    return recovery.AdmittedInbound(tenant_id=tenant_id, turn_id=turn_id, conversation_id=3,
+                                    provider_message_id="wamid.retry", finished=True)
 
 
 def deliver(db: Any, *, msg_id: str, ledger: Any = None) -> Dict[str, List[Any]]:
@@ -97,8 +103,12 @@ def deliver(db: Any, *, msg_id: str, ledger: Any = None) -> Dict[str, List[Any]]
     async def _handler(**kwargs: Any) -> None:
         seen["handled"].append(kwargs)
 
-    def _lookup(**kwargs: Any) -> Optional[recovery.UnfinishedTurn]:
+    def _lookup(**kwargs: Any) -> Optional[recovery.AdmittedInbound]:
         return None if ledger is None else ledger(**kwargs)
+
+    def _unfinished_only(**kwargs: Any) -> Optional[recovery.AdmittedInbound]:
+        found = _lookup(**kwargs)
+        return found if found is not None and found.unfinished else None
 
     with (
         patch.object(webhook, "get_db", return_value=iter([db])),
@@ -106,7 +116,8 @@ def deliver(db: Any, *, msg_id: str, ledger: Any = None) -> Dict[str, List[Any]]
         patch.object(webhook, "_handle_merchant_message", side_effect=_handler),
         patch.object(webhook, "_post_wa", new=AsyncMock(
             side_effect=lambda *a, **k: seen["sent"].append(a))),
-        patch.object(recovery, "unfinished_turn_for", _lookup),
+        patch.object(recovery, "admitted_turn_for", _lookup),
+        patch.object(recovery, "unfinished_turn_for", _unfinished_only),
     ):
         asyncio.run(webhook._dispatch_message(PHONE_ID, {
             "from": SENDER, "id": msg_id, "type": "text", "text": {"body": "وين طلبي؟"},
@@ -151,12 +162,12 @@ def test_a_retry_carrying_unfinished_runtime_work_reaches_the_handler(configured
 def test_the_retry_stops_being_let_through_once_the_work_is_finished(configured, db):
     state = {"open": True}
 
-    def ledger(**kwargs: Any) -> Optional[recovery.UnfinishedTurn]:
-        return unfinished(db.tenant_id) if state["open"] else None
+    def ledger(**kwargs: Any) -> Optional[recovery.AdmittedInbound]:
+        return unfinished(db.tenant_id) if state["open"] else finished(db.tenant_id)
 
     assert len(deliver(db, msg_id="wamid.closes", ledger=ledger)["handled"]) == 1
     assert len(deliver(db, msg_id="wamid.closes", ledger=ledger)["handled"]) == 1
-    state["open"] = False
+    state["open"] = False                                # another invocation finished it
     assert deliver(db, msg_id="wamid.closes", ledger=ledger)["handled"] == []
 
 
@@ -198,7 +209,7 @@ def test_a_refused_turn_the_runtime_has_not_finished_is_not_given_to_legacy(conf
     the answer is silence from this runtime, never a second answer from V1."""
     from services import commerce_runtime_pilot as seam
 
-    monkeypatch.setattr(recovery, "unfinished_turn_for",
+    monkeypatch.setattr(recovery, "admitted_turn_for",
                         lambda **kwargs: unfinished(db.tenant_id))
     monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")   # now refused
 
@@ -227,7 +238,7 @@ def test_a_refusal_that_means_the_runtime_was_never_here_costs_no_lookup(configu
     from services import commerce_runtime_pilot as seam
 
     asked: List[Any] = []
-    monkeypatch.setattr(recovery, "unfinished_turn_for",
+    monkeypatch.setattr(recovery, "admitted_turn_for",
                         lambda **kwargs: asked.append(kwargs) or unfinished(db.tenant_id))
     monkeypatch.delenv(reason_env, raising=False)
 
@@ -296,7 +307,7 @@ def test_the_draining_seam_runs_the_turn_rather_than_only_withholding_it(configu
     from services import commerce_runtime_pilot as seam
 
     monkeypatch.setenv(pg.ENV_DRAINING, "true")
-    monkeypatch.setattr(recovery, "unfinished_turn_for",
+    monkeypatch.setattr(recovery, "admitted_turn_for",
                         lambda **kwargs: unfinished(db.tenant_id))
     monkeypatch.setattr(seam, "_history_rows", lambda db_, **kwargs: [])
     ran: List[Dict[str, Any]] = []
@@ -332,7 +343,7 @@ def test_a_draining_pilot_takes_no_new_turn_even_through_the_seam(configured, mo
     from services import commerce_runtime_pilot as seam
 
     monkeypatch.setenv(pg.ENV_DRAINING, "true")
-    monkeypatch.setattr(recovery, "unfinished_turn_for", lambda **kwargs: None)
+    monkeypatch.setattr(recovery, "admitted_turn_for", lambda **kwargs: None)
 
     class _Convo:
         id = 501
@@ -346,3 +357,211 @@ def test_a_draining_pilot_takes_no_new_turn_even_through_the_seam(configured, mo
         legacy_already_answered=False, ai_gate_skipped=False,
     ))
     assert result.handled is False and result.reason == pg.PILOT_DRAINING
+
+
+# ── An admitted identity never becomes new legacy work (F3, re-review) ───────
+
+
+def test_a_turn_completed_between_deduplication_and_routing_is_not_given_to_legacy(
+        configured, monkeypatch, db):
+    """The reviewer's race: the retry is let through because the turn is open,
+    another invocation completes it, and by the time routing looks the recovery
+    question answers "nothing to do" — which is not the same as "not ours"."""
+    from services import commerce_runtime_pilot as seam
+
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    # Deduplication saw an unfinished turn; routing sees a finished one.
+    monkeypatch.setattr(recovery, "admitted_turn_for",
+                        lambda **kwargs: finished(db.tenant_id))
+
+    class _Convo:
+        id = 501
+        customer_id = 9
+        language = "ar"
+
+    result = asyncio.run(seam.maybe_handle_with_commerce_runtime(
+        db=db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="وين طلبي؟",
+        convo=_Convo(), wa_msg_id="wamid.retry", inbound_metadata=None,
+        trace=type("T", (), {"mark_outbound_sent": lambda self, **k: None})(),
+        legacy_already_answered=False, ai_gate_skipped=False,
+    ))
+    assert result.handled is True                          # not handed back
+    assert result.reason == f"{seam.OWNED_PREFIX}{pg.PILOT_DRAINING}"
+
+
+@pytest.mark.parametrize("refusal_env, refusal", [
+    (pg.ENV_DRAINING, pg.PILOT_DRAINING),
+    (pg.ENV_RECIPIENT_ALLOWLIST, pg.RECIPIENT_NOT_ALLOWLISTED),
+])
+def test_a_finished_runtime_turn_is_withheld_whatever_the_refusal(configured, monkeypatch, db,
+                                                                  refusal_env, refusal):
+    from services import commerce_runtime_pilot as seam
+
+    if refusal_env == pg.ENV_DRAINING:
+        monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    else:
+        monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")
+    monkeypatch.setattr(recovery, "admitted_turn_for",
+                        lambda **kwargs: finished(db.tenant_id))
+
+    class _Convo:
+        id = 501
+        customer_id = 9
+        language = "ar"
+
+    result = asyncio.run(seam.maybe_handle_with_commerce_runtime(
+        db=db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="وين طلبي؟",
+        convo=_Convo(), wa_msg_id="wamid.retry", inbound_metadata=None,
+        trace=type("T", (), {"mark_outbound_sent": lambda self, **k: None})(),
+        legacy_already_answered=False, ai_gate_skipped=False,
+    ))
+    assert result.handled is True and result.reason == f"{seam.OWNED_PREFIX}{refusal}"
+
+
+def test_a_finished_turn_is_still_not_recovery_work(configured, db):
+    """Withholding it from legacy is not the same as reopening it."""
+    from services import commerce_runtime_pilot as seam
+
+    assert seam._admitted_runtime_turn(
+        tenant_id=db.tenant_id, phone_id=PHONE_ID, wa_msg_id="", refusal="x") is None
+
+
+# ── The dispatcher claims ownership before its own owners act (F2) ───────────
+
+
+def test_the_claim_is_made_for_a_configured_tenant_and_recipient(configured, db):
+    from services import commerce_runtime_pilot as seam
+
+    with patch.object(pg, "verified_connection", lambda _db, **kwargs: (f"wa:{PHONE_ID}", "17")):
+        assert seam.commerce_runtime_claims_inbound(
+            db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="مرحبا",
+            wa_msg_id="wamid.x") is True
+
+
+@pytest.mark.parametrize("unset", [pg.ENV_ENABLED, pg.ENV_MODEL, pg.ENV_RECIPIENT_ALLOWLIST])
+def test_nothing_the_pilot_is_not_configured_for_is_ever_claimed(configured, monkeypatch, db,
+                                                                 unset):
+    from services import commerce_runtime_pilot as seam
+
+    monkeypatch.delenv(unset, raising=False)
+    monkeypatch.setattr(recovery, "admitted_turn_for", lambda **kwargs: None)
+    with patch.object(pg, "verified_connection", lambda _db, **kwargs: (f"wa:{PHONE_ID}", "17")):
+        assert seam.commerce_runtime_claims_inbound(
+            db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="مرحبا",
+            wa_msg_id="wamid.x") is False
+
+
+def test_an_inbound_the_runtime_already_owns_is_claimed_even_while_draining(configured,
+                                                                            monkeypatch, db):
+    """The recovery case: draining takes no new turns and still owns its own."""
+    from services import commerce_runtime_pilot as seam
+
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    monkeypatch.setattr(recovery, "admitted_turn_for", lambda **kwargs: unfinished(db.tenant_id))
+    assert seam.commerce_runtime_claims_inbound(
+        db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="وين طلبي؟",
+        wa_msg_id="wamid.retry") is True
+
+
+def test_a_draining_pilot_claims_nothing_new(configured, monkeypatch, db):
+    from services import commerce_runtime_pilot as seam
+
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    monkeypatch.setattr(recovery, "admitted_turn_for", lambda **kwargs: None)
+    assert seam.commerce_runtime_claims_inbound(
+        db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="سؤال جديد",
+        wa_msg_id="wamid.new") is False
+
+
+def test_a_claim_check_that_raises_is_not_a_claim(configured, monkeypatch, db):
+    from services import commerce_runtime_pilot as seam
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("guard unavailable")
+
+    monkeypatch.setattr(pg, "evaluate_pilot_route", explode)
+    assert seam.commerce_runtime_claims_inbound(
+        db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="مرحبا",
+        wa_msg_id="wamid.x") is False
+
+
+# ── The dispatcher's own owners no longer act first (F2, re-review) ──────────
+
+
+def drive_payment_claim(db: Any, *, msg_id: str, claimed: Any = None) -> Dict[str, Any]:
+    """One inbound the dispatcher's payment-claim short circuit would take.
+
+    Its decision function is doubled so the branch is certain to fire; the
+    branch itself, the dispatcher and the ownership claim are real.
+    """
+    import core.order_flow as order_flow
+    import core.payment_intent as payment_intent
+    import routers.whatsapp_webhook as webhook
+
+    seen: Dict[str, Any] = {"handled": [], "short_circuit": [], "patched": []}
+
+    async def _handler(**kwargs: Any) -> None:
+        seen["handled"].append(kwargs)
+
+    def _claim(**kwargs: Any) -> Dict[str, Any]:
+        seen["short_circuit"].append(kwargs)
+        return {"reply": "تم استلام مبلغك", "state_patch": {"stage": "awaiting_receipt"}}
+
+    def _patch(*args: Any, **kwargs: Any) -> None:
+        seen["patched"].append(kwargs)
+
+    with (
+        patch.object(webhook, "get_db", return_value=iter([db])),
+        patch.object(webhook, "_is_platform_tenant", return_value=False),
+        patch.object(webhook, "_handle_merchant_message", side_effect=_handler),
+        patch.object(webhook, "_post_wa", new=AsyncMock(return_value=True)),
+        patch.object(payment_intent, "maybe_handle_payment_claim", _claim),
+        patch.object(order_flow, "apply_state_patch", _patch),
+        patch.object(pg, "verified_connection", lambda _db, **kwargs: (f"wa:{PHONE_ID}", "17")),
+        patch.object(recovery, "admitted_turn_for",
+                     lambda **kwargs: claimed(**kwargs) if claimed else None),
+    ):
+        asyncio.run(webhook._dispatch_message(PHONE_ID, {
+            "from": SENDER, "id": msg_id, "type": "text", "text": {"body": "المبلغ: 126 ريال"},
+        }, {"metadata": {"phone_number_id": PHONE_ID}}))
+    return seen
+
+
+def test_the_payment_short_circuit_takes_the_turn_while_the_pilot_is_off(monkeypatch, db):
+    """Proof the competing dispatcher owner is real and would otherwise act."""
+    from core.inbound_dedup import reset_cache
+
+    reset_cache()
+    monkeypatch.delenv(pg.ENV_ENABLED, raising=False)
+    seen = drive_payment_claim(db, msg_id="wamid.pay.off")
+    assert len(seen["short_circuit"]) == 1                 # it decided
+    assert len(seen["patched"]) == 1                       # and mutated order state
+    assert seen["handled"] == []                           # the handler was never reached
+
+
+def test_a_claimed_inbound_never_reaches_the_payment_short_circuit(configured, db):
+    seen = drive_payment_claim(db, msg_id="wamid.pay.claimed")
+    assert seen["short_circuit"] == []                     # not even asked
+    assert seen["patched"] == []                           # no state mutated
+    assert len(seen["handled"]) == 1
+    assert seen["handled"][0]["commerce_runtime_claimed"] is True
+
+
+def test_a_recovering_retry_never_reaches_the_payment_short_circuit(configured, monkeypatch,
+                                                                    db):
+    """The exposure the reviewer named: a retry let through to finish runtime
+    work must not be answered a second time by a different owner."""
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")            # takes no new turns
+    seen = drive_payment_claim(db, msg_id="wamid.pay.recover",
+                               claimed=lambda **kwargs: unfinished(db.tenant_id))
+    assert seen["short_circuit"] == [] and seen["patched"] == []
+    assert len(seen["handled"]) == 1
+    assert seen["handled"][0]["commerce_runtime_claimed"] is True
+
+
+def test_a_draining_pilot_with_no_open_work_leaves_the_short_circuit_alone(configured,
+                                                                           monkeypatch, db):
+    monkeypatch.setenv(pg.ENV_DRAINING, "true")
+    seen = drive_payment_claim(db, msg_id="wamid.pay.drained")
+    assert len(seen["short_circuit"]) == 1                 # legacy owns it again
+    assert seen["handled"] == []
