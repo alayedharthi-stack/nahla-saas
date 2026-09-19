@@ -16,9 +16,9 @@ from .checkout_context import (
     CheckoutReplyContext,
     apply_delivery_continuation_address_patch,
     apply_previous_address_confirmation,
+    address_choice_actions,
     apply_structured_address_consent,
     load_checkout_reply_context,
-    record_presented_address_offer,
     turn_reference,
     load_identity_first_name,
 )
@@ -115,6 +115,10 @@ def _filter_catalog_missing(missing_fields: List[str]) -> List[str]:
     ]
 
 
+# The reply fields that put an address in front of the customer.
+_ADDRESS_REPLY_FIELDS = frozenset({"delivery_address", "city"})
+
+
 @dataclass
 class OrderFlowV2Result:
     handled: bool = False
@@ -125,6 +129,12 @@ class OrderFlowV2Result:
     operational_reason: str = ""
     permission_source: str = ""
     state_patch: Dict[str, Any] = field(default_factory=dict)
+    # Structured address choices this reply carries, and the showing they
+    # belong to. Both travel to the DELIVERY boundary: the actions go on
+    # the wire, and the presentation is recorded only once that exact
+    # message is proven sent. Producing a reply is not showing it.
+    address_choice_actions: List[Dict[str, Any]] = field(default_factory=list)
+    address_presentation: Any = None
 
 
 _PAYMENT_LINK_REASONS = frozenset({
@@ -322,6 +332,8 @@ def _finalize_result(
     tenant_id: int = 0,
     operational_reason: str = "",
     perm_load: PermissionLoadResult | None = None,
+    address_choice_actions: Optional[List[Dict[str, Any]]] = None,
+    address_presentation: Any = None,
 ) -> OrderFlowV2Result:
     if perm_load is not None:
         gated = _gate_commerce_permissions(
@@ -362,6 +374,8 @@ def _finalize_result(
         handled=True,
         reply=reply,
         skip_brain=skip_brain,
+        address_choice_actions=list(address_choice_actions or []),
+        address_presentation=address_presentation,
         reason=reason,
         operational_reason=operational_reason,
         permission_source=(perm_load.source if perm_load is not None else ""),
@@ -439,16 +453,21 @@ def try_handle_order_flow_v2(
         state_patch: Dict[str, Any],
         skip_brain: bool = True,
     ) -> OrderFlowV2Result:
-        if live_flag and str(reply or "").strip() and presented["presentation"] is not None:
-            # The delivery boundary: this reply carries the address, so a
-            # later structured consent has something real to bind to.
-            record_presented_address_offer(
-                db,
-                tenant_id=int(tenant_id),
-                conversation=conversation,
-                presentation=presented["presentation"],
-                delivery_ref=turn_reference(meta),
-            )
+        # The reply presents the address only when it is ASKING about the
+        # address. A name or payment question mentions no address, so it
+        # registers no showing — that was how the whole inventory came to
+        # be recorded as "shown" by a reply that read "وش اسمك الكامل؟".
+        asking_field = str((state_patch or {}).get("order_flow_v2_last_field") or "")
+        presentation = (
+            presented["presentation"]
+            if live_flag and asking_field in _ADDRESS_REPLY_FIELDS
+            else None
+        )
+        actions = address_choice_actions(presentation) if presentation is not None else []
+        # NOT recorded here. `_finalize` runs before permission gating,
+        # before the outbound lock, and before any send — a reply produced
+        # here may never reach the customer at all. The offer is recorded
+        # at the successful-send boundary, with the outbound message id.
         return _finalize_result(
             live=live_flag,
             shadow_log=shadow_flag,
@@ -459,6 +478,8 @@ def try_handle_order_flow_v2(
             tenant_id=int(tenant_id),
             operational_reason=_op_reason,
             perm_load=perm_load,
+            address_choice_actions=actions,
+            address_presentation=presentation,
         )
 
     if not live and not shadow_log:
@@ -525,12 +546,20 @@ def try_handle_order_flow_v2(
             brain_state=bs,
             inbound_metadata=meta,
         )
-        if not ctx.presentation.is_empty and (
-            ctx.address_choices
-            or ctx.field_modes.get("delivery_address") == MODE_CONFIRM
-            or ctx.field_modes.get("city") == MODE_CONFIRM
-        ):
-            presented["presentation"] = ctx.presentation
+        # Prepared only. Whether this reply actually PRESENTS the address
+        # is decided in ``_finalize``, from the field the reply asks for —
+        # the same state the reply builder used. A context read on its own
+        # shows nobody anything.
+        presented["presentation"] = (
+            ctx.presentation
+            if not ctx.presentation.is_empty
+            and (
+                bool(ctx.address_choices)
+                or ctx.field_modes.get("delivery_address") == MODE_CONFIRM
+                or ctx.field_modes.get("city") == MODE_CONFIRM
+            )
+            else None
+        )
         return ctx
 
     recent_history: List[Any] = []
@@ -1026,13 +1055,18 @@ def try_handle_order_flow_v2(
     # A structured action naming the address is the only thing that writes
     # a durable selection. It is checked first: when the customer taps a
     # choice, that is the answer, whatever else the message text says.
+    # A durable selection is a mutation, so it is gated on the same
+    # authorization every other write is. Shadow evaluation, a disabled or
+    # paused store and a dry run must observe, never write — and
+    # ``persist_order_flow_v2_result`` skipping the patch afterwards is no
+    # help when the write already happened here.
     structured_consent_patch = apply_structured_address_consent(
         db,
         tenant_id=tenant_id,
         conversation=conversation,
         order_prep=order_prep,
         inbound_metadata=meta,
-    )
+    ) if live else {}
     if structured_consent_patch:
         patch.update(structured_consent_patch)
     else:

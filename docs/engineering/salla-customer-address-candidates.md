@@ -189,6 +189,36 @@ through `ExternalCustomerProfile`, a different store is refused
 nothing is asserted, so a tenant with no A1 profiles behaves exactly as
 before rather than losing address import.
 
+### One authority over one customer's address book
+
+Every durable write to a customer's addresses — import, refresh, ownership
+acquisition and selection — serializes on a transaction-scoped PostgreSQL
+advisory lock keyed on `(tenant, customer)`
+(`_acquire_customer_address_scope_lock`; key convention matches
+`services.meta_catalog_onboarding`).
+
+Row locks are not enough, because every decision these writers make is
+derived from a READ of the whole scope: which store owns this source, is
+this revision fresher, is this the revision the customer approved. A
+competing session can commit between that read and the write. Two
+concurrent first imports had no row to lock at all, so both "won" and left
+the source with two owners — after which every later update from either
+store was refused and the source was wedged.
+
+Authority is taken **before** the read, so the decision and the write rest
+on the same state. The wait is bounded: a writer that cannot take
+authority REFUSES (`address_scope_busy`) rather than proceeding on a row it
+read without it, and never pins a connection indefinitely. An import
+repeats, so refusing costs nothing — the next sync or webhook re-delivers
+the payload.
+
+One consequence worth stating for reviewers: an interleaving that pauses a
+writer *inside* the service and then commits a competing transaction is no
+longer physically possible — the competitor is simply refused. The
+schedules that remain, and that the regressions hold, are the ones where
+the competing transaction commits **before** the other writer takes
+authority.
+
 ### Store ownership of the address
 
 One provider customer reference under one tenant is owned by **one store
@@ -222,12 +252,33 @@ A durable address **selection** is an operational act, so it needs
 operational evidence — not a reading of the customer's words.
 
 **Presentation.** Reading a customer's addresses is not showing them to
-anyone: `load_checkout_reply_context` runs on turns that never mention an
-address. It therefore only PREPARES an `AddressPresentation`. The offer is
-recorded by `record_presented_address_offer` at the delivery boundary
-(`order_flow_v2/owner.py` `_finalize`), and only for a live reply that
-actually puts the address in front of the customer — one with address
-choices, or with the city / delivery-address slot in `confirm` mode.
+anyone, and neither is producing a reply. The lifecycle has three distinct
+steps, and each one is somebody's separate decision:
+
+1. **Prepare.** `load_checkout_reply_context` builds an
+   `AddressPresentation` carrying the revision, the choices and a fresh
+   opaque `offer_id`. Nothing is written. This runs on turns that never
+   mention an address.
+2. **Carry.** `order_flow_v2/owner.py` attaches the presentation and the
+   structured `address_choice_actions` to `OrderFlowV2Result`, but ONLY
+   when the reply is actually asking about the address — its
+   `order_flow_v2_last_field` is `delivery_address` or `city`. A reply that
+   asks for a name or a payment method carries nothing. `_finalize` runs
+   before permission gating, before the outbound lock and before any send,
+   so it records nothing either.
+3. **Record.** The webhook records the offer at the **successful-send
+   boundary**, with the OUTBOUND message identity from the send's result
+   sink (`delivery_ref = wamid`). A send with no outbound identity — one
+   that was blocked, suppressed or failed in transport — records nothing.
+   A send the outbound dedup answered with an earlier message's id proves
+   that earlier message, so it may only reaffirm an identical offer that is
+   already recorded, never create a new one.
+
+The choices reach the customer on the supported interactive surface:
+`_send_interactive_reply` when the result carries actions, the ordinary
+text sender otherwise. Button ids and titles are platform-owned CTA
+payload built from stored facts (city and short address code); they
+compose no conversational prose.
 
 An existing offer is never advanced by a later context read. A refresh
 that lands between the presentation and the customer's answer makes that
@@ -235,24 +286,42 @@ answer refuse, which is the point: replacing the offer with the newer
 revision would record approval of content nobody saw.
 
 **Consent.** A durable selection is written only by a STRUCTURED customer
-action — an interactive reply id in the `nahla_addr_select:<address_id>`
-namespace (`button_id` / `list_reply_id`), handled by
-`apply_structured_address_consent`. It names the exact address, it cannot
-be a question, and no phrasing produces it. The selection is still bound to
-the offered revision: a fingerprint that no longer matches refuses, as does
-an address that was never offered, an offer for another tenant, and an
-offer for another customer. Tapping the same choice twice selects once.
+action — an interactive reply id
+`nahla_addr_select:<offer_id>:<address_id>` (`button_id` /
+`list_reply_id`), handled by `apply_structured_address_consent`.
+
+The `offer_id` is what makes the action answerable to ONE outbound
+message. Without it, a button kept from an older message selected
+whatever that row held later: the customer's tap means "the address you
+showed me", and only the offer identity can say which showing that was. A
+tap carrying a superseded `offer_id` matches no live offer and is refused.
+The selection is additionally bound to tenant, customer, conversation and
+the offered fingerprint, so a changed revision, another tenant's offer and
+an action arriving in a different conversation all refuse.
+
+The selection's idempotency identity is `<offer_id>:<inbound message id>`
+— taken from the ACTION, not from when an offer happened to be stored. One
+action redelivered is one selection; a different tap is a new one.
 
 **Why not free text.** `هل عنواني محفوظ عندكم؟` ("is my address saved with
 you?") and `نفس العنوان السابق` ("same address as before") both read as
 `previous_address_confirmed` from the platform's existing intent detector.
 A phrase detector cannot separate an inquiry from consent, and widening or
 narrowing it would be customer-intent regex repair — forbidden by GOV-001
-and wrong again on the next phrasing. So free text continues to drive the
-turn's checkout exactly as it does on `main` (`shipping_source =
-customer_confirmed_previous_address`), and simply never writes the durable
-act; the patch carries `address_selection_durable = False`. No intent
-detector, keyword router or customer regex was changed.
+and wrong again on the next phrasing.
+
+So free text is **context only**. It carries the known fields forward so
+the reply can ask about them (`address_reference_detected`,
+`address_selection_durable = False`), and it does not mark the order's
+delivery address accepted: `has_accepted_delivery_address` stays false
+until the structured action arrives. An inquiry reaching a checkout writer
+as an acceptance was the defect, not the fix. No intent detector, keyword
+router or customer regex was changed.
+
+**Authorization.** Consent is a mutation, so it runs only when the turn is
+live. Shadow evaluation, a disabled or paused store and a dry run observe
+and write nothing — `persist_order_flow_v2_result` skipping the state
+patch afterwards is no help if the durable write already happened.
 
 ## 6. Save and adoption evidence
 
@@ -273,6 +342,7 @@ unavailable capability, an ambiguous identity and a failed commit all
 resolve to `none`.
 
 ### The operation, and who produces it
+
 
 Evidence answers "is this address durably there". It does not answer "did
 *this turn* do anything", and an address that was already on file proves
@@ -298,6 +368,14 @@ that wants to make the claim:
    `selection_operation_ref` does not authorize it
    (`committed_operation_mismatch`).
 
+A committed selection carrying **no** operation identity — a
+confirmed-shipping write, or a pre-slice row — is a real and reusable
+selection, but it cannot testify that *this* turn adopted it. Unknown
+identity is not a match, so it resolves to `committed_operation_unknown`
+and supports no new-operation claim. Reuse of such an address is a
+separate question, answered by `resolve_customer_address_selection` and
+unchanged.
+
 ### What the guard removes, and what it must not
 
 `customer_address_save_claim_guard` judges **completed-action assertions
@@ -315,10 +393,23 @@ therefore split again before an interrogative lead, and each clause is
 judged on its own — so only the offending clause is removed and the honest
 half survives.
 
-Negation is **positional**: it must stand before the claim to govern it.
-`لم يتم حفظ عنوانك` denies the save. `عنوانك محفوظ بدون أي مشكلة` asserts
-it and then says it went smoothly — `بدون` there negates "problem", not the
-save. No phrase list can repair that; only position can.
+Negation must **govern** the claim, not merely sit near it. Three cases,
+all structural rather than lexical:
+
+* `عنوانك محفوظ بدون أي مشكلة` — the negation is AFTER the claim, so it
+  negates "problem", not the save.
+* `لا يوجد أي مشكلة وتم حفظ عنوانك` — the negation is before the claim but
+  governs a different statement, and the attached `و` on the claim marks
+  where that statement ends.
+* `لم نغير طلبك لكن تم حفظ عنوانك` — an adversative connective starts a new
+  clause the previous negation does not reach, so `لكن` (and `بس`, `but`,
+  `however`, …) is a clause boundary.
+
+So a negation reaches at most two tokens forward, never across a
+coordinating `و`/`ف` that starts the claim's own statement, and never
+across an adversative connective. `لم يتم حفظ عنوانك` and
+`لم يسبق أن تم حفظ عنوانك` stay truthful negatives; both review cases are
+removed. No phrase list can make that distinction; only scope can.
 
 ### When the claim was the whole reply
 
@@ -336,7 +427,12 @@ it. Two boundaries, two behaviours:
   budget is shared with `product_claim_grounding_guard`.
 * **Post-compose boundary** (`post_compose_guard_pipeline`), which runs
   after composition and has no composer to ask: the truthful platform line
-  is sent rather than silence. The send is suppressed only if even that is
+  is sent rather than silence, and the provenance is restamped on both the
+  live tracker and the compose event
+  (`stamp_address_claim_fallback_provenance`). Leaving `compose_source=llm`
+  there would make the audit trail claim the customer read the model's
+  words when they did not — the exact failure this guard exists to
+  prevent. The send is suppressed only if even the fallback is
   unavailable.
 
 Fallback metadata is recorded so this is measurable in production:
@@ -390,11 +486,14 @@ out of scope here.
   aborted, and a rejected optional provenance write rolls back that row
   alone rather than taking the confirmed address down with it.
 * **Structured consent channel.** A durable selection needs an interactive
-  reply carrying `nahla_addr_select:<address_id>`. Where a merchant's
-  surface sends no interactive replies, candidates are still imported,
-  read and offered, and checkout still continues on free text — only the
-  durable selection (and any claim resting on it) waits for a structured
-  action.
+  reply carrying `nahla_addr_select:<offer_id>:<address_id>`, which the
+  platform produces itself when a reply asks about the address. Where the
+  provider or surface does not deliver interactive replies, candidates are
+  still imported, read and offered, and checkout still continues on free
+  text — but the delivery address is not marked accepted from free text,
+  so such a checkout will ask for the address rather than reuse it. Live
+  behaviour of this channel has not been exercised against a real
+  WhatsApp surface (see the PR's deferred list).
 * **Salla permissions / subscriptions.** Candidates only appear where the
   connection can read customers (`sync_customers`) and/or where the
   customer webhook is delivered. Neither is changed by this slice.

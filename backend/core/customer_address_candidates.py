@@ -450,6 +450,89 @@ def _provenance_rows(
     return list(query.order_by(CustomerAddressProvenance.id.asc()).all())
 
 
+# One customer's address book is one durable scope, and every write to it
+# — import, refresh, ownership acquisition, selection — serializes on it.
+#
+# Row locks are not enough: the decisions these writers make are derived
+# from a READ of the whole scope (which store owns this source, is this
+# revision fresher, is this the revision the customer approved), and a
+# competing session can commit between that read and the write. Two
+# concurrent first imports had no row to lock at all, so they both "won"
+# and left the source with two owners.
+#
+# Key convention matches ``services.meta_catalog_onboarding``: a dedicated
+# namespace key plus a hashed scope key.
+_ADDRESS_SCOPE_LOCK_KEY = 904223
+_SCOPE_LOCK_WAIT_SECONDS = 3.0
+_SCOPE_LOCK_POLL_SECONDS = 0.02
+
+LOCK_ACQUIRED = "acquired"
+LOCK_UNSUPPORTED = "unsupported"
+LOCK_BUSY = "busy"
+
+
+def _acquire_customer_address_scope_lock(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    wait_seconds: float = _SCOPE_LOCK_WAIT_SECONDS,
+) -> str:
+    """Take authority over this customer's address book, or report failure.
+
+    Transaction-scoped, so it is released by the caller's own commit or
+    rollback and never outlives the work it protects.
+
+    A bounded wait rather than an unbounded block: a writer that cannot
+    get authority must REFUSE, not proceed on a row it read without it,
+    and must not pin a connection indefinitely either.
+
+    Returns ``LOCK_UNSUPPORTED`` on a backend without advisory locks —
+    SQLite serializes writers itself, so there is nothing to take.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+
+    if not _supports_savepoints(db):
+        return LOCK_UNSUPPORTED
+    statement = text(
+        "SELECT pg_try_advisory_xact_lock(:k, hashtext(:scope))"
+    )
+    params = {"k": _ADDRESS_SCOPE_LOCK_KEY, "scope": f"{int(tenant_id)}:{int(customer_id)}"}
+    deadline = _monotonic() + max(0.0, float(wait_seconds))
+    while True:
+        try:
+            if bool(db.execute(statement, params).scalar()):
+                return LOCK_ACQUIRED
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — an unusable lock is reported as failure, and every caller refuses on failure
+            logger.debug(
+                "[CUSTOMER_ADDRESS] scope lock unavailable tenant=%s customer=%s",
+                tenant_id,
+                customer_id,
+                exc_info=True,
+            )
+            return LOCK_BUSY
+        if _monotonic() >= deadline:
+            logger.info(
+                "[CUSTOMER_ADDRESS] scope busy tenant=%s customer=%s",
+                tenant_id,
+                customer_id,
+            )
+            return LOCK_BUSY
+        _sleep(_SCOPE_LOCK_POLL_SECONDS)
+
+
+def _monotonic() -> float:
+    import time  # noqa: PLC0415
+
+    return time.monotonic()
+
+
+def _sleep(seconds: float) -> None:
+    import time  # noqa: PLC0415
+
+    time.sleep(seconds)
+
+
 def _address_row(db: Any, *, tenant_id: int, address_id: int) -> Any:
     from models import CustomerAddress  # noqa: PLC0415
 
@@ -491,12 +574,24 @@ def upsert_imported_address_candidate(
             reason="no_supported_address_components",
         )
 
+    # Authority FIRST. Every decision below — who owns this source, is this
+    # revision fresher, does this content already exist — is derived from a
+    # read, so the read itself has to happen under authority. Acquiring it
+    # afterwards would only protect the write, and the decision it carries
+    # out would already be stale.
+    lock = _acquire_customer_address_scope_lock(
+        db, tenant_id=tenant_id, customer_id=customer_id,
+    )
+    if lock == LOCK_BUSY:
+        # Refuse rather than write from an unauthorized read. An import
+        # repeats: the next sync or webhook re-delivers this payload.
+        return CandidateUpsertResult(action=ACTION_SKIPPED, reason="address_scope_busy")
+
     now = observed_at or _utcnow()
     fingerprint = address_content_fingerprint(components)
-    # ONE read of the whole source scope. Ownership is decided against all
-    # of it; freshness, idempotency and the update decision are then judged
-    # against this store's own rows only. Reading twice would also widen
-    # the window a concurrent writer can land in.
+    # ONE read of the whole source scope, under that authority. Ownership is
+    # decided against all of it; freshness, idempotency and the update
+    # decision are then judged against this store's own rows only.
     all_rows = _provenance_rows(
         db,
         tenant_id=tenant_id,
@@ -923,6 +1018,17 @@ def record_explicit_address_selection(
 
     if not tenant_id or not customer_id or not address_id:
         return SelectionResult(action=ACTION_SKIPPED, reason="missing_scope")
+
+    # Same authority the importer takes, for the same reason: the revision
+    # check below is only meaningful if the content cannot change between
+    # reading it and recording approval of it. Without this, a refresh
+    # committing in between left the customer recorded as having approved
+    # content they never saw — or, worse, left no selection at all.
+    lock = _acquire_customer_address_scope_lock(
+        db, tenant_id=tenant_id, customer_id=customer_id,
+    )
+    if lock == LOCK_BUSY:
+        return SelectionResult(action=ACTION_SKIPPED, reason="address_scope_busy")
 
     row = _address_row(db, tenant_id=tenant_id, address_id=int(address_id))
     if row is None:

@@ -272,13 +272,18 @@
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_two_concurrent_first_imports_commit_one_address",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_absent_provenance_table_still_commits_the_confirmed_address",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_concurrent_refresh_between_offer_and_selection_is_refused",
-        "backend/tests/test_salla_customer_address_candidates_pg.py::test_losing_concurrent_first_import_recovers_the_winning_row",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_second_concurrent_first_import_returns_the_winning_row",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_selection_committed_between_refresh_read_and_write_is_preserved",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_after_the_race",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_rejected_provenance_insert_still_commits_the_confirmed_address",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_failed_optional_read_leaves_the_caller_transaction_usable",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_revision_constraint_is_scoped_to_the_store_connection",
-        "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_same_store_still_cannot_duplicate_one_revision"
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_same_store_still_cannot_duplicate_one_revision",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_writer_without_authority_still_recovers_from_the_constraint",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_writer_that_cannot_take_authority_refuses",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_stale_refresh_that_arrives_after_a_newer_one_is_refused",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_selection_arriving_after_a_refresh_refuses_the_changed_revision",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_two_stores_racing_the_first_import_yield_one_owner"
       ]
     }
   ]

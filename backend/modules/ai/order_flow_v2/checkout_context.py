@@ -16,13 +16,20 @@ class AddressPresentation:
     """What a reply is ABOUT TO put in front of the customer.
 
     Reading context is not showing anything to anyone. This carries the
-    revision a reply would describe, and only the delivery boundary turns
-    it into a recorded offer.
+    revision a reply would describe and an opaque identity for THAT
+    showing; only a proven successful send turns it into a recorded offer.
+
+    ``offer_id`` is generated when the presentation is prepared and is
+    embedded in the action ids the customer will tap. It is what makes an
+    action answerable to one specific outbound message: a tap carrying a
+    superseded ``offer_id`` names a showing that is no longer the live one,
+    and is refused rather than applied to whatever the row holds now.
     """
 
     address_id: int = 0
     fingerprint: str = ""
     choices: Tuple[Dict[str, Any], ...] = ()
+    offer_id: str = ""
 
     @property
     def is_empty(self) -> bool:
@@ -98,16 +105,73 @@ def _write_conversation_metadata(db: Any, conversation: Any, meta: Dict[str, Any
         return False
 
 
-def consent_action_id(address_id: Any) -> str:
-    """The structured reply id that selects this address."""
+def new_offer_id() -> str:
+    """An opaque identity for one showing of one address revision."""
+    import uuid  # noqa: PLC0415
+
+    return uuid.uuid4().hex[:16]
+
+
+def consent_action_id(offer_id: Any, address_id: Any) -> str:
+    """The structured reply id that selects this address FROM THIS showing.
+
+    The offer id is in the payload, not merely the address id. Without it
+    a button kept from an older message selected whatever that row held
+    later — the customer's tap said "the address you showed me", and only
+    the offer identity can tell which one that was.
+    """
+    ref = str(offer_id or "").strip()
     try:
-        return f"{CONSENT_ACTION_PREFIX}:{int(address_id)}"
+        row_id = int(address_id)
     except (TypeError, ValueError):
         return ""
+    if not ref or not row_id:
+        return ""
+    return f"{CONSENT_ACTION_PREFIX}:{ref}:{row_id}"
 
 
-def structured_consent_address_id(inbound_metadata: Any) -> Optional[int]:
-    """The address a STRUCTURED customer action named, if any.
+def address_choice_actions(presentation: Any) -> List[Dict[str, Any]]:
+    """Structured choices for the outbound surface, or nothing.
+
+    Platform-owned CTA payload built from trusted stored facts — the id is
+    the offer/address identity, the title is the address's own city and
+    short code. It composes no conversational prose.
+    """
+    if presentation is None or getattr(presentation, "is_empty", True):
+        return []
+    offer_id = str(getattr(presentation, "offer_id", "") or "")
+    if not offer_id:
+        return []
+    rows: List[Dict[str, Any]] = []
+    for choice in getattr(presentation, "choices", ()) or ():
+        action_id = consent_action_id(offer_id, choice.get("address_id"))
+        if not action_id:
+            continue
+        rows.append({"id": action_id, "title": _choice_title(choice)})
+    if not rows and getattr(presentation, "address_id", 0):
+        action_id = consent_action_id(offer_id, presentation.address_id)
+        if action_id:
+            rows.append({
+                "id": action_id,
+                "title": _choice_title({"city": "", "short_address_code": ""}),
+            })
+    return rows[:3]
+
+
+def _choice_title(choice: Dict[str, Any]) -> str:
+    """A short label from the address's own stored facts."""
+    city = str((choice or {}).get("city") or "").strip()
+    code = str((choice or {}).get("short_address_code") or "").strip()
+    label = " ".join(part for part in (city, code) if part).strip()
+    if not label:
+        label = str((choice or {}).get("address_line") or "").strip()
+    if not label:
+        label = str((choice or {}).get("address_id") or "")
+    return label[:20]
+
+
+def structured_consent_action(inbound_metadata: Any) -> Optional[Tuple[str, int]]:
+    """The (offer, address) a STRUCTURED customer action named, if any.
 
     Only an interactive reply id counts. Free text — however it is phrased,
     and whatever an intent detector makes of it — never reaches here, which
@@ -119,12 +183,17 @@ def structured_consent_address_id(inbound_metadata: Any) -> Optional[int]:
         raw = str(inbound_metadata.get(key) or "").strip()
         if not raw.startswith(f"{CONSENT_ACTION_PREFIX}:"):
             continue
+        parts = raw.split(":")
+        if len(parts) != 3:
+            # An id without an offer identity cannot say which showing it
+            # answers, so it authorizes nothing.
+            continue
         try:
-            address_id = int(raw.split(":", 1)[1])
+            address_id = int(parts[2])
         except (TypeError, ValueError):
             continue
-        if address_id:
-            return address_id
+        if parts[1] and address_id:
+            return parts[1], address_id
     return None
 
 
@@ -234,6 +303,7 @@ def record_offered_address(
     conversation: Any,
     previous: Any,
     delivery_ref: str = "",
+    offer_id: str = "",
 ) -> None:
     """Remember which address revision was put in front of the customer.
 
@@ -256,15 +326,18 @@ def record_offered_address(
     meta = _conversation_metadata(conversation)
     current = meta.get(_OFFER_KEY)
     offer = {
+        "offer_id": str(offer_id or ""),
         "address_id": int(address_id),
         "fingerprint": fingerprint,
         "customer_id": int(getattr(conversation, "customer_id", 0) or 0),
+        "conversation_id": int(getattr(conversation, "id", 0) or 0),
         "tenant_id": int(tenant_id),
         "offered_at": datetime.now(timezone.utc).isoformat(),
         "delivery_ref": str(delivery_ref or ""),
     }
     if isinstance(current, dict) and all(
-        current.get(k) == offer[k] for k in ("address_id", "fingerprint", "customer_id", "tenant_id")
+        current.get(k) == offer[k]
+        for k in ("offer_id", "address_id", "fingerprint", "customer_id", "tenant_id")
     ):
         return
     meta[_OFFER_KEY] = offer
@@ -278,6 +351,7 @@ def record_offered_address_set(
     conversation: Any,
     candidates: Any,
     delivery_ref: str = "",
+    offer_id: str = "",
 ) -> None:
     """Remember the set of addresses offered for an explicit choice.
 
@@ -296,14 +370,20 @@ def record_offered_address_set(
         return
     meta = _conversation_metadata(conversation)
     payload = {
+        "offer_id": str(offer_id or ""),
         "customer_id": int(getattr(conversation, "customer_id", 0) or 0),
+        "conversation_id": int(getattr(conversation, "id", 0) or 0),
         "tenant_id": int(tenant_id),
         "offered_at": datetime.now(timezone.utc).isoformat(),
         "delivery_ref": str(delivery_ref or ""),
         "addresses": offered,
     }
     existing = meta.get(_OFFER_SET_KEY)
-    if isinstance(existing, dict) and existing.get("addresses") == offered:
+    if (
+        isinstance(existing, dict)
+        and existing.get("addresses") == offered
+        and str(existing.get("offer_id") or "") == str(offer_id or "")
+    ):
         return
     meta[_OFFER_SET_KEY] = payload
     _write_conversation_metadata(db, conversation, meta)
@@ -316,15 +396,34 @@ def record_presented_address_offer(
     conversation: Any,
     presentation: Any,
     delivery_ref: str = "",
+    duplicate_suppressed: bool = False,
 ) -> bool:
-    """Record what a reply ACTUALLY presented, at the delivery boundary.
+    """Record what a reply ACTUALLY reached the customer with.
 
-    This is the lifecycle event a later consent is checked against: it
-    exists because a reply was produced and handed to delivery, not
-    because some code read the customer's addresses.
+    Called only from the successful-send boundary, with the OUTBOUND
+    message identity. Producing a reply is not showing it: a reply that is
+    blocked, suppressed, or fails in transport never happened as far as
+    the customer is concerned, and recording a presentation for it would
+    let a later tap approve something nobody saw.
+
+    ``duplicate_suppressed`` is a send that the outbound dedup answered
+    with an earlier message's id. That proves the earlier message, not a
+    new showing — so it may only reaffirm an identical offer that is
+    already recorded, never create a new one.
     """
     if conversation is None or presentation is None or presentation.is_empty:
         return False
+    if not str(delivery_ref or "").strip():
+        # No outbound identity means no proof of which message carried it.
+        return False
+    offer_id = str(getattr(presentation, "offer_id", "") or "")
+    if not offer_id:
+        return False
+    if duplicate_suppressed and not _offer_already_recorded(
+        conversation, tenant_id=tenant_id, presentation=presentation,
+    ):
+        return False
+
     recorded = False
     if presentation.address_id and presentation.fingerprint:
         record_offered_address(
@@ -336,6 +435,7 @@ def record_presented_address_offer(
                 content_fingerprint=str(presentation.fingerprint),
             ),
             delivery_ref=delivery_ref,
+            offer_id=offer_id,
         )
         recorded = True
     if presentation.choices:
@@ -345,9 +445,28 @@ def record_presented_address_offer(
             conversation=conversation,
             candidates=[dict(c) for c in presentation.choices],
             delivery_ref=delivery_ref,
+            offer_id=offer_id,
         )
         recorded = True
     return recorded
+
+
+def _offer_already_recorded(
+    conversation: Any,
+    *,
+    tenant_id: int,
+    presentation: Any,
+) -> bool:
+    """True when this exact showing is already the recorded live offer."""
+    meta = _conversation_metadata(conversation)
+    offer_id = str(getattr(presentation, "offer_id", "") or "")
+    single = meta.get(_OFFER_KEY)
+    if isinstance(single, dict) and str(single.get("offer_id") or "") == offer_id:
+        return True
+    offer_set = meta.get(_OFFER_SET_KEY)
+    if isinstance(offer_set, dict) and str(offer_set.get("offer_id") or "") == offer_id:
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -366,6 +485,7 @@ def apply_explicit_address_selection(
     address_id: int,
     order_prep: Optional[Dict[str, Any]] = None,
     inbound_metadata: Optional[Dict[str, Any]] = None,
+    offer_id: str = "",
 ) -> Dict[str, Any]:
     """Select one of the addresses this conversation offered, by id.
 
@@ -381,11 +501,16 @@ def apply_explicit_address_selection(
     from core.order_context_prefill import _shipping_context_to_prep_patch  # noqa: PLC0415
     from core.order_context_builder import _resolved_address_to_shipping_context  # noqa: PLC0415
 
-    offered, operation_ref = _offered_revisions(
+    offered, offer_identity = _offered_revisions(
         tenant_id=int(tenant_id), conversation=conversation,
+        offer_id=offer_id,
     )
     if int(address_id) not in offered:
         return {}
+    # The selection's own idempotency identity comes from the ACTION the
+    # customer took, not from when an offer happened to be stored. One
+    # action redelivered is the same selection; a new tap is a new one.
+    operation_ref = f"{offer_identity}:{turn_reference(inbound_metadata)}"
     customer_id = int(getattr(conversation, "customer_id", 0) or 0)
     if has_accepted_delivery_address(dict(order_prep or {})):
         return {}
@@ -430,18 +555,29 @@ def _offered_revisions(
     *,
     tenant_id: int,
     conversation: Any,
+    offer_id: str = "",
 ) -> Tuple[Dict[int, str], str]:
-    """Every revision this conversation actually presented, and its ref.
+    """The revisions THIS showing presented, and its opaque identity.
 
     Both offer shapes count: a single address put forward for confirmation
     and a set put forward for a choice. A customer who was shown one
     address must be able to accept it structurally, not only choose from a
     list.
+
+    When the action names an ``offer_id``, only offers carrying that exact
+    id are considered. A superseded showing is not the one the customer
+    answered, so a tap kept from it matches nothing — which is what stops
+    an old button from approving a revision presented later.
+
+    Scoped to tenant, customer AND conversation: an offer recorded in one
+    conversation never authorizes an action arriving in another.
     """
     meta = _conversation_metadata(conversation)
     customer_id = int(getattr(conversation, "customer_id", 0) or 0)
+    conversation_id = int(getattr(conversation, "id", 0) or 0)
+    wanted = str(offer_id or "").strip()
     offered: Dict[int, str] = {}
-    operation_ref = ""
+    identity = ""
 
     def _scoped(payload: Any) -> bool:
         if not isinstance(payload, dict):
@@ -451,7 +587,17 @@ def _offered_revisions(
                 return False
             if customer_id and int(payload.get("customer_id") or 0) != customer_id:
                 return False
+            stored_conversation = int(payload.get("conversation_id") or 0)
+            if conversation_id and stored_conversation and stored_conversation != conversation_id:
+                return False
         except (TypeError, ValueError):
+            return False
+        stored_offer = str(payload.get("offer_id") or "")
+        if wanted and stored_offer != wanted:
+            return False
+        if not stored_offer:
+            # An offer with no identity predates this contract and cannot
+            # say which message it was; it authorizes nothing.
             return False
         return True
 
@@ -462,7 +608,7 @@ def _offered_revisions(
                 offered[int(entry["address_id"])] = str(entry["fingerprint"])
             except (KeyError, TypeError, ValueError):
                 continue
-        operation_ref = str(offer_set.get("offered_at") or "")
+        identity = str(offer_set.get("offer_id") or "")
 
     single = meta.get(_OFFER_KEY)
     if _scoped(single):
@@ -472,9 +618,9 @@ def _offered_revisions(
             )
         except (TypeError, ValueError):
             pass
-        operation_ref = operation_ref or str(single.get("offered_at") or "")
+        identity = identity or str(single.get("offer_id") or "")
     offered.pop(0, None)
-    return offered, operation_ref
+    return offered, identity
 
 
 def apply_structured_address_consent(
@@ -496,9 +642,10 @@ def apply_structured_address_consent(
 
     Idempotent: tapping the same choice twice selects once.
     """
-    address_id = structured_consent_address_id(inbound_metadata)
-    if not address_id:
+    action = structured_consent_action(inbound_metadata)
+    if action is None:
         return {}
+    offer_id, address_id = action
     return apply_explicit_address_selection(
         db,
         tenant_id=int(tenant_id),
@@ -506,6 +653,7 @@ def apply_structured_address_consent(
         address_id=int(address_id),
         order_prep=order_prep,
         inbound_metadata=inbound_metadata,
+        offer_id=offer_id,
     )
 
 
@@ -716,6 +864,11 @@ def load_checkout_reply_context(
             address_id=int(getattr(previous_ctx, "address_id", 0) or 0),
             fingerprint=str(getattr(previous_ctx, "content_fingerprint", "") or ""),
             choices=tuple(dict(c) for c in address_choices),
+            # A fresh identity per preparation. It reaches the customer
+            # inside the action ids, and is only persisted if that exact
+            # message is proven sent — so a showing that never left, or one
+            # that has since been superseded, matches no later tap.
+            offer_id=new_offer_id(),
         )
         _, engine_result = resolve_flow_missing_fields(
             prep,
@@ -834,10 +987,15 @@ def apply_previous_address_confirmation(
         # the customer takes a structured action naming the address they
         # were shown. Until then this turn holds the address in order
         # state, and no reply may claim it was saved or adopted.
-        patch = _shipping_context_to_prep_patch(previous)
-        patch["customer_confirmed_previous_address"] = True
-        patch["shipping_source"] = "customer_confirmed_previous_address"
+        # CONTEXT ONLY. The words cannot tell an inquiry from consent —
+        # "هل عنواني محفوظ عندكم؟" and "نفس العنوان السابق" both read as
+        # ``previous_address_confirmed`` — so this path must not mark the
+        # order's delivery address accepted either. It carries the known
+        # fields forward so the reply can ask about them, and the accepted
+        # state waits for the structured action.
+        patch = _candidate_context_only(_shipping_context_to_prep_patch(previous))
         patch["address_selection_durable"] = False
+        patch["address_reference_detected"] = True
         return patch
 
     # On-file claim without explicit confirm phrase — reply layer confirms; do not auto-apply.

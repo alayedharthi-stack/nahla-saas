@@ -8033,15 +8033,60 @@ async def _handle_merchant_message(
                     _POReason.PRE_BRAIN_FAST_PATH,
                     owner=f"order_flow_v2:{_of2_result.reason}",
                 )
-                _of2_ok = await _send_whatsapp_message(
-                    phone_id=phone_id,
-                    to=to,
-                    text=_of2_reply,
-                    _tenant_id=tenant_id,
-                    _db=db,
-                    _inbound_message_id=wa_msg_id,
-                )
+                # Structured address choices ride the supported interactive
+                # surface. A text payload cannot carry an action the
+                # customer can tap, so without this the selection path had
+                # no producer and the ids existed only in tests.
+                _of2_actions = list(getattr(_of2_result, "address_choice_actions", None) or [])
+                _of2_sink: Dict[str, Any] = {}
+                if _of2_actions:
+                    _of2_ok = await _send_interactive_reply(
+                        phone_id=phone_id,
+                        to=to,
+                        body_text=_of2_reply,
+                        buttons=_of2_actions,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                        _result_sink=_of2_sink,
+                    )
+                else:
+                    _of2_ok = await _send_whatsapp_message(
+                        phone_id=phone_id,
+                        to=to,
+                        text=_of2_reply,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                        _inbound_message_id=wa_msg_id,
+                        _result_sink=_of2_sink,
+                    )
                 if _of2_ok:
+                    # The message reached the provider, so what it carried
+                    # was genuinely presented. Record it with the OUTBOUND
+                    # identity; a send the dedup answered with an earlier
+                    # message's id may only reaffirm an identical offer.
+                    try:
+                        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+                            record_presented_address_offer,
+                        )
+
+                        _of2_presentation = getattr(_of2_result, "address_presentation", None)
+                        if _of2_presentation is not None:
+                            record_presented_address_offer(
+                                db,
+                                tenant_id=int(tenant_id),
+                                conversation=convo,
+                                presentation=_of2_presentation,
+                                delivery_ref=str(_of2_sink.get("wamid") or ""),
+                                duplicate_suppressed=bool(
+                                    _of2_sink.get("duplicate_suppressed")
+                                ),
+                            )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unrecorded presentation makes a later tap refuse, which is the safe direction, and must not fail a delivered message
+                        logger.debug(
+                            "[ORDER_FLOW_V2] address presentation not recorded tenant=%s",
+                            tenant_id,
+                            exc_info=True,
+                        )
                     StateManager.save_message(
                         db,
                         to,

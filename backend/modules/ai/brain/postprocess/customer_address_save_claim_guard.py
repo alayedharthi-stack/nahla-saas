@@ -128,11 +128,24 @@ _NEGATION_RES: Tuple[re.Pattern, ...] = (
 # interrogative lead, and each clause is judged on its own.
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?؟،])\s+|\n+", re.UNICODE)
 _CLAUSE_SPLIT = re.compile(
+    # Before an interrogative lead…
     r"(?=\s(?:و|ف)?(?:هل|وش|ايش|أيش|كيف|متى|متي|وين|أين|اين|ليش|لماذا)\s)"
     r"|(?=\s(?:and\s+|but\s+)?(?:do|did|would|shall|can|could|should|will)"
-    r"\s+(?:you|we)\b)",
+    r"\s+(?:you|we)\b)"
+    # …and before an adversative connective, which starts a new clause the
+    # previous clause's negation does not reach: "we did not change your
+    # order BUT your address was saved" denies the order change, not the
+    # save. These are structural connectives, not intent phrasings.
+    r"|(?=\s(?:و?لكن|بس|الا\s+ان|غير\s+ان|but|however|though|yet)\s)",
     re.UNICODE | re.IGNORECASE,
 )
+
+# How far a negation reaches. A negation governs the claim it stands next
+# to, not every claim later in the clause: "there is no problem AND your
+# address was saved" denies the problem. One intervening token covers the
+# attached forms ("لم يتم حفظ") without letting a negation reach across a
+# whole coordinated statement.
+_NEGATION_REACH_TOKENS = 2
 
 
 def _sentences(text: str) -> list:
@@ -159,20 +172,36 @@ def is_interrogative(text: str) -> bool:
 
 
 def _negated_before(norm: str, start: int) -> bool:
-    """True when a negation governs the claim — i.e. stands BEFORE it.
+    """True when a negation GOVERNS the claim, not merely precedes it.
 
-    Position is the whole point. "لم يتم حفظ عنوانك" denies the save; the
-    negation precedes it. "عنوانك محفوظ بدون أي مشكلة" asserts the save and
-    then says it went smoothly — "بدون" there negates "مشكلة", not the save.
-    Treating any negation token anywhere as an exemption let the second one
-    through, and no phrase list can repair that: only position can.
+    Position alone is not enough, in either direction:
+
+    * "عنوانك محفوظ بدون أي مشكلة" asserts the save and then says it went
+      smoothly — "بدون" negates "مشكلة", so a negation AFTER the claim
+      never governs it.
+    * "لا يوجد أي مشكلة وتم حفظ عنوانك" denies the problem and then
+      asserts the save — the negation is before the claim but governs a
+      different statement, and the attached "و" marks where that statement
+      ends.
+
+    So a negation must stand immediately before the claim, with at most
+    one intervening token, and must not be cut off from it by a
+    coordinating "و"/"ف" that starts the claim's own statement. No phrase
+    list can make that distinction; only scope can.
     """
+    if start > 0 and norm[start - 1] in ("و", "ف"):
+        # The claim carries its own coordinating prefix, so it is a new
+        # statement and an earlier negation does not reach into it.
+        return False
     for pattern in _NEGATION_RES:
         for match in pattern.finditer(norm):
-            if match.end() <= start:
-                return True
             if match.start() >= start:
                 break
+            if match.end() > start:
+                continue
+            gap = norm[match.end():start].strip()
+            if len(gap.split()) <= _NEGATION_REACH_TOKENS:
+                return True
     return False
 
 
@@ -474,6 +503,39 @@ def apply_address_claim_failed_compose_fallback(result_data: Any) -> str:
     return text
 
 
+def stamp_address_claim_fallback_provenance(
+    sink: Any,
+    *,
+    fallback_reason: str = ADDRESS_CLAIM_FALLBACK_REASON,
+) -> None:
+    """Record that the delivered text is the platform's, not the model's.
+
+    Used at a boundary that substitutes the emergency fallback directly —
+    the last-line guard, which runs after composition and has no composer
+    left to ask. Leaving ``compose_source=llm`` there would make the audit
+    trail claim the customer read the model's words when they did not.
+    """
+    if not isinstance(sink, dict):
+        return
+    sink["compose_source"] = "fallback_deterministic"
+    sink["response_mode"] = "fallback_deterministic"
+    sink["chosen_path"] = ADDRESS_CLAIM_FALLBACK_ACTION
+    sink["fallback_reason"] = str(fallback_reason or ADDRESS_CLAIM_FALLBACK_REASON)
+    sink["fallback_action_type"] = ADDRESS_CLAIM_FALLBACK_ACTION
+    sink["final_customer_text_source"] = "fallback_deterministic"
+    sink["llm_candidate_present"] = True
+    sink["address_save_claim_constitutional_fallback"] = True
+    reasons = [
+        str(r)
+        for r in (sink.get("final_transform_reasons") or [])
+        if str(r or "").strip()
+    ]
+    if "customer_address_save_claim_guard" not in reasons:
+        reasons.append("customer_address_save_claim_guard")
+    sink["final_transform_reasons"] = reasons
+    sink["final_text_transformed"] = True
+
+
 def finalize_address_claim_after_authorized_recompose(
     *,
     second_pass: AddressSaveClaimGuardResult,
@@ -560,6 +622,7 @@ __all__ = [
     "finalize_address_claim_after_authorized_recompose",
     "invoke_authorized_address_claim_recompose",
     "resolve_outbound_after_address_claim_scrub",
+    "stamp_address_claim_fallback_provenance",
     "stamp_address_claim_guard_provenance",
     "strip_unsupported_address_save_sentences",
 ]

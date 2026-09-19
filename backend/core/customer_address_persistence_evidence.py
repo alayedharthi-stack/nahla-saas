@@ -266,14 +266,25 @@ def resolve_customer_address_persistence_evidence(
         # and be waved through.
         if attempt.fingerprint != selected.fingerprint:
             return no_evidence("committed_revision_mismatch")
-        if (
-            attempt.operation is AddressOperation.ADOPT_SELECTION
-            and selected.selection_operation_ref
-            and attempt.operation_ref != selected.selection_operation_ref
-        ):
-            # This selection was committed by a DIFFERENT operation. A
-            # standing selection is not proof that this turn adopted it.
-            return no_evidence("committed_operation_mismatch")
+        if attempt.operation is AddressOperation.ADOPT_SELECTION:
+            committed_ref = str(selected.selection_operation_ref or "")
+            if not committed_ref:
+                # The committed selection carries no operation identity —
+                # a confirmed-shipping write or a pre-slice row. It is a
+                # real, reusable selection, but it cannot testify that
+                # THIS turn adopted it. Unknown identity is not a match.
+                return CustomerAddressPersistenceEvidence(
+                    scope=AddressPersistenceScope.IMPORTED_CANDIDATE,
+                    reason="committed_operation_unknown",
+                    operation=AddressOperation.NONE,
+                    address_id=selected.address_id,
+                    fingerprint=selected.fingerprint,
+                    components=selected.components.as_dict(),
+                )
+            if attempt.operation_ref != committed_ref:
+                # This selection was committed by a DIFFERENT operation. A
+                # standing selection is not proof that this turn adopted it.
+                return no_evidence("committed_operation_mismatch")
         return CustomerAddressPersistenceEvidence(
             scope=AddressPersistenceScope.SELECTED_DELIVERY_ADDRESS,
             reason="explicit_selection_committed",

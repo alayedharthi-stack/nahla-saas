@@ -838,29 +838,33 @@ def test_a_concurrent_refresh_between_offer_and_selection_is_refused(
 #    call's own read already sees the first call's commit. ────────────────
 
 @contextmanager
-def _interleave_at_history_read(
+def _interleave_before_authority(
     target: Session, action: Callable[[], Any],
 ) -> Iterator[Dict[str, Any]]:
-    """Run ``action`` once, at the moment ``target`` reads source history.
+    """Run ``action``'s whole transaction just before ``target`` takes authority.
 
-    The pause is inside the real service between its read and its write —
-    the only place a competing commit can invalidate what it just read.
+    This is the only schedule that stays physically possible now that every
+    durable write to one customer's address book serializes on a scope
+    lock. Pausing *after* authority is taken cannot interleave at all: the
+    competing session would simply be refused, which the busy tests cover
+    separately. What remains — and what these tests hold — is that the
+    session which arrives second re-derives every decision from state that
+    already includes the first session's commit.
     """
-    real = address_candidates._provenance_rows
+    real = address_candidates._acquire_customer_address_scope_lock
     state: Dict[str, Any] = {"fired": False, "result": None}
 
     def hooked(db: Any, **kwargs: Any):
-        rows = real(db, **kwargs)
         if db is target and not state["fired"]:
             state["fired"] = True
             state["result"] = action()
-        return rows
+        return real(db, **kwargs)
 
-    address_candidates._provenance_rows = hooked
+    address_candidates._acquire_customer_address_scope_lock = hooked
     try:
         yield state
     finally:
-        address_candidates._provenance_rows = real
+        address_candidates._acquire_customer_address_scope_lock = real
 
 
 def _session_is_usable(db: Session) -> bool:
@@ -870,14 +874,17 @@ def _session_is_usable(db: Session) -> bool:
         return False
 
 
-def test_losing_concurrent_first_import_recovers_the_winning_row(
+def test_the_second_concurrent_first_import_returns_the_winning_row(
     pg_at_0110: Engine,
 ) -> None:
-    """R7: the loser of the insert race returns the winner, not a dead session.
+    """R7: the second importer returns the winner, not a duplicate or a dead session.
 
-    The unique constraint is doing its job either way. What is under test is
-    the LOSER: it must come back with the winning address, be able to commit
-    its own transaction, and still be usable afterwards.
+    With scope authority in place this no longer reaches the unique
+    constraint at all — the second importer's history read already includes
+    the winner's commit, which is the point of taking authority before
+    reading. What is under test is the outcome for the SECOND caller: the
+    winning address, one row, and a session that still commits and works.
+    The constraint backstop is proven separately, below.
     """
     setup = _session(pg_at_0110)
     try:
@@ -894,16 +901,16 @@ def test_losing_concurrent_first_import_recovers_the_winning_row(
             winner.commit()
             return result
 
-        with _interleave_at_history_read(loser, win) as state:
+        with _interleave_before_authority(loser, win) as state:
             outcome = _import(loser, tenant_id, customer_id, payload)
 
-        assert state["fired"], "the competing import must run inside the read"
+        assert state["fired"], "the competing import must commit before authority"
         winning = state["result"]
         assert winning.action == ACTION_CREATED
 
-        # The loser recovers the committed row instead of raising.
+        # It returns the committed row instead of duplicating or raising.
         assert outcome.action == ACTION_UNCHANGED
-        assert outcome.reason == "concurrent_import_deduplicated"
+        assert outcome.reason == "identical_source_content"
         assert outcome.address_id == winning.address_id
 
         # And its transaction is still healthy: it commits and keeps working.
@@ -959,7 +966,7 @@ def test_selection_committed_between_refresh_read_and_write_is_preserved(
         newer = _payload(
             id="SC-PG-REFRESH-RACE", city="جدة",
             location="حي الشاطئ، شارع 7", updated_at="2026-09-02T10:00:00Z")
-        with _interleave_at_history_read(refresher, approve) as state:
+        with _interleave_before_authority(refresher, approve) as state:
             outcome = _import(refresher, tenant_id, customer_id, newer)
         refresher.commit()
 
@@ -1010,7 +1017,7 @@ def test_a_later_legitimate_revision_still_lands_after_the_race(
             winner.commit()
             return result
 
-        with _interleave_at_history_read(loser, win):
+        with _interleave_before_authority(loser, win):
             _import(loser, tenant_id, customer_id, payload)
         loser.commit()
 
@@ -1252,3 +1259,286 @@ def test_the_same_store_still_cannot_duplicate_one_revision(
         db.rollback()
     finally:
         db.close()
+
+
+def test_a_writer_without_authority_still_recovers_from_the_constraint(
+    pg_at_0110: Engine,
+) -> None:
+    """R7: the uniqueness backstop, and recovery from it, are still real.
+
+    Authority is what normally keeps two importers apart, so the race that
+    reaches the constraint can only be produced by a writer that did not
+    take it — an older deployment, or a direct insert. The constraint must
+    still refuse the duplicate, and the caller must come back with the
+    winning row on a session it can still commit.
+    """
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            setup, salla_id="SC-PG-NOAUTH", phone="+966500000916")
+    finally:
+        setup.close()
+
+    payload = _payload(id="SC-PG-NOAUTH")
+    loser, winner = _session(pg_at_0110), _session(pg_at_0110)
+    real_lock = address_candidates._acquire_customer_address_scope_lock
+    fired: Dict[str, Any] = {"done": False, "winner": None}
+
+    def unauthorized(db: Any, **kwargs: Any) -> str:
+        # Neither session takes authority; the loser's competitor commits
+        # after the loser has already read an empty history.
+        return address_candidates.LOCK_UNSUPPORTED
+
+    def race(db: Any, **kwargs: Any):
+        rows = address_candidates._provenance_rows.__wrapped__(db, **kwargs) if hasattr(
+            address_candidates._provenance_rows, "__wrapped__") else real_rows(db, **kwargs)
+        if db is loser and not fired["done"]:
+            fired["done"] = True
+            fired["winner"] = _import(winner, tenant_id, customer_id, payload)
+            winner.commit()
+        return rows
+
+    real_rows = address_candidates._provenance_rows
+    address_candidates._acquire_customer_address_scope_lock = unauthorized
+    address_candidates._provenance_rows = race
+    try:
+        outcome = _import(loser, tenant_id, customer_id, payload)
+    finally:
+        address_candidates._acquire_customer_address_scope_lock = real_lock
+        address_candidates._provenance_rows = real_rows
+
+    try:
+        assert fired["done"], "the competing import must land inside the read"
+        assert fired["winner"].action == ACTION_CREATED
+        assert outcome.action == ACTION_UNCHANGED
+        assert outcome.reason == "concurrent_import_deduplicated"
+        assert outcome.address_id == fired["winner"].address_id
+        loser.commit()
+        assert _session_is_usable(loser)
+    finally:
+        loser.close()
+        winner.close()
+
+    check = _session(pg_at_0110)
+    try:
+        assert check.query(CustomerAddress).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).count() == 1
+    finally:
+        check.close()
+
+
+# ── I4 / I5: one durable authority over a customer's address book ───────
+
+def test_a_writer_that_cannot_take_authority_refuses(pg_at_0110: Engine) -> None:
+    """Refusal, not an unauthorized write on a row read without authority."""
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            setup, salla_id="SC-PG-BUSY", phone="+966500000917")
+    finally:
+        setup.close()
+
+    holder, blocked = _session(pg_at_0110), _session(pg_at_0110)
+    try:
+        # The holder takes authority and keeps its transaction open.
+        assert address_candidates._acquire_customer_address_scope_lock(
+            holder, tenant_id=tenant_id, customer_id=customer_id,
+        ) == address_candidates.LOCK_ACQUIRED
+
+        outcome = address_candidates.upsert_imported_address_candidate(
+            blocked, tenant_id=tenant_id, customer_id=customer_id,
+            components=AddressComponents(city=CITY, short_address_code=SHORT_CODE),
+            source=SOURCE_SALLA_CUSTOMER_PROFILE, source_ref="SC-PG-BUSY",
+            source_updated_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+        assert outcome.action == "skipped"
+        assert outcome.reason == "address_scope_busy"
+
+        selection = record_explicit_address_selection(
+            blocked, tenant_id=tenant_id, customer_id=customer_id, address_id=1,
+            selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+            expected_fingerprint="whatever", operation_ref="busy",
+        )
+        assert selection.reason == "address_scope_busy"
+        blocked.commit()
+        assert _session_is_usable(blocked)
+    finally:
+        holder.rollback()
+        holder.close()
+        blocked.close()
+
+    check = _session(pg_at_0110)
+    try:
+        assert check.query(CustomerAddress).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).count() == 0
+    finally:
+        check.close()
+
+
+def test_a_stale_refresh_that_arrives_after_a_newer_one_is_refused(
+    pg_at_0110: Engine,
+) -> None:
+    """I4: freshness is re-derived under authority, not from a cached read."""
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            setup, salla_id="SC-PG-STALE", phone="+966500000918")
+        first = _import(setup, tenant_id, customer_id, _payload(id="SC-PG-STALE"))
+        setup.commit()
+    finally:
+        setup.close()
+
+    stale, newer = _session(pg_at_0110), _session(pg_at_0110)
+    try:
+        def newest():
+            result = _import(newer, tenant_id, customer_id, _payload(
+                id="SC-PG-STALE", city="الدمام", location="حي الفيصلية، شارع 3",
+                updated_at="2026-09-03T10:00:00Z"))
+            newer.commit()
+            return result
+
+        with _interleave_before_authority(stale, newest) as state:
+            outcome = _import(stale, tenant_id, customer_id, _payload(
+                id="SC-PG-STALE", city="جدة", location="حي الشاطئ، شارع 7",
+                updated_at="2026-09-02T10:00:00Z"))
+        stale.commit()
+
+        assert state["result"].action == ACTION_UPDATED
+        assert outcome.action == "skipped"
+        assert outcome.reason == "stale_source_event"
+    finally:
+        stale.close()
+        newer.close()
+
+    check = _session(pg_at_0110)
+    try:
+        row = check.query(CustomerAddress).filter_by(id=first.address_id).one()
+        assert row.city == "الدمام", "the newer revision was overwritten by a stale one"
+        provenance = check.query(CustomerAddressProvenance).filter_by(
+            customer_address_id=first.address_id).one()
+        assert provenance.source_updated_at == datetime(
+            2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    finally:
+        check.close()
+
+
+def test_a_selection_arriving_after_a_refresh_refuses_the_changed_revision(
+    pg_at_0110: Engine,
+) -> None:
+    """I4, the other direction: approval of content the customer never saw."""
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            setup, salla_id="SC-PG-REVERSE", phone="+966500000919")
+        first = _import(setup, tenant_id, customer_id, _payload(id="SC-PG-REVERSE"))
+        setup.commit()
+    finally:
+        setup.close()
+
+    selecting, refreshing = _session(pg_at_0110), _session(pg_at_0110)
+    try:
+        def refresh():
+            result = _import(refreshing, tenant_id, customer_id, _payload(
+                id="SC-PG-REVERSE", city="جدة", location="حي الشاطئ، شارع 7",
+                updated_at="2026-09-02T10:00:00Z"))
+            refreshing.commit()
+            return result
+
+        with _interleave_before_authority(selecting, refresh) as state:
+            outcome = record_explicit_address_selection(
+                selecting, tenant_id=tenant_id, customer_id=customer_id,
+                address_id=first.address_id,
+                expected_fingerprint=first.fingerprint,
+                selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+                operation_ref="reverse-race")
+        selecting.commit()
+
+        assert state["result"].action == ACTION_UPDATED
+        assert outcome.action == "skipped"
+        assert outcome.reason == "address_revision_changed"
+    finally:
+        selecting.close()
+        refreshing.close()
+
+    check = _session(pg_at_0110)
+    try:
+        resolution = resolve_customer_address_selection(
+            check, tenant_id=tenant_id, customer_id=customer_id)
+        assert resolution.selected is None, "a changed revision was recorded as approved"
+    finally:
+        check.close()
+
+
+def test_two_stores_racing_the_first_import_yield_one_owner(
+    pg_at_0110: Engine,
+) -> None:
+    """I5: ownership acquisition is atomic even with no provenance to lock.
+
+    Before, both stores read an empty history, both created, and the source
+    ended with two owners — after which BOTH were refused on every later
+    update and the source was wedged.
+    """
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            setup, salla_id="SC-PG-TWOSTORE-RACE", phone="+966500000920")
+        connections = []
+        for store in ("STORE-RACE-A", "STORE-RACE-B"):
+            row = Integration(
+                tenant_id=tenant_id, provider="salla", external_store_id=store,
+                config={"store_id": store}, enabled=True)
+            setup.add(row)
+            setup.flush()
+            connections.append(int(row.id))
+        setup.commit()
+    finally:
+        setup.close()
+
+    components = AddressComponents(city=CITY, short_address_code=SHORT_CODE)
+    later = AddressComponents(city="جدة", short_address_code="JJJD5678")
+
+    def run(session: Session, connection_id: int, parts: AddressComponents, revision: int):
+        return address_candidates.upsert_imported_address_candidate(
+            session, tenant_id=tenant_id, customer_id=customer_id, components=parts,
+            source=SOURCE_SALLA_CUSTOMER_PROFILE, source_ref="SC-PG-TWOSTORE-RACE",
+            integration_connection_id=connection_id,
+            source_updated_at=datetime(2026, 9, revision, tzinfo=timezone.utc))
+
+    second, first = _session(pg_at_0110), _session(pg_at_0110)
+    try:
+        def win():
+            result = run(first, connections[0], components, 1)
+            first.commit()
+            return result
+
+        with _interleave_before_authority(second, win) as state:
+            outcome = run(second, connections[1], components, 1)
+        second.commit()
+
+        assert state["result"].action == ACTION_CREATED
+        # The loser refuses outright — it does not create a second owner.
+        assert outcome.action == "skipped"
+        assert outcome.reason == "source_owned_by_another_connection"
+    finally:
+        second.close()
+        first.close()
+
+    check = _session(pg_at_0110)
+    try:
+        rows = check.query(CustomerAddressProvenance).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).all()
+        assert len(rows) == 1
+        assert {r.integration_connection_id for r in rows} == {connections[0]}
+        assert check.query(CustomerAddress).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).count() == 1
+    finally:
+        check.close()
+
+    # And the winner is not wedged: it keeps updating its own source.
+    owner_session = _session(pg_at_0110)
+    try:
+        refreshed = run(owner_session, connections[0], later, 2)
+        owner_session.commit()
+        assert refreshed.action == ACTION_UPDATED
+    finally:
+        owner_session.close()

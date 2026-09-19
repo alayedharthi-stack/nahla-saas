@@ -607,6 +607,9 @@ def run_post_compose_truth_guards(
                 from core.fallback_policy import (  # noqa: PLC0415
                     empty_reply_fallback,
                 )
+                from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # noqa: PLC0415
+                    stamp_address_claim_fallback_provenance,
+                )
 
                 reply, suppress_address_send = (
                     resolve_outbound_after_address_claim_scrub(
@@ -616,6 +619,20 @@ def run_post_compose_truth_guards(
                         ).strip(),
                     )
                 )
+                if reply.strip():
+                    # The text now on the wire is the platform's, not the
+                    # model's. Saying otherwise in the provenance would make
+                    # the audit trail itself untrue — the exact failure this
+                    # guard exists to prevent.
+                    for sink in (live_provenance_tracker, brain_persona_compose_event):
+                        stamp_address_claim_fallback_provenance(
+                            sink,
+                            fallback_reason=(
+                                f"{casg_result.reason}:scrubbed_empty"
+                                if casg_result.reason
+                                else "scrubbed_empty"
+                            ),
+                        )
             _note_live_text_mutation(
                 live_provenance_tracker,
                 reason_token=guard_name,
