@@ -96,6 +96,7 @@ SOURCE_HANDOFF_ACK        = "handoff_ack"         # explicit customer handoff re
 SOURCE_PAUSED             = "paused"              # ai_pause_guard skipped this turn
 SOURCE_BILLING_DENIED     = "billing_access_denied"
 SOURCE_LAYER0             = "layer0"              # pre-brain Layer 0 router (no LLM)
+SOURCE_COMMERCE_RUNTIME   = "commerce_runtime"    # owner-pilot commerce runtime owned the turn
 SOURCE_UNKNOWN            = "unknown"
 
 
