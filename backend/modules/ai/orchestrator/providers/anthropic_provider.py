@@ -135,6 +135,154 @@ class AnthropicProvider(BaseAIProvider):
             audit_context=audit_context,
         )
 
+    def call_single_step(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        system: str,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Dict[str, Any]] = None,
+        max_tokens: int = 1024,
+        timeout_seconds: Optional[float] = None,
+        audit_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run exactly one Anthropic inference step and report it structurally.
+
+        This exists for callers that own their own loop and therefore need what
+        :meth:`_call_internal` deliberately flattens away: the tool-use block
+        ids, the stop reason and the usage, each reported as it arrived or as
+        explicitly absent. It runs **one** request: SDK-level retries are turned
+        off so the caller's own durable attempt accounting is the single
+        authority on how often the model is asked, and the per-request timeout
+        is the caller's, not the library default.
+
+        Never raises. ``status`` is closed:
+        ``ok``, ``no_api_key``, ``sdk_unavailable``, ``auth_error``,
+        ``rate_limited``, ``overloaded``, ``timeout``, ``connection_error``,
+        ``api_error``, ``sdk_error``.
+        """
+        if not _API_KEY:
+            return {"provider": "none", "model": "none", "status": "no_api_key",
+                    "stop_reason": None, "blocks": [], "usage": None, "error": None}
+        if not _SDK_AVAILABLE:
+            # A single structured step needs block ids and a stop reason; the raw
+            # httpx path in this module is kept for the legacy flattened calls.
+            return {"provider": "none", "model": "none", "status": "sdk_unavailable",
+                    "stop_reason": None, "blocks": [], "usage": None, "error": None}
+
+        model = resolve_model_for_provider(
+            audit_context, provider="anthropic", default=resolve_anthropic_model(),
+        )
+        system_chars = len(system or "")
+        messages_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        total_prompt_chars = system_chars + messages_chars
+        audit_extra = dict(audit_context or {})
+        emit_llm_cost_audit(
+            tenant_id=audit_extra.get("tenant_id"),
+            conversation_id=audit_extra.get("conversation_id"),
+            turn_id=audit_extra.get("turn_id"),
+            model=model,
+            provider="anthropic",
+            messages_count=len(messages),
+            system_chars=system_chars,
+            messages_chars=messages_chars,
+            history_chars=audit_extra.get("history_chars", messages_chars),
+            tools_chars=audit_extra.get("tools_chars"),
+            total_prompt_chars=total_prompt_chars,
+            estimated_input_tokens=approx_tokens_from_chars(total_prompt_chars),
+            reason=audit_extra.get("reason") or "anthropic_provider.call_single_step",
+            intent=audit_extra.get("intent"),
+            stage=audit_extra.get("stage"),
+            channel=audit_extra.get("channel"),
+            model_tier=audit_extra.get("model_tier"),
+        )
+
+        def failure(status: str, exc: Optional[BaseException] = None) -> Dict[str, Any]:
+            if exc is not None:
+                logger.warning(
+                    "[engine] Claude single step: %s diagnostics=%s", status,
+                    anthropic_exception_diagnostics(exc),
+                )
+            return {"provider": "anthropic", "model": model, "status": status,
+                    "stop_reason": None, "blocks": [], "usage": None,
+                    "error": type(exc).__name__ if exc is not None else None}
+
+        try:
+            client_kwargs: Dict[str, Any] = {"api_key": _API_KEY, "max_retries": 0}
+            if timeout_seconds is not None:
+                client_kwargs["timeout"] = float(timeout_seconds)
+            client = _anthropic_sdk.Anthropic(**client_kwargs)
+            request_body: Dict[str, Any] = {
+                "model": model,
+                "max_tokens": int(max_tokens),
+                "system": system,
+                "messages": messages,
+            }
+            if tools:
+                request_body["tools"] = tools
+                if tool_choice:
+                    request_body["tool_choice"] = dict(tool_choice)
+            response = client.messages.create(**request_body)
+        except _anthropic_sdk.AuthenticationError as exc:
+            return failure("auth_error", exc)
+        except _anthropic_sdk.RateLimitError as exc:
+            return failure("rate_limited", exc)
+        except _anthropic_sdk.APITimeoutError as exc:
+            return failure("timeout", exc)
+        except _anthropic_sdk.APIConnectionError as exc:
+            return failure("connection_error", exc)
+        except _anthropic_sdk.APIStatusError as exc:
+            status = "overloaded" if getattr(exc, "status_code", None) == 529 else "api_error"
+            return failure(status, exc)
+        except Exception as exc:  # noqa: BLE001 - a step is an outcome, never a crash
+            return failure("sdk_error", exc)
+
+        blocks: List[Dict[str, Any]] = []
+        reply_chars = 0
+        for block in getattr(response, "content", None) or []:
+            kind = getattr(block, "type", "")
+            if kind == "tool_use":
+                blocks.append({
+                    "type": "tool_use",
+                    "id": getattr(block, "id", "") or "",
+                    "name": getattr(block, "name", "") or "",
+                    "input": getattr(block, "input", None) or {},
+                })
+            elif kind == "text":
+                text = getattr(block, "text", "") or ""
+                reply_chars += len(text)
+                blocks.append({"type": "text", "text": text})
+            else:
+                blocks.append({"type": str(kind or "unknown")})
+
+        raw_usage = getattr(response, "usage", None)
+        usage: Optional[Dict[str, Any]] = None
+        if raw_usage is not None:
+            usage = {
+                "input_tokens": getattr(raw_usage, "input_tokens", None),
+                "output_tokens": getattr(raw_usage, "output_tokens", None),
+                "cache_read_input_tokens": getattr(raw_usage, "cache_read_input_tokens", None),
+                "cache_creation_input_tokens": getattr(raw_usage, "cache_creation_input_tokens", None),
+            }
+        record_ai_usage_from_anthropic(
+            audit_extra=audit_extra, model=model, response=response,
+            reply_text="x" * reply_chars, total_prompt_chars=total_prompt_chars,
+        )
+        logger.info(
+            "[engine] Claude single step | model=%s stop_reason=%s blocks=%d usage_present=%s",
+            model, getattr(response, "stop_reason", None), len(blocks), usage is not None,
+        )
+        return {
+            "provider": "anthropic",
+            "model": model,
+            "status": "ok",
+            "stop_reason": getattr(response, "stop_reason", None),
+            "blocks": blocks,
+            "usage": usage,
+            "request_id": getattr(response, "id", None),
+            "error": None,
+        }
+
     def _call_internal(
         self,
         *,

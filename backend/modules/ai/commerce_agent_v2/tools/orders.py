@@ -251,19 +251,18 @@ def _summary_evidence(order: Any) -> tuple[OrderSummarySnapshot, EvidenceRecord]
     )
 
 
-@commerce_read_tool("resolve_customer_order", is_enabled=_catalog_search_enabled)
-async def resolve_customer_order(
-    run_context: RunContextWrapper[CommerceAgentContext],
+async def resolve_customer_order_impl(
+    context: CommerceAgentContext,
     order_number: str = "",
     purpose: Literal["status", "shipment"] = "status",
 ) -> OrderResolveResult:
-    """Resolve one order inside the trusted current tenant and customer scope.
+    """SDK-free implementation of the ``resolve_customer_order`` read tool.
 
-    ``order_number`` is only an optional lookup key; customer and tenant
-    identity always come from trusted context. Use purpose ``shipment`` for a
-    shipment/tracking question and ``status`` for other order questions.
+    The model-visible name, signature and description stay on the
+    decorated wrapper below; this body is unchanged and is the single
+    implementation shared by the Agents-SDK tool and by the commerce
+    runtime's own loop, which passes the trusted context directly.
     """
-    context = run_context.context
     context.assert_scope()
     if not context.capabilities.read_orders:
         return OrderResolveResult(status="denied", failure_reason="order_reads_disabled")
@@ -327,13 +326,17 @@ def _line_item_snapshots(order: Any) -> list[OrderLineItemSnapshot]:
     return results
 
 
-@commerce_read_tool("get_order_details", is_enabled=_catalog_search_enabled)
-async def get_order_details(
-    run_context: RunContextWrapper[CommerceAgentContext],
+async def get_order_details_impl(
+    context: CommerceAgentContext,
     order_id: int,
 ) -> OrderDetailsResult:
-    """Get total and line items for an order authorized by resolve_customer_order."""
-    context = run_context.context
+    """SDK-free implementation of the ``get_order_details`` read tool.
+
+    The model-visible name, signature and description stay on the
+    decorated wrapper below; this body is unchanged and is the single
+    implementation shared by the Agents-SDK tool and by the commerce
+    runtime's own loop, which passes the trusted context directly.
+    """
     if not context.capabilities.read_orders:
         return OrderDetailsResult(status="denied", failure_reason="order_reads_disabled")
     order = _load_authorized_order(context, order_id)
@@ -530,13 +533,17 @@ def _shipment_snapshot(
     )
 
 
-@commerce_read_tool("get_order_shipment", is_enabled=_catalog_search_enabled)
-async def get_order_shipment(
-    run_context: RunContextWrapper[CommerceAgentContext],
+async def get_order_shipment_impl(
+    context: CommerceAgentContext,
     order_id: int,
 ) -> OrderShipmentResult:
-    """Get shipment/tracking facts for an order authorized in this trusted run."""
-    context = run_context.context
+    """SDK-free implementation of the ``get_order_shipment`` read tool.
+
+    The model-visible name, signature and description stay on the
+    decorated wrapper below; this body is unchanged and is the single
+    implementation shared by the Agents-SDK tool and by the commerce
+    runtime's own loop, which passes the trusted context directly.
+    """
     if not context.capabilities.read_shipments:
         return OrderShipmentResult(status="denied", failure_reason="shipment_reads_disabled")
     order = _load_authorized_order(context, order_id)
@@ -552,6 +559,40 @@ async def get_order_shipment(
     snapshot, evidence = projected
     context.register_evidence([evidence])
     return OrderShipmentResult(status="ok", shipment=snapshot, evidence=[evidence])
+
+
+
+@commerce_read_tool("resolve_customer_order", is_enabled=_catalog_search_enabled)
+async def resolve_customer_order(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    order_number: str = "",
+    purpose: Literal["status", "shipment"] = "status",
+) -> OrderResolveResult:
+    """Resolve one order inside the trusted current tenant and customer scope.
+
+    ``order_number`` is only an optional lookup key; customer and tenant
+    identity always come from trusted context. Use purpose ``shipment`` for a
+    shipment/tracking question and ``status`` for other order questions.
+    """
+    return await resolve_customer_order_impl(run_context.context, order_number=order_number, purpose=purpose)
+
+
+@commerce_read_tool("get_order_details", is_enabled=_catalog_search_enabled)
+async def get_order_details(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    order_id: int,
+) -> OrderDetailsResult:
+    """Get total and line items for an order authorized by resolve_customer_order."""
+    return await get_order_details_impl(run_context.context, order_id=order_id)
+
+
+@commerce_read_tool("get_order_shipment", is_enabled=_catalog_search_enabled)
+async def get_order_shipment(
+    run_context: RunContextWrapper[CommerceAgentContext],
+    order_id: int,
+) -> OrderShipmentResult:
+    """Get shipment/tracking facts for an order authorized in this trusted run."""
+    return await get_order_shipment_impl(run_context.context, order_id=order_id)
 
 
 __all__ = [
