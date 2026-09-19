@@ -2,7 +2,10 @@
 
 Status: recorded 2026-09-19 as the contract of the second dormant slice;
 corrected the same day after the independent ledger review (L1 completion
-boundary, L2 key encoding, evidence trust boundary, receipt semantics).
+boundary, L2 key encoding, evidence trust boundary, receipt semantics) and
+again for the final bounded completion correction (schema state: standalone
+0108 / partial / complete, reservation against completion, exact duplicate
+semantics of results and receipts).
 Extends `commerce-runtime-foundation-contract.md`; nothing here reopens the
 closed findings B1, B2, B3, processing order, database-target enforcement or
 report freshness. Authority for the implementation in
@@ -120,14 +123,29 @@ in this slice proves that an external event occurred; authenticating
 external evidence and correlating incoming provider receipts are the
 responsibility of a future trusted adapter that owns the provider boundary.
 
-**Duplicate semantics (exact).** An identical repeat of a retained fact
-(same outcome or receipt kind, same provider message id, same evidence)
-returns the existing row. The same kind with different evidence is refused
-(`IllegalTransition`), never merged. Replaying an older `unknown`
-observation after `confirmed` or `rejected` was established is refused and
-leaves the established state intact. A reach receipt that omits the
-provider message id is bound to the accepted send's id: that is an internal
-association, not an independent correlation of an incoming receipt.
+**Duplicate semantics (exact).** The two evidence ledgers keep different,
+each safe, duplicate rules; neither ever downgrades an established outcome.
+
+* *Effect results* (`record_effect_result`): an identical repeat of the
+  attempt's **latest** result (same outcome, same evidence) returns that
+  row. Replaying an older `unknown` result after `confirmed` or `rejected`
+  was established is refused (`IllegalTransition`) and leaves the
+  established status and `confirmed_result` intact. Any other result for an
+  established attempt, and any second `unknown`, is refused; only
+  `confirmed` or `rejected` evidence may resolve an `unknown` once.
+* *Delivery receipts* (`record_delivery_receipt`): an **exact historical
+  duplicate** of any receipt already recorded for the attempt (same kind,
+  same provider message id, same evidence) returns that existing receipt,
+  including an older `unknown` receipt whose send was later resolved; the
+  sequence's established outcome is not touched, so nothing is downgraded.
+  **Changed evidence** is refused: a transport receipt for an attempt whose
+  outcome is established (other than the one-time resolution of `unknown` by
+  `accepted` or `rejected`), a reach receipt of a kind already recorded with
+  other evidence, and a reach receipt naming a provider message id other
+  than the accepted send's, are all `IllegalTransition`; nothing is merged.
+* A reach receipt that omits the provider message id is bound to the
+  accepted send's id: that is an internal association, not an independent
+  correlation of an incoming receipt.
 
 ## 5. Processing, transport and reach stay separate
 
@@ -182,7 +200,7 @@ association, not an independent correlation of an incoming receipt.
   terminal.
 * **Completion boundary (both terminal entry points).** The foundation's
   terminal path enforces it under the conversation lock, before any write,
-  whenever the revision `0109` tables exist: a terminal is refused
+  on a database whose ledger schema is complete: a terminal is refused
   (`CompletionBlocked`, `actionable_work_remains`) while an effect or
   delivery intent of the turn is reserved but not dispatched or an attempt
   has no established outcome; a refused completion writes nothing, not even
@@ -191,8 +209,28 @@ association, not an independent correlation of an incoming receipt.
   `record_terminal`, which records caller-supplied transport and reach, is
   refused outright for a ledger-bearing turn (`ledger_bearing_turn`): such
   turns complete only through the ledger-derived path. Turns without ledger
-  records, and databases without the ledger tables, keep the foundation's
-  behaviour unchanged.
+  records keep the foundation's behaviour unchanged.
+* **Schema state (standalone 0108, partial, complete).** Before any write
+  the guard classifies the database over every ledger relation of revision
+  `0109` (the six ledger tables), by name. *Absent* (no ledger relation at
+  all) is the standalone `0108` foundation schema: nothing is consulted and
+  the foundation's behaviour is unchanged. *Complete* (all six present)
+  applies the ledger-aware rules above. *Partial* (some present, some
+  missing) cannot establish whether the turn's obligations are complete, so
+  every terminal write, for every turn and on both entry points, is refused
+  (`LedgerSchemaIncomplete`, naming the missing and the present relations)
+  before any state or terminal write; retained obligations stay where they
+  are. Nothing repairs the schema automatically, and no cancellation,
+  transfer or post-terminal dispatch is offered; once the schema is
+  restored, the ledger-aware rules apply again and retained work completes
+  through the supported lifecycle.
+* **Reservation against completion.** Both take the conversation row lock,
+  so on independent connections they resolve in lock-acquisition order:
+  when the reservation wins, the completion runs after it, sees the new
+  obligation and is refused (`actionable_work_remains`); when the
+  completion wins, the terminal ends the turn's eligibility and the waiting
+  reservation is refused (`turn_not_eligible`) and inserts nothing into the
+  completed turn.
 * Every other operation runs one write transaction; `finalize_turn` may open
   one read-only transaction after a terminal primary-key race, exactly like
   the foundation's `record_terminal`.
@@ -229,8 +267,17 @@ contradictory transitions fail explicitly; every operation closes its
 transaction before returning; reserved intents and pending attempts block
 premature completion on both terminal entry points while turns without
 ledger records keep the foundation path; distinct business identities with
-equal payloads stay distinct. The strict inventory lists them as required
-proofs (`commerce_runtime_ledgers`, `commerce_runtime_ledgers_migration`).
+equal payloads stay distinct; a partial ledger schema fails closed in both
+directions (delivery parent relation unavailable with reserved and
+dispatching effects, effects parent relation unavailable with a reserved
+delivery) on both entry points, leaving state and terminal unchanged, and
+the retained work completes once the relation is restored; the standalone
+`0108` schema keeps the foundation terminal available; a reservation and a
+completion racing on independent connections resolve in both lock orders
+(reservation first: the completion is refused on the new obligation;
+completion first: the reservation is refused as not eligible and inserts
+nothing). The strict inventory lists them as required proofs
+(`commerce_runtime_ledgers`, `commerce_runtime_ledgers_migration`).
 
 ## 10. Out of scope (unchanged decisions)
 
