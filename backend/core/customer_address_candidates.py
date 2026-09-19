@@ -437,6 +437,16 @@ def _provenance_rows(
     Freshness, idempotency and the update decision are all judged against
     this list, so leaving the store out of it let one connection's revision
     silence or overwrite another's.
+
+    ``populate_existing`` is the other half of the scope lock. The lock
+    stops a competitor from writing while we decide; it does nothing about
+    a competitor who already committed before we took it. A session that
+    read these rows earlier in its transaction holds them in the identity
+    map, and an ordinary query hands those stale objects straight back —
+    so the decision would rest on the state as of the earlier read, under
+    an authority taken later. Autoflush still sends this session's own
+    pending work ahead of the SELECT, so legitimate caller writes survive
+    the refresh.
     """
     from models import CustomerAddressProvenance  # noqa: PLC0415
 
@@ -444,7 +454,7 @@ def _provenance_rows(
         tenant_id=int(tenant_id),
         customer_id=int(customer_id),
         source=source,
-    )
+    ).populate_existing()
     if source_ref:
         query = query.filter(CustomerAddressProvenance.source_ref == source_ref)
     if integration_connection_id is not None:
@@ -539,11 +549,17 @@ def _sleep(seconds: float) -> None:
 
 
 def _address_row(db: Any, *, tenant_id: int, address_id: int) -> Any:
+    """The address row as the DATABASE has it, not as this session saw it.
+
+    See ``_provenance_rows``: authority acquired after a read is authority
+    over stale values unless the read is redone against the database.
+    """
     from models import CustomerAddress  # noqa: PLC0415
 
     return (
         db.query(CustomerAddress)
         .filter_by(tenant_id=int(tenant_id), id=int(address_id))
+        .populate_existing()
         .first()
     )
 
@@ -890,7 +906,7 @@ def _find_provenance_by_revision(
         source=source,
         source_ref=source_ref or None,
         content_fingerprint=fingerprint,
-    )
+    ).populate_existing()
     if integration_connection_id is None:
         query = query.filter(
             CustomerAddressProvenance.integration_connection_id.is_(None)
@@ -1045,6 +1061,7 @@ def record_explicit_address_selection(
     prov = (
         db.query(CustomerAddressProvenance)
         .filter_by(tenant_id=int(tenant_id), customer_address_id=int(address_id))
+        .populate_existing()
         .first()
     )
     components = components_from_address_row(row, prov)
@@ -1137,6 +1154,7 @@ def _is_current_selection(
                 customer_id=int(customer_id),
                 selection_state=SELECTION_STATE_SELECTED,
             )
+            .populate_existing()
             .all()
         )
     except Exception:  # noqa: BLE001  # noqa: silent-ok — falls back to "not current", which re-writes the selection rather than silently keeping another one

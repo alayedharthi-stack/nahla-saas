@@ -77,7 +77,9 @@ from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # 
     detect_address_save_claim_kinds,
 )
 from modules.ai.order_flow_v2.checkout_context import (  # noqa: E402
+    _offered_revisions,
     address_choice_actions,
+    address_more_action_id,
     apply_delivery_continuation_address_patch,
     apply_explicit_address_selection,
     apply_previous_address_confirmation,
@@ -86,6 +88,7 @@ from modules.ai.order_flow_v2.checkout_context import (  # noqa: E402
     load_checkout_reply_context,
     read_offered_address,
     record_presented_address_offer,
+    delivered_address_action_ids,
     structured_consent_action,
 )
 
@@ -1129,17 +1132,54 @@ def _load_ctx(db, tenant, convo, order_prep=None):
     return ctx
 
 
+def _wire_payload(presentation):
+    """The payload this presentation would actually leave as.
+
+    Built through the REAL surface choice and the REAL wire sanitizers, so
+    a test never records a showing the provider would have thinned out.
+    """
+    from core.wa_link_buttons import whatsapp_reply_buttons_payload
+    from modules.ai.order_flow_v2.checkout_context import (
+        address_choice_actions,
+        address_choice_rows,
+        address_choice_surface,
+    )
+
+    surface = address_choice_surface(presentation)
+    if surface == "list":
+        rows = []
+        seen_ids, seen_titles = set(), set()
+        for row in address_choice_rows(presentation):
+            if row["id"] in seen_ids or row["title"] in seen_titles:
+                continue
+            seen_ids.add(row["id"])
+            seen_titles.add(row["title"])
+            rows.append(row)
+            if len(rows) >= 10:
+                break
+        return {"interactive": {"type": "list", "action": {"sections": [{"rows": rows}]}}}
+    if surface == "buttons":
+        buttons = whatsapp_reply_buttons_payload(address_choice_actions(presentation))
+        return {"interactive": {"type": "button", "action": {"buttons": buttons}}}
+    return {}
+
+
 def _present(db, tenant, convo, reply_ctx, delivery_ref="wamid.out-1",
-             duplicate_suppressed=False):
+             duplicate_suppressed=False, sent_payload=None):
     """The SUCCESSFUL-SEND boundary, with the outbound message identity."""
+    from modules.ai.order_flow_v2.checkout_context import delivered_address_action_ids
+
+    presentation = getattr(reply_ctx, "presentation", reply_ctx)
+    payload = _wire_payload(presentation) if sent_payload is None else sent_payload
     recorded = record_presented_address_offer(
         db, tenant_id=tenant.id, conversation=convo,
-        presentation=reply_ctx.presentation, delivery_ref=delivery_ref,
+        presentation=presentation, delivery_ref=delivery_ref,
         duplicate_suppressed=duplicate_suppressed,
+        delivered_action_ids=delivered_address_action_ids(payload),
     )
     db.commit()
     # The showing, so a test can build the action the customer would tap.
-    return reply_ctx.presentation if recorded else None
+    return presentation if recorded else None
 
 
 def _consent_meta(presentation, address_id, turn_ref="wamid.in-1"):
@@ -1550,32 +1590,46 @@ def test_several_candidates_are_offered_for_explicit_selection():
 
 
 def test_checkout_level_a_then_b_then_a_selection_round_trip():
-    """R5: the customer may go back to an address they selected before.
+    """C3/R5: the customer may go back to an address they selected before.
 
-    Every step goes through the public checkout helpers, so a projection
-    that quietly drops superseded selections fails here rather than only
-    in the core resolver.
+    The order's state is RETAINED across the three turns, the way a real
+    conversation retains it. Passing a fresh ``order_prep={}`` each time
+    was the test erasing the very condition its own first step created:
+    once address A is accepted, the second tap hit an early bail and
+    returned an empty patch, so the order kept A while the customer was
+    being asked to choose. Every step goes through the public checkout
+    helpers, so a projection that quietly drops superseded selections
+    fails here rather than only in the core resolver.
     """
     db, _ = _make_db()
     tenant, customer = _seed(db)
     a, b = _two_candidates(db, tenant, customer)
     convo = _conversation(db, tenant, customer)
 
+    from core.wa_order_lifecycle import has_accepted_delivery_address  # noqa: PLC0415
+
     chosen = []
+    order_prep = {}
     for target in (a, b, a):
-        reply_ctx = _load_ctx(db, tenant, convo)
+        reply_ctx = _load_ctx(db, tenant, convo, order_prep=order_prep)
         # The full inventory stays offerable, whatever is selected now.
         assert {c["address_id"] for c in reply_ctx.address_choices} == {
             a.address_id, b.address_id
         }
         showing = _present(db, tenant, convo, reply_ctx)
         patch = apply_structured_address_consent(
-            db, tenant_id=tenant.id, conversation=convo, order_prep={},
+            db, tenant_id=tenant.id, conversation=convo, order_prep=order_prep,
             inbound_metadata=_consent_meta(showing, target.address_id,
                                            turn_ref=f"wamid.in-{target.address_id}-{len(chosen)}"),
         )
         db.commit()
         assert patch.get("customer_confirmed_previous_address") is True
+        # The order state the next turn inherits, exactly as the owner
+        # merges it.
+        order_prep = {**order_prep, **patch}
+        assert has_accepted_delivery_address(order_prep) is True
+        assert order_prep["short_address_code"] == target.components.short_address_code
+        assert order_prep["city"] == target.components.city
         resolution = resolve_customer_address_selection(
             db, tenant_id=tenant.id, customer_id=customer.id,
         )
@@ -1818,17 +1872,31 @@ def test_a_showing_is_recorded_only_with_a_proven_outbound_identity():
     convo = _conversation(db, tenant, customer)
     reply_ctx = _load_ctx(db, tenant, convo)
 
+    delivered = delivered_address_action_ids(_wire_payload(reply_ctx.presentation))
+    assert delivered, "the showing must reach the wire at all"
+
     # No outbound identity — a blocked, suppressed or failed send.
     assert record_presented_address_offer(
         db, tenant_id=tenant.id, conversation=convo,
         presentation=reply_ctx.presentation, delivery_ref="",
+        delivered_action_ids=delivered,
     ) is False
     assert read_offered_address(tenant_id=tenant.id, conversation=convo) is None
 
-    # A real outbound message id records it.
+    # An outbound identity, but nothing observed on the wire — a caller
+    # that cannot say what left proves no showing either.
     assert record_presented_address_offer(
         db, tenant_id=tenant.id, conversation=convo,
         presentation=reply_ctx.presentation, delivery_ref="wamid.out-real",
+        delivered_action_ids=[],
+    ) is False
+    assert read_offered_address(tenant_id=tenant.id, conversation=convo) is None
+
+    # A real outbound message id AND the actions that were on it.
+    assert record_presented_address_offer(
+        db, tenant_id=tenant.id, conversation=convo,
+        presentation=reply_ctx.presentation, delivery_ref="wamid.out-real",
+        delivered_action_ids=delivered,
     ) is True
     db.commit()
     offer = read_offered_address(tenant_id=tenant.id, conversation=convo)
@@ -1852,6 +1920,8 @@ def test_a_deduplicated_send_never_claims_a_new_showing():
     assert record_presented_address_offer(
         db, tenant_id=tenant.id, conversation=convo, presentation=first.presentation,
         delivery_ref="wamid.out-1",
+        delivered_action_ids=delivered_address_action_ids(
+            _wire_payload(first.presentation)),
     ) is True
     db.commit()
 
@@ -1861,6 +1931,8 @@ def test_a_deduplicated_send_never_claims_a_new_showing():
     assert record_presented_address_offer(
         db, tenant_id=tenant.id, conversation=convo, presentation=second.presentation,
         delivery_ref="wamid.out-1", duplicate_suppressed=True,
+        delivered_action_ids=delivered_address_action_ids(
+            _wire_payload(second.presentation)),
     ) is False
     db.commit()
     assert read_offered_address(
@@ -1871,6 +1943,8 @@ def test_a_deduplicated_send_never_claims_a_new_showing():
     assert record_presented_address_offer(
         db, tenant_id=tenant.id, conversation=convo, presentation=first.presentation,
         delivery_ref="wamid.out-1", duplicate_suppressed=True,
+        delivered_action_ids=delivered_address_action_ids(
+            _wire_payload(first.presentation)),
     ) is True
 
 
@@ -2269,3 +2343,438 @@ def test_an_allowed_reply_leaves_the_provenance_untouched():
     assert result.reply == reply
     assert tracker["compose_source"] == "llm"
     assert "fallback_reason" not in tracker
+
+
+# ── C1–C4: the closure review's reproductions, as regressions ────────
+
+
+def _many_candidates(db, tenant, customer, count, city="الرياض"):
+    """Several addresses in ONE city, distinguished only by their street."""
+    rows = []
+    for index in range(count):
+        rows.append(
+            upsert_imported_address_candidate(
+                db, tenant_id=tenant.id, customer_id=customer.id,
+                components=AddressComponents(
+                    city=city, address_line=f"شارع مستقل {index}",
+                ),
+                source_ref=f"ADDR-{index}",
+            )
+        )
+    db.commit()
+    return rows
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 4, 7, 10])
+def test_every_offered_address_survives_the_wire(count):
+    """C1: what is recorded as shown is what the payload actually carried.
+
+    Four addresses in one city all titled "الرياض" met the wire
+    sanitizer's duplicate-title rule and arrived as ONE tappable choice,
+    while all four were recorded as offered. A tap the customer could not
+    make was authorized, and three addresses were unreachable.
+    """
+    from core.wa_link_buttons import whatsapp_reply_buttons_payload  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    rows = _many_candidates(db, tenant, customer, count)
+    convo = _conversation(db, tenant, customer)
+
+    result = _owner_turn(db, tenant, convo, live=True, missing=("delivery_address",))
+    db.commit()
+    presentation = result.address_presentation
+    assert presentation is not None
+
+    payload = _wire_payload(presentation)
+    delivered = delivered_address_action_ids(payload)
+    # Every address the customer owns is selectable on the message sent.
+    assert len(delivered) == count
+    assert {structured_consent_action({"button_id": i})[1] for i in delivered} == {
+        row.address_id for row in rows
+    }
+    # Distinguishable, and never thinned by the real button sanitizer.
+    if result.address_choice_surface == "buttons":
+        assert len(whatsapp_reply_buttons_payload(result.address_choice_actions)) == count
+    titles = [
+        row["title"] for section in payload["interactive"]["action"].get("sections", [])
+        for row in section["rows"]
+    ] or [b["reply"]["title"] for b in payload["interactive"]["action"].get("buttons", [])]
+    assert len(set(titles)) == len(titles)
+    assert all(titles)
+
+    _present(db, tenant, convo, result.address_presentation, sent_payload=payload)
+    offered, _ = _offered_revisions(tenant_id=tenant.id, conversation=convo,
+                                    offer_id=presentation.offer_id)
+    assert set(offered) == {row.address_id for row in rows}
+
+
+def test_a_choice_the_wire_dropped_is_never_authorized():
+    """C1: the receipt follows the payload, not the intention."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    reply_ctx = _load_ctx(db, tenant, convo)
+    presentation = reply_ctx.presentation
+
+    # A transport that carried only the FIRST choice.
+    full = _wire_payload(presentation)
+    thinned = {
+        "interactive": {
+            "type": "list",
+            "action": {"sections": [{"rows": [
+                {"id": consent_action_id(presentation.offer_id, a.address_id),
+                 "title": "الرياض"},
+            ]}]},
+        }
+    }
+    assert len(delivered_address_action_ids(full)) == 2
+
+    _present(db, tenant, convo, presentation, sent_payload=thinned)
+    offered, _ = _offered_revisions(tenant_id=tenant.id, conversation=convo,
+                                    offer_id=presentation.offer_id)
+    assert set(offered) == {a.address_id}
+
+    # The address that never reached the customer authorizes nothing.
+    assert apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(presentation, b.address_id,
+                                       turn_ref="wamid.in-unshown"),
+    ) == {}
+    assert resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected is None
+
+
+def test_an_inventory_larger_than_one_message_stays_reachable():
+    """C1: paging, not silent truncation, for a long address book."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    rows = _many_candidates(db, tenant, customer, 12)
+    convo = _conversation(db, tenant, customer)
+
+    seen = set()
+    page_action = None
+    for _turn in range(2):
+        meta = {"wa_message_id": f"wamid.page-{_turn}",
+                "button_id": page_action or "checkout_continue"}
+        result = _owner_turn(db, tenant, convo, live=True,
+                             missing=("delivery_address",), inbound_metadata=meta)
+        db.commit()
+        presentation = result.address_presentation
+        assert presentation is not None
+        assert result.address_choice_surface == "list"
+        delivered = delivered_address_action_ids(_wire_payload(presentation))
+        seen |= {structured_consent_action({"button_id": i})[1] for i in delivered}
+        page_action = address_more_action_id(presentation)
+        assert page_action, "a longer inventory must offer a way to the rest"
+
+    assert seen == {row.address_id for row in rows}
+
+
+def test_a_denied_commerce_permission_writes_no_selection():
+    """C2: authorization comes BEFORE the mutation, not after it.
+
+    The owner returned ``handled=False`` with a denial reason while the
+    durable selection and the turn operation were already written — and
+    an unhandled result cannot undo them, because the caller commits the
+    transaction either way.
+    """
+    from unittest.mock import patch as _patch  # noqa: PLC0415
+
+    from modules.ai.commerce.permission_loader import PermissionLoadResult  # noqa: PLC0415
+    from modules.ai.commerce.permissions import CommercePermissionSet  # noqa: PLC0415
+    from modules.ai.order_flow_v2 import owner as owner_module  # noqa: PLC0415
+
+    for load_ok, expected_reason in (
+        (True, "commerce_permission_denied:create_orders"),
+        (False, "commerce_permissions_load_failed"),
+    ):
+        db, _ = _make_db()
+        tenant, customer = _seed(db)
+        imported = _import(db, tenant, customer, _payload())
+        db.commit()
+        convo = _conversation(db, tenant, customer)
+        showing = _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+
+        denied = PermissionLoadResult(
+            permissions=CommercePermissionSet(tenant_id=tenant.id, can_create_orders=False),
+            source="db_row" if load_ok else "load_failed",
+            ok=load_ok,
+        )
+        with _patch.object(owner_module, "load_tenant_commerce_permissions",
+                           return_value=denied):
+            result = _owner_turn(
+                db, tenant, convo, live=True,
+                inbound_metadata=_consent_meta(showing, imported.address_id,
+                                               turn_ref="wamid.in-denied"),
+            )
+        # The caller commits whatever the owner left behind.
+        db.commit()
+
+        assert result.handled is False
+        assert result.reason == expected_reason
+        assert resolve_customer_address_selection(
+            db, tenant_id=tenant.id, customer_id=customer.id,
+        ).selected is None
+        assert (convo.extra_metadata or {}).get("address_operation") is None
+
+
+def test_an_authorized_commerce_permission_still_writes_the_selection():
+    """C2's positive half: the gate blocks denial, not the capability."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    showing = _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+
+    _owner_turn(
+        db, tenant, convo, live=True,
+        inbound_metadata=_consent_meta(showing, imported.address_id,
+                                       turn_ref="wamid.in-allowed"),
+    )
+    db.commit()
+
+    selected = resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected
+    assert selected is not None and selected.address_id == imported.address_id
+
+
+# ── Section 5: the address truth contract at the OrderFlowV2 boundary ──
+
+
+def _of2_guard(db, tenant, convo, reply, turn_ref="wamid.in-guard"):
+    from modules.ai.order_flow_v2.outbound_guards import (  # noqa: PLC0415
+        apply_order_flow_v2_outbound_guards,
+    )
+
+    sink = {}
+    text = apply_order_flow_v2_outbound_guards(
+        reply,
+        db=db,
+        tenant_id=tenant.id,
+        conversation_id=convo.id,
+        conversation=convo,
+        turn_ref=turn_ref,
+        provenance_sink=sink,
+        order_prep={},
+    )
+    return text, sink
+
+
+def test_the_orderflow_boundary_removes_an_unsupported_save_claim():
+    """Section 5: this branch answers and returns before the Brain guards.
+
+    A reply produced here claiming the address was saved met no address
+    guard at all — the shared post-compose boundary never ran for it.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    text, sink = _of2_guard(db, tenant, convo, "تم حفظ عنوانك. نكمل الطلب؟")
+
+    assert "حفظ عنوانك" not in text
+    assert text.strip(), "the guard removes the claim; it must not silence the turn"
+    assert sink["address_save_claim_guard_action"] == (
+        "blocked_unsupported_address_save_claim"
+    )
+    assert sink["final_text_transformed"] is True
+    assert "customer_address_save_claim_guard" in sink["final_transform_reasons"]
+
+
+def test_the_orderflow_boundary_keeps_a_claim_its_own_turn_committed():
+    """Section 5's positive half: committed evidence carries the claim."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    showing = _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+
+    _owner_turn(
+        db, tenant, convo, live=True,
+        inbound_metadata=_consent_meta(showing, imported.address_id,
+                                       turn_ref="wamid.in-committed"),
+    )
+    db.commit()
+
+    text, sink = _of2_guard(db, tenant, convo, "تم حفظ عنوانك. نكمل الطلب؟",
+                            turn_ref="wamid.in-committed")
+    assert "تم حفظ عنوانك" in text
+    assert sink["address_save_claim_guard_action"] == "allowed"
+
+
+def test_an_operation_from_another_turn_never_carries_this_reply():
+    """Section 5: the evidence is scoped to THIS inbound turn."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    showing = _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+
+    _owner_turn(
+        db, tenant, convo, live=True,
+        inbound_metadata=_consent_meta(showing, imported.address_id,
+                                       turn_ref="wamid.in-earlier"),
+    )
+    db.commit()
+
+    text, sink = _of2_guard(db, tenant, convo, "تم حفظ عنوانك.",
+                            turn_ref="wamid.in-a-later-turn")
+    assert "حفظ عنوانك" not in text
+    assert sink["address_save_claim_guard_action"] == (
+        "blocked_unsupported_address_save_claim"
+    )
+
+
+def test_an_emptied_reply_falls_back_with_its_provenance_declared():
+    """Section 5: the fallback is allowed, but it must say it is one."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    # The whole reply is the unsupported claim — removal leaves nothing.
+    text, sink = _of2_guard(db, tenant, convo, "تم حفظ عنوانك")
+
+    assert text.strip(), "an emptied reply still has to speak"
+    assert "حفظ عنوانك" not in text
+    assert sink["compose_source"] == "fallback_deterministic"
+    assert sink["response_mode"] == "fallback_deterministic"
+    assert sink["fallback_reason"]
+    assert sink["fallback_action_type"]
+    assert sink["chosen_path"]
+    assert sink["final_text_transformed"] is True
+
+
+def test_an_honest_address_reply_is_left_exactly_as_composed():
+    """Section 5: the guard removes claims, it does not rewrite replies."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    honest = "وش العنوان اللي تبي نوصل له؟"
+    text, sink = _of2_guard(db, tenant, convo, honest)
+    assert text == honest
+    assert sink["address_save_claim_guard_action"] == "allowed"
+    assert sink.get("final_text_transformed") is not True
+
+
+def test_re_preparing_one_inbound_turn_is_the_same_showing():
+    """Observation 7: a redelivery must not become a second live offer.
+
+    A random identity per preparation made two preparations of the SAME
+    inbound turn produce two different payloads, so the outbound dedup
+    could not see the redelivery as the same message. The identity is
+    derived from the showing — scope, turn, page and the exact revisions
+    on it — so re-preparing that turn reproduces it, and a genuinely
+    different showing still differs.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    meta = {"wa_message_id": "wamid.in-retry", "button_id": "checkout_continue"}
+
+    first = _owner_turn(db, tenant, convo, live=True,
+                        missing=("delivery_address",), inbound_metadata=meta)
+    second = _owner_turn(db, tenant, convo, live=True,
+                         missing=("delivery_address",), inbound_metadata=dict(meta))
+    db.commit()
+
+    assert first.address_presentation.offer_id == second.address_presentation.offer_id
+    assert (
+        _wire_payload(first.address_presentation)
+        == _wire_payload(second.address_presentation)
+    )
+
+    # A different inbound turn is a different showing.
+    other = _owner_turn(db, tenant, convo, live=True, missing=("delivery_address",),
+                        inbound_metadata={"wa_message_id": "wamid.in-other",
+                                          "button_id": "checkout_continue"})
+    assert other.address_presentation.offer_id != first.address_presentation.offer_id
+
+    # And so is the same turn once the inventory underneath it changes.
+    upsert_imported_address_candidate(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+        components=AddressComponents(city="جدة", address_line="طريق الملك"),
+        source_ref="ADDR-NEW",
+    )
+    db.commit()
+    changed = _owner_turn(db, tenant, convo, live=True,
+                          missing=("delivery_address",), inbound_metadata=dict(meta))
+    assert changed.address_presentation.offer_id != first.address_presentation.offer_id
+    assert {a.address_id, b.address_id} < {
+        c["address_id"] for c in changed.address_presentation.choices
+    }
+
+
+def test_an_action_from_an_expired_showing_approves_nothing():
+    """Observation 7: supersession is not the only way a showing ends.
+
+    An offer nobody superseded stayed answerable forever in a
+    conversation that simply went quiet — a button tapped weeks later
+    still named a live showing. A showing is a question asked in a
+    conversation, and it expires the way a question does.
+    """
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+        _OFFER_TTL_SECONDS,
+        _OFFER_KEY,
+        _OFFER_SET_KEY,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    imported = _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    showing = _present(db, tenant, convo, _load_ctx(db, tenant, convo))
+    assert showing is not None
+
+    # Age the recorded showing past the window, nothing else changed.
+    stale = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=_OFFER_TTL_SECONDS + 60)
+    ).isoformat()
+    meta = dict(convo.extra_metadata or {})
+    for key in (_OFFER_KEY, _OFFER_SET_KEY):
+        if isinstance(meta.get(key), dict):
+            meta[key] = {**meta[key], "offered_at": stale}
+    convo.extra_metadata = meta
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    flag_modified(convo, "extra_metadata")
+    db.commit()
+
+    assert apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(showing, imported.address_id,
+                                       turn_ref="wamid.in-late"),
+    ) == {}
+    assert resolve_customer_address_selection(
+        db, tenant_id=tenant.id, customer_id=customer.id,
+    ).selected is None
+
+    # A fresh showing of the same address is answerable again.
+    fresh = _present(db, tenant, convo, _load_ctx(db, tenant, convo),
+                     delivery_ref="wamid.out-fresh")
+    assert fresh is not None
+    patch = apply_structured_address_consent(
+        db, tenant_id=tenant.id, conversation=convo, order_prep={},
+        inbound_metadata=_consent_meta(fresh, imported.address_id,
+                                       turn_ref="wamid.in-fresh"),
+    )
+    db.commit()
+    assert patch.get("customer_confirmed_previous_address") is True

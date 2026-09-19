@@ -126,7 +126,11 @@ _NEGATION_RES: Tuple[re.Pattern, ...] = (
 # question mark exempted the assertion — a false claim shipped because of a
 # question about something else. So a sentence is split again before an
 # interrogative lead, and each clause is judged on its own.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?؟،])\s+|\n+", re.UNICODE)
+# ``,`` belongs here beside ``،``. Without it "No worries, your address
+# was saved" was one clause, and the reassurance's "No" sat close enough
+# to the claim to look like it governed it. The Arabic comma was already
+# a boundary; its ASCII twin does the same job in the same replies.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?؟،,؛;:])\s+|\n+", re.UNICODE)
 _CLAUSE_SPLIT = re.compile(
     # Before an interrogative lead…
     r"(?=\s(?:و|ف)?(?:هل|وش|ايش|أيش|كيف|متى|متي|وين|أين|اين|ليش|لماذا)\s)"
@@ -146,6 +150,17 @@ _CLAUSE_SPLIT = re.compile(
 # attached forms ("لم يتم حفظ") without letting a negation reach across a
 # whole coordinated statement.
 _NEGATION_REACH_TOKENS = 2
+
+# A coordinator between a negation and a claim ends the negation's
+# statement, exactly as an attached "و"/"ف" prefix does. "no problem and
+# your address was saved" denies the problem; the save is its own
+# statement. These are structural connectives — the same class as the
+# adversatives above — not intent phrasings, and the list does not grow
+# with wording.
+_COORDINATOR_GAP_RE = re.compile(
+    r"(?:^|\s)(?:and|plus|also|then|so|وايضا|ايضا|كما)(?:\s|$)",
+    re.UNICODE | re.IGNORECASE,
+)
 
 
 def _sentences(text: str) -> list:
@@ -200,6 +215,10 @@ def _negated_before(norm: str, start: int) -> bool:
             if match.end() > start:
                 continue
             gap = norm[match.end():start].strip()
+            if _COORDINATOR_GAP_RE.search(gap):
+                # The claim opens its own statement; the negation stopped
+                # at the end of the previous one.
+                continue
             if len(gap.split()) <= _NEGATION_REACH_TOKENS:
                 return True
     return False

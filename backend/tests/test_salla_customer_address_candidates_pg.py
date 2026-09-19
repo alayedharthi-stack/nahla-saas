@@ -1542,3 +1542,149 @@ def test_two_stores_racing_the_first_import_yield_one_owner(
         assert refreshed.action == ACTION_UPDATED
     finally:
         owner_session.close()
+
+
+# ── C4: authority acquired AFTER a read is authority over stale values ──
+
+
+def test_a_retained_row_does_not_survive_taking_authority(pg_at_0110: Engine) -> None:
+    """C4: the scope lock must not decide from the identity map.
+
+    The lock keeps a competitor out from the moment it is taken. It says
+    nothing about a competitor who committed BEFORE that — and a session
+    that read these rows earlier in its transaction holds them in
+    SQLAlchemy's identity map, so an ordinary query under the lock hands
+    the stale objects straight back. The decision then rests on the state
+    as of the earlier read.
+
+    Both writers here are ordinary: no stubbed lock, no bypassed service,
+    no mocked row. The competitor simply commits first.
+    """
+    holder = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(holder)
+        first = _import(holder, tenant_id, customer_id, _payload())
+        holder.commit()
+
+        # An ordinary earlier read in this transaction — the shape every
+        # real caller has after loading context.
+        retained_address = holder.get(CustomerAddress, first.address_id)
+        retained_provenance = (
+            holder.query(CustomerAddressProvenance)
+            .filter_by(customer_address_id=first.address_id)
+            .one()
+        )
+        assert retained_address.city == CITY
+        assert retained_provenance is not None
+
+        competitor = _session(pg_at_0110)
+        try:
+            _import(competitor, tenant_id, customer_id,
+                    _payload(city="جدة", updated_at="2026-09-02T10:00:00Z"))
+            competitor.commit()
+        finally:
+            competitor.close()
+
+        # Approving the revision this session still remembers must be
+        # refused: it is not the revision the database holds.
+        outcome = record_explicit_address_selection(
+            holder, tenant_id=tenant_id, customer_id=customer_id,
+            address_id=first.address_id,
+            selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+            expected_fingerprint=first.fingerprint,
+            operation_ref="c4:selection",
+        )
+        holder.commit()
+        assert outcome.action == "skipped"
+        assert outcome.reason == "address_revision_changed"
+    finally:
+        holder.close()
+
+    check = _session(pg_at_0110)
+    try:
+        assert check.get(CustomerAddress, first.address_id).city == "جدة"
+        assert resolve_customer_address_selection(
+            check, tenant_id=tenant_id, customer_id=customer_id,
+        ).selected is None
+    finally:
+        check.close()
+
+
+def test_a_retained_row_does_not_let_a_stale_refresh_win(pg_at_0110: Engine) -> None:
+    """C4: freshness is judged against the database, not against memory."""
+    holder = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(holder)
+        first = _import(holder, tenant_id, customer_id, _payload())
+        holder.commit()
+
+        retained_address = holder.get(CustomerAddress, first.address_id)
+        retained_provenance = (
+            holder.query(CustomerAddressProvenance)
+            .filter_by(customer_address_id=first.address_id)
+            .one()
+        )
+        assert retained_address is not None and retained_provenance is not None
+
+        competitor = _session(pg_at_0110)
+        try:
+            _import(competitor, tenant_id, customer_id,
+                    _payload(city="الدمام", updated_at="2026-09-03T10:00:00Z"))
+            competitor.commit()
+        finally:
+            competitor.close()
+
+        # A source event OLDER than the committed one must not land.
+        outcome = _import(holder, tenant_id, customer_id,
+                          _payload(city="بريدة", updated_at="2026-09-02T10:00:00Z"))
+        holder.commit()
+        assert outcome.action == "skipped"
+        assert outcome.reason == "stale_source_event"
+    finally:
+        holder.close()
+
+    check = _session(pg_at_0110)
+    try:
+        assert check.get(CustomerAddress, first.address_id).city == "الدمام"
+        current = (
+            check.query(CustomerAddressProvenance)
+            .filter_by(customer_address_id=first.address_id)
+            .one()
+        )
+        assert current.source_updated_at == datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
+    finally:
+        check.close()
+
+
+def test_a_later_legitimate_revision_still_lands_from_a_retained_session(
+    pg_at_0110: Engine,
+) -> None:
+    """C4's positive half: refusing stale state must not refuse progress."""
+    holder = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(holder)
+        first = _import(holder, tenant_id, customer_id, _payload())
+        holder.commit()
+        retained = holder.get(CustomerAddress, first.address_id)
+        assert retained is not None
+
+        competitor = _session(pg_at_0110)
+        try:
+            _import(competitor, tenant_id, customer_id,
+                    _payload(city="جدة", updated_at="2026-09-02T10:00:00Z"))
+            competitor.commit()
+        finally:
+            competitor.close()
+
+        outcome = _import(holder, tenant_id, customer_id,
+                          _payload(city="مكة", updated_at="2026-09-04T10:00:00Z"))
+        holder.commit()
+        assert outcome.action == ACTION_UPDATED
+    finally:
+        holder.close()
+
+    check = _session(pg_at_0110)
+    try:
+        assert check.get(CustomerAddress, first.address_id).city == "مكة"
+    finally:
+        check.close()

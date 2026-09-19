@@ -17,6 +17,8 @@ from .checkout_context import (
     apply_delivery_continuation_address_patch,
     apply_previous_address_confirmation,
     address_choice_actions,
+    address_choice_rows,
+    address_choice_surface,
     apply_structured_address_consent,
     load_checkout_reply_context,
     turn_reference,
@@ -134,6 +136,11 @@ class OrderFlowV2Result:
     # the wire, and the presentation is recorded only once that exact
     # message is proven sent. Producing a reply is not showing it.
     address_choice_actions: List[Dict[str, Any]] = field(default_factory=list)
+    # The same choices as interactive-list rows, and which surface can
+    # carry them. Reply buttons stop at three; beyond that the send
+    # boundary must use the list, or the extra choices simply vanish.
+    address_choice_rows: List[Dict[str, Any]] = field(default_factory=list)
+    address_choice_surface: str = "none"
     address_presentation: Any = None
 
 
@@ -333,6 +340,8 @@ def _finalize_result(
     operational_reason: str = "",
     perm_load: PermissionLoadResult | None = None,
     address_choice_actions: Optional[List[Dict[str, Any]]] = None,
+    address_choice_rows: Optional[List[Dict[str, Any]]] = None,
+    address_choice_surface: str = "none",
     address_presentation: Any = None,
 ) -> OrderFlowV2Result:
     if perm_load is not None:
@@ -375,6 +384,8 @@ def _finalize_result(
         reply=reply,
         skip_brain=skip_brain,
         address_choice_actions=list(address_choice_actions or []),
+        address_choice_rows=list(address_choice_rows or []),
+        address_choice_surface=str(address_choice_surface or "none"),
         address_presentation=address_presentation,
         reason=reason,
         operational_reason=operational_reason,
@@ -437,6 +448,16 @@ def try_handle_order_flow_v2(
         conversation=conversation,
     )
     perm_load = load_tenant_commerce_permissions(db, int(tenant_id))
+    # A durable address write is a commerce mutation, so it needs the SAME
+    # authorization an order write needs, established BEFORE the write —
+    # not after. ``_gate_commerce_permissions`` runs at finalization, which
+    # is far too late: returning ``handled=False`` cannot undo a selection
+    # already written, and the caller commits the transaction regardless.
+    # Fail closed: a permission load that did not succeed authorizes
+    # nothing.
+    address_write_authorized = bool(
+        live and perm_load.ok and perm_load.permissions.can_create_orders
+    )
 
     # What a reply is about to present. Filled only by a reply context that
     # actually asks the customer about their saved address, and recorded
@@ -464,6 +485,8 @@ def try_handle_order_flow_v2(
             else None
         )
         actions = address_choice_actions(presentation) if presentation is not None else []
+        rows = address_choice_rows(presentation) if presentation is not None else []
+        surface = address_choice_surface(presentation) if presentation is not None else "none"
         # NOT recorded here. `_finalize` runs before permission gating,
         # before the outbound lock, and before any send — a reply produced
         # here may never reach the customer at all. The offer is recorded
@@ -479,6 +502,8 @@ def try_handle_order_flow_v2(
             operational_reason=_op_reason,
             perm_load=perm_load,
             address_choice_actions=actions,
+            address_choice_rows=rows,
+            address_choice_surface=surface,
             address_presentation=presentation,
         )
 
@@ -1066,7 +1091,7 @@ def try_handle_order_flow_v2(
         conversation=conversation,
         order_prep=order_prep,
         inbound_metadata=meta,
-    ) if live else {}
+    ) if address_write_authorized else {}
     if structured_consent_patch:
         patch.update(structured_consent_patch)
     else:

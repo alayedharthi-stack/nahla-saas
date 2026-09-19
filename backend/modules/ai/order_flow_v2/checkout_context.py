@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.order_context_prefill import MODE_CONFIRM
 from core.wa_order_lifecycle import has_accepted_delivery_address
@@ -28,8 +28,14 @@ class AddressPresentation:
 
     address_id: int = 0
     fingerprint: str = ""
+    # THIS page of the inventory — what one message can actually carry.
+    # A choice that is not on this page is not being shown, so it is not
+    # in the receipt either; ``page``/``page_count`` say how the rest is
+    # reached.
     choices: Tuple[Dict[str, Any], ...] = ()
     offer_id: str = ""
+    page: int = 0
+    page_count: int = 1
 
     @property
     def is_empty(self) -> bool:
@@ -112,6 +118,54 @@ def new_offer_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+def offer_id_for_showing(
+    *,
+    tenant_id: Any,
+    conversation: Any,
+    turn_ref: str,
+    choices: Any = (),
+    address_id: Any = 0,
+    fingerprint: str = "",
+    page: int = 0,
+) -> str:
+    """The identity of THIS showing — stable for one inbound turn.
+
+    A random identity per preparation looked safe and was not: preparing
+    the same inbound turn twice produced two different payloads, so the
+    outbound dedup could not recognise the redelivery as the same message
+    and the customer could end up holding two live offers for one
+    question. The identity is therefore derived from what actually makes
+    a showing what it is — the scope, the turn being answered, the page,
+    and the exact revisions on it. Re-preparing the same turn reproduces
+    it; anything else changes it.
+
+    It stays opaque: a digest of values the customer never sees, not a
+    row id or a timestamp they could guess or replay into another scope.
+    Without an inbound turn there is nothing stable to derive from, so a
+    random identity is used rather than a predictable one.
+    """
+    import hashlib  # noqa: PLC0415
+
+    turn = str(turn_ref or "").strip()
+    if not turn:
+        return new_offer_id()
+    parts = [
+        str(int(tenant_id or 0)),
+        str(int(getattr(conversation, "id", 0) or 0)),
+        str(int(getattr(conversation, "customer_id", 0) or 0)),
+        turn,
+        str(int(page or 0)),
+        f"{int(address_id or 0)}:{str(fingerprint or '')}",
+    ]
+    for choice in choices or ():
+        parts.append(
+            f"{int((choice or {}).get('address_id') or 0)}"
+            f":{str((choice or {}).get('content_fingerprint') or (choice or {}).get('fingerprint') or '')}"
+        )
+    digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+    return digest[:16]
+
+
 def consent_action_id(offer_id: Any, address_id: Any) -> str:
     """The structured reply id that selects this address FROM THIS showing.
 
@@ -134,14 +188,21 @@ def address_choice_actions(presentation: Any) -> List[Dict[str, Any]]:
     """Structured choices in WhatsApp reply-button shape, or nothing.
 
     Platform-owned CTA payload built from trusted stored facts — the id is
-    the offer/address identity, the title is the address's own city and
-    short code. It composes no conversational prose.
+    the offer/address identity, the title is drawn from the address's own
+    fields. It composes no conversational prose.
 
     The shape is ``{"type": "reply", "reply": {"id", "title"}}`` because
     that is what the final wire sanitizer
     (``core.wa_link_buttons.whatsapp_reply_buttons_payload``) reads. A flat
     ``{"id", "title"}`` survives that sanitizer as an EMPTY button, which
     would reach the customer as an untappable choice.
+
+    Every choice in ``presentation.choices`` gets an action, and the
+    titles are made distinct from each other. Truncating to three here was
+    how choice four became unreachable, and titling four Riyadh addresses
+    "الرياض" was how the wire sanitizer's duplicate-title rule silently
+    deleted three of them. The send boundary picks the surface that can
+    carry the count (see ``address_choice_surface``).
     """
     if presentation is None or getattr(presentation, "is_empty", True):
         return []
@@ -149,49 +210,258 @@ def address_choice_actions(presentation: Any) -> List[Dict[str, Any]]:
     if not offer_id:
         return []
 
-    def _button(address_id: Any, choice: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        action_id = consent_action_id(offer_id, address_id)
-        if not action_id:
-            return None
-        return {
-            "type": "reply",
-            "reply": {"id": action_id, "title": _choice_title(choice)},
-        }
+    choices = [dict(c) for c in (getattr(presentation, "choices", ()) or ())]
+    if not choices and getattr(presentation, "address_id", 0):
+        choices = [{"address_id": presentation.address_id}]
 
     rows: List[Dict[str, Any]] = []
-    for choice in getattr(presentation, "choices", ()) or ():
-        button = _button(choice.get("address_id"), choice)
-        if button is not None:
-            rows.append(button)
-    if not rows and getattr(presentation, "address_id", 0):
-        button = _button(presentation.address_id, {})
-        if button is not None:
-            rows.append(button)
-    return rows[:3]
+    for choice, title, _description, _fallback in _labelled_choices(
+        choices, _BUTTON_TITLE_LIMIT
+    ):
+        action_id = consent_action_id(offer_id, choice.get("address_id"))
+        if not action_id:
+            continue
+        rows.append({"type": "reply", "reply": {"id": action_id, "title": title}})
+    return rows
+
+
+def address_choice_rows(presentation: Any) -> List[Dict[str, Any]]:
+    """The same choices as interactive-list rows.
+
+    A list row carries a description as well as a title, so the street
+    that distinguishes two addresses in one city is visible to the
+    customer instead of being compressed out of a 20-character button.
+    """
+    if presentation is None or getattr(presentation, "is_empty", True):
+        return []
+    offer_id = str(getattr(presentation, "offer_id", "") or "")
+    if not offer_id:
+        return []
+
+    choices = [dict(c) for c in (getattr(presentation, "choices", ()) or ())]
+    if not choices and getattr(presentation, "address_id", 0):
+        choices = [{"address_id": presentation.address_id}]
+
+    rows: List[Dict[str, Any]] = []
+    for choice, title, description, _fallback in _labelled_choices(
+        choices, _LIST_TITLE_LIMIT
+    ):
+        action_id = consent_action_id(offer_id, choice.get("address_id"))
+        if not action_id:
+            continue
+        row: Dict[str, Any] = {"id": action_id, "title": title}
+        if description:
+            row["description"] = description
+        rows.append(row)
+    more = address_more_action_id(presentation)
+    if more:
+        rows.append({"id": more, "title": _MORE_ROW_TITLE})
+    return rows
+
+
+def address_choice_surface(presentation: Any) -> str:
+    """``buttons``, ``list`` or ``none`` — which surface can carry this.
+
+    Buttons are preferred when they can actually do the job: at most
+    three choices, no paging, and labels that tell the addresses apart
+    within a button's 20 characters. When the stored fields only differ
+    past that budget the buttons would read "الرياض", "الرياض #2",
+    "الرياض #3" — distinct enough for the provider, useless to the
+    customer. A list row has a longer title AND a description, so the
+    street that actually distinguishes them is visible.
+    """
+    actions = address_choice_actions(presentation)
+    if not actions:
+        return "none"
+    if len(actions) > _BUTTON_SURFACE_LIMIT or address_more_action_id(presentation):
+        return "list"
+    if len(actions) > 1 and _needs_detail_surface(presentation):
+        return "list"
+    return "buttons"
+
+
+def _needs_detail_surface(presentation: Any) -> bool:
+    """True when a button label cannot distinguish these on its own."""
+    choices = [dict(c) for c in (getattr(presentation, "choices", ()) or ())]
+    if len(choices) < 2:
+        return False
+    on_buttons = _labelled_choices(choices, _BUTTON_TITLE_LIMIT)
+    if any(fallback for _c, _t, _d, fallback in on_buttons):
+        return True
+    on_list = _labelled_choices(choices, _LIST_TITLE_LIMIT)
+    return [t for _c, t, _d, _f in on_buttons] != [t for _c, t, _d, _f in on_list]
+
+
+def address_more_action_id(presentation: Any) -> str:
+    """The action that shows the NEXT page, when the inventory has one."""
+    if presentation is None:
+        return ""
+    if int(getattr(presentation, "page_count", 1) or 1) <= 1:
+        return ""
+    offer_id = str(getattr(presentation, "offer_id", "") or "")
+    if not offer_id:
+        return ""
+    page = int(getattr(presentation, "page", 0) or 0)
+    page_count = int(getattr(presentation, "page_count", 1) or 1)
+    return f"{PAGE_ACTION_PREFIX}:{offer_id}:{(page + 1) % page_count}"
+
+
+def structured_page_request(inbound_metadata: Any) -> int:
+    """The page a paging action asked for, or 0.
+
+    Paging is how a customer with more addresses than one message can
+    hold still reaches every one of them. It authorizes nothing: it only
+    decides which page the next showing presents.
+    """
+    if not isinstance(inbound_metadata, dict):
+        return 0
+    for key in ("button_id", "list_reply_id", "interactive_reply_id", "button_provenance"):
+        raw = str(inbound_metadata.get(key) or "").strip()
+        if not raw.startswith(f"{PAGE_ACTION_PREFIX}:"):
+            continue
+        parts = raw.split(":")
+        if len(parts) != 3:
+            continue
+        try:
+            return max(0, int(parts[2]))
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
 # WhatsApp rejects a reply button whose title is empty or over 20
-# characters, and rejects the whole payload on duplicate titles.
+# characters, and rejects the whole payload on duplicate titles. An
+# interactive list allows a longer title plus a description, and at most
+# ten rows in total across every section.
 _BUTTON_TITLE_LIMIT = 20
+_BUTTON_SURFACE_LIMIT = 3
+_LIST_TITLE_LIMIT = 24
+_LIST_DESCRIPTION_LIMIT = 72
+_LIST_ROW_LIMIT = 10
 _BUTTON_TITLE_FALLBACK = "العنوان المحفوظ"
+_MORE_ROW_TITLE = "عناوين أخرى"
+PAGE_ACTION_PREFIX = "nahla_addr_page"
+
+
+def address_choice_page(
+    choices: List[Dict[str, Any]], page: int = 0
+) -> Tuple[List[Dict[str, Any]], int, int]:
+    """One page of the inventory, the page index, and how many pages.
+
+    Up to ``_LIST_ROW_LIMIT`` choices fit in one showing. Beyond that the
+    last row is spent on a paging action, so a page holds one fewer. The
+    whole inventory stays reachable either way; nothing is dropped.
+    """
+    rows = [dict(c) for c in (choices or []) if c]
+    if not rows:
+        return [], 0, 1
+    if len(rows) <= _LIST_ROW_LIMIT:
+        return rows, 0, 1
+    per_page = _LIST_ROW_LIMIT - 1
+    page_count = (len(rows) + per_page - 1) // per_page
+    index = max(0, int(page or 0)) % page_count
+    start = index * per_page
+    return rows[start:start + per_page], index, page_count
+
+
+def _labelled_choices(
+    choices: List[Dict[str, Any]], limit: int
+) -> List[Tuple[Dict[str, Any], str, str, bool]]:
+    """Choices paired with a DISTINCT title and a describing line.
+
+    Two addresses the customer cannot tell apart are two addresses they
+    cannot choose between, and identical titles are rejected outright at
+    the provider — so a label is extended with whatever field actually
+    differs (district, then street, then the row id) until it is unique.
+    Uniqueness is judged on the same normalized key the wire sanitizer
+    de-duplicates on, so a title that survives here survives there.
+    """
+    from core.product_button_label import normalize_button_title_key  # noqa: PLC0415
+
+    out: List[Tuple[Dict[str, Any], str, str, bool]] = []
+    seen: set = set()
+    for choice in choices or []:
+        title = ""
+        candidates = _title_candidates(choice, limit)
+        # The last candidate is always the row-id form: reaching it means
+        # the address's OWN fields did not distinguish it at this length.
+        id_form = candidates[-1] if candidates else ""
+        for candidate in candidates:
+            key = normalize_button_title_key(candidate)
+            if key and key in seen:
+                continue
+            title = candidate
+            if key:
+                seen.add(key)
+            break
+        used_id_fallback = bool(title) and title == id_form and len(candidates) > 1
+        if not title:
+            # Every candidate collided; the row id cannot.
+            title = _with_id_suffix(_BUTTON_TITLE_FALLBACK, choice, limit)
+            seen.add(normalize_button_title_key(title))
+            used_id_fallback = True
+        out.append((choice, title, _choice_description(choice), used_id_fallback))
+    return out
+
+
+def _title_candidates(choice: Dict[str, Any], limit: int) -> List[str]:
+    """Increasingly specific labels, all from the address's own fields."""
+    choice = choice or {}
+    city = str(choice.get("city") or "").strip()
+    code = str(choice.get("short_address_code") or "").strip()
+    district = str(choice.get("district") or "").strip()
+    line = str(choice.get("address_line") or choice.get("street") or "").strip()
+
+    base = " ".join(part for part in (city, code) if part).strip()
+    candidates = [base] if base else []
+    for detail in (district, line):
+        if not detail:
+            continue
+        candidates.append(" - ".join(part for part in (base or city, detail) if part).strip())
+    if not candidates and line:
+        candidates.append(line)
+    seed = base or city or line or _BUTTON_TITLE_FALLBACK
+    candidates.append(_with_id_suffix(seed, choice, limit))
+    return [c[:limit].strip() for c in candidates if c.strip()]
+
+
+def _with_id_suffix(seed: str, choice: Dict[str, Any], limit: int) -> str:
+    """``seed`` plus the row id, trimming the seed rather than the id."""
+    address_id = str((choice or {}).get("address_id") or "").strip()
+    if not address_id:
+        return (seed or _BUTTON_TITLE_FALLBACK)[:limit]
+    suffix = f" #{address_id}"
+    head = (seed or _BUTTON_TITLE_FALLBACK)[: max(1, limit - len(suffix))].strip()
+    return f"{head}{suffix}"[:limit]
+
+
+def _choice_description(choice: Dict[str, Any]) -> str:
+    """The detail line an interactive list row can carry."""
+    choice = choice or {}
+    parts = [
+        str(choice.get("district") or "").strip(),
+        str(choice.get("address_line") or choice.get("street") or "").strip(),
+        str(choice.get("short_address_code") or "").strip(),
+    ]
+    seen: set = set()
+    kept: List[str] = []
+    for part in parts:
+        if part and part not in seen:
+            seen.add(part)
+            kept.append(part)
+    return " · ".join(kept)[:_LIST_DESCRIPTION_LIMIT]
 
 
 def _choice_title(choice: Dict[str, Any]) -> str:
-    """A short label from the address's own stored facts.
+    """A short label from one address's own stored facts.
 
-    Never empty: a button with no title is rejected at the provider, and
-    an address always has at least its row id to distinguish it.
+    Kept for callers that label a single address. Distinguishing a SET of
+    addresses is ``_labelled_choices``' job — one label at a time cannot
+    know what it has to differ from.
     """
-    city = str((choice or {}).get("city") or "").strip()
-    code = str((choice or {}).get("short_address_code") or "").strip()
-    label = " ".join(part for part in (city, code) if part).strip()
-    if not label:
-        label = str((choice or {}).get("address_line") or "").strip()
-    if not label:
-        address_id = str((choice or {}).get("address_id") or "").strip()
-        label = f"{_BUTTON_TITLE_FALLBACK} {address_id}".strip() if address_id \
-            else _BUTTON_TITLE_FALLBACK
-    return label[:_BUTTON_TITLE_LIMIT]
+    labelled = _labelled_choices([dict(choice or {})], _BUTTON_TITLE_LIMIT)
+    return labelled[0][1] if labelled else _BUTTON_TITLE_FALLBACK
+
 
 
 def structured_consent_action(inbound_metadata: Any) -> Optional[Tuple[str, int]]:
@@ -297,6 +567,15 @@ def read_turn_address_operation_for_conversation(
 
 
 _OPERATION_TTL_SECONDS = 600
+
+# How long a showing stays answerable. Supersession is the primary
+# lifecycle — the next showing replaces the live offer — but supersession
+# alone left an offer answerable forever in a conversation that simply
+# went quiet, and a button tapped weeks later would still approve the
+# revision it named. A showing is a question asked in a conversation, so
+# it expires the way a question does. The revision check still applies
+# inside the window; this only bounds how long the question stands.
+_OFFER_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def _parse_iso(raw: Any) -> Optional[datetime]:
@@ -421,6 +700,7 @@ def record_presented_address_offer(
     presentation: Any,
     delivery_ref: str = "",
     duplicate_suppressed: bool = False,
+    delivered_action_ids: Optional[Sequence[str]] = None,
 ) -> bool:
     """Record what a reply ACTUALLY reached the customer with.
 
@@ -429,6 +709,16 @@ def record_presented_address_offer(
     blocked, suppressed, or fails in transport never happened as far as
     the customer is concerned, and recording a presentation for it would
     let a later tap approve something nobody saw.
+
+    ``delivered_action_ids`` are the action ids present in the payload as
+    it left, read back after every sanitizer had its say. The receipt is
+    built from THAT, not from what the reply intended: the wire layer
+    drops a choice whose title collides with an earlier one, and recording
+    the intended set authorized addresses the customer was never able to
+    see or tap. An id that is not in the delivered payload is not in the
+    offer. Passing ``None`` means the caller could not observe the wire —
+    then nothing is recorded, because an unverified showing is exactly the
+    thing this function exists to refuse.
 
     ``duplicate_suppressed`` is a send that the outbound dedup answered
     with an earlier message's id. That proves the earlier message, not a
@@ -448,8 +738,19 @@ def record_presented_address_offer(
     ):
         return False
 
+    delivered = {str(a).strip() for a in (delivered_action_ids or ()) if str(a).strip()}
+    if not delivered:
+        return False
+
+    def _was_delivered(address_id: Any) -> bool:
+        return consent_action_id(offer_id, address_id) in delivered
+
     recorded = False
-    if presentation.address_id and presentation.fingerprint:
+    if (
+        presentation.address_id
+        and presentation.fingerprint
+        and _was_delivered(presentation.address_id)
+    ):
         record_offered_address(
             db,
             tenant_id=int(tenant_id),
@@ -462,17 +763,55 @@ def record_presented_address_offer(
             offer_id=offer_id,
         )
         recorded = True
-    if presentation.choices:
+    shown = [
+        dict(choice)
+        for choice in (presentation.choices or ())
+        if _was_delivered(choice.get("address_id"))
+    ]
+    if shown:
         record_offered_address_set(
             db,
             tenant_id=int(tenant_id),
             conversation=conversation,
-            candidates=[dict(c) for c in presentation.choices],
+            candidates=shown,
             delivery_ref=delivery_ref,
             offer_id=offer_id,
         )
         recorded = True
     return recorded
+
+
+def delivered_address_action_ids(payload: Any) -> List[str]:
+    """Every address action id present in an outbound payload as sent.
+
+    Reads the payload back rather than trusting what was handed to the
+    transport, so a choice a sanitizer removed cannot be recorded as
+    shown. Both supported surfaces are covered: reply buttons and
+    interactive-list rows.
+    """
+    if not isinstance(payload, dict):
+        return []
+    action = ((payload.get("interactive") or {}).get("action") or {})
+    if not isinstance(action, dict):
+        return []
+    out: List[str] = []
+    for button in action.get("buttons") or ():
+        if not isinstance(button, dict):
+            continue
+        reply = button.get("reply") if isinstance(button.get("reply"), dict) else {}
+        candidate = str(reply.get("id") or "").strip()
+        if candidate.startswith(f"{CONSENT_ACTION_PREFIX}:"):
+            out.append(candidate)
+    for section in action.get("sections") or ():
+        if not isinstance(section, dict):
+            continue
+        for row in section.get("rows") or ():
+            if not isinstance(row, dict):
+                continue
+            candidate = str(row.get("id") or "").strip()
+            if candidate.startswith(f"{CONSENT_ACTION_PREFIX}:"):
+                out.append(candidate)
+    return out
 
 
 def _offer_already_recorded(
@@ -536,8 +875,13 @@ def apply_explicit_address_selection(
     # action redelivered is the same selection; a new tap is a new one.
     operation_ref = f"{offer_identity}:{turn_reference(inbound_metadata)}"
     customer_id = int(getattr(conversation, "customer_id", 0) or 0)
-    if has_accepted_delivery_address(dict(order_prep or {})):
-        return {}
+    # An address already accepted for this order does NOT end the choice.
+    # Bailing out here was how "actually, send it to the other one" died:
+    # the first tap accepted address A, and every later tap returned an
+    # empty patch, so the order kept A while the customer was told to
+    # choose. A tap is only refused when it names a showing that is not
+    # live, or a revision that changed since it was shown — both checked
+    # below. Changing an accepted address is a supported lifecycle.
 
     resolution = resolve_customer_address_selection(
         db, tenant_id=int(tenant_id), customer_id=customer_id,
@@ -569,9 +913,30 @@ def apply_explicit_address_selection(
         attempt=attempt,
         turn_ref=turn_reference(inbound_metadata),
     )
-    patch = _shipping_context_to_prep_patch(previous)
+    patch = _replace_order_delivery_address(previous)
     patch["customer_confirmed_previous_address"] = True
     patch["shipping_source"] = "customer_selected_address"
+    return patch
+
+
+def _replace_order_delivery_address(previous: Any) -> Dict[str, Any]:
+    """The order's delivery address becomes THIS address and nothing else.
+
+    ``_shipping_context_to_prep_patch`` writes the chosen address's own
+    fields, including the empty ones — but the acceptance markers a
+    previous address left behind (a pin, a maps URL, an accepted status)
+    are not among them. Merged into retained order state they would keep
+    asserting the earlier address, so a switch would carry the old
+    coordinates under the new city. Every acceptance marker the new
+    address does not itself supply is cleared.
+    """
+    from core.order_context_prefill import _shipping_context_to_prep_patch  # noqa: PLC0415
+
+    patch = _shipping_context_to_prep_patch(previous)
+    for key in _ACCEPTING_PREP_FIELDS:
+        if key not in patch:
+            patch[key] = None
+    patch["address_candidate_only"] = False
     return patch
 
 
@@ -622,6 +987,12 @@ def _offered_revisions(
         if not stored_offer:
             # An offer with no identity predates this contract and cannot
             # say which message it was; it authorizes nothing.
+            return False
+        offered_at = _parse_iso(payload.get("offered_at"))
+        if offered_at is None:
+            # No showing time means nothing bounds it; fail closed.
+            return False
+        if (datetime.now(timezone.utc) - offered_at).total_seconds() > _OFFER_TTL_SECONDS:
             return False
         return True
 
@@ -879,6 +1250,12 @@ def load_checkout_reply_context(
         previous_ctx = getattr(ctx, "known_previous_address", None)
         known_previous = _shipping_context_dict(previous_ctx)
         address_choices = [dict(c) for c in getattr(ctx, "known_address_candidates", ()) or ()]
+        # One showing carries one page. The customer may have more saved
+        # addresses than any single WhatsApp message can hold; a paging
+        # action moves between pages so none of them is unreachable.
+        page_choices, page_index, page_count = address_choice_page(
+            address_choices, structured_page_request(inbound_metadata),
+        )
         # PREPARED, not recorded. Reading context is not presentation: this
         # runs on turns that never mention an address, and recording an
         # offer here made a later reply answerable to something nobody saw.
@@ -887,12 +1264,25 @@ def load_checkout_reply_context(
         presentation = AddressPresentation(
             address_id=int(getattr(previous_ctx, "address_id", 0) or 0),
             fingerprint=str(getattr(previous_ctx, "content_fingerprint", "") or ""),
-            choices=tuple(dict(c) for c in address_choices),
-            # A fresh identity per preparation. It reaches the customer
-            # inside the action ids, and is only persisted if that exact
-            # message is proven sent — so a showing that never left, or one
-            # that has since been superseded, matches no later tap.
-            offer_id=new_offer_id(),
+            choices=tuple(dict(c) for c in page_choices),
+            # One identity per SHOWING, not per preparation. It reaches
+            # the customer inside the action ids, and is only persisted
+            # if that exact message is proven sent — so a showing that
+            # never left, or one that has since been superseded, matches
+            # no later tap. Re-preparing the same inbound turn reproduces
+            # the same identity, so a redelivery is recognisably the same
+            # message instead of a second live offer.
+            offer_id=offer_id_for_showing(
+                tenant_id=tenant_id,
+                conversation=conversation,
+                turn_ref=turn_reference(inbound_metadata),
+                choices=page_choices,
+                address_id=int(getattr(previous_ctx, "address_id", 0) or 0),
+                fingerprint=str(getattr(previous_ctx, "content_fingerprint", "") or ""),
+                page=page_index,
+            ),
+            page=page_index,
+            page_count=page_count,
         )
         _, engine_result = resolve_flow_missing_fields(
             prep,

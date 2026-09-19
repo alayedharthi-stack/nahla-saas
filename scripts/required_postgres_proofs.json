@@ -251,7 +251,7 @@
       "id": "salla_customer_address_candidates",
       "kind": "proof",
       "module": "backend/tests/test_salla_customer_address_candidates_pg.py",
-      "origin": "Salla address-candidate PR \u2014 revision 0110 (fresh, create_all reconciliation, reversible), candidate durability across commit/session/conversation, one provenance row per address, tenant isolation, selected-address reuse after reset, and the independent review's PostgreSQL closure: evidence absent before commit / present after / gone after rollback, two concurrent first imports committing one address, an absent provenance table still committing the confirmed address, and a concurrent refresh between offer and selection being refused",
+      "origin": "Salla address-candidate PR — revision 0110 (fresh, create_all reconciliation, reversible), candidate durability across commit/session/conversation, one provenance row per address, tenant isolation, selected-address reuse after reset, and the independent review's PostgreSQL closure: evidence absent before commit / present after / gone after rollback, two concurrent first imports committing one address, an absent provenance table still committing the confirmed address, and a concurrent refresh between offer and selection being refused",
       "required_env": {
         "LEGACY_MIG_PG_TEST_DATABASE_URL": null
       },
@@ -283,7 +283,10 @@
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_writer_that_cannot_take_authority_refuses",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_stale_refresh_that_arrives_after_a_newer_one_is_refused",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_selection_arriving_after_a_refresh_refuses_the_changed_revision",
-        "backend/tests/test_salla_customer_address_candidates_pg.py::test_two_stores_racing_the_first_import_yield_one_owner"
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_two_stores_racing_the_first_import_yield_one_owner",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_survive_taking_authority",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_let_a_stale_refresh_win",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_from_a_retained_session"
       ]
     }
   ]

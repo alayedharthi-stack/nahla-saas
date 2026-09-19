@@ -8006,6 +8006,10 @@ async def _handle_merchant_message(
                     result=_of2_result,
                 )
                 _of2_reply = _of2_result.reply
+                # Provenance for THIS reply, recorded on the stored
+                # message. The address guard fills it in when it removes a
+                # claim or hands the turn to the emergency fallback.
+                _of2_provenance: Dict[str, Any] = {}
                 try:
                     from modules.ai.order_flow_v2.outbound_guards import (  # noqa: PLC0415
                         apply_order_flow_v2_outbound_guards,
@@ -8016,6 +8020,9 @@ async def _handle_merchant_message(
                         db=db,
                         tenant_id=int(tenant_id),
                         conversation_id=getattr(convo, "id", None),
+                        conversation=convo,
+                        turn_ref=str(wa_msg_id or ""),
+                        provenance_sink=_of2_provenance,
                         order_prep=dict(
                             ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
                                 "order_prep"
@@ -8038,8 +8045,24 @@ async def _handle_merchant_message(
                 # customer can tap, so without this the selection path had
                 # no producer and the ids existed only in tests.
                 _of2_actions = list(getattr(_of2_result, "address_choice_actions", None) or [])
+                _of2_rows = list(getattr(_of2_result, "address_choice_rows", None) or [])
+                _of2_surface = str(getattr(_of2_result, "address_choice_surface", "") or "")
                 _of2_sink: Dict[str, Any] = {}
-                if _of2_actions:
+                if _of2_surface == "list" and _of2_rows:
+                    # More choices than three buttons can carry, or a page
+                    # beyond the first. Truncating to buttons here is what
+                    # made the fourth saved address unreachable.
+                    _of2_ok = await _send_list_reply(
+                        phone_id=phone_id,
+                        to=to,
+                        body_text=_of2_reply,
+                        rows=_of2_rows,
+                        button_label="العناوين المحفوظة",
+                        _tenant_id=tenant_id,
+                        _db=db,
+                        _result_sink=_of2_sink,
+                    )
+                elif _of2_actions:
                     _of2_ok = await _send_interactive_reply(
                         phone_id=phone_id,
                         to=to,
@@ -8066,11 +8089,16 @@ async def _handle_merchant_message(
                     # message's id may only reaffirm an identical offer.
                     try:
                         from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+                            delivered_address_action_ids,
                             record_presented_address_offer,
                         )
 
                         _of2_presentation = getattr(_of2_result, "address_presentation", None)
                         if _of2_presentation is not None:
+                            # Read the payload BACK. Between the reply and
+                            # the provider the wire layer drops rows whose
+                            # titles or ids collide, so only the payload
+                            # that actually left says what was presented.
                             record_presented_address_offer(
                                 db,
                                 tenant_id=int(tenant_id),
@@ -8079,6 +8107,9 @@ async def _handle_merchant_message(
                                 delivery_ref=str(_of2_sink.get("wamid") or ""),
                                 duplicate_suppressed=bool(
                                     _of2_sink.get("duplicate_suppressed")
+                                ),
+                                delivered_action_ids=delivered_address_action_ids(
+                                    _of2_sink.get("sent_payload")
                                 ),
                             )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — an unrecorded presentation makes a later tap refuse, which is the safe direction, and must not fail a delivered message
@@ -8098,6 +8129,11 @@ async def _handle_merchant_message(
                             **_persona_ownership.to_metadata(),
                             "reply_owner": "order_flow_v2",
                             "order_flow_v2_reason": _of2_result.reason,
+                            # What the customer actually received, and why.
+                            # A guard that removed a claim, or an emergency
+                            # fallback that replaced the reply outright, is
+                            # recorded here rather than left implicit.
+                            **_of2_provenance,
                         },
                     )
                     try:
@@ -15986,6 +16022,11 @@ async def _post_wa(
                             "duplicate_suppressed": False,
                             "http_status": (resp_data or {}).get("_nahla_http_status"),
                             "response_body": resp_data,
+                            # What left, after every sanitizer. A caller
+                            # that must record "this is what the customer
+                            # saw" has to read the sent payload back; the
+                            # one it handed in is only what it asked for.
+                            "sent_payload": payload,
                         }
                     )
                 _stamped_id = stamp_outbound_send_status(
@@ -17254,6 +17295,61 @@ async def _send_interactive_reply(
             "type": "button",
             "body": {"text": body_text},
             "action": {"buttons": wire_buttons[:3]},
+        },
+    }, _tenant_id=_tenant_id, _db=_db, _result_sink=_result_sink)
+
+
+async def _send_list_reply(
+    phone_id: str, to: str, body_text: str, rows: list, button_label: str,
+    _tenant_id: Optional[int] = None, _db=None,
+    _result_sink: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Interactive list: the surface for more choices than buttons hold.
+
+    Reply buttons stop at three. A list carries up to ten rows, each with
+    a description, which is what lets several addresses in the same city
+    be told apart. Rows are de-duplicated by id and title for the same
+    reason buttons are — the provider rejects the whole payload otherwise.
+    """
+    wire_rows: list = []
+    seen_ids: set = set()
+    seen_titles: set = set()
+    try:
+        from core.product_button_label import normalize_button_title_key  # noqa: PLC0415
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — fall back to exact titles
+        def normalize_button_title_key(value):  # type: ignore[misc]
+            return str(value or "").strip().lower()
+    for row in list(rows or []):
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("id") or "").strip()
+        title = str(row.get("title") or "").strip()
+        title_key = normalize_button_title_key(title)
+        if not row_id or not title:
+            continue
+        if row_id in seen_ids or (title_key and title_key in seen_titles):
+            continue
+        seen_ids.add(row_id)
+        if title_key:
+            seen_titles.add(title_key)
+        wire_row: Dict[str, Any] = {"id": row_id[:200], "title": title[:24]}
+        description = str(row.get("description") or "").strip()
+        if description:
+            wire_row["description"] = description[:72]
+        wire_rows.append(wire_row)
+        if len(wire_rows) >= 10:
+            break
+    if not wire_rows:
+        return False
+    return await _post_wa(phone_id, {
+        "messaging_product": "whatsapp", "to": to, "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": body_text},
+            "action": {
+                "button": (str(button_label or "").strip() or "اختر")[:20],
+                "sections": [{"rows": wire_rows}],
+            },
         },
     }, _tenant_id=_tenant_id, _db=_db, _result_sink=_result_sink)
 
