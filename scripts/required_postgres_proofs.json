@@ -154,6 +154,37 @@
       ]
     },
     {
+      "id": "commerce_runtime_agent_loop",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py",
+      "origin": "Agent loop PR \u2014 dormant agent loop core: one turn through reasoning, read-only fixture tools, observations feeding the next decision, evidence verification with feedback, bounded stopping, ownership revalidation across awaits, atomic hand-off of one delivery intent, crash and re-entry",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_turn_reasoning_tool_observation_reasoning_reply_and_one_delivery_intent",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_different_observations_lead_to_different_next_decisions",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_direct_reply_finishes_without_an_unnecessary_tool_call",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_invalid_evidence_feeds_verification_back_and_the_correction_is_accepted",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_uncorrectable_verification_fails_bounded_and_reserves_no_delivery",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_commerce_claim_without_any_evidence_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_unknown_tools_invalid_arguments_and_forged_scope_cannot_execute_work",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_provider_without_tool_use_or_parallel_capability_stops_before_executing",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_malformed_and_blocked_provider_results_are_explicit_outcomes",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_repeated_tool_requests_terminate_explicitly",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_tool_timeout_is_an_observation_and_the_loop_stays_honest",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_budget_exhaustion_and_deadline_and_cancellation_stop_without_false_success",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_ownership_lost_while_awaiting_a_result_prevents_state_and_delivery_writes",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_two_processes_running_the_same_turn_produce_one_delivery_sequence",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_crash_before_the_atomic_accept_leaves_no_state_and_no_delivery_sequence",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_re_entry_reuses_the_existing_delivery_intent_and_the_persisted_budget",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_existing_pending_and_unknown_ledger_work_neither_resends_nor_completes",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_completed_turn_is_never_reasoned_about_again",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_loop_run_closes_its_transactions_and_holds_none_across_reasoning"
+      ]
+    },
+    {
       "id": "runner_connection_regressions",
       "kind": "runner_regression",
       "module": "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py",

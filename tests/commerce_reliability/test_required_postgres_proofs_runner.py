@@ -189,7 +189,8 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
     manifest = json.loads(COMMITTED_MANIFEST.read_text(encoding="utf-8"))
     ids = [s["id"] for s in manifest["suites"]]
     assert ids == ["commerce_runtime_foundation", "commerce_runtime_migration", "global_customer_identity",
-                   "commerce_runtime_ledgers", "commerce_runtime_ledgers_migration", "runner_connection_regressions"]
+                   "commerce_runtime_ledgers", "commerce_runtime_ledgers_migration", "commerce_runtime_agent_loop",
+                   "runner_connection_regressions"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -198,6 +199,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                                                "LEGACY_MIG_PG_TEST_DATABASE_URL": None}),
         "commerce_runtime_ledgers": ("proof", harness_env),
         "commerce_runtime_ledgers_migration": ("proof", harness_env),
+        "commerce_runtime_agent_loop": ("proof", harness_env),
         "runner_connection_regressions": ("runner_regression", harness_env),
     }
     for suite in manifest["suites"]:
