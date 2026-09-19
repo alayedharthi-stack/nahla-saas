@@ -1,6 +1,8 @@
 # Commerce runtime — effect and delivery ledgers (contract addendum)
 
-Status: recorded 2026-09-19 as the contract of the second dormant slice.
+Status: recorded 2026-09-19 as the contract of the second dormant slice;
+corrected the same day after the independent ledger review (L1 completion
+boundary, L2 key encoding, evidence trust boundary, receipt semantics).
 Extends `commerce-runtime-foundation-contract.md`; nothing here reopens the
 closed findings B1, B2, B3, processing order, database-target enforcement or
 report freshness. Authority for the implementation in
@@ -30,7 +32,19 @@ it never proves that a provider executed an action exactly once.
   tenant and namespace.
 * The key is derived from what the action is (order reference, coupon code,
   payment reference), never from a provider tool-call id;
-  `derive_business_key` renders that rule.
+  `derive_business_key` renders that rule with encoding **`k1`**:
+  `<action>:k1:<c1>:<c2>...` where every string component is percent-escaped
+  (`%` → `%25`, `:` → `%3A`) before joining, so `["a:b", "c"]` and
+  `["a", "b:c"]` are different identities and so are different component
+  counts. Integers render as decimal digits; empty strings, booleans and
+  `None` are refused. When the encoded key exceeds the 128-character bound it
+  becomes `<action>:k1#sha256:<hex>` over the encoded string; the `#` after
+  the version cannot occur in the plain form, so the forms never collide.
+  Identical components always reproduce the identical key. A different
+  encoding is a new version marker, never a silent change of `k1`.
+* The repository cannot authenticate a key's business meaning: two callers
+  that derive different keys for the same real-world action create two
+  effects. Deriving keys from business identifiers is the caller's contract.
 * Reserving the same key with the same action type, payload hash and
   conversation returns the existing record, whatever its status, so a
   reasoning retry or a provider failover reuses a confirmed result. The same
@@ -57,6 +71,15 @@ it never proves that a provider executed an action exactly once.
   eligible for redispatch: every owner, including the new one, receives
   `DispatchBlocked` / `DeliveryDispatchBlocked` with the exact reason and the
   open attempt.
+* Dispatch requires the originating turn to still be the eligible turn, and
+  a turn's terminal ends its eligibility. So that completion can never strand
+  reserved work, the **completion boundary** (section 7) refuses a terminal
+  while an intent of the turn is reserved but not dispatched or an attempt
+  has no established outcome. The supported order is
+  prepare → reserve dispatch → record outcome → finalize. This slice offers
+  no cancellation, transfer, scheduler or post-terminal dispatch
+  authorization: retained work is dispatched and resolved, or the turn stays
+  open.
 
 ## 4. Honest outcome semantics
 
@@ -75,7 +98,9 @@ rejected | unknown`; `unknown → confirmed | rejected` (late evidence for the
 **same** attempt, once). `confirmed` and `rejected` are final. A confirmed
 result cannot be overwritten and is never replayed as a fresh action.
 Contradictory or out-of-order evidence is an `IllegalTransition`; an
-identical repeat returns the existing row.
+identical repeat returns the existing row. A `reserved` effect is retained
+work: its turn cannot be completed until it is dispatched and its outcome
+recorded (section 7).
 
 Recording evidence for an existing attempt is **scope-bound, not
 lease-bound**: it validates tenant, namespace, conversation and attempt, so
@@ -84,6 +109,25 @@ to its own attempt, while it can create no new effect or attempt. The
 absence of a local success record is never treated as proof that nothing
 happened: after a crash the recovering owner records `unknown`, not
 "not executed".
+
+**Evidence trust boundary.** `record_effect_result` and
+`record_delivery_receipt` are internal persistence APIs that trust their
+caller. Scope validation binds a record to a tenant, namespace, conversation
+and attempt; it authenticates neither the recorder (`recorded_by` is a
+caller-supplied label) nor the provider event behind the evidence. A
+correctly scoped caller can record `confirmed` with empty evidence. Nothing
+in this slice proves that an external event occurred; authenticating
+external evidence and correlating incoming provider receipts are the
+responsibility of a future trusted adapter that owns the provider boundary.
+
+**Duplicate semantics (exact).** An identical repeat of a retained fact
+(same outcome or receipt kind, same provider message id, same evidence)
+returns the existing row. The same kind with different evidence is refused
+(`IllegalTransition`), never merged. Replaying an older `unknown`
+observation after `confirmed` or `rejected` was established is refused and
+leaves the established state intact. A reach receipt that omits the
+provider message id is bound to the accepted send's id: that is an internal
+association, not an independent correlation of an incoming receipt.
 
 ## 5. Processing, transport and reach stay separate
 
@@ -95,17 +139,23 @@ happened: after a crash the recovering owner records `unknown`, not
   without a message id, 5xx or ambiguous response).
 * **Customer reach** is evidence only: `delivered` / `read` receipts bound
   to the accepted provider message id. Acceptance alone leaves reach
-  `unknown`; a `failed` receipt after acceptance makes it `not_reached`.
+  `unknown`. A `failed` receipt after acceptance makes reach `not_reached`
+  only when no `delivered` or `read` evidence exists; established
+  delivered/read evidence is retained and a later `failed` receipt does not
+  downgrade it.
 * `finalize_turn` derives the terminal's transport outcome and customer reach
-  from the ledgers under the same conversation lock, refuses
-  (`CompletionBlocked`) while any attempt has no established outcome, and
-  records the summary in the terminal's `details.ledger`. Evidence recorded
-  later updates the ledgers only; the terminal never changes.
+  from the ledgers under the same conversation lock, is subject to the
+  completion boundary of section 7, and records the summary in the
+  terminal's `details.ledger`. A recorded `unknown` is retained in that
+  summary as unknown, never as success. Evidence recorded later updates the
+  ledgers only; the terminal never changes.
 * A handoff request is a request. `human_transfer_established` is true only
   for a confirmed `handoff_request` whose result carries explicit transfer
   evidence (`transfer.human_owner_ref`, `transfer.accepted_at`); a
   `needs_human` flag or a recorded request never proves a completed human
-  ownership transfer, and the runtime's lease is untouched by it.
+  ownership transfer, and the runtime's lease is untouched by it. The helper
+  checks the supplied fields only; their authenticity is the trusted
+  caller's responsibility, not proof of an external event.
 
 ## 6. Logical delivery sequences
 
@@ -130,6 +180,19 @@ happened: after a crash the recovering owner records `unknown`, not
 * `finalize_turn` persists the terminal atomically with an optional state
   transition and the ledger-derived facts. A crash before commit leaves no
   terminal.
+* **Completion boundary (both terminal entry points).** The foundation's
+  terminal path enforces it under the conversation lock, before any write,
+  whenever the revision `0109` tables exist: a terminal is refused
+  (`CompletionBlocked`, `actionable_work_remains`) while an effect or
+  delivery intent of the turn is reserved but not dispatched or an attempt
+  has no established outcome; a refused completion writes nothing, not even
+  its state transition. A recorded `unknown` and a definitive rejection are
+  established outcomes and do not block. The foundation's own
+  `record_terminal`, which records caller-supplied transport and reach, is
+  refused outright for a ledger-bearing turn (`ledger_bearing_turn`): such
+  turns complete only through the ledger-derived path. Turns without ledger
+  records, and databases without the ledger tables, keep the foundation's
+  behaviour unchanged.
 * Every other operation runs one write transaction; `finalize_turn` may open
   one read-only transaction after a terminal primary-key race, exactly like
   the foundation's `record_terminal`.
@@ -163,7 +226,10 @@ attaches only to its existing attempt; definitive rejection permits one
 bounded recovery; timeout or missing provider message id prevents fallback;
 acceptance, delivery and read receipts remain distinct; illegal or
 contradictory transitions fail explicitly; every operation closes its
-transaction before returning. The strict inventory lists them as required
+transaction before returning; reserved intents and pending attempts block
+premature completion on both terminal entry points while turns without
+ledger records keep the foundation path; distinct business identities with
+equal payloads stay distinct. The strict inventory lists them as required
 proofs (`commerce_runtime_ledgers`, `commerce_runtime_ledgers_migration`).
 
 ## 10. Out of scope (unchanged decisions)
