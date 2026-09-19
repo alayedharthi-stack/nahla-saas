@@ -157,6 +157,16 @@ Regressions:
   `LEGACY_MIG_PG_TEST_DATABASE_URL` is the authoritative admin URL
   (section 2.2). Ephemeral databases (`legacy_mig_*`) are created at
   revision `0107` and dropped.
+* Address-candidate suite: gated on `LEGACY_MIG_PG_TEST_DATABASE_URL`
+  alone, which the existing required-proofs step already provides — the
+  suite therefore needs **no workflow change**. An explicit target is
+  authoritative, so the module fails rather than skips when it is
+  unreachable, and the runner counts a skip as a failure regardless.
+  `CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED=1` and
+  `LEGACY_MIG_PG_INTEGRATION_REQUIRED=1` also force it, for operators and
+  for any later `ci.yml`-only pull request that wants an explicit flag.
+  Ephemeral databases (`legacy_mig_*`) are created at revision `0109` or
+  `0110` and dropped.
 
 ## 3. Proposed CI invocation (separate `ci.yml`-only pull request)
 

@@ -25,7 +25,7 @@ from sqlalchemy import JSON, create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_DIR = REPO_ROOT / "backend"
 DATABASE_DIR = REPO_ROOT / "database"
 for _p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
@@ -834,3 +834,60 @@ def test_confirmation_path_records_the_selection_exactly_once():
     assert len(rows) == 1
     assert rows[0].selection_state == "selected"
     assert db.query(CustomerAddress).count() == 1
+
+
+# ── Guard wiring ────────────────────────────────────────────────────────
+#
+# The full pipeline-ordering contract lives in
+# backend/tests/test_p1b_post_compose_guard_consolidation.py, which the
+# repository's CI does not collect. This keeps the one fact this slice
+# introduces — that the address save-claim guard is actually registered,
+# and where — inside a module CI does run.
+
+def test_address_save_claim_guard_is_registered_in_the_post_compose_pipeline():
+    source = (
+        BACKEND_DIR
+        / "modules" / "ai" / "brain" / "postprocess" / "post_compose_guard_pipeline.py"
+    ).read_text(encoding="utf-8")
+
+    # Scope to the pipeline function: the staff guard is also named inside
+    # the earlier handoff-only helper.
+    body = source[source.index("def run_post_compose_truth_guards") :]
+    positions = {
+        name: body.index(f'guard_name = "{name}"')
+        for name in (
+            "shipment_truth_guard",
+            "customer_address_save_claim_guard",
+            "staff_escalation_truth_guard",
+        )
+    }
+    assert (
+        positions["shipment_truth_guard"]
+        < positions["customer_address_save_claim_guard"]
+        < positions["staff_escalation_truth_guard"]
+    )
+    # The guard resolves its evidence from the database, never from the
+    # turn's own state.
+    assert "resolve_and_apply_customer_address_save_claim_guard" in source
+    assert "customer_id=getattr(convo, \"customer_id\", None)" in source
+
+
+def test_address_save_claim_guard_resolver_reads_committed_evidence():
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.rollback()
+
+    from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # noqa: PLC0415
+        resolve_and_apply_customer_address_save_claim_guard,
+    )
+
+    result = resolve_and_apply_customer_address_save_claim_guard(
+        db=db,
+        reply=SAVE_CLAIM,
+        tenant_id=tenant.id,
+        customer_id=customer.id,
+    )
+    assert result.action == "blocked_unsupported_address_save_claim"
+    assert "تم حفظ عنوانك" not in result.reply
+    assert result.evidence_scope == "none"

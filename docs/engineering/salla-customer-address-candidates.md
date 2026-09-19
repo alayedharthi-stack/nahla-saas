@@ -153,7 +153,36 @@ pipeline (between `shipment_truth_guard` and
 evidence cannot carry, leaving the rest of the reply intact. It authors no
 customer-facing prose and adds no template.
 
-## 7. Activation dependencies
+## 7. Test discovery (no workflow change)
+
+`.github/workflows/ci.yml` is in the GOV-002 scanner's `GOVERNANCE_CORE`
+set, so a runtime pull request may not touch it and an owner exception may
+not be created in the same pull request. This slice therefore adds **no**
+workflow change and relies on discovery that already exists:
+
+* The behavioural regressions live in `tests/`, which is `pytest.ini`'s
+  only `testpaths` entry, so the existing `Run unit tests` step
+  (`python -m pytest -q --maxfail=1`) collects and enforces them. They use
+  in-memory SQLite only and probe no PostgreSQL, preserving the documented
+  invariant that the root run never reaches the job's `127.0.0.1:5433`
+  service.
+* The PostgreSQL proofs stay in `backend/tests/` — where the equivalent
+  identity suite lives — and run through the existing required-proofs
+  step, gated on `LEGACY_MIG_PG_TEST_DATABASE_URL`, which that step
+  already sets.
+
+Known gap, pre-existing and **not** introduced here: `backend/tests` is
+not in `testpaths`, and the repository's CI enumerates backend modules
+individually. `test_p1b_post_compose_guard_consolidation.py` (the full
+post-compose ordering contract, extended by this slice) is among the
+modules CI does not collect — as it was before this change. The one fact
+this slice introduces there, that the address save-claim guard is
+registered between the shipment and staff guards, is additionally asserted
+from `tests/test_salla_customer_address_candidates.py`, which CI does run.
+Closing the wider gap needs a `ci.yml`-only governance pull request and is
+out of scope here.
+
+## 8. Activation dependencies
 
 * **Migration.** `customer_address_provenance` exists only where
   `alembic upgrade 0110` has been applied, or where the ORM table was
@@ -178,7 +207,7 @@ customer-facing prose and adds no template.
   unflagged promotion paths are the delivery-continuation and
   previous-address-confirmation paths in `order_flow_v2/checkout_context`.
 
-## 8. Deferred
+## 9. Deferred
 
 * Order and shipment addresses as candidates — order/shipment addresses
   remain order snapshots.

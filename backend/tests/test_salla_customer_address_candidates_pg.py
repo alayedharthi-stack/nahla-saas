@@ -9,9 +9,13 @@ idempotent under concurrency-shaped repeats, and revision 0110 itself
 question). SQLite proves none of these.
 
 Runs when a PostgreSQL DSN is available (see
-``legacy_migration_drift_postgres_fixtures.connect_engine``); REQUIRED
-under ``CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED=1`` or
-``LEGACY_MIG_PG_INTEGRATION_REQUIRED=1``.
+``legacy_migration_drift_postgres_fixtures.connect_engine``) and is
+REQUIRED — a connection failure fails instead of skipping — whenever
+``LEGACY_MIG_PG_TEST_DATABASE_URL`` is set, which is the configuration
+``scripts/required_postgres_proofs.json`` gates this suite on and which
+CI already provides to the required-proofs step.
+``CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED=1`` and
+``LEGACY_MIG_PG_INTEGRATION_REQUIRED=1`` also force it.
 
 INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
 MODEL_CHANGED=NO
@@ -96,8 +100,17 @@ STREET = "حي النرجس، شارع 10"
 
 
 def _pg_required() -> bool:
+    """These proofs must FAIL, never skip, once a target is configured.
+
+    An explicit ``LEGACY_MIG_PG_TEST_DATABASE_URL`` is authoritative: it is
+    the configuration the required-proofs runner gates this suite on, and
+    the runner counts a skip as a failure anyway. The two opt-in flags stay
+    recognised so an operator (or a later governance change to the
+    workflow) can require the suite without setting a DSN here.
+    """
     return (
-        (os.getenv("CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED") or "").strip() == "1"
+        bool((os.getenv("LEGACY_MIG_PG_TEST_DATABASE_URL") or "").strip())
+        or (os.getenv("CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED") or "").strip() == "1"
         or (os.getenv("LEGACY_MIG_PG_INTEGRATION_REQUIRED") or "").strip() == "1"
     )
 

@@ -200,8 +200,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "commerce_runtime_ledgers": ("proof", harness_env),
         "commerce_runtime_ledgers_migration": ("proof", harness_env),
         "runner_connection_regressions": ("runner_regression", harness_env),
-        "salla_customer_address_candidates": ("proof", {"CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED": "1",
-                                                        "LEGACY_MIG_PG_TEST_DATABASE_URL": None}),
+        "salla_customer_address_candidates": ("proof", {"LEGACY_MIG_PG_TEST_DATABASE_URL": None}),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]

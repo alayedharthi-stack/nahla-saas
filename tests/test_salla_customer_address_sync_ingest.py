@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[1]
 _BACKEND = _REPO / "backend"
 for p in (str(_REPO), str(_BACKEND), str(_REPO / "database")):
     if p not in sys.path:
