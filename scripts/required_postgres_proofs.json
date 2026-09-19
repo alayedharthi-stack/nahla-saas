@@ -246,6 +246,40 @@
         "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py::test_unreachable_explicit_target_fails_without_fallback_to_a_reachable_service",
         "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py::test_reachable_explicit_target_is_used_even_when_every_alternate_is_dead"
       ]
+    },
+    {
+      "id": "salla_customer_address_candidates",
+      "kind": "proof",
+      "module": "backend/tests/test_salla_customer_address_candidates_pg.py",
+      "origin": "Salla address-candidate PR \u2014 revision 0110 (fresh, create_all reconciliation, reversible), candidate durability across commit/session/conversation, one provenance row per address, tenant isolation, selected-address reuse after reset, and the independent review's PostgreSQL closure: evidence absent before commit / present after / gone after rollback, two concurrent first imports committing one address, an absent provenance table still committing the confirmed address, and a concurrent refresh between offer and selection being refused",
+      "required_env": {
+        "LEGACY_MIG_PG_TEST_DATABASE_URL": null
+      },
+      "nodeids": [
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_0110_creates_the_table_on_a_database_at_0109",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_0110_reconciles_a_create_all_materialised_table",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_0110_downgrade_removes_only_this_revision",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_import_survives_commit_a_fresh_session_and_a_new_conversation",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_repeated_import_across_sessions_stays_one_row",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_one_provenance_row_per_address_is_enforced_by_the_schema",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_rolled_back_import_yields_no_durable_save_evidence",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_committed_selection_is_the_only_adoption_evidence",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_another_tenant_never_sees_or_selects_the_address",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_selected_address_reaches_checkout_in_a_new_conversation",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_several_candidates_never_resolve_to_an_implicit_default",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_orm_metadata_matches_the_migrated_schema",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_evidence_is_absent_before_commit_present_after_and_gone_after_rollback",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_two_concurrent_first_imports_commit_one_address",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_absent_provenance_table_still_commits_the_confirmed_address",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_concurrent_refresh_between_offer_and_selection_is_refused",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_losing_concurrent_first_import_recovers_the_winning_row",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_selection_committed_between_refresh_read_and_write_is_preserved",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_after_the_race",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_rejected_provenance_insert_still_commits_the_confirmed_address",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_failed_optional_read_leaves_the_caller_transaction_usable",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_revision_constraint_is_scoped_to_the_store_connection",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_same_store_still_cannot_duplicate_one_revision"
+      ]
     }
   ]
 }

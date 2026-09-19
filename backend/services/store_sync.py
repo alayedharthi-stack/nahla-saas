@@ -3497,6 +3497,208 @@ class StoreSyncService:
         self.db.add(new_customer)
         return "created"
 
+    # ── Salla customer-profile address candidates ─────────────────────────
+    #
+    # Attachment is authorised by the provider customer identity alone:
+    # (tenant, active store connection, salla_customer_id) → exactly one
+    # local Customer. Name matching and phone fallback are NOT accepted
+    # here — they resolve customers, they do not prove whose address this
+    # is. Anything ambiguous or conflicting fails safe with no write.
+
+    def _resolve_customer_for_address_attachment(
+        self,
+        ext_id: str,
+        *,
+        integration_connection_id: int | None = None,
+    ) -> tuple[Optional[Any], str]:
+        """Strict identity binding for address attachment only.
+
+        ``(tenant, salla_customer_id)`` alone is not a binding: the same
+        provider customer reference can exist under two stores of one
+        tenant, and resolving on it let store B attach an address to a
+        customer store A had linked. So when the caller knows which store
+        connection authorises the import, that connection must independently
+        know this reference — an ``ExternalCustomerProfile`` mapped to it.
+        Whether a profile record exists at all is checked separately, so a
+        tenant with no A1 profiles behaves exactly as before rather than
+        losing address import.
+        """
+        ref = str(ext_id or "").strip()
+        if not ref:
+            return None, "missing_salla_customer_id"
+        rows = (
+            self.db.query(Customer)
+            .filter(
+                Customer.tenant_id == self.tenant_id,
+                Customer.salla_customer_id == ref,
+            )
+            .all()
+        )
+        if not rows:
+            return None, "customer_not_linked"
+        if len(rows) > 1:
+            return None, "ambiguous_customer_identity"
+        customer = rows[0]
+        if int(getattr(customer, "tenant_id", 0) or 0) != int(self.tenant_id):
+            return None, "tenant_mismatch"
+        if str(getattr(customer, "salla_customer_id", "") or "").strip() != ref:
+            return None, "conflicting_customer_identity"
+        if not getattr(customer, "id", None):
+            return None, "customer_not_persisted"
+        if integration_connection_id is not None:
+            owner = self._external_profile_owner_for_ref(ref)
+            if owner is not None and int(owner) != int(integration_connection_id):
+                return None, "customer_owned_by_another_connection"
+        return customer, "ok"
+
+    def _external_profile_owner_for_ref(self, ext_id: str) -> Optional[int]:
+        """Which store connection this tenant maps the reference under.
+
+        ``None`` means no mapping is recorded for this reference — nothing
+        is asserted then, so tenants without A1 profiles are unaffected. A
+        reference mapped to more than one connection is ambiguous and
+        returns the conflicting one, which refuses the attachment.
+        """
+        try:
+            from models import ExternalCustomerProfile  # noqa: PLC0415
+
+            owners = {
+                int(row.integration_connection_id)
+                for row in (
+                    self.db.query(ExternalCustomerProfile)
+                    .filter(
+                        ExternalCustomerProfile.tenant_id == self.tenant_id,
+                        ExternalCustomerProfile.external_customer_ref == str(ext_id),
+                    )
+                    .all()
+                )
+                if getattr(row, "integration_connection_id", None) is not None
+            }
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable mapping asserts nothing and leaves the existing binding in force
+            return None
+        if not owners:
+            return None
+        if len(owners) > 1:
+            # Mapped under several stores: no single owner, so no store may
+            # claim this reference for an address attachment.
+            return -1
+        return owners.pop()
+
+    def _resolve_address_integration_connection_id(
+        self,
+        integration_connection_id: int | None = None,
+    ) -> tuple[Optional[int], str]:
+        """Resolve the Salla store connection that AUTHORISES this import.
+
+        A verified connection is a prerequisite for attaching an address,
+        not optional provenance. It must exist, belong to this tenant, be a
+        Salla connection and be enabled. Anything else — missing, foreign,
+        disabled, wrong provider — returns no connection and the caller
+        writes nothing. Recording ``integration_connection_id=None`` and
+        importing anyway would let a payload borrow authority it never had.
+
+        Returns ``(connection_id, reason)``; ``reason`` is ``"ok"`` only
+        when the connection is verified.
+        """
+        from models import Integration  # noqa: PLC0415
+        from store_integration.registry import pick_active_salla_integration  # noqa: PLC0415
+
+        conn_id = (
+            integration_connection_id
+            if integration_connection_id is not None
+            else self._integration_connection_id
+        )
+        if conn_id is None:
+            # No explicit connection on this call path: fall back to the
+            # tenant's own active Salla connection, never to "no check".
+            intg = pick_active_salla_integration(self.db, self.tenant_id)
+            if intg is None:
+                return None, "no_active_salla_connection"
+        else:
+            intg = (
+                self.db.query(Integration)
+                .filter_by(id=int(conn_id), tenant_id=self.tenant_id)
+                .first()
+            )
+            if intg is None:
+                return None, "connection_not_found_for_tenant"
+
+        if int(getattr(intg, "tenant_id", 0) or 0) != int(self.tenant_id):
+            return None, "connection_tenant_mismatch"
+        if str(getattr(intg, "provider", "") or "").strip().lower() != "salla":
+            return None, "connection_provider_mismatch"
+        if not bool(getattr(intg, "enabled", False)):
+            return None, "connection_disabled"
+        return int(intg.id), "ok"
+
+    def _persist_salla_profile_address_candidate(
+        self,
+        payload: Dict,
+        *,
+        integration_connection_id: int | None = None,
+    ) -> str:
+        """Persist the profile address as a durable CANDIDATE (never a default)."""
+        try:
+            from core.customer_address_candidates import (  # noqa: PLC0415
+                SOURCE_SALLA_CUSTOMER_PROFILE,
+                components_from_salla_customer_payload,
+                source_updated_at_from_salla_customer_payload,
+                upsert_imported_address_candidate,
+            )
+
+            ext_id = str((payload or {}).get("id") or "").strip()
+            # The connection is resolved FIRST and checked before any write:
+            # an unverified store binding must stop the attachment, not
+            # merely go unrecorded — and the customer lookup itself is
+            # bound to the connection that came back.
+            conn_id, conn_reason = self._resolve_address_integration_connection_id(
+                integration_connection_id,
+            )
+            if conn_reason != "ok":
+                logger.debug(
+                    "tenant=%s address candidate refused ext_id=%s reason=%s",
+                    self.tenant_id, ext_id or "-", conn_reason,
+                )
+                return conn_reason
+            customer, reason = self._resolve_customer_for_address_attachment(
+                ext_id, integration_connection_id=conn_id,
+            )
+            if customer is None:
+                logger.debug(
+                    "tenant=%s address candidate skipped ext_id=%s reason=%s",
+                    self.tenant_id, ext_id or "-", reason,
+                )
+                return reason
+            components = components_from_salla_customer_payload(payload)
+            if components.is_empty():
+                return "no_supported_address_components"
+            result = upsert_imported_address_candidate(
+                self.db,
+                tenant_id=self.tenant_id,
+                customer_id=int(customer.id),
+                components=components,
+                source=SOURCE_SALLA_CUSTOMER_PROFILE,
+                source_ref=ext_id,
+                integration_connection_id=conn_id,
+                source_updated_at=source_updated_at_from_salla_customer_payload(payload),
+            )
+            logger.info(
+                "[SALLA_ADDRESS_CANDIDATE] tenant=%s customer=%s action=%s reason=%s",
+                self.tenant_id, customer.id, result.action, result.reason,
+            )
+            if result.action == "skipped":
+                # A refusal reports WHY, like every other refusal on this
+                # path. "skipped" alone hides an ownership conflict behind
+                # the same word as "nothing to do".
+                return result.reason or result.action
+            return result.action
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "tenant=%s address candidate row failed: %s",
+                self.tenant_id, type(exc).__name__,
+            )
+            return "failed"
+
     def _upsert_a1_external_profile_side_effect(
         self,
         payload: Dict,
@@ -3581,6 +3783,11 @@ class StoreSyncService:
                 if strict:
                     raise RuntimeError("customer_sync_row_failed") from exc
             self._upsert_a1_external_profile_side_effect(raw)
+        self.db.flush()
+        # Address candidates run after the flush so a customer created in
+        # this batch already has an id to bind the address to.
+        for raw in raw_list:
+            self._persist_salla_profile_address_candidate(raw)
         self.db.flush()
         logger.info(
             "tenant=%s customers sync done — created=%d updated=%d",
@@ -4897,6 +5104,20 @@ class StoreSyncService:
                 self.db.commit()
             except Exception:
                 self.db.rollback()
+
+        # Top-level profile address → durable candidate. Its own
+        # transaction: a failure here rolls back the candidate only, and a
+        # rolled-back candidate yields no save evidence.
+        try:
+            self._persist_salla_profile_address_candidate(
+                payload,
+                integration_connection_id=(
+                    int(effective_conn) if effective_conn is not None else None
+                ),
+            )
+            self.db.commit()
+        except Exception:  # noqa: BLE001
+            self.db.rollback()
 
         snap = (
             self.db.query(StoreKnowledgeSnapshot)

@@ -567,6 +567,91 @@ def run_post_compose_truth_guards(
             )
         )
 
+    # ── customer_address_save_claim_guard ────────────────────────────────
+    guard_name = "customer_address_save_claim_guard"
+    try:
+        from modules.ai.brain.postprocess.customer_address_save_claim_guard import (
+            resolve_and_apply_customer_address_save_claim_guard,
+            resolve_outbound_after_address_claim_scrub,
+        )
+        from modules.ai.order_flow_v2.checkout_context import (
+            read_turn_address_operation,
+            turn_reference,
+        )
+
+        before_guard = reply
+        casg_result = resolve_and_apply_customer_address_save_claim_guard(
+            db=db,
+            reply=reply,
+            tenant_id=tenant_id,
+            customer_id=getattr(convo, "customer_id", None),
+            conversation_id=conv_id,
+            attempt=read_turn_address_operation(
+                convo, turn_ref=turn_reference(inbound_metadata)
+            ),
+        )
+        modified = bool(casg_result.replaced)
+        # Removing the unsupported claim can leave nothing behind. Restoring
+        # the original would send the false claim, and sending an empty
+        # string is silence — a guard may correct the AI, never mute it
+        # (AGENTS.md). This boundary runs AFTER composition, so there is no
+        # second candidate to ask for: the truthful platform line speaks
+        # instead, and the send is suppressed only if even that is missing.
+        # The brain pipeline, which still holds the composer, asks for a
+        # natural recomposition before it ever reaches this point.
+        scrubbed_empty = bool(modified and casg_result.scrubbed_empty)
+        suppress_address_send = False
+        if modified:
+            reply = casg_result.reply
+            if scrubbed_empty:
+                from core.fallback_policy import (  # noqa: PLC0415
+                    empty_reply_fallback,
+                )
+
+                reply, suppress_address_send = (
+                    resolve_outbound_after_address_claim_scrub(
+                        guard_result=casg_result,
+                        empty_reply_fallback_text=str(
+                            empty_reply_fallback() or ""
+                        ).strip(),
+                    )
+                )
+            _note_live_text_mutation(
+                live_provenance_tracker,
+                reason_token=guard_name,
+                before=before_guard,
+                after=reply,
+            )
+        events.append(
+            _log_guard_event(
+                tenant_id=tenant_id,
+                conversation_id=conv_id,
+                layer=layer,
+                guard=guard_name,
+                acted=True,
+                modified=modified,
+                suppressed_send=suppress_address_send,
+                reason=(
+                    f"{casg_result.reason}:scrubbed_empty"
+                    if scrubbed_empty
+                    else casg_result.reason
+                ),
+            )
+        )
+    except Exception:  # noqa: silent-ok — address save claim guard is fail-open
+        events.append(
+            _log_guard_event(
+                tenant_id=tenant_id,
+                conversation_id=conv_id,
+                layer=layer,
+                guard=guard_name,
+                acted=False,
+                modified=False,
+                suppressed_send=False,
+                reason="guard_exception",
+            )
+        )
+
     # ── staff_escalation_truth_guard ─────────────────────────────────────
     guard_name = "staff_escalation_truth_guard"
     suppressed_send = False

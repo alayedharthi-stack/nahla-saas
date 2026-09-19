@@ -16,9 +16,13 @@ from .checkout_context import (
     CheckoutReplyContext,
     apply_delivery_continuation_address_patch,
     apply_previous_address_confirmation,
+    apply_structured_address_consent,
     load_checkout_reply_context,
+    record_presented_address_offer,
+    turn_reference,
     load_identity_first_name,
 )
+from core.order_context_prefill import MODE_CONFIRM
 from modules.ai.checkout_authority import (
     active_whatsapp_checkout,
     checkout_has_items,
@@ -420,6 +424,12 @@ def try_handle_order_flow_v2(
     )
     perm_load = load_tenant_commerce_permissions(db, int(tenant_id))
 
+    # What a reply is about to present. Filled only by a reply context that
+    # actually asks the customer about their saved address, and recorded
+    # only when such a reply is returned for delivery — never by a context
+    # read on a turn that says nothing about an address.
+    presented: Dict[str, Any] = {"presentation": None}
+
     def _finalize(
         *,
         live_flag: bool = live,
@@ -429,6 +439,16 @@ def try_handle_order_flow_v2(
         state_patch: Dict[str, Any],
         skip_brain: bool = True,
     ) -> OrderFlowV2Result:
+        if live_flag and str(reply or "").strip() and presented["presentation"] is not None:
+            # The delivery boundary: this reply carries the address, so a
+            # later structured consent has something real to bind to.
+            record_presented_address_offer(
+                db,
+                tenant_id=int(tenant_id),
+                conversation=conversation,
+                presentation=presented["presentation"],
+                delivery_ref=turn_reference(meta),
+            )
         return _finalize_result(
             live=live_flag,
             shadow_log=shadow_flag,
@@ -496,7 +516,7 @@ def try_handle_order_flow_v2(
         )
 
     def _reply_ctx(prep: Dict[str, Any]) -> CheckoutReplyContext:
-        return load_checkout_reply_context(
+        ctx = load_checkout_reply_context(
             db,
             tenant_id=tenant_id,
             conversation=conversation,
@@ -505,6 +525,13 @@ def try_handle_order_flow_v2(
             brain_state=bs,
             inbound_metadata=meta,
         )
+        if not ctx.presentation.is_empty and (
+            ctx.address_choices
+            or ctx.field_modes.get("delivery_address") == MODE_CONFIRM
+            or ctx.field_modes.get("city") == MODE_CONFIRM
+        ):
+            presented["presentation"] = ctx.presentation
+        return ctx
 
     recent_history: List[Any] = []
     try:
@@ -996,18 +1023,31 @@ def try_handle_order_flow_v2(
 
     on_file_claim = _address_on_file_claim(text)
 
-    addr_confirm_patch = apply_previous_address_confirmation(
+    # A structured action naming the address is the only thing that writes
+    # a durable selection. It is checked first: when the customer taps a
+    # choice, that is the answer, whatever else the message text says.
+    structured_consent_patch = apply_structured_address_consent(
         db,
         tenant_id=tenant_id,
         conversation=conversation,
-        customer_phone=customer_phone,
         order_prep=order_prep,
-        brain_state=bs,
         inbound_metadata=meta,
-        message=text,
     )
-    if addr_confirm_patch:
-        patch.update(addr_confirm_patch)
+    if structured_consent_patch:
+        patch.update(structured_consent_patch)
+    else:
+        addr_confirm_patch = apply_previous_address_confirmation(
+            db,
+            tenant_id=tenant_id,
+            conversation=conversation,
+            customer_phone=customer_phone,
+            order_prep=order_prep,
+            brain_state=bs,
+            inbound_metadata=meta,
+            message=text,
+        )
+        if addr_confirm_patch:
+            patch.update(addr_confirm_patch)
 
     pre_missing = _missing({**order_prep, **patch})
     owner_patch, owner_reason = apply_slot_ownership(

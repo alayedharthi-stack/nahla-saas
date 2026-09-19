@@ -190,7 +190,8 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
     ids = [s["id"] for s in manifest["suites"]]
     assert ids == ["commerce_runtime_foundation", "commerce_runtime_migration", "global_customer_identity",
                    "commerce_runtime_ledgers", "commerce_runtime_ledgers_migration", "commerce_runtime_agent_loop",
-                   "commerce_runtime_pilot", "runner_connection_regressions"]
+                   "commerce_runtime_pilot", "runner_connection_regressions",
+                   "salla_customer_address_candidates"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -202,6 +203,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "commerce_runtime_agent_loop": ("proof", harness_env),
         "commerce_runtime_pilot": ("proof", harness_env),
         "runner_connection_regressions": ("runner_regression", harness_env),
+        "salla_customer_address_candidates": ("proof", {"LEGACY_MIG_PG_TEST_DATABASE_URL": None}),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]

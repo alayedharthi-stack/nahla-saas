@@ -1027,6 +1027,109 @@ class CustomerAddress(Base):
     tenant = relationship('Tenant', back_populates='customer_addresses')
     customer = relationship('Customer', back_populates='addresses')
 
+class CustomerAddressProvenance(Base):
+    """Source binding, revision and explicit selection for one customer address.
+
+    ``customer_addresses`` holds the address CONTENT. This table holds who
+    the content came from, which provider revision it reflects, and whether
+    the customer explicitly selected it as their delivery address.
+
+    The split matters for truth: an address imported from a provider
+    customer profile is a **candidate** (``selection_state='candidate'``),
+    never an automatically adopted delivery address. ``selected_fingerprint``
+    pins the exact content revision the customer approved, so a later
+    provider refresh can be detected instead of silently rewriting what was
+    approved.
+
+    ``source_updated_at`` is the provider's own revision timestamp and stays
+    NULL when the provider did not send one — it is never filled with a
+    locally invented value. ``source_observed_at`` is when Nahla saw the
+    payload, which is a different fact.
+
+    ``source_country`` round-trips the observed country, which
+    ``customer_addresses`` has no column for (``whatsapp_location`` means a
+    WhatsApp location pin, never a country).
+    """
+    __tablename__ = 'customer_address_provenance'
+    __table_args__ = (
+        UniqueConstraint(
+            'tenant_id', 'customer_address_id',
+            name='uq_customer_address_provenance_address',
+        ),
+        # One row per (customer, STORE CONNECTION, source, source ref,
+        # content revision). Two concurrent first imports of the same
+        # payload therefore cannot both commit: the loser gets an
+        # IntegrityError and re-reads the winner. Different revisions still
+        # coexist, so a historical selected revision is never displaced by
+        # a refresh.
+        #
+        # The connection is part of the key because the same provider
+        # customer reference can exist under two stores: without it, one
+        # store's import would collide with — and be deduplicated into —
+        # another store's row.
+        #
+        # COALESCE, not the bare column, because an import that predates a
+        # verified connection stores NULL there and SQL treats NULLs as
+        # distinct: a plain unique key on the column would stop
+        # deduplicating exactly those rows, which is the guarantee the
+        # concurrent-import recovery depends on.
+        Index(
+            'uq_customer_address_provenance_source_revision',
+            'tenant_id', 'customer_id',
+            sa.text('COALESCE(integration_connection_id, -1)'),
+            'source', 'source_ref', 'content_fingerprint',
+            unique=True,
+        ),
+        Index(
+            'ix_customer_address_provenance_source',
+            'tenant_id', 'customer_id', 'source', 'source_ref',
+        ),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    customer_id = Column(Integer, ForeignKey('customers.id'), nullable=False)
+    customer_address_id = Column(
+        Integer, ForeignKey('customer_addresses.id'), nullable=False,
+    )
+    # Lets a caller attach provenance to a still-pending CustomerAddress:
+    # SQLAlchemy fills customer_address_id during the caller's own flush,
+    # so no extra flush is forced on the write path.
+    customer_address = relationship('CustomerAddress')
+
+    # Source binding.
+    source = Column(String, nullable=False)
+    source_ref = Column(String, nullable=True)
+    integration_connection_id = Column(Integer, nullable=True)
+    source_country = Column(String, nullable=True)
+
+    # Revision.
+    content_fingerprint = Column(String, nullable=False)
+    source_updated_at = Column(DateTime(timezone=True), nullable=True)
+    source_observed_at = Column(DateTime(timezone=True), nullable=False)
+
+    # Explicit selection.
+    selection_state = Column(
+        String, nullable=False, server_default='candidate', default='candidate',
+    )
+    selected_fingerprint = Column(String, nullable=True)
+    selected_at = Column(DateTime(timezone=True), nullable=True)
+    selection_source = Column(String, nullable=True)
+    # Identity of the selection OPERATION, so a redelivered confirmation is
+    # a no-op while a genuinely new choice of a previously approved address
+    # becomes the current selection.
+    selection_operation_ref = Column(String, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now(),
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now(),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class CustomerImportBatch(Base):
     """One import session created when the merchant uploads a CSV/XLSX
     of customers. Persists across the four wizard steps (upload →

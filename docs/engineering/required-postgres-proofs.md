@@ -39,6 +39,7 @@ The inventory distinguishes two kinds of suite:
 | `commerce_runtime_agent_loop` | proof | `tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py` | agent loop PR, dormant agent loop core and its durable guarantees (reasoning with read-only fixture tools and observations feeding the next decision; revision-bound attempt debits, concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; bundle-duplicate refusal and the durable crash-safe recovery allowance) | 39 |
 | `commerce_runtime_pilot` | proof | `tests/commerce_reliability/test_commerce_runtime_pilot_pg.py` | pilot integration PR, the owner pilot end to end with the real admission, ownership, agent loop, Anthropic adapter, trusted read context and delivery ledger and only the model's HTTP call and the WhatsApp transport scripted (one inbound message answered at most once across redelivery, re-entry and concurrency; never a success the send does not support; no blind retry of an uncertain send; a follow-up answered from the conversation the platform already recorded; tenant and conversation scope; refusal when the runtime schema is absent) | 17 |
 | `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
+| `salla_customer_address_candidates` | proof | `backend/tests/test_salla_customer_address_candidates_pg.py` | Salla address-candidate PR, revision 0110 (fresh, `create_all` reconciliation, reversible), candidate durability across commit/session/conversation, one provenance row per address, tenant isolation, selected-address reuse after reset, and the independent review's closure cases: evidence absent before commit / present after / gone after rollback, two concurrent first imports committing one address, an absent provenance table still committing the confirmed address, and a concurrent refresh between offer and selection refused | 16 |
 
 The counts above are informational. Nothing in the runner or its self-test
 pins a count: the inventory must equal pytest's own collection of each
@@ -158,6 +159,16 @@ Regressions:
   `LEGACY_MIG_PG_TEST_DATABASE_URL` is the authoritative admin URL
   (section 2.2). Ephemeral databases (`legacy_mig_*`) are created at
   revision `0107` and dropped.
+* Address-candidate suite: gated on `LEGACY_MIG_PG_TEST_DATABASE_URL`
+  alone, which the existing required-proofs step already provides — the
+  suite therefore needs **no workflow change**. An explicit target is
+  authoritative, so the module fails rather than skips when it is
+  unreachable, and the runner counts a skip as a failure regardless.
+  `CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED=1` and
+  `LEGACY_MIG_PG_INTEGRATION_REQUIRED=1` also force it, for operators and
+  for any later `ci.yml`-only pull request that wants an explicit flag.
+  Ephemeral databases (`legacy_mig_*`) are created at revision `0109` or
+  `0110` and dropped.
 
 ## 3. Proposed CI invocation (separate `ci.yml`-only pull request)
 
