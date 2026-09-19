@@ -53,7 +53,7 @@ CONTEXT_UNAVAILABLE = "trusted_context_unavailable"
 ADMISSION_CONFLICT = "admission_conflict"
 INTERNAL_ERROR = "internal_error"
 
-_schema_state: Dict[int, str] = {}
+_schema_state: Dict[str, str] = {}
 _schema_lock = threading.Lock()
 
 
@@ -110,7 +110,10 @@ def runtime_schema_available(engine: Any) -> bool:
     and an incomplete schema counts as unavailable — the runtime never runs
     half-present.
     """
-    key = id(engine)
+    # Keyed by the engine's own target, not by object identity: a garbage
+    # collected engine can hand its id() to the next one, and a probe result
+    # must never be attributed to a different database.
+    key = _engine_key(engine)
     with _schema_lock:
         cached = _schema_state.get(key)
     if cached is not None:
@@ -132,6 +135,13 @@ def runtime_schema_available(engine: Any) -> bool:
         _schema_state[key] = state
     logger.info("[COMMERCE_RUNTIME] schema probe state=%s", state)
     return state == "complete"
+
+
+def _engine_key(engine: Any) -> str:
+    try:
+        return str(engine.url)
+    except Exception:  # noqa: BLE001 - an engine that cannot name itself is probed every time
+        return f"unknown:{id(engine)}"
 
 
 def reset_schema_probe() -> None:

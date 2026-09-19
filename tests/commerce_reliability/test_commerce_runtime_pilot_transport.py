@@ -78,3 +78,60 @@ def test_the_pilot_bounds_how_long_it_waits_for_one_send():
     from services import commerce_runtime_pilot as pilot
 
     assert 0 < pilot.SEND_WAIT_SECONDS <= 120
+
+
+# ── The schema probe's cache ─────────────────────────────────────────────────
+
+
+class _FakeUrl:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __str__(self) -> str:
+        return self._text
+
+
+class _FakeEngine:
+    def __init__(self, url: str) -> None:
+        self.url = _FakeUrl(url)
+        self.connects = 0
+
+    def connect(self):
+        self.connects += 1
+        raise RuntimeError("no database here")
+
+
+def test_the_schema_probe_is_remembered_per_database_not_per_object(monkeypatch):
+    entry.reset_schema_probe()
+    first = _FakeEngine("postgresql://u:***@db-a/nahla")
+    assert entry.runtime_schema_available(first) is False
+    assert entry.runtime_schema_available(first) is False
+    assert first.connects == 1                      # probed once, then remembered
+
+    same_database = _FakeEngine("postgresql://u:***@db-a/nahla")
+    assert entry.runtime_schema_available(same_database) is False
+    assert same_database.connects == 0              # a new object, the same database
+
+    other = _FakeEngine("postgresql://u:***@db-b/nahla")
+    assert entry.runtime_schema_available(other) is False
+    assert other.connects == 1                      # a different database is probed
+    entry.reset_schema_probe()
+
+
+def test_an_engine_that_cannot_name_itself_is_probed_every_time():
+    entry.reset_schema_probe()
+
+    class Nameless(_FakeEngine):
+        @property
+        def url(self):
+            raise RuntimeError("no url")
+
+        @url.setter
+        def url(self, value):
+            pass
+
+    engine = Nameless("x")
+    assert entry.runtime_schema_available(engine) is False
+    assert entry.runtime_schema_available(engine) is False
+    assert engine.connects == 1                     # keyed by identity as a last resort
+    entry.reset_schema_probe()
