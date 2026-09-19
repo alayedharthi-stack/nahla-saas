@@ -62,32 +62,58 @@ def _supports_savepoints(db: Any) -> bool:
 def _nested_or_passthrough(db: Any):
     """Run a write inside a SAVEPOINT when the session supports one.
 
-    A SAVEPOINT keeps a failed write from poisoning the caller's
+    A SAVEPOINT keeps a failed statement from poisoning the caller's
     transaction: only the nested block rolls back, so work the caller had
     already done — an address row it is committing, for instance —
-    survives. Where savepoints are unavailable the block runs inline and
-    the caller's own transaction semantics apply unchanged.
+    survives.
+
+    The rollback is unconditional on failure. A failed flush leaves the
+    nested transaction DEACTIVE, and skipping ``rollback()`` because it is
+    no longer ``is_active`` leaves SQLAlchemy's transaction stack
+    un-unwound: the caller's next commit then raises PendingRollbackError
+    and takes its own work down. Deactivated is precisely the state that
+    most needs the rollback.
     """
     if not _supports_savepoints(db):
         yield None
         return
-    begin_nested = db.begin_nested
-    nested = begin_nested()
+    nested = db.begin_nested()
     try:
         yield nested
     except Exception:
         try:
-            if getattr(nested, "is_active", False):
-                nested.rollback()
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — the original exception below is the one that matters
+            nested.rollback()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — the original exception below is the one the caller must see
             pass
         raise
     else:
+        nested.commit()
+
+
+@contextmanager
+def _read_guard(db: Any):
+    """Isolate an OPTIONAL read so its failure cannot abort the caller.
+
+    On PostgreSQL a failed statement aborts the whole transaction: every
+    later statement raises until a rollback. Catching the exception is not
+    enough — the caller's session is already unusable. Reading inside a
+    SAVEPOINT and rolling it back restores usability.
+    """
+    if not _supports_savepoints(db):
+        yield None
+        return
+    nested = db.begin_nested()
+    try:
+        yield nested
+    except Exception:
         try:
-            if getattr(nested, "is_active", False):
-                nested.commit()
-        except Exception:  # noqa: BLE001  # noqa: silent-ok — a session without real SAVEPOINT support (test doubles) needs no release
+            nested.rollback()
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — see above
             pass
+        raise
+    else:
+        nested.commit()
+
 
 # ── Source labels (closed vocabulary for this slice) ────────────────────
 SOURCE_SALLA_CUSTOMER_PROFILE = "salla_customer_profile"
@@ -520,6 +546,25 @@ def upsert_imported_address_candidate(
         authoritative = source_updated_at is not None and (
             stored_rev is None or source_updated_at >= stored_rev
         )
+        # Acquire authority over the row, then REVALIDATE. Between the
+        # history read above and this write another session may have
+        # selected this very candidate; mutating it then would rewrite an
+        # approved revision in place.
+        prov = _lock_provenance(db, provenance=prov)
+        if prov.selection_state == SELECTION_STATE_SELECTED:
+            return _create_new_candidate(
+                db,
+                tenant_id=tenant_id,
+                customer_id=customer_id,
+                components=components,
+                source=source,
+                source_ref=source_ref,
+                integration_connection_id=integration_connection_id,
+                source_updated_at=source_updated_at,
+                now=now,
+                fingerprint=fingerprint,
+                reason="selected_revision_preserved",
+            )
         row = _address_row(db, tenant_id=tenant_id, address_id=int(prov.customer_address_id))
         if row is None:
             return CandidateUpsertResult(
@@ -571,12 +616,48 @@ def upsert_imported_address_candidate(
     # 3. Every row for this source is an approved revision. Refreshed
     #    content becomes a NEW candidate; the approved revision is never
     #    silently rewritten.
-    reason = "selected_revision_preserved" if rows else "first_import"
-    # The insert races another importer of the same payload. The
-    # (tenant, customer, source, source_ref, content_fingerprint) unique
-    # constraint lets exactly one of them commit; the loser rolls its
-    # SAVEPOINT back and re-reads the winner, so one source revision is one
-    # address row no matter how many callers arrive together.
+    return _create_new_candidate(
+        db,
+        tenant_id=tenant_id,
+        customer_id=customer_id,
+        components=components,
+        source=source,
+        source_ref=source_ref,
+        integration_connection_id=integration_connection_id,
+        source_updated_at=source_updated_at,
+        now=now,
+        fingerprint=fingerprint,
+        reason="selected_revision_preserved" if rows else "first_import",
+    )
+
+
+def _create_new_candidate(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    components: AddressComponents,
+    source: str,
+    source_ref: str,
+    integration_connection_id: Optional[int],
+    source_updated_at: Optional[datetime],
+    now: datetime,
+    fingerprint: str,
+    reason: str,
+) -> CandidateUpsertResult:
+    """Insert one source revision as a fresh, unselected candidate row.
+
+    Used both for a first import and whenever the rows this source already
+    owns are approved revisions, which are never rewritten in place.
+
+    The insert races another importer of the same payload. The
+    (tenant, customer, source, source_ref, content_fingerprint) unique
+    constraint lets exactly one of them commit; the loser rolls its
+    SAVEPOINT back and re-reads the winner, so one source revision is one
+    address row no matter how many callers arrive together.
+    """
+    from models import CustomerAddress, CustomerAddressProvenance  # noqa: PLC0415
+
     try:
         with _nested_or_passthrough(db):
             row = CustomerAddress(
@@ -634,6 +715,29 @@ def upsert_imported_address_candidate(
         fingerprint=fingerprint,
         components=components,
     )
+
+
+def _lock_provenance(db: Any, *, provenance: Any) -> Any:
+    """Re-read the provenance row holding a write lock, where supported."""
+    from models import CustomerAddressProvenance  # noqa: PLC0415
+
+    if not _supports_savepoints(db):
+        return provenance
+    try:
+        locked = (
+            db.query(CustomerAddressProvenance)
+            .filter_by(id=int(provenance.id))
+            .with_for_update()
+            # populate_existing is what makes this a REVALIDATION rather
+            # than a no-op: without it the identity map hands back the row
+            # as this session first read it, and a selection another
+            # session committed in the meantime stays invisible.
+            .populate_existing()
+            .first()
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — without a lock the caller keeps the unlocked row and the unique constraint remains the backstop
+        return provenance
+    return locked if locked is not None else provenance
 
 
 def _find_provenance_by_revision(
@@ -839,13 +943,38 @@ def attach_selection_provenance_for_new_address(
     resolved = components if components is not None else components_from_address_row(address_row)
     if resolved.is_empty():
         return None
+    prov = _build_selection_provenance(
+        tenant_id=tenant_id,
+        customer_id=customer_id,
+        components=resolved,
+        source=source,
+        selection_source=selection_source,
+        selected_at=selected_at,
+    )
+    prov.customer_address = address_row
+    db.add(prov)
+    return prov
+
+
+def _build_selection_provenance(
+    *,
+    tenant_id: int,
+    customer_id: int,
+    components: AddressComponents,
+    source: str,
+    selection_source: str,
+    selected_at: Optional[datetime] = None,
+) -> Any:
+    """Construct (but do not add) the provenance row for a selection."""
+    from models import CustomerAddressProvenance  # noqa: PLC0415
+
     now = selected_at or _utcnow()
-    fingerprint = address_content_fingerprint(resolved)
-    prov = CustomerAddressProvenance(
+    fingerprint = address_content_fingerprint(components)
+    return CustomerAddressProvenance(
         tenant_id=int(tenant_id),
         customer_id=int(customer_id),
         source=source,
-        source_country=resolved.country or None,
+        source_country=components.country or None,
         content_fingerprint=fingerprint,
         source_updated_at=None,
         source_observed_at=now,
@@ -856,8 +985,78 @@ def attach_selection_provenance_for_new_address(
         created_at=now,
         updated_at=now,
     )
-    prov.customer_address = address_row
-    db.add(prov)
+
+
+def attach_selection_provenance_contained(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    address_row: Any,
+    selection_source: str,
+    source: str,
+    components: Optional[AddressComponents] = None,
+    selected_at: Optional[datetime] = None,
+) -> Optional[Any]:
+    """Attach selection provenance without risking the caller's address write.
+
+    Provenance only LABELS an address the caller already decided to write.
+    Queueing the insert and letting the caller's COMMIT execute it puts the
+    two in the same statement batch: a rejected provenance insert then
+    poisons the transaction, the commit raises ``PendingRollbackError`` and
+    the address the customer confirmed is lost with it.
+
+    So on a backend with savepoints the caller's pending work is flushed
+    FIRST, outside the savepoint, and only the provenance insert runs
+    inside it. A failure there rolls back to the savepoint — the
+    provenance row and nothing else — leaving the caller's transaction
+    healthy and its address write intact. Nothing here commits or rolls
+    back the caller's transaction.
+
+    Without savepoints there is no containment boundary to use, so the
+    queued, I/O-free attachment is kept: forcing a flush on that path would
+    change write behaviour callers depend on without buying any
+    containment.
+    """
+    if not tenant_id or not customer_id or address_row is None:
+        return None
+    if not _supports_savepoints(db):
+        return attach_selection_provenance_for_new_address(
+            db,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            address_row=address_row,
+            selection_source=selection_source,
+            source=source,
+            components=components,
+            selected_at=selected_at,
+        )
+    if not provenance_table_available(db):
+        return None
+    resolved = components if components is not None else components_from_address_row(address_row)
+    if resolved.is_empty():
+        return None
+
+    # The caller's address INSERT lands outside the savepoint, so rolling
+    # the savepoint back can never undo it. It also assigns the id the
+    # provenance row needs.
+    db.flush()
+    address_id = int(getattr(address_row, "id", 0) or 0)
+    if not address_id:
+        return None
+
+    prov = _build_selection_provenance(
+        tenant_id=tenant_id,
+        customer_id=customer_id,
+        components=resolved,
+        source=source,
+        selection_source=selection_source,
+        selected_at=selected_at,
+    )
+    prov.customer_address_id = address_id
+    with _nested_or_passthrough(db):
+        db.add(prov)
+        db.flush()
     return prov
 
 
@@ -1022,12 +1221,13 @@ def resolve_customer_address_selection(
     provenance: Dict[int, Any] = {}
     provenance_readable = True
     try:
-        for prov in (
-            db.query(CustomerAddressProvenance)
-            .filter_by(tenant_id=int(tenant_id), customer_id=int(customer_id))
-            .all()
-        ):
-            provenance[int(prov.customer_address_id)] = prov
+        with _read_guard(db):
+            for prov in (
+                db.query(CustomerAddressProvenance)
+                .filter_by(tenant_id=int(tenant_id), customer_id=int(customer_id))
+                .all()
+            ):
+                provenance[int(prov.customer_address_id)] = prov
     except Exception:  # noqa: BLE001  # noqa: silent-ok — a provenance read failure degrades the projection conservatively (below); it must not fail the caller's read path
         # Read-optional, but NOT proof of anything: a failed read says only
         # that provenance is unknown. Rows are classified from what the

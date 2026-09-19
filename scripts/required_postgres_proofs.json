@@ -242,7 +242,12 @@
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_evidence_is_absent_before_commit_present_after_and_gone_after_rollback",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_two_concurrent_first_imports_commit_one_address",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_absent_provenance_table_still_commits_the_confirmed_address",
-        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_concurrent_refresh_between_offer_and_selection_is_refused"
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_concurrent_refresh_between_offer_and_selection_is_refused",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_losing_concurrent_first_import_recovers_the_winning_row",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_selection_committed_between_refresh_read_and_write_is_preserved",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_after_the_race",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_rejected_provenance_insert_still_commits_the_confirmed_address",
+        "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_failed_optional_read_leaves_the_caller_transaction_usable"
       ]
     }
   ]

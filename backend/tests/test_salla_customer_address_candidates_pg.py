@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Tuple
+from typing import Any, Callable, Dict, Iterator, Tuple
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
@@ -47,9 +48,11 @@ for _entry in (str(_REPO), str(_BACKEND), str(_DATABASE)):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
 
+import core.customer_address_candidates as address_candidates  # noqa: E402
 from core.customer_address_candidates import (  # noqa: E402
     ACTION_CREATED,
     ACTION_UNCHANGED,
+    ACTION_UPDATED,
     REASON_MULTIPLE_CANDIDATES,
     SELECTION_SOURCE_CUSTOMER_CONFIRMED,
     SOURCE_SALLA_CUSTOMER_PROFILE,
@@ -823,3 +826,295 @@ def test_a_concurrent_refresh_between_offer_and_selection_is_refused(
         ).selected is None
     finally:
         confirming.close()
+
+
+# ── Forced interleavings — real concurrent schedules, not two sequential
+#    sessions. Each hook pauses one session INSIDE the service, at its real
+#    history read, and runs the competing session's whole transaction there.
+#    Sequential calls cannot expose a check/write race, because the second
+#    call's own read already sees the first call's commit. ────────────────
+
+@contextmanager
+def _interleave_at_history_read(
+    target: Session, action: Callable[[], Any],
+) -> Iterator[Dict[str, Any]]:
+    """Run ``action`` once, at the moment ``target`` reads source history.
+
+    The pause is inside the real service between its read and its write —
+    the only place a competing commit can invalidate what it just read.
+    """
+    real = address_candidates._provenance_rows
+    state: Dict[str, Any] = {"fired": False, "result": None}
+
+    def hooked(db: Any, **kwargs: Any):
+        rows = real(db, **kwargs)
+        if db is target and not state["fired"]:
+            state["fired"] = True
+            state["result"] = action()
+        return rows
+
+    address_candidates._provenance_rows = hooked
+    try:
+        yield state
+    finally:
+        address_candidates._provenance_rows = real
+
+
+def _session_is_usable(db: Session) -> bool:
+    try:
+        return db.execute(text("SELECT 1")).scalar() == 1
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def test_losing_concurrent_first_import_recovers_the_winning_row(
+    pg_at_0110: Engine,
+) -> None:
+    """R7: the loser of the insert race returns the winner, not a dead session.
+
+    The unique constraint is doing its job either way. What is under test is
+    the LOSER: it must come back with the winning address, be able to commit
+    its own transaction, and still be usable afterwards.
+    """
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            setup, salla_id="SC-PG-RACE-FORCED", phone="+966500000911")
+    finally:
+        setup.close()
+
+    payload = _payload(id="SC-PG-RACE-FORCED")
+    loser, winner = _session(pg_at_0110), _session(pg_at_0110)
+    try:
+        def win():
+            result = _import(winner, tenant_id, customer_id, payload)
+            winner.commit()
+            return result
+
+        with _interleave_at_history_read(loser, win) as state:
+            outcome = _import(loser, tenant_id, customer_id, payload)
+
+        assert state["fired"], "the competing import must run inside the read"
+        winning = state["result"]
+        assert winning.action == ACTION_CREATED
+
+        # The loser recovers the committed row instead of raising.
+        assert outcome.action == ACTION_UNCHANGED
+        assert outcome.reason == "concurrent_import_deduplicated"
+        assert outcome.address_id == winning.address_id
+
+        # And its transaction is still healthy: it commits and keeps working.
+        loser.commit()
+        assert _session_is_usable(loser)
+    finally:
+        loser.close()
+        winner.close()
+
+    check = _session(pg_at_0110)
+    try:
+        assert check.query(CustomerAddress).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).count() == 1
+        assert check.query(CustomerAddressProvenance).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).count() == 1
+    finally:
+        check.close()
+
+
+def test_selection_committed_between_refresh_read_and_write_is_preserved(
+    pg_at_0110: Engine,
+) -> None:
+    """R7: an approved revision is never content-mutated by a late refresh.
+
+    The refresher reads an unselected row, the customer approves that exact
+    row in another session, and only then does the refresher write. The
+    approved revision must survive untouched and the refreshed content must
+    land as its own candidate.
+    """
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            setup, salla_id="SC-PG-REFRESH-RACE", phone="+966500000912")
+        first = _import(setup, tenant_id, customer_id,
+                        _payload(id="SC-PG-REFRESH-RACE"))
+        setup.commit()
+    finally:
+        setup.close()
+
+    refresher, selector = _session(pg_at_0110), _session(pg_at_0110)
+    try:
+        def approve():
+            result = record_explicit_address_selection(
+                selector, tenant_id=tenant_id, customer_id=customer_id,
+                address_id=first.address_id,
+                expected_fingerprint=first.fingerprint,
+                selection_source=SELECTION_SOURCE_CUSTOMER_CONFIRMED,
+                operation_ref="pg-refresh-race",
+            )
+            selector.commit()
+            return result
+
+        newer = _payload(
+            id="SC-PG-REFRESH-RACE", city="جدة",
+            location="حي الشاطئ، شارع 7", updated_at="2026-09-02T10:00:00Z")
+        with _interleave_at_history_read(refresher, approve) as state:
+            outcome = _import(refresher, tenant_id, customer_id, newer)
+        refresher.commit()
+
+        assert state["fired"]
+        assert state["result"].action == ACTION_UPDATED
+        # The refresh became a NEW candidate rather than rewriting the row
+        # the customer approved.
+        assert outcome.action == ACTION_CREATED
+        assert outcome.reason == "selected_revision_preserved"
+        assert outcome.address_id != first.address_id
+        assert _session_is_usable(refresher)
+    finally:
+        refresher.close()
+        selector.close()
+
+    check = _session(pg_at_0110)
+    try:
+        approved = check.query(CustomerAddress).filter_by(
+            id=first.address_id).one()
+        assert approved.city == CITY, "the approved revision was rewritten"
+        resolution = resolve_customer_address_selection(
+            check, tenant_id=tenant_id, customer_id=customer_id)
+        assert resolution.selected is not None, "the selection was lost"
+        assert resolution.selected.address_id == first.address_id
+        # Both revisions remain visible; nothing is silently dropped.
+        assert {a.address_id for a in resolution.addresses} == {
+            first.address_id, outcome.address_id}
+    finally:
+        check.close()
+
+
+def test_a_later_legitimate_revision_still_lands_after_the_race(
+    pg_at_0110: Engine,
+) -> None:
+    """R7: losing one race must not wedge the source. Retry keeps working."""
+    setup = _session(pg_at_0110)
+    try:
+        tenant_id, customer_id = _seed(
+            setup, salla_id="SC-PG-RETRY", phone="+966500000913")
+    finally:
+        setup.close()
+
+    payload = _payload(id="SC-PG-RETRY")
+    loser, winner = _session(pg_at_0110), _session(pg_at_0110)
+    try:
+        def win():
+            result = _import(winner, tenant_id, customer_id, payload)
+            winner.commit()
+            return result
+
+        with _interleave_at_history_read(loser, win):
+            _import(loser, tenant_id, customer_id, payload)
+        loser.commit()
+
+        # The same session now imports a genuinely newer revision.
+        newer = _import(loser, tenant_id, customer_id, _payload(
+            id="SC-PG-RETRY", city="جدة", location="حي الشاطئ، شارع 7",
+            updated_at="2026-09-03T10:00:00Z"))
+        loser.commit()
+        assert newer.action in (ACTION_UPDATED, ACTION_CREATED)
+        assert newer.components.city == "جدة"
+    finally:
+        loser.close()
+        winner.close()
+
+    check = _session(pg_at_0110)
+    try:
+        resolution = resolve_customer_address_selection(
+            check, tenant_id=tenant_id, customer_id=customer_id)
+        cities = {a.components.city for a in resolution.addresses}
+        assert "جدة" in cities
+    finally:
+        check.close()
+
+
+def test_a_rejected_provenance_insert_still_commits_the_confirmed_address(
+    pg_at_0110: Engine,
+) -> None:
+    """R6: an optional write that FAILS must not take the caller down.
+
+    The missing-table case is already covered. This is the harder one: the
+    table exists and the insert is rejected by the database. A queued insert
+    would surface at the caller's COMMIT, poison the transaction and lose
+    the address the customer confirmed.
+    """
+    from core.customer_shipping_address_writer import (  # noqa: PLC0415
+        persist_customer_shipping_address_if_confirmed,
+    )
+
+    constraint = "probe_reject_confirmed_shipping_provenance"
+    with pg_at_0110.begin() as conn:
+        conn.execute(text(
+            f"ALTER TABLE {_TABLE} ADD CONSTRAINT {constraint} "
+            "CHECK (source <> 'order_confirmed_shipping')"))
+    try:
+        db = _session(pg_at_0110)
+        try:
+            tenant_id, customer_id = _seed(
+                db, salla_id="SC-PG-PROV-REJECT", phone="+966500000914")
+            persisted, _row = persist_customer_shipping_address_if_confirmed(
+                db, tenant_id=tenant_id, customer_id=customer_id, order_id=None,
+                snapshot={"city": CITY, "short_address_code": SHORT_CODE},
+                order_prep={"customer_confirmed_previous_address": True},
+                confirmed_reason="pg_rejected_provenance",
+            )
+            assert persisted is True
+            db.commit()
+            assert _session_is_usable(db)
+        finally:
+            db.close()
+
+        check = _session(pg_at_0110)
+        try:
+            assert check.query(CustomerAddress).filter_by(
+                tenant_id=tenant_id, customer_id=customer_id).count() == 1
+            assert check.query(CustomerAddressProvenance).filter_by(
+                tenant_id=tenant_id, customer_id=customer_id).count() == 0
+        finally:
+            check.close()
+    finally:
+        with pg_at_0110.begin() as conn:
+            conn.execute(text(
+                f"ALTER TABLE {_TABLE} DROP CONSTRAINT {constraint}"))
+
+
+def test_a_failed_optional_read_leaves_the_caller_transaction_usable(
+    pg_at_0109: Engine,
+) -> None:
+    """R6: catching a statement error does NOT restore a PostgreSQL transaction.
+
+    Without the provenance table the resolver's query fails. PostgreSQL then
+    refuses every later statement in that transaction until it is rolled
+    back, so the resolver must isolate its own optional read rather than
+    hand the caller a session that only looks alive.
+    """
+    assert _TABLE not in inspect(pg_at_0109).get_table_names()
+    db = _session(pg_at_0109)
+    try:
+        tenant_id, customer_id = _seed(
+            db, salla_id="SC-PG-READFAIL", phone="+966500000915")
+        db.add(CustomerAddress(
+            tenant_id=tenant_id, customer_id=customer_id, city=CITY,
+            address_text=STREET, address_type="imported_profile_candidate"))
+        db.commit()
+
+        resolution = resolve_customer_address_selection(
+            db, tenant_id=tenant_id, customer_id=customer_id)
+        # Degraded, not broken: the legacy projection still answers.
+        assert len(resolution.addresses) == 1
+
+        assert _session_is_usable(db), "the caller's transaction was aborted"
+        # And the caller can still do — and commit — its own work.
+        db.add(CustomerAddress(
+            tenant_id=tenant_id, customer_id=customer_id, city="جدة",
+            address_text="حي الشاطئ، شارع 7",
+            address_type="imported_profile_candidate"))
+        db.commit()
+        assert db.query(CustomerAddress).filter_by(
+            tenant_id=tenant_id, customer_id=customer_id).count() == 2
+    finally:
+        db.close()
