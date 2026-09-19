@@ -190,34 +190,57 @@ def build_fixture_tools(catalog: FixtureCatalog) -> Tuple[RegisteredTool, ...]:
 
 
 class ToolRegistry:
-    """The allowlist the loop exposes. Every tool is read-only by construction;
-    a definition that is not is refused at registration."""
+    """The allowlist the loop exposes, and the sole authority on how a request
+    is validated.
+
+    The registry keeps its own private copy of every schema and never hands it
+    out: ``definitions`` returns detached copies built fresh on each call, so
+    nothing a provider (or any other holder) does to what it was given can
+    change what the registry validates against. A tool whose definition is not
+    read-only is refused at registration.
+    """
 
     def __init__(self, tools: Sequence[RegisteredTool]) -> None:
         self._tools: Dict[str, RegisteredTool] = {}
+        self._schemas: Dict[str, Dict[str, Any]] = {}
         for tool in tools:
             name = ac.validate_tool_name(tool.definition.name)
             if not tool.definition.read_only:
                 raise c.ValidationError(f"tool {name} is not read-only; only read-only tools may be registered")
             if name in self._tools:
                 raise c.ValidationError(f"tool {name} registered twice")
+            if not isinstance(tool.definition.input_schema, Mapping):
+                raise c.ValidationError(f"tool {name} must declare a mapping input schema")
             self._tools[name] = tool
+            # The authoritative schema: a private deep copy, never shared.
+            self._schemas[name] = ac.public_copy(tool.definition.input_schema)
 
     @property
     def definitions(self) -> Tuple[ac.ToolDefinition, ...]:
-        return tuple(t.definition for t in self._tools.values())
+        """Provider-visible definitions, detached from the authoritative ones."""
+        return tuple(
+            dataclasses.replace(tool.definition, input_schema=ac.public_copy(self._schemas[name]))
+            for name, tool in self._tools.items()
+        )
 
     def execute(self, scope: ToolScope, request: ac.ToolRequest, *, timeout_seconds: float) -> ac.ToolObservation:
         """Validate, then run the tool in a worker thread bounded by ``timeout_seconds``.
 
         Refusals (unknown tool, invalid arguments, scope override) never run
-        anything. A timeout discards the result; the observation says so.
+        anything. A timeout abandons the call and the observation says so; the
+        abandoned thread may still be running and its late value is discarded,
+        which is a local abandonment, not proof that the work stopped.
         """
+        if timeout_seconds <= 0:
+            return self._refusal(request, ac.ToolErrorCode.TIMEOUT.value,
+                                 "no execution time remained inside the turn's deadline")
         tool = self._tools.get(request.tool_name)
         if tool is None:
             return self._refusal(request, ac.ToolErrorCode.UNKNOWN_TOOL.value, "no such tool is exposed")
         try:
-            arguments = _validate_arguments(tool.definition.input_schema, request.arguments)
+            # Validated against the registry's private schema, never against a
+            # copy any caller could have altered.
+            arguments = _validate_arguments(self._schemas[request.tool_name], request.arguments)
         except ac.ToolError as exc:
             return self._refusal(request, exc.code, str(exc))
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -234,7 +257,7 @@ class ToolRegistry:
                 return self._refusal(request, ac.ToolErrorCode.TOOL_FAILURE.value, type(exc).__name__)
         finally:
             executor.shutdown(wait=False)
-        result = dict(outcome.result)
+        result = ac.public_copy(outcome.result)
         if len(json.dumps(result, ensure_ascii=False, sort_keys=True).encode("utf-8")) > ac.MAX_OBSERVATION_BYTES:
             return self._refusal(request, ac.ToolErrorCode.RESULT_TOO_LARGE.value, "the tool result exceeds the bound")
         refs = tuple(ac.validate_evidence_ref(r) for r in outcome.evidence_refs)

@@ -26,7 +26,7 @@ def _loop(dsn: str, budget: Dict[str, Any] | None = None, tenants: Dict[str, int
     engine = create_engine(dsn, pool_pre_ping=True)
     limits = ac.LoopBudget(**budget) if budget else ac.LoopBudget()
     scoped = tenants or {}
-    registry = build_registry(int(scoped.get("a", 1)), int(scoped.get("b", 2)))
+    registry = build_registry(int(scoped.get("a", 1)), int(scoped.get("b", 2)), int(scoped.get("c", 3)))
     return engine, AgentLoop(LedgerRepository(engine), registry, budget=limits)
 
 
@@ -43,6 +43,14 @@ def _scripted(script: str):
         ])
     if script == "direct_reply":
         return sp.ScriptedReasoningProvider([sp.reply("أهلاً! كيف أقدر أساعدك؟")])
+    if script == "search_then_reply_slow":
+        # One tool call, then a reply: used by the crash worker so a durable
+        # tool debit exists before the process dies at the accept boundary.
+        return sp.ScriptedReasoningProvider([
+            sp.tools(sp.tool_call("c1", "catalog_search", query="قميص")),
+            lambda request: sp.reply("تمام.", refs=[r for o in request.observations for r in o.evidence_refs][:1],
+                                     commerce=True),
+        ])
     raise AssertionError(f"unknown script {script}")
 
 

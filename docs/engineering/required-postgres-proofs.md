@@ -36,7 +36,7 @@ The inventory distinguishes two kinds of suite:
 | `global_customer_identity` | proof | `backend/tests/test_global_customer_display_identity_pg.py` | PR #1087 (merged), 0107 persistence cases | 5 |
 | `commerce_runtime_ledgers` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py` | ledger PR, dormant effect and delivery ledgers (business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit, ledger-derived terminals, completion boundary on both terminal entry points, distinct business identities, schema-state completion guard with the standalone-0108 control, reservation/completion race in both lock orders) | 30 |
 | `commerce_runtime_ledgers_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py` | ledger PR, revision 0109 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required) | 12 |
-| `commerce_runtime_agent_loop` | proof | `tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py` | agent loop PR, dormant agent loop core (one turn through reasoning, read-only fixture tools, observations feeding the next decision, evidence verification with feedback, bounded stopping, ownership revalidation across awaits, atomic hand-off of one delivery intent, crash and re-entry) | 19 |
+| `commerce_runtime_agent_loop` | proof | `tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py` | agent loop PR, dormant agent loop core and its durable guarantees (reasoning with read-only fixture tools and observations feeding the next decision; revision-bound attempt debits, concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes) | 33 |
 | `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
 
 The counts above are informational. Nothing in the runner or its self-test
@@ -71,7 +71,7 @@ process with `--junitxml` and judges the JUnit output:
 | Any skip, failure or error | exit **1**, the node id and reason are listed; a skip is never a pass |
 | Leaf `testsuite` counts differ from the inventory or show skips, failures or errors | exit **1** |
 | Non-zero pytest exit | exit **1** |
-| Everything above satisfied for every suite | exit **0**, `PROVEN (105/105 required tests passed: 103/103 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
+| Everything above satisfied for every suite | exit **0**, `PROVEN (119/119 required tests passed: 117/117 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
 
 The runner is pure standard library, imports no application code and carries
 no allowances. `tests/commerce_reliability/test_required_postgres_proofs_runner.py`
@@ -303,3 +303,9 @@ Recorded on 2026-09-19 (PostgreSQL 16.13, Python 3.11), agent loop head:
 PROVEN 105/105 (27 + 10 + 5 + 30 + 12 + 19 proofs, 2 runner/fixture
 regressions), 0 skipped, 128 s, 0 databases left behind. The nineteen added
 proofs are the dormant agent loop core; they call no model and send nothing.
+
+Recorded on 2026-09-19 (PostgreSQL 16.13, Python 3.11), corrected agent loop
+head: PROVEN 119/119 (27 + 10 + 5 + 30 + 12 + 33 proofs, 2 runner/fixture
+regressions), 0 skipped. The agent loop suite grew from 19 to 33 with the
+durable-accounting, enforced-wait, scope, validation, isolation and
+ownership-loss regressions of the review corrections.

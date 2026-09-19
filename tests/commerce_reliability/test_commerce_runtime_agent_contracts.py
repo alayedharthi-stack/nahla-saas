@@ -6,6 +6,9 @@ progress. Runs in the ordinary root suite.
 """
 from __future__ import annotations
 
+import datetime as _dt
+import json
+
 import pytest
 
 from core.commerce_runtime import agent_contracts as ac
@@ -16,6 +19,13 @@ from core.commerce_runtime import ledger_contracts as lc
 from tests.commerce_reliability.agent_fixture_catalog import build_catalog, build_registry
 
 SCOPE = at.ToolScope(tenant_id=1, namespace="live", conversation_id=10, turn_id=100)
+NOW = _dt.datetime(2026, 9, 19, 12, 0, tzinfo=_dt.timezone.utc)
+
+
+def _progress(*, steps_used: int = 0, tool_calls_used: int = 0,
+              limits: ac.LoopBudget = ac.LoopBudget()) -> ac.LoopProgress:
+    return ac.LoopProgress(turn_id=7, phase=ac.LoopPhase.REASONING.value, limits=limits, deadline_at=NOW,
+                           steps_used=steps_used, tool_calls_used=tool_calls_used)
 
 
 def _observation(call_id: str = "c1", *, ok: bool = True, refs=("product:blue_cotton_shirt",)) -> ac.ToolObservation:
@@ -169,36 +179,164 @@ def test_a_failing_tool_becomes_an_observation_not_an_exception() -> None:
 
 
 def test_loop_progress_round_trips_and_ignores_another_turn_or_version() -> None:
-    budget = ac.LoopBudget(max_steps=3, max_tool_calls=4)
-    progress = ac.LoopProgress(turn_id=7, phase=ac.LoopPhase.REASONING.value, steps_used=2, tool_calls_used=1,
-                               elapsed_seconds=1.25)
-    payload = progress.to_payload(budget)
-    assert payload["budget"] == {"max_steps": 3, "max_tool_calls": 4, "deadline_seconds": budget.deadline_seconds}
+    progress = _progress(steps_used=2, tool_calls_used=1)
+    payload = progress.to_payload()
+    assert payload["limits"] == progress.limits.to_payload()
     restored = ac.LoopProgress.from_payload(payload, turn_id=7)
-    assert restored is not None and (restored.steps_used, restored.tool_calls_used) == (2, 1)
+    assert restored == progress
     assert ac.LoopProgress.from_payload(payload, turn_id=8) is None
     assert ac.LoopProgress.from_payload({**payload, "version": 99}, turn_id=7) is None
     assert ac.LoopProgress.from_payload({"version": ac.AGENT_LOOP_STATE_VERSION, "turn_id": 7}, turn_id=7) is None
+    assert ac.LoopProgress.from_payload({**payload, "limits": {"max_steps": 1}}, turn_id=7) is None
+    assert ac.LoopProgress.from_payload({**payload, "deadline_at": "not-a-time"}, turn_id=7) is None
     assert ac.LoopProgress.from_payload(None, turn_id=7) is None
 
 
-def test_progress_lives_in_the_versioned_state_payload_and_fits_its_bound() -> None:
-    payload = {ac.AGENT_LOOP_STATE_KEY: ac.LoopProgress(
-        turn_id=1, phase=ac.LoopPhase.STOPPED.value, steps_used=4, tool_calls_used=6, elapsed_seconds=12.5,
-        stop_reason=ac.StopReason.BUDGET_EXHAUSTED.value).to_payload(ac.LoopBudget())}
+def test_progress_carries_the_authoritative_limits_and_deadline() -> None:
+    """A restored progress is the authority: limits and deadline come from it."""
+    limits = ac.LoopBudget(max_steps=2, max_tool_calls=3, deadline_seconds=45)
+    progress = _progress(limits=limits)
+    restored = ac.LoopProgress.from_payload(progress.to_payload(), turn_id=7)
+    assert restored is not None
+    assert restored.limits == limits and restored.deadline_at == progress.deadline_at
+    assert restored.limits != ac.LoopBudget(), "a different caller budget cannot be mistaken for the stored one"
+
+
+def test_same_debits_arbitrates_between_invocations() -> None:
+    mine = _progress(steps_used=2, tool_calls_used=1)
+    assert mine.same_debits(_progress(steps_used=2, tool_calls_used=1))
+    assert not mine.same_debits(_progress(steps_used=3, tool_calls_used=1))
+    assert not mine.same_debits(_progress(steps_used=2, tool_calls_used=2))
+    assert not mine.same_debits(None)
+
+
+def test_observation_checkpoints_keep_evidence_and_drop_bodies_under_the_bound() -> None:
+    small = ac.ToolObservation("c1", "catalog_search", True, {"products": [{"ref": "product:x"}]}, None, None,
+                               ("product:x",))
+    big = ac.ToolObservation("c2", "catalog_search", True, {"blob": "y" * 20_000}, None, None, ("product:y",))
+    kept = ac.checkpoint_observations([small])
+    assert kept[0].body == {"products": [{"ref": "product:x"}]} and kept[0].evidence_refs == ("product:x",)
+    assert kept[0].restore().result == small.result and kept[0].restore().restored is True
+
+    bounded = ac.checkpoint_observations([small, big])
+    assert [o.evidence_refs for o in bounded] == [("product:x",), ("product:y",)], "references always survive"
+    assert any(o.body is None for o in bounded), "an over-large body is dropped, not stored"
+    truncated = next(o for o in bounded if o.body is None).restore()
+    assert truncated.body_truncated is True and truncated.result is None
+    payload_bytes = len(json.dumps([o.to_payload() for o in bounded], ensure_ascii=False).encode("utf-8"))
+    assert payload_bytes <= ac.MAX_CHECKPOINT_BYTES
+
+
+def test_a_full_progress_payload_fits_the_state_payload_bound() -> None:
+    observations = [ac.ToolObservation(f"c{i}", "catalog_search", True, {"products": [{"ref": f"product:{i}"}]},
+                                       None, None, (f"product:{i}",))
+                    for i in range(ac.MAX_CHECKPOINT_OBSERVATIONS + 6)]
+    progress = ac.LoopProgress(
+        turn_id=1, phase=ac.LoopPhase.REASONING.value, limits=ac.LoopBudget(), deadline_at=NOW,
+        steps_used=4, tool_calls_used=6, observations=ac.checkpoint_observations(observations),
+        feedback=((1, ("unknown_evidence",)),), executed=tuple(f"catalog_search:{i}" for i in range(8)),
+    )
+    assert len(progress.observations) == ac.MAX_CHECKPOINT_OBSERVATIONS
+    payload = {ac.AGENT_LOOP_STATE_KEY: progress.to_payload()}
     assert c.validate_payload(payload, field="payload", max_bytes=c.MAX_PAYLOAD_BYTES)
+
+
+# ── Complete boundary validation ─────────────────────────────────────────────
+
+
+def test_a_provider_result_is_validated_whole_before_anything_in_it_runs() -> None:
+    caps = ac.ProviderCapabilities(provider_name="t", parallel_tool_use=True, max_tool_requests_per_step=3)
+    ok = ac.validate_provider_result(
+        ac.ProviderToolRequests((ac.ToolRequest("c1", "catalog_search", {"query": "x"}),)), caps)
+    assert isinstance(ok, ac.ProviderToolRequests) and len(ok.requests) == 1
+    for bad in (ac.ProviderToolRequests(None), ac.ProviderToolRequests(()),                # type: ignore[arg-type]
+                ac.ProviderToolRequests({"a": 1}), ac.ProviderToolRequests("c1"),          # type: ignore[arg-type]
+                ac.ProviderToolRequests((ac.ToolRequest("c1", "catalog_search", {"q": {1}}),)),
+                ac.ProviderToolRequests((ac.ToolRequest("c1", "catalog_search", {}),
+                                         ac.ToolRequest("c1", "catalog_search", {"query": "y"}))),
+                ac.ProviderReply(ac.ReplyDraft(text="hi", evidence_refs=None)),            # type: ignore[arg-type]
+                ac.ProviderReply(ac.ReplyDraft(text="hi", evidence_refs="product:x")),     # type: ignore[arg-type]
+                ac.ProviderReply(ac.ReplyDraft(text="hi", payload=None)),                  # type: ignore[arg-type]
+                ac.ProviderFailure(""), ac.ProviderBlocked("  "), ac.ProviderInvalid(None),  # type: ignore[arg-type]
+                "not a result", None, 42):
+        with pytest.raises(c.ValidationError):
+            ac.validate_provider_result(bad, caps)
+
+
+def test_capability_limits_are_enforced_at_the_boundary() -> None:
+    serial = ac.ProviderCapabilities(provider_name="t", parallel_tool_use=False)
+    two = ac.ProviderToolRequests((ac.ToolRequest("c1", "catalog_search", {"query": "x"}),
+                                   ac.ToolRequest("c2", "catalog_search", {"query": "y"})))
+    with pytest.raises(ac.UnsupportedCapability) as parallel:
+        ac.validate_provider_result(two, serial)
+    assert (parallel.value.capability, parallel.value.requested, parallel.value.allowed) == (
+        "parallel_tool_use", 2, 1)
+    with pytest.raises(ac.UnsupportedCapability) as none_at_all:
+        ac.validate_provider_result(two, ac.ProviderCapabilities(provider_name="t", tool_use=False))
+    assert none_at_all.value.capability == "tool_use"
+    for bad in (None, {"provider_name": "t"}, ac.ProviderCapabilities(provider_name=""),
+                ac.ProviderCapabilities(provider_name="t", max_tool_requests_per_step=0)):
+        with pytest.raises(c.ValidationError):
+            ac.validate_capabilities(bad)
+
+
+def test_a_non_serializable_argument_is_a_declared_failure_not_a_type_error() -> None:
+    class Opaque:
+        pass
+
+    with pytest.raises(c.ValidationError) as exc:
+        ac.validate_tool_request(ac.ToolRequest("c1", "catalog_search", {"query": Opaque()}))
+    assert "not serializable" in str(exc.value)
+    with pytest.raises(c.ValidationError):
+        ac.validate_tool_request(ac.ToolRequest("c1", "catalog_search", {1: "numeric key"}))
+
+
+def test_validated_arguments_are_detached_from_the_providers_mapping() -> None:
+    arguments = {"query": "قميص", "nested": {"a": [1, 2]}}
+    validated = ac.validate_tool_request(ac.ToolRequest("c1", "catalog_search", arguments))
+    arguments["nested"]["a"].append(3)
+    assert validated.arguments["nested"]["a"] == [1, 2]
 
 
 # ── Scripted provider ────────────────────────────────────────────────────────
 
 
-def test_every_declared_stop_reason_is_one_the_loop_can_actually_raise() -> None:
-    """The stop vocabulary is closed *and* exhaustive: no member is decorative."""
-    import pathlib  # noqa: PLC0415
+# Every stop reason is tied to the PostgreSQL regression that drives the loop
+# into it and asserts the resulting outcome. This is coverage of behaviour, not
+# a search for the constant in the source.
+STOP_REASON_COVERAGE = {
+    ac.StopReason.TURN_NOT_IN_SCOPE: "test_a_turn_of_another_conversation_is_refused_before_any_work_is_read",
+    ac.StopReason.TURN_NOT_ELIGIBLE: "test_a_turn_that_is_not_the_oldest_unresolved_one_never_reaches_the_provider",
+    ac.StopReason.TURN_COMPLETED: "test_a_completed_turn_is_never_reasoned_about_again",
+    ac.StopReason.OWNERSHIP_LOST: "test_ownership_lost_while_awaiting_a_result_keeps_the_debit_and_writes_nothing_more",
+    ac.StopReason.CONCURRENT_INVOCATION: "test_two_processes_on_the_same_turn_cannot_share_one_debit",
+    ac.StopReason.BUDGET_EXHAUSTED: "test_budget_exhaustion_and_cancellation_stop_without_false_success",
+    ac.StopReason.DEADLINE_EXCEEDED: "test_the_deadline_is_rechecked_inside_the_reservation_transaction",
+    ac.StopReason.CANCELLED: "test_budget_exhaustion_and_cancellation_stop_without_false_success",
+    ac.StopReason.PROVIDER_FAILURE: "test_malformed_and_blocked_provider_results_are_explicit_outcomes",
+    ac.StopReason.PROVIDER_BLOCKED: "test_malformed_and_blocked_provider_results_are_explicit_outcomes",
+    ac.StopReason.PROVIDER_INVALID: "test_malformed_result_collections_execute_no_tool_and_leak_no_type_error",
+    ac.StopReason.PROVIDER_TIMEOUT: "test_a_hanging_provider_is_abandoned_at_its_enforced_wait",
+    ac.StopReason.UNSUPPORTED_CAPABILITY:
+        "test_a_provider_without_tool_use_or_parallel_capability_stops_before_executing",
+    ac.StopReason.VERIFICATION_FAILED: "test_uncorrectable_verification_fails_bounded_and_reserves_no_delivery",
+    ac.StopReason.REPEATED_TOOL_REQUEST: "test_repeated_tool_requests_terminate_explicitly",
+}
 
-    source = pathlib.Path("backend/core/commerce_runtime/agent_loop.py").read_text(encoding="utf-8")
-    unraisable = [reason.name for reason in ac.StopReason if f"StopReason.{reason.name}.value" not in source]
-    assert unraisable == []
+
+def test_every_stop_reason_has_a_behavioural_regression() -> None:
+    """The vocabulary is closed and every member is reached by a real run.
+
+    Each reason names the PostgreSQL regression that drives the loop into it;
+    that test asserts the outcome, so a decorative member cannot survive here.
+    """
+    import pathlib as _pathlib  # noqa: PLC0415
+
+    assert set(STOP_REASON_COVERAGE) == set(ac.StopReason), "every stop reason needs a behavioural regression"
+    module = _pathlib.Path("tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py").read_text(
+        encoding="utf-8")
+    missing = sorted({name for name in STOP_REASON_COVERAGE.values() if f"def {name}(" not in module})
+    assert missing == [], missing
 
 
 def test_the_scripted_provider_is_deterministic_and_fails_explicitly_when_exhausted() -> None:

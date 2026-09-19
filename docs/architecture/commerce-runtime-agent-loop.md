@@ -1,7 +1,11 @@
 # Commerce runtime — dormant agent loop core (contract)
 
-Status: recorded 2026-09-19 as the contract of the third dormant slice.
-Extends `commerce-runtime-foundation-contract.md` and
+Status: recorded 2026-09-19 as the contract of the third dormant slice;
+corrected the same day after the independent review of PR #1095 (durable
+attempt accounting, enforced waits and the reservation deadline, scope and
+eligibility boundaries, complete boundary validation, isolation of
+authoritative data, closed ownership-loss outcomes). Extends
+`commerce-runtime-foundation-contract.md` and
 `commerce-runtime-effect-and-delivery-ledgers.md`; nothing here reopens the
 closed findings of either. Authority for the implementation in
 `backend/core/commerce_runtime/{agent_contracts,agent_tools,agent_scripted,agent_loop}.py`.
@@ -28,29 +32,40 @@ reasoning provider represents **one inference step** and owns none of them.
 conversation, turn, the inbound payload and the conversation state as data),
 the available tool definitions, the prior observations, prior verification
 feedback and the remaining execution budget. A provider declares
-`ProviderCapabilities` (tool use, parallel tool use, evidence references, a
-per-step request limit); the loop never assumes more than is declared.
+`ProviderCapabilities`; the declaration itself is validated, and the loop
+never assumes more than it declares.
 
 `ProviderResult` is a closed tagged union that distinguishes, explicitly:
 
 | Result | Meaning | Loop behaviour |
 | --- | --- | --- |
-| `ProviderToolRequests` | wants one or more tools | validate, authorize, execute, observe, continue |
+| `ProviderToolRequests` | wants one or more tools | validate the whole bundle, authorize, debit, execute, observe, continue |
 | `ProviderReply` | a reply draft | validate, verify, accept or feed back |
 | `ProviderFailure` | could not produce a step | stop, `provider_failure` |
 | `ProviderBlocked` | declined (policy) | stop, `provider_blocked`; not retried |
 | `ProviderInvalid` | incomplete or malformed output | stop, `provider_invalid`; never treated as a reply |
 
-An unsupported capability, a malformed request and a draft that fails
-validation are refused **before** any tool executes and before any delivery
-is reserved. A provider that raises becomes `provider_failure`, never a crash
-of the loop. Forced tool use is not imposed on any provider: a direct reply
-without a tool call is a legitimate first step.
-
 **Model tool-call ids are correlation only.** `call_id` matches a request to
-its observation. It is never a business idempotency key (those are the
-ledger's `derive_business_key` values), never an evidence reference and never
-an authorization credential.
+its observation, and call ids within one bundle must be distinct. A call id is
+never a business idempotency key (those are the ledger's `derive_business_key`
+values), never an evidence reference and never an authorization credential.
+
+### 2.1 Complete validation before anything runs
+
+A provider result is validated **whole, before any part of it is executed**:
+the union variant, every nested field, the capability declaration, the tool
+request collection and each request's argument shape and serializability, the
+reply draft's text, kind, payload and evidence collection, and the
+non-emptiness of a failure reason. Consequences:
+
+* a bundle that mixes a valid and a malformed request executes **zero** tools;
+* shapes such as `ProviderToolRequests(None)`, `evidence_refs=None` and a
+  non-serializable argument become the declared outcome `provider_invalid`,
+  never an incidental `TypeError` leaving the loop;
+* a capability the provider did not declare becomes `unsupported_capability`
+  before execution;
+* the attempt already debited for that step **stays debited**: rejecting the
+  output does not refund the attempt.
 
 ## 3. Tools
 
@@ -63,98 +78,181 @@ kind and closed error codes (`unknown_tool`, `invalid_arguments`,
 registered.
 
 * **Scope comes from the trusted runtime context.** The loop builds a
-  `ToolScope` from the turn it was given. Model arguments naming
-  `tenant_id`, `namespace`, `conversation_id`, `turn_id`, `token`, `owner_id`
-  and similar are refused (`scope_override_refused`) before the tool runs;
-  they are never merged, ignored or "sanitised".
+  `ToolScope` from the turn it was given. Model arguments naming `tenant_id`,
+  `namespace`, `conversation_id`, `turn_id`, `token`, `owner_id` and similar
+  are refused (`scope_override_refused`) before the tool runs.
 * **Tool results are data.** They carry evidence references the verifier can
   check. They acquire no instruction or authorization authority, and a failed
   or timed-out call contributes no evidence.
-* Each call is bounded by a per-call timeout; a late result is discarded and
-  reported as `timeout`.
+
+### 3.1 Isolation of authoritative data
+
+The registry owns the authoritative schema of every tool as a **private deep
+copy** and never hands it out. `definitions` builds a detached copy on each
+call, and validated arguments, observation bodies, the authorized context and
+every event detail are detached copies too. A frozen dataclass does not
+protect the nested dictionaries inside it; these copies do. Consequently a
+holder of a provider-visible definition can widen a declared maximum, change a
+declared type or empty the required list and **nothing changes** about what
+the registry enforces, what the conversation state holds, or what the inbound
+turn says.
 
 ## 4. Verification of the reply draft
 
-Before a draft may be handed to delivery, deterministic checks run:
+Before a draft may be handed to delivery, deterministic **structural** checks
+run:
 
 * every cited evidence reference must exist among **this turn's** successful
-  observations;
-* a draft that claims commerce facts must cite at least one reference;
+  observations (including observations restored from a durable checkpoint);
+* a draft whose `claims_commerce_facts` flag is set must cite at least one
+  reference;
 * the text must be present and within bounds.
 
 A correctable failure becomes `VerificationFeedback` fed into the next
-reasoning step **within the same budget**; when no step remains the loop
-stops with `verification_failed` and reserves nothing.
+reasoning step **within the same budget**; when no step remains the loop stops
+with `verification_failed` and reserves nothing.
 
-**What this proves and what it does not.** It proves that the cited evidence
-was actually observed in this turn, in this tenant's scope, and that a
-commerce claim is not unsupported. It does **not** prove that every sentence
-of the reply is consistent with that evidence: semantic grounding of the
-wording is not established by this slice, and a valid reference alone does
-not make a sentence correct.
+**What this proves, stated exactly.** It proves that each cited reference was
+produced by a tool call made in this turn, inside this tenant's scope, and
+that a draft declaring commerce facts cites at least one such reference. It
+proves nothing about the reply's content: reference membership is **not**
+evidence that a sentence is factually accurate, that the cited data supports
+what the sentence says, or that the reply answers the customer's question
+completely. `claims_commerce_facts` is a **provider-declared** flag, so a
+provider that does not set it is not checked for citations at all. Semantic
+grounding, answer completeness and truthful flagging are not established by
+this slice.
 
-## 5. Bounded execution
+## 5. Durable attempt accounting
 
-Bounded inference steps, bounded tool calls, a per-call timeout and an
-overall deadline. A repeated identical tool request (same tool, same
-arguments) terminates the loop rather than looping. Cancellation is checked
-between steps. Every stop is explicit and named: `budget_exhausted`,
-`deadline_exceeded`, `cancelled`, `repeated_tool_request`,
-`verification_failed`, `provider_*`, `unsupported_capability`,
-`ownership_lost`, `turn_not_eligible`, `turn_completed`. The vocabulary is
-closed **and** exhaustive: every declared reason is one the loop raises. A
-refused or timed-out tool is an *observation*, not a stop, so the loop reports
-it and keeps its budget; a provider call that runs long is caught by the
-deadline, and a per-call provider timeout belongs to a future adapter, which
-reports it as `ProviderFailure`.
+Every attempt is paid for **before** the work it pays for runs. Before a
+provider call, and before a bundle of tool calls, the loop writes the consumed
+attempts into the conversation's versioned state under the reserved key
+`agent_loop`, through the foundation's compare-and-set state commit.
 
-Budget information is **persisted** in the conversation's versioned state
-under the reserved key `agent_loop` (steps used, tool calls used, elapsed
-seconds, phase, stop reason). Re-entry adopts those counters, so re-entering
-a turn cannot reset the limits. `Conversation.extra_metadata` is not used and
-is not the authority for loop progress.
+* **Bound to one revision.** The counters are computed from the progress found
+  at revision *R* and written with a compare-and-set on *R*. The loop never
+  reads a fresh revision and overwrites it with counters derived from an older
+  snapshot.
+* **Arbitration, including within one ownership epoch.** A debit is refused
+  (`concurrent_invocation`) when the durable progress is not exactly what this
+  invocation last wrote, or when the compare-and-set loses. Two callers
+  holding the same token therefore cannot execute on the same debit; the
+  loser's conclusions are discarded and the winner's progress is preserved.
+* **Survives a crash.** A process that dies after a provider or tool call but
+  before the acceptance commit leaves its debits behind and leaves no reply
+  state and no delivery sequence.
+* **Restored on re-entry, never enlarged.** A later invocation restores the
+  authoritative limits, the absolute deadline, the consumed attempts, the
+  checkpointed observations, the verification feedback and the repeat history.
+  A caller that passes a different budget does not change the stored one; the
+  difference is recorded in the `resumed` event.
+* **Checkpoint bound.** Observation identities, outcomes and evidence
+  references are always checkpointed; result **bodies** are dropped
+  oldest-first when the checkpoint would exceed its bound, and only the most
+  recent observations are kept at all. A restored observation says plainly
+  that it was restored and whether its body was dropped. Verification stays
+  exact because references always survive.
+* **Recovery repeats.** Repeating a read-only tool call that a *previous*
+  invocation made is permitted once and is marked `recovery_repeat`; it
+  consumes budget like any other attempt. Repeating a call within the *same*
+  invocation is refused (`repeated_tool_request`). Nothing here claims
+  exactly-once provider or tool execution: an abandoned call may have run.
 
-## 6. Ownership, state and delivery
+## 6. Enforced waits, deadlines and cancellation
 
-* Every database operation is a completed repository call. **No transaction
-  is held across a reasoning step or a tool call** (foundation §3.7).
-* Ownership is re-validated on the database clock **after every await**:
-  before accepting a draft and before any write. A run whose lease expired,
-  was taken over or was fenced writes no state and reserves no delivery;
-  stops caused by lost ownership or an ineligible turn persist nothing.
-* The accepted reply state and its delivery intent are persisted **atomically**
-  by `LedgerRepository.commit_turn_decision`. The outcome is
-  `pending_delivery` with the sequence id.
-* **Generating a reply is not sending it.** The loop never dispatches, never
-  records a receipt, and never finalizes a turn. Transport outcome stays
-  `not_attempted` and no terminal exists when the loop returns.
-* **Re-entry reuses existing work.** Before reasoning again the loop inspects
-  the terminal, the ledger summary and the delivery sequence: a completed
-  turn stops (`turn_completed`), an existing delivery sequence is reused
-  (never a second sequence, including for a concurrent run that loses the
-  compare-and-set), and pending or `unknown` effect work stops the run
-  instead of resending or completing.
+* **The loop enforces its own waits.** The provider call and each tool call
+  run under a wait the loop imposes at the orchestration boundary; telling a
+  provider how many seconds remain is not a limit. Each wait is capped to the
+  smaller of its per-call limit (`provider_timeout_seconds`,
+  `tool_timeout_seconds`) and the time left before the turn's deadline.
+* **The deadline is an absolute database timestamp**, fixed from the database
+  clock when the turn's progress is first written and persisted with it, so
+  re-entry cannot extend it. It is checked before each debit.
+* **Rechecked at the reservation boundary.** The acceptance transaction
+  re-checks the deadline *inside* the transaction, after the conversation row
+  lock and before any write, on the database clock. A reply accepted before
+  expiry therefore cannot reserve delivery after expiry, even when the
+  transaction waited on a lock in between. This uses the ledger's additive
+  `precondition` hook (section 7.1).
+* **Remaining database-wait limits.** The row-lock wait itself is not bounded
+  by this slice: PostgreSQL's `lock_timeout` is not set here, so a contended
+  lock can delay the transaction. The recheck above converts such a delay into
+  a refusal rather than a late reservation; bounding the wait itself is left
+  to deployment configuration and is stated here rather than implied away.
+* **Cancellation is local.** An abandoned provider or tool call may still be
+  running; its late value is discarded and has no path to progress, state or
+  delivery. Abandoning a call is **not** proof that the remote work stopped,
+  and the loop never claims it is.
 
-## 7. Alignment with the public Anthropic agent guidance
+## 7. Ownership, scope, state and delivery
 
-The two references — *Building effective agents* and *Building agents with
-the Claude Agent SDK* — guide this implementation; the merged Nahla contracts
+* Every database operation is a completed repository call. **No transaction is
+  held across a reasoning step or a tool call** (foundation §3.7).
+* **Membership before anything else.** The turn must belong to the authorized
+  tenant, namespace **and** conversation before any of its work is read or
+  returned. A turn from another conversation stops the run with
+  `turn_not_in_scope` and returns no terminal, no delivery sequence and no
+  reuse.
+* **Eligibility before reasoning.** Fresh work requires the turn to be the
+  conversation's eligible (oldest unresolved) turn; otherwise the run stops
+  before the provider is ever called.
+* **Ownership at every debit.** The token is re-judged on the database clock
+  before each debit, so ownership lost during a provider or tool call cannot
+  buy another reasoning step, a state write or a reservation.
+* **Existing work versus new work.** When the turn already has a terminal, an
+  existing delivery sequence, or pending / `unknown` effect work, the loop
+  returns a **read-only** outcome describing it and writes nothing: reuse
+  grants no dispatch and no write authority, and never creates a second
+  sequence. Only a turn with no such work proceeds to reasoning and may create
+  new work.
+* **Atomic hand-off.** The accepted reply state and its delivery intent are
+  persisted in one `commit_turn_decision`; the outcome is `pending_delivery`
+  with the sequence id. **Generating a reply is not sending it**: the loop
+  never dispatches, never records a receipt and never finalizes a turn.
+* **Closed outcomes.** Every stop is named and the vocabulary is closed:
+  `turn_not_in_scope`, `turn_not_eligible`, `turn_completed`,
+  `ownership_lost`, `concurrent_invocation`, `budget_exhausted`,
+  `deadline_exceeded`, `cancelled`, `provider_failure`, `provider_blocked`,
+  `provider_invalid`, `provider_timeout`, `unsupported_capability`,
+  `verification_failed`, `repeated_tool_request`. Each is reached by a
+  PostgreSQL regression that asserts the resulting outcome. The internal stop
+  signal never escapes the loop: when ownership turns out to be gone while a
+  stop is being recorded, the returned reason becomes `ownership_lost` and the
+  original reason is kept in the detail, because that conclusion was never
+  made durable and another owner may already hold the turn.
+
+### 7.1 Narrow dependency extension
+
+`LedgerRepository.commit_turn_decision` gained one optional parameter,
+`precondition(conn, snapshot)`, evaluated after the conversation row lock, the
+ownership guard and the eligibility check, and before any write of that
+transaction; raising from it aborts the transaction and writes nothing.
+Omitting it reproduces the previous behaviour exactly, so every existing
+caller and every ledger guarantee is unchanged. The loop uses it for the
+deadline recheck of section 6. The change is recorded in the ledger contract
+and exercised by the reservation-deadline regression.
+
+## 8. Alignment with the public Anthropic agent guidance
+
+The two references — *Building effective agents* and *Building agents with the
+Claude Agent SDK* — guide this implementation; the merged Nahla contracts
 remain authoritative. No SDK-owned lifecycle is introduced, no dependency is
 replaced and no model is selected here. This is not a claim of literal recipe
 completion.
 
 | Principle | Implementation | Test evidence | Remaining limitation |
 | --- | --- | --- | --- |
-| Simple composition: one model, tools, a loop — not a framework | `agent_loop.AgentLoop.run_turn`: a single loop over provider step → tools → observations | `test_turn_reasoning_tool_observation_reasoning_reply_and_one_delivery_intent` | No planner, router, multi-agent orchestration or subagents; a single conversation turn only |
-| Clear tool interfaces (a documented "agent–computer interface") | `agent_tools.ToolDefinition` with name, description, JSON schema, result kind, closed error codes | `test_every_exposed_tool_declares_a_schema_description_and_result_kind` | Three read-only fixture tools; no real catalogue, order or knowledge source is connected |
-| Observations feed the next decision | Observations are appended to `ProviderRequest.observations` each step | `test_different_observations_lead_to_different_next_decisions` | Observations are in-memory for one turn; no cross-turn memory or context compaction |
-| Verification / feedback loop before acting on output | `verify_reply_draft` plus `VerificationFeedback` re-entering the next step | `test_invalid_evidence_feeds_verification_back_and_the_correction_is_accepted`, `test_uncorrectable_verification_fails_bounded_and_reserves_no_delivery` | Rules-based verification of evidence existence only; no LLM judge, no semantic grounding check |
-| Bounded stopping conditions | Steps, tool calls, per-call timeout, deadline, repeat detection, cancellation | `test_budget_exhaustion_and_deadline_and_cancellation_stop_without_false_success`, `test_repeated_tool_requests_terminate_explicitly`, `test_tool_timeout_is_an_observation_and_the_loop_stays_honest` | Budgets are fixed per run; there is no adaptive effort control and no token accounting |
-| Guardrails at the action boundary | Allowlist, read-only registration, scope-override refusal, capability checks | `test_unknown_tools_invalid_arguments_and_forged_scope_cannot_execute_work`, `test_only_read_only_tools_can_be_registered` | Guardrails cover the tool boundary; the provider's wording is not policed here |
-| Transparency: show the agent's steps | `LoopEvent` stream and `LoopOutcome.stop_reason` on every run | `_kinds(outcome)` assertions in the path tests | Events carry no private model reasoning and no secrets, by design; they are returned, not persisted as a log |
-| Checkpoints / durable progress | Progress in the versioned state; atomic decision commit; re-entry reuse | `test_re_entry_reuses_the_existing_delivery_intent_and_the_persisted_budget`, `test_crash_before_the_atomic_accept_leaves_no_state_and_no_delivery_sequence` | One checkpoint shape (per turn); no resumable mid-tool-call checkpointing |
+| Simple composition: one model, tools, a loop | `agent_loop.AgentLoop.run_turn` | `test_turn_reasoning_tool_observation_reasoning_reply_and_one_delivery_intent` | No planner, router, subagents or multi-agent orchestration; one turn only |
+| Clear tool interfaces | `agent_tools.ToolDefinition` and the private registry schemas | `test_every_exposed_tool_declares_a_schema_description_and_result_kind`, `test_provider_visible_schemas_and_context_cannot_change_what_is_enforced` | Three read-only fixture tools; no real catalogue, order or knowledge source |
+| Observations feed the next decision | observations appended to each `ProviderRequest`, checkpointed durably | `test_same_question_and_query_with_different_observations_take_different_paths`, `test_checkpointed_observations_and_repeat_history_survive_re_entry` | One turn's observations; bodies may be dropped at the checkpoint bound; no cross-turn memory |
+| Verification / feedback before acting | `verify_reply_draft` plus `VerificationFeedback` | `test_invalid_evidence_feeds_verification_back_and_the_correction_is_accepted` | Structural reference checks only; no semantic grounding and no completeness check |
+| Bounded stopping conditions | enforced waits, absolute deadline, step and tool budgets, repeat detection, cancellation | `test_a_hanging_provider_is_abandoned_at_its_enforced_wait`, `test_a_tool_wait_is_capped_by_the_remaining_overall_deadline`, `test_budget_exhaustion_and_cancellation_stop_without_false_success` | Fixed budgets; no adaptive effort or token accounting; cancellation is local |
+| Guardrails at the action boundary | allowlist, read-only registration, scope refusal, complete result validation | `test_unknown_tools_invalid_arguments_and_forged_scope_cannot_execute_work`, `test_a_bundle_mixing_a_valid_and_a_malformed_request_executes_no_tool` | Guards the tool boundary; the provider's wording is not policed |
+| Transparency of steps | `LoopEvent` stream, named `stop_reason`, durable progress | event-sequence assertions in the path tests | No secrets and no private model reasoning are recorded, by design |
+| Durable checkpoints | revision-bound debits, checkpointed context, atomic decision commit | `test_a_crash_after_the_tool_ran_keeps_the_debits_and_leaves_no_reservation`, `test_re_entry_restores_the_authoritative_limits_and_cannot_enlarge_them` | One checkpoint shape per turn; no mid-tool-call resume |
 
-## 8. Out of scope (unchanged decisions)
+## 9. Out of scope (unchanged decisions)
 
 No real reasoning adapter, no live model call, no prompt, persona or model
 selection; no dispatch, transport adapter or reconciliation worker; no
@@ -162,11 +260,11 @@ mutating business tools; no search projections, signed callbacks or
 multi-agent orchestration; no startup, webhook, worker, scheduler or routing
 wiring; no migration (this slice adds no schema), no bootstrap-target change,
 no activation flag, no tenant allowlist and no customer data. V1 and PR #1085
-stay frozen; #835, #865 and the deferred customer-identity work stay
-separate. UC-01 and UC-02 remain open in the active legacy paths and commerce
+stay frozen; #835, #865 and the deferred customer-identity work stay separate.
+UC-01 and UC-02 remain open in the active legacy paths and commerce
 reliability acceptance remains **NOT ACCEPTED**.
 
-## 9. What a real reasoning adapter still needs
+## 10. What a real reasoning adapter still needs
 
 1. An adapter implementing `capabilities` and `step(ProviderRequest)` against
    a real model, translating `ToolDefinition` to that model's tool schema and
@@ -174,10 +272,11 @@ reliability acceptance remains **NOT ACCEPTED**.
    `ProviderInvalid` on truncation and `ProviderBlocked` on refusal.
 2. A prompt/persona surface owned by the existing AI modules and governed by
    the constitution, not by this package (this slice contains no prompt).
-3. Per-call timeouts, retries and cost/token accounting at the adapter
-   boundary, feeding the loop's existing budget.
-4. Real tools replacing the fixtures, each still read-only at this stage,
-   with the same scope-from-context rule.
+3. Transport retries and cost/token accounting at the adapter boundary; the
+   loop's own bounded wait is implemented, an adapter's internal retry budget
+   is not.
+4. Real tools replacing the fixtures, each still read-only at this stage, with
+   the same scope-from-context rule.
 5. Separate authorization for dispatch: a transport adapter and the ledger's
    dispatch reservation path, which this slice deliberately does not touch.
 6. End-to-end validation on a shared environment, which needs the merge,

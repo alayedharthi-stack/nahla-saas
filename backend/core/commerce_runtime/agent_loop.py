@@ -1,39 +1,53 @@
 """The dormant agent loop core.
 
 One loop, one eligible turn. Nahla owns the control flow: it builds the
-authorized context from trusted runtime state, asks the reasoning provider
-for one inference step, executes only the allowlisted read-only tools the
-provider requested, feeds the observations back into the next step, verifies
-the reply draft against the evidence gathered in this turn, and hands an
-accepted reply to the delivery ledger as a durable delivery intent. It never
-sends anything.
+authorized context from trusted runtime state, asks the reasoning provider for
+one inference step, executes only the allowlisted read-only tools the provider
+requested, feeds the observations back into the next step, verifies the reply
+draft against the evidence gathered in this turn, and hands an accepted reply
+to the delivery ledger as a durable delivery intent. It never sends anything.
 
-Invariants this module upholds:
+Guarantees this module upholds:
 
-* **No transaction across reasoning or tool execution.** Every database
-  operation is a completed repository call; the provider step and the tool
-  calls happen between them.
-* **Ownership is re-validated after every await.** A step whose result comes
-  back after the lease was lost, taken over or fenced writes no state and
-  reserves no delivery.
-* **Durable state, not a side channel.** Loop progress lives in the
-  conversation's versioned state payload under ``agent_loop``, committed
-  through the foundation's compare-and-set; ``Conversation.extra_metadata``
-  is not touched, and re-entry reads the persisted budget instead of
-  restarting it.
-* **Generating a reply is not sending it.** The accepted reply and its
-  delivery intent are persisted atomically by
-  ``LedgerRepository.commit_turn_decision``; the outcome is
-  ``pending_delivery``. No dispatch, reconciliation or terminal completion
-  happens here.
-* **Re-entry reuses existing work.** An existing delivery sequence for the
-  turn is reused, never duplicated; pending, dispatching or unknown ledger
-  work stops the loop explicitly instead of resending or completing.
+* **Durable attempt accounting.** Before any provider call and before any tool
+  call, the consumed attempt is written to the conversation's versioned state
+  under a compare-and-set bound to the revision the counters were computed
+  from. A crash after the provider or tool ran leaves that debit behind, and
+  two invocations can never proceed on the same debit: the loser of the
+  compare-and-set stops with ``concurrent_invocation``. Re-entry restores the
+  authoritative limits, deadline, consumed attempts, observations, feedback
+  and repeat history; a caller cannot reset or enlarge them.
+* **Enforced waits.** The provider call and every tool call run under a wait
+  the loop enforces itself, capped to the smaller of the per-call limit and
+  the time left before the turn's deadline. An abandoned call's late value is
+  discarded and has no path to progress or delivery. Abandonment is local: it
+  is not proof that the remote work stopped.
+* **Authoritative deadline at the reservation boundary.** The deadline is an
+  absolute database timestamp. It is re-checked inside the reservation
+  transaction, after the conversation row lock, before any write, so a reply
+  accepted before expiry cannot reserve delivery after it.
+* **Scope and eligibility before work.** The turn must belong to the
+  authorized tenant, namespace and conversation before anything about it is
+  read or returned, and must be the eligible turn before any reasoning starts.
+  Ownership is re-validated at every debit, so ownership lost during a tool
+  call cannot buy another reasoning step.
+* **Complete boundary validation.** A provider result is validated whole
+  before any part of it runs; a bundle mixing a valid and a malformed request
+  executes no tool, and malformed output becomes a declared outcome while the
+  attempt already debited stays debited.
+* **No transaction across reasoning or tool execution**, and generating a
+  reply is never sending one: the loop returns ``pending_delivery`` and never
+  dispatches, reconciles or finalizes a turn.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import datetime as _dt
+import json
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+
+from sqlalchemy.engine import Connection
 
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_tools as at
@@ -45,12 +59,21 @@ Clock = Callable[[], float]
 
 
 class _Stop(Exception):
-    """Internal: stop the loop with this reason and detail."""
+    """Internal: stop the loop with this reason and detail. Never escapes ``run_turn``."""
 
     def __init__(self, reason: str, **detail: Any) -> None:
         self.reason = reason
         self.detail = detail
         super().__init__(reason)
+
+
+class _DeadlinePassed(Exception):
+    """Raised inside the reservation transaction when the turn's deadline expired."""
+
+    def __init__(self, db_now: _dt.datetime, deadline_at: _dt.datetime) -> None:
+        self.db_now = db_now
+        self.deadline_at = deadline_at
+        super().__init__(f"deadline {deadline_at.isoformat()} passed at {db_now.isoformat()}")
 
 
 class AgentLoop:
@@ -61,7 +84,7 @@ class AgentLoop:
         self._ledgers = ledgers
         self._foundation = ledgers.foundation
         self._registry = registry
-        self._budget = ac.validate_budget(budget or ac.LoopBudget())
+        self._requested_budget = ac.validate_budget(budget or ac.LoopBudget())
         self._clock = clock or time.monotonic
 
     # ── Public entry point ───────────────────────────────────────────────────
@@ -72,123 +95,118 @@ class AgentLoop:
                  _fault_before_commit: Optional[Callable[[], None]] = None) -> ac.LoopOutcome:
         tenant_id, ns, conversation_id, token = self._foundation._scoped(tenant_id, namespace, conversation_id, token)
         turn_id = c.validate_counter(turn_id, field="turn_id")
-        started = self._clock()
-        events: List[ac.LoopEvent] = []
-        state = _RunState(budget=self._budget, started=started, clock=self._clock, events=events)
-
+        session = _Session(scope=_Scope(tenant_id, ns, conversation_id, turn_id), token=token,
+                           requested=self._requested_budget, clock=self._clock)
         try:
-            snap = self._snapshot(tenant_id, ns, conversation_id, token)
-            resumed = ac.LoopProgress.from_payload(snap.state_payload.get(ac.AGENT_LOOP_STATE_KEY), turn_id=turn_id)
-            if resumed is not None:
-                state.adopt(resumed)
-                state.record(0, "resumed", {"steps_used": resumed.steps_used,
-                                            "tool_calls_used": resumed.tool_calls_used,
-                                            "phase": resumed.phase})
-            existing = self._existing_work(tenant_id, ns, turn_id)
+            snap = self._snapshot(session)
+            # F3: membership first — nothing about a turn outside this scope is
+            # read, reused or returned.
+            turn = self._turn_in_scope(session)
+            session.adopt(snap, self._restore(snap, turn_id), self._requested_budget)
+            existing = self._existing_work(session)
             if existing is not None:
                 return existing
-            turn = self._turn(tenant_id, ns, conversation_id, turn_id)
+            # F3: fresh work needs the eligible turn before any reasoning.
+            if snap.eligible_turn_id != turn_id:
+                raise _Stop(ac.StopReason.TURN_NOT_ELIGIBLE.value, eligible_turn_id=snap.eligible_turn_id)
             context = ac.AuthorizedContext(
                 tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id, turn_id=turn_id,
-                inbound=dict(turn.payload), state_payload=dict(snap.state_payload),
+                inbound=ac.public_copy(turn.payload), state_payload=ac.public_copy(snap.state_payload),
             )
             scope = at.ToolScope(tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id, turn_id=turn_id)
-            capabilities = self._capabilities(provider)
-            draft = self._reason(provider, capabilities, context, scope, state, cancelled)
-            return self._accept(tenant_id, ns, conversation_id, turn_id, token, draft, state,
-                                fault_before_commit=_fault_before_commit)
+            session.capabilities = self._capabilities(provider)
+            draft = self._reason(provider, context, scope, session, cancelled)
+            return self._accept(session, draft, fault_before_commit=_fault_before_commit)
         except _Stop as stop:
-            return self._stop(tenant_id, ns, conversation_id, turn_id, token, state, stop)
+            return self._stop(session, stop)
 
     # ── Reasoning / acting / observing ───────────────────────────────────────
 
-    def _reason(self, provider: Any, capabilities: ac.ProviderCapabilities, context: ac.AuthorizedContext,
-                scope: at.ToolScope, state: "_RunState",
+    def _reason(self, provider: Any, context: ac.AuthorizedContext, scope: at.ToolScope, session: "_Session",
                 cancelled: Optional[Callable[[], bool]]) -> ac.ReplyDraft:
         while True:
-            state.check_cancelled(cancelled)
-            state.check_deadline()
-            state.begin_step()
+            session.check_cancelled(cancelled)
+            # F1: the attempt is debited durably, under ownership and revision
+            # guards, *before* the provider is invoked.
+            self._debit(session, steps=1, phase=ac.LoopPhase.REASONING.value)
             request = ac.ProviderRequest(
-                step_no=state.steps_used, context=context, tools=self._registry.definitions,
-                observations=tuple(state.observations), feedback=tuple(state.feedback), budget=state.budget_view(),
+                step_no=session.progress.steps_used, context=context, tools=self._registry.definitions,
+                observations=session.provider_observations(), feedback=session.provider_feedback(),
+                budget=session.budget_view(),
             )
-            result = self._provider_step(provider, request, state)
-            # The provider has answered. Time passed and the caller may have
-            # cancelled; ownership is re-judged at the write boundary (_accept).
-            state.check_cancelled(cancelled)
-            state.check_deadline()
+            result = self._provider_step(provider, request, session)
+            session.check_cancelled(cancelled)
 
             if isinstance(result, ac.ProviderReply):
-                draft = self._validated_draft(result, state)
-                problems = ac.verify_reply_draft(draft, state.observations)
+                draft = result.draft
+                problems = ac.verify_reply_draft(draft, session.observations)
                 if not problems:
-                    state.record(state.steps_used, "reply_accepted",
-                                 {"evidence_refs": list(draft.evidence_refs), "kind": draft.kind})
+                    session.record("reply_accepted",
+                                   {"evidence_refs": list(draft.evidence_refs), "kind": draft.kind})
                     return draft
-                state.record(state.steps_used, "verification_failed",
-                             {"problems": [p.code for p in problems]})
-                if not state.steps_left():
+                session.record("verification_failed", {"problems": [p.code for p in problems]})
+                if not session.steps_left():
                     raise _Stop(ac.StopReason.VERIFICATION_FAILED.value,
-                                problems=[p.code for p in problems], last_step=state.steps_used)
-                state.feedback.append(ac.VerificationFeedback(step_no=state.steps_used, problems=problems))
+                                problems=[p.code for p in problems], last_step=session.progress.steps_used)
+                session.feedback.append(ac.VerificationFeedback(step_no=session.progress.steps_used,
+                                                                problems=problems))
                 continue
 
             if isinstance(result, ac.ProviderToolRequests):
-                self._run_tools(result, capabilities, scope, state)
+                self._run_tools(result, scope, session)
                 continue
 
-            raise self._provider_stop(result)
+            raise self._provider_stop(result)          # pragma: no cover - validation narrows the union
 
-    def _provider_step(self, provider: Any, request: ac.ProviderRequest, state: "_RunState") -> ac.ProviderResult:
+    def _provider_step(self, provider: Any, request: ac.ProviderRequest, session: "_Session") -> ac.ProviderResult:
+        """Invoke the provider under an enforced wait and validate its result whole."""
+        wait = session.wait_for(session.limits.provider_timeout_seconds)
         try:
-            result = provider.step(request)
+            raw = _bounded_call(lambda: provider.step(request), wait)
+        except concurrent.futures.TimeoutError as exc:
+            # The call is abandoned locally; a late value can reach nothing.
+            raise _Stop(ac.StopReason.PROVIDER_TIMEOUT.value, waited_seconds=round(wait, 3)) from exc
         except Exception as exc:  # noqa: BLE001 - a provider exception is an explicit outcome, never a crash
             raise _Stop(ac.StopReason.PROVIDER_FAILURE.value, error=type(exc).__name__) from exc
-        if not isinstance(result, ac.ProviderResult):
-            raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error="result is not a ProviderResult")
-        state.record(state.steps_used, "provider_step", {"result": type(result).__name__})
-        return result
-
-    def _run_tools(self, result: ac.ProviderToolRequests, capabilities: ac.ProviderCapabilities,
-                   scope: at.ToolScope, state: "_RunState") -> None:
-        requests = tuple(result.requests)
-        if not requests:
-            raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error="tool step carried no request")
-        if not capabilities.tool_use:
-            raise _Stop(ac.StopReason.UNSUPPORTED_CAPABILITY.value, capability="tool_use")
-        allowed = min(capabilities.max_tool_requests_per_step if capabilities.parallel_tool_use else 1,
-                      ac.MAX_TOOL_REQUESTS_PER_STEP)
-        if len(requests) > allowed:
-            raise _Stop(ac.StopReason.UNSUPPORTED_CAPABILITY.value,
-                        capability="parallel_tool_use", requested=len(requests), allowed=allowed)
-        for raw in requests:
-            try:
-                request = ac.validate_tool_request(raw)
-            except c.ValidationError as exc:
-                raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc)) from exc
-            signature = state.signature(request)
-            if signature in state.executed:
-                raise _Stop(ac.StopReason.REPEATED_TOOL_REQUEST.value,
-                            tool=request.tool_name, repeats=state.executed[signature] + 1)
-            if not state.tool_calls_left():
-                raise _Stop(ac.StopReason.BUDGET_EXHAUSTED.value, limit="max_tool_calls")
-            state.check_deadline()
-            state.tool_calls_used += 1
-            state.executed[signature] = state.executed.get(signature, 0) + 1
-            observation = self._registry.execute(scope, request, timeout_seconds=state.budget.tool_timeout_seconds)
-            state.observations.append(observation)
-            state.record(state.steps_used, "tool_observation",
-                         {"tool": observation.tool_name, "ok": observation.ok,
-                          "error_code": observation.error_code,
-                          "evidence_refs": list(observation.evidence_refs)})
-
-    @staticmethod
-    def _validated_draft(result: ac.ProviderReply, state: "_RunState") -> ac.ReplyDraft:
+        # F4: the whole result is validated before any part of it runs.
         try:
-            return ac.validate_reply_draft(result.draft)
+            result = ac.validate_provider_result(raw, session.capabilities)
+        except ac.UnsupportedCapability as exc:
+            raise _Stop(ac.StopReason.UNSUPPORTED_CAPABILITY.value, capability=exc.capability,
+                        requested=exc.requested, allowed=exc.allowed) from exc
         except c.ValidationError as exc:
             raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc)) from exc
+        session.record("provider_step", {"result": type(result).__name__})
+        if isinstance(result, (ac.ProviderFailure, ac.ProviderBlocked, ac.ProviderInvalid)):
+            raise self._provider_stop(result)
+        return result
+
+    def _run_tools(self, result: ac.ProviderToolRequests, scope: at.ToolScope, session: "_Session") -> None:
+        """Every request in the bundle is already validated; authorize, debit, run."""
+        requests = list(result.requests)
+        for request in requests:
+            signature = session.signature(request)
+            if signature in session.executed_here:
+                raise _Stop(ac.StopReason.REPEATED_TOOL_REQUEST.value,
+                            tool=request.tool_name, repeats=session.executed_here[signature] + 1)
+        if session.progress.tool_calls_used + len(requests) > session.limits.max_tool_calls:
+            raise _Stop(ac.StopReason.BUDGET_EXHAUSTED.value, limit="max_tool_calls",
+                        requested=len(requests),
+                        remaining=session.limits.max_tool_calls - session.progress.tool_calls_used)
+        # F1: the tool attempts are debited durably before any tool runs.
+        self._debit(session, tool_calls=len(requests), phase=ac.LoopPhase.REASONING.value)
+        for request in requests:
+            signature = session.signature(request)
+            recovery = signature in session.executed_before
+            session.executed_here[signature] = session.executed_here.get(signature, 0) + 1
+            wait = session.wait_for(session.limits.tool_timeout_seconds)
+            observation = self._registry.execute(scope, request, timeout_seconds=wait)
+            session.observations.append(observation)
+            session.record("tool_observation",
+                           {"tool": observation.tool_name, "ok": observation.ok,
+                            "error_code": observation.error_code,
+                            "evidence_refs": list(observation.evidence_refs),
+                            **({"recovery_repeat": True} if recovery else {})})
 
     @staticmethod
     def _provider_stop(result: ac.ProviderResult) -> _Stop:
@@ -202,230 +220,425 @@ class AgentLoop:
 
     @staticmethod
     def _capabilities(provider: Any) -> ac.ProviderCapabilities:
-        capabilities = getattr(provider, "capabilities", None)
-        if not isinstance(capabilities, ac.ProviderCapabilities):
-            raise _Stop(ac.StopReason.UNSUPPORTED_CAPABILITY.value, capability="declaration")
-        return capabilities
+        try:
+            return ac.validate_capabilities(getattr(provider, "capabilities", None))
+        except c.ValidationError as exc:
+            raise _Stop(ac.StopReason.UNSUPPORTED_CAPABILITY.value, capability="declaration",
+                        error=str(exc)) from exc
+
+    # ── Durable progress ─────────────────────────────────────────────────────
+
+    def _debit(self, session: "_Session", *, steps: int = 0, tool_calls: int = 0, phase: str) -> None:
+        """Persist the consumed attempts before the work they pay for runs.
+
+        Read, judge and write are bound to one revision: the counters are
+        computed from the progress found at revision *R* and written with a
+        compare-and-set on *R*. A concurrent invocation that advanced the turn
+        is detected (its progress differs from what this session last wrote) or
+        loses the compare-and-set; either way it cannot share this debit.
+        """
+        snap = self._snapshot(session)                       # re-validates ownership after any wait
+        persisted = self._restore(snap, session.scope.turn_id)
+        if not session.owns_persisted(persisted):
+            raise _Stop(ac.StopReason.CONCURRENT_INVOCATION.value,
+                        expected={"steps_used": session.progress.steps_used,
+                                  "tool_calls_used": session.progress.tool_calls_used},
+                        found=({"steps_used": persisted.steps_used,
+                                "tool_calls_used": persisted.tool_calls_used} if persisted else None))
+        self._check_deadline(session, snap.db_now)
+        if steps and session.progress.steps_used + steps > session.limits.max_steps:
+            raise _Stop(ac.StopReason.BUDGET_EXHAUSTED.value, limit="max_steps",
+                        steps_used=session.progress.steps_used)
+        advanced = session.advanced(steps=steps, tool_calls=tool_calls, phase=phase)
+        payload = ac.public_copy(snap.state_payload)
+        payload[ac.AGENT_LOOP_STATE_KEY] = advanced.to_payload()
+        try:
+            commit = self._foundation.commit_state(
+                tenant_id=session.scope.tenant_id, namespace=session.scope.namespace,
+                conversation_id=session.scope.conversation_id, token=session.token,
+                turn_id=session.scope.turn_id, expected_revision=snap.state_revision, payload=payload)
+        except c.StateConflict as exc:
+            raise _Stop(ac.StopReason.CONCURRENT_INVOCATION.value, rejection=exc.reason.value,
+                        expected_revision=snap.state_revision) from exc
+        except c.OwnershipRejected as exc:
+            raise _Stop(ac.StopReason.OWNERSHIP_LOST.value, rejection=exc.reason.value) from exc
+        session.commit_progress(advanced, commit.revision)
+        session.record("attempt_debited", {"steps_used": advanced.steps_used,
+                                           "tool_calls_used": advanced.tool_calls_used,
+                                           "revision": commit.revision})
 
     # ── Durable outcomes ─────────────────────────────────────────────────────
 
-    def _accept(self, tenant_id: int, ns: str, conversation_id: int, turn_id: int, token: c.OwnershipToken,
-                draft: ac.ReplyDraft, state: "_RunState",
+    def _accept(self, session: "_Session", draft: ac.ReplyDraft,
                 fault_before_commit: Optional[Callable[[], None]]) -> ac.LoopOutcome:
         """Persist the accepted reply state and its delivery intent atomically."""
-        snap = self._snapshot(tenant_id, ns, conversation_id, token)     # re-validates ownership after the await
-        if snap.eligible_turn_id != turn_id:
+        scope = session.scope
+        snap = self._snapshot(session)                       # ownership re-validated after the last await
+        if snap.eligible_turn_id != scope.turn_id:
             raise _Stop(ac.StopReason.TURN_NOT_ELIGIBLE.value, eligible_turn_id=snap.eligible_turn_id)
-        existing = self._ledgers.get_delivery_sequence(tenant_id=tenant_id, namespace=ns, turn_id=turn_id)
-        progress = state.progress(turn_id, ac.LoopPhase.REPLY_PENDING_DELIVERY.value)
+        existing = self._ledgers.get_delivery_sequence(tenant_id=scope.tenant_id, namespace=scope.namespace,
+                                                       turn_id=scope.turn_id)
         if existing is not None:
-            # Re-entry after the intent was already persisted: never a second sequence.
-            state.record(state.steps_used, "delivery_intent_reused", {"sequence_id": existing.sequence_id})
-            return ac.LoopOutcome(
-                status=ac.LoopStatus.PENDING_DELIVERY.value, stop_reason=None, turn_id=turn_id,
-                delivery_sequence_id=existing.sequence_id, reused_delivery=True, state_revision=snap.state_revision,
-                steps_used=state.steps_used, tool_calls_used=state.tool_calls_used, events=tuple(state.events),
-                detail={"delivery_kind": existing.intent_kind},
-            )
-        payload = dict(snap.state_payload)
-        payload[ac.AGENT_LOOP_STATE_KEY] = progress.to_payload(state.budget)
+            session.record("delivery_intent_reused", {"sequence_id": existing.sequence_id})
+            return session.outcome(status=ac.LoopStatus.PENDING_DELIVERY.value,
+                                   delivery_sequence_id=existing.sequence_id, reused=True,
+                                   revision=snap.state_revision, detail={"delivery_kind": existing.intent_kind})
+        persisted = self._restore(snap, scope.turn_id)
+        if not session.owns_persisted(persisted):
+            raise _Stop(ac.StopReason.CONCURRENT_INVOCATION.value,
+                        found=({"steps_used": persisted.steps_used,
+                                "tool_calls_used": persisted.tool_calls_used} if persisted else None))
+        accepted = session.advanced(phase=ac.LoopPhase.REPLY_PENDING_DELIVERY.value)
+        payload = ac.public_copy(snap.state_payload)
+        payload[ac.AGENT_LOOP_STATE_KEY] = accepted.to_payload()
         payload["reply"] = {"text": draft.text, "kind": draft.kind, "evidence_refs": list(draft.evidence_refs)}
         transition = c.StateTransition(expected_revision=snap.state_revision, payload=payload)
-        delivery_payload = dict(draft.payload)
+        delivery_payload = ac.public_copy(draft.payload)
         delivery_payload["text"] = draft.text
         delivery_payload["evidence_refs"] = list(draft.evidence_refs)
+        deadline_at = session.progress.deadline_at
+
+        def deadline_still_open(conn: Connection, locked: c.ConversationSnapshot) -> None:
+            # F2: the authoritative recheck, on the database clock read after the
+            # row lock and before this transaction writes anything.
+            if locked.db_now >= deadline_at:
+                raise _DeadlinePassed(locked.db_now, deadline_at)
+
         try:
             decision = self._ledgers.commit_turn_decision(
-                tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id, token=token, turn_id=turn_id,
-                state_transition=transition,
+                tenant_id=scope.tenant_id, namespace=scope.namespace, conversation_id=scope.conversation_id,
+                token=session.token, turn_id=scope.turn_id, state_transition=transition,
                 delivery_intent=lc.DeliveryIntent(kind=draft.kind, payload=delivery_payload),
-                _fault_before_commit=fault_before_commit,
+                precondition=deadline_still_open, _fault_before_commit=fault_before_commit,
             )
+        except _DeadlinePassed as exc:
+            raise _Stop(ac.StopReason.DEADLINE_EXCEEDED.value, at="reservation_boundary",
+                        deadline_at=exc.deadline_at.isoformat(), db_now=exc.db_now.isoformat()) from exc
         except c.StateConflict as exc:
-            # Another run of this turn committed first. Its delivery intent is the
-            # turn's one intent: reuse it instead of reserving a second sequence.
-            raced = self._ledgers.get_delivery_sequence(tenant_id=tenant_id, namespace=ns, turn_id=turn_id)
+            raced = self._ledgers.get_delivery_sequence(tenant_id=scope.tenant_id, namespace=scope.namespace,
+                                                        turn_id=scope.turn_id)
             if raced is None:
-                raise _Stop(ac.StopReason.OWNERSHIP_LOST.value, rejection=exc.reason.value) from exc
-            state.record(state.steps_used, "delivery_intent_reused",
-                         {"sequence_id": raced.sequence_id, "raced": True})
-            return ac.LoopOutcome(
-                status=ac.LoopStatus.PENDING_DELIVERY.value, stop_reason=None, turn_id=turn_id,
-                delivery_sequence_id=raced.sequence_id, reused_delivery=True, state_revision=None,
-                steps_used=state.steps_used, tool_calls_used=state.tool_calls_used, events=tuple(state.events),
-                detail={"delivery_kind": raced.intent_kind, "raced": True},
-            )
+                raise _Stop(ac.StopReason.CONCURRENT_INVOCATION.value, rejection=exc.reason.value) from exc
+            session.record("delivery_intent_reused", {"sequence_id": raced.sequence_id, "raced": True})
+            return session.outcome(status=ac.LoopStatus.PENDING_DELIVERY.value,
+                                   delivery_sequence_id=raced.sequence_id, reused=True, revision=None,
+                                   detail={"delivery_kind": raced.intent_kind, "raced": True})
         except c.OwnershipRejected as exc:
             raise _Stop(ac.StopReason.OWNERSHIP_LOST.value, rejection=exc.reason.value) from exc
         sequence = decision.delivery
         assert sequence is not None
-        state.record(state.steps_used, "delivery_intent_reserved",
-                     {"sequence_id": sequence.sequence_id, "kind": sequence.intent_kind})
-        return ac.LoopOutcome(
-            status=ac.LoopStatus.PENDING_DELIVERY.value, stop_reason=None, turn_id=turn_id,
-            delivery_sequence_id=sequence.sequence_id, reused_delivery=False,
-            state_revision=decision.state.revision if decision.state else snap.state_revision,
-            steps_used=state.steps_used, tool_calls_used=state.tool_calls_used, events=tuple(state.events),
-            detail={"delivery_kind": sequence.intent_kind, "evidence_refs": list(draft.evidence_refs)},
-        )
+        session.commit_progress(accepted, decision.state.revision if decision.state else snap.state_revision)
+        session.record("delivery_intent_reserved", {"sequence_id": sequence.sequence_id,
+                                                    "kind": sequence.intent_kind})
+        return session.outcome(status=ac.LoopStatus.PENDING_DELIVERY.value,
+                               delivery_sequence_id=sequence.sequence_id, reused=False,
+                               revision=session.revision,
+                               detail={"delivery_kind": sequence.intent_kind,
+                                       "evidence_refs": list(draft.evidence_refs)})
 
-    def _stop(self, tenant_id: int, ns: str, conversation_id: int, turn_id: int, token: c.OwnershipToken,
-              state: "_RunState", stop: _Stop) -> ac.LoopOutcome:
-        """Record the stop in durable state when ownership still allows it.
+    def _stop(self, session: "_Session", stop: _Stop) -> ac.LoopOutcome:
+        """Record the stop durably when ownership still allows it, and always return.
 
-        A stop caused by lost ownership or an ineligible turn writes nothing:
-        stale work must not touch state.
+        This method never raises: ownership lost while persisting a stop is
+        itself an outcome, not an exception escaping the loop. Stops caused by
+        lost ownership, a turn outside the scope, an ineligible or completed
+        turn, or a concurrent invocation write nothing at all.
+
+        When ownership turns out to be gone while the stop is being recorded,
+        the returned reason becomes ``ownership_lost`` and the original reason
+        is kept in the detail: the caller's own conclusion was never made
+        durable, and another owner may already be working the turn.
         """
-        state.record(state.steps_used, "stopped", {"reason": stop.reason, **stop.detail})
+        session.record("stopped", {"reason": stop.reason, **stop.detail})
+        reason = stop.reason
+        detail: Dict[str, Any] = dict(stop.detail)
         revision: Optional[int] = None
-        writable = stop.reason not in {ac.StopReason.OWNERSHIP_LOST.value, ac.StopReason.TURN_NOT_ELIGIBLE.value,
-                                       ac.StopReason.TURN_COMPLETED.value}
-        if writable:
-            progress = state.progress(turn_id, ac.LoopPhase.STOPPED.value, stop_reason=stop.reason)
+        silent = {ac.StopReason.OWNERSHIP_LOST.value, ac.StopReason.TURN_NOT_ELIGIBLE.value,
+                  ac.StopReason.TURN_COMPLETED.value, ac.StopReason.TURN_NOT_IN_SCOPE.value,
+                  ac.StopReason.CONCURRENT_INVOCATION.value}
+        if stop.reason not in silent and session.progress is not None:
             try:
-                snap = self._snapshot(tenant_id, ns, conversation_id, token)
-                payload = dict(snap.state_payload)
-                payload[ac.AGENT_LOOP_STATE_KEY] = progress.to_payload(state.budget)
+                snap = self._snapshot(session)
+                persisted = self._restore(snap, session.scope.turn_id)
+                if not session.owns_persisted(persisted):
+                    raise _Stop(ac.StopReason.CONCURRENT_INVOCATION.value)
+                stopped = session.advanced(phase=ac.LoopPhase.STOPPED.value, stop_reason=stop.reason)
+                payload = ac.public_copy(snap.state_payload)
+                payload[ac.AGENT_LOOP_STATE_KEY] = stopped.to_payload()
                 commit = self._foundation.commit_state(
-                    tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id, token=token, turn_id=turn_id,
-                    expected_revision=snap.state_revision, payload=payload,
-                )
+                    tenant_id=session.scope.tenant_id, namespace=session.scope.namespace,
+                    conversation_id=session.scope.conversation_id, token=session.token,
+                    turn_id=session.scope.turn_id, expected_revision=snap.state_revision, payload=payload)
                 revision = commit.revision
-            except (c.OwnershipRejected, c.StateConflict) as exc:
-                reason = getattr(exc, "reason", None)
-                state.record(state.steps_used, "stop_not_persisted",
-                             {"rejection": reason.value if reason is not None else type(exc).__name__})
-        return ac.LoopOutcome(
-            status=ac.LoopStatus.STOPPED.value, stop_reason=stop.reason, turn_id=turn_id,
-            delivery_sequence_id=None, reused_delivery=False, state_revision=revision,
-            steps_used=state.steps_used, tool_calls_used=state.tool_calls_used, events=tuple(state.events),
-            detail=dict(stop.detail),
-        )
+                session.commit_progress(stopped, commit.revision)
+            except _Stop as nested:
+                session.record("stop_not_persisted", {"reason": nested.reason, **nested.detail})
+                if nested.reason == ac.StopReason.OWNERSHIP_LOST.value:
+                    reason, detail = nested.reason, {**nested.detail, "original_reason": stop.reason,
+                                                     "original_detail": dict(stop.detail)}
+                else:
+                    detail["not_persisted"] = nested.reason
+            except c.CommerceRuntimeError as exc:
+                rejection = getattr(exc, "reason", None)
+                rejected_as = rejection.value if rejection is not None else type(exc).__name__
+                session.record("stop_not_persisted", {"rejection": rejected_as})
+                if isinstance(exc, c.OwnershipRejected) and not isinstance(exc, c.StateConflict):
+                    reason, detail = (ac.StopReason.OWNERSHIP_LOST.value,
+                                      {"rejection": rejected_as, "original_reason": stop.reason,
+                                       "original_detail": dict(stop.detail)})
+                else:
+                    detail["not_persisted"] = rejected_as
+        return session.outcome(status=ac.LoopStatus.STOPPED.value, stop_reason=reason,
+                               delivery_sequence_id=None, reused=False, revision=revision, detail=detail)
 
     # ── Reads ────────────────────────────────────────────────────────────────
 
-    def _snapshot(self, tenant_id: int, ns: str, conversation_id: int,
-                  token: c.OwnershipToken) -> c.ConversationSnapshot:
+    def _snapshot(self, session: "_Session") -> c.ConversationSnapshot:
         """Read the conversation and judge the token against it on the database clock."""
-        snap = self._foundation.get_conversation(tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id)
+        scope = session.scope
+        snap = self._foundation.get_conversation(tenant_id=scope.tenant_id, namespace=scope.namespace,
+                                                 conversation_id=scope.conversation_id)
         reason = c.classify_rejection(
             current_owner=snap.lease_owner, current_fence=snap.lease_fence, current_epoch=snap.ownership_epoch,
-            current_expires_at=snap.lease_expires_at, current_revision=snap.state_revision, token=token,
+            current_expires_at=snap.lease_expires_at, current_revision=snap.state_revision, token=session.token,
             db_now=snap.db_now,
         )
         if reason is not None:
             raise _Stop(ac.StopReason.OWNERSHIP_LOST.value, rejection=reason.value)
+        session.observe_clock(snap.db_now)
         return snap
 
-    def _turn(self, tenant_id: int, ns: str, conversation_id: int, turn_id: int) -> c.TurnRecord:
-        turns = self._foundation.list_turns(tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id)
-        for turn in turns:
-            if turn.turn_id == turn_id:
+    def _turn_in_scope(self, session: "_Session") -> c.TurnRecord:
+        """The turn must belong to this tenant, namespace *and* conversation."""
+        scope = session.scope
+        for turn in self._foundation.list_turns(tenant_id=scope.tenant_id, namespace=scope.namespace,
+                                                conversation_id=scope.conversation_id):
+            if turn.turn_id == scope.turn_id:
                 return turn
-        raise c.TurnNotFound(f"turn {turn_id} not found in tenant {tenant_id}/{ns}")
+        raise _Stop(ac.StopReason.TURN_NOT_IN_SCOPE.value, turn_id=scope.turn_id,
+                    conversation_id=scope.conversation_id)
 
-    def _existing_work(self, tenant_id: int, ns: str, turn_id: int) -> Optional[ac.LoopOutcome]:
+    @staticmethod
+    def _restore(snap: c.ConversationSnapshot, turn_id: int) -> Optional[ac.LoopProgress]:
+        return ac.LoopProgress.from_payload(snap.state_payload.get(ac.AGENT_LOOP_STATE_KEY), turn_id=turn_id)
+
+    @staticmethod
+    def _check_deadline(session: "_Session", db_now: _dt.datetime) -> None:
+        if db_now >= session.progress.deadline_at:
+            raise _Stop(ac.StopReason.DEADLINE_EXCEEDED.value, at="debit_boundary",
+                        deadline_at=session.progress.deadline_at.isoformat(), db_now=db_now.isoformat())
+
+    def _existing_work(self, session: "_Session") -> Optional[ac.LoopOutcome]:
         """Inspect state and ledger work before reasoning again.
 
-        A completed turn, an existing delivery intent, or pending/unknown
-        ledger work each end the run explicitly: nothing is resent, nothing
-        is completed and no second sequence is created.
+        Reached only for a turn already proven to belong to this scope. It
+        returns read-only outcomes and writes nothing: reuse grants no dispatch
+        and no write authority.
         """
-        terminal = self._foundation.get_terminal(tenant_id=tenant_id, namespace=ns, turn_id=turn_id)
+        scope = session.scope
+        terminal = self._foundation.get_terminal(tenant_id=scope.tenant_id, namespace=scope.namespace,
+                                                 turn_id=scope.turn_id)
         if terminal is not None:
-            return ac.LoopOutcome(
-                status=ac.LoopStatus.STOPPED.value, stop_reason=ac.StopReason.TURN_COMPLETED.value, turn_id=turn_id,
-                delivery_sequence_id=None, reused_delivery=False, state_revision=None, steps_used=0,
-                tool_calls_used=0, events=(), detail={"processing_outcome": terminal.processing_outcome},
-            )
-        summary = self._ledgers.turn_ledger_summary(tenant_id=tenant_id, namespace=ns, turn_id=turn_id)
-        sequence = self._ledgers.get_delivery_sequence(tenant_id=tenant_id, namespace=ns, turn_id=turn_id)
+            session.record("turn_already_completed", {"processing_outcome": terminal.processing_outcome})
+            return session.outcome(status=ac.LoopStatus.STOPPED.value,
+                                   stop_reason=ac.StopReason.TURN_COMPLETED.value, delivery_sequence_id=None,
+                                   reused=False, revision=None,
+                                   detail={"processing_outcome": terminal.processing_outcome})
+        summary = self._ledgers.turn_ledger_summary(tenant_id=scope.tenant_id, namespace=scope.namespace,
+                                                    turn_id=scope.turn_id)
+        sequence = self._ledgers.get_delivery_sequence(tenant_id=scope.tenant_id, namespace=scope.namespace,
+                                                       turn_id=scope.turn_id)
         if sequence is not None:
-            return ac.LoopOutcome(
-                status=ac.LoopStatus.PENDING_DELIVERY.value, stop_reason=None, turn_id=turn_id,
-                delivery_sequence_id=sequence.sequence_id, reused_delivery=True, state_revision=None,
-                steps_used=0, tool_calls_used=0,
-                events=(ac.LoopEvent(0, "delivery_intent_reused", {"sequence_id": sequence.sequence_id,
-                                                                   "delivery_outcome": summary.delivery_outcome}),),
-                detail={"delivery_kind": sequence.intent_kind, "delivery_outcome": summary.delivery_outcome,
-                        "delivery_attempt_count": sequence.attempt_count},
-            )
+            session.record("delivery_intent_reused", {"sequence_id": sequence.sequence_id,
+                                                      "delivery_outcome": summary.delivery_outcome})
+            return session.outcome(status=ac.LoopStatus.PENDING_DELIVERY.value,
+                                   delivery_sequence_id=sequence.sequence_id, reused=True, revision=None,
+                                   detail={"delivery_kind": sequence.intent_kind,
+                                           "delivery_outcome": summary.delivery_outcome,
+                                           "delivery_attempt_count": sequence.attempt_count})
         if summary.pending_effect_attempts or summary.effects_by_status.get(lc.EffectStatus.UNKNOWN.value):
-            return ac.LoopOutcome(
-                status=ac.LoopStatus.STOPPED.value, stop_reason=ac.StopReason.TURN_NOT_ELIGIBLE.value, turn_id=turn_id,
-                delivery_sequence_id=None, reused_delivery=False, state_revision=None, steps_used=0, tool_calls_used=0,
-                events=(ac.LoopEvent(0, "ledger_work_outstanding",
-                                     {"pending_effect_attempts": summary.pending_effect_attempts,
-                                      "effects_by_status": dict(summary.effects_by_status)}),),
-                detail={"effects_by_status": dict(summary.effects_by_status)},
-            )
+            session.record("ledger_work_outstanding",
+                           {"pending_effect_attempts": summary.pending_effect_attempts,
+                            "effects_by_status": dict(summary.effects_by_status)})
+            return session.outcome(status=ac.LoopStatus.STOPPED.value,
+                                   stop_reason=ac.StopReason.TURN_NOT_ELIGIBLE.value, delivery_sequence_id=None,
+                                   reused=False, revision=None,
+                                   detail={"effects_by_status": dict(summary.effects_by_status)})
         return None
 
 
-class _RunState:
-    """Mutable bookkeeping of one run: budget, observations, feedback, events."""
+def _bounded_call(work: Callable[[], Any], wait_seconds: float) -> Any:
+    """Run ``work`` in a worker thread and wait at most ``wait_seconds`` for it.
 
-    def __init__(self, *, budget: ac.LoopBudget, started: float, clock: Clock, events: List[ac.LoopEvent]) -> None:
-        self.budget = budget
-        self._started = started
-        self._clock = clock
-        self.events = events
+    The wait is enforced here, at the orchestration boundary. On timeout the
+    call is abandoned: its thread may still be running and its value, whenever
+    it arrives, is discarded. That is local abandonment, not proof that the
+    work stopped.
+    """
+    if wait_seconds <= 0:
+        raise concurrent.futures.TimeoutError("no time remained inside the turn's deadline")
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(work)
+        return future.result(timeout=wait_seconds)
+    finally:
+        executor.shutdown(wait=False)
+
+
+class _Scope:
+    __slots__ = ("tenant_id", "namespace", "conversation_id", "turn_id")
+
+    def __init__(self, tenant_id: int, namespace: str, conversation_id: int, turn_id: int) -> None:
+        self.tenant_id = tenant_id
+        self.namespace = namespace
+        self.conversation_id = conversation_id
+        self.turn_id = turn_id
+
+
+class _Session:
+    """One invocation's view of a turn: its durable progress and its events."""
+
+    def __init__(self, *, scope: _Scope, token: c.OwnershipToken, requested: ac.LoopBudget, clock: Clock) -> None:
+        self.scope = scope
+        self.token = token
+        self.limits = requested
+        self.progress: Optional[ac.LoopProgress] = None
+        self.written: Optional[ac.LoopProgress] = None     # what this session last persisted, if anything
+        self.revision: Optional[int] = None
         self.observations: List[ac.ToolObservation] = []
         self.feedback: List[ac.VerificationFeedback] = []
-        self.executed: Dict[Tuple[str, str], int] = {}
-        self.steps_used = 0
-        self.tool_calls_used = 0
-        self._carried_seconds = 0.0
+        self.executed_before: Dict[str, int] = {}
+        self.executed_here: Dict[str, int] = {}
+        self.events: List[ac.LoopEvent] = []
+        self.capabilities = ac.ProviderCapabilities(provider_name="unknown")
+        self._clock = clock
+        self._db_now: Optional[_dt.datetime] = None
+        self._db_read_at: float = clock()
 
-    # budget -------------------------------------------------------------
-    def adopt(self, resumed: ac.LoopProgress) -> None:
-        """Re-entry continues the persisted budget; it never resets the limits."""
-        self.steps_used = resumed.steps_used
-        self.tool_calls_used = resumed.tool_calls_used
-        self._carried_seconds = resumed.elapsed_seconds
+    # progress ------------------------------------------------------------
+    def adopt(self, snap: c.ConversationSnapshot, restored: Optional[ac.LoopProgress],
+              requested: ac.LoopBudget) -> None:
+        """Restore the authoritative progress, or start it for a fresh turn.
 
-    def elapsed(self) -> float:
-        return self._carried_seconds + (self._clock() - self._started)
+        The persisted limits and deadline win: a later invocation can neither
+        reset nor enlarge them.
+        """
+        self.written = restored
+        if restored is not None:
+            self.progress = restored
+            self.limits = restored.limits
+            self.observations = [o.restore() for o in restored.observations]
+            self.feedback = [ac.VerificationFeedback(step, tuple(ac.VerificationProblem(code, "restored")
+                                                                for code in codes))
+                             for step, codes in restored.feedback]
+            self.executed_before = {signature: 1 for signature in restored.executed}
+            self.record("resumed", {"steps_used": restored.steps_used,
+                                    "tool_calls_used": restored.tool_calls_used, "phase": restored.phase,
+                                    "limits_restored": True,
+                                    "requested_limits_differ": restored.limits != requested})
+        else:
+            self.limits = requested
+            self.progress = ac.LoopProgress(
+                turn_id=self.scope.turn_id, phase=ac.LoopPhase.REASONING.value, limits=requested,
+                deadline_at=snap.db_now + _dt.timedelta(seconds=requested.deadline_seconds),
+                steps_used=0, tool_calls_used=0,
+            )
+        self.revision = snap.state_revision
+
+    def advanced(self, *, steps: int = 0, tool_calls: int = 0, phase: Optional[str] = None,
+                 stop_reason: Optional[str] = None) -> ac.LoopProgress:
+        base = self.progress
+        assert base is not None
+        return ac.LoopProgress(
+            turn_id=base.turn_id, phase=phase or base.phase, limits=base.limits, deadline_at=base.deadline_at,
+            steps_used=base.steps_used + steps, tool_calls_used=base.tool_calls_used + tool_calls,
+            observations=ac.checkpoint_observations(self.observations),
+            feedback=tuple((f.step_no, tuple(p.code for p in f.problems)) for f in self.feedback),
+            executed=tuple(sorted(set(self.executed_before) | set(self.executed_here))),
+            stop_reason=stop_reason,
+        )
+
+    def commit_progress(self, progress: ac.LoopProgress, revision: int) -> None:
+        self.progress = progress
+        self.written = progress
+        self.revision = revision
+
+    def owns_persisted(self, persisted: Optional[ac.LoopProgress]) -> bool:
+        """Whether the durable progress is exactly what this session last wrote.
+
+        A fresh turn legitimately has nothing persisted; anything else means
+        another invocation advanced this turn and this one may not debit on top
+        of it.
+        """
+        if self.written is None:
+            return persisted is None
+        return self.written.same_debits(persisted)
+
+    # budget --------------------------------------------------------------
+    def observe_clock(self, db_now: _dt.datetime) -> None:
+        self._db_now = db_now
+        self._db_read_at = self._clock()
+
+    def remaining_seconds(self) -> float:
+        """Time left before the authoritative deadline, from the last database
+        clock read plus the monotonic time since."""
+        if self.progress is None or self._db_now is None:
+            return float(self.limits.deadline_seconds)
+        elapsed_since_read = max(0.0, self._clock() - self._db_read_at)
+        return (self.progress.deadline_at - self._db_now).total_seconds() - elapsed_since_read
+
+    def wait_for(self, per_call_limit: float) -> float:
+        """Cap a wait to the smaller of its own limit and the time left."""
+        return min(float(per_call_limit), self.remaining_seconds())
 
     def steps_left(self) -> bool:
-        return self.steps_used < self.budget.max_steps
-
-    def tool_calls_left(self) -> bool:
-        return self.tool_calls_used < self.budget.max_tool_calls
-
-    def begin_step(self) -> None:
-        if not self.steps_left():
-            raise _Stop(ac.StopReason.BUDGET_EXHAUSTED.value, limit="max_steps", steps_used=self.steps_used)
-        self.steps_used += 1
-
-    def check_deadline(self) -> None:
-        if self.elapsed() >= self.budget.deadline_seconds:
-            raise _Stop(ac.StopReason.DEADLINE_EXCEEDED.value, elapsed_seconds=round(self.elapsed(), 3))
+        return self.progress is not None and self.progress.steps_used < self.limits.max_steps
 
     def check_cancelled(self, cancelled: Optional[Callable[[], bool]]) -> None:
         if cancelled is not None and cancelled():
             raise _Stop(ac.StopReason.CANCELLED.value)
 
     def budget_view(self) -> ac.BudgetView:
+        assert self.progress is not None
         return ac.BudgetView(
-            remaining_steps=max(0, self.budget.max_steps - self.steps_used),
-            remaining_tool_calls=max(0, self.budget.max_tool_calls - self.tool_calls_used),
-            remaining_seconds=round(max(0.0, self.budget.deadline_seconds - self.elapsed()), 3),
+            remaining_steps=max(0, self.limits.max_steps - self.progress.steps_used),
+            remaining_tool_calls=max(0, self.limits.max_tool_calls - self.progress.tool_calls_used),
+            remaining_seconds=round(max(0.0, self.remaining_seconds()), 3),
         )
 
-    # bookkeeping --------------------------------------------------------
+    # provider-facing copies ----------------------------------------------
+    def provider_observations(self) -> Tuple[ac.ToolObservation, ...]:
+        """Observations detached from the ones verification reads."""
+        return tuple(
+            ac.ToolObservation(call_id=o.call_id, tool_name=o.tool_name, ok=o.ok,
+                               result=ac.public_copy(o.result) if o.result is not None else None,
+                               error_code=o.error_code, error=o.error, evidence_refs=tuple(o.evidence_refs),
+                               restored=o.restored, body_truncated=o.body_truncated)
+            for o in self.observations
+        )
+
+    def provider_feedback(self) -> Tuple[ac.VerificationFeedback, ...]:
+        return tuple(ac.VerificationFeedback(step_no=f.step_no, problems=tuple(f.problems)) for f in self.feedback)
+
+    # bookkeeping ---------------------------------------------------------
     @staticmethod
-    def signature(request: ac.ToolRequest) -> Tuple[str, str]:
-        import json  # noqa: PLC0415 - local, keeps the module's import surface small
-        return request.tool_name, json.dumps(dict(request.arguments), sort_keys=True, ensure_ascii=False)
+    def signature(request: ac.ToolRequest) -> str:
+        return request.tool_name + ":" + json.dumps(dict(request.arguments), sort_keys=True, ensure_ascii=False)
 
-    def record(self, step_no: int, kind: str, detail: Mapping[str, Any]) -> None:
-        self.events.append(ac.LoopEvent(step_no=step_no, kind=kind, detail=dict(detail)))
+    def record(self, kind: str, detail: Mapping[str, Any]) -> None:
+        step_no = self.progress.steps_used if self.progress is not None else 0
+        self.events.append(ac.LoopEvent(step_no=step_no, kind=kind, detail=ac.public_copy(detail)))
 
-    def progress(self, turn_id: int, phase: str, *, stop_reason: Optional[str] = None) -> ac.LoopProgress:
-        return ac.LoopProgress(turn_id=turn_id, phase=phase, steps_used=self.steps_used,
-                               tool_calls_used=self.tool_calls_used, elapsed_seconds=self.elapsed(),
-                               stop_reason=stop_reason)
+    def outcome(self, *, status: str, delivery_sequence_id: Optional[int], reused: bool,
+                revision: Optional[int], detail: Mapping[str, Any],
+                stop_reason: Optional[str] = None) -> ac.LoopOutcome:
+        return ac.LoopOutcome(
+            status=status, stop_reason=stop_reason, turn_id=self.scope.turn_id,
+            delivery_sequence_id=delivery_sequence_id, reused_delivery=reused, state_revision=revision,
+            steps_used=self.progress.steps_used if self.progress is not None else 0,
+            tool_calls_used=self.progress.tool_calls_used if self.progress is not None else 0,
+            events=tuple(self.events), detail=ac.public_copy(detail),
+        )
 
 
 __all__ = ["AgentLoop"]
