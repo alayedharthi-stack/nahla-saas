@@ -3833,3 +3833,32 @@ def test_recovery_after_a_guard_failure_still_pursues_the_city_goal():
     assert meta["compose_source"] == "fallback_deterministic"
     assert meta["fallback_reason"] == "address_reply_unverifiable_after_compose"
     assert meta["address_claim_compose_attempted"] is True
+
+
+def test_the_webhooks_inline_field_read_matches_the_owners_own_set():
+    """The resilient inline read must not drift from the module's set.
+
+    The webhook reads the collection field directly from the owner's
+    state patch so the decision survives the recovery module failing to
+    import. That read names the fields literally, so a field added to
+    ``ADDRESS_REPLY_FIELDS`` and not to the webhook would silently stop
+    composing — and stop recovering — for that field.
+    """
+    import ast  # noqa: PLC0415
+
+    from modules.ai.order_flow_v2.address_reply_recovery import (  # noqa: PLC0415
+        ADDRESS_REPLY_FIELDS,
+    )
+
+    tree = ast.parse((BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text())
+    literals = {
+        frozenset(ast.literal_eval(node.comparators[0]))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.NotIn)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "_of2_address_field"
+        and isinstance(node.comparators[0], ast.Tuple)
+    }
+    assert literals == {frozenset(ADDRESS_REPLY_FIELDS)}, literals
