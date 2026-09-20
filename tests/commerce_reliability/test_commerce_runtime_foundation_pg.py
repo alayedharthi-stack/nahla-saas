@@ -264,7 +264,15 @@ def foundation(pg_admin_dsn: str):
 
 
 def test_migration_applies_cleanly_on_the_current_head_and_is_reversible(pg_admin_dsn: str) -> None:
-    assert _script_heads() == {OTHER_HEAD, APPLICATION_HEAD}, "the chain must extend 0107 and leave 0092 untouched"
+    # 0111 extends 0107 → 0108 → 0109 and leaves the A1-Validate head alone. The
+    # address revision 0110 is a sibling of 0111 (both revise 0109), so the
+    # repository carries {0092, 0111} until that branch merges and
+    # {0092, 0110, 0111} afterwards — either is the expected topology.
+    from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: PLC0415
+
+    heads = _script_heads()
+    assert {OTHER_HEAD, APPLICATION_HEAD} <= heads and repository_heads_expected(heads), \
+        f"the chain must extend 0107 and leave 0092 untouched, got {sorted(heads)}"
     name, dsn = _create_database(pg_admin_dsn)
     engine = None
     try:
