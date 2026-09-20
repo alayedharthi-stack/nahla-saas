@@ -65,6 +65,8 @@ from services.internal_conversational_e2e_contract import (  # noqa: E402
     CODE_ADDRESS_EVIDENCE_INCOMPLETE,
     CODE_ADDRESS_EXPECTATION_UNMET,
     CODE_ADDRESS_EXPECTATIONS_MISSING,
+    CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED,
+    CODE_ADDRESS_TIMING_UNCORRELATED,
     CODE_ADDRESS_INJECTION_NOT_EXECUTED,
     CODE_ADDRESS_RECEIPT_MISMATCH,
     CODE_ADDRESS_EVIDENCE_MISSING,
@@ -389,6 +391,9 @@ CITY_EXPECTATIONS: Dict[str, Any] = {
 def _model_call(**overrides: Any) -> Dict[str, Any]:
     call = {
         "call_index": 0,
+        "compose_source": "fake-provider",
+        "fallback_reason": "",
+        "outcome_pending": False,
         "stage": STAGE_ORDINARY,
         "collection_field": "city",
         "turn_ref": "probe.city.0",
@@ -404,14 +409,19 @@ def _model_call(**overrides: Any) -> Dict[str, Any]:
     return call
 
 
+DELIVERY_ID = "captured." + "a" * 32
+
+
 def _address_turn(**overrides: Any) -> Dict[str, Any]:
     record = {
         "turn_ref": "probe.city.0",
         "outbound_metadata_turn_ref": "probe.city.0",
         "outbound_message_id": "4242",
+        "outbound_message_row_verified": True,
         "transport": "captured",
-        "delivery_ids": ["captured." + "a" * 32],
+        "delivery_ids": [DELIVERY_ID],
         "captured_payload_digest": "sha256:" + "b" * 64,
+        "captured_payload_digest_verified": True,
         "execution_path": PATH_ORDINARY,
         "delivered_surface": SURFACE_LIST,
         "failure_injection": "none",
@@ -421,8 +431,12 @@ def _address_turn(**overrides: Any) -> Dict[str, Any]:
         "receipt_action_ids": ["nahla_addr_select:offer:1"],
         "receipt_address_ids": ["1"],
         "recorded_action_ids": ["1"],
+        "recorded_offer_id": "offer",
+        "recorded_offer_delivery_ref": DELIVERY_ID,
         "outbound_provenance": {"compose_source": "llm", "address_reply_composed": True},
         "model_bound_calls": [_model_call()],
+        "turn_timing": {"turn_id": "turn-1", "total_turn_ms": 12},
+        "turn_timing_unavailable": False,
     }
     record.update(overrides)
     return record
@@ -495,7 +509,7 @@ def test_missing_outcome_or_provenance_is_rejected():
     assert CODE_MODEL_CALL_EVIDENCE_INCOMPLETE in _blockers(
         _address_turn(model_bound_calls=[_model_call(outcome_recorded=False)]),
     )
-    assert CODE_ADDRESS_EVIDENCE_INCOMPLETE in _blockers(
+    assert CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED in _blockers(
         _address_turn(outbound_provenance={}),
     )
 
@@ -575,7 +589,9 @@ def test_a_truthful_no_compose_turn_keeps_its_fallback_evidence():
     assert _blockers(honest) == []
 
     silent = _address_turn(
-        compose_entered=False, model_bound_calls=[], outbound_provenance={"compose_source": "llm"},
+        compose_entered=False,
+        model_bound_calls=[],
+        outbound_provenance={"compose_source": "llm"},
     )
     assert CODE_MODEL_CALL_EVIDENCE_INCOMPLETE in _blockers(silent)
 
@@ -1215,3 +1231,567 @@ def test_a_capture_refusal_releases_the_dedup_reservation():
     assert asyncio.run(_main()) is True
     assert len(captured) == 1, "the retry must reach capture, not a stale reservation"
     assert provider_calls == []
+
+
+# ── C2: binding is verified, not shaped ───────────────────────────────────
+#
+# Each of these returned NO blockers before. A shape test — "starts with
+# sha256:", "is a non-empty string" — is not a binding.
+
+
+def test_an_action_id_naming_another_offer_and_address_is_rejected():
+    """The wire ids must resolve to the addresses both sides claim.
+
+    Comparing only ``receipt_address_ids`` against ``recorded_action_ids``
+    left the ids that actually left unchecked, so an action naming a
+    different offer AND a different address passed.
+    """
+    assert CODE_ADDRESS_RECEIPT_MISMATCH in _blockers(
+        _address_turn(receipt_action_ids=["nahla_addr_select:different:999"]),
+    )
+
+
+def test_ids_from_two_different_showings_are_rejected():
+    """One payload answers one question."""
+    assert CODE_ADDRESS_RECEIPT_MISMATCH in _blockers(
+        _address_turn(
+            receipt_action_ids=[
+                "nahla_addr_select:offer:1",
+                "nahla_addr_select:other:2",
+            ],
+            receipt_address_ids=["1", "2"],
+            recorded_action_ids=["1", "2"],
+        ),
+    )
+
+
+def test_a_malformed_action_id_is_rejected():
+    assert CODE_ADDRESS_RECEIPT_MISMATCH in _blockers(
+        _address_turn(receipt_action_ids=["not-an-action-id"]),
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides,label",
+    [
+        ({"outbound_message_id": ""}, "no row id at all"),
+        ({"outbound_message_row_verified": False}, "row never verified"),
+        ({"delivery_ids": ["foreign-delivery"]}, "foreign delivery id"),
+        ({"captured_payload_digest": "sha256:not-a-digest"}, "digest of nothing"),
+        ({"captured_payload_digest_verified": False}, "digest never recomputed"),
+        ({"recorded_offer_delivery_ref": "some-other-delivery"}, "offer recorded against another delivery"),
+        ({"recorded_offer_delivery_ref": ""}, "offer names no delivery"),
+    ],
+)
+def test_a_foreign_or_unverified_artifact_is_rejected(overrides, label):
+    assert CODE_ADDRESS_EVIDENCE_UNBOUND in _blockers(
+        _address_turn(**overrides)
+    ), label
+
+
+def test_final_provenance_must_name_a_source():
+    """"Non-empty mapping" established nothing about the final text."""
+    assert CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED in _blockers(
+        _address_turn(outbound_provenance={"address_turn_ref": "probe.city.0"}),
+    )
+    # A source outside the doctrine's closed set is not a source either.
+    assert CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED in _blockers(
+        _address_turn(outbound_provenance={"compose_source": "template"}),
+    )
+    # And a fallback has to say why it fell back.
+    assert CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED in _blockers(
+        _address_turn(outbound_provenance={"compose_source": "fallback_deterministic"}),
+    )
+
+
+def test_a_call_without_candidate_or_fallback_detail_is_rejected():
+    stripped = {
+        k: v for k, v in _model_call().items() if k != "candidate_present"
+    }
+    assert CODE_MODEL_CALL_EVIDENCE_INCOMPLETE in _blockers(
+        _address_turn(model_bound_calls=[stripped]),
+    )
+    # Claimed a candidate but named no source.
+    assert CODE_MODEL_CALL_EVIDENCE_INCOMPLETE in _blockers(
+        _address_turn(
+            model_bound_calls=[_model_call(candidate_present=True, compose_source="")],
+        ),
+    )
+    # No candidate and no reason why.
+    assert CODE_MODEL_CALL_EVIDENCE_INCOMPLETE in _blockers(
+        _address_turn(
+            model_bound_calls=[
+                _model_call(candidate_present=False, fallback_reason="")
+            ],
+        ),
+    )
+
+
+def test_uncorrelated_or_silently_absent_timing_is_rejected():
+    """Latency is acceptable correlated, or declared unavailable — not absent."""
+    assert CODE_ADDRESS_TIMING_UNCORRELATED in _blockers(
+        _address_turn(turn_timing={}, turn_timing_unavailable=False),
+    )
+    assert CODE_ADDRESS_TIMING_UNCORRELATED in _blockers(
+        _address_turn(turn_timing={"total_turn_ms": 12}),
+    )
+    # Explicitly unavailable is a truthful outcome.
+    assert CODE_ADDRESS_TIMING_UNCORRELATED not in _blockers(
+        _address_turn(turn_timing={}, turn_timing_unavailable=True),
+    )
+
+
+def test_expectations_must_state_field_and_goal_and_missing_field():
+    """``any`` accepted a manifest that asserted almost nothing."""
+    for partial in (
+        {"collection_field": "city"},
+        {"response_goal": "collect_delivery_city"},
+        {"collection_field": "city", "response_goal": "collect_delivery_city"},
+    ):
+        assert CODE_ADDRESS_EXPECTATIONS_MISSING in _blockers(
+            _address_turn(), expectations=partial,
+        ), partial
+
+
+# ── C3: the acceptance cutoff is immutable ────────────────────────────────
+
+
+def test_a_late_outcome_cannot_rewrite_a_sealed_record():
+    """Sealing froze nothing: ``update`` never checked it.
+
+    A call that started before the cutoff and finished after it
+    overwrote its sealed record, and the late counter stayed at zero — so
+    a timed-out call could be reported as answered.
+    """
+    from core.acceptance_compose_observer import _Recorder, ModelBoundCall  # noqa: PLC0415
+
+    recorder = _Recorder()
+    index = recorder.append(
+        ModelBoundCall(
+            call_index=0,
+            stage=STAGE_ORDINARY,
+            collection_field="city",
+            turn_ref="t1",
+            observed_at="orchestrator_adapter",
+            response_goal="collect_delivery_city",
+            missing_field="city",
+            delivery_address_status="accepted",
+            has_accepted_maps_reference=True,
+            stage_declared=True,
+        )
+    )
+    recorder.seal()
+    recorder.update(index, outcome_recorded=True, candidate_present=True)
+
+    record = recorder.snapshot()[0]
+    assert record.outcome_recorded is False, "a sealed record must not change"
+    # And the call that never returned says so, rather than going silent.
+    assert record.outcome_pending is True
+    assert recorder.late_arrivals == 1
+    assert recorder.late_breakdown() == {"late_appends": 0, "late_outcomes": 1}
+    # A late APPEND is refused and counted separately.
+    assert recorder.append(record) == -1
+    assert recorder.late_breakdown()["late_appends"] == 1
+
+
+def test_a_call_that_completes_after_the_cutoff_is_counted_not_absorbed():
+    """Event-controlled, through a real thread — not an immediate raise."""
+    import threading  # noqa: PLC0415
+
+    from core.acceptance_compose_observer import (  # noqa: PLC0415
+        late_model_bound_breakdown,
+        seal_model_bound_observation,
+    )
+
+    released = threading.Event()
+    started = threading.Event()
+
+    def _worker() -> None:
+        index = observe_model_bound_call(
+            context_metadata=_metadata("collect_delivery_city", {"missing_field": "city"})
+        )
+        started.set()
+        released.wait(5)
+        record_model_bound_outcome(index, candidate_present=True, compose_source="late")
+
+    async def _main():
+        with _context(), model_bound_observation():
+            with compose_stage(STAGE_ORDINARY, collection_field="city", turn_ref="t1"):
+                task = asyncio.create_task(asyncio.to_thread(_worker))
+                # Yield to the loop so the worker thread actually starts;
+                # blocking here would keep it from ever running.
+                for _ in range(200):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                assert started.is_set(), "the worker must have reached the boundary"
+            # The turn's acceptance cutoff closes here, while the call is
+            # still outstanding — exactly the timeout case.
+            seal_model_bound_observation()
+            accepted = [c.to_dict() for c in recorded_model_bound_calls()]
+            released.set()
+            await task
+            after = [c.to_dict() for c in recorded_model_bound_calls()]
+            return accepted, after, dict(late_model_bound_breakdown())
+
+    accepted, after, late = asyncio.run(_main())
+    assert len(accepted) == 1
+    assert accepted[0]["outcome_pending"] is True
+    assert accepted[0]["outcome_recorded"] is False
+    # The late completion changed nothing and was counted.
+    assert after == accepted
+    assert late["late_outcomes"] == 1
+
+
+def test_a_pending_call_is_acceptable_evidence():
+    """A genuine timeout is a truthful outcome, not missing evidence."""
+    pending = _model_call(outcome_recorded=False, outcome_pending=True)
+    assert CODE_MODEL_CALL_EVIDENCE_INCOMPLETE not in _blockers(
+        _address_turn(model_bound_calls=[pending]),
+    )
+    silent = _model_call(outcome_recorded=False, outcome_pending=False)
+    assert CODE_MODEL_CALL_EVIDENCE_INCOMPLETE in _blockers(
+        _address_turn(model_bound_calls=[silent]),
+    )
+
+
+def test_a_subsequent_turn_starts_from_a_clean_cutoff():
+    with _context():
+        with model_bound_observation():
+            with compose_stage(STAGE_ORDINARY, turn_ref="t1"):
+                observe_model_bound_call(context_metadata=_metadata("a", {}))
+            assert len(recorded_model_bound_calls()) == 1
+        with model_bound_observation():
+            assert recorded_model_bound_calls() == ()
+            with compose_stage(STAGE_RECOVERY, turn_ref="t2"):
+                observe_model_bound_call(context_metadata=_metadata("b", {}))
+            calls = recorded_model_bound_calls()
+            assert len(calls) == 1
+            assert calls[0].turn_ref == "t2"
+
+
+# ── C4: the runner drives the real chain ──────────────────────────────────
+#
+# Everything above drives pieces. This drives ``run_sandbox_of2_turn`` with
+# a handler that executes the REAL OrderFlowV2 send block — the real owner
+# result, the real composer, the real guards and recovery, the real
+# serializer and the real ``_post_wa`` — substituting only the provider
+# below the adapter, so the observation hook inside it actually runs.
+#
+# What this does NOT do is enter ``_handle_merchant_message`` itself; see
+# the note in the harness runbook. The gap is stated rather than papered
+# over.
+
+
+def _reserve_tenant_one(db: Any) -> None:
+    from models import Tenant  # noqa: PLC0415
+
+    db.add(Tenant(name="platform-placeholder", is_active=False))
+    db.flush()
+
+
+def _address_suite():
+    import importlib  # noqa: PLC0415
+
+    tests_dir = str(REPO_ROOT / "tests")
+    if tests_dir not in sys.path:
+        sys.path.insert(0, tests_dir)
+    return importlib.import_module("test_salla_customer_address_candidates")
+
+
+def _real_chain_handler(*, addr, db, tenant, convo, result, captured_provider):
+    """A handler that runs the real send block with the real transport."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    import routers.whatsapp_webhook as webhook  # noqa: PLC0415
+
+    from core.conversation_engine import StateManager  # noqa: PLC0415
+    from modules.ai.brain.persona_ownership import (  # noqa: PLC0415
+        PersonaBypassReason,
+        PersonaOwnershipRecord,
+    )
+
+    namespace = addr._webhook_send_block()
+    namespace.update(
+        {
+            "_trace": SimpleNamespace(outbound_lock_acquired=lambda: True),
+            "persist_order_flow_v2_result": lambda *a, **k: None,
+            "db": db,
+            "tenant_id": tenant.id,
+            "to": addr.CUSTOMER_PHONE,
+            "phone_id": "internal-direct-code-probe",
+            "wa_msg_id": "probe.city.0",
+            "convo": convo,
+            "text": "الرياض",
+            # The REAL transport boundary, not a stand-in.
+            "_post_wa": webhook._post_wa,
+            "_persona_ownership": PersonaOwnershipRecord(),
+            "_POReason": PersonaBypassReason,
+            "StateManager": StateManager,
+            "_sync_persona_observability": lambda: None,
+            "_of2_result": result,
+        }
+    )
+
+    async def _handler(*args: Any, **kwargs: Any) -> None:
+        await namespace["_exercise"]()
+
+    return _handler
+
+
+def _fake_pipeline(reply_text: str = "وين نوصل طلبك؟"):
+    """Substitute BELOW the adapter, so the observation hook still runs.
+
+    Patching ``generate_ai_reply`` itself replaces the very function that
+    records the call, which is why the first cut of this test saw zero
+    model-bound calls through a chain that plainly made one.
+    """
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    def _run(request: Any):
+        return SimpleNamespace(
+            reply_text=reply_text, provider_used="fake-provider", metadata={},
+        )
+
+    return _run
+
+
+def test_the_runner_drives_the_real_chain_and_captures_it():
+    """Runner → real owner result → composer → guards → serializer → capture."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    import modules.ai.orchestrator.adapter as adapter  # noqa: PLC0415
+    import routers.whatsapp_webhook as webhook  # noqa: PLC0415
+
+    from services.internal_conversational_e2e_harness import (  # noqa: PLC0415
+        run_sandbox_of2_turn,
+    )
+
+    addr = _address_suite()
+    db, _engine = addr._make_db()
+    # Tenant 1 is the platform tenant and is hard-denied by the identity
+    # gate, so the probe tenant must not be the first row.
+    _reserve_tenant_one(db)
+    tenant, customer = addr._seed(db)
+    addr._two_candidates(db, tenant, customer)
+    convo = addr._conversation(db, tenant, customer)
+    result = addr._address_turn(db, tenant, convo, field="city")
+
+    provider_calls: list = []
+    handler = _real_chain_handler(
+        addr=addr, db=db, tenant=tenant, convo=convo, result=result,
+        captured_provider=provider_calls,
+    )
+
+    async def _main():
+        with patch.object(
+            webhook, "provider_send_message", _recording_provider(provider_calls)
+        ), patch.object(adapter._pipeline, "run", _fake_pipeline()):
+            return await run_sandbox_of2_turn(
+                db=db,
+                request=_of2_request(
+                    tenant_id=tenant.id,
+                    allowed_tenants=frozenset({tenant.id}),
+                    conversation=convo,
+                    customer_phone=addr.CUSTOMER_PHONE,
+                    turn_ref="probe.city.0",
+                    expected_operational_result="address_reply",
+                ),
+                handler=handler,
+            )
+
+    outcome = asyncio.run(_main())
+    evidence = outcome.evidence
+    address_turn = evidence["address_turn"]
+
+    assert provider_calls == [], "no provider call may be attempted"
+    assert address_turn["transport"] == "captured"
+    assert address_turn["captured_payload_digest_verified"] is True
+    assert address_turn["outbound_message_row_verified"] is True
+    assert address_turn["outbound_metadata_turn_ref"] == "probe.city.0"
+
+    # The city turn's facts, read at the adapter boundary through the real
+    # composer — the observation that was silently lost before.
+    calls = address_turn["model_bound_calls"]
+    assert len(calls) >= 1
+    assert calls[0]["stage"] == STAGE_ORDINARY
+    assert calls[0]["response_goal"] == "collect_delivery_city"
+    assert calls[0]["missing_field"] == "city"
+    assert calls[0]["delivery_address_status"] == "accepted"
+    assert calls[0]["has_accepted_maps_reference"] is True
+    assert calls[0]["observed_at"] == "orchestrator_adapter"
+
+    # Receipt and recorded showing agree, tied to a delivery this turn
+    # actually captured.
+    assert address_turn["receipt_address_ids"] == address_turn["recorded_action_ids"]
+    assert address_turn["recorded_offer_delivery_ref"] in address_turn["delivery_ids"]
+    assert evidence["status"] == "evaluated"
+
+
+def test_the_runner_drives_the_real_recovery_chain():
+    """The guard fails for real; the recovery leg is observed as its own stage."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    import modules.ai.orchestrator.adapter as adapter  # noqa: PLC0415
+    import routers.whatsapp_webhook as webhook  # noqa: PLC0415
+
+    from services.internal_conversational_e2e_harness import (  # noqa: PLC0415
+        run_sandbox_of2_turn,
+    )
+
+    addr = _address_suite()
+    db, _engine = addr._make_db()
+    # Tenant 1 is the platform tenant and is hard-denied by the identity
+    # gate, so the probe tenant must not be the first row.
+    _reserve_tenant_one(db)
+    tenant, customer = addr._seed(db)
+    addr._two_candidates(db, tenant, customer)
+    convo = addr._conversation(db, tenant, customer)
+    result = addr._address_turn(db, tenant, convo, field="city")
+
+    provider_calls: list = []
+    handler = _real_chain_handler(
+        addr=addr, db=db, tenant=tenant, convo=convo, result=result,
+        captured_provider=provider_calls,
+    )
+
+    async def _main():
+        with patch.object(
+            webhook, "provider_send_message", _recording_provider(provider_calls)
+        ), patch.object(
+            adapter._pipeline, "run", _fake_pipeline("تم حفظ عنوانك. نكمل الطلب؟")
+        ), patch(
+            "modules.ai.order_flow_v2.outbound_guards"
+            ".apply_order_flow_v2_outbound_guards",
+            side_effect=RuntimeError("isolated wrapper failure"),
+        ):
+            return await run_sandbox_of2_turn(
+                db=db,
+                request=_of2_request(
+                    tenant_id=tenant.id,
+                    allowed_tenants=frozenset({tenant.id}),
+                    conversation=convo,
+                    customer_phone=addr.CUSTOMER_PHONE,
+                    turn_ref="probe.city.0",
+                    failure_injection="none",
+                    expected_operational_result="address_reply",
+                ),
+                handler=handler,
+            )
+
+    outcome = asyncio.run(_main())
+    address_turn = outcome.evidence["address_turn"]
+
+    assert provider_calls == []
+    assert address_turn["execution_path"] == PATH_RECOVERY
+    # Text-only: the refused turn drops the structured surface.
+    assert address_turn["delivered_surface"] == SURFACE_TEXT
+    stages = [c["stage"] for c in address_turn["model_bound_calls"]]
+    assert STAGE_ORDINARY in stages and STAGE_RECOVERY in stages, stages
+    # Every call on a city turn keeps the city goal, recovery included.
+    for call in address_turn["model_bound_calls"]:
+        assert call["response_goal"] == "collect_delivery_city", call
+        assert call["missing_field"] == "city", call
+
+
+# ── C4: the operator's scenario gate, actually exercised ──────────────────
+
+
+def _load_scenarios(path: Any):
+    import importlib.util as util  # noqa: PLC0415
+
+    spec = util.spec_from_file_location(
+        "of2_operator",
+        REPO_ROOT / "scripts" / "operators" / "internal_conversational_e2e_session.py",
+    )
+    module = util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, module._load_scenarios(path)
+
+
+def test_the_shipped_manifest_parses_through_the_operator():
+    """The runbook's manifest is executable, not illustrative."""
+    module, scenarios = _load_scenarios(
+        REPO_ROOT / "docs" / "engineering" / "of2-address-scenarios.json"
+    )
+    assert len(scenarios) >= 7
+    ids = {s["scenario_id"] for s in scenarios}
+    assert {
+        "ordinary_delivery_address_one_saved",
+        "ordinary_no_saved_choices",
+        "city_only_accepted_address",
+        "provider_failure_retains_choices",
+        "provider_timeout_retains_choices",
+        "guard_boundary_recovery_text_only",
+        "continuation_after_captured_choice",
+    } <= ids
+    for scenario in scenarios:
+        for turn in scenario["turns"]:
+            assert turn["mode"] == "of2"
+            assert turn["expected_operational_result"]
+
+
+def test_the_operator_refuses_an_of2_turn_that_declares_nothing(tmp_path):
+    """Each omission is refused at load, before any turn runs."""
+    import json  # noqa: PLC0415
+
+    def _manifest(turn: Dict[str, Any]) -> Any:
+        path = tmp_path / f"m{uuid.uuid4().hex[:8]}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "scenario_schema_version": "internal_conversational_e2e_scenarios_v2",
+                    "scenarios": [{"scenario_id": "s1", "turns": [turn]}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    base = {
+        "text": "الرياض",
+        "mode": "of2",
+        "expected_status": "evaluated",
+        "expects_address_turn": True,
+        "expected_operational_result": "address_reply",
+        "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+        },
+    }
+    module, scenarios = _load_scenarios(_manifest(dict(base)))
+    assert scenarios[0]["turns"][0]["expectations"]["missing_field"] == "city"
+
+    for drop, expected in (
+        ("expects_address_turn", "expects_address_turn_required"),
+        ("expected_operational_result", "expected_operational_result_invalid"),
+        ("expectations", "expectations_required"),
+    ):
+        turn = {k: v for k, v in base.items() if k != drop}
+        with pytest.raises(ValueError) as err:
+            _load_scenarios(_manifest(turn))
+        assert str(err.value) == expected, drop
+
+
+def test_the_operator_refuses_an_unresolvable_captured_action():
+    """An unresolved placeholder answers no showing, so it must not run."""
+    module, _ = _load_scenarios(
+        REPO_ROOT / "docs" / "engineering" / "of2-address-scenarios.json"
+    )
+    turn = {
+        "inbound_metadata": {"button_id": "__captured_action_id__"},
+        "captured_action_index": 0,
+    }
+    with pytest.raises(ValueError) as err:
+        module._continuation_metadata(turn, [])
+    assert str(err.value) == "captured_action_reference_unresolved"
+
+    with pytest.raises(ValueError) as err:
+        module._continuation_metadata(
+            {**turn, "captured_action_index": 5}, ["nahla_addr_select:o:1"],
+        )
+    assert str(err.value) == "captured_action_reference_out_of_range"
+
+    resolved = module._continuation_metadata(turn, ["nahla_addr_select:o:1"])
+    assert resolved == {"button_id": "nahla_addr_select:o:1"}

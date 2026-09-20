@@ -504,7 +504,9 @@ ADDRESS_TURN_REQUIRED_FIELDS: tuple[str, ...] = (
     "execution_path",
     "failure_injection",
     "model_bound_calls",
+    "captured_payload_digest_verified",
     "outbound_message_id",
+    "outbound_message_row_verified",
     "outbound_metadata_turn_ref",
     "outbound_provenance",
     "receipt_action_ids",
@@ -531,6 +533,25 @@ CODE_ADDRESS_EXPECTATION_UNMET = "address_turn_expectation_unmet"
 CODE_ADDRESS_RECEIPT_MISMATCH = "address_turn_receipt_mismatch"
 CODE_ADDRESS_INJECTION_NOT_EXECUTED = "address_turn_injection_not_executed"
 CODE_ADDRESS_EXPECTATIONS_MISSING = "address_turn_expectations_missing"
+CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED = "address_turn_final_source_unestablished"
+CODE_ADDRESS_TIMING_UNCORRELATED = "address_turn_timing_uncorrelated"
+
+CONSENT_ACTION_PREFIX = "nahla_addr_select"
+_SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CAPTURED_DELIVERY_ID = re.compile(r"^captured\.[0-9a-f]{32}$")
+
+# The closed set the doctrine allows for a customer-facing reply.
+COMPOSE_SOURCES = frozenset(
+    {
+        "llm",
+        "persona_llm",
+        "merchant_template",
+        "meta_template",
+        "legal_exact_text",
+        "security_exact_text",
+        "fallback_deterministic",
+    }
+)
 
 # What a scenario must state about an address turn before its evidence
 # means anything. Signing protects the bytes after they are written; it
@@ -584,9 +605,27 @@ def _model_call_blockers(
             # path this call belongs to was never established.
             blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
             break
-        if not call.get("outcome_recorded"):
+        # An outcome, or a truthful "this call never returned". Silence
+        # is neither.
+        if not call.get("outcome_recorded") and not call.get("outcome_pending"):
             blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
             break
+        if call.get("outcome_recorded"):
+            if not isinstance(call.get("candidate_present"), bool):
+                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+                break
+            # Where the text came from, or why there is none. One of the
+            # two must be stated; "it returned something" is not a source.
+            if not call.get("candidate_present") and not str(
+                call.get("fallback_reason") or ""
+            ).strip():
+                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+                break
+            if call.get("candidate_present") and not str(
+                call.get("compose_source") or ""
+            ).strip():
+                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+                break
 
     for call in calls:
         if not isinstance(call, Mapping):
@@ -607,7 +646,14 @@ def _model_call_blockers(
 
 
 def _binding_blockers(record: Mapping[str, Any]) -> list[str]:
-    """One turn, three artifacts, tied by identity rather than by hope."""
+    """One turn, three artifacts, tied by VERIFIED identity.
+
+    Checking that a digest starts with ``sha256:`` and that two ids are
+    non-empty is a shape test, not a binding: a foreign row id, a foreign
+    delivery id and a digest of nothing all passed it. Each one is now
+    checked against the thing it is supposed to identify, and the
+    producer states whether it could verify them at all.
+    """
     blockers: list[str] = []
     turn_ref = str(record.get("turn_ref") or "")
     if not turn_ref or str(record.get("outbound_metadata_turn_ref") or "") != turn_ref:
@@ -617,33 +663,93 @@ def _binding_blockers(record: Mapping[str, Any]) -> list[str]:
             if isinstance(call, Mapping) and str(call.get("turn_ref") or "") != turn_ref:
                 blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
                 break
-    # The captured payload has to be the payload this receipt came from,
-    # and the persisted row has to be the row this turn wrote.
-    if str(record.get("transport") or "") == "captured":
-        if not str(record.get("captured_payload_digest") or "").startswith("sha256:"):
+
+    if str(record.get("transport") or "") != "captured":
+        return sorted(set(blockers))
+
+    digest = str(record.get("captured_payload_digest") or "")
+    if not _SHA256_DIGEST.fullmatch(digest):
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+    # The producer recomputed the digest from the payload it captured and
+    # says whether it matched. A digest nobody checked binds nothing.
+    if record.get("captured_payload_digest_verified") is not True:
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+
+    delivery_ids = record.get("delivery_ids")
+    delivery_ids = (
+        list(delivery_ids)
+        if isinstance(delivery_ids, Sequence) and not isinstance(delivery_ids, (str, bytes))
+        else []
+    )
+    if not delivery_ids or not all(
+        _CAPTURED_DELIVERY_ID.fullmatch(str(v)) for v in delivery_ids
+    ):
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+
+    # The persisted row was fetched and is this turn's row, not an
+    # arbitrary non-empty string.
+    if record.get("outbound_message_row_verified") is not True:
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+    if not str(record.get("outbound_message_id") or "").strip():
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+
+    # The recorded showing names the delivery it was recorded against.
+    # When a showing exists at all, that reference must be one of the
+    # delivery ids this turn actually captured.
+    if record.get("recorded_action_ids"):
+        offer_ref = str(record.get("recorded_offer_delivery_ref") or "")
+        if not offer_ref or offer_ref not in {str(v) for v in delivery_ids}:
             blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
-        if not record.get("delivery_ids"):
-            blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
-        if not str(record.get("outbound_message_id") or "").strip():
-            blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
-    return blockers
+
+    # Latency is only acceptable when it is correlated to this turn.
+    timing = record.get("turn_timing")
+    timing = dict(timing) if isinstance(timing, Mapping) else {}
+    if not timing:
+        if record.get("turn_timing_unavailable") is not True:
+            # Either correlated timing, or an explicit statement that the
+            # measurement is unavailable. Silently absent is neither.
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+    elif not str(timing.get("turn_id") or "").strip():
+        blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+    return sorted(set(blockers))
 
 
 def _receipt_blockers(record: Mapping[str, Any]) -> list[str]:
     """What was offered on the wire is what was recorded as offered.
 
-    The two lists are compared as ADDRESS identities. Comparing action
-    ids against address ids — which is what the first cut stored — can
-    never be equal and so never failed, which is the same as not
-    checking.
+    Three lists have to agree, not two. ``receipt_action_ids`` are the ids
+    that actually left; ``receipt_address_ids`` are what they resolve to;
+    ``recorded_action_ids`` are the addresses the platform recorded as
+    shown. Comparing only the last two let an action id naming a
+    different offer and a different address pass, because nobody checked
+    that the ids on the wire were the ones those addresses came from.
     """
+    delivered_actions = record.get("receipt_action_ids")
     delivered = record.get("receipt_address_ids")
     recorded = record.get("recorded_action_ids")
-    if not isinstance(delivered, Sequence) or isinstance(delivered, (str, bytes)):
-        return [CODE_ADDRESS_RECEIPT_MISMATCH]
-    if not isinstance(recorded, Sequence) or isinstance(recorded, (str, bytes)):
+    for value in (delivered_actions, delivered, recorded):
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return [CODE_ADDRESS_RECEIPT_MISMATCH]
+
+    resolved: set[str] = set()
+    offers: set[str] = set()
+    for action_id in delivered_actions:
+        parts = str(action_id or "").split(":")
+        if len(parts) != 3 or parts[0] != CONSENT_ACTION_PREFIX:
+            return [CODE_ADDRESS_RECEIPT_MISMATCH]
+        offers.add(parts[1])
+        resolved.add(parts[2])
+
+    if resolved != {str(v) for v in delivered}:
         return [CODE_ADDRESS_RECEIPT_MISMATCH]
     if {str(v) for v in delivered} != {str(v) for v in recorded}:
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    # One showing answers one question: ids from two different offers on
+    # one payload mean the receipt does not describe a single showing.
+    if delivered_actions and len(offers) != 1:
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    recorded_offer = str(record.get("recorded_offer_id") or "")
+    if offers and recorded_offer and recorded_offer not in offers:
         return [CODE_ADDRESS_RECEIPT_MISMATCH]
     return []
 
@@ -673,7 +779,10 @@ def address_turn_evidence_blockers(
     # An OrderFlowV2 scenario has to say what it expects. Without that,
     # every check below degrades to "some string is present", which is
     # how a city turn asserting a missing DELIVERY ADDRESS passed.
-    if not any(_expected(wants, field) for field in ADDRESS_EXPECTATION_FIELDS):
+    # Every one of them, not any of them. A manifest stating only the
+    # collection field leaves the goal and the missing field unasserted,
+    # so a turn could contradict either and still be accepted.
+    if not all(_expected(wants, field) for field in ADDRESS_EXPECTATION_FIELDS):
         blockers.append(CODE_ADDRESS_EXPECTATIONS_MISSING)
 
     missing = [f for f in ADDRESS_TURN_REQUIRED_FIELDS if f not in record]
@@ -694,8 +803,15 @@ def address_turn_evidence_blockers(
     # Final-text provenance: what the customer received and why.
     provenance = record.get("outbound_provenance")
     provenance = dict(provenance) if isinstance(provenance, Mapping) else {}
-    if not provenance:
-        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    # "Non-empty mapping" established nothing about the final text. The
+    # source has to be named, and it has to be one of the closed values.
+    source = str(provenance.get("compose_source") or "").strip()
+    if source not in COMPOSE_SOURCES:
+        blockers.append(CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED)
+    elif source == "fallback_deterministic" and not str(
+        provenance.get("fallback_reason") or ""
+    ).strip():
+        blockers.append(CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED)
 
     # An injection that was declared but never fired proves nothing about
     # the mechanism it named, and must not be filed as a passing check.

@@ -62,6 +62,7 @@ from services.internal_conversational_e2e_contract import (  # noqa: E402
     sign_session_evidence,
 )
 from services.internal_conversational_e2e_harness import (  # noqa: E402
+    OPERATIONAL_RESULTS,
     SandboxOf2TurnRequest,
     SandboxTurnRequest,
     run_sandbox_of2_turn,
@@ -78,6 +79,7 @@ from services.internal_conversational_e2e_sql_error_audit import (  # noqa: E402
 
 
 SCENARIO_SCHEMA_VERSION = SCENARIO_SCHEMA_VERSION_V1
+CAPTURED_ACTION_PLACEHOLDER = "__captured_action_id__"
 SESSION_SCHEMA_VERSION = "internal_conversational_e2e_session_v1"
 MAX_SCENARIOS = 30
 MAX_TURNS_PER_SCENARIO = 12
@@ -275,6 +277,12 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                 # so a Brain turn claiming it would declare a requirement
                 # nothing in the run could ever satisfy.
                 raise ValueError("expects_address_turn_invalid")
+            operational_result = str(turn.get("expected_operational_result") or "")
+            if mode == TURN_MODE_OF2 and operational_result not in OPERATIONAL_RESULTS:
+                # Every OrderFlowV2 turn says what it must DO. Address
+                # evidence is legitimately optional on a continuation
+                # turn; proving the turn happened is not.
+                raise ValueError("expected_operational_result_invalid")
             expectations = turn.get("expectations") or {}
             if not isinstance(expectations, Mapping):
                 raise ValueError("expectations_invalid")
@@ -299,6 +307,7 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                     "failure_injection": failure_injection,
                     "expects_address_turn": expects_address_turn,
                     "expectations": dict(expectations),
+                    "expected_operational_result": operational_result,
                     "inbound_metadata": dict(turn.get("inbound_metadata") or {}),
                     "captured_action_index": (
                         int(turn["captured_action_index"])
@@ -424,14 +433,26 @@ def _continuation_metadata(
     answering a showing that never happened.
     """
     metadata = dict(turn.get("inbound_metadata") or {})
+    placeholder_present = any(
+        value == CAPTURED_ACTION_PLACEHOLDER for value in metadata.values()
+    )
     index = turn.get("captured_action_index")
-    if index is None or not captured_action_ids:
+    if not placeholder_present:
+        if index is not None:
+            raise ValueError("captured_action_reference_unused")
         return metadata
+    # A placeholder that cannot be resolved must REFUSE, not travel into
+    # the turn unresolved: an unresolved marker answers no showing, and a
+    # turn that silently replays it proves nothing about continuation.
+    if index is None:
+        raise ValueError("captured_action_reference_unresolved")
+    if not captured_action_ids:
+        raise ValueError("captured_action_reference_unresolved")
     if not 0 <= int(index) < len(captured_action_ids):
-        return metadata
+        raise ValueError("captured_action_reference_out_of_range")
     action_id = str(captured_action_ids[int(index)])
     return {
-        key: (action_id if value == "__captured_action_id__" else value)
+        key: (action_id if value == CAPTURED_ACTION_PLACEHOLDER else value)
         for key, value in metadata.items()
     }
 
@@ -607,9 +628,16 @@ async def run_session(
                             failure_injection=turn["failure_injection"],
                             expects_address_turn=turn["expects_address_turn"],
                             expectations=turn["expectations"],
+                            expected_state_delta_keys=tuple(
+                                turn["expected_state_delta_keys"]
+                            ),
+                            expected_operational_result=turn[
+                                "expected_operational_result"
+                            ],
                             inbound_metadata=_continuation_metadata(
                                 turn, last_captured_action_ids,
                             ),
+                            state_probe=_state_probe,
                         ),
                     )
                     clear_last_turn_sql_error_audit()

@@ -67,6 +67,9 @@ class ModelBoundCall:
     has_accepted_maps_reference: bool
     stage_declared: bool
     outcome_recorded: bool = False
+    # Set at the acceptance cutoff for a call that never returned. A
+    # genuine timeout is a truthful outcome, not missing evidence.
+    outcome_pending: bool = False
     candidate_present: bool = False
     compose_source: str = ""
     fallback_reason: str = ""
@@ -94,23 +97,30 @@ class _Recorder:
 
     Holding a mutable recorder in the ContextVar fixes that: the child
     inherits the same object, and appending to it is visible everywhere.
-    A lock keeps concurrent workers honest, and sealing at the end of the
-    turn means a call that completes after its ``wait_for`` gave up is
-    counted as late instead of landing in the next turn's evidence.
+
+    The acceptance cutoff is where the evidence is decided, so it is
+    immutable. Sealing does two things: it freezes what has been accepted,
+    and it marks every call still without an outcome as ``pending`` —
+    which is the truth about a call whose ``wait_for`` gave up before it
+    returned. After that, a late append or a late outcome is COUNTED and
+    discarded rather than quietly rewriting an accepted record. Nothing
+    here pretends to know, at snapshot time, how a call that has not
+    returned will end.
     """
 
-    __slots__ = ("_calls", "_lock", "_sealed", "_late")
+    __slots__ = ("_calls", "_lock", "_sealed", "_late_appends", "_late_outcomes")
 
     def __init__(self) -> None:
         self._calls: List[ModelBoundCall] = []
         self._lock = threading.Lock()
         self._sealed = False
-        self._late = 0
+        self._late_appends = 0
+        self._late_outcomes = 0
 
     def append(self, record: ModelBoundCall) -> int:
         with self._lock:
             if self._sealed:
-                self._late += 1
+                self._late_appends += 1
                 return -1
             index = len(self._calls)
             self._calls.append(replace(record, call_index=index))
@@ -118,14 +128,34 @@ class _Recorder:
 
     def update(self, index: int, **changes: Any) -> None:
         with self._lock:
+            if self._sealed:
+                # The cutoff has passed. This outcome is real, but it is
+                # not part of what was accepted, and overwriting a sealed
+                # record would make a timed-out call look answered.
+                self._late_outcomes += 1
+                return
             if index < 0 or index >= len(self._calls):
-                self._late += 1
+                self._late_outcomes += 1
                 return
             self._calls[index] = replace(self._calls[index], **changes)
 
     def seal(self) -> None:
+        """Freeze the record, marking unfinished calls as pending."""
         with self._lock:
+            if self._sealed:
+                return
+            self._calls = [
+                call
+                if call.outcome_recorded
+                else replace(call, outcome_pending=True)
+                for call in self._calls
+            ]
             self._sealed = True
+
+    @property
+    def sealed(self) -> bool:
+        with self._lock:
+            return self._sealed
 
     def snapshot(self) -> Tuple[ModelBoundCall, ...]:
         with self._lock:
@@ -134,7 +164,14 @@ class _Recorder:
     @property
     def late_arrivals(self) -> int:
         with self._lock:
-            return self._late
+            return self._late_appends + self._late_outcomes
+
+    def late_breakdown(self) -> Dict[str, int]:
+        with self._lock:
+            return {
+                "late_appends": self._late_appends,
+                "late_outcomes": self._late_outcomes,
+            }
 
 
 _STAGE: ContextVar[Optional[_StageMarker]] = ContextVar(
@@ -198,9 +235,25 @@ def recorded_model_bound_calls() -> Tuple[ModelBoundCall, ...]:
 
 
 def late_model_bound_arrivals() -> int:
-    """Calls that completed after their turn was sealed."""
+    """Appends and outcomes that arrived after the acceptance cutoff."""
     recorder = _RECORDER.get()
     return recorder.late_arrivals if recorder is not None else 0
+
+
+def late_model_bound_breakdown() -> Dict[str, int]:
+    recorder = _RECORDER.get()
+    return (
+        recorder.late_breakdown()
+        if recorder is not None
+        else {"late_appends": 0, "late_outcomes": 0}
+    )
+
+
+def seal_model_bound_observation() -> None:
+    """Close the acceptance cutoff explicitly, before the evidence is read."""
+    recorder = _RECORDER.get()
+    if recorder is not None:
+        recorder.seal()
 
 
 def _address_facts(context_metadata: Any) -> Dict[str, Any]:
@@ -273,6 +326,8 @@ __all__ = [
     "ModelBoundCall",
     "compose_stage",
     "late_model_bound_arrivals",
+    "late_model_bound_breakdown",
+    "seal_model_bound_observation",
     "model_bound_observation",
     "observe_model_bound_call",
     "record_model_bound_outcome",

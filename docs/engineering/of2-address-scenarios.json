@@ -24,7 +24,8 @@
             "missing_field": "delivery_address",
             "expected_execution_path": "ordinary"
           },
-          "expected_denials": []
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
         }
       ]
     },
@@ -44,7 +45,8 @@
             "expected_execution_path": "ordinary",
             "expected_surface": "text"
           },
-          "expected_denials": []
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
         }
       ]
     },
@@ -65,7 +67,8 @@
             "requires_accepted_maps_reference": true,
             "expected_execution_path": "ordinary"
           },
-          "expected_denials": []
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
         }
       ]
     },
@@ -85,7 +88,8 @@
             "expected_execution_path": "ordinary",
             "expected_surface": "list"
           },
-          "expected_denials": []
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
         }
       ]
     },
@@ -104,7 +108,8 @@
             "missing_field": "delivery_address",
             "expected_execution_path": "ordinary"
           },
-          "expected_denials": []
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
         }
       ]
     },
@@ -126,7 +131,8 @@
             "expected_execution_path": "recovery",
             "expected_surface": "text"
           },
-          "expected_denials": []
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
         }
       ]
     },
@@ -152,7 +158,8 @@
             "missing_field": "delivery_address",
             "expected_execution_path": "ordinary"
           },
-          "expected_denials": []
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
         },
         {
           "text": "اختيار العنوان",
@@ -161,8 +168,14 @@
           "failure_injection": "none",
           "expects_address_turn": false,
           "captured_action_index": 0,
-          "inbound_metadata": {"button_id": "__captured_action_id__"},
-          "expected_denials": []
+          "inbound_metadata": {
+            "button_id": "__captured_action_id__"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "structured_selection",
+          "expected_state_delta_keys": [
+            "conversation_metadata_fingerprint"
+          ]
         }
       ]
     }

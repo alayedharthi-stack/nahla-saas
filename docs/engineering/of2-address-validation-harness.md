@@ -219,7 +219,9 @@ diff /tmp/stateB.before /tmp/stateB.after || true
 
 Execution, from the repository root:
 
-Scenario manifest (`internal_conversational_e2e_scenarios_v2`), one turn:
+Scenario manifest (`internal_conversational_e2e_scenarios_v2`). A complete
+OrderFlowV2 turn — every field below is required and the loader refuses
+the manifest without them:
 
 ```json
 {
@@ -228,16 +230,62 @@ Scenario manifest (`internal_conversational_e2e_scenarios_v2`), one turn:
   "expected_status": "evaluated",
   "failure_injection": "none",
   "expects_address_turn": true,
+  "expected_operational_result": "address_reply",
+  "expectations": {
+    "collection_field": "city",
+    "response_goal": "collect_delivery_city",
+    "missing_field": "city",
+    "delivery_address_status": "accepted",
+    "requires_accepted_maps_reference": true,
+    "expected_execution_path": "ordinary"
+  },
   "expected_denials": []
 }
 ```
 
 `failure_injection` is one of `none`, `provider_error`,
-`provider_timeout`, `guard_boundary`. A turn declaring
-`expects_address_turn` outside `mode: "of2"` is rejected, as is an OF2
-turn in a v1 manifest — a v1 manifest is never silently demoted to a
-Brain turn, which would measure a different path than the scenario asked
-for.
+`provider_timeout`, `guard_boundary`. `expected_operational_result` is
+one of `address_reply` (a new collection reply was captured),
+`structured_selection` (a captured choice was consumed and moved state)
+or `refusal` (an expected gate, nothing sent). `expectations` must state
+`collection_field`, `response_goal` **and** `missing_field` — any one of
+them alone asserts almost nothing. A turn declaring
+`expects_address_turn` outside `mode: "of2"` is rejected, as is an
+OrderFlowV2 turn in a v1 manifest.
+
+A continuation turn replays an action id from the previous turn's
+**captured** payload:
+
+```json
+{
+  "text": "اختيار العنوان",
+  "mode": "of2",
+  "expected_status": "evaluated",
+  "failure_injection": "none",
+  "expects_address_turn": false,
+  "expected_operational_result": "structured_selection",
+  "expected_state_delta_keys": ["conversation_metadata_fingerprint"],
+  "captured_action_index": 0,
+  "inbound_metadata": {"button_id": "__captured_action_id__"},
+  "expected_denials": []
+}
+```
+
+An index that names no captured action, or one out of range, **refuses
+before the turn runs** (`captured_action_reference_unresolved` /
+`…_out_of_range`) rather than replaying an unresolved marker.
+
+## 6a. Per-scenario fixture state — still to be supplied
+
+The scenarios describe incompatible customer states (one saved address,
+several, none, an accepted address with the city missing). The operator
+creates **one** pristine conversation and carries it through the session,
+so the manifest's expectations cannot be satisfied by a single seeded
+state. Before a sandbox run, each scenario needs its fixture prepared and
+isolated — shared state preserved only for the intentional continuation
+pair. That preparation is **not** in this branch; it is the remaining
+handoff item, and a run started without it will fail on the first
+scenario whose state does not match, which is the correct outcome.
 
 ## 7. Stop conditions and rollback
 
@@ -255,6 +303,19 @@ Never run `alembic downgrade 0109` against a shared database: it drops a
 table `create_all` may have been populating since deploy.
 
 ## 8. Offline coverage
+
+### Coverage boundary, stated
+
+The runner is driven end-to-end against the **real** OrderFlowV2 send
+block — real owner result, real composer, real guards and recovery, real
+serializer, real `_post_wa` — with the provider substituted *below* the
+adapter so the observation hook still runs. It does **not** yet enter
+`_handle_merchant_message` itself: in an offline SQLite sandbox that
+handler returns without producing an address turn, because the owner
+needs a cart, a verified identity and a missing-address checkout state
+that the seeded fixture does not yet establish. Patching the owner's
+internals and calling the result "the real owner path" would be worse
+than saying so. Closing that gap belongs with the fixture work in §6a.
 
 `tests/test_of2_validation_harness.py` covers valid capture, capture
 failure, invalid context, isolation across turns and asyncio tasks,

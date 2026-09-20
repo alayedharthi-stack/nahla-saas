@@ -427,7 +427,14 @@ class SandboxOf2TurnRequest:
     failure_injection: str = "none"
     expects_address_turn: bool = False
     expectations: Mapping[str, Any] = field(default_factory=dict)
+    expected_state_delta_keys: tuple[str, ...] = ()
+    # What this turn must DO. ``address_reply`` is a new collection turn;
+    # ``structured_selection`` is a captured choice being consumed;
+    # ``refusal`` is an expected gate. A turn that declares none of these
+    # cannot be accepted just because the handler returned.
+    expected_operational_result: str = ""
     inbound_metadata: Mapping[str, Any] = field(default_factory=dict)
+    state_probe: Optional[Callable[[Any, int, Any], Mapping[str, Any]]] = None
 
 
 def _payload_digest(payload: Mapping[str, Any]) -> str:
@@ -448,27 +455,75 @@ def _payload_digest(payload: Mapping[str, Any]) -> str:
         return ""
 
 
-def _latest_outbound_message_id(db: Any, *, conversation_id: int) -> str:
-    """The persisted row this turn wrote, by identity."""
-    try:
-        from models import MessageEvent  # noqa: PLC0415
+OPERATIONAL_RESULT_ADDRESS_REPLY = "address_reply"
+OPERATIONAL_RESULT_STRUCTURED_SELECTION = "structured_selection"
+OPERATIONAL_RESULT_REFUSAL = "refusal"
+OPERATIONAL_RESULTS = frozenset(
+    {
+        OPERATIONAL_RESULT_ADDRESS_REPLY,
+        OPERATIONAL_RESULT_STRUCTURED_SELECTION,
+        OPERATIONAL_RESULT_REFUSAL,
+    }
+)
 
-        row = (
-            db.query(MessageEvent)
-            .filter(
-                MessageEvent.conversation_id == int(conversation_id),
-                MessageEvent.direction == "outbound",
-            )
-            .order_by(MessageEvent.id.desc())
-            .first()
-        )
-        return str(getattr(row, "id", "") or "")
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence
-        return ""
+STATUS_EVALUATED = "evaluated"
+STATUS_NO_EXECUTION = "no_execution_observed"
 
 
-def _latest_outbound_metadata(db: Any, *, conversation_id: int) -> dict[str, Any]:
-    """The metadata the runtime itself persisted for this turn's reply."""
+def _derived_status(
+    *,
+    captured: bool,
+    model_calls: list,
+    state_delta: Mapping[str, Any],
+    outbound_row_verified: bool,
+) -> str:
+    """What the turn did, read off what it did.
+
+    Initialising the status to ``evaluated`` and leaving it there whenever
+    the handler returned normally meant an early return that performed no
+    work reported the same status as a fully executed turn.
+    """
+    if captured or model_calls or outbound_row_verified or dict(state_delta or {}):
+        return STATUS_EVALUATED
+    return STATUS_NO_EXECUTION
+
+
+def _operational_result_blockers(
+    *,
+    expected: str,
+    status: str,
+    captured: bool,
+    address_turn: Mapping[str, Any],
+    state_delta: Mapping[str, Any],
+) -> list[str]:
+    """Did the turn produce the operational result it declared?"""
+    if expected not in OPERATIONAL_RESULTS:
+        return ["expected_operational_result_missing"]
+    if expected == OPERATIONAL_RESULT_REFUSAL:
+        # A refusal proves itself by NOT executing and NOT sending.
+        return [] if not captured else ["expected_refusal_not_observed"]
+    if status != STATUS_EVALUATED:
+        return ["expected_operational_result_not_observed"]
+    if expected == OPERATIONAL_RESULT_ADDRESS_REPLY:
+        return [] if captured else ["expected_operational_result_not_observed"]
+    # A structured selection has to CONSUME the action: the conversation
+    # state must have moved. A reply alone does not establish it.
+    changed = dict(state_delta or {})
+    if not changed:
+        return ["structured_selection_changed_no_state"]
+    return []
+
+
+def _outbound_row_for_turn(
+    db: Any, *, conversation_id: int, turn_ref: str,
+) -> tuple[str, dict[str, Any], bool]:
+    """Fetch the row this turn actually wrote, and say whether it is that row.
+
+    Returning the newest outbound id and calling it bound proved nothing:
+    any non-empty string satisfied the old check. This fetches the latest
+    outbound row for the conversation and only reports it verified when
+    its persisted metadata names THIS turn.
+    """
     try:
         from models import MessageEvent  # noqa: PLC0415
 
@@ -482,13 +537,63 @@ def _latest_outbound_metadata(db: Any, *, conversation_id: int) -> dict[str, Any
             .first()
         )
         if row is None:
-            return {}
+            return "", {}, False
         stored = getattr(row, "extra_metadata", None)
-        # A row whose metadata is not a mapping carries no binding, which
-        # the evidence reports as unbound rather than crashing on.
-        return dict(stored) if isinstance(stored, Mapping) else {}
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence below
-        return {}
+        metadata = dict(stored) if isinstance(stored, Mapping) else {}
+        row_id = str(getattr(row, "id", "") or "")
+        verified = bool(
+            row_id
+            and turn_ref
+            and str(metadata.get("address_turn_ref") or "") == str(turn_ref)
+        )
+        return row_id, metadata, verified
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence
+        return "", {}, False
+
+
+def _recorded_offer_binding(
+    *, tenant_id: int, conversation: Any, delivered_ids: Sequence[str],
+) -> tuple[str, str]:
+    """The offer these action ids name, and the delivery it was RECORDED against.
+
+    ``record_presented_address_offer`` stores ``delivery_ref`` — the
+    outbound identity the showing was committed from — alongside the
+    offer. Reading it back is what ties the recorded showing to a
+    delivery this turn actually captured; without it, "recorded" and
+    "delivered" are two independent readings that merely look compatible.
+    """
+    try:
+        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+            _OFFER_KEY,
+            _OFFER_SET_KEY,
+            _conversation_metadata,
+            _offered_revisions,
+        )
+
+        offer_ids = {
+            parts[1]
+            for parts in (str(a or "").split(":") for a in delivered_ids)
+            if len(parts) == 3
+        }
+        if len(offer_ids) != 1:
+            return "", ""
+        offer_id = sorted(offer_ids)[0]
+        offered, _identity = _offered_revisions(
+            tenant_id=int(tenant_id), conversation=conversation, offer_id=offer_id,
+        )
+        if not offered:
+            return "", ""
+        meta = _conversation_metadata(conversation)
+        for key in (_OFFER_SET_KEY, _OFFER_KEY):
+            stored = meta.get(key)
+            if not isinstance(stored, Mapping):
+                continue
+            if str(stored.get("offer_id") or "") != offer_id:
+                continue
+            return offer_id, str(stored.get("delivery_ref") or "")
+        return offer_id, ""
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence
+        return "", ""
 
 
 def _recorded_offer_address_ids(
@@ -551,8 +656,10 @@ async def run_sandbox_of2_turn(
     """Run one OrderFlowV2 address turn through the real webhook handler."""
     from core.acceptance_compose_observer import (  # noqa: PLC0415
         late_model_bound_arrivals,
+        late_model_bound_breakdown,
         model_bound_observation,
         recorded_model_bound_calls,
+        seal_model_bound_observation,
     )
     from core.acceptance_execution_context import (  # noqa: PLC0415
         outbound_capture_sink,
@@ -601,6 +708,18 @@ async def run_sandbox_of2_turn(
     except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         timing_token = None
 
+    def _probe() -> dict[str, Any]:
+        if request.state_probe is None:
+            return {}
+        try:
+            return dict(
+                request.state_probe(db, request.tenant_id, request.conversation)
+            )
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable probe is reported as an empty delta
+            return {}
+
+    before_state = _probe()
+
     with internal_conversational_e2e_context(
         session_id=request.session_id,
         tenant_id=request.tenant_id,
@@ -630,8 +749,13 @@ async def run_sandbox_of2_turn(
             status = "handler_exception"
             blockers.append("handler_exception")
             blockers.append(type(exc).__name__.lower()[:48])
+        # Close the acceptance cutoff BEFORE reading, so the snapshot is
+        # what was accepted rather than whatever happened to have landed
+        # by the time the read ran.
+        seal_model_bound_observation()
         model_calls = [call.to_dict() for call in recorded_model_bound_calls()]
         late_calls = late_model_bound_arrivals()
+        late_detail = dict(late_model_bound_breakdown())
         injection = dict(injection_state())
         turn_sql_error_audit = sql_error_scope.summary
         # ``recorded_egress_denials`` yields EgressDenialAudit dataclasses.
@@ -665,16 +789,22 @@ async def run_sandbox_of2_turn(
         except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
             pass
 
+    after_state = _probe()
+    state_delta = _state_delta(before_state, after_state)
+
     payload = dict(captured[-1].payload) if captured else {}
     _receipt_action_ids = _delivered_action_ids(payload)
-    outbound_meta = _latest_outbound_metadata(
-        db, conversation_id=int(getattr(request.conversation, "id", 0) or 0),
+    outbound_message_id, outbound_meta, outbound_row_verified = _outbound_row_for_turn(
+        db,
+        conversation_id=int(getattr(request.conversation, "id", 0) or 0),
+        turn_ref=request.turn_ref,
     )
-    outbound_message_id = str(outbound_meta.get("_nahla_message_event_id") or "")
-    if not outbound_message_id:
-        outbound_message_id = _latest_outbound_message_id(
-            db, conversation_id=int(getattr(request.conversation, "id", 0) or 0),
-        )
+    recorded_offer_id, recorded_offer_delivery_ref = _recorded_offer_binding(
+        tenant_id=request.tenant_id,
+        conversation=request.conversation,
+        delivered_ids=_receipt_action_ids,
+    )
+    _captured_digest = _payload_digest(payload) if captured else ""
 
     address_turn = {
         "turn_ref": request.turn_ref,
@@ -685,9 +815,19 @@ async def run_sandbox_of2_turn(
             outbound_meta.get("address_turn_ref") or ""
         ),
         "outbound_message_id": outbound_message_id,
+        "outbound_message_row_verified": bool(outbound_row_verified),
         "transport": "captured" if captured else "not_captured",
         "delivery_ids": [str(record.delivery_id) for record in captured],
-        "captured_payload_digest": _payload_digest(payload) if captured else "",
+        "captured_payload_digest": _captured_digest,
+        # Recomputed from the payload that was captured, then compared.
+        # A digest nobody checked binds nothing.
+        "captured_payload_digest_verified": bool(
+            captured
+            and _captured_digest
+            and _captured_digest == _payload_digest(dict(captured[-1].payload))
+        ),
+        "recorded_offer_id": recorded_offer_id,
+        "recorded_offer_delivery_ref": recorded_offer_delivery_ref,
         # Execution first, presentation second — and never the other way
         # round. A customer with no saved addresses gets an ordinary turn
         # with no choices, which is not a recovery.
@@ -697,6 +837,7 @@ async def run_sandbox_of2_turn(
         "injection_state": injection,
         "compose_entered": bool(model_calls),
         "late_model_bound_arrivals": int(late_calls),
+        "late_model_bound_breakdown": late_detail,
         "collection_field": str(
             outbound_meta.get("order_flow_v2_last_field")
             or (model_calls[0].get("collection_field") if model_calls else "")
@@ -718,6 +859,12 @@ async def run_sandbox_of2_turn(
         "turn_timing": dict(outbound_meta.get("turn_timing") or {})
         if isinstance(outbound_meta.get("turn_timing"), Mapping)
         else {},
+        # Stated, never implied: an absent measurement is reported as
+        # unavailable rather than passed off as a complete record.
+        "turn_timing_unavailable": not isinstance(
+            outbound_meta.get("turn_timing"), Mapping
+        )
+        or not outbound_meta.get("turn_timing"),
     }
     blockers.extend(
         address_turn_evidence_blockers(
@@ -726,6 +873,35 @@ async def run_sandbox_of2_turn(
             expectations=dict(request.expectations or {}),
         )
     )
+
+    # Status is DERIVED, not initialised to success. A handler that
+    # returned normally having done nothing is not an evaluated turn, and
+    # must not inherit the optimistic value the runner started with.
+    if status == "evaluated":
+        status = _derived_status(
+            captured=bool(captured),
+            model_calls=model_calls,
+            state_delta=state_delta,
+            outbound_row_verified=bool(outbound_row_verified),
+        )
+
+    # Every turn declares what it must DO. Address evidence stays optional
+    # for a genuine non-collection turn — but "no address reply expected"
+    # must not also mean "nothing need be proved".
+    result_blockers = _operational_result_blockers(
+        expected=str(request.expected_operational_result or ""),
+        status=status,
+        captured=bool(captured),
+        address_turn=address_turn,
+        state_delta=state_delta,
+    )
+    blockers.extend(result_blockers)
+
+    missing_delta = sorted(
+        set(request.expected_state_delta_keys) - set(state_delta or {})
+    )
+    if missing_delta:
+        blockers.append("expected_state_delta_missing")
     # The denials this scenario declared, compared against what happened.
     observed = Counter(
         (str(a.get("egress_kind") or ""), str(a.get("operation") or ""))
@@ -755,6 +931,9 @@ async def run_sandbox_of2_turn(
             request.customer_phone, key=request.evidence_hmac_key,
         ),
         "status": status,
+        "state_delta": state_delta,
+        "expected_state_delta_keys": list(request.expected_state_delta_keys),
+        "expected_operational_result": str(request.expected_operational_result or ""),
         "address_turn": address_turn,
         "denial_audits": denial_audits,
         "expected_denials": [
