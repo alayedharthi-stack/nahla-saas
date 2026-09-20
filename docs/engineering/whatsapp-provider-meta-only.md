@@ -114,3 +114,10 @@ and anything under `backend/modules/ai/`:
 2. **`claude/nahla-meta-only-remove-360dialog`** — everything else. It deletes
    the provider constants the media half still imports on `main`, so its CI is
    red until (1) merges.
+3. **`claude/nahlah-commerce-c0-audit-lbubgc`** (PR #1099, the commerce runtime
+   lifecycle) — stacked on (2). It carries (2) as a merge commit, so its head is
+   the actual integrated head: the retired 360dialog wrapper and its pilot
+   acceptance call are gone, and the Meta route alone records a pilot-scoped
+   inbound before acknowledging it. Its base is (2)'s branch until (2) merges,
+   after which it targets `main` with nothing left to resolve. No compatibility
+   shim revives retired-provider behaviour on that branch.
