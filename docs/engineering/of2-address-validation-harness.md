@@ -198,16 +198,23 @@ export SANDBOX_DB_B="postgresql://USER:PASS@HOST:PORT/DBNAME_B"   # disposable
   && DATABASE_URL="$SANDBOX_DB_B" python -m alembic upgrade 0088 \
   && DATABASE_URL="$SANDBOX_DB_B" python -m alembic upgrade 0093 \
   && DATABASE_URL="$SANDBOX_DB_B" python -m alembic upgrade 0109 )
-# start the app once against DB B, let lifespan run create_all, then stop it
+# Start the app once against DB B, let lifespan run create_all, then stop it.
+# NOTE: main.app is the outermost raw-ASGI wrapper (backend/main.py), not the
+# FastAPI instance. The lifespan lives on main._FASTAPI_APPLICATION; using
+# main.app here raises AttributeError and materialises nothing. The sleep must
+# outlast the bootstrap, which runs create_all in a BACKGROUND task.
 ( cd "$REPO_ROOT/backend" \
   && DATABASE_URL="$SANDBOX_DB_B" NAHLA_SKIP_DB_BOOTSTRAP=1 \
-     timeout 60 python -c "
+     timeout 240 python -c "
 import asyncio, main
+_fast = main._FASTAPI_APPLICATION
 async def _boot():
-    async with main.app.router.lifespan_context(main.app):
-        await asyncio.sleep(5)
+    async with _fast.router.lifespan_context(_fast):
+        await asyncio.sleep(25)
 asyncio.run(_boot())
 " )
+# Prove the activation boundary before Alembic sees the database:
+psql "$SANDBOX_DB_B" -tAc "select to_regclass('public.customer_address_provenance')"
 psql "$SANDBOX_DB_B" -c "\d+ customer_address_provenance" > /tmp/stateB.before
 ( cd "$REPO_ROOT/database" \
   && DATABASE_URL="$SANDBOX_DB_B" python -m alembic upgrade 0110 )
@@ -216,6 +223,44 @@ diff /tmp/stateB.before /tmp/stateB.after || true
 # Expect ONLY: server defaults set, NOT NULL enforced, missing
 # FK/unique/index created. No column dropped, no existing value changed.
 ```
+
+### 6.1 Executed result (head `62b34afd`, PostgreSQL 16, disposable databases)
+
+This sequence has now been **run**, not only described. Both supported
+states were prepared to 0109 by the recorded path and then taken to 0110.
+
+| Check | State A (table absent) | State B (`create_all` first) |
+|-------|------------------------|------------------------------|
+| Table before 0110 | absent (`Did not find any relation`) | **present** — materialised by the app's lifespan at 0109, with no `alembic upgrade 0110` |
+| `alembic_version` after the app start | n/a | still `0109,0088` — unmoved |
+| 0110 outcome | table created with the full shape: 18 columns, PK, `ix_…_source`, `uq_…_address`, the `COALESCE`-partial `uq_…_source_revision`, and all three FKs | `diff` of `\d+` before → after is **empty**: no shape change |
+| Seeded row (`selection_state='selected'`, `created_at` 2020-01-01, `updated_at` 2020-01-02, fingerprint, `source_ref`) | n/a | **byte-identical after 0110** — `selected` not normalised to `candidate`, neither timestamp rewritten |
+
+State B is the operationally important one, and it is the claim the
+deployment note rests on: **the application materialises this table by
+itself**. That is now observed, not inferred from reading
+`backend/main.py`.
+
+State B was run twice — once with the app's own Alembic bootstrap left
+enabled, and once with `NAHLA_SKIP_DB_BOOTSTRAP=1` as the block above
+documents — with identical results. The second run is the stronger
+evidence: with the bootstrap skipped the application never invokes
+Alembic at all, `alembic_version` stays at `0109,0088`, and the table
+still appears. Nothing but `create_all` can account for it.
+
+**One branch of 0110 is not exercised by either supported state, and is
+not claimed as verified.** The fill step at
+`database/migrations/versions/0110_customer_address_provenance.py:255`
+(`UPDATE … WHERE "<col>" IS NULL`) can only run where a column is already
+present and nullable. In State A the table does not exist, and in State B
+`create_all` emits the columns `NOT NULL` with their server defaults
+already set — so the `alter_column`/fill/`NOT NULL` sequence is a no-op in
+both, which is exactly why the State B diff is empty. A database holding a
+NULL in `selection_state`, `created_at` or `updated_at` is a third,
+partial shape, which §5 places **out of scope**: record it and stop.
+Manufacturing one here to exercise the branch would be inventing a shape
+the migration is not authorised to meet, so it was not done.
+
 
 Execution, from the repository root:
 
