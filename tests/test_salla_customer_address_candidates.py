@@ -2626,16 +2626,26 @@ def test_an_operation_from_another_turn_never_carries_this_reply():
     )
     db.commit()
 
-    text, sink = _of2_guard(db, tenant, convo, "تم حفظ عنوانك.",
+    text, sink = _of2_guard(db, tenant, convo, "تم حفظ عنوانك. نكمل الطلب؟",
                             turn_ref="wamid.in-a-later-turn")
     assert "حفظ عنوانك" not in text
+    assert "نكمل الطلب؟" in text, "the honest half of the reply survives"
     assert sink["address_save_claim_guard_action"] == (
         "blocked_unsupported_address_save_claim"
     )
 
 
-def test_an_emptied_reply_falls_back_with_its_provenance_declared():
-    """Section 5: the fallback is allowed, but it must say it is one."""
+def test_an_emptied_reply_is_suppressed_not_falsely_attributed():
+    """D4: no compose happened here, so no compose failure may be claimed.
+
+    When removal leaves nothing, the approved generic emergency fallback
+    is NOT available: its exception is scoped to a genuine LLM compose
+    failure, and nothing on this path composes. Borrowing its wording
+    meant recording ``llm_candidate_present`` and a recomposition that
+    never occurred — metadata asserting an event that did not happen,
+    which is the same class of untruth the guard exists to remove. The
+    turn is refused instead, and the gap is recorded so it is measurable.
+    """
     db, _ = _make_db()
     tenant, customer = _seed(db)
     _import(db, tenant, customer, _payload())
@@ -2645,13 +2655,17 @@ def test_an_emptied_reply_falls_back_with_its_provenance_declared():
     # The whole reply is the unsupported claim — removal leaves nothing.
     text, sink = _of2_guard(db, tenant, convo, "تم حفظ عنوانك")
 
-    assert text.strip(), "an emptied reply still has to speak"
-    assert "حفظ عنوانك" not in text
-    assert sink["compose_source"] == "fallback_deterministic"
-    assert sink["response_mode"] == "fallback_deterministic"
-    assert sink["fallback_reason"]
-    assert sink["fallback_action_type"]
-    assert sink["chosen_path"]
+    assert text == ""
+    assert sink["address_claim_send_suppressed"] is True
+    assert sink["address_save_claim_suppress_reason"] == "removal_left_no_reply"
+    assert sink["address_save_claim_guard_action"] == (
+        "suppressed_unverifiable_address_save_claim"
+    )
+    # The truthful part: nothing composed, so nothing may be claimed.
+    assert sink["llm_candidate_present"] is False
+    assert sink["address_claim_compose_attempted"] is False
+    assert "compose_source" not in sink
+    assert "fallback_reason" not in sink
     assert sink["final_text_transformed"] is True
 
 
@@ -2778,3 +2792,241 @@ def test_an_action_from_an_expired_showing_approves_nothing():
     )
     db.commit()
     assert patch.get("customer_confirmed_previous_address") is True
+
+
+# ── D1–D4: the second closure review's reproductions, as regressions ───
+
+
+def _rendered_rows(result):
+    """What the customer actually sees, whichever surface carried it."""
+    from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+        address_choice_actions,
+        address_choice_rows,
+    )
+
+    if result.address_choice_surface == "list":
+        return [
+            {"id": r["id"], "title": r["title"], "description": r.get("description", "")}
+            for r in address_choice_rows(result.address_presentation)
+            if str(r["id"]).startswith("nahla_addr_select:")
+        ]
+    return [
+        {"id": b["reply"]["id"], "title": b["reply"]["title"], "description": ""}
+        for b in address_choice_actions(result.address_presentation)
+    ]
+
+
+_LONG_SHARED_STREET = (
+    "شارع الملك عبدالعزيز بالقرب من المركز التجاري والحديقة العامة بوابة المجمع السكني "
+)
+
+
+def _addresses(db, tenant, customer, lines, city="الرياض"):
+    rows = [
+        upsert_imported_address_candidate(
+            db, tenant_id=tenant.id, customer_id=customer.id,
+            components=AddressComponents(city=city, address_line=line),
+            source_ref=f"D1-{index}",
+        )
+        for index, line in enumerate(lines)
+    ]
+    db.commit()
+    return rows
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # The review's case: identical long street, different building.
+        [_LONG_SHARED_STREET + "مبنى 11 شقة 1", _LONG_SHARED_STREET + "مبنى 22 شقة 2"],
+        # Three, two of which agree further into the string.
+        [_LONG_SHARED_STREET + "مبنى 11 شقة 1",
+         _LONG_SHARED_STREET + "مبنى 11 شقة 2",
+         _LONG_SHARED_STREET + "مبنى 99 شقة 9"],
+        # Short and already distinct.
+        ["حي النرجس شارع 1", "حي الياسمين شارع 2"],
+    ],
+)
+def test_the_customer_can_tell_the_destinations_apart(lines):
+    """D1: distinct row ids are not evidence of an identifiable destination.
+
+    Two addresses on the same long street were labelled from the FRONT of
+    the text, so both rows showed the same street and neither building.
+    The rows differed to the provider and were indistinguishable to the
+    person choosing between them, and both ids became authorized.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    rows = _addresses(db, tenant, customer, lines)
+    convo = _conversation(db, tenant, customer)
+
+    result = _owner_turn(db, tenant, convo, live=True, missing=("delivery_address",))
+    db.commit()
+    shown = _rendered_rows(result)
+    assert len(shown) == len(lines)
+
+    rendered = [f"{r['title']}|{r['description']}" for r in shown]
+    assert len(set(rendered)) == len(rendered), rendered
+
+    # Each row shows an excerpt of ITS OWN address, not of the shared
+    # street, and that excerpt is not what any other row is showing.
+    for index, line in enumerate(lines):
+        excerpt = (shown[index]["description"] or shown[index]["title"])
+        excerpt = excerpt.replace("…", "").strip()
+        assert excerpt, rendered
+        assert excerpt in line, (excerpt, line)
+        for other in range(len(lines)):
+            if other == index or lines[other] == line:
+                continue
+            other_excerpt = (
+                shown[other]["description"] or shown[other]["title"]
+            ).replace("…", "").strip()
+            assert excerpt != other_excerpt, rendered
+
+    # And what is shown is still exactly what is authorized.
+    _present(db, tenant, convo, result.address_presentation)
+    offered, _ = _offered_revisions(tenant_id=tenant.id, conversation=convo,
+                                    offer_id=result.address_presentation.offer_id)
+    assert set(offered) == {row.address_id for row in rows}
+
+
+def test_one_label_scheme_covers_every_row():
+    """D1: a row identified only by elimination is not identified.
+
+    Escalating per row left the first choice holding the bare city while
+    the second carried a street — distinct, but the customer could only
+    work out the first by ruling out the second.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _addresses(db, tenant, customer,
+               [_LONG_SHARED_STREET + "مبنى 11", _LONG_SHARED_STREET + "مبنى 22"])
+    convo = _conversation(db, tenant, customer)
+
+    result = _owner_turn(db, tenant, convo, live=True, missing=("delivery_address",))
+    shown = _rendered_rows(result)
+    bare_city = [r for r in shown if r["title"].strip() == "الرياض"]
+    assert not bare_city, shown
+
+
+def _wire_text(db, tenant, convo, reply, turn_ref="wamid.in-guard"):
+    from modules.ai.order_flow_v2.outbound_guards import (  # noqa: PLC0415
+        apply_order_flow_v2_outbound_guards,
+    )
+
+    sink = {}
+    text = apply_order_flow_v2_outbound_guards(
+        reply, db=db, tenant_id=tenant.id, conversation_id=convo.id,
+        conversation=convo, turn_ref=turn_ref, provenance_sink=sink, order_prep={},
+    )
+    # The literal key, not the module constant: this helper has to run
+    # against a tree that does not define it, so the pre-fix failure is
+    # behavioural rather than an import error.
+    return text, sink, sink.get("address_claim_send_suppressed", False)
+
+
+def test_malformed_persisted_operation_never_carries_a_claim():
+    """D3: unreadable persisted state is not evidence, and must not raise.
+
+    ``address_operation.conversation_id`` stored as a string raised inside
+    the reader. The boundary caught it and returned the reply untouched,
+    so the unverified claim went to the customer with no guard decision
+    recorded at all.
+    """
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    convo.extra_metadata = {
+        **(convo.extra_metadata or {}),
+        "address_operation": {"conversation_id": "broken", "turn_ref": "wamid.in-guard"},
+    }
+    flag_modified(convo, "extra_metadata")
+    db.commit()
+
+    text, sink, suppressed = _wire_text(db, tenant, convo, "تم حفظ عنوانك. نكمل الطلب؟")
+    assert "حفظ عنوانك" not in text
+    assert suppressed is False, "the honest half is still sendable"
+    assert sink["address_save_claim_guard_action"] == (
+        "blocked_unsupported_address_save_claim"
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "modules.ai.order_flow_v2.checkout_context.read_turn_address_operation",
+        "core.customer_address_persistence_evidence."
+        "resolve_customer_address_persistence_evidence",
+    ],
+)
+def test_an_evidence_failure_removes_the_claim_rather_than_trusting_it(target):
+    """D3: every failure under the guard proves nothing, not "probably fine"."""
+    from unittest.mock import patch as _patch  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    with _patch(target, side_effect=RuntimeError("isolated failure")):
+        text, sink, _ = _wire_text(db, tenant, convo, "تم حفظ عنوانك. نكمل الطلب؟")
+
+    assert "حفظ عنوانك" not in text
+    assert "نكمل الطلب؟" in text
+    assert sink["address_save_claim_guard_action"] == (
+        "blocked_unsupported_address_save_claim"
+    )
+
+
+def test_a_guard_failure_suppresses_the_turn_rather_than_sending_the_claim():
+    """D3: if nothing can judge the claim, the claim does not go out."""
+    from unittest.mock import patch as _patch  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    with _patch(
+        "modules.ai.brain.postprocess.customer_address_save_claim_guard"
+        ".apply_customer_address_save_claim_guard",
+        side_effect=RuntimeError("isolated guard failure"),
+    ):
+        text, sink, suppressed = _wire_text(db, tenant, convo, "تم حفظ عنوانك. نكمل الطلب؟")
+
+    assert text == ""
+    assert suppressed is True
+    assert sink["address_save_claim_suppress_reason"] == "guard_unavailable"
+    assert sink["llm_candidate_present"] is False
+
+
+def test_a_reply_with_no_claim_survives_every_failure():
+    """D3's other half: fail-closed must not mean fail-silent.
+
+    A reply that asserts nothing has nothing to verify, so an unavailable
+    database or guard must leave it exactly as composed.
+    """
+    from unittest.mock import patch as _patch  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    honest = "وش العنوان اللي تبي نوصل له؟"
+
+    with _patch(
+        "modules.ai.order_flow_v2.checkout_context.read_turn_address_operation",
+        side_effect=RuntimeError("isolated failure"),
+    ):
+        text, sink, suppressed = _wire_text(db, tenant, convo, honest)
+
+    assert text == honest
+    assert suppressed is False
+    assert sink["address_save_claim_guard_action"] == "allowed"

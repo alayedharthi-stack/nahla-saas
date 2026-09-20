@@ -113,9 +113,15 @@ _INTERROGATIVE_RES: Tuple[re.Pattern, ...] = (
     re.compile(r"(?:^|\s)(?:do|did|would|shall|can|should)\s+(?:you|we)\b", re.IGNORECASE),
 )
 
+# ``(?:و|ف)?`` is the attached coordinating prefix Arabic writes onto the
+# negation particle itself: "ولم يتم حفظ عنوانك" is the same denial as
+# "لم يتم حفظ عنوانك". Without it the particle went unrecognised and the
+# guard deleted a TRUTHFUL negative — silencing honest wording, which is
+# the opposite of what it is for. This is the same structural prefix the
+# claim side already accounts for, not a new phrasing to match.
 _NEGATION_RES: Tuple[re.Pattern, ...] = (
-    re.compile(r"(?:^|\s)(?:لم|لن|ما|مو|مب|ليس|بدون|غير)(?:\s|$)", re.UNICODE),
-    re.compile(r"(?:^|\s)لا\s*(?:يوجد|يمكن|نستطيع|زال)", re.UNICODE),
+    re.compile(r"(?:^|\s)(?:و|ف)?(?:لم|لن|ما|مو|مب|ليس|بدون|غير)(?:\s|$)", re.UNICODE),
+    re.compile(r"(?:^|\s)(?:و|ف)?لا\s*(?:يوجد|يمكن|نستطيع|زال)", re.UNICODE),
     re.compile(r"\b(?:not|no|never|cannot|can't|couldn't|didn't|won't)\b", re.IGNORECASE),
 )
 
@@ -130,7 +136,27 @@ _NEGATION_RES: Tuple[re.Pattern, ...] = (
 # was saved" was one clause, and the reassurance's "No" sat close enough
 # to the claim to look like it governed it. The Arabic comma was already
 # a boundary; its ASCII twin does the same job in the same replies.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?؟،,؛;:])\s+|\n+", re.UNICODE)
+#
+# And the boundary cannot depend on the SPACE. "No worries,your address
+# was saved" is the same sentence with a typo, and requiring whitespace
+# after the punctuation handed the claim straight back. So a comma-like
+# mark separates clauses wherever it appears, and a sentence-ender does
+# so when a letter follows it directly — the digit case is excluded on
+# purpose, because ``3.14`` and ``1,000`` are one token, not two clauses.
+_SENTENCE_SPLIT = re.compile(
+    r"(?<=[.!?؟،,؛;:])\s+"
+    r"|\n+"
+    # A comma-like mark with nothing after it — unless BOTH sides are
+    # digits, which is a thousands separator, not a clause end.
+    r"|(?<=[،,؛;])(?![0-9])(?=\S)"
+    r"|(?<![0-9])(?<=[،,؛;])(?=[0-9])"
+    # ``!``/``?`` run straight into the next clause often enough.
+    r"|(?<=[!?؟])(?=[^\W\d_])"
+    # A full stop does too, but only with a real word in front of it:
+    # ``ر.س`` and ``e.g`` are one token, not two clauses.
+    r"|(?<=\w\w\.)(?=[^\W\d_])",
+    re.UNICODE,
+)
 _CLAUSE_SPLIT = re.compile(
     # Before an interrogative lead…
     r"(?=\s(?:و|ف)?(?:هل|وش|ايش|أيش|كيف|متى|متي|وين|أين|اين|ليش|لماذا)\s)"

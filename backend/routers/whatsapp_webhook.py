@@ -8036,6 +8036,33 @@ async def _handle_merchant_message(
                         tenant_id,
                         to,
                     )
+                if _of2_provenance.get("address_claim_send_suppressed") or not str(
+                    _of2_reply or ""
+                ).strip():
+                    # The guard could not stand behind this reply: it
+                    # asserts a save whose evidence is unreadable, or
+                    # removal left nothing honest to send. Delivering it
+                    # anyway is the one outcome the Claim Rule forbids,
+                    # and there is no composer on this path to ask for
+                    # different wording. Nothing is sent, nothing is
+                    # recorded as shown, and the turn is logged so the
+                    # gap is measurable rather than invisible.
+                    logger.error(
+                        "[ORDER_FLOW_V2] address claim unverifiable, not sending "
+                        "tenant=%s to=%s reason=%s",
+                        tenant_id,
+                        to,
+                        _of2_provenance.get("address_save_claim_suppress_reason"),
+                    )
+                    try:
+                        db.commit()
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — the owner's own state was already persisted above; a commit failure here must not raise into the webhook
+                        try:
+                            db.rollback()
+                        except Exception:  # noqa: silent-ok — rollback best-effort after commit failure
+                            pass
+                    _sync_persona_observability()
+                    return
                 _persona_ownership.mark_bypass(
                     _POReason.PRE_BRAIN_FAST_PATH,
                     owner=f"order_flow_v2:{_of2_result.reason}",

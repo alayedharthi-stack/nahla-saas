@@ -1,6 +1,7 @@
 """Bridge OrderContext saved-address truth into OrderFlowV2 deterministic replies."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -9,6 +10,8 @@ from core.order_context_prefill import MODE_CONFIRM
 from core.wa_order_lifecycle import has_accepted_delivery_address
 
 from .missing_fields import compute_v2_missing_fields
+
+logger = logging.getLogger("nahla.order_flow_v2.checkout_context")
 
 
 @dataclass(frozen=True)
@@ -364,79 +367,11 @@ def address_choice_page(
     return rows[start:start + per_page], index, page_count
 
 
-def _labelled_choices(
-    choices: List[Dict[str, Any]], limit: int
-) -> List[Tuple[Dict[str, Any], str, str, bool]]:
-    """Choices paired with a DISTINCT title and a describing line.
-
-    Two addresses the customer cannot tell apart are two addresses they
-    cannot choose between, and identical titles are rejected outright at
-    the provider — so a label is extended with whatever field actually
-    differs (district, then street, then the row id) until it is unique.
-    Uniqueness is judged on the same normalized key the wire sanitizer
-    de-duplicates on, so a title that survives here survives there.
-    """
-    from core.product_button_label import normalize_button_title_key  # noqa: PLC0415
-
-    out: List[Tuple[Dict[str, Any], str, str, bool]] = []
-    seen: set = set()
-    for choice in choices or []:
-        title = ""
-        candidates = _title_candidates(choice, limit)
-        # The last candidate is always the row-id form: reaching it means
-        # the address's OWN fields did not distinguish it at this length.
-        id_form = candidates[-1] if candidates else ""
-        for candidate in candidates:
-            key = normalize_button_title_key(candidate)
-            if key and key in seen:
-                continue
-            title = candidate
-            if key:
-                seen.add(key)
-            break
-        used_id_fallback = bool(title) and title == id_form and len(candidates) > 1
-        if not title:
-            # Every candidate collided; the row id cannot.
-            title = _with_id_suffix(_BUTTON_TITLE_FALLBACK, choice, limit)
-            seen.add(normalize_button_title_key(title))
-            used_id_fallback = True
-        out.append((choice, title, _choice_description(choice), used_id_fallback))
-    return out
+_ELISION = "…"
 
 
-def _title_candidates(choice: Dict[str, Any], limit: int) -> List[str]:
-    """Increasingly specific labels, all from the address's own fields."""
-    choice = choice or {}
-    city = str(choice.get("city") or "").strip()
-    code = str(choice.get("short_address_code") or "").strip()
-    district = str(choice.get("district") or "").strip()
-    line = str(choice.get("address_line") or choice.get("street") or "").strip()
-
-    base = " ".join(part for part in (city, code) if part).strip()
-    candidates = [base] if base else []
-    for detail in (district, line):
-        if not detail:
-            continue
-        candidates.append(" - ".join(part for part in (base or city, detail) if part).strip())
-    if not candidates and line:
-        candidates.append(line)
-    seed = base or city or line or _BUTTON_TITLE_FALLBACK
-    candidates.append(_with_id_suffix(seed, choice, limit))
-    return [c[:limit].strip() for c in candidates if c.strip()]
-
-
-def _with_id_suffix(seed: str, choice: Dict[str, Any], limit: int) -> str:
-    """``seed`` plus the row id, trimming the seed rather than the id."""
-    address_id = str((choice or {}).get("address_id") or "").strip()
-    if not address_id:
-        return (seed or _BUTTON_TITLE_FALLBACK)[:limit]
-    suffix = f" #{address_id}"
-    head = (seed or _BUTTON_TITLE_FALLBACK)[: max(1, limit - len(suffix))].strip()
-    return f"{head}{suffix}"[:limit]
-
-
-def _choice_description(choice: Dict[str, Any]) -> str:
-    """The detail line an interactive list row can carry."""
+def _address_detail(choice: Dict[str, Any]) -> str:
+    """Everything about this address BELOW the city line, in one string."""
     choice = choice or {}
     parts = [
         str(choice.get("district") or "").strip(),
@@ -449,15 +384,191 @@ def _choice_description(choice: Dict[str, Any]) -> str:
         if part and part not in seen:
             seen.add(part)
             kept.append(part)
-    return " · ".join(kept)[:_LIST_DESCRIPTION_LIMIT]
+    return " · ".join(kept)
+
+
+def _word_boundary_prefix(texts: List[str]) -> int:
+    """Length of the longest shared opening these texts have in common.
+
+    Cut back to a word boundary so a label never starts mid-word.
+    """
+    if len(texts) < 2:
+        return 0
+    shortest = min(len(t) for t in texts)
+    common = 0
+    while common < shortest and len({t[common] for t in texts}) == 1:
+        common += 1
+    if common <= 0:
+        return 0
+    head = texts[0][:common]
+    cut = max(head.rfind(" "), head.rfind("·"), head.rfind("،"), head.rfind(","))
+    return cut + 1 if cut > 0 else 0
+
+
+def _distinguishing_details(choices: List[Dict[str, Any]], width: int) -> List[str]:
+    """Each address's detail line, windowed onto what makes it DIFFERENT.
+
+    Two addresses on the same long street differ only at the end —
+    "…بوابة المجمع السكني مبنى 11 شقة 1" against "…مبنى 22 شقة 2". Taking
+    the first N characters of each showed the customer the identical
+    street twice and hid both buildings, so the rows were distinct to the
+    provider and indistinguishable to the person choosing between them.
+
+    So the window starts where they diverge, not where the text does.
+    Any two texts that share a prefix differ at the character right after
+    it, so a window opened there is distinguishing by construction. Groups
+    that still collide (three addresses, two of which agree further) are
+    re-cut against their own shared opening until nothing collides or no
+    cut is left to make.
+    """
+    details = [_address_detail(c) for c in choices]
+    shown = list(details)
+    elided = [False] * len(details)
+
+    def _render(index: int) -> str:
+        text = shown[index]
+        if elided[index]:
+            text = f"{_ELISION} {text}".strip()
+        return text[:width].strip()
+
+    for _round in range(8):
+        groups: Dict[str, List[int]] = {}
+        for index in range(len(shown)):
+            groups.setdefault(_render(index).casefold(), []).append(index)
+        colliding = [idx for idx in groups.values() if len(idx) > 1]
+        if not colliding:
+            break
+        progressed = False
+        for indexes in colliding:
+            texts = [shown[i] for i in indexes]
+            if len(set(texts)) <= 1:
+                # Genuinely the same detail — no window can separate them.
+                continue
+            cut = _word_boundary_prefix(texts)
+            if cut <= 0:
+                continue
+            for i in indexes:
+                remainder = shown[i][cut:].strip()
+                if remainder and remainder != shown[i]:
+                    shown[i] = remainder
+                    elided[i] = True
+                    progressed = True
+        if not progressed:
+            break
+
+    return [
+        (f"{_ELISION} {shown[i]}".strip() if elided[i] else shown[i])
+        for i in range(len(shown))
+    ]
+
+
+def _labelled_choices(
+    choices: List[Dict[str, Any]], limit: int
+) -> List[Tuple[Dict[str, Any], str, str, bool]]:
+    """Choices paired with an IDENTIFYING title and a describing line.
+
+    Labelling is chosen for the SET, not per row. Escalating greedily —
+    the first row keeps the bare city, later rows get a street — produced
+    titles that were distinct to the provider and useless to the person
+    choosing: "الرياض" beside "الرياض - مبنى 22" tells you what the
+    second address is and leaves the first identified only by
+    elimination. So one scheme covers every row:
+
+      1. city (plus the national short code) — only when that alone
+         already tells every row in this set apart;
+      2. otherwise every row carries its own distinguishing detail, the
+         part of the address that differs from the others here;
+      3. otherwise the row id, for addresses whose stored text really is
+         identical and which no label can separate.
+
+    Uniqueness is judged on the same normalized key the wire sanitizer
+    de-duplicates on, so a title that survives here survives there.
+    """
+    from core.product_button_label import normalize_button_title_key  # noqa: PLC0415
+
+    rows = list(choices or [])
+    if not rows:
+        return []
+    descriptions = _distinguishing_details(rows, _LIST_DESCRIPTION_LIMIT)
+    title_details = _distinguishing_details(rows, limit)
+    bases = [_base_label(choice) for choice in rows]
+
+    def _render(scheme: str) -> List[str]:
+        titles: List[str] = []
+        for index, choice in enumerate(rows):
+            base = bases[index]
+            detail = title_details[index]
+            if scheme == "base":
+                title = base
+            else:
+                title = _join_within(base, detail, limit)
+            if scheme == "id":
+                title = _with_id_suffix(title or base, choice, limit)
+            titles.append((title or _BUTTON_TITLE_FALLBACK)[:limit].strip())
+        return titles
+
+    chosen: List[str] = []
+    scheme_used = "id"
+    for scheme in ("base", "detail", "id"):
+        titles = _render(scheme)
+        keys = [normalize_button_title_key(t) for t in titles]
+        if all(titles) and len(set(keys)) == len(keys):
+            chosen, scheme_used = titles, scheme
+            break
+    if not chosen:
+        chosen, scheme_used = _render("id"), "id"
+
+    needs_detail = scheme_used != "base"
+    return [
+        (
+            rows[index],
+            chosen[index],
+            descriptions[index][:_LIST_DESCRIPTION_LIMIT].strip(),
+            needs_detail,
+        )
+        for index in range(len(rows))
+    ]
+
+
+def _base_label(choice: Dict[str, Any]) -> str:
+    """City plus the national short code — the shared, shortest identity."""
+    choice = choice or {}
+    city = str(choice.get("city") or "").strip()
+    code = str(choice.get("short_address_code") or "").strip()
+    return " ".join(part for part in (city, code) if part).strip()
+
+
+def _join_within(base: str, detail: str, limit: int) -> str:
+    """``base - detail``, dropping the base rather than the detail.
+
+    What distinguishes the address is the detail. A label trimmed to fit
+    must keep that and lose the city it shares with everything else.
+    """
+    base = str(base or "").strip()
+    detail = str(detail or "").strip()
+    if not detail:
+        return base
+    joined = " - ".join(part for part in (base, detail) if part).strip()
+    if len(joined) <= limit:
+        return joined
+    return detail[:limit].strip() or base
+
+
+def _with_id_suffix(seed: str, choice: Dict[str, Any], limit: int) -> str:
+    """``seed`` plus the row id, trimming the seed rather than the id."""
+    address_id = str((choice or {}).get("address_id") or "").strip()
+    if not address_id:
+        return (seed or _BUTTON_TITLE_FALLBACK)[:limit]
+    suffix = f" #{address_id}"
+    head = (seed or _BUTTON_TITLE_FALLBACK)[: max(1, limit - len(suffix))].strip()
+    return f"{head}{suffix}"[:limit]
 
 
 def _choice_title(choice: Dict[str, Any]) -> str:
-    """A short label from one address's own stored facts.
+    """A short label for ONE address, from its own stored facts.
 
-    Kept for callers that label a single address. Distinguishing a SET of
-    addresses is ``_labelled_choices``' job — one label at a time cannot
-    know what it has to differ from.
+    Distinguishing a SET is ``_labelled_choices``' job — one label at a
+    time cannot know what it has to differ from.
     """
     labelled = _labelled_choices([dict(choice or {})], _BUTTON_TITLE_LIMIT)
     return labelled[0][1] if labelled else _BUTTON_TITLE_FALLBACK
@@ -532,20 +643,32 @@ def read_turn_address_operation(conversation: Any, *, turn_ref: str = "") -> Any
 
     if conversation is None:
         return NO_OPERATION
-    payload = _conversation_metadata(conversation).get(_TURN_OPERATION_KEY)
-    if not isinstance(payload, dict):
+    try:
+        payload = _conversation_metadata(conversation).get(_TURN_OPERATION_KEY)
+        if not isinstance(payload, dict):
+            return NO_OPERATION
+        conversation_id = int(getattr(conversation, "id", 0) or 0)
+        if conversation_id and int(payload.get("conversation_id") or 0) != conversation_id:
+            return NO_OPERATION
+        if str(payload.get("turn_ref") or "") != str(turn_ref or ""):
+            return NO_OPERATION
+        recorded = _parse_iso(payload.get("recorded_at"))
+        if recorded is None:
+            return NO_OPERATION
+        if (datetime.now(timezone.utc) - recorded).total_seconds() > _OPERATION_TTL_SECONDS:
+            return NO_OPERATION
+        return AddressOperationAttempt.from_dict(payload)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unreadable persisted state proves no operation, which is the fail-closed reading; the caller must not treat it as support
+        # Persisted metadata this reader cannot parse — a non-integer
+        # conversation id, a truncated payload — is not evidence of an
+        # operation. It used to raise here, and the boundary above caught
+        # it and sent the unverified claim through untouched.
+        logger.debug(
+            "[ORDER_FLOW_V2] unreadable turn address operation turn_ref=%s",
+            turn_ref,
+            exc_info=True,
+        )
         return NO_OPERATION
-    conversation_id = int(getattr(conversation, "id", 0) or 0)
-    if conversation_id and int(payload.get("conversation_id") or 0) != conversation_id:
-        return NO_OPERATION
-    if str(payload.get("turn_ref") or "") != str(turn_ref or ""):
-        return NO_OPERATION
-    recorded = _parse_iso(payload.get("recorded_at"))
-    if recorded is None:
-        return NO_OPERATION
-    if (datetime.now(timezone.utc) - recorded).total_seconds() > _OPERATION_TTL_SECONDS:
-        return NO_OPERATION
-    return AddressOperationAttempt.from_dict(payload)
 
 
 def read_turn_address_operation_for_conversation(
