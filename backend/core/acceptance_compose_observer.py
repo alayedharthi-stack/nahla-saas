@@ -65,6 +65,14 @@ class ModelBoundCall:
     missing_field: str
     delivery_address_status: str
     has_accepted_maps_reference: bool
+    # True when this call actually carried the turn's address context.
+    # A turn can make more than one model-bound call, and only the ones
+    # given the address facts can be judged against an address
+    # expectation. Recording it keeps every call visible while saying
+    # which of them the expectation applies to — the alternative,
+    # silently dropping a call, would hide exactly what this file exists
+    # to observe.
+    address_bound: bool
     stage_declared: bool
     outcome_recorded: bool = False
     # Set at the acceptance cutoff for a call that never returned. A
@@ -262,7 +270,7 @@ def _address_facts(context_metadata: Any) -> Dict[str, Any]:
     state = dict(brain_state) if isinstance(brain_state, Mapping) else {}
     known = state.get("known_facts")
     facts = dict(known) if isinstance(known, Mapping) else {}
-    return {
+    out = {
         "response_goal": _safe(state.get("response_goal")),
         "missing_field": _safe(facts.get("missing_field")),
         "delivery_address_status": _safe(facts.get("delivery_address_status")),
@@ -271,6 +279,10 @@ def _address_facts(context_metadata: Any) -> Dict[str, Any]:
             str(facts.get("google_maps_url") or "").strip()
         ),
     }
+    out["address_bound"] = bool(
+        out["response_goal"] or out["missing_field"] or out["delivery_address_status"]
+    )
+    return out
 
 
 def observe_model_bound_call(*, context_metadata: Any) -> int:

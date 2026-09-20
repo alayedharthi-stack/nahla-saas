@@ -320,17 +320,159 @@ An index that names no captured action, or one out of range, **refuses
 before the turn runs** (`captured_action_reference_unresolved` /
 `…_out_of_range`) rather than replaying an unresolved marker.
 
-## 6a. Per-scenario fixture state — still to be supplied
+Every OrderFlowV2 scenario also declares `fixture_state` (one of
+`no_saved_addresses`, `one_saved_address`, `several_saved_addresses`,
+`accepted_address_pending_city`) and gives each OrderFlowV2 turn a
+**structural** `inbound_metadata`. See section 6a.
 
-The scenarios describe incompatible customer states (one saved address,
-several, none, an accepted address with the city missing). The operator
-creates **one** pristine conversation and carries it through the session,
-so the manifest's expectations cannot be satisfied by a single seeded
-state. Before a sandbox run, each scenario needs its fixture prepared and
-isolated — shared state preserved only for the intentional continuation
-pair. That preparation is **not** in this branch; it is the remaining
-handoff item, and a run started without it will fail on the first
-scenario whose state does not match, which is the correct outcome.
+### 6.2 Environment prerequisites
+
+Every variable below must be set for the run; the operator refuses
+without them and names which is missing.
+
+| Variable | Meaning |
+|----------|---------|
+| `NAHLA_INTERNAL_E2E_ENABLED` | default-off master switch |
+| `NAHLA_INTERNAL_E2E_CONFIRM` | explicit execution confirmation |
+| `NAHLA_INTERNAL_E2E_DATABASE_URL` | the **disposable** sandbox database |
+| `NAHLA_INTERNAL_E2E_TENANT_ALLOWLIST` | the sandbox tenant id, comma separated |
+| `NAHLA_INTERNAL_E2E_TEST_PHONE` | the attested test number, digits only |
+| `NAHLA_INTERNAL_E2E_EVIDENCE_HMAC_KEY` | signs the session artifact |
+| `NAHLA_INTERNAL_E2E_ATTESTATION_HMAC_KEY` | signs the sandbox attestation |
+| `NAHLA_INTERNAL_E2E_LLM_ENABLED` | the model may be called |
+| `NAHLA_INTERNAL_E2E_SESSION_DIR` | where the signed session is written |
+| `NAHLA_INTERNAL_E2E_PACING_BURST` | optional; turns per throttle window (default 2) |
+| `NAHLA_INTERNAL_E2E_PACING_WINDOW_SECONDS` | optional; window length (default 11) |
+
+Beyond the harness's own variables, the run needs the runtime configured
+so the address branch is reachable. `ORDER_FLOW_V2_ENABLED=true` (or the
+sandbox tenant listed in `ORDER_FLOW_V2_ENFORCE_TENANTS`) is required:
+shadow evaluation observes and never sends, so no reply can be captured,
+and the preflight reports `order_flow_v2_operational / shadow_only` if it
+is missing. `DATABASE_URL` should point at the same disposable database,
+because several runtime loaders open their own session rather than
+reusing the one passed in.
+
+The sandbox tenant itself needs, as real state and not as a bypass: a
+live billing entitlement, a connected WhatsApp channel, a
+`commerce_permissions` row granting `can_create_orders`, the catalog
+product the manifest's line item names, and -- where `store_ai_mode` is
+`test` -- the test number in `ai_test_allowed_numbers`. The preflight
+names whichever is absent.
+
+### 6.3 Executable sequence
+
+```bash
+export REPO_ROOT="$PWD"
+
+# A0 -- the harness's own preflight: attestation, tenant, database identity.
+( cd "$REPO_ROOT" && python scripts/operators/internal_conversational_e2e_session.py \
+    preflight --tenant-id "$SANDBOX_TENANT_ID" )
+# Refuses, naming the blocker, unless every variable above is set and the
+# attestation matches the database it is about to run against.
+
+# A1 -- the session itself. Prepares each scenario's fixture, stops at the
+#       first failing layer when one does not hold, paces around the
+#       outbound burst throttle, and writes a SIGNED session artifact.
+( cd "$REPO_ROOT" && python scripts/operators/internal_conversational_e2e_session.py \
+    run --tenant-id "$SANDBOX_TENANT_ID" \
+        --scenarios docs/engineering/of2-address-scenarios.json )
+# Exit 0 only when every turn passed. The printed JSON carries
+# session_path; the artifact holds scenario_fixtures, outbound_pacing,
+# turn_results, of2_path_report and the signature.
+
+# A2 -- read the result without trusting the summary.
+python - "$SESSION_PATH" <<'READ_SESSION'
+import json, sys
+session = json.loads(open(sys.argv[1], encoding="utf-8").read())
+print("verdict:", session["verdict"], "blockers:", session["blockers"])
+print("pacing:", session["outbound_pacing"])
+for report in session["scenario_fixtures"]:
+    print(report["scenario_id"], report["fixture"]["state"], report["divergences"])
+for turn in session["turn_results"]:
+    record = turn.get("address_turn") or {}
+    print(turn["scenario_id"], turn["turn_index"], turn["status"],
+          record.get("execution_path"), record.get("delivered_surface"),
+          sorted(turn.get("blockers") or []))
+READ_SESSION
+```
+
+A scenario that reports `scenario_fixture_divergence` names the layer in
+`scenario_fixtures[].divergences`. Fix that layer; do not re-run hoping
+the layer below it will answer differently.
+
+## 6a. Per-scenario fixtures, and why a turn did not happen
+
+`backend/services/internal_conversational_e2e_of2_fixtures.py`.
+
+The scenarios describe **mutually exclusive** customer states — none
+saved, one, several, an accepted address whose city is still open — so no
+single seeded state can satisfy the manifest. Every OrderFlowV2 scenario
+therefore declares `fixture_state`, and the loader refuses one that does
+not; `run_session` prepares each scenario before it runs.
+
+Isolation is by **reset**, not by opening a conversation per scenario.
+The webhook resolves a customer's conversation through its own path, so a
+fresh row created beside it is invisible to the owner: the turn writes to
+one conversation while the runner reads another, and every artifact
+lookup comes back empty while the turn itself looks healthy. The fixture
+resets the conversation the runtime actually uses — its checkout, its
+recorded address offer, its collection state — and clears the customer's
+addresses, so nothing carries from the previous scenario.
+
+The customer's phone is stored in the spelling the **runtime** stores.
+The webhook normalises an inbound number to E.164 before it creates a
+customer; a fixture that wrote the raw form created a second customer for
+the same person and then prepared one customer's addresses while the
+runtime read the other's.
+
+### The preflight, and the first divergence
+
+`of2_fixture_preflight` walks the same preconditions the runtime walks,
+in the runtime's order, and stops at the FIRST that does not hold:
+
+| Layer | What must hold |
+|-------|----------------|
+| `tenant` | the tenant exists and is active |
+| `billing` | `has_billing_access` — a subscription, a Salla entitlement, a live trial window or a grant |
+| `channel` | a WhatsApp connection with a phone number id |
+| `store_mode` | `is_ai_allowed_by_store_mode` for this number (`store_ai_mode`, `ai_test_allowed_numbers`) |
+| `order_flow_v2_operational` | `resolve_order_flow_v2_operational` returns **live**. Shadow observes and never sends, so no reply can be captured |
+| `commerce_permissions` | the load succeeded and `can_create_orders` is granted — a durable address write needs an order write's authority |
+| `customer` | a customer row for this number |
+| `conversation` | present, and this tenant's |
+| `checkout_state` | an active OrderFlowV2 checkout carrying product evidence |
+| `inbound_shape` | `ofv2_may_own_prebrain` — the inbound is structurally explicit |
+
+Each check delegates to the runtime helper that owns it, so this cannot
+drift into a second opinion about whether a tenant may send. Nothing is
+bypassed or relaxed.
+
+### Free text can never reach this path
+
+**OrderFlowV2 may own a turn before Brain only for a structurally
+explicit inbound** — an interactive reply, a location pin, a catalog
+order, or a bare national short code. Ordinary Arabic prose is Brain's to
+interpret, by design (`unstructured_turn_ownership`). A scenario written
+in prose does not fail: it runs, returns, captures nothing, and
+contributes a turn that looks merely uneventful. The preflight refuses it
+at the `inbound_shape` layer instead, and every turn in the shipped
+manifest carries a structural inbound.
+
+### Pacing, because the throttle is real
+
+The outbound path enforces a burst throttle — six sends per ten seconds
+for one (tenant, recipient) — and a manifest drives every turn at **one**
+attested number. Left unpaced, a session's later scenarios are silently
+throttled: the owner runs, nothing reaches the send boundary, and the
+turn reports as an uneventful failure rather than as "the platform
+declined to send this fast". The throttle is production protection and is
+not weakened; `run_session` waits instead, and records how it paced in
+`outbound_pacing`. One turn can make several sends — a compose that fails
+attempts the reply, then the recovery — so the default is two turns per
+window. Override with `NAHLA_INTERNAL_E2E_PACING_BURST` and
+`NAHLA_INTERNAL_E2E_PACING_WINDOW_SECONDS` where a deployment's throttle
+differs.
 
 ## 7. Stop conditions and rollback
 
@@ -349,18 +491,33 @@ table `create_all` may have been populating since deploy.
 
 ## 8. Offline coverage
 
-### Coverage boundary, stated
+### What is exercised, and how far it reaches
 
-The runner is driven end-to-end against the **real** OrderFlowV2 send
-block — real owner result, real composer, real guards and recovery, real
-serializer, real `_post_wa` — with the provider substituted *below* the
-adapter so the observation hook still runs. It does **not** yet enter
-`_handle_merchant_message` itself: in an offline SQLite sandbox that
-handler returns without producing an address turn, because the owner
-needs a cart, a verified identity and a missing-address checkout state
-that the seeded fixture does not yet establish. Patching the owner's
-internals and calling the result "the real owner path" would be worse
-than saying so. Closing that gap belongs with the fixture work in §6a.
+`run_session` itself is driven end to end: manifest → per-scenario
+fixture → runner → the **real** `_handle_merchant_message` → the real
+OrderFlowV2 owner → the real compose → the real guards and recovery →
+the real outbound serializer → the real `_post_wa` → capture → signed
+evidence. Nothing in the owner is patched and no owner result is prepared
+by hand. All eight turns of the shipped manifest complete with no
+blockers, covering an ordinary collection turn with no saved choices, one
+carrying tappable choices, an accepted-address city turn, an injected
+provider error, an injected provider timeout, the outer-guard recovery,
+and a two-turn continuation whose second turn replays an action id read
+back off the first turn's captured payload.
+
+**Two things are substituted, and neither is on the path under test:**
+the sandbox attestation preflight, which asserts facts about an
+operator's environment rather than about the address path, and the model
+provider, which must not be called from an offline test. The provider is
+replaced *below* the adapter — patching `generate_ai_reply` would replace
+the very function that records the model-bound call.
+
+**What offline execution still does not establish:** that Meta renders
+these payloads, that a handset receives them, that list and button
+surfaces are accepted by the provider, or anything about provider-side
+dedup. Every record carries `transport="captured"` and
+`is_actual_provider_telemetry: false`. Those remain live-execution
+prerequisites.
 
 `tests/test_of2_validation_harness.py` covers valid capture, capture
 failure, invalid context, isolation across turns and asyncio tasks,

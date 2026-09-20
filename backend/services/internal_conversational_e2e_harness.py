@@ -495,60 +495,240 @@ def _operational_result_blockers(
     captured: bool,
     address_turn: Mapping[str, Any],
     state_delta: Mapping[str, Any],
+    selection: Optional[Mapping[str, Any]] = None,
+    refusal: Optional[Mapping[str, Any]] = None,
 ) -> list[str]:
     """Did the turn produce the operational result it declared?"""
     if expected not in OPERATIONAL_RESULTS:
         return ["expected_operational_result_missing"]
     if expected == OPERATIONAL_RESULT_REFUSAL:
-        # A refusal proves itself by NOT executing and NOT sending.
-        return [] if not captured else ["expected_refusal_not_observed"]
+        # Absence of transport is not a refusal. A turn that quietly did
+        # nothing produced exactly this evidence, so the gate that
+        # refused has to be named and its reason recorded.
+        if captured:
+            return ["expected_refusal_not_observed"]
+        gate = dict(refusal or {})
+        if not gate.get("observed") or not str(gate.get("gate") or "").strip():
+            return ["refusal_gate_unestablished"]
+        if not str(gate.get("reason") or "").strip():
+            return ["refusal_reason_unestablished"]
+        return []
     if status != STATUS_EVALUATED:
         return ["expected_operational_result_not_observed"]
     if expected == OPERATIONAL_RESULT_ADDRESS_REPLY:
         return [] if captured else ["expected_operational_result_not_observed"]
-    # A structured selection has to CONSUME the action: the conversation
-    # state must have moved. A reply alone does not establish it.
+
+    # A structured selection has to CONSUME the action the customer
+    # tapped and leave a DURABLE record of it. "Some state changed" was
+    # never selection evidence: every metadata write moves the
+    # conversation fingerprint, so a handler that touched an unrelated
+    # counter and selected nothing passed. What is required is the
+    # address the action names, recorded as selected, in this customer's
+    # and tenant's scope, against the revision that was shown.
+    found: list[str] = []
     changed = dict(state_delta or {})
     if not changed:
-        return ["structured_selection_changed_no_state"]
-    return []
+        found.append("structured_selection_changed_no_state")
+    chosen = dict(selection or {})
+    if not str(chosen.get("consumed_action_id") or "").strip():
+        found.append("structured_selection_action_not_consumed")
+    if not chosen.get("selection_scope_verified"):
+        found.append("structured_selection_scope_unverified")
+    if str(chosen.get("selection_state") or "") != "selected":
+        found.append("structured_selection_not_durably_recorded")
+    if not chosen.get("selection_matches_action"):
+        found.append("structured_selection_address_mismatch")
+    return found
+
+
+# Representations a reply legitimately takes between the wire and the
+# persisted row. A text reply is stored as it left; an interactive reply
+# stores its BODY while the wire payload also carries the actions. That
+# transformation is supported and named, so a mismatch is a finding
+# rather than an unexplained difference — and nothing here compares
+# wording against anything the harness would prefer it to say.
+REPRESENTATION_TEXT = "text_body"
+REPRESENTATION_INTERACTIVE = "interactive_body"
+REPRESENTATION_UNSUPPORTED = "unsupported"
+CONTENT_REPRESENTATIONS: tuple[str, ...] = (
+    REPRESENTATION_TEXT,
+    REPRESENTATION_INTERACTIVE,
+)
+
+
+def _captured_customer_text(payload: Mapping[str, Any]) -> tuple[str, str]:
+    """The customer-visible text in the captured payload, and its shape."""
+    data = dict(payload or {})
+    body = data.get("text")
+    if isinstance(body, Mapping) and str(body.get("body") or "").strip():
+        return str(body.get("body")), REPRESENTATION_TEXT
+    interactive = data.get("interactive")
+    if isinstance(interactive, Mapping):
+        inner = interactive.get("body")
+        if isinstance(inner, Mapping) and str(inner.get("text") or "").strip():
+            return str(inner.get("text")), REPRESENTATION_INTERACTIVE
+    return "", REPRESENTATION_UNSUPPORTED
+
+
+def _text_digest(value: str) -> str:
+    import hashlib  # noqa: PLC0415
+
+    normalized = " ".join(str(value or "").split())
+    if not normalized:
+        return ""
+    return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _content_binding(
+    *,
+    captured_text: str,
+    persisted_body: str,
+    representation: str,
+    captured: bool,
+    row_found: bool,
+) -> dict[str, Any]:
+    """Does what left match what was stored, under a SUPPORTED representation?
+
+    Only whitespace is normalised before comparison. No wording is
+    preferred, rewritten or matched against a phrase list: the question is
+    whether two artifacts of the same reply agree, not whether the reply
+    reads the way anyone wanted.
+    """
+    captured_digest = _text_digest(captured_text)
+    persisted_digest = _text_digest(persisted_body)
+    if not captured:
+        return {
+            "captured_text_digest": "",
+            "persisted_body_digest": "",
+            "representation": "",
+            "content_match": False,
+            "reason": "not_captured",
+        }
+    if representation not in CONTENT_REPRESENTATIONS:
+        return {
+            "captured_text_digest": captured_digest,
+            "persisted_body_digest": persisted_digest,
+            "representation": REPRESENTATION_UNSUPPORTED,
+            "content_match": False,
+            "reason": "representation_unsupported",
+        }
+    if not row_found or not persisted_digest:
+        return {
+            "captured_text_digest": captured_digest,
+            "persisted_body_digest": persisted_digest,
+            "representation": representation,
+            "content_match": False,
+            "reason": "persisted_row_absent",
+        }
+    if not captured_digest:
+        return {
+            "captured_text_digest": "",
+            "persisted_body_digest": persisted_digest,
+            "representation": representation,
+            "content_match": False,
+            "reason": "captured_text_absent",
+        }
+    match = captured_digest == persisted_digest
+    return {
+        "captured_text_digest": captured_digest,
+        "persisted_body_digest": persisted_digest,
+        "representation": representation,
+        "content_match": match,
+        "reason": "" if match else "captured_persisted_content_differs",
+    }
+
+
+def _timing_projection(raw: Any) -> dict[str, Any]:
+    """The identity fields of a turn measurement, and nothing else.
+
+    The full latency snapshot carries spans and provider detail that have
+    no bearing on whether the measurement belongs to this turn. Only the
+    identity is projected into the artifact, so what the validator checks
+    is exactly what it can check.
+    """
+    if not isinstance(raw, Mapping) or not raw:
+        return {}
+    return {
+        "turn_id": str(raw.get("turn_id") or ""),
+        "message_id": str(raw.get("message_id") or ""),
+        "conversation_id": int(raw.get("conversation_id") or 0),
+        "tenant_id": int(raw.get("tenant_id") or 0),
+        "total_turn_ms": int(raw.get("total_turn_ms") or 0),
+        "llm_call_count": len(list(raw.get("llm_calls") or [])),
+    }
 
 
 def _outbound_row_for_turn(
-    db: Any, *, conversation_id: int, turn_ref: str,
-) -> tuple[str, dict[str, Any], bool]:
+    db: Any,
+    *,
+    conversation_id: int,
+    turn_ref: str,
+    tenant_id: int = 0,
+    customer_id: int = 0,
+) -> tuple[str, dict[str, Any], bool, str]:
     """Fetch the row this turn actually wrote, and say whether it is that row.
 
     Returning the newest outbound id and calling it bound proved nothing:
-    any non-empty string satisfied the old check. This fetches the latest
-    outbound row for the conversation and only reports it verified when
-    its persisted metadata names THIS turn.
+    any non-empty string satisfied the old check. This finds the row whose
+    persisted metadata names THIS turn and reports the body it stored, so
+    the captured payload can be compared against something the runtime
+    wrote independently rather than against itself.
+
+    The lookup no longer assumes which conversation the runtime chose. The
+    webhook resolves a customer's conversation through its own path, which
+    is not necessarily the row a fixture prepared — reading "the newest
+    outbound row in the conversation I guessed" found nothing at all while
+    the turn had in fact written one. The turn reference is searched
+    within the CUSTOMER's conversations and the owning row is then checked
+    to belong to this tenant and customer, which is a stronger binding
+    than a guessed conversation plus a matching label.
     """
     try:
-        from models import MessageEvent  # noqa: PLC0415
+        from models import Conversation, MessageEvent  # noqa: PLC0415
 
-        row = (
+        wanted = str(turn_ref or "")
+        scope_ids: list[int] = []
+        if int(conversation_id or 0):
+            scope_ids.append(int(conversation_id))
+        if int(tenant_id or 0) and int(customer_id or 0):
+            scope_ids.extend(
+                int(row_id)
+                for (row_id,) in db.query(Conversation.id).filter(
+                    Conversation.tenant_id == int(tenant_id),
+                    Conversation.customer_id == int(customer_id),
+                )
+                if int(row_id) not in scope_ids
+            )
+        if not scope_ids:
+            return "", {}, False, ""
+
+        rows = (
             db.query(MessageEvent)
             .filter(
-                MessageEvent.conversation_id == int(conversation_id),
+                MessageEvent.conversation_id.in_(scope_ids),
                 MessageEvent.direction == "outbound",
             )
             .order_by(MessageEvent.id.desc())
-            .first()
+            .limit(50)
+            .all()
         )
-        if row is None:
-            return "", {}, False
-        stored = getattr(row, "extra_metadata", None)
-        metadata = dict(stored) if isinstance(stored, Mapping) else {}
-        row_id = str(getattr(row, "id", "") or "")
-        verified = bool(
-            row_id
-            and turn_ref
-            and str(metadata.get("address_turn_ref") or "") == str(turn_ref)
-        )
-        return row_id, metadata, verified
+        for row in rows:
+            stored = getattr(row, "extra_metadata", None)
+            metadata = dict(stored) if isinstance(stored, Mapping) else {}
+            if wanted and str(metadata.get("address_turn_ref") or "") == wanted:
+                return (
+                    str(getattr(row, "id", "") or ""),
+                    metadata,
+                    bool(str(getattr(row, "id", "") or "")),
+                    str(getattr(row, "body", "") or getattr(row, "content", "") or ""),
+                )
+        if rows:
+            stored = getattr(rows[0], "extra_metadata", None)
+            metadata = dict(stored) if isinstance(stored, Mapping) else {}
+            return str(getattr(rows[0], "id", "") or ""), metadata, False, ""
+        return "", {}, False, ""
     except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence
-        return "", {}, False
+        return "", {}, False, ""
 
 
 def _recorded_offer_binding(
@@ -647,6 +827,136 @@ def _delivered_address_ids(delivered_ids: Sequence[str]) -> list[str]:
         return []
 
 
+def _selection_evidence(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    inbound_metadata: Mapping[str, Any],
+    conversation: Any,
+) -> dict[str, Any]:
+    """Which action was replayed, and what the platform DURABLY recorded for it.
+
+    "The conversation state changed" is not a selection. Any metadata
+    write changes the conversation fingerprint, so a handler that did
+    nothing but touch an unrelated counter satisfied it. What proves a
+    selection is the durable row: the address the tapped action names,
+    recorded as selected, for this tenant and this customer, against the
+    revision the customer was shown.
+
+    Read-only, and read back through the platform's own resolver so the
+    action id is interpreted exactly as the runtime interprets it.
+    """
+    out: dict[str, Any] = {
+        "consumed_action_id": "",
+        "action_offer_id": "",
+        "action_address_id": "",
+        "selected_address_id": "",
+        "selection_state": "",
+        "selected_fingerprint": "",
+        "selection_source": "",
+        "selection_matches_action": False,
+        "selection_scope_verified": False,
+    }
+    try:
+        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+            structured_consent_action,
+        )
+
+        meta = dict(inbound_metadata or {})
+        resolved = structured_consent_action(meta)
+        if not resolved:
+            return out
+        offer_id, address_id = resolved
+        for key in ("button_id", "list_reply_id", "interactive_reply_id"):
+            raw = str(meta.get(key) or "").strip()
+            if raw.endswith(f":{address_id}") and offer_id in raw:
+                out["consumed_action_id"] = raw
+                break
+        out["action_offer_id"] = str(offer_id)
+        out["action_address_id"] = str(address_id)
+
+        from models import CustomerAddressProvenance  # noqa: PLC0415
+
+        row = (
+            db.query(CustomerAddressProvenance)
+            .filter(
+                CustomerAddressProvenance.tenant_id == int(tenant_id),
+                CustomerAddressProvenance.customer_id == int(customer_id),
+                CustomerAddressProvenance.customer_address_id == int(address_id),
+            )
+            .first()
+        )
+        if row is None:
+            return out
+        # Scope is part of the proof: a row read without checking whose it
+        # is could belong to another customer entirely.
+        out["selection_scope_verified"] = bool(
+            int(getattr(row, "tenant_id", 0) or 0) == int(tenant_id)
+            and int(getattr(row, "customer_id", 0) or 0) == int(customer_id)
+        )
+        out["selected_address_id"] = str(
+            getattr(row, "customer_address_id", "") or ""
+        )
+        out["selection_state"] = str(getattr(row, "selection_state", "") or "")
+        out["selected_fingerprint"] = str(
+            getattr(row, "selected_fingerprint", "") or ""
+        )
+        out["selection_source"] = str(getattr(row, "selection_source", "") or "")
+        out["selection_matches_action"] = bool(
+            out["selection_scope_verified"]
+            and out["selection_state"] == "selected"
+            and out["selected_address_id"] == str(address_id)
+            and out["selected_fingerprint"]
+        )
+        return out
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unproven selection
+        return out
+
+
+def _refusal_evidence(
+    *,
+    denial_audits: Sequence[Mapping[str, Any]],
+    blockers: Sequence[str],
+    status: str,
+    outbound_meta: Mapping[str, Any],
+) -> dict[str, Any]:
+    """WHICH gate refused, and why — never merely "nothing was sent".
+
+    A turn that silently did nothing produced the same evidence as a turn
+    a gate deliberately stopped, so "not captured" was accepted as proof
+    of refusal. A refusal has an author: an egress denial, a suppression
+    the runtime recorded in its own provenance, or a handler that raised.
+    """
+    for audit in denial_audits or []:
+        if not isinstance(audit, Mapping):
+            continue
+        return {
+            "gate": f"egress:{audit.get('egress_kind') or ''}",
+            "reason": str(audit.get("reason") or "egress_denied"),
+            "observed": True,
+        }
+    meta = dict(outbound_meta or {})
+    for key in (
+        "address_save_claim_suppress_reason",
+        "address_claim_send_suppressed",
+        "fallback_reason",
+    ):
+        if str(meta.get(key) or "").strip() or meta.get(key) is True:
+            return {
+                "gate": f"provenance:{key}",
+                "reason": str(meta.get(key) or key),
+                "observed": True,
+            }
+    if "handler_exception" in set(blockers or []):
+        return {
+            "gate": "handler_exception",
+            "reason": "handler_raised",
+            "observed": True,
+        }
+    return {"gate": "", "reason": "", "observed": False}
+
+
 async def run_sandbox_of2_turn(
     *,
     db: Any,
@@ -692,19 +1002,23 @@ async def run_sandbox_of2_turn(
     # inherits whatever the previous turn left bound, and every latency
     # after the first would carry the one before it.
     timing_token = None
+    expected_turn_id = ""
     try:
         from core.turn_latency import (  # noqa: PLC0415
             bind_turn_latency,
             new_turn_latency,
         )
 
-        timing_token = bind_turn_latency(
-            new_turn_latency(
-                tenant_id=int(request.tenant_id),
-                conversation_id=int(getattr(request.conversation, "id", 0) or 0) or None,
-                message_id=request.turn_ref,
-            )
+        _accumulator = new_turn_latency(
+            tenant_id=int(request.tenant_id),
+            conversation_id=int(getattr(request.conversation, "id", 0) or 0) or None,
+            message_id=request.turn_ref,
         )
+        # Remembered here so the persisted measurement can be compared
+        # against THIS turn's accumulator rather than merely checked for
+        # having some non-empty turn id.
+        expected_turn_id = str(getattr(_accumulator, "turn_id", "") or "")
+        timing_token = bind_turn_latency(_accumulator)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
         timing_token = None
 
@@ -794,10 +1108,17 @@ async def run_sandbox_of2_turn(
 
     payload = dict(captured[-1].payload) if captured else {}
     _receipt_action_ids = _delivered_action_ids(payload)
-    outbound_message_id, outbound_meta, outbound_row_verified = _outbound_row_for_turn(
+    (
+        outbound_message_id,
+        outbound_meta,
+        outbound_row_verified,
+        outbound_body,
+    ) = _outbound_row_for_turn(
         db,
         conversation_id=int(getattr(request.conversation, "id", 0) or 0),
         turn_ref=request.turn_ref,
+        tenant_id=int(request.tenant_id),
+        customer_id=int(getattr(request.conversation, "customer_id", 0) or 0),
     )
     recorded_offer_id, recorded_offer_delivery_ref = _recorded_offer_binding(
         tenant_id=request.tenant_id,
@@ -805,6 +1126,20 @@ async def run_sandbox_of2_turn(
         delivered_ids=_receipt_action_ids,
     )
     _captured_digest = _payload_digest(payload) if captured else ""
+    # INDEPENDENT content binding. Hashing the captured payload and then
+    # hashing it again proves only that hashing is deterministic; it says
+    # nothing about the row the runtime persisted. The comparison that
+    # means something is between the text the CAPTURE observed leaving and
+    # the body the outbound writer stored, which are produced by two
+    # different code paths from the same reply.
+    _captured_text, _representation = _captured_customer_text(payload)
+    _content = _content_binding(
+        captured_text=_captured_text,
+        persisted_body=outbound_body,
+        representation=_representation,
+        captured=bool(captured),
+        row_found=bool(outbound_row_verified),
+    )
 
     address_turn = {
         "turn_ref": request.turn_ref,
@@ -819,13 +1154,15 @@ async def run_sandbox_of2_turn(
         "transport": "captured" if captured else "not_captured",
         "delivery_ids": [str(record.delivery_id) for record in captured],
         "captured_payload_digest": _captured_digest,
-        # Recomputed from the payload that was captured, then compared.
-        # A digest nobody checked binds nothing.
-        "captured_payload_digest_verified": bool(
-            captured
-            and _captured_digest
-            and _captured_digest == _payload_digest(dict(captured[-1].payload))
-        ),
+        # Two independent artifacts of one reply, compared. The digest is
+        # kept for identity; what makes it EVIDENCE is the content match
+        # below, against a body this runner never wrote.
+        "captured_payload_digest_verified": bool(_content["content_match"]),
+        "captured_text_digest": _content["captured_text_digest"],
+        "persisted_body_digest": _content["persisted_body_digest"],
+        "captured_persisted_representation": _content["representation"],
+        "captured_persisted_content_match": bool(_content["content_match"]),
+        "content_binding_reason": _content["reason"],
         "recorded_offer_id": recorded_offer_id,
         "recorded_offer_delivery_ref": recorded_offer_delivery_ref,
         # Execution first, presentation second — and never the other way
@@ -856,9 +1193,18 @@ async def run_sandbox_of2_turn(
             for key in sorted(outbound_meta)
             if key.startswith(("address_", "compose_", "fallback_", "final_", "llm_"))
         },
-        "turn_timing": dict(outbound_meta.get("turn_timing") or {})
-        if isinstance(outbound_meta.get("turn_timing"), Mapping)
-        else {},
+        "turn_timing": _timing_projection(outbound_meta.get("turn_timing")),
+        # What this runner's OWN accumulator was bound to. A measurement
+        # is correlated when it names this turn, not when it merely
+        # carries some turn id.
+        "turn_timing_expected": {
+            "turn_id": str(expected_turn_id or ""),
+            "message_id": str(request.turn_ref or ""),
+            "conversation_id": int(
+                getattr(request.conversation, "id", 0) or 0
+            ),
+            "tenant_id": int(request.tenant_id),
+        },
         # Stated, never implied: an absent measurement is reported as
         # unavailable rather than passed off as a complete record.
         "turn_timing_unavailable": not isinstance(
@@ -866,6 +1212,14 @@ async def run_sandbox_of2_turn(
         )
         or not outbound_meta.get("turn_timing"),
     }
+    selection = _selection_evidence(
+        db,
+        tenant_id=int(request.tenant_id),
+        customer_id=int(getattr(request.conversation, "customer_id", 0) or 0),
+        inbound_metadata=request.inbound_metadata,
+        conversation=request.conversation,
+    )
+    address_turn["selection"] = selection
     blockers.extend(
         address_turn_evidence_blockers(
             address_turn,
@@ -888,12 +1242,20 @@ async def run_sandbox_of2_turn(
     # Every turn declares what it must DO. Address evidence stays optional
     # for a genuine non-collection turn — but "no address reply expected"
     # must not also mean "nothing need be proved".
+    refusal = _refusal_evidence(
+        denial_audits=denial_audits,
+        blockers=blockers,
+        status=status,
+        outbound_meta=outbound_meta,
+    )
     result_blockers = _operational_result_blockers(
         expected=str(request.expected_operational_result or ""),
         status=status,
         captured=bool(captured),
         address_turn=address_turn,
         state_delta=state_delta,
+        selection=selection,
+        refusal=refusal,
     )
     blockers.extend(result_blockers)
 
@@ -935,6 +1297,8 @@ async def run_sandbox_of2_turn(
         "expected_state_delta_keys": list(request.expected_state_delta_keys),
         "expected_operational_result": str(request.expected_operational_result or ""),
         "address_turn": address_turn,
+        "selection_evidence": selection,
+        "refusal_evidence": refusal,
         "denial_audits": denial_audits,
         "expected_denials": [
             {"egress_kind": kind, "operation": operation}

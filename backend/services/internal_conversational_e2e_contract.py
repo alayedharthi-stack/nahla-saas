@@ -505,6 +505,10 @@ ADDRESS_TURN_REQUIRED_FIELDS: tuple[str, ...] = (
     "failure_injection",
     "model_bound_calls",
     "captured_payload_digest_verified",
+    "captured_persisted_content_match",
+    "captured_persisted_representation",
+    "captured_text_digest",
+    "persisted_body_digest",
     "outbound_message_id",
     "outbound_message_row_verified",
     "outbound_metadata_turn_ref",
@@ -517,6 +521,7 @@ ADDRESS_TURN_REQUIRED_FIELDS: tuple[str, ...] = (
 )
 
 MODEL_BOUND_CALL_REQUIRED_FIELDS: tuple[str, ...] = (
+    "address_bound",
     "call_index",
     "collection_field",
     "delivery_address_status",
@@ -535,6 +540,13 @@ CODE_ADDRESS_INJECTION_NOT_EXECUTED = "address_turn_injection_not_executed"
 CODE_ADDRESS_EXPECTATIONS_MISSING = "address_turn_expectations_missing"
 CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED = "address_turn_final_source_unestablished"
 CODE_ADDRESS_TIMING_UNCORRELATED = "address_turn_timing_uncorrelated"
+CODE_ADDRESS_CONTENT_UNBOUND = "address_turn_content_unbound"
+
+# The representations a reply may legitimately take between the wire and
+# the persisted row. Anything else is recorded, not accepted.
+REPRESENTATION_TEXT = "text_body"
+REPRESENTATION_INTERACTIVE = "interactive_body"
+CONTENT_REPRESENTATIONS = frozenset({REPRESENTATION_TEXT, REPRESENTATION_INTERACTIVE})
 
 CONSENT_ACTION_PREFIX = "nahla_addr_select"
 _SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -627,7 +639,20 @@ def _model_call_blockers(
                 blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
                 break
 
-    for call in calls:
+    # A turn may make more than one model-bound call, and only those
+    # carrying the address context can be judged against an address
+    # expectation. Every call still has to be COMPLETE (above); this
+    # narrows only what the expectation is applied to, and it refuses a
+    # turn where no call carried the context at all rather than passing
+    # one vacuously.
+    address_calls = [
+        call
+        for call in calls
+        if isinstance(call, Mapping) and bool(call.get("address_bound"))
+    ]
+    if calls and not address_calls:
+        blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+    for call in address_calls:
         if not isinstance(call, Mapping):
             continue
         for field in ADDRESS_EXPECTATION_FIELDS:
@@ -670,8 +695,29 @@ def _binding_blockers(record: Mapping[str, Any]) -> list[str]:
     digest = str(record.get("captured_payload_digest") or "")
     if not _SHA256_DIGEST.fullmatch(digest):
         blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
-    # The producer recomputed the digest from the payload it captured and
-    # says whether it matched. A digest nobody checked binds nothing.
+
+    # Two artifacts of ONE reply, produced by two different code paths:
+    # the text the capture observed leaving, and the body the outbound
+    # writer persisted. Hashing the captured payload twice and comparing
+    # the results established only that hashing is deterministic, so a
+    # persisted body replaced with unrelated text passed while both
+    # verification flags stayed true. The comparison is between the two
+    # sources, under a named supported representation, and only
+    # whitespace is normalised — no wording is preferred or matched.
+    if str(record.get("captured_persisted_representation") or "") not in (
+        CONTENT_REPRESENTATIONS
+    ):
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    captured_text_digest = str(record.get("captured_text_digest") or "")
+    persisted_body_digest = str(record.get("persisted_body_digest") or "")
+    if not _SHA256_DIGEST.fullmatch(captured_text_digest):
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    if not _SHA256_DIGEST.fullmatch(persisted_body_digest):
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    if captured_text_digest != persisted_body_digest:
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    if record.get("captured_persisted_content_match") is not True:
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
     if record.get("captured_payload_digest_verified") is not True:
         blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
 
@@ -701,16 +747,38 @@ def _binding_blockers(record: Mapping[str, Any]) -> list[str]:
         if not offer_ref or offer_ref not in {str(v) for v in delivery_ids}:
             blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
 
-    # Latency is only acceptable when it is correlated to this turn.
+    # Latency is only acceptable when it is correlated to THIS turn.
+    # "Carries some turn id" was not correlation: a measurement whose
+    # turn and message ids named a different turn entirely satisfied it.
     timing = record.get("turn_timing")
     timing = dict(timing) if isinstance(timing, Mapping) else {}
+    expected = record.get("turn_timing_expected")
+    expected = dict(expected) if isinstance(expected, Mapping) else {}
     if not timing:
         if record.get("turn_timing_unavailable") is not True:
             # Either correlated timing, or an explicit statement that the
             # measurement is unavailable. Silently absent is neither.
             blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
-    elif not str(timing.get("turn_id") or "").strip():
-        blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+    else:
+        observed_turn = str(timing.get("turn_id") or "").strip()
+        if not observed_turn:
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+        # The runner states what its own accumulator was bound to. When
+        # it can, the persisted measurement must be that one.
+        if str(expected.get("turn_id") or "").strip() and observed_turn != str(
+            expected.get("turn_id")
+        ).strip():
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+        if str(timing.get("message_id") or "") != turn_ref:
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+        if int(expected.get("conversation_id") or 0) and int(
+            timing.get("conversation_id") or 0
+        ) != int(expected.get("conversation_id") or 0):
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+        if int(expected.get("tenant_id") or 0) and int(
+            timing.get("tenant_id") or 0
+        ) != int(expected.get("tenant_id") or 0):
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
     return sorted(set(blockers))
 
 

@@ -61,6 +61,11 @@ from services.internal_conversational_e2e_contract import (  # noqa: E402
     preliminary_environment_blockers,
     sign_session_evidence,
 )
+from services.internal_conversational_e2e_of2_fixtures import (  # noqa: E402
+    FIXTURE_STATES,
+    of2_fixture_preflight,
+    prepare_of2_scenario_fixture,
+)
 from services.internal_conversational_e2e_harness import (  # noqa: E402
     OPERATIONAL_RESULTS,
     SandboxOf2TurnRequest,
@@ -80,6 +85,38 @@ from services.internal_conversational_e2e_sql_error_audit import (  # noqa: E402
 
 SCENARIO_SCHEMA_VERSION = SCENARIO_SCHEMA_VERSION_V1
 CAPTURED_ACTION_PLACEHOLDER = "__captured_action_id__"
+
+# The outbound path carries a real burst throttle — six sends per ten
+# seconds for one (tenant, recipient) — and a scenario manifest drives
+# every turn at ONE attested number. Left unpaced, a session's later
+# scenarios are silently throttled: the owner runs, nothing reaches the
+# send boundary, nothing is captured, and the turn reports as an
+# uneventful failure rather than as "the platform declined to send this
+# fast". The throttle is production protection and is not weakened; the
+# operator waits instead. Both values are overridable for a deployment
+# whose throttle differs.
+PACING_BURST_ENV = "NAHLA_INTERNAL_E2E_PACING_BURST"
+PACING_WINDOW_ENV = "NAHLA_INTERNAL_E2E_PACING_WINDOW_SECONDS"
+# Counted in TURNS, but the throttle counts SENDS, and one turn can make
+# several: a compose that fails attempts the reply, then the recovery.
+# Pacing five turns to a window therefore still lost the later scenarios.
+# Two turns per window keeps the worst case inside six sends.
+DEFAULT_PACING_BURST = 2
+DEFAULT_PACING_WINDOW_SECONDS = 11.0
+
+
+def _pacing(env: Mapping[str, str]) -> tuple[int, float]:
+    try:
+        burst = int(str(env.get(PACING_BURST_ENV) or DEFAULT_PACING_BURST))
+    except (TypeError, ValueError):
+        burst = DEFAULT_PACING_BURST
+    try:
+        window = float(
+            str(env.get(PACING_WINDOW_ENV) or DEFAULT_PACING_WINDOW_SECONDS)
+        )
+    except (TypeError, ValueError):
+        window = DEFAULT_PACING_WINDOW_SECONDS
+    return max(1, burst), max(0.0, window)
 SESSION_SCHEMA_VERSION = "internal_conversational_e2e_session_v1"
 MAX_SCENARIOS = 30
 MAX_TURNS_PER_SCENARIO = 12
@@ -286,7 +323,7 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
             expectations = turn.get("expectations") or {}
             if not isinstance(expectations, Mapping):
                 raise ValueError("expectations_invalid")
-            if expects_address_turn and not any(
+            if expects_address_turn and not all(
                 str(expectations.get(field) or "").strip()
                 for field in ADDRESS_EXPECTATION_FIELDS
             ):
@@ -294,6 +331,13 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                 # that expects address evidence must say which field and
                 # which goal it expects, or the evidence cannot contradict
                 # anything.
+                #
+                # EVERY field, not any of them — matching the validator,
+                # which refuses a record whose expectations are partial.
+                # With ``any`` the loader accepted a manifest naming only
+                # the collection field while the validator then rejected
+                # the run for incomplete expectations, so a manifest the
+                # operator called valid could never pass.
                 raise ValueError("expectations_required")
             checked_turns.append(
                 {
@@ -316,8 +360,22 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                     ),
                 }
             )
+        # Which customer state this scenario needs. The manifest's states
+        # are mutually exclusive, so a scenario that does not say which
+        # one it assumes cannot be prepared — and an unprepared OF2
+        # scenario does not fail loudly, it quietly proves nothing.
+        fixture_state = str(scenario.get("fixture_state") or "")
+        if any(t["mode"] == TURN_MODE_OF2 for t in checked_turns):
+            if fixture_state not in FIXTURE_STATES:
+                raise ValueError("fixture_state_required")
         seen.add(scenario_id)
-        normalized.append({"scenario_id": scenario_id, "turns": checked_turns})
+        normalized.append(
+            {
+                "scenario_id": scenario_id,
+                "fixture_state": fixture_state,
+                "turns": checked_turns,
+            }
+        )
     return normalized
 
 
@@ -597,9 +655,87 @@ async def run_session(
         if created:
             runner_mutations.append("sandbox_conversation_created")
         last_captured_action_ids: list[str] = []
+        fixture_reports: list[dict[str, Any]] = []
+        pacing_burst, pacing_window = _pacing(env_map)
+        dispatched_since_pause = 0
+        pauses = 0
         for scenario in scenarios:
+            scenario_convo = convo
+            # Each OrderFlowV2 scenario is PREPARED before it runs. The
+            # manifest's customer states are mutually exclusive, so one
+            # conversation carried through every scenario would leave most
+            # of them describing a state that does not exist — and an
+            # unprepared OrderFlowV2 turn does not fail, it quietly
+            # returns having done nothing.
+            if str(scenario.get("fixture_state") or "") in FIXTURE_STATES:
+                fixture = prepare_of2_scenario_fixture(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=phone,
+                    scenario_id=scenario["scenario_id"],
+                    session_id=session_id,
+                    state=str(scenario["fixture_state"]),
+                )
+                scenario_convo = fixture.conversation
+                report = {
+                    "scenario_id": scenario["scenario_id"],
+                    "fixture": fixture.to_dict(),
+                    "divergences": [],
+                }
+                runner_mutations.extend(fixture.mutations)
+                first_of2 = next(
+                    (t for t in scenario["turns"] if t["mode"] == TURN_MODE_OF2),
+                    None,
+                )
+                if first_of2 is not None:
+                    inbound = dict(first_of2.get("inbound_metadata") or {})
+                    divergences = of2_fixture_preflight(
+                        db,
+                        tenant_id=tenant_id,
+                        customer_phone=phone,
+                        conversation=scenario_convo,
+                        message=str(first_of2["text"]),
+                        inbound_metadata=inbound,
+                        inbound_normalized_type=str(
+                            inbound.get("inbound_normalized_type")
+                            or inbound.get("type")
+                            or "text"
+                        ),
+                        require_address_turn=bool(
+                            first_of2.get("expects_address_turn")
+                        ),
+                    )
+                    report["divergences"] = [d.to_dict() for d in divergences]
+                fixture_reports.append(report)
+                if report["divergences"]:
+                    # Stop at the first failing layer and SAY which one.
+                    # Running the turn anyway would produce a quiet,
+                    # healthy-looking record of nothing having happened.
+                    results.append(
+                        {
+                            "evidence_channel": EVIDENCE_CHANNEL,
+                            "mode": "of2",
+                            "session_id": session_id,
+                            "scenario_id": scenario["scenario_id"],
+                            "turn_index": 0,
+                            "tenant_id": tenant_id,
+                            "status": "fixture_divergence",
+                            "verdict": "fail",
+                            "blockers": ["scenario_fixture_divergence"],
+                            "fixture_divergences": report["divergences"],
+                        }
+                    )
+                    continue
             for turn_index, turn in enumerate(scenario["turns"]):
                 clear_last_turn_sql_error_audit()
+                if dispatched_since_pause >= pacing_burst and pacing_window > 0:
+                    # Let the burst window clear before the next turn, so
+                    # a throttled send is never mistaken for a turn that
+                    # had nothing to say.
+                    await asyncio.sleep(pacing_window)
+                    dispatched_since_pause = 0
+                    pauses += 1
+                dispatched_since_pause += 1
                 if turn["mode"] == TURN_MODE_OF2:
                     outcome = await run_sandbox_of2_turn(
                         db=db,
@@ -611,7 +747,7 @@ async def run_session(
                             customer_phone=phone,
                             phone_id="internal-direct-code-probe",
                             text=turn["text"],
-                            conversation=convo,
+                            conversation=scenario_convo,
                             allowed_tenants=allowed_tenants,
                             evidence_hmac_key=evidence_key,
                             runtime_revision=str(preflight["runtime_revision"]),
@@ -759,6 +895,17 @@ async def run_session(
         "started_at_utc": started_at_utc,
         "completed_at_utc": completed_at_utc,
         "runner_mutations": runner_mutations,
+        # What each scenario was prepared with, and the first layer that
+        # did not hold when one did not. A scenario whose fixture
+        # diverged is recorded as such rather than reported as a quiet
+        # pass.
+        "scenario_fixtures": fixture_reports,
+        # How the run was paced against the outbound burst throttle.
+        "outbound_pacing": {
+            "burst": pacing_burst,
+            "window_seconds": pacing_window,
+            "pauses": pauses,
+        },
         "turn_results": results,
         "of2_path_report": _of2_path_report(results),
         "observation_window_utc": {

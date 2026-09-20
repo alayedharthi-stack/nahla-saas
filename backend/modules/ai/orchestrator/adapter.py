@@ -168,13 +168,21 @@ def generate_ai_reply(
         )
         raise
     _meta = getattr(payload, "metadata", None) or {}
+    _candidate = bool(str(getattr(payload, "reply_text", "") or "").strip())
+    _declared_reason = (
+        str(_meta.get("fallback_reason") or "") if isinstance(_meta, dict) else ""
+    )
+    # A call that returned nothing has to say so. Leaving the reason empty
+    # made "the model produced no text" indistinguishable from "nobody
+    # recorded why", which is exactly the silence the evidence layer
+    # refuses. When the boundary itself names a reason that one wins.
+    if not _candidate and not _declared_reason:
+        _declared_reason = "empty_model_candidate"
     record_model_bound_outcome(
         _observed,
-        candidate_present=bool(str(getattr(payload, "reply_text", "") or "").strip()),
+        candidate_present=_candidate,
         compose_source=str(getattr(payload, "provider_used", "") or ""),
-        fallback_reason=str(_meta.get("fallback_reason") or "")
-        if isinstance(_meta, dict)
-        else "",
+        fallback_reason=_declared_reason,
     )
     return payload
 
