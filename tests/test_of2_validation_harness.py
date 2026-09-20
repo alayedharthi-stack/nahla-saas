@@ -2042,8 +2042,7 @@ def _entrypoint_request(*, tenant, convo, phone, text, meta, label, **over):
     return SandboxOf2TurnRequest(**base)
 
 
-@pytest.mark.asyncio
-async def test_the_real_entrypoint_produces_a_prepared_address_turn(order_flow_v2_live):
+def test_the_real_entrypoint_produces_a_prepared_address_turn(order_flow_v2_live):
     """``_handle_merchant_message`` itself, with nothing in the owner patched.
 
     This is the claim the whole harness rests on, and it was the one thing
@@ -2082,16 +2081,18 @@ async def test_the_real_entrypoint_produces_a_prepared_address_turn(order_flow_v
         == []
     )
 
-    outcome = await run_sandbox_of2_turn(
-        db=db,
-        request=_entrypoint_request(
-            tenant=tenant,
-            convo=fixture.conversation,
-            phone=phone,
-            text="أكمل الطلب",
-            meta=meta,
-            label="entry",
-        ),
+    outcome = asyncio.run(
+        run_sandbox_of2_turn(
+            db=db,
+            request=_entrypoint_request(
+                tenant=tenant,
+                convo=fixture.conversation,
+                phone=phone,
+                text="أكمل الطلب",
+                meta=meta,
+                label="entry",
+            ),
+        )
     )
     evidence = outcome.evidence
     record = evidence["address_turn"]
@@ -2109,8 +2110,7 @@ async def test_the_real_entrypoint_produces_a_prepared_address_turn(order_flow_v
     assert record["outbound_provenance"]["final_customer_text_source"] == "llm"
 
 
-@pytest.mark.asyncio
-async def test_saved_choices_reach_the_customer_through_the_real_entrypoint(order_flow_v2_live):
+def test_saved_choices_reach_the_customer_through_the_real_entrypoint(order_flow_v2_live):
     """Several saved addresses, so the same turn carries tappable choices."""
     from services.internal_conversational_e2e_harness import (  # noqa: PLC0415
         run_sandbox_of2_turn,
@@ -2131,16 +2131,18 @@ async def test_saved_choices_reach_the_customer_through_the_real_entrypoint(orde
     )
     assert len(fixture.address_ids) == 3
 
-    outcome = await run_sandbox_of2_turn(
-        db=db,
-        request=_entrypoint_request(
-            tenant=tenant,
-            convo=fixture.conversation,
-            phone=phone,
-            text="متابعة الشراء",
-            meta=_interactive("of2_resume_checkout"),
-            label="choices",
-        ),
+    outcome = asyncio.run(
+        run_sandbox_of2_turn(
+            db=db,
+            request=_entrypoint_request(
+                tenant=tenant,
+                convo=fixture.conversation,
+                phone=phone,
+                text="متابعة الشراء",
+                meta=_interactive("of2_resume_checkout"),
+                label="choices",
+            ),
+        )
     )
     record = outcome.evidence["address_turn"]
     assert outcome.evidence["blockers"] == [], outcome.evidence["blockers"]
@@ -2152,8 +2154,7 @@ async def test_saved_choices_reach_the_customer_through_the_real_entrypoint(orde
     assert record["recorded_offer_delivery_ref"] in record["delivery_ids"]
 
 
-@pytest.mark.asyncio
-async def test_the_preflight_refuses_free_text_before_running_it(order_flow_v2_live):
+def test_the_preflight_refuses_free_text_before_running_it(order_flow_v2_live):
     """Free text can never reach this path, and the run must say so.
 
     Not a fixture gap: OrderFlowV2 owns a turn pre-Brain only for a
