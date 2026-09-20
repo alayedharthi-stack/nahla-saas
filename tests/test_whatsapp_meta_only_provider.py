@@ -211,3 +211,149 @@ def test_the_module_keeps_no_handler_for_the_retired_provider():
     for name in ("_handle_360dialog_body", "_safe_360dialog_ack",
                  "_classify_360dialog_field", "_scope_accepts"):
         assert not hasattr(wh, name), name
+
+
+# ── 4. The token boundary: a retired row's credential is never processed ─────
+#
+# The reviewer's reproduction: a connection left over from the retired provider
+# still holds a stored credential, and that credential is past its expiry. On
+# the reviewed head ``provider_send_message`` resolved the token first — reading
+# the credential, exchanging it at Meta's OAuth endpoint because it was expired,
+# rewriting the row's expiry on Meta's 190 and committing token state onto it —
+# and only then reached the refusal. Every one of those has to be zero.
+
+import copy
+from datetime import datetime, timedelta, timezone
+
+
+def _retired_row_with_expired_credential():
+    return SimpleNamespace(
+        id=7, tenant_id=33, provider="dialog360", phone_number_id="PID-1",
+        connection_type="embedded", access_token="retired-provider-key-expired",
+        token_type="retired", token_expires_at=datetime.now(timezone.utc) - timedelta(days=3),
+        extra_metadata={"token_status": "expired", "oauth_session_status": "expired"},
+    )
+
+
+class _NoNetwork:
+    """An ``httpx.AsyncClient`` that fails the case the moment it is constructed."""
+
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("no HTTP client may be opened for a retired provider's row")
+
+
+def _snapshot(conn):
+    return (copy.deepcopy(conn.extra_metadata), conn.token_expires_at, conn.access_token,
+            conn.token_type)
+
+
+def test_an_expired_retired_credential_is_neither_refreshed_nor_rewritten_by_a_send():
+    from core.wa_provider_observability import get_recent_attempts, reset_for_tests
+    from services.whatsapp_platform import service, token_manager
+    from services.whatsapp_platform.service import provider_send_message
+
+    reset_for_tests()
+    conn = _retired_row_with_expired_credential()
+    before = _snapshot(conn)
+    db = MagicMock()
+    with (
+        patch.object(service.httpx, "AsyncClient", _NoNetwork),
+        patch.object(token_manager.httpx, "AsyncClient", _NoNetwork),
+        patch.object(token_manager, "read_access_token",
+                     side_effect=AssertionError("the stored credential must not be read")),
+    ):
+        data, ctx = _run(provider_send_message(
+            db, conn, tenant_id=33, operation="send_message", phone_id="PID-1",
+            payload={"to": "+966500000000", "type": "text", "text": {"body": "مرحبا"}},
+            automation_guard=False,
+        ))
+
+    assert data["error"]["_nahla_unsupported_provider"] is True
+    assert ctx.token == ""
+    assert ctx.token_status == token_manager.TOKEN_STATUS_UNSUPPORTED_PROVIDER
+    assert _snapshot(conn) == before                       # zero metadata mutation
+    db.commit.assert_not_called()                          # nothing persisted
+    latest = get_recent_attempts(33)[0]
+    assert latest["classification"] == "provider_error_field"   # definite, not "exception"
+    assert latest["response_status"] is None
+
+
+def test_token_resolution_refuses_a_retired_row_before_reading_its_credential():
+    from services.whatsapp_platform import token_manager
+
+    conn = _retired_row_with_expired_credential()
+    before = _snapshot(conn)
+    db = MagicMock()
+    with (
+        patch.object(token_manager.httpx, "AsyncClient", _NoNetwork),
+        patch.object(token_manager, "read_access_token",
+                     side_effect=AssertionError("the stored credential must not be read")),
+    ):
+        with pytest.raises(pu.UnsupportedWhatsAppProvider):
+            _run(token_manager.get_token_for_operation(
+                db, conn, tenant_id=33, operation="send_message"))
+    assert _snapshot(conn) == before
+    db.commit.assert_not_called()
+
+
+def test_the_synchronous_token_context_is_unsupported_without_reading_the_credential():
+    from services.whatsapp_platform import token_manager
+
+    conn = _retired_row_with_expired_credential()
+    with patch.object(token_manager, "read_access_token",
+                      side_effect=AssertionError("the stored credential must not be read")):
+        ctx = token_manager.get_token_context(conn)
+        candidates = token_manager.get_token_candidates(conn)
+        state = token_manager.get_oauth_session_state(conn)
+    assert ctx.token == ""
+    assert ctx.token_status == token_manager.TOKEN_STATUS_UNSUPPORTED_PROVIDER
+    assert [c.token_status for c in candidates] == [token_manager.TOKEN_STATUS_UNSUPPORTED_PROVIDER]
+    assert state == (token_manager.TOKEN_STATUS_UNSUPPORTED_PROVIDER, None)
+
+
+def test_the_refresh_never_exchanges_a_retired_credential_at_meta():
+    from services.whatsapp_platform import token_manager
+
+    conn = _retired_row_with_expired_credential()
+    before = _snapshot(conn)
+    with (
+        patch.object(token_manager.httpx, "AsyncClient", _NoNetwork),
+        patch.object(token_manager, "read_access_token",
+                     side_effect=AssertionError("the stored credential must not be read")),
+    ):
+        assert _run(token_manager._refresh_merchant_long_lived_token(conn)) is None
+    assert _snapshot(conn) == before
+
+
+def test_token_state_is_never_written_onto_a_retired_row():
+    from services.whatsapp_platform import token_manager
+
+    conn = _retired_row_with_expired_credential()
+    before = _snapshot(conn)
+    db = MagicMock()
+    token_manager.update_token_state(conn, token_source="platform", token_status="healthy",
+                                     oauth_session_status="healthy")
+    token_manager.persist_token_context(
+        db, conn, tenant_id=33, operation="send_message",
+        ctx=token_manager.unsupported_provider_context(conn))
+    assert _snapshot(conn) == before
+    db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("stored", ["meta", ""])
+def test_a_meta_row_and_a_pre_column_row_still_resolve_their_token(stored):
+    """The compatibility behaviour is untouched: Meta, and the rows written
+    before the column existed, resolve and persist exactly as before."""
+    from services.whatsapp_platform import token_manager
+
+    conn = SimpleNamespace(
+        id=7, tenant_id=33, provider=stored, phone_number_id="PID-1",
+        connection_type="embedded", access_token="tok",
+        token_expires_at=datetime.now(timezone.utc) + timedelta(days=30), extra_metadata={})
+    db = MagicMock()
+    with patch.object(token_manager.httpx, "AsyncClient", _NoNetwork):
+        ctx = _run(token_manager.get_token_for_operation(
+            db, conn, tenant_id=33, operation="send_message"))
+    assert ctx.token == "tok" and ctx.token_status == "healthy"
+    assert conn.extra_metadata["token_status"] == "healthy"
+    db.commit.assert_called_once()

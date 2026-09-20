@@ -19,6 +19,33 @@ would send one provider's credential to Meta's API, on a number Meta may never
 have had. `services/whatsapp_platform/provider_utils.py` is the single place
 that decides, and every path that acts on a connection asks it first.
 
+## The token boundary
+
+A connection row left over from the retired provider still holds a stored
+credential. On the reviewed head, a send for such a row resolved its token
+**before** the provider refusal ran: the credential was read, and — because it
+was expired — exchanged at Meta's OAuth endpoint as if it were a Meta token,
+the row's expiry rewritten on Meta's `190`, and token state committed onto the
+row. Only then did the request wrapper refuse. Each of those is now impossible
+by construction:
+
+| Boundary | For a row naming a retired provider |
+| --- | --- |
+| `get_token_for_operation` | raises `UnsupportedWhatsAppProvider` before any candidate is built, before any refresh, before any persistence |
+| `get_token_context` / `get_token_candidates` / `build_token_context` / `get_oauth_session_state` | answer an `unsupported_provider` context without reading the stored credential |
+| `_refresh_merchant_long_lived_token` | returns `None` without reading the credential; nothing is exchanged at `graph.facebook.com/oauth/access_token` |
+| `update_token_state` / `persist_token_context` | write nothing and commit nothing |
+| the scheduled refresh (`_refresh_all_wa_tokens`) | skips the row |
+| `provider_send_message`, `graph_get`, `graph_post`, `provider_submit_template` and the other wrappers | refuse **before** token resolution and record the attempt as a definite provider failure (`provider_error_field`, no status) — never the ambiguous transport exception that invites a resend |
+
+The reviewer's reproduction — an expired retired-provider credential driven
+through the real `provider_send_message` — is
+`tests/test_whatsapp_meta_only_provider.py::test_an_expired_retired_credential_is_neither_refreshed_nor_rewritten_by_a_send`:
+no HTTP client is constructed, the stored credential is never read, the row's
+metadata and expiry are byte-for-byte unchanged, and nothing is committed.
+Meta rows and the pre-column rows (empty `provider`) resolve and persist exactly
+as before.
+
 ## Executable surfaces removed
 
 | surface | what happened |

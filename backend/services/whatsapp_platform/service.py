@@ -25,7 +25,11 @@ from .provider_utils import (
     require_supported_provider,
     wa_provider,
 )
-from .token_manager import WhatsAppTokenContext, get_token_for_operation
+from .token_manager import (
+    WhatsAppTokenContext,
+    get_token_for_operation,
+    unsupported_provider_context,
+)
 
 logger = logging.getLogger("nahla.whatsapp.service")
 
@@ -122,6 +126,32 @@ def _unsupported_provider_envelope(conn: Any) -> Dict[str, Any]:
             "_nahla_unsupported_provider": True,
         }
     }
+
+
+async def _resolve_token(
+    db: Session,
+    conn: Any,
+    *,
+    tenant_id: Optional[int],
+    operation: str,
+    prefer_platform: bool = False,
+) -> WhatsAppTokenContext:
+    """The token for this operation — or, for a row naming a retired provider,
+    a context that carries no token and reads no credential.
+
+    Every request wrapper below refuses such a context before a request exists,
+    so the refusal is definite and recorded; and because the token is resolved
+    only for a supported row, no refresh is attempted at Meta's OAuth endpoint
+    with another provider's key and no token state is written onto the row.
+    """
+    if conn is not None and not provider_is_supported(conn):
+        logger.error("[WA token] op=%s tenant=%s provider=%r — refused before token "
+                     "resolution; Meta WhatsApp Cloud API is the only supported provider",
+                     operation, tenant_id, raw_provider(conn))
+        return unsupported_provider_context(conn)
+    return await get_token_for_operation(
+        db, conn, tenant_id=tenant_id, operation=operation, prefer_platform=prefer_platform,
+    )
 
 
 def _provider_base_url(conn: Any) -> str:
@@ -640,7 +670,7 @@ async def graph_get(
     params: Optional[Dict[str, Any]] = None,
     timeout: float = 20,
 ) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
-    ctx = await get_token_for_operation(
+    ctx = await _resolve_token(
         db,
         conn,
         tenant_id=tenant_id,
@@ -669,7 +699,7 @@ async def graph_post(
     params: Optional[Dict[str, Any]] = None,
     timeout: float = 20,
 ) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
-    ctx = await get_token_for_operation(
+    ctx = await _resolve_token(
         db,
         conn,
         tenant_id=tenant_id,
@@ -709,6 +739,23 @@ async def provider_send_message(
         operation=operation or "provider_send_message",
         tenant_id=tenant_id,
     )
+    if conn is not None and not provider_is_supported(conn):
+        # Refused before anything else happens to this send: no credential is
+        # read, no refresh is attempted, no token state is written, and the
+        # attempt is recorded as a definite provider failure rather than an
+        # ambiguous transport exception. ``provider_post_with_context`` is the
+        # one place that refusal is shaped and recorded.
+        refused = unsupported_provider_context(conn)
+        data = await provider_post_with_context(
+            conn,
+            refused,
+            tenant_id=tenant_id,
+            operation=operation,
+            path=f"{phone_id}/messages",
+            json=dict(payload or {}),
+            timeout=timeout,
+        )
+        return data, refused
     send_payload = dict(payload or {})
     send_payload.pop("_nahla_inbound_id", None)
     raw_to = str(send_payload.get("to") or "").strip()
@@ -845,7 +892,7 @@ async def provider_send_message(
                     _quota_exc,
                 )
 
-    ctx = await get_token_for_operation(
+    ctx = await _resolve_token(
         db,
         conn,
         tenant_id=tenant_id,
@@ -886,7 +933,7 @@ async def provider_submit_template(
     prefer_platform: bool = False,
     timeout: float = 20,
 ) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
-    ctx = await get_token_for_operation(
+    ctx = await _resolve_token(
         db,
         conn,
         tenant_id=tenant_id,
@@ -922,7 +969,7 @@ async def provider_delete_template(
 
     Meta API: DELETE /{waba_id}/message_templates?name={template_name}
     """
-    ctx = await get_token_for_operation(
+    ctx = await _resolve_token(
         db, conn,
         tenant_id=tenant_id,
         operation="template_delete",
@@ -954,7 +1001,7 @@ async def provider_list_templates(
     prefer_platform: bool = False,
     timeout: float = 20,
 ) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
-    ctx = await get_token_for_operation(
+    ctx = await _resolve_token(
         db,
         conn,
         tenant_id=tenant_id,
