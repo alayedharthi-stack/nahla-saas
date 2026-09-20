@@ -137,7 +137,37 @@ def generate_ai_reply(
         tenant_id, _channel, customer_phone,
     )
 
-    return _pipeline.run(request)
+    # Measurement only, and inert outside an internal-E2E acceptance
+    # context. This is the boundary where the call is actually made, so
+    # it is the only place that can testify to what the model was given
+    # — the reply and the final state cannot. Both calls below are
+    # fail-open by construction; a measurement failure never changes the
+    # customer's reply.
+    from core.acceptance_compose_observer import (  # noqa: PLC0415
+        observe_model_bound_call,
+        record_model_bound_outcome,
+    )
+
+    _observed = observe_model_bound_call(context_metadata=context_metadata)
+    try:
+        payload = _pipeline.run(request)
+    except BaseException:
+        record_model_bound_outcome(
+            _observed,
+            candidate_present=False,
+            fallback_reason="provider_call_raised",
+        )
+        raise
+    _meta = getattr(payload, "metadata", None) or {}
+    record_model_bound_outcome(
+        _observed,
+        candidate_present=bool(str(getattr(payload, "reply_text", "") or "").strip()),
+        compose_source=str(getattr(payload, "provider_used", "") or ""),
+        fallback_reason=str(_meta.get("fallback_reason") or "")
+        if isinstance(_meta, dict)
+        else "",
+    )
+    return payload
 
 
 async def generate_orchestrate_response(

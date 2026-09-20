@@ -12,7 +12,7 @@ from typing import Any, Mapping, Sequence
 
 
 CONTRACT_VERSION = "internal_conversational_e2e_v1"
-EVIDENCE_SCHEMA_VERSION = "internal_conversational_e2e_evidence_v2"
+EVIDENCE_SCHEMA_VERSION = "internal_conversational_e2e_evidence_v3"
 EVIDENCE_SIGNATURE_SCHEMA_VERSION = "internal_conversational_e2e_signature_v1"
 EVIDENCE_CHANNEL = "direct_code_probe"
 
@@ -429,3 +429,184 @@ def evaluate_preflight(
         "runtime_revision": attested_revision,
         "attestation_id": attestation.attestation_id if attestation else None,
     }
+
+
+# ── OrderFlowV2 address-turn evidence (schema v3) ─────────────────────────
+#
+# Kept HARNESS-SPECIFIC on purpose. The platform's shared reply provenance
+# (``TextProvenance`` / ``PROVENANCE_FIELDS``) is consumed by every
+# non-address caller and by the completeness check over stored artifacts;
+# widening it to carry an address concern would turn a validation need into
+# a platform contract change, with re-verification of every historical
+# record behind it. Nothing here touches it. The signature already covers
+# the whole canonical payload, so these fields are signed by construction
+# and tampering with any of them fails ``verify_session_evidence``; and
+# because that verifier never reads ``evidence_schema_version``, v2
+# artifacts keep verifying unchanged.
+
+EVIDENCE_SCHEMA_VERSIONS_SUPPORTED: tuple[str, ...] = (
+    "internal_conversational_e2e_evidence_v2",
+    "internal_conversational_e2e_evidence_v3",
+)
+
+SCENARIO_SCHEMA_VERSION_V1 = "internal_conversational_e2e_scenarios_v1"
+SCENARIO_SCHEMA_VERSION_V2 = "internal_conversational_e2e_scenarios_v2"
+SCENARIO_SCHEMA_VERSIONS_SUPPORTED: tuple[str, ...] = (
+    SCENARIO_SCHEMA_VERSION_V1,
+    SCENARIO_SCHEMA_VERSION_V2,
+)
+
+TURN_MODE_BRAIN = "brain"
+TURN_MODE_OF2 = "of2"
+TURN_MODES = frozenset({TURN_MODE_BRAIN, TURN_MODE_OF2})
+
+# What a scenario says it did to this turn on purpose. ``none`` is the only
+# value that may contribute to a NATURAL outcome rate; the others exist to
+# confirm a mechanism and carry their own denominator.
+FAILURE_INJECTION_NONE = "none"
+FAILURE_INJECTIONS = frozenset(
+    {
+        FAILURE_INJECTION_NONE,
+        "provider_error",
+        "provider_timeout",
+        "guard_boundary",
+    }
+)
+
+# How the reply was executed. Derived from execution and provenance, never
+# from whether the payload happened to carry choices.
+PATH_ORDINARY = "ordinary"
+PATH_RECOVERY = "recovery"
+PATH_UNRESOLVED = "unresolved"
+EXECUTION_PATHS = frozenset({PATH_ORDINARY, PATH_RECOVERY, PATH_UNRESOLVED})
+
+# What the customer was actually offered. A SEPARATE dimension: an
+# ordinary turn for a customer with no saved addresses legitimately
+# carries no choices, and must not be read as a recovery because of it.
+SURFACE_BUTTONS = "buttons"
+SURFACE_LIST = "list"
+SURFACE_TEXT = "text"
+SURFACE_NONE = "none"
+DELIVERED_SURFACES = frozenset(
+    {SURFACE_BUTTONS, SURFACE_LIST, SURFACE_TEXT, SURFACE_NONE}
+)
+
+CODE_ADDRESS_EVIDENCE_MISSING = "address_turn_evidence_missing"
+CODE_ADDRESS_EVIDENCE_INCOMPLETE = "address_turn_evidence_incomplete"
+CODE_ADDRESS_EVIDENCE_UNBOUND = "address_turn_evidence_unbound"
+CODE_MODEL_CALL_EVIDENCE_INCOMPLETE = "model_bound_call_evidence_incomplete"
+
+ADDRESS_TURN_REQUIRED_FIELDS: tuple[str, ...] = (
+    "collection_field",
+    "delivered_surface",
+    "execution_path",
+    "failure_injection",
+    "model_bound_calls",
+    "outbound_metadata_turn_ref",
+    "receipt_action_ids",
+    "recorded_action_ids",
+    "transport",
+    "turn_ref",
+)
+
+MODEL_BOUND_CALL_REQUIRED_FIELDS: tuple[str, ...] = (
+    "call_index",
+    "collection_field",
+    "delivery_address_status",
+    "has_accepted_maps_reference",
+    "missing_field",
+    "observed_at",
+    "response_goal",
+    "stage",
+    "turn_ref",
+)
+
+
+def address_turn_evidence_blockers(
+    record: Any,
+    *,
+    expects_address_turn: bool,
+) -> list[str]:
+    """Why this turn's address evidence cannot be accepted.
+
+    ``address_turn`` is optional in the SCHEMA so that a v3 artifact for a
+    brain turn stays valid — but optional must not mean "absent is fine".
+    A scenario turn that declares ``expects_address_turn`` and produces no
+    record, or an incomplete one, is a failure of the run, not a silently
+    thinner artifact.
+    """
+    blockers: list[str] = []
+    if not expects_address_turn:
+        return blockers
+    if not isinstance(record, Mapping) or not record:
+        return [CODE_ADDRESS_EVIDENCE_MISSING]
+
+    missing = [f for f in ADDRESS_TURN_REQUIRED_FIELDS if f not in record]
+    if missing:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("execution_path") or "") not in EXECUTION_PATHS:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("delivered_surface") or "") not in DELIVERED_SURFACES:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("failure_injection") or "") not in FAILURE_INJECTIONS:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("transport") or "") != "captured":
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+
+    calls = record.get("model_bound_calls")
+    if not isinstance(calls, Sequence) or isinstance(calls, (str, bytes)) or not calls:
+        blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+    else:
+        for call in calls:
+            if not isinstance(call, Mapping) or any(
+                field not in call for field in MODEL_BOUND_CALL_REQUIRED_FIELDS
+            ):
+                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+                break
+            if str(call.get("observed_at") or "") != "orchestrator_adapter":
+                # Reconstructed from somewhere else is not observation.
+                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+                break
+
+    # The captured payload, the persisted outbound metadata and the
+    # presentation receipt must describe ONE turn. Three artifacts that
+    # cannot be tied together prove nothing about any of them.
+    turn_ref = str(record.get("turn_ref") or "")
+    if not turn_ref or str(record.get("outbound_metadata_turn_ref") or "") != turn_ref:
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+    else:
+        for call in record.get("model_bound_calls") or []:
+            if isinstance(call, Mapping) and str(call.get("turn_ref") or "") != turn_ref:
+                blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+                break
+
+    return sorted(set(blockers))
+
+
+def classify_execution_path(provenance: Any) -> str:
+    """Ordinary or recovery, from what the run recorded about itself.
+
+    Never from the delivered surface: an ordinary turn for a customer with
+    no saved addresses has no choices to offer and is still ordinary.
+    """
+    meta = dict(provenance or {}) if isinstance(provenance, Mapping) else {}
+    if meta.get("address_reply_recovered") or meta.get("address_claim_send_suppressed"):
+        return PATH_RECOVERY
+    if "address_reply_composed" in meta or meta.get("address_claim_compose_attempted") is not None:
+        return PATH_ORDINARY
+    return PATH_UNRESOLVED
+
+
+def delivered_surface(payload: Any) -> str:
+    """What the captured payload actually offered the customer."""
+    body = dict(payload or {}) if isinstance(payload, Mapping) else {}
+    interactive = body.get("interactive")
+    interactive = dict(interactive) if isinstance(interactive, Mapping) else {}
+    kind = str(interactive.get("type") or "").strip().lower()
+    if kind == "button":
+        return SURFACE_BUTTONS
+    if kind == "list":
+        return SURFACE_LIST
+    if body.get("text"):
+        return SURFACE_TEXT
+    return SURFACE_NONE

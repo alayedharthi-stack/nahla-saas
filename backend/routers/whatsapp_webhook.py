@@ -79,6 +79,8 @@ from core.conversation_engine import (
 )
 from services.whatsapp_platform.service import provider_send_message
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
+from core.acceptance_compose_observer import compose_stage as _acceptance_compose_stage
+from core.acceptance_execution_context import capture_outbound_payload
 from core.database import get_db
 from core.wa_conn_write_metrics import (
     WA_STAMP_THROTTLE_SEC,
@@ -297,6 +299,36 @@ def _otp_record_metadata_mutation(
         tracker.note(f"{layer}:metadata_only")
     except Exception:  # noqa: BLE001  # noqa: silent-ok — policy must not block send
         pass
+
+
+def _of2_save_metadata(
+    base: Dict[str, Any], *, turn_ref: str = "",
+) -> Dict[str, Any]:
+    """Attach this turn's timing snapshot to an OrderFlowV2 outbound save.
+
+    The Brain path gets ``turn_timing`` through ``_otp_merge_save_metadata``;
+    these two OrderFlowV2 saves never went through it, so an address turn
+    persisted its provenance with no measurable latency beside it. Frequency
+    and latency for this path therefore had no queryable source at all.
+    Measurement only, and fail-open.
+    """
+    out = dict(base or {})
+    # The inbound turn this reply answers. Persisting it is what lets the
+    # captured payload, this stored metadata and the presentation receipt
+    # be shown to describe ONE turn rather than three readings that merely
+    # look compatible.
+    if str(turn_ref or "").strip():
+        out["address_turn_ref"] = str(turn_ref).strip()
+    try:
+        from core.turn_latency import (  # noqa: PLC0415
+            get_turn_latency,
+            merge_turn_latency_into_metadata,
+        )
+
+        merge_turn_latency_into_metadata(out, get_turn_latency())
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        pass
+    return out
 
 
 def _otp_merge_save_metadata(
@@ -8052,27 +8084,36 @@ async def _handle_merchant_message(
                         _of2_address_field = (
                             address_collection_field(_of2_result) or _of2_address_field
                         )
-                        _of2_composed = await compose_address_turn_reply(
-                            db,
-                            tenant_id=int(tenant_id),
-                            conversation=convo,
-                            customer_phone=to,
-                            message=str(text or ""),
-                            known_facts=address_turn_facts(
-                                order_prep=(
-                                    ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
-                                        "order_prep"
-                                    )
-                                    or {}
-                                ),
-                                presentation=getattr(
-                                    _of2_result, "address_presentation", None
-                                ),
-                                field_name=_of2_address_field,
-                            ),
+                        # Declares WHICH stage is running, from the branch
+                        # that runs it. Inert outside internal E2E.
+                        with _acceptance_compose_stage(
+                            "ordinary",
+                            collection_field=_of2_address_field,
                             turn_ref=str(wa_msg_id or ""),
-                            response_goal=response_goal_for_field(_of2_address_field),
-                        )
+                        ):
+                            _of2_composed = await compose_address_turn_reply(
+                                db,
+                                tenant_id=int(tenant_id),
+                                conversation=convo,
+                                customer_phone=to,
+                                message=str(text or ""),
+                                known_facts=address_turn_facts(
+                                    order_prep=(
+                                        ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
+                                            "order_prep"
+                                        )
+                                        or {}
+                                    ),
+                                    presentation=getattr(
+                                        _of2_result, "address_presentation", None
+                                    ),
+                                    field_name=_of2_address_field,
+                                ),
+                                turn_ref=str(wa_msg_id or ""),
+                                response_goal=response_goal_for_field(
+                                    _of2_address_field
+                                ),
+                            )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — handled immediately below, where the turn falls to the approved line rather than to the prose this path no longer owns
                         logger.exception(
                             "[ORDER_FLOW_V2] address reply compose unavailable "
@@ -8195,27 +8236,34 @@ async def _handle_merchant_message(
                         # instead of falling back to the helper's
                         # delivery-address default, which would answer a
                         # city turn with the wrong question.
-                        _of2_recovery = await compose_address_recovery_reply(
-                            db,
-                            tenant_id=int(tenant_id),
-                            conversation=convo,
-                            customer_phone=to,
-                            message=str(text or ""),
-                            known_facts=address_turn_facts(
-                                order_prep=(
-                                    ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
-                                        "order_prep"
-                                    )
-                                    or {}
-                                ),
-                                presentation=getattr(
-                                    _of2_result, "address_presentation", None
-                                ),
-                                field_name=_of2_address_field,
-                            ),
+                        with _acceptance_compose_stage(
+                            "recovery",
+                            collection_field=_of2_address_field,
                             turn_ref=str(wa_msg_id or ""),
-                            response_goal=response_goal_for_field(_of2_address_field),
-                        )
+                        ):
+                            _of2_recovery = await compose_address_recovery_reply(
+                                db,
+                                tenant_id=int(tenant_id),
+                                conversation=convo,
+                                customer_phone=to,
+                                message=str(text or ""),
+                                known_facts=address_turn_facts(
+                                    order_prep=(
+                                        ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
+                                            "order_prep"
+                                        )
+                                        or {}
+                                    ),
+                                    presentation=getattr(
+                                        _of2_result, "address_presentation", None
+                                    ),
+                                    field_name=_of2_address_field,
+                                ),
+                                turn_ref=str(wa_msg_id or ""),
+                                response_goal=response_goal_for_field(
+                                    _of2_address_field
+                                ),
+                            )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — handled immediately below, where an unrecovered turn is logged rather than answered with unverified text
                         logger.exception(
                             "[ORDER_FLOW_V2] address recovery failed tenant=%s to=%s",
@@ -8245,13 +8293,13 @@ async def _handle_merchant_message(
                                 "outbound",
                                 conversation_id=convo.id,
                                 tenant_id=tenant_id,
-                                extra_metadata={
+                                extra_metadata=_of2_save_metadata({
                                     **_persona_ownership.to_metadata(),
                                     "reply_owner": "order_flow_v2",
                                     "order_flow_v2_reason": "address_reply_recovery",
                                     **_of2_provenance,
                                     **_of2_recovery.as_metadata(),
-                                },
+                                }, turn_ref=str(wa_msg_id or "")),
                             )
                     else:
                         logger.error(
@@ -8357,7 +8405,7 @@ async def _handle_merchant_message(
                         "outbound",
                         conversation_id=convo.id,
                         tenant_id=tenant_id,
-                        extra_metadata={
+                        extra_metadata=_of2_save_metadata({
                             **_persona_ownership.to_metadata(),
                             "reply_owner": "order_flow_v2",
                             "order_flow_v2_reason": _of2_result.reason,
@@ -8366,7 +8414,7 @@ async def _handle_merchant_message(
                             # fallback that replaced the reply outright, is
                             # recorded here rather than left implicit.
                             **_of2_provenance,
-                        },
+                        }, turn_ref=str(wa_msg_id or "")),
                     )
                     try:
                         db.commit()
@@ -16200,6 +16248,40 @@ async def _post_wa(
                 _tenant_id, recipient,
             )
             return False
+
+        # ── internal-E2E transport capture ───────────────────────────
+        # Everything above this line is the real send boundary and stays
+        # real: the sanitizer, the dedup decision, the recipient checks.
+        # Only the dispatch itself is replaced, and only while a
+        # validated acceptance context is installed. The call below is a
+        # no-op in production (empty string) and FAIL-CLOSED otherwise —
+        # an absent, mismatched or failing sink raises here rather than
+        # letting control reach ``provider_send_message``.
+        _captured_delivery_id = capture_outbound_payload(
+            egress_kind="whatsapp_provider",
+            operation="send_message",
+            tenant_id=_tenant_id,
+            phone_id=phone_id,
+            payload=payload,
+        )
+        if _captured_delivery_id:
+            if _result_sink is not None:
+                _result_sink.update(
+                    {
+                        "classification": "ok",
+                        "wamid": _captured_delivery_id,
+                        "duration_ms": 0,
+                        "duplicate_suppressed": False,
+                        "sent_payload": payload,
+                        "transport": "captured",
+                    }
+                )
+            logger.info(
+                "[WA] outbound captured (internal E2E, not dispatched) | "
+                "tenant=%s to=%s",
+                _tenant_id, recipient,
+            )
+            return True
 
         try:
             resp_data, ctx = await provider_send_message(

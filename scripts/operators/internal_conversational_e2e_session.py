@@ -15,7 +15,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 for _entry in (str(APP_ROOT), str(APP_ROOT / "backend"), str(APP_ROOT / "database")):
@@ -29,6 +29,15 @@ from models import Conversation  # noqa: E402
 from modules.ai.brain.pipeline import get_brain  # noqa: E402
 from scripts.operators.deployment_revision_attestation_contract import (  # noqa: E402
     evaluate_runtime_revision_attestation,
+)
+from services.internal_conversational_e2e_contract import (  # noqa: E402
+    FAILURE_INJECTIONS,
+    SCENARIO_SCHEMA_VERSION_V1,
+    SCENARIO_SCHEMA_VERSION_V2,
+    SCENARIO_SCHEMA_VERSIONS_SUPPORTED,
+    TURN_MODE_BRAIN,
+    TURN_MODE_OF2,
+    TURN_MODES,
 )
 from services.internal_conversational_e2e_contract import (  # noqa: E402
     DATABASE_URL_ENV,
@@ -52,7 +61,9 @@ from services.internal_conversational_e2e_contract import (  # noqa: E402
     sign_session_evidence,
 )
 from services.internal_conversational_e2e_harness import (  # noqa: E402
+    SandboxOf2TurnRequest,
     SandboxTurnRequest,
+    run_sandbox_of2_turn,
     run_sandbox_turn,
 )
 from services.internal_conversational_e2e_sql_error_audit import (  # noqa: E402
@@ -65,7 +76,7 @@ from services.internal_conversational_e2e_sql_error_audit import (  # noqa: E402
 )
 
 
-SCENARIO_SCHEMA_VERSION = "internal_conversational_e2e_scenarios_v1"
+SCENARIO_SCHEMA_VERSION = SCENARIO_SCHEMA_VERSION_V1
 SESSION_SCHEMA_VERSION = "internal_conversational_e2e_session_v1"
 MAX_SCENARIOS = 30
 MAX_TURNS_PER_SCENARIO = 12
@@ -191,8 +202,10 @@ def execute_preflight(
 
 def _load_scenarios(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("scenario_schema_version") != SCENARIO_SCHEMA_VERSION:
+    manifest_version = str(payload.get("scenario_schema_version") or "")
+    if manifest_version not in SCENARIO_SCHEMA_VERSIONS_SUPPORTED:
         raise ValueError("scenario_manifest_invalid")
+    of2_allowed = manifest_version == SCENARIO_SCHEMA_VERSION_V2
     scenarios = payload.get("scenarios")
     if not isinstance(scenarios, list) or not 0 < len(scenarios) <= MAX_SCENARIOS:
         raise ValueError("scenario_manifest_invalid")
@@ -239,6 +252,22 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                 )
             if len(set(normalized_denials)) != len(normalized_denials):
                 raise ValueError("expected_denials_invalid")
+            # OrderFlowV2 turns are a v2-manifest capability. A v1
+            # manifest that names one is rejected rather than silently
+            # demoted to a Brain turn, which would quietly measure a
+            # different path than the scenario asked for.
+            mode = str(turn.get("mode") or TURN_MODE_BRAIN)
+            if mode not in TURN_MODES or (mode == TURN_MODE_OF2 and not of2_allowed):
+                raise ValueError("turn_mode_invalid")
+            failure_injection = str(turn.get("failure_injection") or "none")
+            if failure_injection not in FAILURE_INJECTIONS:
+                raise ValueError("failure_injection_invalid")
+            expects_address_turn = bool(turn.get("expects_address_turn") or False)
+            if expects_address_turn and mode != TURN_MODE_OF2:
+                # Only the OrderFlowV2 path can produce address evidence,
+                # so a Brain turn claiming it would declare a requirement
+                # nothing in the run could ever satisfy.
+                raise ValueError("expects_address_turn_invalid")
             checked_turns.append(
                 {
                     "text": str(turn["text"]),
@@ -247,11 +276,79 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                         str(v) for v in (turn.get("expected_state_delta_keys") or [])
                     ),
                     "expected_denials": tuple(sorted(normalized_denials)),
+                    "mode": mode,
+                    "failure_injection": failure_injection,
+                    "expects_address_turn": expects_address_turn,
                 }
             )
         seen.add(scenario_id)
         normalized.append({"scenario_id": scenario_id, "turns": checked_turns})
     return normalized
+
+
+def _of2_path_report(turn_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Natural and injected outcomes, never mixed into one rate.
+
+    An injected failure confirms a MECHANISM. Counting it beside naturally
+    observed outcomes would invent a failure rate the run never measured,
+    so the two carry separate denominators and are reported separately.
+    A small synthetic session is not a production rate either way, which is
+    why the window and the sample counts travel with every number.
+    """
+    natural: dict[str, list[int]] = {}
+    injected: dict[str, list[int]] = {}
+    surfaces: dict[str, int] = {}
+    attempted = 0
+    for row in turn_results:
+        address_turn = row.get("address_turn")
+        if not isinstance(address_turn, Mapping) or not address_turn:
+            continue
+        attempted += 1
+        path = str(address_turn.get("execution_path") or "unresolved")
+        surface = str(address_turn.get("delivered_surface") or "none")
+        surfaces[surface] = surfaces.get(surface, 0) + 1
+        timing = address_turn.get("turn_timing")
+        latency = int(row.get("latency_ms") or 0)
+        if isinstance(timing, Mapping) and timing.get("total_turn_ms"):
+            latency = int(timing.get("total_turn_ms") or latency)
+        bucket = (
+            natural
+            if str(address_turn.get("failure_injection") or "none") == "none"
+            else injected
+        )
+        bucket.setdefault(path, []).append(latency)
+
+    def _summary(bucket: dict[str, list[int]]) -> dict[str, Any]:
+        total = sum(len(v) for v in bucket.values())
+        return {
+            "denominator": total,
+            "by_path": {
+                path: {
+                    "samples": len(samples),
+                    "latency_ms_p50": _percentile(samples, 50),
+                    "latency_ms_p95": _percentile(samples, 95),
+                }
+                for path, samples in sorted(bucket.items())
+            },
+        }
+
+    return {
+        "address_turns_attempted": attempted,
+        "natural": _summary(natural),
+        "injected_mechanism_checks": _summary(injected),
+        # A separate dimension on purpose: an ordinary turn for a customer
+        # with no saved addresses carries no choices and is still ordinary.
+        "delivered_surface_counts": dict(sorted(surfaces.items())),
+        "representative_of_production": False,
+    }
+
+
+def _percentile(samples: list[int], pct: int) -> Optional[int]:
+    if not samples:
+        return None
+    ordered = sorted(samples)
+    index = max(0, min(len(ordered) - 1, (pct * len(ordered)) // 100))
+    return int(ordered[index])
 
 
 def _conversation(db: Any, *, tenant_id: int, phone: str, session_id: str) -> tuple[Any, bool]:
@@ -396,6 +493,38 @@ async def run_session(
         for scenario in scenarios:
             for turn_index, turn in enumerate(scenario["turns"]):
                 clear_last_turn_sql_error_audit()
+                if turn["mode"] == TURN_MODE_OF2:
+                    outcome = await run_sandbox_of2_turn(
+                        db=db,
+                        request=SandboxOf2TurnRequest(
+                            session_id=session_id,
+                            scenario_id=scenario["scenario_id"],
+                            turn_index=turn_index,
+                            tenant_id=tenant_id,
+                            customer_phone=phone,
+                            phone_id="internal-direct-code-probe",
+                            text=turn["text"],
+                            conversation=convo,
+                            allowed_tenants=allowed_tenants,
+                            evidence_hmac_key=evidence_key,
+                            runtime_revision=str(preflight["runtime_revision"]),
+                            database_identity_fingerprint=str(
+                                preflight["database_identity_fingerprint"]
+                            ),
+                            network_attestation_id=str(preflight["attestation_id"]),
+                            llm_allowed_hosts=tuple(preflight["llm_allowed_hosts"]),
+                            turn_ref=(
+                                f"probe.{scenario['scenario_id']}.{turn_index}"
+                            ),
+                            expected_denials=turn["expected_denials"],
+                            allow_llm_inference=llm_allowed,
+                            failure_injection=turn["failure_injection"],
+                            expects_address_turn=turn["expects_address_turn"],
+                        ),
+                    )
+                    clear_last_turn_sql_error_audit()
+                    results.append(dict(outcome.evidence))
+                    continue
                 outcome = await run_sandbox_turn(
                     db=db,
                     request=SandboxTurnRequest(
@@ -490,6 +619,11 @@ async def run_session(
         "completed_at_utc": completed_at_utc,
         "runner_mutations": runner_mutations,
         "turn_results": results,
+        "of2_path_report": _of2_path_report(results),
+        "observation_window_utc": {
+            "started_at_utc": started_at_utc,
+            "completed_at_utc": completed_at_utc,
+        },
         "runtime_error_audit": summarize_session_sql_error_audit(
             recorded_session_sql_error_audits()
         ),

@@ -5,7 +5,7 @@ import time
 import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from core.acceptance_execution_context import (
     internal_conversational_e2e_context,
@@ -386,3 +386,306 @@ async def run_sandbox_turn(
         "sandbox_disposal_required": True,
     }
     return SandboxTurnOutcome(evidence=evidence, evaluated_status=result.status)
+
+
+# ── OrderFlowV2 address turn ──────────────────────────────────────────────
+#
+# ``run_sandbox_turn`` above evaluates the Brain. The OrderFlowV2 address
+# path is NOT reachable from there: it lives in the webhook handler, ahead
+# of the Brain, and ``merchant_brain_turn`` never mentions it. So a turn
+# that needs the real owner, the real compose, the real guards, the real
+# recovery and the real outbound serialization has to enter where they
+# actually are — ``_handle_merchant_message`` — with the transport
+# captured rather than dispatched.
+#
+# Nothing about the boundary is simulated: the same sanitizer, the same
+# dedup decision, the same receipt derived from the payload that left. A
+# synthetic delivery id proves LOCAL processing and nothing else, so every
+# record here says ``transport="captured"``.
+
+
+@dataclass(frozen=True)
+class SandboxOf2TurnRequest:
+    session_id: str
+    scenario_id: str
+    turn_index: int
+    tenant_id: int
+    customer_phone: str
+    phone_id: str
+    text: str
+    conversation: Any
+    allowed_tenants: frozenset[int]
+    evidence_hmac_key: str
+    runtime_revision: str
+    database_identity_fingerprint: str
+    network_attestation_id: str
+    llm_allowed_hosts: tuple[str, ...]
+    turn_ref: str
+    expected_denials: tuple[tuple[str, str], ...] = ()
+    allow_llm_inference: bool = False
+    failure_injection: str = "none"
+    expects_address_turn: bool = False
+    inbound_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _latest_outbound_metadata(db: Any, *, conversation_id: int) -> dict[str, Any]:
+    """The metadata the runtime itself persisted for this turn's reply."""
+    try:
+        from models import MessageEvent  # noqa: PLC0415
+
+        row = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.conversation_id == int(conversation_id),
+                MessageEvent.direction == "outbound",
+            )
+            .order_by(MessageEvent.id.desc())
+            .first()
+        )
+        if row is None:
+            return {}
+        return dict(getattr(row, "extra_metadata", None) or {})
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence below
+        return {}
+
+
+def _recorded_offer_address_ids(
+    *, tenant_id: int, conversation: Any, delivered_ids: Sequence[str],
+) -> list[str]:
+    """Which addresses the platform RECORDED as shown for this showing.
+
+    Read back through the platform's own reader, keyed by the offer
+    identity carried on the ids that actually left, so the comparison is
+    "what was recorded" against "what was delivered" rather than two
+    readings of the same source.
+    """
+    try:
+        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+            _offered_revisions,
+            structured_consent_action,
+        )
+
+        offer_ids = set()
+        for action_id in delivered_ids:
+            parts = str(action_id or "").split(":")
+            if len(parts) == 3 and structured_consent_action({"button_id": action_id}):
+                offer_ids.add(parts[1])
+        recorded: set[str] = set()
+        for offer_id in sorted(offer_ids):
+            offered, _ = _offered_revisions(
+                tenant_id=int(tenant_id),
+                conversation=conversation,
+                offer_id=offer_id,
+            )
+            recorded.update(str(address_id) for address_id in (offered or {}))
+        return sorted(recorded)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence
+        return []
+
+
+def _delivered_address_ids(delivered_ids: Sequence[str]) -> list[str]:
+    """The addresses the captured payload actually offered."""
+    try:
+        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+            structured_consent_action,
+        )
+
+        out: set[str] = set()
+        for action_id in delivered_ids:
+            resolved = structured_consent_action({"button_id": action_id})
+            if resolved:
+                out.add(str(resolved[1]))
+        return sorted(out)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable id yields no receipt
+        return []
+
+
+async def run_sandbox_of2_turn(
+    *,
+    db: Any,
+    request: SandboxOf2TurnRequest,
+    handler: Optional[Callable[..., Any]] = None,
+) -> SandboxTurnOutcome:
+    """Run one OrderFlowV2 address turn through the real webhook handler."""
+    from core.acceptance_compose_observer import (  # noqa: PLC0415
+        model_bound_observation,
+        recorded_model_bound_calls,
+    )
+    from core.acceptance_execution_context import (  # noqa: PLC0415
+        outbound_capture_sink,
+    )
+    from services.internal_conversational_e2e_contract import (  # noqa: PLC0415
+        FAILURE_INJECTIONS,
+        address_turn_evidence_blockers,
+        classify_execution_path,
+        delivered_surface,
+    )
+
+    _validate_of2_request(request)
+    if handler is None:
+        from routers.whatsapp_webhook import (  # noqa: PLC0415
+            _handle_merchant_message,
+        )
+
+        handler = _handle_merchant_message
+
+    started = time.perf_counter()
+    blockers: list[str] = []
+    mutations: list[str] = []
+    captured: list[Any] = []
+    status = "evaluated"
+
+    with internal_conversational_e2e_context(
+        session_id=request.session_id,
+        tenant_id=request.tenant_id,
+        allow_llm_inference=request.allow_llm_inference,
+    ), outbound_capture_sink(captured.append), model_bound_observation(), (
+        internal_e2e_sql_error_turn(
+            scenario_id=request.scenario_id,
+            turn_index=request.turn_index,
+        )
+    ):
+        try:
+            await handler(
+                request.phone_id,
+                request.customer_phone,
+                request.text,
+                request.tenant_id,
+                db,
+                dict(request.inbound_metadata),
+                None,
+                None,
+                request.turn_ref,
+            )
+            mutations.append("sandbox_of2_turn_executed")
+        except Exception as exc:  # noqa: BLE001
+            status = "handler_exception"
+            blockers.append("handler_exception")
+            blockers.append(type(exc).__name__.lower()[:48])
+        model_calls = [call.to_dict() for call in recorded_model_bound_calls()]
+        denial_audits = [
+            audit.to_audit_dict() for audit in recorded_egress_denials()
+        ]
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            blockers.append("sandbox_commit_failed")
+
+    payload = dict(captured[-1].payload) if captured else {}
+    _receipt_action_ids = _delivered_action_ids(payload)
+    outbound_meta = _latest_outbound_metadata(
+        db, conversation_id=int(getattr(request.conversation, "id", 0) or 0),
+    )
+    injection = (
+        request.failure_injection
+        if request.failure_injection in FAILURE_INJECTIONS
+        else "none"
+    )
+
+    address_turn = {
+        "turn_ref": request.turn_ref,
+        # Read from what the runtime PERSISTED. Never defaulted to the
+        # requested value — a default would manufacture the very binding
+        # this field exists to prove.
+        "outbound_metadata_turn_ref": str(
+            outbound_meta.get("address_turn_ref") or ""
+        ),
+        "transport": "captured" if captured else "not_captured",
+        "delivery_ids": [str(record.delivery_id) for record in captured],
+        # Execution first, presentation second — and never the other way
+        # round. A customer with no saved addresses gets an ordinary turn
+        # with no choices, which is not a recovery.
+        "execution_path": classify_execution_path(outbound_meta),
+        "delivered_surface": delivered_surface(payload),
+        "failure_injection": injection,
+        "collection_field": str(
+            outbound_meta.get("order_flow_v2_last_field")
+            or (model_calls[0].get("collection_field") if model_calls else "")
+            or ""
+        ),
+        "model_bound_calls": model_calls,
+        "receipt_action_ids": _receipt_action_ids,
+        "receipt_address_ids": _delivered_address_ids(_receipt_action_ids),
+        "recorded_action_ids": _recorded_offer_address_ids(
+            tenant_id=request.tenant_id,
+            conversation=request.conversation,
+            delivered_ids=_receipt_action_ids,
+        ),
+        "outbound_provenance": {
+            key: outbound_meta[key]
+            for key in sorted(outbound_meta)
+            if key.startswith(("address_", "compose_", "fallback_", "final_", "llm_"))
+        },
+        "turn_timing": dict(outbound_meta.get("turn_timing") or {})
+        if isinstance(outbound_meta.get("turn_timing"), Mapping)
+        else {},
+    }
+    blockers.extend(
+        address_turn_evidence_blockers(
+            address_turn, expects_address_turn=request.expects_address_turn,
+        )
+    )
+
+    evidence = {
+        "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        "evidence_channel": EVIDENCE_CHANNEL,
+        "mode": "of2",
+        "session_id": request.session_id,
+        "scenario_id": request.scenario_id,
+        "turn_index": request.turn_index,
+        "tenant_id": request.tenant_id,
+        "runtime_revision": request.runtime_revision,
+        "database_identity_fingerprint": request.database_identity_fingerprint,
+        "network_attestation_id": request.network_attestation_id,
+        "llm_allowed_hosts": list(request.llm_allowed_hosts),
+        "test_phone_hmac": hmac_identifier(
+            request.customer_phone, key=request.evidence_hmac_key,
+        ),
+        "status": status,
+        "address_turn": address_turn,
+        "denial_audits": denial_audits,
+        "captured_outbound": [record.to_audit_dict() for record in captured],
+        "latency_ms": int((time.perf_counter() - started) * 1000),
+        "mutations": mutations,
+        "verdict": "pass" if not blockers else "fail",
+        "blockers": sorted(set(blockers)),
+        "provider_observation": {
+            "source": "application_internal_e2e_context",
+            "network_dispatch_success_observed": False,
+            "is_actual_provider_telemetry": False,
+        },
+        "actual_provider_acceptance_satisfied": False,
+        "sandbox_disposal_required": True,
+    }
+    return SandboxTurnOutcome(evidence=evidence, evaluated_status=status)
+
+
+def _delivered_action_ids(payload: Mapping[str, Any]) -> list[str]:
+    try:
+        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+            delivered_address_action_ids,
+        )
+
+        return sorted(str(v) for v in delivered_address_action_ids(dict(payload or {})))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable payload yields no receipt
+        return []
+
+
+def _validate_of2_request(request: SandboxOf2TurnRequest) -> None:
+    """The same identity gate the Brain runner applies, plus the turn ref."""
+    try:
+        uuid.UUID(request.session_id)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("session_id_invalid") from exc
+    if not SAFE_SCENARIO_ID_RE.fullmatch(str(request.scenario_id or "")):
+        raise ValueError("scenario_id_invalid")
+    if type(request.turn_index) is not int or request.turn_index < 0:
+        raise ValueError("turn_index_invalid")
+    validate_explicit_tenant_id(request.tenant_id, allowed=request.allowed_tenants)
+    if not str(request.customer_phone or "").strip():
+        raise ValueError("customer_phone_invalid")
+    if not SAFE_AUDIT_VALUE_RE.fullmatch(str(request.turn_ref or "")):
+        raise ValueError("turn_ref_invalid")
+    if not str(request.evidence_hmac_key or ""):
+        raise ValueError("evidence_hmac_key_missing")
