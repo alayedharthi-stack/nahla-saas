@@ -8018,11 +8018,24 @@ async def _handle_merchant_message(
                 # structural about this turn — the action ids, the choice
                 # labels, the paging, the receipt — stays platform-owned
                 # and is untouched.
-                _of2_is_address_turn = bool(
+                # WHICH field this turn is collecting is decided by the
+                # owner's own state patch — never by the customer's
+                # wording — and it is resolved ONCE, here, so that the
+                # ordinary composition below and the recovery that
+                # follows a refused candidate pursue the SAME goal with
+                # the SAME facts. Reading it inline keeps the decision
+                # alive even when the recovery module is the thing that
+                # failed to import, which is exactly when the branch
+                # below must still refuse to revive the old prose.
+                _of2_address_field = str(
                     (getattr(_of2_result, "state_patch", None) or {}).get(
                         "order_flow_v2_last_field"
-                    ) in ("delivery_address", "city")
+                    )
+                    or ""
                 )
+                if _of2_address_field not in ("delivery_address", "city"):
+                    _of2_address_field = ""
+                _of2_is_address_turn = bool(_of2_address_field)
                 if _of2_is_address_turn:
                     _of2_composed = None
                     try:
@@ -8033,7 +8046,12 @@ async def _handle_merchant_message(
                             response_goal_for_field,
                         )
 
-                        _of2_field = address_collection_field(_of2_result)
+                        # The owner's own reader is authoritative when it
+                        # is available; the inline read above is only the
+                        # resilient copy of the same state.
+                        _of2_address_field = (
+                            address_collection_field(_of2_result) or _of2_address_field
+                        )
                         _of2_composed = await compose_address_turn_reply(
                             db,
                             tenant_id=int(tenant_id),
@@ -8050,10 +8068,10 @@ async def _handle_merchant_message(
                                 presentation=getattr(
                                     _of2_result, "address_presentation", None
                                 ),
-                                field_name=_of2_field,
+                                field_name=_of2_address_field,
                             ),
                             turn_ref=str(wa_msg_id or ""),
-                            response_goal=response_goal_for_field(_of2_field),
+                            response_goal=response_goal_for_field(_of2_address_field),
                         )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — handled immediately below, where the turn falls to the approved line rather than to the prose this path no longer owns
                         logger.exception(
@@ -8164,22 +8182,39 @@ async def _handle_merchant_message(
                     _of2_recovery = None
                     try:
                         from modules.ai.order_flow_v2.address_reply_recovery import (  # noqa: PLC0415
+                            address_turn_facts,
                             compose_address_recovery_reply,
+                            response_goal_for_field,
                         )
 
+                        # The refused candidate does not change WHAT the
+                        # turn is collecting. Recovery therefore reuses
+                        # the same supported fact projection and the same
+                        # collection goal as the ordinary composition
+                        # above — accepted address facts included —
+                        # instead of falling back to the helper's
+                        # delivery-address default, which would answer a
+                        # city turn with the wrong question.
                         _of2_recovery = await compose_address_recovery_reply(
                             db,
                             tenant_id=int(tenant_id),
                             conversation=convo,
                             customer_phone=to,
                             message=str(text or ""),
-                            known_facts=dict(
-                                ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
-                                    "order_prep"
-                                )
-                                or {}
+                            known_facts=address_turn_facts(
+                                order_prep=(
+                                    ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
+                                        "order_prep"
+                                    )
+                                    or {}
+                                ),
+                                presentation=getattr(
+                                    _of2_result, "address_presentation", None
+                                ),
+                                field_name=_of2_address_field,
                             ),
                             turn_ref=str(wa_msg_id or ""),
+                            response_goal=response_goal_for_field(_of2_address_field),
                         )
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — handled immediately below, where an unrecovered turn is logged rather than answered with unverified text
                         logger.exception(

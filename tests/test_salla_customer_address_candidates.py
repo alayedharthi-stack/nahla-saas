@@ -3763,3 +3763,73 @@ def test_a_delivery_address_turn_keeps_its_own_field_and_goal():
     state = _model_state(seen)
     assert dict(state.get("known_facts") or {}).get("missing_field") == "delivery_address"
     assert state.get("response_goal") == "collect_delivery_address"
+
+
+def _model_states(seen):
+    """EVERY brain state bound into a model call, in order.
+
+    ``_model_state`` reads only the first. The recovery that follows a
+    refused candidate is a SECOND model-bound call on the same turn, and
+    a defect that lives only in that call is invisible to a probe that
+    stops at the first one.
+    """
+    return [
+        dict((call.get("context_metadata") or {}).get("brain_state") or {})
+        for call in seen
+    ]
+
+
+def test_recovery_after_a_guard_failure_still_pursues_the_city_goal():
+    """G3 at the recovery caller, not only at the ordinary compose.
+
+    Forcing the outer guard to fail on a CITY collection turn drives the
+    turn through recovery. That call passed the raw ``order_prep`` and no
+    goal at all, so the helper's delivery-address default took over: the
+    second model-bound call of the same turn asked for a delivery
+    address that was already accepted, contradicting the first. Both
+    calls must now carry the city goal and the accepted address context,
+    and the refused save claim must still not ship.
+    """
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    result = _address_turn(db, tenant, convo, field="city")
+    assert result.state_patch.get("order_flow_v2_last_field") == "city"
+
+    seen = []
+    guard_fails = [
+        ("modules.ai.order_flow_v2.outbound_guards"
+         ".apply_order_flow_v2_outbound_guards",
+         {"side_effect": RuntimeError("isolated wrapper failure")}),
+    ]
+    sent, saved = _run_send_block(
+        db, tenant, convo, result,
+        patches=_fake_provider(
+            reply_text="تم حفظ عنوانك الجديد. نكمل الطلب؟", calls=seen,
+        ) + guard_fails,
+    )
+
+    states = _model_states(seen)
+    assert len(states) == 2, (
+        "the ordinary compose and the recovery are both model-bound", seen,
+    )
+    for index, state in enumerate(states):
+        known = dict(state.get("known_facts") or {})
+        assert known.get("missing_field") == "city", (index, known)
+        assert state.get("response_goal") == "collect_delivery_city", (index, state)
+        # The address already accepted on this order is still supplied.
+        assert known.get("delivery_address_status") == "accepted", (index, known)
+        assert known.get("google_maps_url"), (index, known)
+
+    # Revalidation could not run either, so the composed save claim is
+    # refused rather than delivered, exactly as before this correction.
+    body = _payload_text(sent[0])
+    assert "حفظ عنوانك" not in body, body
+    assert is_compose_failure_fallback(body), body
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "fallback_deterministic"
+    assert meta["fallback_reason"] == "address_reply_unverifiable_after_compose"
+    assert meta["address_claim_compose_attempted"] is True
