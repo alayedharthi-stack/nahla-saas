@@ -323,7 +323,7 @@ def record_webhook_raw(
     elif isinstance(raw_body, str):
         body_str = raw_body
     else:
-        # Be liberal about what we accept — some 360dialog paths
+        # Be liberal about what we accept — some provider paths
         # already gave us a parsed dict.
         try:
             body_str = json.dumps(raw_body, ensure_ascii=False)[:64_000]

@@ -2679,7 +2679,7 @@ async def admin_force_connect_whatsapp(
     return result.to_api_dict()
 
 
-# ── Coexistence (360dialog) request management ──────────────────────────────
+# ── Coexistence request management ──────────────────────────────────────────
 
 @router.post("/admin/whatsapp/disconnect/{tenant_id}")
 async def admin_force_disconnect_whatsapp(
@@ -3036,7 +3036,7 @@ async def admin_list_coexistence_requests(
     List WhatsApp connect requests for the admin queue.
 
     Includes:
-      * ``coexistence`` — legacy 360dialog / mobile+AI onboarding
+      * ``coexistence`` — legacy mobile+AI onboarding
       * ``assisted`` — merchant «طلب ربط بمساعدة فريق نحلة»
 
     Pass ``?status_filter=all`` to include every status.
@@ -3047,7 +3047,6 @@ async def admin_list_coexistence_requests(
         from routers.whatsapp_connect import (  # noqa: PLC0415
             _assisted_connect_state,
             _coexistence_integration_complete,
-            _coexistence_webhook_block,
         )
 
         query = db.query(WhatsAppConnection).filter(
@@ -3106,7 +3105,6 @@ async def admin_list_coexistence_requests(
                             "missing_fields": [],
                             "db_status": conn.status,
                         },
-                        "webhooks": _coexistence_webhook_block(conn),
                     })
                     continue
 
@@ -3141,7 +3139,6 @@ async def admin_list_coexistence_requests(
                     "webhook_verified":   bool(conn.webhook_verified),
                     "connected_at":       conn.connected_at.isoformat() if conn.connected_at else None,
                     "integration_complete": completeness,
-                    "webhooks":           _coexistence_webhook_block(conn),
                 })
             except Exception as row_exc:
                 logger.warning("[admin/coexistence] row error tenant=%s: %s", getattr(conn, "tenant_id", "?"), row_exc)

@@ -185,7 +185,7 @@ RECONCILE_ALLOWED_SUBSCRIPTION_STATUSES = frozenset({TRIAL_STATUS_PENDING_WHATSA
 
 # Historical connected_at is trusted only for Meta writers gated on real provider
 # readiness (Embedded verified, Coexistence SMB accept, post-#845 finalizer).
-# 360dialog / operator-backfill paths can stamp connected_at without the same
+# Operator-backfill paths can stamp connected_at without the same
 # readiness gate — those rows are ambiguous, not auto-repaired in WA-1.
 RECONCILE_TRUSTED_CONNECTED_AT_PROVIDERS = frozenset({"meta"})
 

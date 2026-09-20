@@ -10,7 +10,7 @@ inbound" failures: WhatsApp messages that arrive at the webhook but
 never materialize into a Conversation row in Nahla. The architectural
 investigation (see ``docs/adr/0004-inbound-lifecycle-telemetry.md``)
 identified at least 27 silent drop-points across the ingestion path —
-HTTP-layer rejects, 360dialog routing gates, dispatcher early returns,
+HTTP-layer rejects, routing gates, dispatcher early returns,
 short-circuits that save ``MessageEvent`` rows with ``conversation_id``
 NULL, swallow-except blocks that roll back uncommitted Conversation
 flushes.
@@ -106,7 +106,9 @@ EVENT_HTTP_REPLAY_REJECT          = "http_replay_reject"
 EVENT_HTTP_PARSE_FAIL             = "http_parse_fail"
 EVENT_BG_REJECTED                 = "bg_rejected"
 
-# 360dialog routing gates
+# Routing gates. Retained as a stable telemetry vocabulary: the removed
+# 360dialog batch loop was their only emitter, and historical log lines
+# and dashboards still name them.
 EVENT_FIELD_NOT_MESSAGES          = "field_not_messages"
 EVENT_FIELD_MESSAGES              = "field_messages"
 EVENT_SECRET_MISMATCH             = "secret_mismatch"

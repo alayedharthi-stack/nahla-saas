@@ -64,7 +64,7 @@ MOCK_DEFAULTS: Dict[str, str] = {
 def _body_text(template: WhatsAppTemplate) -> str:
     """Extract the BODY text from a template's components.
 
-    Defensive against non-dict components — older Salla / 360dialog
+    Defensive against non-dict components — older Salla / provider
     payloads occasionally serialised components as raw strings inside
     ``WhatsAppTemplate.components``. We must skip those silently
     instead of raising ``AttributeError: 'str' object has no

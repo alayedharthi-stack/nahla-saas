@@ -10,11 +10,7 @@ from sqlalchemy.orm import Session
 
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION, WA_TOKEN
 from core.log_redaction import redact_exception
-from .provider_utils import (
-    WHATSAPP_CONNECTION_TYPE_DIRECT,
-    WHATSAPP_PROVIDER_360DIALOG,
-    wa_provider,
-)
+from .provider_utils import WHATSAPP_CONNECTION_TYPE_DIRECT
 from .wa_connection_secrets import read_access_token, store_access_token
 
 logger = logging.getLogger("nahla.whatsapp.token_manager")
@@ -68,8 +64,6 @@ def _merchant_token_health(conn: Any) -> Tuple[str, Optional[datetime]]:
 def get_oauth_session_state(conn: Any) -> tuple[str, Optional[str]]:
     if not conn:
         return "missing", None
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
-        return "not_applicable", None
     meta = _read_meta(conn)
     if getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT and not read_access_token(conn):
         return "not_applicable", None
@@ -88,10 +82,6 @@ def build_token_context(conn: Any, *, source: str) -> WhatsAppTokenContext:
     oauth_status, oauth_message = get_oauth_session_state(conn)
     if source == "platform":
         token = WA_TOKEN or ""
-        token_status = "healthy" if token else "missing"
-        expires_at = None
-    elif source == "dialog360":
-        token = read_access_token(conn)
         token_status = "healthy" if token else "missing"
         expires_at = None
     elif source == "merchant_oauth":
@@ -114,16 +104,12 @@ def build_token_context(conn: Any, *, source: str) -> WhatsAppTokenContext:
 def _default_prefer_platform(conn: Any) -> bool:
     return bool(
         conn
-        and wa_provider(conn) != WHATSAPP_PROVIDER_360DIALOG
         and getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT
     )
 
 
 def get_token_candidates(conn: Any, *, prefer_platform: bool = False) -> List[WhatsAppTokenContext]:
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
-        order = ["dialog360"]
-    else:
-        order = ["platform", "merchant_oauth"] if prefer_platform else ["merchant_oauth", "platform"]
+    order = ["platform", "merchant_oauth"] if prefer_platform else ["merchant_oauth", "platform"]
     contexts: List[WhatsAppTokenContext] = []
     seen: set[str] = set()
     for source in order:
@@ -170,7 +156,7 @@ def update_token_state(
     if token_expires_at is not None:
         meta["operational_token_expires_at"] = token_expires_at.isoformat()
         conn.token_expires_at = token_expires_at
-    elif token_source in {"platform", "dialog360"}:
+    elif token_source == "platform":
         meta["operational_token_expires_at"] = None
     if oauth_session_status is not None:
         meta["oauth_session_status"] = oauth_session_status
@@ -227,8 +213,6 @@ def persist_token_context(
 async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppTokenContext]:
     plain = read_access_token(conn) if conn else ""
     if not conn or not plain:
-        return None
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
         return None
     if not META_APP_ID or not META_APP_SECRET:
         return None

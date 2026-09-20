@@ -17,7 +17,7 @@ single dashboard label of "فشل الإرسال" (send failed):
      leaking Python tracebacks into the dashboard (e.g. ``"'messages'"``
      when Meta returned an error body and the engine tried to read
      ``response["messages"][0]["id"]``).
-  3. **Meta error JSONs** returned by the Cloud / 360dialog APIs were
+  3. **Meta error JSONs** returned by the Cloud API were
      **not parsed at all**. The engine treated any non-throwing call as
      success, so a template the merchant hadn't gotten approved would
      silently look "sent" with ``wa_message_id=None``.

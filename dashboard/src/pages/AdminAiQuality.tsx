@@ -10,7 +10,7 @@
  *   2. ``inbound_drop``   — message vanished BEFORE the brain ran
  *      (unsupported type, empty text, handoff ack failure, dispatcher
  *      exception).
- *   3. ``webhook_routing`` — 360dialog / Meta webhook arrived but could
+ *   3. ``webhook_routing`` — a Meta webhook arrived but could
  *      not be routed to a tenant.
  *
  * Privacy: phone numbers come back already masked from the API.
@@ -80,7 +80,7 @@ const TABS: TabSpec[] = [
     key:         'webhook_routing',
     label:       'مشاكل الـ Webhook',
     description:
-      'إشعارات Meta / 360dialog وصلت ولم نتمكن من ربطها بأي تاجر — phone_number_id مفقود/غير معروف/مكرر، أو سرّ التكامل لم يطابق.',
+      'إشعارات Meta وصلت ولم نتمكن من ربطها بأي تاجر — phone_number_id مفقود/غير معروف/مكرر، أو سرّ التكامل لم يطابق.',
     trackedTypes: [
       { key: 'unrouted_missing_phone_id', label: 'بدون phone_number_id' },
       { key: 'unrouted_unknown_phone_id', label: 'phone_number_id غير معروف' },

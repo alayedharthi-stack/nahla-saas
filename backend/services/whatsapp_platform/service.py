@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 import httpx
 from sqlalchemy.orm import Session
 
-from core.config import D360_API_BASE_URL, D360_PARTNER_API_KEY, D360_PARTNER_HUB_BASE, META_GRAPH_API_VERSION
+from core.config import META_GRAPH_API_VERSION
 from core.wa_provider_observability import (
     CLASSIFICATION_EXCEPTION,
     CLASSIFICATION_MISSING_WAMID,
@@ -19,7 +19,10 @@ from core.wa_provider_observability import (
 )
 from .provider_utils import (
     WHATSAPP_CONNECTION_TYPE_COEXISTENCE,
-    WHATSAPP_PROVIDER_360DIALOG,
+    UnsupportedWhatsAppProvider,
+    provider_is_supported,
+    raw_provider,
+    require_supported_provider,
     wa_provider,
 )
 from .token_manager import WhatsAppTokenContext, get_token_for_operation
@@ -36,7 +39,7 @@ logger = logging.getLogger("nahla.whatsapp.service")
 # legitimately have no wamid and must NOT be misclassified.
 
 # Path → "is this a send call?". We match by the trailing segment so
-# Meta (``{phone_id}/messages``) and 360dialog (``messages``) both
+# Meta (``{phone_id}/messages``) sends
 # resolve correctly.
 _SEND_PATH_SUFFIXES = ("/messages", "messages")
 
@@ -54,7 +57,7 @@ def _is_send_path(path: str) -> bool:
 
 def _extract_wamid(body: Any) -> Optional[str]:
     """Pull ``messages[0].id`` out of a provider response, or
-    ``None`` on any structural mismatch. Both Meta and 360dialog use
+    ``None`` on any structural mismatch. Meta uses
     the same success shape.
     """
     if not isinstance(body, dict):
@@ -94,24 +97,43 @@ def _classify_response(
     return CLASSIFICATION_OK
 
 GRAPH = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-D360_BASE = D360_API_BASE_URL.rstrip("/")
-_D360_PARTNER_HUB = D360_PARTNER_HUB_BASE.rstrip("/")
+
+
+UNSUPPORTED_PROVIDER_CODE = "unsupported_provider"
+
+
+def _unsupported_provider_envelope(conn: Any) -> Dict[str, Any]:
+    """The answer for a connection this platform cannot speak for.
+
+    A definite failure, not an ambiguous one: nothing was sent, nothing can
+    have been accepted, and the caller must not resend or fall back to Meta.
+    Shaped like a provider error envelope so every existing classifier,
+    audit row and UI already handles it.
+    """
+    return {
+        "error": {
+            "message": (
+                "whatsapp connection provider "
+                f"{raw_provider(conn)!r} is not supported; Meta WhatsApp Cloud API "
+                "is the only supported provider"
+            ),
+            "type": UNSUPPORTED_PROVIDER_CODE,
+            "code": 0,
+            "_nahla_unsupported_provider": True,
+        }
+    }
 
 
 def _provider_base_url(conn: Any) -> str:
-    provider = wa_provider(conn)
-    if provider == WHATSAPP_PROVIDER_360DIALOG:
-        return D360_BASE
+    """Meta Graph, or a refusal. A connection this platform cannot speak for is
+    never given Meta's base URL: it would send one provider's traffic, with
+    another provider's credentials, to a phone number Meta may not hold."""
+    require_supported_provider(conn)
     return GRAPH
 
 
 def _provider_headers(conn: Any, ctx: WhatsAppTokenContext) -> Dict[str, str]:
-    provider = wa_provider(conn)
-    if provider == WHATSAPP_PROVIDER_360DIALOG:
-        return {
-            "D360-API-KEY": ctx.token,
-            "Content-Type": "application/json",
-        }
+    require_supported_provider(conn)
     return {
         "Authorization": f"Bearer {ctx.token}",
         "Content-Type": "application/json",
@@ -130,7 +152,7 @@ def _provider_url(conn: Any, path: str) -> str:
 # (templates use ``provider_submit_template`` instead — see below for
 # why those are deliberately skipped). This helper strips any internal
 # ``[FOO]`` / ``[FOO:bar]`` token the AI may have leaked into a text
-# slot before the payload hits Meta / 360dialog.
+# slot before the payload hits Meta.
 #
 # Background: merchants reported customers receiving ``[TRANSFER]`` and
 # similar markers literally in WhatsApp. The root cause is GPT
@@ -298,9 +320,11 @@ async def provider_get_with_context(
     params: Optional[Dict[str, Any]] = None,
     timeout: float = 20,
 ) -> Dict[str, Any]:
+    if not provider_is_supported(conn):
+        logger.error("[WA provider_get] refused op=%s tenant=%s provider=%s — unsupported",
+                     operation, tenant_id, raw_provider(conn))
+        return _unsupported_provider_envelope(conn)
     headers = _provider_headers(conn, ctx)
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
-        headers.pop("Content-Type", None)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(_provider_url(conn, path), headers=headers, params=params or {})
         data = resp.json()
@@ -345,6 +369,30 @@ async def provider_post_with_context(
       ``[WA_SEND_EXCEPTION]``        — transport-level failure
     """
     provider = wa_provider(conn)
+    if not provider_is_supported(conn):
+        # Refused before the request exists. Recorded like any other definite
+        # provider failure so the outcome is "did not send", never "may have
+        # been accepted".
+        logger.error("[WA provider_post] refused op=%s tenant=%s provider=%s — unsupported",
+                     operation, tenant_id, raw_provider(conn))
+        refusal = _unsupported_provider_envelope(conn)
+        try:
+            _record_provider_attempt(
+                tenant_id=tenant_id, operation=operation, provider=provider, method="POST",
+                full_url="", path=path, request_payload=json,
+                headers_summary={"token_source": getattr(ctx, "source", None)},
+                response_status=None, response_body=refusal, parsed_wamid=None,
+                classification=CLASSIFICATION_PROVIDER_ERROR, duration_ms=None,
+                error_text=f"unsupported provider {raw_provider(conn)!r}",
+                connection_phone_number_id=(
+                    getattr(conn, "phone_number_id", None) if conn is not None else None),
+                connection_id=getattr(conn, "id", None) if conn is not None else None,
+                connection_type=(
+                    getattr(conn, "connection_type", None) if conn is not None else None),
+            )
+        except Exception:  # noqa: BLE001 - observability is best-effort
+            logger.warning("[WA provider_post] could not record the refusal")
+        return refusal
     full_url = _provider_url(conn, path)
     headers  = _provider_headers(conn, ctx)
     headers_summary = _summarize_provider_headers(headers, token_source=ctx.source)
@@ -518,7 +566,7 @@ async def provider_post_with_context(
     # ``MessageEvent`` row with the wire-layer outcome without
     # re-deriving the classification. We use leading-underscore
     # keys so this metadata cannot collide with any provider field
-    # name (Meta / 360dialog responses never carry ``_nahla_*``).
+    # name (Meta responses never carry ``_nahla_*``).
     # Caller is free to ignore these fields — non-send paths
     # (template submit, webhook config) just don't read them.
     if isinstance(data, dict):
@@ -816,18 +864,6 @@ async def provider_send_message(
     observe_wire_payload(tenant_id, send_payload, "provider_payload_assembly")
     send_payload = _scrub_outbound_payload(send_payload)
     observe_wire_payload(tenant_id, send_payload, "provider_marker_scrub")
-    if provider == WHATSAPP_PROVIDER_360DIALOG:
-        send_payload.setdefault("recipient_type", "individual")
-        data = await provider_post_with_context(
-            conn,
-            ctx,
-            tenant_id=tenant_id,
-            operation=operation,
-            path="messages",
-            json=send_payload,
-            timeout=timeout,
-        )
-        return data, ctx
     data = await provider_post_with_context(
         conn,
         ctx,
@@ -858,7 +894,7 @@ async def provider_submit_template(
         prefer_platform=prefer_platform,
     )
     provider = wa_provider(conn)
-    path = "v1/configs/templates" if provider == WHATSAPP_PROVIDER_360DIALOG else f"{waba_id}/message_templates"
+    path = f"{waba_id}/message_templates"
     data = await provider_post_with_context(
         conn,
         ctx,
@@ -885,7 +921,6 @@ async def provider_delete_template(
     Delete a template from Meta by name.
 
     Meta API: DELETE /{waba_id}/message_templates?name={template_name}
-    360dialog: DELETE v1/configs/templates?name={template_name}
     """
     ctx = await get_token_for_operation(
         db, conn,
@@ -894,11 +929,7 @@ async def provider_delete_template(
         prefer_platform=prefer_platform,
     )
     provider = wa_provider(conn)
-
-    if provider == WHATSAPP_PROVIDER_360DIALOG:
-        path = f"v1/configs/templates"
-    else:
-        path = f"{waba_id}/message_templates"
+    path = f"{waba_id}/message_templates"
 
     headers = _provider_headers(conn, ctx)
     url = _provider_url(conn, path)
@@ -931,21 +962,16 @@ async def provider_list_templates(
         prefer_platform=prefer_platform,
     )
     provider = wa_provider(conn)
-
-    if provider == WHATSAPP_PROVIDER_360DIALOG:
-        path = "v1/configs/templates"
-        params: Optional[Dict[str, Any]] = None
-    else:
-        path = f"{waba_id}/message_templates"
-        # Explicitly request fields including `status` — without this
-        # parameter Meta Graph API v20+ may omit the status field entirely,
-        # causing every template to default to PENDING in the sync loop
-        # (`item.get("status") or "PENDING"`).
-        # `limit=250` avoids missing templates behind pagination.
-        params = {
-            "fields": "name,status,category,language,components,rejected_reason,quality_score,id",
-            "limit": "250",
-        }
+    path = f"{waba_id}/message_templates"
+    # Explicitly request fields including `status` — without this
+    # parameter Meta Graph API v20+ may omit the status field entirely,
+    # causing every template to default to PENDING in the sync loop
+    # (`item.get("status") or "PENDING"`).
+    # `limit=250` avoids missing templates behind pagination.
+    params: Optional[Dict[str, Any]] = {
+        "fields": "name,status,category,language,components,rejected_reason,quality_score,id",
+        "limit": "250",
+    }
 
     data = await provider_get_with_context(
         conn,
@@ -960,612 +986,32 @@ async def provider_list_templates(
     # ── Pagination: follow `paging.next` to collect ALL templates ─────────
     # Meta returns at most `limit` items per page. For accounts with
     # hundreds of templates we must follow the cursor chain.
-    if provider != WHATSAPP_PROVIDER_360DIALOG:
-        all_items = list(data.get("data") or [])
-        next_url = (data.get("paging") or {}).get("next")
-        pages = 0
-        while next_url and pages < 20:  # safety cap
-            pages += 1
-            try:
-                headers = _provider_headers(conn, ctx)
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.get(next_url, headers=headers)
-                    page = resp.json()
-                all_items.extend(page.get("data") or [])
-                next_url = (page.get("paging") or {}).get("next")
-            except Exception as exc:
-                logger.warning(
-                    "[WA template_sync] pagination failed tenant=%s page=%d: %s",
-                    tenant_id, pages, exc,
-                )
-                break
-        if pages:
-            logger.info(
-                "[WA template_sync] tenant=%s fetched %d extra page(s), total=%d templates",
-                tenant_id, pages, len(all_items),
+    all_items = list(data.get("data") or [])
+    next_url = (data.get("paging") or {}).get("next")
+    pages = 0
+    while next_url and pages < 20:  # safety cap
+        pages += 1
+        try:
+            headers = _provider_headers(conn, ctx)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(next_url, headers=headers)
+                page = resp.json()
+            all_items.extend(page.get("data") or [])
+            next_url = (page.get("paging") or {}).get("next")
+        except Exception as exc:
+            logger.warning(
+                "[WA template_sync] pagination failed tenant=%s page=%d: %s",
+                tenant_id, pages, exc,
             )
-        data = {**data, "data": all_items}
+            break
+    if pages:
+        logger.info(
+            "[WA template_sync] tenant=%s fetched %d extra page(s), total=%d templates",
+            tenant_id, pages, len(all_items),
+        )
+    data = {**data, "data": all_items}
 
     return data, ctx
-
-
-async def dialog360_configure_webhook(
-    *,
-    api_key: str,
-    url: str,
-    headers: Optional[Dict[str, str]] = None,
-    timeout: float = 5,
-) -> Dict[str, Any]:
-    """Register (POST) the channel webhook URL with 360dialog.
-
-    The endpoint accepts a single URL plus optional custom headers that
-    360dialog will replay on every webhook delivery. Nahla uses this to
-    inject the per-tenant `X-Nahla-Coexistence-Secret` header.
-    """
-    req_headers = {
-        "D360-API-KEY": api_key,
-        "Content-Type": "application/json",
-    }
-    payload: Dict[str, Any] = {"url": url}
-    if headers:
-        payload["headers"] = headers
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(f"{D360_BASE}/v1/configs/webhook", headers=req_headers, json=payload)
-        try:
-            data = resp.json()
-        except Exception:
-            data = {"raw": resp.text}
-    logger.info("[WA dialog360 webhook] configure status=%s body=%s", resp.status_code, data)
-    if resp.status_code >= 400 and "error" not in data:
-        data = {"error": data, "status_code": resp.status_code}
-    return data
-
-
-async def dialog360_get_webhook_config(
-    *,
-    api_key: str,
-    timeout: float = 5,
-) -> Dict[str, Any]:
-    """Read back the currently configured channel webhook from 360dialog.
-
-    Used by the owner-panel "Verify" action: we compare the URL 360dialog has
-    on file against the URL Nahla expects and surface a mismatch instead of
-    silently trusting the local cache.
-    """
-    req_headers = {"D360-API-KEY": api_key}
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(f"{D360_BASE}/v1/configs/webhook", headers=req_headers)
-        try:
-            data = resp.json()
-        except Exception:
-            data = {"raw": resp.text}
-    logger.info("[WA dialog360 webhook] read status=%s body=%s", resp.status_code, data)
-    if resp.status_code >= 400:
-        return {"error": data, "status_code": resp.status_code}
-    return data
-
-
-# ── 360dialog WABA-level webhook (Coexistence) ────────────────────────────────
-#
-# 360dialog supports two webhook scopes for inbound traffic:
-#
-#   1. **Phone-number / Channel** — `POST /v1/configs/webhook`  (per channel)
-#   2. **WABA-level**             — `POST /waba_webhook`        (whole WABA)
-#
-# Delivery priority (per 360dialog docs):
-#   Phone-Number webhook > WABA webhook > nothing (callbacks drop).
-#
-# In Coexistence (WhatsApp Business App + Cloud API sharing the same number)
-# the WABA-level webhook is what actually drives `messages` callbacks for
-# every phone hanging off that WABA. If a re-link rotates the channel's
-# `phone_number_id` and the WABA-level webhook was never set (or was wiped
-# by a prior re-onboarding), inbound delivery silently stops — the
-# 360dialog UI keeps showing the Channel Webhook ✓ while WABA Webhook = N/A,
-# and `recent-webhook-events` reads `events_returned=0` even after fresh
-# customer messages. The Set/Get helpers below let us drive that scope from
-# code so we never depend on a manual hub-UI step again.
-
-async def dialog360_get_waba_webhook(
-    *,
-    api_key: str,
-    timeout: float = 5,
-) -> Dict[str, Any]:
-    """Read the current WABA-level webhook config from 360dialog.
-
-    Response includes ``url``, ``headers``, ``waba_id``, ``numbers_on_this_waba``.
-    """
-    req_headers = {"D360-API-KEY": api_key}
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(f"{D360_BASE}/waba_webhook", headers=req_headers)
-        try:
-            data = resp.json()
-        except Exception:
-            data = {"raw": resp.text}
-    logger.info(
-        "[WA dialog360 waba_webhook] read status=%s body=%s",
-        resp.status_code, data,
-    )
-    if resp.status_code >= 400:
-        return {"error": data, "status_code": resp.status_code}
-    return data
-
-
-async def dialog360_set_waba_webhook(
-    *,
-    api_key: str,
-    url: str,
-    headers: Optional[Dict[str, str]] = None,
-    override_all: bool = True,
-    timeout: float = 8.0,
-) -> Dict[str, Any]:
-    """Configure (POST) the WABA-level webhook URL with 360dialog.
-
-    Parameters
-    ----------
-    api_key
-        Channel D360-API-KEY for any channel on the target WABA.
-    url
-        Full HTTPS callback URL (no underscores in domain, no explicit port).
-    headers
-        Optional custom headers 360dialog will replay on every delivery.
-        Nahla uses this to inject ``X-Nahla-Coexistence-Secret`` so the
-        receiving router can drop forged events.
-    override_all
-        When ``True``, the WABA webhook is applied to **every** Cloud API
-        number under this WABA, regardless of any pre-existing
-        phone-number-level webhook. When ``False``, only numbers that
-        currently lack a phone-number-level webhook are touched. For
-        Nahla we default to ``True`` so a stale per-channel webhook on
-        an old ``phone_number_id`` can never silently swallow inbound
-        traffic for the new one.
-
-    Notes
-    -----
-    360dialog applies the change asynchronously (15–20 s); call
-    ``dialog360_get_waba_webhook`` after a short delay to confirm.
-    """
-    req_headers = {
-        "D360-API-KEY": api_key,
-        "Content-Type": "application/json",
-    }
-    payload: Dict[str, Any] = {"url": url, "override_all": bool(override_all)}
-    if headers:
-        payload["headers"] = headers
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            f"{D360_BASE}/waba_webhook",
-            headers=req_headers,
-            json=payload,
-        )
-        try:
-            data = resp.json()
-        except Exception:
-            data = {"raw": resp.text}
-    logger.info(
-        "[WA dialog360 waba_webhook] set status=%s override_all=%s body=%s",
-        resp.status_code, override_all, data,
-    )
-    if resp.status_code >= 400 and "error" not in data:
-        data = {"error": data, "status_code": resp.status_code}
-    return data
-
-
-def _clip_body(body: Any, limit: int = 240) -> str:
-    try:
-        import json as _json  # noqa: PLC0415
-        txt = _json.dumps(body, ensure_ascii=False) if isinstance(body, dict) else str(body)
-    except Exception:
-        txt = str(body)
-    txt = txt.replace("\n", " ").strip()
-    return txt[:limit] + ("…" if len(txt) > limit else "")
-
-
-async def dialog360_live_verify_probes(
-    *,
-    tenant_id: int,
-    api_key: str,
-    phone_number_id: str,
-    waba_id: str,
-    channel_id: Optional[str],
-    connection_type: str,
-    partner_id: Optional[str],
-    timeout: float = 10.0,
-) -> Dict[str, Any]:
-    """
-    Multi-step live probe against 360dialog Channel API + Partner Hub.
-
-    GET ``/v1/configs`` is NOT universally reliable for Coexistence or hub-
-    provisioned channels (may legitimately return 404 ``{"error":"Not found"}``)
-    while messaging + webhook READ still work. Callers must combine these probe
-    results with webhook traffic / stored identifiers rather than trusting a
-    single endpoint.
-    """
-    coexistence = str(connection_type or "").strip().lower() == WHATSAPP_CONNECTION_TYPE_COEXISTENCE
-    steps: list[Dict[str, Any]] = []
-
-    logger.info(
-        "[D360 live-verify] tenant=%s base=%s coexistence=%s channel_id=%s "
-        "phone_number_id=%s waba_id=%s api_key=present partner_id_cfg=%s",
-        tenant_id,
-        D360_BASE,
-        coexistence,
-        channel_id or "-",
-        phone_number_id or "-",
-        waba_id or "-",
-        partner_id or "-",
-    )
-
-    auth_revoked = False
-
-    def _record_step(
-        *,
-        name: str,
-        method: str,
-        url: str,
-        headers: Dict[str, str],
-        uses_channel_key: bool,
-        status_code: Optional[int],
-        ok_http: bool,
-        body_preview: str,
-    ) -> None:
-        nonlocal auth_revoked
-        hdr_keys = ",".join(sorted(headers.keys()))
-        log_url = url.replace(api_key, "<redacted>") if api_key and api_key in url else url
-        if uses_channel_key and status_code in (401, 403):
-            auth_revoked = True
-        steps.append({
-            "step":             name,
-            "method":           method.upper(),
-            "url":              log_url,
-            "headers_present":  hdr_keys,
-            "uses_channel_key": uses_channel_key,
-            "status_code":      status_code,
-            "ok":               ok_http,
-            "body_preview":     body_preview,
-        })
-        logger.info(
-            "[D360 live-verify] tenant=%s step=%s %s %s status=%s ok=%s body_preview=%r",
-            tenant_id, name, method.upper(), log_url, status_code, ok_http, body_preview,
-        )
-
-    hdr_chan = {"D360-API-KEY": api_key}
-
-    async def _step_http(
-        *,
-        name: str,
-        method: str,
-        url: str,
-        headers: Dict[str, str],
-        params: Optional[Dict[str, str]] = None,
-        json_body: Optional[Dict[str, Any]] = None,
-        uses_channel_key: bool = False,
-    ) -> None:
-        log_url = url.replace(api_key, "<redacted>") if api_key and api_key in url else url
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                if method.upper() == "GET":
-                    resp = await client.get(url, headers=headers, params=params or {})
-                else:
-                    resp = await client.request(method.upper(), url, headers=headers, json=json_body)
-            ok_http = 200 <= resp.status_code < 300
-            try:
-                parsed = resp.json()
-            except Exception:
-                parsed = resp.text
-            preview = _clip_body(parsed if isinstance(parsed, dict) else {"body": parsed})
-            _record_step(
-                name=name, method=method, url=url, headers=headers,
-                uses_channel_key=uses_channel_key,
-                status_code=resp.status_code, ok_http=ok_http, body_preview=preview,
-            )
-        except Exception as exc:
-            err = f"{type(exc).__name__}: {exc}"[:220]
-            logger.warning("[D360 live-verify] tenant=%s step=%s FAILED url=%s err=%s", tenant_id, name, log_url, err)
-            _record_step(
-                name=name, method=method, url=url, headers=headers,
-                uses_channel_key=uses_channel_key,
-                status_code=None, ok_http=False, body_preview=err,
-            )
-
-    await _step_http(
-        name="v1_configs",
-        method="GET",
-        url=f"{D360_BASE}/v1/configs",
-        headers=dict(hdr_chan),
-        uses_channel_key=True,
-    )
-
-    await _step_http(
-        name="webhook_read",
-        method="GET",
-        url=f"{D360_BASE}/v1/configs/webhook",
-        headers={**hdr_chan, "Content-Type": "application/json"},
-        uses_channel_key=True,
-    )
-
-    if phone_number_id:
-        await _step_http(
-            name="phone_object",
-            method="GET",
-            url=f"{D360_BASE}/{phone_number_id}",
-            headers=dict(hdr_chan),
-            params={"fields": "id,display_phone_number,verified_name,quality_rating,whatsapp_business_account"},
-            uses_channel_key=True,
-        )
-
-    if partner_id and channel_id and D360_PARTNER_API_KEY:
-        p_url = f"{_D360_PARTNER_HUB}/api/v2/partners/{partner_id}/channels/{channel_id}"
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.get(
-                    p_url,
-                    headers={"Authorization": f"Bearer {D360_PARTNER_API_KEY}"},
-                )
-            ok_http = 200 <= resp.status_code < 300
-            try:
-                pdata = resp.json()
-            except Exception:
-                pdata = resp.text
-            if isinstance(pdata, dict) and pdata.get("error"):
-                ok_http = False
-            preview = _clip_body(pdata if isinstance(pdata, dict) else {"body": pdata})
-            _record_step(
-                name="partner_channel",
-                method="GET",
-                url=p_url,
-                headers={"Authorization": "Bearer <redacted>"},
-                uses_channel_key=False,
-                status_code=resp.status_code,
-                ok_http=ok_http,
-                body_preview=preview,
-            )
-        except Exception as exc:
-            err = f"{type(exc).__name__}: {exc}"[:220]
-            logger.warning("[D360 live-verify] tenant=%s step=partner_channel FAILED err=%s", tenant_id, err)
-            _record_step(
-                name="partner_channel",
-                method="GET",
-                url=p_url,
-                headers={"Authorization": "Bearer <redacted>"},
-                uses_channel_key=False,
-                status_code=None,
-                ok_http=False,
-                body_preview=err,
-            )
-
-    composite_alive = any(
-        s.get("ok")
-        for s in steps
-        if s["step"] in {"v1_configs", "webhook_read", "phone_object", "partner_channel"}
-    )
-
-    summary = " | ".join(
-        f"{s['step']}={s.get('status_code')}{'✓' if s.get('ok') else '✗'}"
-        for s in steps
-    )
-
-    return {
-        "coexistence_mode":     coexistence,
-        "d360_api_base":        D360_BASE,
-        "composite_alive":      composite_alive,
-        "channel_auth_revoked": auth_revoked,
-        "steps":                steps,
-        "summary":              summary,
-    }
-
-
-# ── 360dialog Partner API helpers ─────────────────────────────────────────────
-
-
-async def dialog360_generate_api_key(
-    *,
-    partner_id: str,
-    channel_id: str,
-    timeout: float = 5,
-) -> Dict[str, Any]:
-    """
-    Generate (or retrieve) the D360-API-KEY for a channel the merchant connected
-    during Integrated Onboarding.
-
-    POST https://hub.360dialog.com/api/v2/partners/{partner_id}/channels/{channel_id}/api-keys
-    Authorization: Bearer {D360_PARTNER_API_KEY}
-    """
-    if not D360_PARTNER_API_KEY:
-        return {"error": "D360_PARTNER_API_KEY not configured"}
-    url = f"{_D360_PARTNER_HUB}/api/v2/partners/{partner_id}/channels/{channel_id}/api-keys"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {D360_PARTNER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-        )
-    try:
-        data = resp.json()
-    except Exception:
-        data = {"raw": resp.text}
-    logger.info(
-        "[D360 partner] generate_api_key partner=%s channel=%s status=%s",
-        partner_id, channel_id, resp.status_code,
-    )
-    return data
-
-
-async def dialog360_get_channel_info(
-    *,
-    partner_id: str,
-    channel_id: str,
-    timeout: float = 5,
-) -> Dict[str, Any]:
-    """
-    Retrieve channel details (status, phone_number, waba_id, etc.) from Partner API.
-
-    GET https://hub.360dialog.com/api/v2/partners/{partner_id}/channels/{channel_id}
-    """
-    if not D360_PARTNER_API_KEY:
-        return {"error": "D360_PARTNER_API_KEY not configured"}
-    url = f"{_D360_PARTNER_HUB}/api/v2/partners/{partner_id}/channels/{channel_id}"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(
-            url,
-            headers={"Authorization": f"Bearer {D360_PARTNER_API_KEY}"},
-        )
-    try:
-        return resp.json()
-    except Exception:
-        return {"raw": resp.text}
-
-
-async def dialog360_resolve_channel_metadata(
-    *,
-    api_key: str,
-    phone_number_id: Optional[str] = None,
-    channel_id: Optional[str] = None,
-    partner_id: Optional[str] = None,
-    timeout: float = 5,
-) -> Dict[str, Any]:
-    """Best-effort resolver for missing 360dialog channel metadata.
-
-    Calls every reasonable 360dialog endpoint we have credentials for and
-    merges the results into a single normalised payload:
-
-        {
-          "waba_id":         str | None,
-          "phone_number_id": str | None,
-          "phone_number":    str | None,
-          "display_name":    str | None,
-          "channel_status":  str | None,
-          "sources":         [str, ...],   # which endpoints contributed
-          "errors":          {endpoint: error_msg},
-          "raw":             {endpoint: raw response},
-        }
-
-    Resolution sources, in priority order:
-
-      1. **Partner API** (`hub.360dialog.com/api/v2/partners/.../channels/...`)
-         — Most authoritative when we have D360_PARTNER_API_KEY + channel_id.
-         Returns waba_id, phone_number, status, etc.
-      2. **Channel API: GET /v1/configs** with the per-tenant `D360-API-KEY`
-         — Returns webhook config + sometimes ``on_behalf_of_business_info``
-         and the channel's own phone metadata.
-      3. **Phone object endpoint**: ``GET /<phone_number_id>`` against the
-         WABA-V2 host using the api_key as a Meta-style bearer. 360dialog's
-         WABA-V2 cluster mirrors Meta Cloud API for this path and returns
-         ``display_phone_number`` + ``verified_name`` when the channel is
-         active.
-
-    The caller decides what to persist; the resolver itself is read-only."""
-    out: Dict[str, Any] = {
-        "waba_id":         None,
-        "phone_number_id": phone_number_id,
-        "phone_number":    None,
-        "display_name":    None,
-        "channel_status":  None,
-        "sources":         [],
-        "errors":          {},
-        "raw":             {},
-    }
-
-    if not api_key and not (partner_id and channel_id):
-        out["errors"]["resolver"] = "no credentials available"
-        return out
-
-    # ── 1. Partner API ─────────────────────────────────────────────────
-    if partner_id and channel_id and D360_PARTNER_API_KEY:
-        try:
-            info = await dialog360_get_channel_info(partner_id=partner_id, channel_id=channel_id)
-            out["raw"]["partner"] = info
-            if isinstance(info, dict) and "error" not in info:
-                out["waba_id"]        = out["waba_id"] or info.get("waba_id") or info.get("waba_account_id")
-                out["phone_number"]   = out["phone_number"] or info.get("phone_number") or info.get("phone")
-                out["display_name"]   = out["display_name"] or info.get("name") or info.get("verified_name")
-                out["channel_status"] = out["channel_status"] or info.get("status")
-                out["sources"].append("partner")
-            elif isinstance(info, dict) and "error" in info:
-                out["errors"]["partner"] = str(info.get("error"))[:200]
-        except Exception as exc:
-            out["errors"]["partner"] = f"{type(exc).__name__}: {exc}"[:200]
-
-    # ── 2. Channel-level GET /v1/configs ───────────────────────────────
-    if api_key:
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.get(
-                    f"{D360_BASE}/v1/configs",
-                    headers={"D360-API-KEY": api_key},
-                )
-                try:
-                    data = resp.json()
-                except Exception:
-                    data = {"raw": resp.text}
-            out["raw"]["v1_configs"] = {"status_code": resp.status_code, "body": data}
-            if 200 <= resp.status_code < 300 and isinstance(data, dict):
-                # 360dialog mixes flat + nested shapes across product
-                # versions. Probe both.
-                obo = data.get("on_behalf_of_business_info") or {}
-                phone = data.get("phone") or data.get("phone_number") or {}
-                out["waba_id"] = (
-                    out["waba_id"]
-                    or data.get("waba_id")
-                    or data.get("waba_account_id")
-                    or obo.get("waba_id")
-                    or obo.get("id")
-                )
-                out["phone_number_id"] = (
-                    out["phone_number_id"]
-                    or data.get("phone_number_id")
-                    or (phone.get("id") if isinstance(phone, dict) else None)
-                )
-                out["phone_number"] = (
-                    out["phone_number"]
-                    or data.get("display_phone_number")
-                    or (phone.get("display_phone_number") if isinstance(phone, dict) else None)
-                )
-                out["display_name"] = (
-                    out["display_name"]
-                    or data.get("verified_name")
-                    or (phone.get("verified_name") if isinstance(phone, dict) else None)
-                )
-                out["sources"].append("v1_configs")
-            elif resp.status_code >= 400:
-                out["errors"]["v1_configs"] = f"http_{resp.status_code}: {str(data)[:200]}"
-        except Exception as exc:
-            out["errors"]["v1_configs"] = f"{type(exc).__name__}: {exc}"[:200]
-
-    # ── 3. Phone object endpoint (WABA-V2 / Cloud API parity) ──────────
-    pnid = out["phone_number_id"]
-    if api_key and pnid:
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.get(
-                    f"{D360_BASE}/{pnid}",
-                    headers={"D360-API-KEY": api_key},
-                    params={"fields": "id,display_phone_number,verified_name,quality_rating,whatsapp_business_account"},
-                )
-                try:
-                    data = resp.json()
-                except Exception:
-                    data = {"raw": resp.text}
-            out["raw"]["phone_object"] = {"status_code": resp.status_code, "body": data}
-            if 200 <= resp.status_code < 300 and isinstance(data, dict):
-                wba = data.get("whatsapp_business_account") or {}
-                out["waba_id"]      = out["waba_id"] or (wba.get("id") if isinstance(wba, dict) else None)
-                out["phone_number"] = out["phone_number"] or data.get("display_phone_number")
-                out["display_name"] = out["display_name"] or data.get("verified_name")
-                out["sources"].append("phone_object")
-            elif resp.status_code >= 400:
-                out["errors"]["phone_object"] = f"http_{resp.status_code}: {str(data)[:200]}"
-        except Exception as exc:
-            out["errors"]["phone_object"] = f"{type(exc).__name__}: {exc}"[:200]
-
-    logger.info(
-        "[D360 resolver] phone_number_id=%s channel_id=%s sources=%s errors=%s "
-        "→ waba=%s phone=%s name=%s",
-        phone_number_id, channel_id, out["sources"], list(out["errors"].keys()),
-        out["waba_id"], out["phone_number"], out["display_name"],
-    )
-    return out
 
 
 async def fetch_meta_phone_tier(
@@ -1575,38 +1021,19 @@ async def fetch_meta_phone_tier(
     tenant_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Fetch messaging_limit and quality_rating for the phone from whatever
-    provider Meta lives behind for THIS connection.
+    Fetch messaging_limit and quality_rating for this connection's phone
+    number from Meta Graph: ``GET /{phone_id}?fields=...``.
 
-    Routing rules (set on ``WhatsAppConnection.provider``):
-      * ``meta``       → Graph API direct: ``GET /{phone_id}?fields=...``
-      * ``dialog360``  → 360dialog Cloud API. The Coexistence relay only
-                         proxies a *subset* of Graph fields; in particular
-                         ``messaging_limit_tier`` is NOT consistently
-                         exposed. We probe three paths in order and
-                         return the first one that yields a non-empty
-                         tier:
-                           1. ``GET /{phone_id}?fields=messaging_limit_tier,quality_rating``
-                              — works for direct Meta, sometimes for d360.
-                           2. ``GET /v1/configs`` — d360 channel config
-                              endpoint; some accounts surface the tier
-                              under ``messaging_limit`` here.
-                           3. ``GET /v1/health/messaging-tier`` —
-                              d360 health proxy where it exists.
-
-    Return shape now ALWAYS includes a ``_diagnostics`` block listing
-    each path tried, the HTTP status (best-effort), and a redacted
-    snippet of the response. The UI surfaces this so the merchant can
-    see WHY we still show e.g. ``TIER_250`` after Meta granted them a
-    higher tier — usually because the provider's read path doesn't
-    expose the field and we're rendering a stale cached value.
+    Return shape ALWAYS includes a ``_diagnostics`` block listing the path
+    tried, the HTTP status (best-effort), and a redacted snippet of the
+    response. The UI surfaces this so the merchant can see WHY we still show
+    e.g. ``TIER_250`` after Meta granted them a higher tier.
 
     On any failure we leave the cached row untouched (return empty
     ``messaging_limit``); the UI flags it as stale.
     """
     phone_id = getattr(conn, "phone_number_id", None)
-    provider = (getattr(conn, "provider", None) or "meta").strip().lower()
-    is_d360 = provider in ("dialog360", "360dialog", "d360")
+    provider = wa_provider(conn)
 
     diagnostics: list = []
 
@@ -1637,7 +1064,7 @@ async def fetch_meta_phone_tier(
             "_diagnostics":    [{"path": "(skipped)", "error": "no phone_id or token"}],
         }
 
-    # ── 1) Graph-style ``GET /{phone_id}`` — works for direct Meta, sometimes d360
+    # ── Graph-style ``GET /{phone_id}`` ───────────────────────────────────────
     try:
         data = await provider_get_with_context(
             conn, ctx,
@@ -1650,8 +1077,6 @@ async def fetch_meta_phone_tier(
         _record(f"GET /{phone_id}?fields=messaging_limit_tier,quality_rating", "2xx?", data)
         tier = data.get("messaging_limit_tier") if isinstance(data, dict) else None
         quality = data.get("quality_rating") if isinstance(data, dict) else None
-        if not tier and is_d360 and isinstance(data, dict):
-            tier = data.get("messaging_limit") or data.get("tier")
         if tier:
             return {
                 "messaging_limit": tier,
@@ -1664,67 +1089,6 @@ async def fetch_meta_phone_tier(
             "[WA] fetch_meta_phone_tier phone_id path failed tenant=%s provider=%s: %s",
             tenant_id, provider, exc,
         )
-
-    # ── 2 & 3) 360dialog-specific fallbacks ───────────────────────────────────
-    if is_d360:
-        # ``GET /v1/configs`` — channel-level metadata. Some d360 tenants
-        # see ``messaging_limit`` on this object (legacy product).
-        try:
-            data = await provider_get_with_context(
-                conn, ctx,
-                tenant_id=tenant_id,
-                operation="fetch_phone_tier_v1_configs",
-                path="v1/configs",
-                params=None,
-                timeout=15,
-            )
-            _record("GET /v1/configs", "2xx?", data)
-            if isinstance(data, dict):
-                tier = (
-                    data.get("messaging_limit_tier")
-                    or data.get("messaging_limit")
-                    or (data.get("phone") or {}).get("messaging_limit_tier") if isinstance(data.get("phone"), dict) else None
-                )
-                quality = (
-                    data.get("quality_rating")
-                    or ((data.get("phone") or {}).get("quality_rating") if isinstance(data.get("phone"), dict) else None)
-                )
-                if tier:
-                    return {
-                        "messaging_limit": tier,
-                        "quality_rating":  quality,
-                        "_diagnostics":    diagnostics,
-                    }
-        except Exception as exc:
-            _record("GET /v1/configs", None, None, error=f"{type(exc).__name__}: {exc}"[:200])
-            logger.warning(
-                "[WA] fetch_meta_phone_tier v1/configs failed tenant=%s: %s",
-                tenant_id, exc,
-            )
-
-        # ``GET /v1/health/messaging-tier`` — d360 health proxy. Returns
-        # 404 for tenants without the feature; that's fine, we record it
-        # in diagnostics and return empty.
-        try:
-            data = await provider_get_with_context(
-                conn, ctx,
-                tenant_id=tenant_id,
-                operation="fetch_phone_tier_health",
-                path="v1/health/messaging-tier",
-                params=None,
-                timeout=15,
-            )
-            _record("GET /v1/health/messaging-tier", "2xx?", data)
-            if isinstance(data, dict):
-                tier = data.get("messaging_limit_tier") or data.get("tier") or data.get("messaging_limit")
-                if tier:
-                    return {
-                        "messaging_limit": tier,
-                        "quality_rating":  data.get("quality_rating"),
-                        "_diagnostics":    diagnostics,
-                    }
-        except Exception as exc:
-            _record("GET /v1/health/messaging-tier", None, None, error=f"{type(exc).__name__}: {exc}"[:200])
 
     # Nothing worked. Return the diagnostics so the UI can render them
     # and the merchant can see WHY we don't have a fresh tier value.

@@ -44,7 +44,7 @@ interface WaUsageDetail {
 
 const TIER_SOURCE_LABEL_WA: Record<string, string> = {
   meta_graph: 'Meta Cloud API',
-  dialog360:  '360dialog (Coexistence)',
+  unsupported: 'مزود غير مدعوم',
 }
 
 function formatSyncedAtWa(iso: string | null | undefined): string {
@@ -198,7 +198,7 @@ export default function WaUsage() {
   // Last refresh result — surfaced as a diagnostic panel so the
   // merchant can see exactly what the provider returned (or didn't).
   // Provider-agnostic: works whether the connection is direct-Meta
-  // or via a relay like 360dialog.
+  // or via a relay.
   const [tierDiagnostics, setTierDiagnostics] = useState<{
     updated: boolean
     provider?: string

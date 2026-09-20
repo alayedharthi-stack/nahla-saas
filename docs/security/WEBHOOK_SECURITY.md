@@ -31,8 +31,6 @@ follows the rollout schedule below.
   - `GET /admin/webhooks/audit-summary` — counts per provider/tenant/status
   - `GET /admin/webhooks/audit-summary/failures` — recent invalid samples
   - `POST /admin/webhooks/enforcement` — flip a per-tenant flag
-- `backend/scripts/backfill_d360_coexistence_secret.py` — one-shot
-  back-fill of 360dialog connections missing `coexistence_internal_secret`.
 - `scripts/preflight_check.py` — refuses to boot in production when
   `ZID_WEBHOOK_REQUIRED_AT_BOOT=true` and `ZID_WEBHOOK_SECRET` is empty.
 
@@ -166,28 +164,12 @@ For each live Salla merchant (track in
    correct (true) but become redundant once the global default is
    `true`.
 
-### 4d. 360dialog secret back-fill
+### 4d. 360dialog secret back-fill — retired
 
-Run during a chosen quiet window:
-
-```sh
-# Dry-run first — prints the plan, makes no changes
-python backend/scripts/backfill_d360_coexistence_secret.py
-
-# Targeted single tenant
-python backend/scripts/backfill_d360_coexistence_secret.py --tenant 12
-
-# Real run, all candidates
-python backend/scripts/backfill_d360_coexistence_secret.py --apply
-
-# Real run, capped (staged rollout)
-python backend/scripts/backfill_d360_coexistence_secret.py --apply --limit 5
-```
-
-The script is idempotent: rows that already have a
-`coexistence_internal_secret` are skipped. Each successful row gets a
-fresh `secrets.token_urlsafe(24)` secret pushed to 360dialog and
-persisted on the connection's `extra_metadata`.
+360dialog is no longer a supported provider and the back-fill script is gone
+with it. Historical connection rows keep whatever
+`coexistence_internal_secret` they were given; nothing reads it any more. See
+`docs/engineering/whatsapp-provider-meta-only.md`.
 
 ### 4e. Moyasar / HyperPay enforcement
 

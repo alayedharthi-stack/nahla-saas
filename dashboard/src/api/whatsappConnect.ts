@@ -105,15 +105,6 @@ export interface WaHealthResult {
   provider?: string | null
 }
 
-export interface CoexistenceRequestPayload {
-  phone_number: string
-  display_name?: string
-  has_whatsapp_business_app?: boolean
-  understands_keep_app_installed?: boolean
-  understands_open_every_13_days?: boolean
-  notes?: string
-}
-
 export interface AssistedConnectRequestPayload {
   contact_phone?: string
   display_name?: string
@@ -153,15 +144,6 @@ export const whatsappConnectApi = {
 
   health: () =>
     apiCall<WaHealthResult>('/whatsapp/connection/health'),
-
-  requestCoexistence: (data: CoexistenceRequestPayload) =>
-    apiCall<WaConnection & { status: string; message?: string }>('/whatsapp/coexistence/request', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-
-  getCoexistenceStatus: () =>
-    apiCall<WaConnection>('/whatsapp/coexistence/status'),
 
   requestAssistedConnect: (data: AssistedConnectRequestPayload) =>
     apiCall<WaConnection & { status: string; message?: string }>('/whatsapp/assisted-connect/request', {
