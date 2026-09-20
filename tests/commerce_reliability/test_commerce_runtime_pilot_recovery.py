@@ -867,12 +867,19 @@ def test_an_accepted_inbound_nobody_admitted_passes_both_dedup_boundaries(config
         assert webhook._duplicate_is_unfinished_runtime_work(
             phone_number_id=PHONE_ID, sender=SENDER,
             msg_id="wamid.accepted.only") is True
-        # A record that has been resolved is finished work, and stays a duplicate.
+        # A record an operator has closed is finished work, and stays a
+        # duplicate. (It cannot be *resolved* here: resolution needs the
+        # runtime's own accepted reply, and nothing answered this one.)
         from core.commerce_runtime import handover
 
         assert handover.resolve_inbound(db, tenant_id=db.tenant_id,
                                         channel_connection_ref=f"wa:{PHONE_ID}",
-                                        provider_message_id="wamid.accepted.only") is True
+                                        provider_message_id="wamid.accepted.only") is False
+        entry = handover.pending_inbound(db, tenant_id=db.tenant_id)[0]
+        closed = handover.dispose_inbound(
+            db, tenant_id=db.tenant_id, entry_ids=[entry.id], disposition="not_required",
+            evidence={"authorized_by": "owner", "why": "test: no answer owed"}, by="owner")
+        assert closed.disposed == (entry.id,), closed.refused
         assert webhook._duplicate_is_unfinished_runtime_work(
             phone_number_id=PHONE_ID, sender=SENDER,
             msg_id="wamid.accepted.only") is False
@@ -1062,3 +1069,112 @@ def test_a_grant_without_a_pending_record_authorises_nothing(configured, db):
     with runner.granted(forged):
         seen = deliver(db, msg_id="wamid.never.accepted")
     assert seen["handled"][0]["commerce_runtime_claim"].basis == "drain_buffered"
+
+
+# ── The grant is checked again where it is used: on the admitting connection ─
+
+from types import SimpleNamespace  # noqa: E402
+
+RECIPIENT = "+" + SENDER
+
+
+def test_recovery_admission_checks_the_grant_s_entry_on_the_admitting_connection(configured, db):
+    """``admits_recovery_on`` is what the admission transaction asks. It reads
+    the barrier **and** the grant's durable entry on that same connection: the
+    entry must exist, name this tenant, connection and identity, and still be
+    pending. A disposition committed in between withdraws the grant."""
+    from core.commerce_runtime import handover
+
+    accept(db, "wamid.grant.checked")
+    record = handover.accepted_inbound(db, tenant_id=db.tenant_id,
+                                       channel_connection_ref=f"wa:{PHONE_ID}",
+                                       provider_message_id="wamid.grant.checked")
+    handover.open_drain(db, tenant_id=db.tenant_id)
+    engine = db.get_bind()
+
+    def admits(**overrides: Any) -> bool:
+        claim = dict(entry_id=record.id, channel_connection_ref=f"wa:{PHONE_ID}",
+                     provider_message_id="wamid.grant.checked")
+        claim.update(overrides)
+        with engine.connect() as conn:
+            return handover.admits_recovery_on(conn, tenant_id=db.tenant_id, **claim)
+
+    assert admits() is True                                             # pending, draining
+    assert admits(entry_id=None) is False                                # no grant: not recovery
+    assert admits(entry_id=record.id + 1000) is False                    # no such entry
+    assert admits(provider_message_id="wamid.someone.else") is False     # wrong identity
+    assert admits(channel_connection_ref="wa:OTHER") is False            # wrong connection
+    with engine.connect() as conn:                                       # wrong tenant
+        assert handover.admits_recovery_on(
+            conn, tenant_id=db.tenant_id + 1, entry_id=record.id,
+            channel_connection_ref=f"wa:{PHONE_ID}",
+            provider_message_id="wamid.grant.checked") is False
+
+    # The operator disposes of the entry: the grant now authorises nothing.
+    closed = handover.dispose_inbound(
+        db, tenant_id=db.tenant_id, entry_ids=[record.id], disposition="not_required",
+        evidence={"authorized_by": "owner", "why": "withdrawn while draining"}, by="owner")
+    assert closed.disposed == (record.id,), closed.refused
+    assert admits() is False
+
+
+def test_recovery_admission_still_refuses_a_settled_barrier_whatever_the_entry_says(configured, db):
+    from core.commerce_runtime import handover
+    from core.commerce_runtime import handover_models as hm
+
+    accept(db, "wamid.grant.settled")
+    record = handover.accepted_inbound(db, tenant_id=db.tenant_id,
+                                       channel_connection_ref=f"wa:{PHONE_ID}",
+                                       provider_message_id="wamid.grant.settled")
+    handover.open_drain(db, tenant_id=db.tenant_id)
+    row = db.query(hm.HandoverBarrier).filter_by(tenant_id=db.tenant_id).one()
+    row.state = hm.STATE_SETTLED
+    db.commit()
+    with db.get_bind().connect() as conn:
+        assert handover.admits_recovery_on(
+            conn, tenant_id=db.tenant_id, entry_id=record.id,
+            channel_connection_ref=f"wa:{PHONE_ID}",
+            provider_message_id="wamid.grant.settled") is False
+
+
+def test_the_seam_hands_the_grant_s_identity_to_the_admission_check(configured, db, monkeypatch):
+    """The seam does not ask 'is the barrier open' on its own; it asks about
+    the grant's entry, by id, connection and identity."""
+    from core.commerce_runtime import handover
+    from services import commerce_runtime_pilot as seam
+    from services import commerce_runtime_recovery as runner
+
+    accept(db, "wamid.grant.identity")
+    record = handover.accepted_inbound(db, tenant_id=db.tenant_id,
+                                       channel_connection_ref=f"wa:{PHONE_ID}",
+                                       provider_message_id="wamid.grant.identity")
+    asked: List[Dict[str, Any]] = []
+
+    def _admits(conn: Any, **kwargs: Any) -> bool:
+        asked.append(dict(kwargs))
+        return False
+
+    monkeypatch.setattr(handover, "admits_recovery_on", _admits)
+
+    captured: Dict[str, Any] = {}
+
+    def _run(**kwargs: Any) -> Any:
+        captured["barrier"] = kwargs["admission_barrier"]
+        raise RuntimeError("stop here: the barrier callback is what this test reads")
+
+    from core.commerce_runtime import runtime_entry as entry
+    monkeypatch.setattr(entry, "run_commerce_runtime_turn", _run)
+    handover.open_drain(db, tenant_id=db.tenant_id)
+    with runner.granted(record):
+        with pytest.raises(RuntimeError):
+            asyncio.run(seam._own_turn(  # noqa: SLF001
+                db=db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=RECIPIENT,
+                text="x", convo=SimpleNamespace(id=1, customer_id=None),
+                wa_msg_id="wamid.grant.identity", inbound_metadata=None, trace=None,
+                decision=SimpleNamespace(connection_ref=f"wa:{PHONE_ID}", connection_id="1",
+                                         recipient=RECIPIENT, model="model-x"),
+                customer_name="", recovery_grant=runner.current_grant()))
+    assert captured["barrier"](object()) is False
+    assert asked == [{"tenant_id": db.tenant_id, "entry_id": record.id,
+                      "channel_connection_ref": f"wa:{PHONE_ID}",
+                      "provider_message_id": "wamid.grant.identity"}]

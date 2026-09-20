@@ -64,6 +64,8 @@ from tests.commerce_reliability.test_commerce_runtime_pilot_pg import (
     timed_out,
 )
 
+from tests.commerce_reliability.runtime_support import stop_record_for  # noqa: E402
+
 REVISION = "0111"
 PHONE = "+966500000042"
 # Meta phone-number ids are globally unique; the route drops an id that
@@ -182,10 +184,12 @@ STOP_EVIDENCE = {
     "deployment": "railway:nahla-backend@deploy-1234",
     "stop_verified_by": "railway deployment status=REMOVED, replicas=0",
     "observed_at": "2099-01-01T00:00:00+00:00",
-    # The platform's own record, captured verbatim. It names the deployment.
-    "stop_record": ('[{"deployment": "railway:nahla-backend@deploy-1234", '
-                    '"status": "REMOVED", "replicas": 0}]'),
 }
+# The platform's own record, structured as the stop-record job writes it: this
+# deployment, its incarnation, an inactive state, zero active replicas, observed
+# at the moment the retirement claims.
+STOP_EVIDENCE["stop_record"] = stop_record_for(
+    STOP_EVIDENCE["deployment"], observed_at=STOP_EVIDENCE["observed_at"])
 # The deployment inventory every settlement and release is reconciled against.
 EXPECTED_WORKERS = "worker-a"
 
@@ -870,10 +874,21 @@ def test_h5_an_unresolved_accepted_record_blocks_settlement(configured, store):
 
 
 def test_h5_a_record_the_runtime_finished_stops_counting(configured, store):
+    """A record stops counting when the runtime's own turn for it reached a
+    terminal that is an accepted reply — and only then: with no turn, the same
+    call refuses and the record keeps counting."""
     drain_and_converge(store)
     defer(store, identity="wamid.finished", reason=handover.REASON_ACCEPTED)
     db = store.session()
     try:
+        assert handover.resolve_inbound(
+            db, tenant_id=store.tenant_id,
+            channel_connection_ref=f"wa:{store.connection_id}",
+            provider_message_id="wamid.finished") is False        # nothing answered it yet
+        assert store.state().deferred_pending == 1
+        report = store.run_turn(transport=Transport([accepted("wamid.out.h5")]),
+                                provider_message_id="wamid.finished")
+        assert report.reason == entry.HANDLED
         assert handover.resolve_inbound(
             db, tenant_id=store.tenant_id,
             channel_connection_ref=f"wa:{store.connection_id}",
@@ -1264,6 +1279,7 @@ import functools
 
 from services import commerce_runtime_acceptance as acceptance_service
 from tests.commerce_reliability.runtime_support import (
+    stop_record_for,
     META_TEST_APP_SECRET as APP_SECRET,
     meta_webhook_request as meta_request,
 )
@@ -1509,20 +1525,36 @@ def test_an_unauthenticated_request_takes_no_pilot_obligation(configured, store,
 def test_recovery_admission_follows_the_barrier_on_the_admitting_connection(configured, store):
     """Open and draining admit accepted work under a grant; settled and released
     refuse it — read on the admitting transaction's own connection."""
-    def admits() -> bool:
+    def admits(record: Any) -> bool:
         with store.engine.connect() as conn:
             with conn.begin():
-                return handover.admits_recovery_on(conn, tenant_id=store.tenant_id)
+                return handover.admits_recovery_on(
+                    conn, tenant_id=store.tenant_id, entry_id=record.id,
+                    channel_connection_ref=record.channel_connection_ref,
+                    provider_message_id=record.provider_message_id)
 
-    assert admits() is True                                  # open (no row yet)
+    def closed(record: Any) -> None:
+        assert dispose(store, record.id, "not_required",
+                       {"authorized_by": "owner", "why": "test"}).disposed == (record.id,)
+
+    first = defer(store, identity="wamid.grant.open", reason=handover.REASON_ACCEPTED)
+    assert admits(first) is True                             # open (no barrier row yet)
     drain_and_converge(store)
-    assert admits() is True                                  # draining
+    assert admits(first) is True                             # draining
+    closed(first)                                            # settlement needs nothing pending
     assert settle(store) == job.EXIT_OK
-    assert admits() is False                                 # settled
+    second = defer(store, identity="wamid.grant.settled", reason=handover.REASON_SETTLED_WINDOW)
+    assert admits(second) is False                           # settled: the entry is pending, the barrier refuses
+    closed(second)
+    # An arrival after settlement blocks release until the counts are re-taken:
+    # drain, settle again, then release — the documented way out.
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_OK
     assert job.main(["release"]) == job.EXIT_OK
-    assert admits() is False                                 # released
+    assert admits(second) is False                           # released (and nothing can be recorded now)
     assert job.main(["reopen"]) == job.EXIT_OK
-    assert admits() is True
+    third = defer(store, identity="wamid.grant.reopened", reason=handover.REASON_ACCEPTED)
+    assert admits(third) is True
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1743,7 +1775,8 @@ def test_retirement_needs_a_stop_record_that_names_the_deployment(configured, st
             handover.retire_worker(db, tenant_id=store.tenant_id, name="worker-gone",
                                    by="owner", reason="gone", evidence=sentence_only)
         assert "stop_record" in str(caught.value)
-        elsewhere = dict(STOP_EVIDENCE, stop_record='[{"deployment": "some-other-deploy"}]')
+        elsewhere = dict(STOP_EVIDENCE, stop_record=stop_record_for(
+            "some-other-deploy", observed_at=STOP_EVIDENCE["observed_at"]))
         with pytest.raises(handover.RetirementRefused) as caught:
             handover.retire_worker(db, tenant_id=store.tenant_id, name="worker-gone",
                                    by="owner", reason="gone", evidence=elsewhere)
@@ -1759,3 +1792,543 @@ def test_retirement_needs_a_stop_record_that_names_the_deployment(configured, st
     assert worker.retirement_evidence["stop_record"] == STOP_EVIDENCE["stop_record"]
     assert worker.retirement_evidence["stop_record_sha256"] == hashlib.sha256(
         STOP_EVIDENCE["stop_record"].encode()).hexdigest()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Closure round: the grant re-checked at admission, a terminal is not an
+# answer, both lock orders of release-versus-acceptance, and a stop record
+# that has to say what it says.
+# ═════════════════════════════════════════════════════════════════════════════
+
+from sqlalchemy import text as sa_text  # noqa: E402
+
+from core.commerce_runtime import contracts as rc  # noqa: E402
+from core.commerce_runtime import handover_models as hm  # noqa: E402
+from tests.commerce_reliability.test_commerce_runtime_pilot_pg import rejected  # noqa: E402
+
+CONNECTION_REF_OF = "wa:{}"
+
+
+def pending_entry(store: Store, identity: str, *, reason: str = handover.REASON_ACCEPTED) -> Any:
+    """A pending obligation on this merchant's own connection reference — the
+    same reference the runtime admits turns under, so a turn and its record
+    bind to each other exactly as the seam records them."""
+    db = store.session()
+    try:
+        record = handover.record_inbound(
+            db, tenant_id=store.tenant_id, phone_number_id=store.phone_id,
+            channel_connection_ref=CONNECTION_REF_OF.format(store.connection_id), recipient=PHONE,
+            provider_message_id=identity,
+            payload={"text": QUESTION, "type": "text", "raw": {"id": identity, "type": "text",
+                                                               "text": {"body": QUESTION}}},
+            reason=reason, barrier_generation=0)
+        assert record is not None and record.pending
+        return record
+    finally:
+        db.close()
+
+
+def entry_state(store: Store, entry_id: int) -> Tuple[str, Optional[str], Dict[str, Any]]:
+    with store.engine.connect() as conn:
+        row = conn.execute(sa_text(
+            f"SELECT state, disposition, disposition_evidence FROM {hm.DEFERRED_TABLE} "
+            f"WHERE id = :id"), {"id": int(entry_id)}).mappings().one()
+    return str(row["state"]), row["disposition"], dict(row["disposition_evidence"] or {})
+
+
+def run_turn_with(store: Store, *, provider_message_id: str, transport: Any = None,
+                  anthropic: Any = None) -> entry.TurnReport:
+    """The real runtime for this merchant's customer, with the two doubles chosen."""
+    return entry.run_commerce_runtime_turn(
+        engine=store.engine, session_factory=store.session_factory,
+        tenant_id=store.tenant_id, conversation_id=store.conversation_id,
+        connection_ref=CONNECTION_REF_OF.format(store.connection_id),
+        connection_id=str(store.connection_id),
+        customer_id=store.customer_id, normalized_customer_phone=PHONE,
+        provider_message_id=provider_message_id, inbound_text=QUESTION,
+        inbound_metadata={"source": "closure-round"},
+        transport=transport if transport is not None
+        else Transport([accepted("wamid.out." + uuid.uuid4().hex[:8])]),
+        instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+        budget=ac.LoopBudget(max_steps=3, max_tool_calls=4, tool_timeout_seconds=10.0,
+                             provider_timeout_seconds=15.0, deadline_seconds=45.0),
+        anthropic_provider=anthropic if anthropic is not None
+        else ScriptedAnthropic([step([reply("تفضل", call_id="r1")])]),
+    )
+
+
+def admitted_for(store: Store, identity: str) -> Any:
+    """The runtime turn admitted for ``identity`` under this merchant's own
+    connection reference (the one ``pending_entry`` and ``run_turn_with`` use)."""
+    return recovery.admitted_turn_for(tenant_id=store.tenant_id,
+                                      phone_number_id=str(store.connection_id),
+                                      provider_message_id=identity, engine=store.engine)
+
+
+def terminal_outcomes(store: Store, identity: str) -> Tuple[str, str, str]:
+    found = admitted_for(store, identity)
+    assert found is not None and found.finished
+    with store.engine.connect() as conn:
+        row = conn.execute(sa_text(
+            "SELECT processing_outcome, transport_outcome, customer_reach "
+            "FROM commerce_runtime_turn_terminals WHERE turn_id = :id"),
+            {"id": int(found.turn_id)}).one()
+    return tuple(str(v) for v in row)
+
+
+def wait_for(thread: threading.Thread, *, seconds: float) -> bool:
+    thread.join(seconds)
+    return not thread.is_alive()
+
+
+# ── D: the grant is checked again inside the admitting transaction ───────────
+
+
+def test_a_disposition_that_committed_first_withdraws_the_grant_at_admission(configured, store):
+    """Reproduction of the closure finding, on real PostgreSQL: a grant captured
+    for a pending entry while draining; the operator disposes of the entry;
+    the admission check for that grant, run on the admitting connection, is
+    false — pending count is zero **and** the callback says no."""
+    record = pending_entry(store, "wamid.grant.withdrawn")
+    drain_and_converge(store)
+    claim = dict(entry_id=record.id, channel_connection_ref=record.channel_connection_ref,
+                 provider_message_id=record.provider_message_id)
+
+    with store.engine.begin() as conn:
+        assert handover.admits_recovery_on(conn, tenant_id=store.tenant_id, **claim) is True
+
+    closed = dispose(store, record.id, "not_required",
+                     {"authorized_by": "owner", "why": "withdrawn while draining"})
+    assert closed.disposed == (record.id,), closed.refused
+    assert handover.pending_count(store.session(), tenant_id=store.tenant_id) == 0
+
+    with store.engine.begin() as conn:
+        assert handover.admits_recovery_on(conn, tenant_id=store.tenant_id, **claim) is False
+
+
+def test_an_admission_holding_the_entry_makes_the_disposition_wait_and_then_refuse(configured, store):
+    """Order one, forced: the admission transaction has passed the grant check
+    (the entry row is locked, the shared tenant lock held) and inserts its
+    turn; a disposition started meanwhile blocks on the tenant lock — observed,
+    not assumed — and once the admission commits it finds an admitted,
+    unfinished turn and refuses by name."""
+    record = pending_entry(store, "wamid.grant.admitted.first")
+    drain_and_converge(store)
+    repository = LedgerRepository(store.engine).foundation
+    passed = threading.Event()
+    proceed = threading.Event()
+
+    def guard(conn: Any) -> bool:
+        ok = handover.admits_recovery_on(
+            conn, tenant_id=store.tenant_id, entry_id=record.id,
+            channel_connection_ref=record.channel_connection_ref,
+            provider_message_id=record.provider_message_id)
+        passed.set()
+        assert proceed.wait(20), "the test never released the admission"
+        return ok
+
+    admitted: Dict[str, Any] = {}
+
+    def admit() -> None:
+        admitted["turn"] = repository.admit_turn(
+            tenant_id=store.tenant_id, namespace=rc.Namespace.LIVE,
+            conversation_ref=f"whatsapp:{store.conversation_id}",
+            channel_connection_ref=record.channel_connection_ref,
+            provider_message_id=record.provider_message_id, admission_guard=guard)
+
+    admission = threading.Thread(target=admit, daemon=True)
+    admission.start()
+    assert passed.wait(20)
+
+    outcome: Dict[str, Any] = {}
+    disposition = threading.Thread(
+        target=lambda: outcome.update(result=dispose(
+            store, record.id, "not_required", {"authorized_by": "owner", "why": "late"})),
+        daemon=True)
+    disposition.start()
+    assert not wait_for(disposition, seconds=1.0)          # blocked behind the admission
+    proceed.set()
+    assert wait_for(admission, seconds=20) and admitted["turn"].duplicate is False
+    assert wait_for(disposition, seconds=20)
+    refused = outcome["result"].refused
+    assert refused == {record.id: f"turn_admitted_and_unfinished:{admitted['turn'].turn_id}"}
+    assert entry_state(store, record.id)[0] == "pending"
+
+
+def test_a_disposition_holding_the_entry_makes_the_admission_wait_and_then_refuse(configured, store):
+    """Order two, forced: the disposition transaction holds the tenant lock
+    and the entry row; the admission check started meanwhile blocks — observed
+    — and once the disposition commits it reads a disposed entry and refuses."""
+    record = pending_entry(store, "wamid.grant.disposed.first")
+    drain_and_converge(store)
+    db = store.session()
+    verdict: Dict[str, Any] = {}
+
+    def check() -> None:
+        with store.engine.begin() as conn:
+            verdict["admits"] = handover.admits_recovery_on(
+                conn, tenant_id=store.tenant_id, entry_id=record.id,
+                channel_connection_ref=record.channel_connection_ref,
+                provider_message_id=record.provider_message_id)
+
+    try:
+        with handover._locked(db, store.tenant_id) as session:      # noqa: SLF001
+            row = (session.query(hm.DeferredInbound)
+                   .filter(hm.DeferredInbound.id == record.id).with_for_update().one())
+            checker = threading.Thread(target=check, daemon=True)
+            checker.start()
+            assert not wait_for(checker, seconds=1.0)               # blocked behind the lock
+            row.state = hm.DEFERRED_DISPOSED
+            row.disposition = "not_required"
+            row.disposed_by = "owner"
+            row.disposed_at = handover._now()                        # noqa: SLF001
+            row.disposition_evidence = {"authorized_by": "owner", "why": "first"}
+            session.commit()
+        assert wait_for(checker, seconds=20)
+    finally:
+        db.close()
+    assert verdict["admits"] is False
+
+
+def test_a_live_grant_for_a_pending_entry_still_admits_while_draining(configured, store):
+    """The control: nothing disposed, barrier draining, the same check says yes
+    on the admitting connection and the turn is admitted."""
+    record = pending_entry(store, "wamid.grant.live")
+    drain_and_converge(store)
+    repository = LedgerRepository(store.engine).foundation
+    admitted = repository.admit_turn(
+        tenant_id=store.tenant_id, namespace=rc.Namespace.LIVE,
+        conversation_ref=f"whatsapp:{store.conversation_id}",
+        channel_connection_ref=record.channel_connection_ref,
+        provider_message_id=record.provider_message_id,
+        admission_guard=lambda conn: handover.admits_recovery_on(
+            conn, tenant_id=store.tenant_id, entry_id=record.id,
+            channel_connection_ref=record.channel_connection_ref,
+            provider_message_id=record.provider_message_id))
+    assert admitted.duplicate is False
+    assert admitted_for(store, "wamid.grant.live") is not None
+
+
+# ── E: a terminal is not an answer ───────────────────────────────────────────
+
+
+def test_a_failed_terminal_bound_to_the_entry_does_not_establish_answered(configured, store):
+    """Reproduction of the closure finding, on the real runtime: the model call
+    fails, the runtime records a terminal with ``processing=failed``,
+    ``transport=not_attempted`` and a customer reach that is not ``reached`` —
+    correctly bound to this entry and later than it. That terminal establishes
+    nothing:
+    ``answered`` and ``replayed`` are refused with the outcomes it recorded,
+    normal resolution refuses, recovery reports it, and the entry stays pending
+    until the operator closes it under the honest name."""
+    from services import commerce_runtime_recovery as runner
+
+    record = pending_entry(store, "wamid.failed.terminal")
+    report = run_turn_with(store, provider_message_id="wamid.failed.terminal",
+                           anthropic=ScriptedAnthropic([]))
+    assert report.reason != "ok"
+    processing, transport, reach = terminal_outcomes(store, "wamid.failed.terminal")
+    # The runtime's own vocabulary for a model failure with no send attempted:
+    # the customer was neither reached nor not reached — no reply existed.
+    assert (processing, transport, reach) == ("failed", "not_attempted", "not_applicable")
+
+    for kind, key in (("answered", "answered_by_provider_message_id"),
+                      ("replayed", "replayed_as_provider_message_id")):
+        refused = dispose(store, record.id, kind, {key: "wamid.failed.terminal"})
+        assert refused.disposed == ()
+        assert refused.refused[record.id] == ("terminal_is_not_an_accepted_reply:"
+                                             "processing=failed,transport=not_attempted,"
+                                             "customer_reach=not_applicable")
+
+    db = store.session()
+    try:
+        assert handover.resolve_inbound(
+            db, tenant_id=store.tenant_id, channel_connection_ref=record.channel_connection_ref,
+            provider_message_id="wamid.failed.terminal") is False
+        ok, why, _ = handover.verify_handling(db, tenant_id=store.tenant_id, entry_id=record.id)
+        assert ok is False and why.startswith("terminal_is_not_an_accepted_reply:")
+        assert handover.pending_count(db, tenant_id=store.tenant_id) == 1
+        for dry_run in (True, False):
+            outcome = runner.recover_tenant(db, tenant_id=store.tenant_id, dry_run=dry_run)
+            assert [o.outcome for o in outcome.outcomes] == [runner.SKIPPED_FINISHED_UNANSWERED]
+            assert "processing=failed" in outcome.outcomes[0].detail
+        assert handover.pending_count(db, tenant_id=store.tenant_id) == 1
+    finally:
+        db.close()
+
+    closed = dispose(store, record.id, "unanswered",
+                     {"authorized_by": "owner", "why": "the model call failed; closing knowingly"})
+    assert closed.disposed == (record.id,), closed.refused
+    state, disposition, evidence = entry_state(store, record.id)
+    assert (state, disposition) == ("disposed", "unanswered")
+    assert evidence["verified"]["runtime_terminal"].startswith("terminal_is_not_an_accepted_reply:")
+    assert evidence["verified"]["runtime_turn_id"] == admitted_for(store, "wamid.failed.terminal").turn_id
+
+
+def test_a_definitively_rejected_send_is_not_an_answer_either(configured, store):
+    record = pending_entry(store, "wamid.rejected.send")
+    run_turn_with(store, provider_message_id="wamid.rejected.send",
+                  transport=Transport([rejected()]))
+    processing, transport, reach = terminal_outcomes(store, "wamid.rejected.send")
+    assert transport == "rejected_definitive" and reach == "not_reached"
+    refused = dispose(store, record.id, "answered",
+                      {"answered_by_provider_message_id": "wamid.rejected.send"})
+    assert refused.refused[record.id].startswith("terminal_is_not_an_accepted_reply:")
+    assert handover.resolve_inbound(
+        store.session(), tenant_id=store.tenant_id,
+        channel_connection_ref=record.channel_connection_ref,
+        provider_message_id="wamid.rejected.send") is False
+    closed = dispose(store, record.id, "unanswered",
+                     {"authorized_by": "owner", "why": "the provider rejected the send"})
+    assert closed.disposed == (record.id,), closed.refused
+
+
+def test_an_accepted_reply_resolves_the_entry_and_records_delivery_separately(configured, store):
+    """The positive control: a completed turn whose reply the provider accepted
+    resolves its own entry, and what is stored says exactly that — accepted by
+    the provider, delivery **not** confirmed — rather than 'answered'."""
+    record = pending_entry(store, "wamid.accepted.reply")
+    run_turn_with(store, provider_message_id="wamid.accepted.reply")
+    processing, transport, reach = terminal_outcomes(store, "wamid.accepted.reply")
+    assert (processing, transport) == ("completed", "accepted")
+    db = store.session()
+    try:
+        ok, why, verified = handover.verify_handling(db, tenant_id=store.tenant_id,
+                                                     entry_id=record.id)
+        assert (ok, why) == (True, "")
+        assert verified["reply_accepted_by_provider"] is True
+        assert verified["customer_delivery_confirmed"] is (reach == "reached")
+        assert verified["customer_reach"] == reach
+        assert handover.resolve_inbound(
+            db, tenant_id=store.tenant_id, channel_connection_ref=record.channel_connection_ref,
+            provider_message_id="wamid.accepted.reply",
+            evidence={"closed_by": "test"}) is True
+    finally:
+        db.close()
+    state, _disposition, evidence = entry_state(store, record.id)
+    assert state == "resolved"
+    assert evidence["closed_by"] == "test"
+    assert evidence["verified"]["turn_id"] == admitted_for(store, "wamid.accepted.reply").turn_id
+    assert evidence["verified"]["transport_outcome"] == "accepted"
+
+
+def test_no_response_dispositions_are_refused_when_the_runtime_answered(configured, store):
+    """``not_required`` and ``unanswered`` are statements that nothing answered
+    this inbound. When the runtime's own turn did, both are refused; the
+    truthful disposition is ``answered``, and it is accepted."""
+    record = pending_entry(store, "wamid.answered.already")
+    run_turn_with(store, provider_message_id="wamid.answered.already")
+    for kind in ("not_required", "unanswered"):
+        refused = dispose(store, record.id, kind, {"authorized_by": "owner", "why": "x"})
+        assert refused.refused == {record.id: "the_runtime_answered_this_inbound"}
+    closed = dispose(store, record.id, "answered",
+                     {"answered_by_provider_message_id": "wamid.answered.already"})
+    assert closed.disposed == (record.id,), closed.refused
+
+
+def test_an_unknown_send_outcome_cannot_be_called_unanswered(configured, store):
+    """A send whose outcome nobody established may have arrived. It is not an
+    answer (transport is not ``accepted``) and it is not 'unanswered' either;
+    the entry stays pending, exactly as an unknown outcome blocks settlement."""
+    record = pending_entry(store, "wamid.unknown.send")
+    run_turn_with(store, provider_message_id="wamid.unknown.send",
+                  transport=Transport([timed_out()]))
+    _processing, transport, _reach = terminal_outcomes(store, "wamid.unknown.send")
+    assert transport == "unknown"
+    for kind in ("unanswered", "not_required"):
+        refused = dispose(store, record.id, kind, {"authorized_by": "owner", "why": "x"})
+        assert refused.refused == {record.id: "delivery_outcome_unknown"}
+    answered = dispose(store, record.id, "answered",
+                       {"answered_by_provider_message_id": "wamid.unknown.send"})
+    assert answered.refused[record.id].startswith("terminal_is_not_an_accepted_reply:")
+    assert entry_state(store, record.id)[0] == "pending"
+
+
+def test_resolution_refuses_an_entry_with_no_turn_at_all(configured, store):
+    record = pending_entry(store, "wamid.never.admitted")
+    db = store.session()
+    try:
+        assert handover.resolve_inbound(
+            db, tenant_id=store.tenant_id, channel_connection_ref=record.channel_connection_ref,
+            provider_message_id="wamid.never.admitted", evidence={"closed_by": "nobody"}) is False
+        assert handover.verify_handling(db, tenant_id=store.tenant_id, entry_id=record.id)[:2] \
+            == (False, "no_runtime_turn_for_that_identity")
+    finally:
+        db.close()
+    assert entry_state(store, record.id)[0] == "pending"
+
+
+# ── F: release and acceptance, both lock orders, forced ─────────────────────
+
+
+def _barrier_state(store: Store) -> str:
+    db = store.session()
+    try:
+        return handover.read_barrier(db, tenant_id=store.tenant_id).state
+    finally:
+        db.close()
+
+
+def _settled(store: Store) -> None:
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_OK
+    assert _barrier_state(store) == handover.STATE_SETTLED
+
+
+def test_a_release_waits_for_an_acceptance_holding_the_shared_lock_and_then_sees_it(
+        configured, store, monkeypatch):
+    """Order one: an acceptance transaction holds the shared tenant lock with
+    its row inserted and not yet committed; ``release`` started meanwhile
+    blocks on the exclusive lock — observed — and, once the acceptance commits,
+    refuses because the row is there. The barrier stays settled."""
+    _settled(store)
+    monkeypatch.setenv(job.ENV_EXPECTED_WORKERS, EXPECTED_WORKERS)
+    outcome: Dict[str, Any] = {}
+
+    def release() -> None:
+        db = store.session()
+        try:
+            outcome["result"] = handover.release(db, tenant_id=store.tenant_id,
+                                                 expected_workers=[EXPECTED_WORKERS])
+        finally:
+            db.close()
+
+    with store.engine.connect() as conn:
+        with conn.begin():
+            handover._take_advisory_lock(conn, tenant_id=store.tenant_id, exclusive=False)  # noqa: SLF001
+            conn.execute(sa_text(
+                f"INSERT INTO {hm.DEFERRED_TABLE} (tenant_id, namespace, channel_connection_ref, "
+                f"phone_number_id, recipient, provider_message_id, payload, reason, state) "
+                f"VALUES (:t, 'live', :ref, :pid, :to, :pmid, '{{}}'::jsonb, 'accepted', 'pending')"),
+                {"t": store.tenant_id, "ref": CONNECTION_REF_OF.format(store.connection_id),
+                 "pid": store.phone_id, "to": PHONE, "pmid": "wamid.race.accept.first"})
+            releasing = threading.Thread(target=release, daemon=True)
+            releasing.start()
+            assert not wait_for(releasing, seconds=1.0)     # blocked behind the shared lock
+        # committed: the acceptance is durable
+    assert wait_for(releasing, seconds=20)
+    result = outcome["result"]
+    assert result.released is False
+    assert "deferred_pending=1" in result.blockers
+    assert _barrier_state(store) == handover.STATE_SETTLED
+
+
+def test_an_acceptance_waits_for_a_release_holding_the_exclusive_lock_and_then_refuses(
+        configured, store):
+    """Order two: a release transaction holds the exclusive tenant lock with
+    the state written and not yet committed; ``record_inbound`` started
+    meanwhile blocks on the shared lock — observed — and, once the release
+    commits, raises ``BarrierReleased`` and writes nothing."""
+    _settled(store)
+    outcome: Dict[str, Any] = {}
+
+    def accept() -> None:
+        db = store.session()
+        try:
+            handover.record_inbound(
+                db, tenant_id=store.tenant_id, phone_number_id=store.phone_id,
+                channel_connection_ref=CONNECTION_REF_OF.format(store.connection_id),
+                recipient=PHONE, provider_message_id="wamid.race.release.first",
+                payload={"text": QUESTION}, reason=handover.REASON_ACCEPTED,
+                barrier_generation=1)
+            outcome["result"] = "recorded"
+        except handover.BarrierReleased as refused:
+            outcome["result"] = refused
+        finally:
+            db.close()
+
+    with store.engine.connect() as conn:
+        with conn.begin():
+            handover._take_advisory_lock(conn, tenant_id=store.tenant_id, exclusive=True)  # noqa: SLF001
+            conn.execute(sa_text(
+                f"UPDATE {hm.BARRIER_TABLE} SET state = 'released', released_at = now() "
+                f"WHERE tenant_id = :t AND namespace = 'live'"), {"t": store.tenant_id})
+            accepting = threading.Thread(target=accept, daemon=True)
+            accepting.start()
+            assert not wait_for(accepting, seconds=1.0)     # blocked behind the exclusive lock
+    assert wait_for(accepting, seconds=20)
+    assert isinstance(outcome["result"], handover.BarrierReleased)
+    assert handover.pending_count(store.session(), tenant_id=store.tenant_id) == 0
+    assert _barrier_state(store) == handover.STATE_RELEASED
+
+
+# ── G: the stop record has to say what it says ──────────────────────────────
+
+
+def _reporting(store: Store, name: str) -> None:
+    db = store.session()
+    try:
+        handover.note_worker(db, tenant_id=store.tenant_id, observed_generation=0,
+                             observed_state=handover.STATE_OPEN, name=name, force=True)
+    finally:
+        db.close()
+
+
+def _retire(store: Store, name: str, evidence: Dict[str, Any]) -> Any:
+    db = store.session()
+    try:
+        return handover.retire_worker(db, tenant_id=store.tenant_id, name=name, by="owner",
+                                      reason="gone", evidence=evidence)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("record, needle", [
+    (dict(state="running"), "stop_record_state_is_not_inactive:running"),
+    (dict(state="SUCCESS"), "stop_record_state_is_not_inactive:success"),
+    (dict(state="sleeping"), "stop_record_state_is_not_inactive:sleeping"),
+    (dict(active_replicas=1), "stop_record_reports_active_replicas:1"),
+    (dict(observed_at="2098-12-31T00:00:00+00:00"), "stop_record_observation_differs_from_observed_at"),
+])
+def test_a_stop_record_that_contradicts_the_stop_is_refused(configured, store, record, needle):
+    """Reproduction of the closure finding: a record naming the deployment with
+    ``status=RUNNING`` and ``replicas=1`` used to retire the worker on the
+    strength of its digest. The record is now read, and a record that says the
+    deployment is running — or that replicas are active, or that observes a
+    different moment — refuses the retirement by name."""
+    _reporting(store, "worker-contradicted")
+    fields = dict(observed_at=STOP_EVIDENCE["observed_at"])
+    fields.update(record)
+    contradictory = dict(STOP_EVIDENCE, stop_record=stop_record_for(
+        STOP_EVIDENCE["deployment"], **fields))
+    with pytest.raises(handover.RetirementRefused) as caught:
+        _retire(store, "worker-contradicted", contradictory)
+    assert needle in str(caught.value)
+    db = store.session()
+    try:
+        worker = next(w for w in handover.fleet(db, tenant_id=store.tenant_id)
+                      if w.worker_id == "worker-contradicted")
+    finally:
+        db.close()
+    assert worker.retired is False
+
+
+def test_a_free_text_stop_record_is_refused_whatever_it_says(configured, store):
+    _reporting(store, "worker-prose")
+    prose = dict(STOP_EVIDENCE, stop_record="railway:nahla-backend@deploy-1234 status=REMOVED replicas=0")
+    with pytest.raises(handover.RetirementRefused, match="stop_record_not_structured"):
+        _retire(store, "worker-prose", prose)
+
+
+def test_a_worker_that_named_its_deployment_is_retired_only_against_it(configured, store):
+    """A worker that reported as ``<deployment>/<replica>@host:pid`` carries
+    its deployment on its row. Evidence about another deployment retires
+    nothing; evidence about its own does."""
+    named = "deploy-9f1/0@host-a:41"
+    _reporting(store, named)
+    other = dict(STOP_EVIDENCE, deployment="deploy-000", stop_record=stop_record_for(
+        "deploy-000", observed_at=STOP_EVIDENCE["observed_at"]))
+    with pytest.raises(handover.RetirementRefused, match="deployment_does_not_match_the_worker_s_own:deploy-9f1"):
+        _retire(store, named, other)
+    own = dict(STOP_EVIDENCE, deployment="deploy-9f1", stop_record=stop_record_for(
+        "deploy-9f1", observed_at=STOP_EVIDENCE["observed_at"], incarnation="deploy-9f1/0"))
+    assert _retire(store, named, own) is True
+    db = store.session()
+    try:
+        worker = next(w for w in handover.fleet(db, tenant_id=store.tenant_id)
+                      if w.worker_id == named)
+    finally:
+        db.close()
+    assert worker.retired is True
+    assert worker.retirement_evidence["stop_record_state"] == "removed"
+    assert worker.retirement_evidence["stop_record_incarnation"] == "deploy-9f1/0"

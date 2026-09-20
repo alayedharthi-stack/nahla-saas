@@ -43,6 +43,7 @@ from core.commerce_runtime.handover_models import create_handover_tables  # noqa
 from core.commerce_runtime.models import RuntimeBase  # noqa: E402
 from database.models import Base, Tenant  # noqa: E402
 from scripts.operators import commerce_runtime_pilot_handover as job  # noqa: E402
+from tests.commerce_reliability.runtime_support import stop_record_for  # noqa: E402
 
 
 @event.listens_for(Base.metadata, "before_create")
@@ -172,9 +173,11 @@ STOP_EVIDENCE = {
     "stop_verified_by": "railway deployment status=REMOVED, replicas=0",
     "observed_at": "2099-01-01T00:00:00+00:00",
 }
-# The platform's own record of the stop, retained verbatim; it names the deployment.
-STOP_EVIDENCE["stop_record"] = (
-    '[{"deployment": "' + STOP_EVIDENCE["deployment"] + '", "status": "REMOVED"}]')
+# The platform's own record of the stop, structured as the stop-record job
+# writes it: this deployment, its incarnation, an inactive state, zero active
+# replicas, observed at the moment the retirement claims.
+STOP_EVIDENCE["stop_record"] = stop_record_for(
+    STOP_EVIDENCE["deployment"], observed_at=STOP_EVIDENCE["observed_at"])
 
 
 def report(db: Any, *, generation: Optional[int] = None, name: str = "worker-a",
@@ -381,8 +384,10 @@ def test_a_worker_that_reported_after_the_stop_was_observed_cannot_be_retired(
         configured, db):
     """It is demonstrably running, whatever the operator believes."""
     report(db, name="worker-live")
-    stale_evidence = dict(STOP_EVIDENCE,
-                          observed_at="2020-01-01T00:00:00+00:00")
+    observed = "2020-01-01T00:00:00+00:00"
+    stale_evidence = dict(STOP_EVIDENCE, observed_at=observed,
+                          stop_record=stop_record_for(STOP_EVIDENCE["deployment"],
+                                                      observed_at=observed))
     with pytest.raises(handover.RetirementRefused) as refused:
         handover.retire_worker(db, tenant_id=db.tenant_id, name="worker-live",
                                by="owner", reason="believed stopped",
@@ -699,18 +704,36 @@ def test_disposing_an_entry_that_does_not_exist_is_refused(configured, db):
                 "--by", "owner"]) == job.EXIT_BLOCKED
 
 
-def test_a_runtime_that_finishes_its_own_turn_resolves_the_record(configured, db):
-    """A resolved record stops counting; it is never resolved by time passing."""
+def test_a_record_is_resolved_only_by_a_verified_answer_never_by_a_caller(configured, db):
+    """``resolve_inbound`` is not a way to make a record stop counting: with no
+    runtime turn that answered this inbound it refuses and the record stays
+    pending, however many times it is asked. Closing it without an answer is an
+    operator's disposition under its honest name, and that is what stops the
+    count. (The positive case — a finished turn with an accepted reply resolving
+    its own record — runs against the real runtime on PostgreSQL.)"""
     assert run(["drain"]) == job.EXIT_OK
     defer(db, identity="wamid.finished")
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
-    assert handover.resolve_inbound(db, tenant_id=db.tenant_id,
-                                    channel_connection_ref="wa:PID",
-                                    provider_message_id="wamid.finished") is True
+    for _ in range(2):
+        assert handover.resolve_inbound(db, tenant_id=db.tenant_id,
+                                        channel_connection_ref="wa:PID",
+                                        provider_message_id="wamid.finished") is False
+        assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+    ok, why, _evidence = handover.verify_handling(
+        db, tenant_id=db.tenant_id,
+        entry_id=handover.pending_inbound(db, tenant_id=db.tenant_id)[0].id)
+    assert (ok, why) == (False, "no_runtime_turn_for_that_identity")
+    entry = handover.pending_inbound(db, tenant_id=db.tenant_id)[0]
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "unanswered",
+                "--evidence", json.dumps({"authorized_by": "owner",
+                                          "why": "nothing answered it; closing knowingly"}),
+                "--by", "owner"]) == job.EXIT_OK
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
-    assert handover.resolve_inbound(db, tenant_id=db.tenant_id,
-                                    channel_connection_ref="wa:PID",
-                                    provider_message_id="wamid.finished") is False
+    with handover._own_session(db) as session:
+        row = session.query(hm.DeferredInbound).filter(hm.DeferredInbound.id == entry.id).one()
+        assert (row.state, row.disposition) == ("disposed", "unanswered")
+        assert row.disposition_evidence["verified"]["runtime_terminal"] \
+            == "no_runtime_turn_for_that_identity"
 
 
 def test_disposed_history_does_not_consume_the_pending_capacity(configured, db,

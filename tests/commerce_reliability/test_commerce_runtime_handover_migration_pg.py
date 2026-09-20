@@ -318,6 +318,66 @@ def test_the_pending_index_with_the_right_name_but_no_predicate_is_refused(
              "index constraint ix_commerce_runtime_deferred_inbound_pending is")
 
 
+def test_a_check_constraint_differing_only_in_literal_case_is_refused(database_at_0109) -> None:
+    """``'OPEN'`` is not ``'open'``: a barrier that accepted the upper-case
+    word would accept a state the runtime never writes and refuse the one it
+    does. The comparison keeps what is inside the quotes byte for byte."""
+    dsn, engine = database_at_0109
+    _declared(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {hm.BARRIER_TABLE} DROP CONSTRAINT "
+                          f"ck_commerce_runtime_handover_barrier_state"))
+        conn.execute(text(f"ALTER TABLE {hm.BARRIER_TABLE} ADD CONSTRAINT "
+                          f"ck_commerce_runtime_handover_barrier_state "
+                          f"CHECK (state IN ('OPEN', 'draining', 'settled', 'released'))"))
+    _refused(dsn, engine, hm.BARRIER_TABLE,
+             "check constraint ck_commerce_runtime_handover_barrier_state is")
+
+
+def test_a_predicate_differing_only_in_literal_whitespace_is_refused(database_at_0109) -> None:
+    """``state = 'pending '`` indexes nothing the runtime ever writes; an index
+    with the right name over that predicate is not the pending index."""
+    dsn, engine = database_at_0109
+    _declared(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX ix_commerce_runtime_deferred_inbound_pending"))
+        conn.execute(text(f"CREATE INDEX ix_commerce_runtime_deferred_inbound_pending "
+                          f"ON {hm.DEFERRED_TABLE} (tenant_id, namespace) "
+                          f"WHERE state = 'pending '"))
+    _refused(dsn, engine, hm.DEFERRED_TABLE,
+             "index constraint ix_commerce_runtime_deferred_inbound_pending is")
+
+
+def test_spelling_outside_the_quotes_is_not_a_difference(database_at_0109) -> None:
+    """The same guarantee written with other keyword case and spacing — and
+    the same literals — reflects to the same definition and is accepted."""
+    dsn, engine = database_at_0109
+    _declared(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {hm.DEFERRED_TABLE} DROP CONSTRAINT "
+                          f"ck_commerce_runtime_deferred_inbound_state"))
+        conn.execute(text(f"ALTER TABLE {hm.DEFERRED_TABLE} ADD CONSTRAINT "
+                          f"ck_commerce_runtime_deferred_inbound_state "
+                          f"check  (  STATE   in ('pending','resolved','disposed')  )"))
+        conn.execute(text("DROP INDEX ix_commerce_runtime_deferred_inbound_pending"))
+        conn.execute(text(f"create index ix_commerce_runtime_deferred_inbound_pending "
+                          f"on {hm.DEFERRED_TABLE} (tenant_id,namespace) where STATE='pending'"))
+    module = _migration_module()
+    with engine.connect() as conn:
+        assert module._differences(conn, _table(hm.DEFERRED_TABLE)) == []
+    _alembic(dsn, THIS_REVISION)
+    assert THIS_REVISION in _current_revisions(engine)
+
+
+def test_the_normaliser_keeps_literals_and_folds_the_rest() -> None:
+    normalise = _migration_module()._normalized_sql
+    assert normalise("state IN ('open', 'draining')") == normalise("STATE  in ('open',   'draining')")
+    assert normalise("state IN ('open')") != normalise("state IN ('OPEN')")
+    assert normalise("x = 'a b'") != normalise("x = 'a  b'")
+    assert normalise('"State" = 1') != normalise('"state" = 1')
+    assert normalise("x = 'it''s'") == "x = 'it''s'"
+
+
 def test_a_primary_key_over_the_wrong_columns_is_refused(database_at_0109) -> None:
     dsn, engine = database_at_0109
     _declared(engine)
@@ -343,8 +403,11 @@ def test_an_undeclared_constraint_is_refused_rather_than_tolerated(database_at_0
 # runtime alone
 # ═════════════════════════════════════════════════════════════════════════════
 
+import datetime as _dt
 import os
+import re
 import tempfile
+import uuid
 
 from scripts.operators import commerce_runtime_pilot_migration_contract as contract
 
@@ -380,6 +443,20 @@ def sibling_location():
     if _script_has(ADDRESS_REVISION):
         yield None, "customer_address_provenance"
         return
+    actual = os.environ.get(ACTUAL_SIBLING_ENV, "").strip()
+    if actual:
+        # The **actual** address revision from #1096, copied into an isolated
+        # version location: the proof then runs against the real table, the
+        # real foreign keys and the real indexes, not a stand-in.
+        with open(actual, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        found = re.search(r'^_TABLE\s*=\s*"([^"]+)"', source, re.M)
+        with tempfile.TemporaryDirectory() as folder:
+            with open(os.path.join(folder, os.path.basename(actual)), "w",
+                      encoding="utf-8") as handle:
+                handle.write(source)
+            yield folder, (found.group(1) if found else "customer_address_provenance")
+        return
     with tempfile.TemporaryDirectory() as folder:
         with open(os.path.join(folder, "0110_stand_in_address_sibling.py"), "w",
                   encoding="utf-8") as handle:
@@ -393,6 +470,55 @@ def sibling_location():
                 "def downgrade() -> None:\n"
                 f'    op.drop_table("{STAND_IN_TABLE}")\n')
         yield folder, STAND_IN_TABLE
+
+
+# Point this at #1096's real ``0110_customer_address_provenance.py`` to run the
+# sibling proofs against the actual address revision instead of the stand-in.
+ACTUAL_SIBLING_ENV = "NAHLA_ADDRESS_SIBLING_MIGRATION"
+
+
+def _seed_row(conn, table_name: str, *, seen=None) -> int:
+    """Insert one row into ``table_name``, satisfying its NOT NULL columns and
+    foreign keys with the smallest values that fit — recursively for the
+    tables it references — and return its id. Generic on purpose: the address
+    table is #1096's to define, and this proof only has to put real rows into
+    whatever it defines and see them survive the runtime's rollback."""
+    from sqlalchemy import MetaData, Table, insert, select
+    from sqlalchemy import Boolean, Date, DateTime, Integer, JSON, Numeric, Text, String
+    from sqlalchemy.dialects.postgresql import JSONB
+
+    seen = seen if seen is not None else set()
+    table = Table(table_name, MetaData(), autoload_with=conn)
+    values = {}
+    for column in table.columns:
+        if column.primary_key or column.nullable or column.server_default is not None:
+            continue
+        foreign = next(iter(column.foreign_keys), None)
+        if foreign is not None:
+            target = foreign.column.table.name
+            if target in seen:
+                continue
+            existing = conn.execute(select(foreign.column).limit(1)).scalar()
+            values[column.name] = existing if existing is not None else _seed_row(
+                conn, target, seen=seen | {table_name})
+            continue
+        kind = column.type
+        if isinstance(kind, (JSON, JSONB)):
+            values[column.name] = {}
+        elif isinstance(kind, Boolean):
+            values[column.name] = False
+        elif isinstance(kind, (Integer, Numeric)):
+            values[column.name] = 1
+        elif isinstance(kind, DateTime):
+            values[column.name] = _dt.datetime.now(_dt.timezone.utc)
+        elif isinstance(kind, Date):
+            values[column.name] = _dt.date.today()
+        elif isinstance(kind, (String, Text)):
+            values[column.name] = f"seed-{uuid.uuid4().hex[:8]}"
+        else:
+            values[column.name] = f"seed-{uuid.uuid4().hex[:8]}"
+    pk = next(iter(table.primary_key.columns))
+    return int(conn.execute(insert(table).values(**values).returning(pk)).scalar_one())
 
 
 def _alembic_with(dsn: str, revision: str, *, extra_location, downgrade: bool = False) -> None:
@@ -433,6 +559,12 @@ def test_the_siblings_apply_in_either_order_and_the_runtime_rolls_back_alone(
     # database's own account of itself.
     assert contract.already_applied(frozenset(_current_revisions(engine)))
 
+    # Address data lives in the sibling's table before the runtime rolls back.
+    with engine.begin() as conn:
+        seeded = _seed_row(conn, address_table)
+        before = conn.execute(text(f'SELECT COUNT(*) FROM "{address_table}"')).scalar_one()
+    assert before == 1
+
     # The one runtime-only rollback spelling.
     argv = contract.build_downgrade_argv(python_executable="python")
     target = argv[-1]
@@ -445,6 +577,9 @@ def test_the_siblings_apply_in_either_order_and_the_runtime_rolls_back_alone(
     assert set(LEDGER_RELATIONS) <= remaining
     assert _current_revisions(engine) == {ADDRESS_REVISION}  # ...and its revision stands
     assert contract.start_state_accepted(frozenset(_current_revisions(engine)))
+    with engine.connect() as conn:                          # ...and its rows are intact
+        rows = conn.execute(text(f'SELECT id FROM "{address_table}"')).scalars().all()
+    assert rows == [seeded]
 
 
 def test_the_common_ancestor_spellings_would_take_the_sibling_with_them(

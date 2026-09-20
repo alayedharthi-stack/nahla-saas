@@ -106,8 +106,32 @@ _last_heartbeat: Dict[Tuple[int, int], float] = {}
 
 
 def worker_id() -> str:
-    """This process, named the same way for the whole of its life."""
-    return f"{socket.gethostname()}:{os.getpid()}"
+    """This process, named the same way for the whole of its life.
+
+    When the platform that runs it names the deployment and the replica
+    (Railway sets ``RAILWAY_DEPLOYMENT_ID`` and ``RAILWAY_REPLICA_ID``), the
+    identity carries them: ``<deployment>/<replica>@<host>:<pid>``. That is what
+    lets a retirement be checked against the deployment the worker actually
+    belonged to rather than against whatever the operator typed.
+    """
+    base = f"{socket.gethostname()}:{os.getpid()}"
+    deployment = str(os.environ.get("RAILWAY_DEPLOYMENT_ID", "") or "").strip()
+    if not deployment:
+        return base
+    replica = str(os.environ.get("RAILWAY_REPLICA_ID", "") or "").strip() or "0"
+    return f"{deployment}/{replica}@{base}"
+
+
+def worker_deployment(identity: Any) -> Optional[str]:
+    """The deployment a worker id names, or ``None`` for a bare ``host:pid``."""
+    text = str(identity or "").strip()
+    if "@" not in text:
+        return None
+    head = text.split("@", 1)[0]
+    if "/" not in head:
+        return None
+    deployment = head.split("/", 1)[0].strip()
+    return deployment or None
 
 
 def _now() -> _dt.datetime:
@@ -411,8 +435,10 @@ def admits_new_work_on(conn: Any, *, tenant_id: int) -> bool:
         return False
 
 
-def admits_recovery_on(conn: Any, *, tenant_id: int) -> bool:
-    """Whether **accepted** work may be admitted, read on the caller's connection.
+def admits_recovery_on(conn: Any, *, tenant_id: int, entry_id: Optional[int] = None,
+                       channel_connection_ref: Optional[str] = None,
+                       provider_message_id: Optional[str] = None) -> bool:
+    """Whether **this accepted entry** may be admitted, read on the caller's connection.
 
     The form a recovery replay's admission uses. A drain stops new work; an
     inbound the provider was already told we had is not new work, and refusing
@@ -420,7 +446,17 @@ def admits_recovery_on(conn: Any, *, tenant_id: int) -> bool:
     open *or draining* admits it, ordered against a transition by the same
     shared lock as :func:`admits_new_work_on`. Settled and released do not: a
     settlement has been signed off and a release has been verified, and neither
-    may be admitted over. Fails **closed**.
+    may be admitted over.
+
+    The grant that brought the caller here was checked against the durable
+    record *before* admission; it is checked **again here, on the admitting
+    transaction's own connection**, because what authorises an exception to a
+    drain is the pending obligation, and an operator may have disposed of it in
+    between. The entry row is locked for the rest of the admission transaction
+    and has to name this tenant, this channel connection and this provider
+    message id and still be pending; otherwise nothing is admitted. A
+    disposition and an admission of the same entry are therefore serialised by
+    the database: whichever commits second sees the other. Fails **closed**.
     """
     from sqlalchemy import text as _text  # noqa: PLC0415
 
@@ -431,10 +467,34 @@ def admits_recovery_on(conn: Any, *, tenant_id: int) -> bool:
                   f"WHERE tenant_id = :tenant AND namespace = :ns"),
             {"tenant": int(tenant_id), "ns": NAMESPACE},
         ).scalar_one_or_none()
-        return state is None or str(state) in (STATE_OPEN, STATE_DRAINING)
+        if not (state is None or str(state) in (STATE_OPEN, STATE_DRAINING)):
+            return False
+        if entry_id is None:
+            # No grant named an entry: this is not a recovery admission at all.
+            return False
+        locking = " FOR UPDATE" if _dialect_of(conn) == "postgresql" else ""
+        entry = conn.execute(
+            _text(f"SELECT tenant_id, channel_connection_ref, provider_message_id, state "
+                  f"FROM {hm.DEFERRED_TABLE} WHERE id = :id AND namespace = :ns{locking}"),
+            {"id": int(entry_id), "ns": NAMESPACE},
+        ).mappings().first()
+        if entry is None:
+            return False
+        if int(entry["tenant_id"]) != int(tenant_id):
+            return False
+        if str(entry["channel_connection_ref"]) != str(channel_connection_ref or "").strip():
+            return False
+        if str(entry["provider_message_id"]) != str(provider_message_id or "").strip():
+            return False
+        if str(entry["state"]) != hm.DEFERRED_PENDING:
+            logger.warning("[COMMERCE_RUNTIME_HANDOVER] recovery grant withdrawn before "
+                           "admission tenant=%s entry=%s state=%s — refusing",
+                           tenant_id, entry_id, entry["state"])
+            return False
+        return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[COMMERCE_RUNTIME_HANDOVER] barrier unreadable on the recovery "
-                       "admission connection tenant=%s error=%s — refusing",
+        logger.warning("[COMMERCE_RUNTIME_HANDOVER] barrier or entry unreadable on the "
+                       "recovery admission connection tenant=%s error=%s — refusing",
                        tenant_id, type(exc).__name__)
         return False
 
@@ -883,9 +943,76 @@ RETIREMENT_EVIDENCE_KEYS: Tuple[str, ...] = (
 # A stop record is retained on the worker row, so it is bounded.
 STOP_RECORD_MAX_BYTES = 64 * 1024
 
+# What the platform's own record of a stop has to contain before it counts. It
+# is a structured document — the operator captures the platform's answer and
+# the operator tooling shapes it — because a free-text listing can say
+# "RUNNING" about the very deployment it is offered as proof of stopping.
+STOP_RECORD_REQUIRED_KEYS: Tuple[str, ...] = (
+    "deployment",       # the exact deployment identity the record is about
+    "incarnation",      # the process/replica incarnation of that deployment
+    "state",            # the platform's state word for it, as captured
+    "active_replicas",  # how many replicas of it the platform reports running
+    "observed_at",      # when the platform was asked, ISO-8601
+    "source",           # how it was asked: the command or API query
+)
+# A state word the platform uses for a deployment or process that is no longer
+# running. Anything else — running, deploying, sleeping, an unknown word — is
+# not evidence of a stop and is refused by name.
+STOP_RECORD_INACTIVE_STATES = frozenset({
+    "stopped", "removed", "exited", "crashed", "failed", "terminated", "inactive",
+    "dead", "skipped",
+})
+
 
 class RetirementRefused(ValueError):
     """The evidence offered does not establish that this worker stopped."""
+
+
+def _validated_stop_record(record: str, *, deployment: str,
+                           observed: _dt.datetime) -> Dict[str, Any]:
+    """The platform's stop record, checked for what it actually says.
+
+    A digest proves which bytes were retained, not that a process stopped. So
+    the record is read: it has to be a structured document about **this**
+    deployment, naming the incarnation, carrying a state word the platform uses
+    for something no longer running, reporting **zero** active replicas, and
+    observed at the moment the retirement claims. A record that says the
+    deployment is running is a contradiction and is refused as one.
+    """
+    import json  # noqa: PLC0415
+
+    try:
+        document = json.loads(record)
+    except ValueError as exc:
+        raise RetirementRefused("stop_record_not_structured") from exc
+    if not isinstance(document, dict):
+        raise RetirementRefused("stop_record_not_structured")
+    missing = [key for key in STOP_RECORD_REQUIRED_KEYS
+               if document.get(key) is None or str(document.get(key)).strip() == ""]
+    if missing:
+        raise RetirementRefused(f"stop_record_missing:{','.join(missing)}")
+    if str(document["deployment"]).strip() != deployment:
+        # The record has to be *about* this deployment. A capture of some
+        # other deployment proves nothing about this one.
+        raise RetirementRefused("stop_record_does_not_name_the_deployment")
+    state = str(document["state"]).strip().lower()
+    if state not in STOP_RECORD_INACTIVE_STATES:
+        raise RetirementRefused(f"stop_record_state_is_not_inactive:{state}")
+    try:
+        replicas = int(document["active_replicas"])
+    except (TypeError, ValueError) as exc:
+        raise RetirementRefused("stop_record_active_replicas_not_an_integer") from exc
+    if replicas != 0:
+        raise RetirementRefused(f"stop_record_reports_active_replicas:{replicas}")
+    seen = _parse_moment(str(document["observed_at"]))
+    if seen is None:
+        raise RetirementRefused("stop_record_observed_at_invalid")
+    if seen != observed:
+        raise RetirementRefused("stop_record_observation_differs_from_observed_at")
+    raw = document.get("raw")
+    if raw is not None and not isinstance(raw, str):
+        raise RetirementRefused("stop_record_raw_must_be_text")
+    return {"state": state, "incarnation": str(document["incarnation"]).strip()}
 
 
 def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str,
@@ -927,14 +1054,18 @@ def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str,
     if len(encoded) > STOP_RECORD_MAX_BYTES:
         raise RetirementRefused(f"stop_record_too_large:{len(encoded)}>{STOP_RECORD_MAX_BYTES}")
     deployment = str(supplied["deployment"]).strip()
-    if deployment not in record:
-        # The record has to be *about* this deployment. A captured listing that
-        # never mentions it proves nothing about it.
-        raise RetirementRefused("stop_record_does_not_name_the_deployment")
+    bound = worker_deployment(identity)
+    if bound is not None and bound != deployment:
+        # The worker named the deployment it belonged to when it reported.
+        # Evidence about a different deployment retires nothing here.
+        raise RetirementRefused(f"deployment_does_not_match_the_worker_s_own:{bound}")
+    structured = _validated_stop_record(record, deployment=deployment, observed=observed)
     import hashlib  # noqa: PLC0415
 
     supplied["stop_record_sha256"] = hashlib.sha256(encoded).hexdigest()
     supplied["stop_record_bytes"] = len(encoded)
+    supplied["stop_record_state"] = structured["state"]
+    supplied["stop_record_incarnation"] = structured["incarnation"]
 
     with _locked(db, tenant_id) as session:
         row = (session.query(hm.HandoverWorker)
@@ -1121,17 +1252,126 @@ def resolve_inbound(db: Any, *, tenant_id: int, channel_connection_ref: str,
             if row is None:
                 session.rollback()
                 return False
+            # The caller's word is not what closes the row. The runtime's own
+            # turn for this identity is looked up on this database and has to
+            # be bound to this entry and to have **answered** it — the same
+            # validator an operator's disposition is held to. A terminal that
+            # records a failed or never-sent reply leaves the obligation
+            # pending, where settlement will count it and an operator can name
+            # honestly what happened to it.
+            ok, why, verified = _verified_answer(session, row, identity)
+            if not ok:
+                session.rollback()
+                logger.warning("[COMMERCE_RUNTIME_HANDOVER] deferred inbound stays pending "
+                               "tenant=%s entry=%s reason=%s", tenant_id, row.id, why)
+                return False
+            moment = _now()
             row.state = hm.DEFERRED_RESOLVED
-            row.resolved_at = _now()
-            row.updated_at = _now()
-            if evidence:
-                row.disposition_evidence = dict(evidence)
+            row.resolved_at = moment
+            row.updated_at = moment
+            row.disposition_evidence = dict(evidence or {}, verified=verified,
+                                            verified_at=moment.isoformat())
             session.commit()
             return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("[COMMERCE_RUNTIME_HANDOVER] could not resolve deferred inbound "
                        "tenant=%s error=%s", tenant_id, type(exc).__name__)
         return False
+
+
+def verify_handling(db: Any, *, tenant_id: int, entry_id: int) -> Tuple[bool, str, Dict[str, Any]]:
+    """Read-only: would this entry's own runtime turn resolve it right now?
+
+    The same validator :func:`resolve_inbound` applies before it writes, run
+    without writing — for a dry run, or for a report that has to say *why* an
+    entry with a finished turn is still pending.
+    """
+    with _own_session(db) as session:
+        row = (session.query(hm.DeferredInbound)
+               .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                       hm.DeferredInbound.namespace == NAMESPACE,
+                       hm.DeferredInbound.id == int(entry_id))
+               .first())
+        if row is None:
+            return False, "not_this_tenant_s_entry", {}
+        if str(row.state) != hm.DEFERRED_PENDING:
+            return False, f"already_{row.state}", {}
+        return _verified_answer(session, row, str(row.provider_message_id))
+
+
+def _verified_answer(session: Any, row: Any, identity: str) -> Tuple[bool, str, Dict[str, Any]]:
+    """The runtime turn for ``identity``, checked as an answer to ``row``."""
+    from core.commerce_runtime import recovery  # noqa: PLC0415
+
+    phone_number_id = str(row.channel_connection_ref).split(":", 1)[-1]
+    try:
+        # The same database this resolution is being written to, not whatever
+        # the process default points at.
+        found = recovery.admitted_turn_for(
+            tenant_id=int(row.tenant_id), phone_number_id=phone_number_id,
+            provider_message_id=identity, engine=_engine_of(session))
+    except Exception as exc:  # noqa: BLE001 - unverifiable is not verified
+        logger.warning("[COMMERCE_RUNTIME_HANDOVER] handling evidence unverifiable "
+                       "tenant=%s error=%s", row.tenant_id, type(exc).__name__)
+        return False, "evidence_could_not_be_verified", {}
+    return handling_verdict(session, row, found)
+
+
+# What a terminal has to say before it counts as having answered a customer.
+# "The turn finished" is a statement about the runtime; "the customer was
+# answered" is a statement about a reply the provider accepted. Only the second
+# closes an obligation, and a confirmed delivery is recorded as a third thing —
+# ``customer_reach`` — never inferred from either.
+ANSWER_PROCESSING_OUTCOME = "completed"
+ANSWER_TRANSPORT_OUTCOME = "accepted"
+CUSTOMER_REACHED = "reached"
+
+
+def handling_verdict(session: Any, row: Any, found: Any) -> Tuple[bool, str, Dict[str, Any]]:
+    """Whether runtime turn ``found`` **answered** deferred entry ``row``.
+
+    One validator for every path that closes an obligation on the strength of
+    a turn — normal resolution, recovery's finished-turn branch and an
+    operator's ``answered``/``replayed`` disposition all come through here. A
+    turn counts only when it exists, reached a terminal, is bound to this
+    entry's tenant, channel connection and customer, was recorded after the
+    inbound arrived, and its terminal records a completed turn whose reply the
+    provider **accepted**. A failed turn, a reply never attempted, a definitive
+    rejection or an abandoned turn is a terminal, not an answer, and it is named
+    as such so the caller can say what actually happened.
+    """
+    if found is None:
+        return False, "no_runtime_turn_for_that_identity", {}
+    if not getattr(found, "finished", False):
+        return False, "that_turn_has_no_terminal", {}
+    bound, why, binding = _turn_binding(session, row, found)
+    if not bound:
+        return False, why, {}
+    own = str(getattr(found, "provider_message_id", "") or "") == str(row.provider_message_id)
+    if not own:
+        # Another turn is claimed to have answered this inbound: an answer
+        # recorded before this message arrived did not answer it. The entry's
+        # **own** turn is the handling of this very inbound whenever it was
+        # recorded, so chronology against the bookkeeping row says nothing.
+        terminal_at = _aware(binding.get("terminal_recorded_at"))
+        arrived_at = _aware(row.created_at)
+        if terminal_at is None or arrived_at is None or terminal_at < arrived_at:
+            return False, "answering_terminal_predates_this_inbound", {}
+    processing = str(binding.get("processing_outcome") or "")
+    transport = str(binding.get("transport_outcome") or "")
+    reach = str(binding.get("customer_reach") or "")
+    if processing != ANSWER_PROCESSING_OUTCOME or transport != ANSWER_TRANSPORT_OUTCOME:
+        return False, (f"terminal_is_not_an_accepted_reply:processing={processing},"
+                       f"transport={transport},customer_reach={reach}"), {
+                           "turn_id": int(found.turn_id), "processing_outcome": processing,
+                           "transport_outcome": transport, "customer_reach": reach}
+    return True, "", dict(binding, turn_id=int(found.turn_id),
+                          verified_against="commerce_runtime_turn_terminals",
+                          reply_accepted_by_provider=True,
+                          # Provider acceptance is not delivery. What the
+                          # terminal knows about the customer is carried as it
+                          # is, and "confirmed" is true only when it says so.
+                          customer_delivery_confirmed=(reach == CUSTOMER_REACHED))
 
 
 def pending_inbound(db: Any, *, tenant_id: int, limit: int = 200) -> Tuple[DeferredRecord, ...]:
@@ -1169,6 +1409,10 @@ DISPOSITION_EVIDENCE_KEYS: Mapping[str, Tuple[str, ...]] = {
     "answered": ("answered_by_provider_message_id",),
     "superseded": ("superseded_by_provider_message_id",),
     "not_required": ("authorized_by", "why"),
+    # The customer was not answered and the operator closes the obligation
+    # knowing that. It asserts no delivery; it is refused when the runtime did
+    # in fact answer, because then the honest disposition is ``answered``.
+    "unanswered": ("authorized_by", "why"),
 }
 
 
@@ -1192,6 +1436,15 @@ def _verified_handling(session: Any, row: Any, kind: str,
         return False, f"evidence_missing:{','.join(missing)}", {}
 
     if kind == "not_required":
+        # No delivery was owed — an operator's judgement, which cannot stand
+        # when the runtime's own turn did in fact answer this inbound: then
+        # the record is ``answered``, whatever anyone decided about it. Nor
+        # when a send's outcome is unknown: it may have arrived.
+        ok, _why, found = _verified_answer(session, row, str(row.provider_message_id))
+        if ok:
+            return False, "the_runtime_answered_this_inbound", {}
+        if found.get("transport_outcome") == "unknown":
+            return False, "delivery_outcome_unknown", {}
         return True, "", {"authorized_by": str(evidence["authorized_by"]).strip(),
                           "why": str(evidence["why"]).strip()}
 
@@ -1225,39 +1478,69 @@ def _verified_handling(session: Any, row: Any, kind: str,
                           "superseded_by_provider_message_id": identity,
                           "superseded_by_created_at": later_at.isoformat()}
 
+    if kind == "unanswered":
+        # The one disposition that says the customer was **not** answered. It
+        # is refused when the runtime's own turn for this inbound did answer —
+        # then the truthful record is ``answered`` — and otherwise stores what
+        # the runtime's terminal, if any, actually recorded.
+        ok, why, found = _verified_answer(session, row, str(row.provider_message_id))
+        if ok:
+            return False, "the_runtime_answered_this_inbound", {}
+        if found.get("transport_outcome") == "unknown":
+            # A send nobody established the outcome of may have arrived.
+            # "Unanswered" would be a claim nobody can make; it stays pending.
+            return False, "delivery_outcome_unknown", {}
+        return True, "", {"authorized_by": str(evidence["authorized_by"]).strip(),
+                          "why": str(evidence["why"]).strip(),
+                          "runtime_terminal": why,
+                          **({"runtime_turn_id": found["turn_id"]} if found.get("turn_id") else {})}
+
     key = keys[0]
     identity = str(evidence[key]).strip()
     if kind == "replayed" and identity != str(row.provider_message_id):
         # A replay handles *this* inbound, under its own identity. Naming
         # another message is an "answered" claim, and is checked as one.
         return False, "replayed_identity_is_not_this_inbound", {}
-    phone_number_id = str(row.channel_connection_ref).split(":", 1)[-1]
-    try:
-        # The same database this disposition is being written to, not whatever
-        # the process default points at: evidence checked against one database
-        # and recorded in another is not evidence.
-        found = recovery.admitted_turn_for(
-            tenant_id=int(row.tenant_id), phone_number_id=phone_number_id,
-            provider_message_id=identity, engine=_engine_of(session))
-    except Exception as exc:  # noqa: BLE001 - unverifiable is not verified
-        logger.warning("[COMMERCE_RUNTIME_HANDOVER] disposition evidence unverifiable "
-                       "tenant=%s error=%s", row.tenant_id, type(exc).__name__)
-        return False, "evidence_could_not_be_verified", {}
-    if found is None:
-        return False, "no_runtime_turn_for_that_identity", {}
-    if not found.finished:
-        return False, "that_turn_has_no_terminal", {}
-    bound, why, binding = _turn_binding(session, row, found)
-    if not bound:
+    # ``answered`` and ``replayed`` both claim a runtime turn answered this
+    # customer. The claim is checked by the one validator every closing path
+    # uses: bound to this entry, recorded after it arrived, and a completed
+    # turn whose reply the provider accepted. A terminal alone is not an answer.
+    ok, why, verified = _verified_answer(session, row, identity)
+    if not ok:
         return False, why, {}
-    if kind == "answered":
-        terminal_at = _aware(binding.get("terminal_recorded_at"))
-        arrived_at = _aware(row.created_at)
-        if terminal_at is None or arrived_at is None or terminal_at < arrived_at:
-            # An answer recorded before this message arrived did not answer it.
-            return False, "answering_terminal_predates_this_inbound", {}
-    return True, "", dict(binding, **{key: identity, "turn_id": int(found.turn_id),
-                                      "verified_against": "commerce_runtime_turn_terminals"})
+    return True, "", dict(verified, **{key: identity})
+
+
+def _unfinished_turn_for(session: Any, row: Any) -> Optional[int]:
+    """The id of a runtime turn admitted for this entry's identity that has no
+    terminal yet, or ``None``. Read on the caller's own transaction. Raises
+    when it cannot be established — the caller must not treat that as "none".
+    """
+    from sqlalchemy import inspect as sa_inspect  # noqa: PLC0415
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    try:
+        turn = session.execute(sa_text(
+            "SELECT t.id FROM commerce_runtime_turns t "
+            "LEFT JOIN commerce_runtime_turn_terminals x "
+            "ON x.turn_id = t.id AND x.tenant_id = t.tenant_id AND x.namespace = t.namespace "
+            "WHERE t.tenant_id = :tenant AND t.namespace = :ns "
+            "AND t.channel_connection_ref = :ref AND t.provider_message_id = :pmid "
+            "AND x.turn_id IS NULL"),
+            {"tenant": int(row.tenant_id), "ns": NAMESPACE,
+             "ref": str(row.channel_connection_ref), "pmid": str(row.provider_message_id)},
+        ).scalar()
+    except Exception:
+        # A database without the runtime's turn tables cannot hold an
+        # admitted turn at all — the runtime refuses to admit without them —
+        # so that one case is "none". Anything else is unverifiable and is
+        # raised to the caller, which must not read it as "none".
+        session.rollback()
+        bind = session.get_bind() if hasattr(session, "get_bind") else session
+        if not sa_inspect(bind).has_table("commerce_runtime_turns"):
+            return None
+        raise
+    return None if turn is None else int(turn)
 
 
 def _turn_binding(session: Any, row: Any, found: Any) -> Tuple[bool, str, Dict[str, Any]]:
@@ -1303,17 +1586,23 @@ def _turn_binding(session: Any, row: Any, found: Any) -> Tuple[bool, str, Dict[s
             candidates = {pg.normalize_recipient(p) for p in phones if p}
             if pg.normalize_recipient(row.recipient) not in candidates:
                 return False, "turn_belongs_to_another_customer", {}
-            terminal_at = conn.execute(sa_text(
-                "SELECT recorded_at FROM commerce_runtime_turn_terminals "
+            terminal = conn.execute(sa_text(
+                "SELECT recorded_at, processing_outcome, transport_outcome, customer_reach "
+                "FROM commerce_runtime_turn_terminals "
                 "WHERE turn_id = :id AND tenant_id = :tenant"),
-                {"id": int(found.turn_id), "tenant": int(row.tenant_id)}).scalar()
+                {"id": int(found.turn_id), "tenant": int(row.tenant_id)}).mappings().first()
     except Exception as exc:  # noqa: BLE001 - unverifiable is not verified
         logger.warning("[COMMERCE_RUNTIME_HANDOVER] turn binding unverifiable tenant=%s "
                        "error=%s", row.tenant_id, type(exc).__name__)
         return False, "evidence_could_not_be_verified", {}
-    moment = _aware(terminal_at)
+    if terminal is None:
+        return False, "that_turn_has_no_terminal", {}
+    moment = _aware(terminal["recorded_at"])
     return True, "", {"app_conversation_id": int(app_conversation_id),
-                      "terminal_recorded_at": None if moment is None else moment.isoformat()}
+                      "terminal_recorded_at": None if moment is None else moment.isoformat(),
+                      "processing_outcome": str(terminal["processing_outcome"] or ""),
+                      "transport_outcome": str(terminal["transport_outcome"] or ""),
+                      "customer_reach": str(terminal["customer_reach"] or "")}
 
 
 def dispose_inbound(db: Any, *, tenant_id: int, entry_ids: Sequence[int], disposition: str,
@@ -1367,6 +1656,22 @@ def dispose_inbound(db: Any, *, tenant_id: int, entry_ids: Sequence[int], dispos
             if cutoff is not None and created is not None and created > cutoff:
                 refused[entry] = "arrived_after_the_inspection"
                 continue
+            # Read under the tenant's exclusive lock this transaction holds, so
+            # it is ordered against a recovery admission: an admission that
+            # committed first has a turn here, and this refuses; one that has
+            # not committed yet waits on the lock and then finds the row
+            # disposed. Nothing is disposed of underneath a running turn.
+            try:
+                running = _unfinished_turn_for(session, row)
+            except Exception as exc:  # noqa: BLE001 - unverifiable is not disposable
+                logger.warning("[COMMERCE_RUNTIME_HANDOVER] turn state unverifiable "
+                               "tenant=%s entry=%s error=%s", tenant_id, entry,
+                               type(exc).__name__)
+                refused[entry] = "turn_state_could_not_be_verified"
+                continue
+            if running is not None:
+                refused[entry] = f"turn_admitted_and_unfinished:{running}"
+                continue
             ok, why, verified = _verified_handling(session, row, kind, dict(evidence or {}))
             if not ok:
                 refused[entry] = why
@@ -1395,7 +1700,10 @@ __all__ = [
     "DISPOSITION_EVIDENCE_KEYS", "RETIREMENT_EVIDENCE_KEYS", "ReleaseState",
     "RetirementRefused", "expected_fleet", "release_state",
     "BLOCKER_INVENTORY_UNSTATED", "BarrierReleased", "ReleaseResult", "STATE_RELEASED",
-    "STOP_RECORD_MAX_BYTES", "admits_recovery_on", "fleet_blockers", "fleet_on", "release",
+    "STOP_RECORD_MAX_BYTES", "STOP_RECORD_REQUIRED_KEYS", "STOP_RECORD_INACTIVE_STATES",
+    "ANSWER_PROCESSING_OUTCOME", "ANSWER_TRANSPORT_OUTCOME", "CUSTOMER_REACHED",
+    "handling_verdict", "verify_handling", "worker_deployment",
+    "admits_recovery_on", "fleet_blockers", "fleet_on", "release",
     "accepted_inbound", "admits_new_work_on", "barrier_admits_new_work", "convergence",
     "dispose_inbound",
     "fleet", "note_worker", "open_drain", "pending_count", "pending_count_on",

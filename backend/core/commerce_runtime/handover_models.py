@@ -98,8 +98,12 @@ DISPOSITION_REPLAYED = "replayed"          # re-delivered and handled; evidence 
 DISPOSITION_ANSWERED = "answered"          # the customer was answered by another path
 DISPOSITION_SUPERSEDED = "superseded"      # a later message from the same customer replaced it
 DISPOSITION_NOT_REQUIRED = "not_required"  # established that no answer was owed
+# The customer was **not** answered and an operator closes the obligation
+# knowingly: the runtime's attempt failed or never sent, and nothing else will.
+# Named for what it is, so it can never be mistaken for a delivered answer.
+DISPOSITION_UNANSWERED = "unanswered"
 DISPOSITIONS = (DISPOSITION_REPLAYED, DISPOSITION_ANSWERED, DISPOSITION_SUPERSEDED,
-                DISPOSITION_NOT_REQUIRED)
+                DISPOSITION_NOT_REQUIRED, DISPOSITION_UNANSWERED)
 
 _NAMESPACE_SQL = "namespace IN ('live', 'shadow')"
 _BARRIER_STATE_SQL = "state IN ('open', 'draining', 'settled', 'released')"
@@ -110,7 +114,7 @@ _DEFERRED_STATE_SQL = "state IN ('pending', 'resolved', 'disposed')"
 _DISPOSITION_SQL = (
     "((state = 'disposed') = (disposition IS NOT NULL)) AND "
     "(disposition IS NULL OR disposition IN "
-    "('replayed', 'answered', 'superseded', 'not_required'))"
+    "('replayed', 'answered', 'superseded', 'not_required', 'unanswered'))"
 )
 
 
@@ -270,7 +274,7 @@ __all__ = [
     "BARRIER_STATES", "BARRIER_TABLE", "DEFERRED_DISPOSED", "DEFERRED_PENDING",
     "DEFERRED_REASONS", "DEFERRED_RESOLVED", "DEFERRED_STATES", "DEFERRED_TABLE",
     "DISPOSITIONS", "DISPOSITION_ANSWERED", "DISPOSITION_NOT_REQUIRED",
-    "DISPOSITION_REPLAYED", "DISPOSITION_SUPERSEDED", "DeferredInbound",
+    "DISPOSITION_REPLAYED", "DISPOSITION_SUPERSEDED", "DISPOSITION_UNANSWERED", "DeferredInbound",
     "HANDOVER_TABLES", "HANDOVER_TABLE_OBJECTS", "HandoverBarrier", "HandoverWorker",
     "REASON_ACCEPTED", "REASON_ADMISSION_REFUSED", "REASON_DRAIN_BUFFERED",
     "REASON_PROCESS_DRAINING", "REASON_SETTLED_WINDOW", "STATE_DRAINING", "STATE_OPEN",

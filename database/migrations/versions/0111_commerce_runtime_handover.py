@@ -140,8 +140,46 @@ def _reflected_shape(bind, name: str) -> dict:
 
 
 def _normalized_sql(value) -> str:
-    """One spelling for an expression, whichever side it was reflected from."""
-    return " ".join(str(value or "").split()).lower()
+    """One spelling for an expression — outside its quotes.
+
+    Keywords and identifiers are case-insensitive and whitespace between them
+    is not significant, so those are folded. A quoted literal or a quoted
+    identifier is neither: ``'open'`` and ``'OPEN'`` are different values and
+    ``'a b'`` and ``'a  b'`` are different values, so a check or a predicate
+    that differs only inside its quotes is a different guarantee. The
+    contents of every quoted segment are kept byte for byte (a doubled quote
+    inside it is part of it), and only the SQL around them is normalised.
+    """
+    text = str(value or "")
+    out = []
+    i, n = 0, len(text)
+    pending_space = False
+    while i < n:
+        ch = text[i]
+        if ch in ("'", '"'):
+            quote, j = ch, i + 1
+            while j < n:
+                if text[j] == quote:
+                    if j + 1 < n and text[j + 1] == quote:
+                        j += 2          # a doubled quote is part of the value
+                        continue
+                    break
+                j += 1
+            if pending_space and out:
+                out.append(" ")
+            pending_space = False
+            out.append(text[i:j + 1])
+            i = j + 1
+            continue
+        if ch.isspace():
+            pending_space = True
+        else:
+            if pending_space and out:
+                out.append(" ")
+            pending_space = False
+            out.append(ch.lower())
+        i += 1
+    return "".join(out).strip()
 
 
 def _guarantees(bind, name: str, schema=None) -> dict:

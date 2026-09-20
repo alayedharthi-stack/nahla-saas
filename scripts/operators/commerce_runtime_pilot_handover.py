@@ -29,18 +29,23 @@ step is a command:
                 generation **it observed** the first time it evaluates a route
                 after the change, so convergence is *observed* here rather than
                 asserted. ``status`` names the workers still behind or stale.
-                A worker that has stopped is retired explicitly:
+                A worker that has stopped is retired explicitly, on the
+                platform's own record of the stop, built by
+                commerce_runtime_worker_stop_record from the captured
+                deployment listing (it refuses while the deployment is active):
 
                 python -m ... handover retire --worker <id> \\
-                    --by "<operator>" --reason "terminated in deploy 1234" \\
-                    --evidence '{"deployment": "...", "stop_verified_by": "...",
-                                 "observed_at": "..."}' \\
-                    --stop-record /path/to/captured-deployment-listing.json
+                    --by "<operator>" --reason "removed in the rollout" \\
+                    --evidence '{"stop_verified_by": "railway deployment list: REMOVED"}' \\
+                    --stop-record /tmp/stop-record.json
 
                 Silence never retires a worker. A stale one blocks settlement
-                until somebody says, on the record, that it is gone — and shows
-                the platform's own record of the stop, which is retained on the
-                worker row with its digest.
+                until somebody says, on the record, that it is gone — and the
+                record is read: it must name this deployment and incarnation,
+                say an inactive state and zero active replicas, and be observed
+                when claimed. A record that says RUNNING is refused. Stopping
+                and fencing the process is the operator's, against the
+                platform; what this job verifies is the record.
 
     3. STATUS   python -m ... commerce_runtime_pilot_handover status
                 Shows, per tenant: barrier state and generation, worker
@@ -371,6 +376,19 @@ def cmd_retire(db: Any, tenants: Sequence[int], args: Any) -> int:
                    path=stop_record_path, error=type(exc).__name__)
             return EXIT_USAGE
         evidence.setdefault("stop_record_source", stop_record_path)
+        # The record is structured (see commerce_runtime_worker_stop_record);
+        # the moment it was observed and the deployment it names are its own
+        # to state, so they are taken from it when the operator did not repeat
+        # them. Anything the operator *did* state is checked against it by
+        # retire_worker, not overwritten here.
+        try:
+            document = json.loads(evidence["stop_record"])
+        except ValueError:
+            document = None
+        if isinstance(document, dict):
+            for key in ("deployment", "observed_at"):
+                if not str(evidence.get(key) or "").strip() and document.get(key):
+                    evidence[key] = str(document[key])
 
     retired: List[int] = []
     try:
@@ -382,8 +400,10 @@ def cmd_retire(db: Any, tenants: Sequence[int], args: Any) -> int:
         result(RESULT_FAILED_PRECONDITION, reason="retirement_refused", detail=str(refused),
                required=list(handover.RETIREMENT_EVIDENCE_KEYS),
                hint="name the deployment, how the stop was verified, when it was "
-                    "observed, and pass the captured platform record with "
-                    "--stop-record; elapsed silence is not one of them")
+                    "observed, and pass the structured platform record built by "
+                    "commerce_runtime_worker_stop_record with --stop-record; a record "
+                    "that says the deployment is running is refused, and elapsed "
+                    "silence is not evidence")
         return EXIT_USAGE
     if not retired:
         result(RESULT_FAILED_PRECONDITION, reason="worker_not_found", worker=name)
@@ -639,7 +659,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Any:
     parser.add_argument("--entry", action="append", type=int, default=None,
                         help="a deferred entry id from 'status'; repeat for several")
     parser.add_argument("--disposition", default="",
-                        help="replayed | answered | superseded | not_required")
+                        help="replayed | answered | superseded | not_required | unanswered")
     parser.add_argument("--evidence", default="{}",
                         help="a JSON object recording how the entry was handled")
     parser.add_argument("--worker", default="", help="the worker id to retire")

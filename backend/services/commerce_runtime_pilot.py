@@ -884,8 +884,16 @@ async def _own_turn(
         if recovery_grant is not None:
             # Accepted work under a recovery grant: admitted while the barrier
             # is open or draining, refused while it is settled or released —
-            # read on this same connection, under the same shared lock.
-            return handover.admits_recovery_on(conn, tenant_id=int(tenant_id))
+            # read on this same connection, under the same shared lock. The
+            # grant's durable entry is locked and checked **here** as well: it
+            # must still be pending and still name this tenant, connection and
+            # identity, or an operator's disposition has withdrawn what the
+            # grant rested on and nothing is admitted.
+            return handover.admits_recovery_on(
+                conn, tenant_id=int(tenant_id),
+                entry_id=int(recovery_grant.entry_id),
+                channel_connection_ref=str(recovery_grant.channel_connection_ref),
+                provider_message_id=str(recovery_grant.provider_message_id))
         return handover.admits_new_work_on(conn, tenant_id=int(tenant_id))
 
     def run() -> Any:

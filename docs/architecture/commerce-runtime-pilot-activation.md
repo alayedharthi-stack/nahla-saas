@@ -310,26 +310,51 @@ states; a replica in the inventory that never wrote a row blocks, and an
 unstated inventory blocks. A worker that stops reporting is *stale* and blocks,
 and only an operator retires one, naming themselves, their reason, the
 deployment, how the stop was verified, when — and handing over the platform's
-own record of the stop, which is retained on the row with its digest. Shared
-admission locking orders this job against the workers that take it; it does not
-prove a fleet was rolled out or shut down, and the stop record is what the
-operator captured rather than something this platform fetched.
+own record of the stop. That record is **read, not merely retained**: it is a
+structured document about the exact deployment and incarnation, carrying a
+state word the platform uses for something no longer running and zero active
+replicas, observed at the moment the retirement claims; a record that says the
+deployment is running is refused as the contradiction it is, and a worker that
+named its own deployment when it reported can only be retired against that
+deployment. Shared admission locking orders this job against the workers that
+take it; it does not prove a fleet was rolled out or shut down. The platform
+verifies the record's identity and consistency; that the capture is the
+platform's genuine answer about that deployment at that moment remains the
+operator's, and the runbook says so where the procedure is written.
 
 **Disposition is per entry and evidenced — and bound to the entry.** Each
 deferred row is named by id and disposed of individually, with a disposition
-from a closed set (`replayed`, `answered`, `superseded`, `not_required`) and
-evidence checked against the records before the row closes. `replayed` names
-this entry's own provider message id and requires the runtime turn admitted for
-it to have reached a terminal; `answered` names another turn that must be the
-same tenant's, on the same channel connection, in a conversation bound to the
-same customer, with a terminal recorded no earlier than this message arrived —
-another conversation's terminal proves nothing about this one; `superseded`
-names a later entry for the same tenant, connection and recipient, later in
-arrival order — an older message replaces nothing. An entry that arrived after
-the operator last looked is not in their list and is not disposed of. Disposed
-and resolved rows stay as history and stop counting against the pending limit.
-An `unknown` delivery outcome still blocks settlement, is never replayed over,
-and is never resolved by elapsed time.
+from a closed set (`replayed`, `answered`, `superseded`, `not_required`,
+`unanswered`) and evidence checked against the records before the row closes.
+**A terminal is not an answer.** One validator decides, for every path that
+closes an obligation on the strength of a runtime turn — normal resolution when
+a turn finishes, recovery's finished-turn branch, and the `answered` and
+`replayed` dispositions — whether the turn answered the entry: it must exist,
+have a terminal, be bound to the same tenant, the same channel connection and a
+conversation of the same customer, be recorded no earlier than the message
+arrived when it is another message's turn, and its terminal must record a
+completed turn whose reply the provider **accepted**. A failed, never-attempted, rejected or abandoned reply is a
+terminal and not an answer: the obligation stays pending, counted by
+settlement, until an operator closes it under the honest name — `unanswered`,
+which is refused when the runtime did answer. Provider acceptance is recorded
+as acceptance; a confirmed delivery is a separate fact carried from the
+terminal's `customer_reach` and never inferred. `superseded` names a later
+entry for the same tenant, connection and recipient, later in arrival order — an
+older message replaces nothing. An entry whose turn is admitted and unfinished
+is not disposed of at all: the runtime owns it. An entry that arrived after the
+operator last looked is not in their list and is not disposed of. Disposed and
+resolved rows stay as history and stop counting against the pending limit. An
+`unknown` delivery outcome still blocks settlement, is never replayed over, and
+is never resolved by elapsed time.
+
+**A recovery grant is re-checked where it is used.** The runner states, for one
+replay, which accepted entry it is handing back; the seam honours it only for
+that identity with a pending durable record, and the admission transaction
+locks that entry row on its own connection and checks it again — still pending,
+still this tenant, connection and identity — before a turn is inserted. A
+disposition committed in between withdraws the grant, and a grant admitted in
+between makes the disposition refuse: the two are serialised by the database,
+in either order.
 
 **An acknowledgement is a promise.** Both webhook entry points acknowledge first
 and process in the background. For the legacy path that is right; for a
@@ -348,9 +373,17 @@ request's `X-Hub-Signature-256` verified — the legacy path's audit mode does n
 extend to the pilot — and otherwise the request is `503 pilot_scope_unauthenticated`
 with nothing recorded. **A released tenant:** after `release`, `503
 pilot_released`, nothing recorded, until the switch is off. **A nonce:** replay
-protection claims its nonce before anything is durable, so a process that dies
-in between leaves a nonce and no record; before a nonce alone answers 200, the
-route checks that every pilot-scoped message in the body is on record, and one
+protection claims its nonce before anything is durable, and a claim is not an
+acceptance. The nonce is written `claimed` and marked `completed` only once the
+route has finished deciding; a copy of the body that finds an open claim inside
+the in-flight lease is answered `503 replay_in_flight` rather than acknowledged
+on another request's behalf, a copy that finds a claim older than the lease
+takes it over as a first attempt — whatever the pilot flag or the barrier say by
+then, so a process that died between claim and record, a release, and a
+disablement in between cannot turn the retry into a `200` for a message nothing
+holds — and only a `completed` nonce is a replay. A refused request gives back
+only the claim it holds itself. And before a completed nonce alone answers 200,
+the route checks that every pilot-scoped message in the body is on record; one
 that is not is a first attempt. Concurrent and completed duplicates stay
 idempotent — the record is written once and the dispatcher's deduplication
 holds.

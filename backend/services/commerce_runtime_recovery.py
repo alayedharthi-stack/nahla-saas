@@ -103,7 +103,8 @@ def granted(record: Any) -> Iterator[RecoveryGrant]:
 
 # Outcomes, one per entry. Every one of them is a fact about that entry.
 REPLAYED = "replayed"                      # handed back to the dispatcher
-RESOLVED_ALREADY_FINISHED = "already_finished"   # a terminal existed; closed against it
+RESOLVED_ALREADY_FINISHED = "already_finished"   # an accepted reply existed; closed against it
+SKIPPED_FINISHED_UNANSWERED = "finished_unanswered"  # a terminal exists but it is not an answer
 SKIPPED_BARRIER_CLOSED = "barrier_closed"  # the tenant is not admitting work
 SKIPPED_IN_FLIGHT = "in_flight"            # another runner holds this entry
 SKIPPED_NOT_REPLAYABLE = "not_replayable"  # nothing stored that can be rebuilt
@@ -293,17 +294,29 @@ def recover_tenant(db: Any, *, tenant_id: int, limit: int = 50,
             provider_message_id=record.provider_message_id, engine=engine)
 
         if owned is not None and owned.finished:
-            # Completed work is never repeated. The obligation is closed
-            # against the terminal that completed it, which is the same check
-            # the runtime itself makes.
-            if not dry_run:
-                handover.resolve_inbound(
+            # Finished work is never repeated — both dedup boundaries would
+            # refuse it anyway. But a terminal is not an answer: the obligation
+            # is closed only when the runtime's turn is bound to this entry and
+            # its reply was accepted by the provider, checked by the same
+            # validator the runtime and the operator's dispositions use. A
+            # failed or never-sent reply leaves the entry pending, named, for
+            # an operator to dispose of honestly.
+            if dry_run:
+                ok, why, _verified = handover.verify_handling(
+                    db, tenant_id=int(tenant_id), entry_id=int(record.id))
+            else:
+                ok = handover.resolve_inbound(
                     db, tenant_id=int(tenant_id),
                     channel_connection_ref=record.channel_connection_ref,
                     provider_message_id=record.provider_message_id,
                     evidence={"terminal_for_turn_id": int(owned.turn_id),
                               "closed_by": "recovery"})
-            done(RESOLVED_ALREADY_FINISHED, f"turn={owned.turn_id}")
+                why = "" if ok else handover.verify_handling(
+                    db, tenant_id=int(tenant_id), entry_id=int(record.id))[1]
+            if ok:
+                done(RESOLVED_ALREADY_FINISHED, f"turn={owned.turn_id}")
+            else:
+                done(SKIPPED_FINISHED_UNANSWERED, f"turn={owned.turn_id} {why}".strip())
             continue
 
         if not admits:

@@ -592,3 +592,78 @@ def meta_webhook_request(body_payload, *, signature: str = "valid"):
 
     return Request({"type": "http", "method": "POST", "path": "/webhook/whatsapp",
                     "headers": headers, "query_string": b""}, receive=_receive)
+
+
+# ── Doubles shared by the acceptance, handover and route suites ──────────────
+
+
+class NonceRedis:
+    """Enough of Redis for the replay nonce: SET NX EX, GET, DEL and the two
+    compare-and-set scripts ``webhook_security`` runs through ``eval``.
+
+    The scripts are recognised by the name on their first line and performed
+    in Python; nothing here interprets Lua. ``clock`` is what the double reads
+    when the code under test asks for the current time through it — a test
+    that wants a claim to age moves it forward rather than sleeping.
+    """
+
+    def __init__(self) -> None:
+        self.keys: Dict[str, str] = {}
+        self.ttls: Dict[str, int] = {}
+        self.evals: List[str] = []
+
+    def set(self, key: str, value: str, nx: bool = False, ex: int = 0) -> Any:
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = str(value)
+        if ex:
+            self.ttls[key] = int(ex)
+        return True
+
+    def get(self, key: str) -> Any:
+        value = self.keys.get(key)
+        return None if value is None else value.encode("utf-8")
+
+    def delete(self, key: str) -> int:
+        self.ttls.pop(key, None)
+        return 1 if self.keys.pop(key, None) is not None else 0
+
+    def eval(self, script: str, numkeys: int, *args: Any) -> int:
+        name = script.splitlines()[0].strip()
+        self.evals.append(name)
+        key = str(args[0])
+        expected = str(args[1])
+        current = self.keys.get(key)
+        if name == "-- nahla:nonce_cas_set":
+            if current != expected:
+                return 0
+            ttl = self.ttls.get(key) or int(args[3])
+            self.keys[key] = str(args[2])
+            self.ttls[key] = int(ttl)
+            return 1
+        if name == "-- nahla:nonce_cas_del":
+            if current != expected:
+                return 0
+            return self.delete(key)
+        raise AssertionError(f"unexpected script {name!r}")
+
+
+def stop_record_for(deployment: str, *, observed_at: str, incarnation: Optional[str] = None,
+                    state: str = "removed", active_replicas: int = 0,
+                    source: str = "railway deployment list --service nahla-saas --json",
+                    raw: Optional[str] = None) -> str:
+    """A structured stop record as ``commerce_runtime_worker_stop_record`` writes one."""
+    import json as _json
+
+    record: Dict[str, Any] = {
+        "deployment": deployment,
+        "incarnation": incarnation or f"{deployment}/0",
+        "state": state,
+        "active_replicas": active_replicas,
+        "observed_at": observed_at,
+        "source": source,
+        "platform": "railway",
+    }
+    if raw is not None:
+        record["raw"] = raw
+    return _json.dumps(record, ensure_ascii=False, sort_keys=True)

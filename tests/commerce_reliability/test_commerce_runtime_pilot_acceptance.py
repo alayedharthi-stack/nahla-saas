@@ -250,6 +250,7 @@ def test_a_database_that_raises_is_not_an_acceptance(configured, db, monkeypatch
 # authentication decision.
 from tests.commerce_reliability.runtime_support import (  # noqa: E402
     META_TEST_APP_SECRET as APP_SECRET,
+    NonceRedis,
     meta_webhook_request as meta_request,
 )
 
@@ -407,20 +408,7 @@ def test_the_verified_connection_travels_into_persistence(configured, db):
 # ── A refusal the provider can retry ─────────────────────────────────────────
 
 
-class _Redis:
-    """Enough of Redis for the nonce: SET NX EX, DELETE."""
-
-    def __init__(self) -> None:
-        self.keys: Dict[str, str] = {}
-
-    def set(self, key: str, value: str, nx: bool = False, ex: int = 0) -> Any:
-        if nx and key in self.keys:
-            return None
-        self.keys[key] = value
-        return True
-
-    def delete(self, key: str) -> int:
-        return 1 if self.keys.pop(key, None) is not None else 0
+_Redis = NonceRedis   # SET NX EX, GET, DEL and the two compare-and-set scripts
 
 
 @pytest.fixture()
@@ -664,3 +652,203 @@ def test_after_release_a_new_inbound_is_refused_not_accepted_and_abandoned(
     response = call_meta(body(message("wamid.after.release")), spawned)
     assert response.status_code == 200 and spawned == ["webhook_meta"]
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
+# ── A nonce is a claim, not an acceptance ────────────────────────────────────
+#
+# The replay nonce is written ``claimed:<token>:<epoch>`` when a request takes
+# it and ``completed:<token>`` once that request has finished deciding. Only the
+# second is a replay. These cases drive the real Meta route with the real
+# signature evaluator, the real recorder on this database, and the nonce store
+# doubled by ``NonceRedis`` (SET NX EX, GET, DEL and the two compare-and-set
+# scripts); only the background spawn is observed.
+
+
+def _orphan_claim(seconds_ago: float, token: str = "deadprocess") -> str:
+    import time as _time
+
+    return f"claimed:{token}:{int(_time.time() - seconds_ago)}"
+
+
+def _fresh_claim(token: str = "otherrequest") -> str:
+    return _orphan_claim(0.0, token)
+
+
+def _nonce(store: Any, payload: Dict[str, Any]) -> Any:
+    import json as _json
+
+    return store.keys.get(_security.replay_nonce_key("meta", _json.dumps(payload).encode()))
+
+
+def _set_nonce(store: Any, payload: Dict[str, Any], value: str) -> None:
+    import json as _json
+
+    store.keys[_security.replay_nonce_key("meta", _json.dumps(payload).encode())] = value
+
+
+def test_an_orphaned_claim_older_than_the_lease_is_taken_over_as_a_first_attempt(
+        configured, db, bound, replay_protected):
+    """A process claimed the nonce and died before writing anything down. The
+    provider's identical retry finds a claim older than any request takes to
+    decide, takes it over, persists and processes — and leaves the nonce
+    completed under its own token."""
+    payload = body(message("wamid.orphan.claim"))
+    _set_nonce(replay_protected, payload, _orphan_claim(_security.REPLAY_IN_FLIGHT_LEASE_SECONDS + 5))
+
+    spawned: List[Any] = []
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200 and spawned == ["webhook_meta"]
+    assert [r.provider_message_id for r in handover.pending_inbound(db, tenant_id=db.tenant_id)] \
+        == ["wamid.orphan.claim"]
+    assert str(_nonce(replay_protected, payload)).startswith("completed:")
+    assert "deadprocess" not in str(_nonce(replay_protected, payload))
+
+    # Now it is a replay, and a replay of recorded work is a 200 that spawns nothing.
+    again = call_meta_protected(payload, spawned)
+    assert again.status_code == 200 and spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+
+
+def test_a_claim_still_in_flight_is_answered_retryable_not_acknowledged(
+        configured, db, bound, replay_protected):
+    """A copy of a body whose first copy is still deciding: nothing is known
+    about the outcome yet, so nothing is acknowledged on its behalf and nothing
+    is recorded or spawned by the copy. The first copy's claim is untouched."""
+    payload = body(message("wamid.in.flight"))
+    claim = _fresh_claim()
+    _set_nonce(replay_protected, payload, claim)
+
+    spawned: List[Any] = []
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 503
+    assert b"replay_in_flight" in bytes(response.body)
+    assert spawned == [] and handover.pending_count(db, tenant_id=db.tenant_id) == 0
+    assert _nonce(replay_protected, payload) == claim
+
+    # The first copy finishes: its completed marker turns the copy into a replay.
+    _set_nonce(replay_protected, payload, "completed:otherrequest")
+    recorded = acceptance.record_before_acknowledging(payload, session_factory=sessions(db),
+                                                      authenticated=True)
+    assert recorded.ok and recorded.recorded == ("wamid.in.flight",)
+    again = call_meta_protected(payload, spawned)
+    assert again.status_code == 200 and spawned == []
+
+
+def test_the_full_sequence_die_release_disable_retry_still_processes_the_message(
+        configured, db, bound, replay_protected, monkeypatch):
+    """The reviewer's sequence, end to end on the real route:
+
+    1. a valid signed request acquires the nonce; the process dies before the
+       durable acceptance;
+    2. with no pending record, the tenant is drained, settled and released;
+    3. the identical retry, pilot still enabled, is refused ``503
+       pilot_released`` — it took the orphaned claim over and gives back **its
+       own** claim on refusal, so no nonce is left behind;
+    4. the pilot is disabled as documented;
+    5. the identical retry is a first attempt: 200, processing scheduled. It is
+       never a ``200 replay`` for a message nothing holds.
+    """
+    from core.commerce_runtime import handover_models as hm
+
+    payload = body(message("wamid.die.release.disable"))
+    # 1. the dead process's claim, older than the in-flight lease
+    _set_nonce(replay_protected, payload, _orphan_claim(_security.REPLAY_IN_FLIGHT_LEASE_SECONDS + 30))
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+    # 2. nothing pending, so the handover completes through to release
+    handover.open_drain(db, tenant_id=db.tenant_id)
+    row = db.query(hm.HandoverBarrier).filter_by(tenant_id=db.tenant_id).one()
+    row.state = hm.STATE_RELEASED
+    db.commit()
+
+    # 3. the retry while enabled: refused, retryable, and the claim it took over
+    # is given back — the nonce does not survive to lie later.
+    spawned: List[Any] = []
+    refused = call_meta_protected(payload, spawned)
+    assert refused.status_code == 503 and b"pilot_released" in bytes(refused.body)
+    assert spawned == [] and handover.pending_count(db, tenant_id=db.tenant_id) == 0
+    assert _nonce(replay_protected, payload) is None
+
+    # 4. the documented switch
+    monkeypatch.delenv(pg.ENV_ENABLED)
+
+    # 5. the retry is a first attempt for the legacy path: not a replay
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200
+    assert bytes(response.body) == b'{"status":"ok"}'
+    assert spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+    assert str(_nonce(replay_protected, payload)).startswith("completed:")
+
+
+def test_a_retry_inside_the_lease_after_a_death_is_delayed_not_lost(
+        configured, db, bound, replay_protected, monkeypatch):
+    """The same death, but the retry arrives before the lease has run out: it
+    is answered retryable (the claim may still be a live request), and the
+    later retry — after the lease — takes the claim over. Delayed, never lost."""
+    payload = body(message("wamid.die.early.retry"))
+    _set_nonce(replay_protected, payload, _orphan_claim(1.0))
+
+    spawned: List[Any] = []
+    early = call_meta_protected(payload, spawned)
+    assert early.status_code == 503 and b"replay_in_flight" in bytes(early.body)
+    assert spawned == [] and handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+    _set_nonce(replay_protected, payload, _orphan_claim(_security.REPLAY_IN_FLIGHT_LEASE_SECONDS + 1))
+    late = call_meta_protected(payload, spawned)
+    assert late.status_code == 200 and spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+
+
+def test_a_mixed_batch_behind_an_orphaned_claim_is_recorded_and_processed_once(
+        configured, db, bound, replay_protected):
+    """Two pilot-scoped messages in one body whose first copy died after the
+    claim: the retry records both once, spawns once, and the copy after that is
+    a replay that spawns nothing and records nothing more."""
+    payload = body(message("wamid.batch.one"), message("wamid.batch.two"))
+    _set_nonce(replay_protected, payload, _orphan_claim(_security.REPLAY_IN_FLIGHT_LEASE_SECONDS + 5))
+
+    spawned: List[Any] = []
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200 and spawned == ["webhook_meta"]
+    recorded = sorted(r.provider_message_id for r in handover.pending_inbound(db, tenant_id=db.tenant_id))
+    assert recorded == ["wamid.batch.one", "wamid.batch.two"]
+
+    again = call_meta_protected(payload, spawned)
+    assert again.status_code == 200 and spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 2
+
+
+def test_a_refused_request_gives_back_only_the_claim_it_holds(
+        configured, db, bound, replay_protected, monkeypatch):
+    """Two concurrent retries of one orphaned body: the first takes the claim
+    over; the second finds a fresh claim and is answered retryable. When the
+    first is then refused (the recorder fails), it releases its own claim and
+    the third retry starts clean. A request never deletes a claim it does not
+    hold — checked directly against the compare-and-delete."""
+    payload = body(message("wamid.own.claim"))
+    real_record = handover.record_inbound
+    broken = {"now": True}
+    monkeypatch.setattr(handover, "record_inbound",
+                        lambda *a, **k: None if broken["now"] else real_record(*a, **k))
+    _set_nonce(replay_protected, payload, _orphan_claim(_security.REPLAY_IN_FLIGHT_LEASE_SECONDS + 5))
+
+    spawned: List[Any] = []
+    first = call_meta_protected(payload, spawned)
+    assert first.status_code == 503 and b"inbound_not_persisted" in bytes(first.body)
+    assert _nonce(replay_protected, payload) is None          # its own claim, released
+
+    # A verdict holding somebody else's claim releases nothing.
+    _set_nonce(replay_protected, payload, _fresh_claim("somebody"))
+    stale = _security.ReplayVerdict(reject=False, claimed=True,
+                                    key=_security.replay_nonce_key(
+                                        "meta", __import__("json").dumps(payload).encode()),
+                                    token="notmine", claim="claimed:notmine:0")
+    assert _security.release_replay_nonce(stale) is False
+    assert _nonce(replay_protected, payload) == _fresh_claim("somebody")
+
+    broken["now"] = False
+    _set_nonce(replay_protected, payload, _orphan_claim(_security.REPLAY_IN_FLIGHT_LEASE_SECONDS + 5))
+    third = call_meta_protected(payload, spawned)
+    assert third.status_code == 200 and spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1

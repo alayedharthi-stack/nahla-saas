@@ -46,6 +46,7 @@ from core.webhook_audit import record_result as _record_signature_audit
 from core.webhook_security import (
     SignatureStatus,
     evaluate_replay_claim,
+    mark_replay_completed,
     release_replay_nonce,
     verify_meta_signature,
 )
@@ -759,13 +760,21 @@ async def whatsapp_incoming(request: Request):
                 "user_agent": request.headers.get("user-agent", "")[:120],
             },
         )
+        if _replay.reject and _replay.in_flight:
+            # Another request with this exact body claimed the nonce and is
+            # still deciding. Its outcome is not known, so nothing is
+            # acknowledged on its behalf: the copy is answered retryable and
+            # the provider's later redelivery finds either a completed nonce
+            # (a replay) or an orphaned claim it may take over.
+            logger.warning("[webhook/meta] duplicate body while the first copy is still in "
+                           "flight — answering retryable, not acknowledging")
+            return JSONResponse({"status": "retry", "reason": "replay_in_flight"},
+                                status_code=503)
         if _replay.reject:
-            # A nonce says a request with this body reached us; it does not say
-            # the process that took it lived long enough to write anything
-            # down. Before a nonce alone answers 200, every pilot-scoped
-            # message in the body has to be on record. One that is not is a
-            # first attempt whatever the nonce says: the acceptance below runs
-            # for it, and the nonce stays where the dead process left it.
+            # A completed nonce says a request with this body finished
+            # deciding. Before it answers 200 on its own, every pilot-scoped
+            # message in the body still has to be on record — the pilot's
+            # obligations are durable rows, and a row is what proves one.
             _durable = await _durable_pilot_status(body, provider="meta")
             if _durable.retryable:
                 logger.error(
@@ -819,6 +828,11 @@ async def whatsapp_incoming(request: Request):
             spawn_background(_handle_whatsapp_body(body), name="webhook_meta")
         except Exception as exc:  # noqa: BLE001
             logger.exception("[webhook/meta] spawn_background failed: %s", exc)
+        # This request has finished deciding: the pilot's obligations are
+        # durable and processing is scheduled. From here on a copy of this
+        # body is a replay. Until this line it was only a claim, and a claim
+        # a dying process leaves behind is taken over by the retry.
+        mark_replay_completed(_replay)
     except _asyncio.CancelledError:
         logger.warning(
             "[webhook/meta] client cancelled — returning 200 to protect "
