@@ -3145,19 +3145,48 @@ def _payload_text(payload):
     return str((payload.get("text") or {}).get("body") or payload.get("text") or "")
 
 
-class _StubComposer:
-    """Stands in for the authorized composer — no provider call is made."""
+# The REAL composer is used throughout; only the provider adapter is
+# replaced. A stub that returns a string cannot expose what the composer
+# does on its own failure paths — it catches provider errors internally
+# and returns the platform's emergency line rather than raising — so a
+# stub would hide exactly the attribution defect these tests exist for.
+_COMPOSED_ADDRESS_QUESTION = "وين نوصل طلبك؟ اختر عنوان أو أرسل رابط الموقع."
 
-    def __init__(self, text="وش عنوان التوصيل اللي تبي نرسل له؟", fail=False):
-        self.text = text
-        self.fail = fail
-        self.calls = 0
 
-    async def compose(self, decision, result, ctx):
-        self.calls += 1
-        if self.fail:
-            raise RuntimeError("isolated compose failure")
-        return self.text
+def _fake_provider(reply_text=_COMPOSED_ADDRESS_QUESTION, fail=False, calls=None):
+    """Patches for the two orchestration entry points, nothing else."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    def _generate(**kwargs):
+        if calls is not None:
+            calls.append(kwargs)
+        if fail:
+            raise RuntimeError("isolated provider failure")
+        return SimpleNamespace(reply_text=reply_text, provider_used="fake", metadata={})
+
+    async def _legacy(**kwargs):
+        raise RuntimeError("isolated provider failure")
+
+    return [
+        ("modules.ai.orchestrator.adapter.generate_ai_reply", {"side_effect": _generate}),
+        ("modules.ai.orchestrator.adapter.generate_orchestrate_response",
+         {"side_effect": _legacy}),
+    ]
+
+
+def _compose_calls_counter():
+    """Count real composer invocations without replacing the composer."""
+    from modules.ai.brain.compose.responder import DefaultComposer  # noqa: PLC0415
+
+    counter = {"n": 0}
+    original = DefaultComposer.compose
+
+    async def _counting(self, decision, result, ctx):
+        counter["n"] += 1
+        return await original(self, decision, result, ctx)
+
+    return counter, ("modules.ai.brain.compose.responder.DefaultComposer.compose",
+                     {"new": _counting})
 
 
 def _result_with_reply(reply, reason="isolated-address-claim"):
@@ -3194,10 +3223,7 @@ def test_an_unchecked_claim_never_reaches_the_wire(patches, label):
 
     sent, saved = _run_send_block(
         db, tenant, convo, _result_with_reply("تم حفظ عنوانك. نكمل الطلب؟"),
-        patches=list(patches) + [(
-            "modules.ai.brain.compose.responder.DefaultComposer",
-            {"return_value": _StubComposer(fail=True)},
-        )],
+        patches=list(patches) + _fake_provider(fail=True),
     )
 
     assert all("حفظ عنوانك" not in _payload_text(p) for p in sent), (label, sent)
@@ -3218,14 +3244,11 @@ def test_a_guard_that_cannot_run_never_sends_the_unchecked_reply(patches, label)
     _import(db, tenant, customer, _payload())
     db.commit()
     convo = _conversation(db, tenant, customer)
-    composer = _StubComposer()
+    counter, counting = _compose_calls_counter()
 
     sent, saved = _run_send_block(
         db, tenant, convo, _result_with_reply("تم حفظ عنوانك. نكمل الطلب؟"),
-        patches=list(patches) + [(
-            "modules.ai.order_flow_v2.address_reply_recovery._default_composer",
-            {"return_value": composer},
-        )],
+        patches=list(patches) + _fake_provider() + [counting],
     )
 
     from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
@@ -3238,7 +3261,7 @@ def test_a_guard_that_cannot_run_never_sends_the_unchecked_reply(patches, label)
     # either, so the approved minimal line speaks — composition was
     # attempted first, and the provenance says which step failed.
     assert bodies, label
-    assert composer.calls == 1, label
+    assert counter["n"] == 1, label
     assert is_compose_failure_fallback(bodies[0]), (label, bodies)
     meta = saved[0]["metadata"]
     assert meta["compose_source"] == "fallback_deterministic"
@@ -3253,18 +3276,15 @@ def test_a_refused_turn_is_answered_by_the_authorized_composer():
     _import(db, tenant, customer, _payload())
     db.commit()
     convo = _conversation(db, tenant, customer)
-    composer = _StubComposer()
+    counter, counting = _compose_calls_counter()
 
     sent, saved = _run_send_block(
         db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
-        patches=[(
-            "modules.ai.order_flow_v2.address_reply_recovery._default_composer",
-            {"return_value": composer},
-        )],
+        patches=_fake_provider() + [counting],
     )
 
-    assert composer.calls == 1
-    assert [_payload_text(p) for p in sent] == [composer.text]
+    assert counter["n"] == 1
+    assert [_payload_text(p) for p in sent] == [_COMPOSED_ADDRESS_QUESTION]
     meta = saved[0]["metadata"]
     assert meta["compose_source"] == "llm"
     assert meta["llm_candidate_present"] is True
@@ -3285,17 +3305,14 @@ def test_a_genuine_compose_failure_earns_the_approved_fallback():
     _import(db, tenant, customer, _payload())
     db.commit()
     convo = _conversation(db, tenant, customer)
-    composer = _StubComposer(fail=True)
+    counter, counting = _compose_calls_counter()
 
     sent, saved = _run_send_block(
         db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
-        patches=[(
-            "modules.ai.order_flow_v2.address_reply_recovery._default_composer",
-            {"return_value": composer},
-        )],
+        patches=_fake_provider(fail=True) + [counting],
     )
 
-    assert composer.calls == 1
+    assert counter["n"] == 1
     assert len(sent) == 1
     assert is_compose_failure_fallback(_payload_text(sent[0]))
     meta = saved[0]["metadata"]
@@ -3316,17 +3333,14 @@ def test_a_recovery_that_restates_the_claim_is_refused_too():
     _import(db, tenant, customer, _payload())
     db.commit()
     convo = _conversation(db, tenant, customer)
-    composer = _StubComposer(text="تم حفظ عنوانك")
+    counter, counting = _compose_calls_counter()
 
     sent, saved = _run_send_block(
         db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
-        patches=[(
-            "modules.ai.order_flow_v2.address_reply_recovery._default_composer",
-            {"return_value": composer},
-        )],
+        patches=_fake_provider(reply_text="تم حفظ عنوانك") + [counting],
     )
 
-    assert composer.calls == 1
+    assert counter["n"] == 1
     assert all("حفظ عنوانك" not in _payload_text(p) for p in sent)
     assert is_compose_failure_fallback(_payload_text(sent[0]))
     meta = saved[0]["metadata"]
@@ -3364,7 +3378,6 @@ def test_a_detector_failure_recovers_rather_than_dropping_the_turn():
     _import(db, tenant, customer, _payload())
     db.commit()
     convo = _conversation(db, tenant, customer)
-    composer = _StubComposer()
 
     sent, saved = _run_send_block(
         db, tenant, convo, _result_with_reply("وش العنوان اللي تبي نوصل له؟"),
@@ -3372,9 +3385,7 @@ def test_a_detector_failure_recovers_rather_than_dropping_the_turn():
             ("modules.ai.brain.postprocess.customer_address_save_claim_guard"
              ".detect_address_save_claim_kinds",
              {"side_effect": RuntimeError("isolated detector failure")}),
-            ("modules.ai.order_flow_v2.address_reply_recovery._default_composer",
-             {"return_value": composer}),
-        ],
+        ] + _fake_provider(),
     )
 
     from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
@@ -3409,3 +3420,186 @@ def test_a_guarded_address_showing_still_reaches_the_wire_with_its_receipt():
     assert {structured_consent_action({"button_id": i})[1] for i in delivered} == set(offered)
     assert set(offered) == {a.address_id, b.address_id}
     assert saved[0]["metadata"].get("address_reply_recovered") is not True
+
+
+# ── F1–F3: the real composer, its provenance, and the ordinary turn ────
+
+
+def test_the_checkout_facts_actually_reach_the_model():
+    """F1: a key in ``result.data`` is not delivery to the model.
+
+    The facts were handed over only as ``ActionResult.data['trusted_facts']``,
+    which the composer does not serialize. It logged the missing
+    ``reply_state``, built a minimal discovery-stage one, and the city,
+    the short address and the customer's name never left this process. A
+    reply that happens to ask for an address is not a reply grounded in
+    the address state we hold.
+    """
+    sentinels = {
+        "city": "CITY_SENTINEL_782",
+        "short_address": "ABCD1234",
+        "full_name": "CUSTOMER_SENTINEL_827",
+        "product_name": "PRODUCT_SENTINEL_653",
+    }
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    convo.extra_metadata = {
+        **(convo.extra_metadata or {}),
+        "brain_state": {"stage": "checkout", "order_prep": dict(sentinels)},
+    }
+    from sqlalchemy.orm.attributes import flag_modified as _fm  # noqa: PLC0415
+
+    _fm(convo, "extra_metadata")
+    db.commit()
+
+    seen = []
+    _run_send_block(
+        db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
+        patches=_fake_provider(calls=seen),
+    )
+
+    assert seen, "the provider was never reached"
+    import json as _json  # noqa: PLC0415
+
+    blob = _json.dumps(seen, ensure_ascii=False, default=str)
+    missing = [name for name, value in sentinels.items() if value not in blob]
+    assert not missing, missing
+
+
+def test_the_composers_own_fallback_is_not_recorded_as_a_model_candidate():
+    """F2: a non-empty return from ``compose`` is not proof of authorship.
+
+    ``DefaultComposer`` catches orchestration failures itself and returns
+    the platform's generic emergency line rather than raising. Treating
+    every non-empty string as an LLM candidate stamped that line
+    ``compose_source=llm`` with no ``fallback_reason`` — the same false
+    provenance class, reintroduced at the newly wired boundary. A stub
+    that raises cannot expose this; only the real composer can.
+    """
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
+        patches=_fake_provider(fail=True),
+    )
+
+    assert is_compose_failure_fallback(_payload_text(sent[0]))
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "fallback_deterministic"
+    assert meta["response_mode"] == "fallback_deterministic"
+    assert meta["final_customer_text_source"] == "fallback_deterministic"
+    assert meta["llm_candidate_present"] is False
+    assert meta["fallback_reason"] == "address_reply_compose_failed"
+    assert meta["fallback_action_type"] == "order_flow_v2_address_reply"
+
+
+def test_an_empty_model_answer_is_a_compose_failure_not_a_candidate():
+    """F2: an empty generation is a failure, and is recorded as one."""
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
+        patches=_fake_provider(reply_text=""),
+    )
+
+    assert is_compose_failure_fallback(_payload_text(sent[0]))
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "fallback_deterministic"
+    assert meta["llm_candidate_present"] is False
+
+
+def test_the_ordinary_address_showing_is_composed_not_written():
+    """F3: the normal turn, not only the refused one.
+
+    Asking the customer where to deliver is a clarification, and
+    AGENTS.md assigns that wording to the composer. The structured part
+    of the turn stays platform-owned: the action ids, the labels, the
+    paging and the receipt are unchanged, and the receipt still equals
+    what went on the wire.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    counter, counting = _compose_calls_counter()
+
+    result = _owner_turn(db, tenant, convo, live=True, missing=("delivery_address",),
+                         inbound_metadata={"wa_message_id": "wamid.in-normal",
+                                           "button_id": "checkout_continue"})
+    sent, saved = _run_send_block(
+        db, tenant, convo, result, turn_ref="wamid.in-normal",
+        patches=_fake_provider() + [counting],
+    )
+
+    assert counter["n"] == 1, "the ordinary address turn must be composed"
+    assert _payload_text(sent[0]) == _COMPOSED_ADDRESS_QUESTION
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "llm"
+    assert meta["llm_candidate_present"] is True
+    assert meta["address_reply_composed"] is True
+
+    # Platform-owned structure survives untouched.
+    delivered = delivered_address_action_ids(sent[0])
+    offered, _ = _offered_revisions(tenant_id=tenant.id, conversation=convo,
+                                    offer_id=result.address_presentation.offer_id)
+    assert {structured_consent_action({"button_id": i})[1] for i in delivered} == set(offered)
+    assert set(offered) == {a.address_id, b.address_id}
+
+
+def test_a_composed_address_turn_that_claims_a_save_is_still_refused():
+    """F3: composition does not exempt the composer from the guard."""
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+
+    result = _owner_turn(db, tenant, convo, live=True, missing=("delivery_address",),
+                         inbound_metadata={"wa_message_id": "wamid.in-claim",
+                                           "button_id": "checkout_continue"})
+    sent, saved = _run_send_block(
+        db, tenant, convo, result, turn_ref="wamid.in-claim",
+        patches=_fake_provider(reply_text="تم حفظ عنوانك"),
+    )
+
+    assert all("حفظ عنوانك" not in _payload_text(p) for p in sent), sent
+    assert is_compose_failure_fallback(_payload_text(sent[0]))
+
+
+def test_a_non_address_turn_is_left_to_its_existing_owner():
+    """F3 stays bounded: only the address paths move to composition."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    counter, counting = _compose_calls_counter()
+
+    result = _owner_turn(db, tenant, convo, live=True, missing=("customer_name",))
+    assert "اسمك" in (result.reply or ""), "the probe must exercise the name question"
+    sent, saved = _run_send_block(
+        db, tenant, convo, result, turn_ref="wamid.in-name",
+        patches=_fake_provider() + [counting],
+    )
+
+    assert counter["n"] == 0
+    # Still the owner's own text (the sanitizer only reflows whitespace).
+    assert "اسمك الكامل" in _payload_text(sent[0])
+    assert _payload_text(sent[0]) != _COMPOSED_ADDRESS_QUESTION
+    assert saved[0]["metadata"].get("address_reply_composed") is not True

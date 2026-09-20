@@ -8010,6 +8010,52 @@ async def _handle_merchant_message(
                 # message. The address guard fills it in when it removes a
                 # claim or hands the turn to the emergency fallback.
                 _of2_provenance: Dict[str, Any] = {}
+                # The ordinary address turn is composed, not written here.
+                # Asking the customer where to deliver is a clarification,
+                # and AGENTS.md assigns that wording to the composer; a
+                # fixed sentence for it is exactly the deterministic
+                # customer-facing prose the doctrine prohibits. Everything
+                # structural about this turn — the action ids, the choice
+                # labels, the paging, the receipt — stays platform-owned
+                # and is untouched.
+                try:
+                    from modules.ai.order_flow_v2.address_reply_recovery import (  # noqa: PLC0415
+                        address_turn_facts,
+                        compose_address_turn_reply,
+                        is_address_collection_turn,
+                    )
+
+                    if is_address_collection_turn(_of2_result):
+                        _of2_composed = await compose_address_turn_reply(
+                            db,
+                            tenant_id=int(tenant_id),
+                            conversation=convo,
+                            customer_phone=to,
+                            message=str(text or ""),
+                            known_facts=address_turn_facts(
+                                order_prep=(
+                                    ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
+                                        "order_prep"
+                                    )
+                                    or {}
+                                ),
+                                presentation=getattr(
+                                    _of2_result, "address_presentation", None
+                                ),
+                            ),
+                            turn_ref=str(wa_msg_id or ""),
+                        )
+                        if _of2_composed.spoke:
+                            _of2_reply = _of2_composed.text
+                            _of2_provenance.update(_of2_composed.as_metadata())
+                            _of2_provenance.pop("address_reply_recovered", None)
+                            _of2_provenance["address_reply_composed"] = True
+                except Exception:  # noqa: BLE001  # noqa: silent-ok — the deterministic reply still stands behind this turn, and the guard below still judges whatever is sent
+                    logger.exception(
+                        "[ORDER_FLOW_V2] address reply compose failed tenant=%s to=%s",
+                        tenant_id,
+                        to,
+                    )
                 try:
                     from modules.ai.order_flow_v2.outbound_guards import (  # noqa: PLC0415
                         apply_order_flow_v2_outbound_guards,

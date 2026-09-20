@@ -116,6 +116,8 @@ def _build_compose_inputs(
         MerchantConversationState,
     )
 
+    from modules.ai.brain.types import BrainReplyState  # noqa: PLC0415
+
     facts = {k: v for k, v in (known_facts or {}).items() if v not in (None, "")}
     decision = Decision(
         action=ACTION_LLM_REPLY,
@@ -125,13 +127,31 @@ def _build_compose_inputs(
         },
     )
     result = ActionResult(success=True, data={"trusted_facts": facts})
+    # ``reply_state`` is what the composer actually serializes into the
+    # model-bound prompt. Handing the facts over in ``result.data`` alone
+    # put them in the audit and nowhere the model could read: the composer
+    # logged the missing reply_state, built a minimal discovery-stage one,
+    # and the city, the short address and the customer's name never left
+    # this process. A reply that happens to ask for an address is not the
+    # same as a reply grounded in the address state we hold.
+    state = MerchantConversationState(stage="checkout")
+    commerce_facts = CommerceFacts()
+    reply_state = BrainReplyState(
+        store_name=str(getattr(commerce_facts, "store_name", "") or ""),
+        stage="checkout",
+        known_facts=dict(facts),
+        intent_name=RECOVERY_RESPONSE_GOAL,
+        response_goal=RECOVERY_RESPONSE_GOAL,
+        recommended_next_step=RECOVERY_RESPONSE_GOAL,
+    )
     ctx = BrainContext(
         tenant_id=int(tenant_id),
         customer_phone=str(customer_phone or ""),
         message=str(message or ""),
         intent=Intent(name=RECOVERY_RESPONSE_GOAL, confidence=1.0),
-        state=MerchantConversationState(),
-        facts=CommerceFacts(),
+        state=state,
+        facts=commerce_facts,
+        reply_state=reply_state,
         customer_id=int(getattr(conversation, "customer_id", 0) or 0) or None,
         conversation_id=int(getattr(conversation, "id", 0) or 0) or None,
     )
@@ -165,6 +185,7 @@ async def compose_address_recovery_reply(
     reasons = ["customer_address_save_claim_guard"]
     candidate = ""
     attempted = False
+    composed_by = "unknown"
     try:
         engine = composer if composer is not None else _default_composer()
         decision, result, ctx = _build_compose_inputs(
@@ -181,6 +202,7 @@ async def compose_address_recovery_reply(
             )
             or ""
         ).strip()
+        composed_by = _compose_text_source(result, candidate)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — a genuine compose failure is what the approved emergency fallback exists for, and it is recorded as one below
         logger.warning(
             "[ORDER_FLOW_V2] address recovery compose failed tenant=%s turn=%s",
@@ -189,8 +211,14 @@ async def compose_address_recovery_reply(
             exc_info=True,
         )
         candidate = ""
+        composed_by = "unknown"
 
-    if not candidate:
+    if not candidate or composed_by != "llm":
+        # Either nothing came back, or what came back is the composer's
+        # OWN deterministic emergency line — it catches provider failures
+        # internally and returns that text rather than raising. Treating
+        # any non-empty return as a model candidate is how a fallback got
+        # stamped ``compose_source=llm`` at this very boundary.
         return RecoveredReply(
             text=_emergency_fallback_text(),
             compose_source="fallback_deterministic",
@@ -240,6 +268,114 @@ async def compose_address_recovery_reply(
     )
 
 
+ADDRESS_REPLY_FIELDS = frozenset({"delivery_address", "city"})
+
+
+def is_address_collection_turn(result: Any) -> bool:
+    """True when this reply's job is to ask about the delivery address."""
+    field_name = str(
+        (getattr(result, "state_patch", None) or {}).get("order_flow_v2_last_field") or ""
+    )
+    return field_name in ADDRESS_REPLY_FIELDS
+
+
+def address_turn_facts(
+    *, order_prep: Optional[Dict[str, Any]], presentation: Any = None,
+) -> Dict[str, Any]:
+    """The trusted facts an address turn is about.
+
+    Platform-owned values only: what is in the order, what the customer
+    already told us, and which saved addresses are being offered. No
+    wording, and nothing asserting that anything was saved.
+    """
+    facts = {
+        k: v for k, v in dict(order_prep or {}).items()
+        if v not in (None, "", [], {})
+    }
+    facts["missing_field"] = "delivery_address"
+    choices = list(getattr(presentation, "choices", ()) or ())
+    if choices:
+        facts["saved_address_choices"] = [
+            {
+                "city": str(c.get("city") or ""),
+                "district": str(c.get("district") or ""),
+                "address_line": str(c.get("address_line") or c.get("street") or ""),
+                "short_address_code": str(c.get("short_address_code") or ""),
+            }
+            for c in choices
+        ]
+    return facts
+
+
+async def compose_address_turn_reply(
+    db: Any,
+    *,
+    tenant_id: int,
+    conversation: Any,
+    customer_phone: str,
+    message: str = "",
+    known_facts: Optional[Dict[str, Any]] = None,
+    turn_ref: str = "",
+    composer: Any = None,
+    timeout_seconds: float = RECOVERY_TIMEOUT_SECONDS,
+) -> RecoveredReply:
+    """Compose the ORDINARY address turn, not only the refused one.
+
+    The structured part of this turn — the action ids, the choice labels,
+    the paging, the receipt — stays platform-owned and is untouched here.
+    What moves is the conversational body, which AGENTS.md assigns to the
+    composer: asking for an address is a clarification, and a fixed
+    sentence for it is the deterministic customer-facing prose the
+    doctrine prohibits.
+
+    The same revalidation applies, so a composed body that asserts a save
+    is refused exactly as any other reply would be.
+    """
+    return await compose_address_recovery_reply(
+        db,
+        tenant_id=tenant_id,
+        conversation=conversation,
+        customer_phone=customer_phone,
+        message=message,
+        known_facts=known_facts,
+        turn_ref=turn_ref,
+        composer=composer,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _compose_text_source(result: Any, candidate: str) -> str:
+    """Who actually wrote this string — ``llm``, or something else.
+
+    A non-empty return from ``compose`` is not proof of model authorship.
+    ``DefaultComposer`` catches orchestration failures itself and returns
+    the platform's generic emergency line, and it records what it did in
+    the provenance it attaches to ``result.data``. That record is read
+    here rather than assumed, and the approved fallback text is detected
+    directly as a second, independent check.
+    """
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    text = str(candidate or "").strip()
+    if not text:
+        return "unknown"
+    try:
+        if is_compose_failure_fallback(text):
+            return "fallback_deterministic"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — the policy read below is the other half of this check
+        pass
+    try:
+        policy = dict((getattr(result, "data", None) or {}).get("outbound_text_policy") or {})
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable policy is "unknown", which is handled as not-LLM
+        return "unknown"
+    if not policy:
+        return "unknown"
+    if policy.get("deterministic_text_detected"):
+        return "fallback_deterministic"
+    source = str(policy.get("text_source") or "").strip().lower()
+    return source or "unknown"
+
+
 def _revalidate(
     text: str, *, db: Any, tenant_id: int, conversation: Any, turn_ref: str
 ):
@@ -286,10 +422,14 @@ def _revalidate(
 
 
 __all__ = [
+    "ADDRESS_REPLY_FIELDS",
     "FALLBACK_ACTION_TYPE",
     "FALLBACK_REASON_COMPOSE_FAILED",
     "FALLBACK_REASON_UNSUPPORTED_AFTER_COMPOSE",
     "FALLBACK_REASON_UNVERIFIABLE_AFTER_COMPOSE",
     "RecoveredReply",
+    "address_turn_facts",
     "compose_address_recovery_reply",
+    "compose_address_turn_reply",
+    "is_address_collection_turn",
 ]
