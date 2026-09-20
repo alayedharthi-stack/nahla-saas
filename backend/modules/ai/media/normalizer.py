@@ -46,7 +46,6 @@ from typing import Any, Dict, Optional
 import httpx
 
 from core.config import (
-    D360_API_BASE_URL,
     INBOUND_MEDIA_MAX_BYTES,
     META_GRAPH_API_VERSION,
     NAHLA_STT_LANGUAGE,
@@ -56,8 +55,7 @@ from core.config import (
 )
 from services.inbound_media_storage import save_inbound_media
 from services.whatsapp_platform.provider_utils import (
-    WHATSAPP_PROVIDER_360DIALOG,
-    wa_provider,
+    WHATSAPP_PROVIDER_META,
 )
 from services.whatsapp_platform.token_manager import get_token_for_operation
 
@@ -990,7 +988,7 @@ def _process_catalog_order(
     """Convert a WhatsApp ``type="order"`` payload into a
     brain-facing text on the standard text path.
 
-    WhatsApp's order shape (Cloud API + 360dialog, identical):
+    WhatsApp's order shape (Cloud API):
 
         {
           "catalog_id": "<meta_catalog_id>",
@@ -1240,7 +1238,7 @@ async def _process_audio(
     # the message-type-based detection when absent.
     voice_flag = bool(audio_payload.get("voice", is_voice_note))
     # WhatsApp does not currently expose ``duration`` on inbound
-    # audio payloads, but 360dialog occasionally relays it. Read
+    # audio payloads, but some relays include it. Read
     # defensively so it ends up in the debug payload when present.
     duration_seconds = audio_payload.get("duration")
     caption = str(audio_payload.get("caption") or "").strip()
@@ -1373,7 +1371,7 @@ async def _process_audio(
     base_meta["ai_used_audio"]     = True
 
     # ── Combine caption + transcript ────────────────────────────
-    # Meta rarely ships a caption with audio, but 360dialog and the
+    # Meta rarely ships a caption with audio, but the
     # web client occasionally do. Concatenate so the brain sees both.
     combined = transcript
     if caption:
@@ -3427,6 +3425,20 @@ def _document_with_fallback(
 # ── Download helper ─────────────────────────────────────────────────
 
 
+def _stored_provider(wa_conn: Any) -> str:
+    """The provider this connection row names, normalised. Never guessed.
+
+    An empty value is Meta — that is what every Meta row held before the
+    column existed. Anything else is a row left over from an integration this
+    platform no longer speaks, and it is never promoted to Meta.
+    """
+    try:
+        raw = str(getattr(wa_conn, "provider", "") or "").strip().lower()
+    except Exception:  # noqa: BLE001 - an unreadable row names no provider
+        return "unreadable"
+    return raw or WHATSAPP_PROVIDER_META
+
+
 async def _download_meta_media(
     *,
     db: Any,
@@ -3435,7 +3447,7 @@ async def _download_meta_media(
     media_id: str,
     mime_type: str,
 ) -> Optional[Dict[str, Any]]:
-    """Resolve a Meta/360dialog ``media_id`` → temporary CDN URL →
+    """Resolve a Meta ``media_id`` → temporary CDN URL →
     binary bytes. Returns ``None`` on any failure so callers can
     decide whether to fall back to the storage / caption path.
     Never raises (logs + returns None) — the whole pipeline is
@@ -3443,56 +3455,40 @@ async def _download_meta_media(
 
     Provider routing
     ────────────────
-    The repo supports both Meta Cloud and 360dialog (BSP). Each
-    speaks a different media-download wire format:
+    Meta Cloud is the only supported provider:
 
-      * Meta Cloud:
-          GET https://graph.facebook.com/{ver}/{media_id}
-          Authorization: Bearer <Meta WABA access token>
+      * GET https://graph.facebook.com/{ver}/{media_id}
+        Authorization: Bearer <Meta WABA access token>
         → returns ``{"url": "<https://lookaside.fbsbx.com/…>",
                     "mime_type": "<mime>"}``
         → second hop fetches the bytes from the lookaside CDN with
           the SAME Authorization header.
 
-      * 360dialog:
-          GET https://waba-v2.360dialog.io/{media_id}
-          D360-API-KEY: <360dialog API key>
-        → returns the same shape but the ``url`` points BACK at
-          ``waba-v2.360dialog.io`` (no public CDN), so the second
-          hop ALSO uses the D360-API-KEY header.
-
-    Routing on ``wa_provider(wa_conn)`` mirrors what
-    ``services.whatsapp_platform.service._provider_base_url`` and
-    ``_provider_headers`` already do for the outbound send path.
-    The previous implementation hard-coded the Meta path which
-    caused a 401 Unauthorized on every 360dialog inbound media
-    event — a 360dialog API key was being sent to Meta's Graph
-    API as a Bearer token.
+    A connection naming a retired provider is refused before either hop:
+    handing its credential to Meta would be sending one provider's key to
+    another provider's API.
     """
-    provider = "meta"
+    provider = _stored_provider(wa_conn)
     try:
-        try:
-            provider = wa_provider(wa_conn) or "meta"
-        except Exception:
-            provider = "meta"
+        # Decided before anything opens: a connection this platform cannot
+        # speak for is refused here rather than falling through to the Meta
+        # hop, which would send one provider's credential to another
+        # provider's API.
+        if provider != WHATSAPP_PROVIDER_META:
+            logger.warning(
+                "[MEDIA_DOWNLOAD_UNSUPPORTED_PROVIDER] tenant=%s media_id=%s provider=%s "
+                "— refusing; Meta WhatsApp Cloud API is the only supported provider",
+                tenant_id, media_id, provider,
+            )
+            return None
 
         token_ctx = await get_token_for_operation(
             db, wa_conn, tenant_id=tenant_id, operation="media_download",
         )
 
-        # ── Branch on provider for base URL + auth header ────────
-        # We deliberately compute both the resolve URL (hop 1) and
-        # the auth header here, BEFORE the httpx client opens, so a
-        # provider misconfiguration produces a single clean log
-        # line instead of an opaque network error.
-        if provider == WHATSAPP_PROVIDER_360DIALOG:
-            base = D360_API_BASE_URL.rstrip("/")
-            resolve_url = f"{base}/{media_id}"
-            headers = {"D360-API-KEY": token_ctx.token}
-        else:
-            base = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-            resolve_url = f"{base}/{media_id}"
-            headers = {"Authorization": f"Bearer {token_ctx.token}"}
+        base = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+        resolve_url = f"{base}/{media_id}"
+        headers = {"Authorization": f"Bearer {token_ctx.token}"}
 
         async with httpx.AsyncClient(timeout=25) as client:
             meta_resp = await client.get(
@@ -3540,36 +3536,11 @@ async def _download_meta_media(
                 return None
 
             # ── Hop-2 auth strategy ──────────────────────────────
-            #
-            # Provider-by-provider behaviour, per official docs:
-            #
-            #   * Meta Cloud:
-            #     Resolved URL → ``lookaside.fbsbx.com/whatsapp_business``
-            #     Auth        → ``Authorization: Bearer <Meta token>``
-            #     Fetch the resolved URL as-is.
-            #
-            #   * 360dialog (per
-            #     https://docs.360dialog.com/docs/v3/whatsapp-api/messages/messages-media/):
-            #
-            #       "Replace the root hostname
-            #        https://lookaside.fbsbx.com with
-            #        https://waba-v2.360dialog.io"
-            #
-            #     360dialog mirrors Meta's response shape (so
-            #     hop-1 returns a lookaside URL), but the actual
-            #     bytes live on 360dialog's gateway, NOT on
-            #     Meta's CDN. Hitting lookaside directly with
-            #     either D360-API-KEY or Bearer returns 401 —
-            #     we never had a session there in the first
-            #     place. The fix is a deterministic host swap
-            #     to ``waba-v2.360dialog.io``, preserving path +
-            #     query, then a single GET with
-            #     ``D360-API-KEY: <D360 key>``.
-            #
-            # F9 hardcoded Meta. F10 added a Bearer fallback for
-            # 360dialog that ALSO went to lookaside — which 360dialog
-            # explicitly documents will not work. F11 implements the
-            # actual documented contract.
+            # Meta Cloud: the resolved URL points at
+            # ``lookaside.fbsbx.com/whatsapp_business`` and is fetched as-is
+            # with ``Authorization: Bearer <Meta token>``. Any other host is
+            # fetched bare: a signed URL needs no header, and a token must
+            # never be handed to a host we did not expect.
             try:
                 _media_host_for_hop2 = (_media_host or "").lower()
             except Exception:
@@ -3580,64 +3551,12 @@ async def _download_meta_media(
                 or _media_host_for_hop2.endswith("fbcdn.net")
                 or _media_host_for_hop2.endswith("fbsbx.com")
             )
-            _is_d360_host = _media_host_for_hop2.endswith("360dialog.io")
 
-            # Decide the EXACT hop-2 URL + headers based on the
-            # provider × host matrix. Single attempt — no
-            # fallback loop. If this fails, the failure is real
-            # (wrong key, expired media_id, gateway outage) and
-            # the right action is to log + return None.
             fetch_url = media_url
             fetch_headers: Dict[str, str] = {}
             host_rewrite_label = "asis"
-
-            if provider == WHATSAPP_PROVIDER_360DIALOG:
-                if _is_d360_host:
-                    # 360dialog returned a native waba-v2 URL
-                    # (some accounts / endpoints do). Use as-is.
-                    fetch_headers = {"D360-API-KEY": token_ctx.token}
-                    host_rewrite_label = "asis"
-                elif _is_meta_host:
-                    # Documented path: swap lookaside → waba-v2.
-                    # Preserve path + query EXACTLY (the ``mid``
-                    # query param is the actual content
-                    # selector — losing it = wrong file).
-                    try:
-                        from urllib.parse import urlparse, urlunparse  # noqa: PLC0415
-                        _parsed = urlparse(media_url)
-                        # waba-v2.360dialog.io is the documented
-                        # canonical host; use it regardless of
-                        # the configured D360_API_BASE_URL value
-                        # so we never accidentally point at the
-                        # partner-hub host (which lacks the
-                        # media-attachment route).
-                        fetch_url = urlunparse(_parsed._replace(
-                            scheme="https",
-                            netloc="waba-v2.360dialog.io",
-                        ))
-                    except Exception as rewrite_exc:  # noqa: BLE001
-                        logger.warning(
-                            "[MEDIA_DOWNLOAD_HOST_REWRITE_FAILED] "
-                            "tenant=%s media_id=%s err=%s — falling "
-                            "back to original URL",
-                            tenant_id, media_id, rewrite_exc,
-                        )
-                        fetch_url = media_url
-                    fetch_headers = {"D360-API-KEY": token_ctx.token}
-                    host_rewrite_label = "lookaside_to_waba_v2"
-                else:
-                    # Unknown third-party host. Don't leak the
-                    # API key — bare GET, signed-URL semantics.
-                    fetch_headers = {}
-                    host_rewrite_label = "bare_unknown_host"
-            else:
-                # Meta: standard contract — fetch lookaside with
-                # Bearer.
-                if _is_meta_host:
-                    fetch_headers = {"Authorization": f"Bearer {token_ctx.token}"}
-                else:
-                    fetch_headers = {}
-                host_rewrite_label = "asis"
+            if _is_meta_host:
+                fetch_headers = {"Authorization": f"Bearer {token_ctx.token}"}
 
             # We log the rewrite outcome BEFORE the network call
             # so a failure mode that crashes the request is
@@ -3656,9 +3575,7 @@ async def _download_meta_media(
                 "provider=%s rewrite=%s fetch_host=%s auth=%s",
                 tenant_id, media_id, provider, host_rewrite_label,
                 _fetch_host,
-                "d360_key" if "D360-API-KEY" in fetch_headers
-                else "bearer" if "Authorization" in fetch_headers
-                else "bare",
+                "bearer" if "Authorization" in fetch_headers else "bare",
             )
 
             media_resp = None
@@ -3747,9 +3664,8 @@ async def _download_meta_media(
         return {"bytes": file_bytes, "mime_type": resolved_mime}
     except httpx.HTTPStatusError as exc:
         # Distinguish HTTP errors (with status codes) from connection
-        # errors. A 401 with provider=meta + 360dialog token in
-        # ctx.source is a strong "wrong wire format" signal — the
-        # exact diagnostic we wanted to make trivial.
+        # errors, so an auth failure is distinguishable from a
+        # gateway outage in the log.
         _status = getattr(getattr(exc, "response", None), "status_code", None)
         logger.warning(
             "[MediaNormalizer] media download HTTP error tenant=%s "
