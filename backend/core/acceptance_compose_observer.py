@@ -31,8 +31,9 @@ from __future__ import annotations
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
+import threading
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Dict, Iterator, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from core.acceptance_execution_context import current_acceptance_context
 
@@ -81,30 +82,86 @@ class _StageMarker:
     turn_ref: str
 
 
+class _Recorder:
+    """One turn's records, held by reference rather than by value.
+
+    The composer reaches the provider through ``asyncio.to_thread`` inside
+    ``asyncio.wait_for``, and the recovery leg adds another task boundary.
+    Python copies the context INTO those children, so a ``ContextVar.set``
+    performed there updates the child's copy and is invisible to the
+    parent that reads the evidence — which is how every real model-bound
+    call went unrecorded while the synchronous unit tests passed.
+
+    Holding a mutable recorder in the ContextVar fixes that: the child
+    inherits the same object, and appending to it is visible everywhere.
+    A lock keeps concurrent workers honest, and sealing at the end of the
+    turn means a call that completes after its ``wait_for`` gave up is
+    counted as late instead of landing in the next turn's evidence.
+    """
+
+    __slots__ = ("_calls", "_lock", "_sealed", "_late")
+
+    def __init__(self) -> None:
+        self._calls: List[ModelBoundCall] = []
+        self._lock = threading.Lock()
+        self._sealed = False
+        self._late = 0
+
+    def append(self, record: ModelBoundCall) -> int:
+        with self._lock:
+            if self._sealed:
+                self._late += 1
+                return -1
+            index = len(self._calls)
+            self._calls.append(replace(record, call_index=index))
+            return index
+
+    def update(self, index: int, **changes: Any) -> None:
+        with self._lock:
+            if index < 0 or index >= len(self._calls):
+                self._late += 1
+                return
+            self._calls[index] = replace(self._calls[index], **changes)
+
+    def seal(self) -> None:
+        with self._lock:
+            self._sealed = True
+
+    def snapshot(self) -> Tuple[ModelBoundCall, ...]:
+        with self._lock:
+            return tuple(self._calls)
+
+    @property
+    def late_arrivals(self) -> int:
+        with self._lock:
+            return self._late
+
+
 _STAGE: ContextVar[Optional[_StageMarker]] = ContextVar(
     "nahla_acceptance_compose_stage",
     default=None,
 )
-_CALLS: ContextVar[Tuple[ModelBoundCall, ...]] = ContextVar(
-    "nahla_acceptance_model_bound_calls",
-    default=(),
-)
-_OBSERVING: ContextVar[bool] = ContextVar(
-    "nahla_acceptance_model_bound_observing",
-    default=False,
+_RECORDER: ContextVar[Optional[_Recorder]] = ContextVar(
+    "nahla_acceptance_model_bound_recorder",
+    default=None,
 )
 
 
 @contextmanager
 def model_bound_observation() -> Iterator[None]:
-    """Scope one turn's observations. Context-scoped, so turns are isolated."""
-    calls_token = _CALLS.set(())
-    observing_token = _OBSERVING.set(True)
+    """Scope one turn's observations.
+
+    Each turn gets its own recorder, so two turns — and two concurrent
+    tasks — never share records, while everything inside one turn writes
+    to the same object however many threads it crosses.
+    """
+    recorder = _Recorder()
+    token = _RECORDER.set(recorder)
     try:
         yield
     finally:
-        _OBSERVING.reset(observing_token)
-        _CALLS.reset(calls_token)
+        recorder.seal()
+        _RECORDER.reset(token)
 
 
 @contextmanager
@@ -136,7 +193,14 @@ def compose_stage(
 
 
 def recorded_model_bound_calls() -> Tuple[ModelBoundCall, ...]:
-    return _CALLS.get()
+    recorder = _RECORDER.get()
+    return recorder.snapshot() if recorder is not None else ()
+
+
+def late_model_bound_arrivals() -> int:
+    """Calls that completed after their turn was sealed."""
+    recorder = _RECORDER.get()
+    return recorder.late_arrivals if recorder is not None else 0
 
 
 def _address_facts(context_metadata: Any) -> Dict[str, Any]:
@@ -159,12 +223,12 @@ def _address_facts(context_metadata: Any) -> Dict[str, Any]:
 def observe_model_bound_call(*, context_metadata: Any) -> int:
     """Record one model-bound call. Returns its index, or -1 when inert."""
     try:
-        if not _OBSERVING.get() or current_acceptance_context() is None:
+        recorder = _RECORDER.get()
+        if recorder is None or current_acceptance_context() is None:
             return -1
         marker = _STAGE.get()
-        calls = _CALLS.get()
         record = ModelBoundCall(
-            call_index=len(calls),
+            call_index=0,
             stage=marker.stage if marker is not None else STAGE_UNSPECIFIED,
             collection_field=marker.collection_field if marker is not None else "",
             turn_ref=marker.turn_ref if marker is not None else "",
@@ -172,8 +236,7 @@ def observe_model_bound_call(*, context_metadata: Any) -> int:
             stage_declared=marker is not None,
             **_address_facts(context_metadata),
         )
-        _CALLS.set((*calls, record))
-        return record.call_index
+        return recorder.append(record)
     except Exception:  # noqa: BLE001  # noqa: silent-ok — measurement must never change the reply
         return -1
 
@@ -187,19 +250,16 @@ def record_model_bound_outcome(
 ) -> None:
     """Attach what the boundary returned to the call that was recorded."""
     try:
-        if call_index < 0:
+        recorder = _RECORDER.get()
+        if recorder is None or call_index < 0:
             return
-        calls = _CALLS.get()
-        if call_index >= len(calls):
-            return
-        updated = replace(
-            calls[call_index],
+        recorder.update(
+            call_index,
             outcome_recorded=True,
             candidate_present=bool(candidate_present),
             compose_source=_safe(compose_source),
             fallback_reason=_safe(fallback_reason),
         )
-        _CALLS.set(tuple(updated if i == call_index else c for i, c in enumerate(calls)))
     except Exception:  # noqa: BLE001  # noqa: silent-ok — measurement must never change the reply
         return
 
@@ -212,6 +272,7 @@ __all__ = [
     "STAGE_UNSPECIFIED",
     "ModelBoundCall",
     "compose_stage",
+    "late_model_bound_arrivals",
     "model_bound_observation",
     "observe_model_bound_call",
     "record_model_bound_outcome",

@@ -80,6 +80,9 @@ from core.conversation_engine import (
 from services.whatsapp_platform.service import provider_send_message
 from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
 from core.acceptance_compose_observer import compose_stage as _acceptance_compose_stage
+from core.acceptance_failure_injection import (
+    maybe_inject_guard_failure as _acceptance_inject_guard_failure,
+)
 from core.acceptance_execution_context import capture_outbound_payload
 from core.database import get_db
 from core.wa_conn_write_metrics import (
@@ -8170,6 +8173,11 @@ async def _handle_merchant_message(
                         apply_order_flow_v2_outbound_guards,
                     )
 
+                    # Inert in production; fires only where a scenario
+                    # armed it. This is the boundary the recovery path
+                    # exists for, so injecting anywhere else would test a
+                    # different failure than the one claimed.
+                    _acceptance_inject_guard_failure()
                     _of2_reply = apply_order_flow_v2_outbound_guards(
                         _of2_reply,
                         db=db,
@@ -16257,14 +16265,54 @@ async def _post_wa(
         # no-op in production (empty string) and FAIL-CLOSED otherwise —
         # an absent, mismatched or failing sink raises here rather than
         # letting control reach ``provider_send_message``.
-        _captured_delivery_id = capture_outbound_payload(
-            egress_kind="whatsapp_provider",
-            operation="send_message",
-            tenant_id=_tenant_id,
-            phone_id=phone_id,
-            payload=payload,
-        )
+        try:
+            _captured_delivery_id = capture_outbound_payload(
+                egress_kind="whatsapp_provider",
+                operation="send_message",
+                tenant_id=_tenant_id,
+                phone_id=phone_id,
+                payload=payload,
+            )
+        except Exception:
+            # ``check_outbound_send`` above already RESERVED this key. A
+            # refusal that leaves the reservation standing would make the
+            # next identical send — two consecutive fallback lines, say —
+            # observe an unfinished attempt instead of a free slot. The
+            # reservation is released as a failure (failures are
+            # retryable) before the refusal propagates and stops the turn.
+            try:
+                from core.outbound_dedup import (  # noqa: PLC0415
+                    record_outbound_result as _release_captured,
+                )
+
+                _release_captured(
+                    tenant_id=_tenant_id,
+                    recipient=recipient,
+                    payload=payload,
+                    wamid=None,
+                    succeeded=False,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — the refusal below is the outcome; release is best-effort
+                pass
+            raise
         if _captured_delivery_id:
+            # A captured send completes the SAME local lifecycle a
+            # dispatched one does, so the dedup cache records a finished
+            # success rather than an attempt still in flight.
+            try:
+                from core.outbound_dedup import (  # noqa: PLC0415
+                    record_outbound_result as _record_captured,
+                )
+
+                _record_captured(
+                    tenant_id=_tenant_id,
+                    recipient=recipient,
+                    payload=payload,
+                    wamid=_captured_delivery_id,
+                    succeeded=True,
+                )
+            except Exception:  # noqa: BLE001  # noqa: silent-ok — dedup bookkeeping must not change the captured outcome
+                pass
             if _result_sink is not None:
                 _result_sink.update(
                     {

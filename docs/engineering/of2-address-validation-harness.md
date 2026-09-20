@@ -63,12 +63,26 @@ carry an address concern would turn a validation need into a platform
 contract change with re-verification of every stored artifact behind it.
 
 `address_turn` is optional in the schema — a Brain turn legitimately has
-none — but **never optional in fact**. A scenario turn declaring
-`expects_address_turn` and producing no record, an incomplete one, an
-observation not taken at the orchestrator adapter, or three artifacts that
-cannot be tied to one `turn_ref`, all fail the run
-(`address_turn_evidence_missing`, `…_incomplete`, `…_unbound`,
-`model_bound_call_evidence_incomplete`).
+none — but **never optional in fact**. An OrderFlowV2 scenario turn must
+state `expects_address_turn` explicitly (the operator refuses a manifest
+that omits it) and, when true, must declare what it expects. Signing
+protects bytes after they are written; it says nothing about whether they
+describe the turn the scenario asked for, so the validator checks meaning:
+
+| Refused | Code |
+|---|---|
+| declared but absent, or empty | `address_turn_evidence_missing` |
+| no stated field/goal expectation | `address_turn_expectations_missing` |
+| a call contradicts the expected field, goal, `missing_field`, address status or maps presence | `address_turn_expectation_unmet` |
+| stage `unspecified`, outcome unrecorded, or observed anywhere but the adapter | `model_bound_call_evidence_incomplete` |
+| wire offer ≠ recorded offer, compared as **address identities** | `address_turn_receipt_mismatch` |
+| missing payload digest, delivery id, persisted row id, or a `turn_ref` that does not match across all three | `address_turn_evidence_unbound` |
+| an injection declared but never fired | `address_turn_injection_not_executed` |
+| unresolved execution path, missing provenance, transport not `captured` | `address_turn_evidence_incomplete` |
+
+A turn where compose could not be **entered** legitimately has zero model
+calls; that stays reportable provided the record carries the fallback
+provenance saying so, rather than simply omitting everything.
 
 Per model-bound call, observed at the boundary and never reconstructed:
 `call_index`, `stage` (declared by the branch that ran), `collection_field`,
@@ -88,11 +102,23 @@ for a customer with no saved addresses carries no choices and is still
 ordinary.
 
 `of2_path_report` splits **natural** outcomes from **injected mechanism
-checks**, each with its own denominator, and carries the observation
-window and per-path sample counts with p50/p95. Injected turns never
-contribute to a natural rate. `representative_of_production: false` is
-emitted unconditionally: a small synthetic session on one sandbox tenant
-is not a production rate.
+checks**, each with its own denominator. The denominator counts turns the
+**owner** established as address collection turns (`collection_field` in
+`delivery_address`/`city`); anything else is excluded and reported as
+`non_address_turns_excluded`, so a customer-name turn is never filed as an
+address attempt. Outcomes are distinguished rather than bucketed —
+`composed`, `fallback`, `refused_claim`, `unresolved` — because healthy
+ordinary composition and an ordinary provider-failure fallback are
+different results. Samples and p50/p95 are reported per path **and**
+outcome, with the observation window, and
+`representative_of_production: false` is emitted unconditionally.
+
+`failure_injection` is not a label. `provider_error` and
+`provider_timeout` install a real fault at the orchestrator adapter,
+immediately before the provider call and after the call is recorded as
+attempted; `guard_boundary` installs one at the OrderFlowV2 outbound
+guard, which is the failure the recovery path exists for. Both record
+that they fired, and an injection that did not fire fails the turn.
 
 ## 5. Migration prerequisite — bounded to 0109 → 0110
 
@@ -137,51 +163,61 @@ modified unless this bounded verification exposes a concrete defect.
 
 ## 6. Ready-to-run sequence
 
-Preparation (disposable database only; never canonical or shared):
+Preparation (disposable database only; never canonical or shared). Every
+block starts from the repository root — the Alembic commands run in
+`database/` inside a subshell so the shell returns to the root afterwards:
 
 ```bash
+export REPO_ROOT="$PWD"
+export SANDBOX_DB="postgresql://USER:PASS@HOST:PORT/DBNAME"   # disposable
+
 # P0 — capture the effective state, read-only
-env | grep -E '^(ORDER_FLOW_V2_(ENABLED|SHADOW_ENABLED|ENFORCE_TENANTS|DISABLED_TENANTS)|LEGACY_ORDER_FLOW_DISABLED)='
+env | grep -E '^(ORDER_FLOW_V2_(ENABLED|SHADOW_ENABLED|ENFORCE_TENANTS|DISABLED_TENANTS)|LEGACY_ORDER_FLOW_DISABLED)=' || true
 psql "$SANDBOX_DB" -c "select version_num from alembic_version"
-psql "$SANDBOX_DB" -c "\d+ customer_address_provenance"
+psql "$SANDBOX_DB" -c "\d+ customer_address_provenance" || echo "table absent"
 
 # P1 — prepare to 0109 by a RECORDED path (preparation, not evidence)
-cd database && DATABASE_URL="$SANDBOX_DB" python -m alembic upgrade 0088
-              DATABASE_URL="$SANDBOX_DB" python -m alembic upgrade 0093
-              DATABASE_URL="$SANDBOX_DB" python -m alembic upgrade 0109
+( cd "$REPO_ROOT/database" \
+  && DATABASE_URL="$SANDBOX_DB" python -m alembic upgrade 0088 \
+  && DATABASE_URL="$SANDBOX_DB" python -m alembic upgrade 0093 \
+  && DATABASE_URL="$SANDBOX_DB" python -m alembic upgrade 0109 )
+psql "$SANDBOX_DB" -c "select version_num from alembic_version"   # expect 0109
 
-# P1a — State A: capture the shape, upgrade, diff
-psql "$SANDBOX_DB" -c "\d+ customer_address_provenance" > /tmp/A.before
-DATABASE_URL="$SANDBOX_DB" python -m alembic upgrade 0110
-psql "$SANDBOX_DB" -c "\d+ customer_address_provenance" > /tmp/A.after
+# P1a — STATE A: table absent, application never started
+psql "$SANDBOX_DB" -c "\d+ customer_address_provenance" > /tmp/stateA.before 2>&1
+( cd "$REPO_ROOT/database" \
+  && DATABASE_URL="$SANDBOX_DB" python -m alembic upgrade 0110 )
+psql "$SANDBOX_DB" -c "\d+ customer_address_provenance" > /tmp/stateA.after
+diff /tmp/stateA.before /tmp/stateA.after || true
 
-# P1b — State B: fresh database at 0109, start the app once, then upgrade
-#        (create_all materialises the ORM shape before Alembic sees it)
+# P1b — STATE B: a SECOND disposable database at 0109, where the
+#        application starts once so create_all materialises the ORM shape
+#        BEFORE Alembic sees it. Executable, not described:
+export SANDBOX_DB_B="postgresql://USER:PASS@HOST:PORT/DBNAME_B"   # disposable
+( cd "$REPO_ROOT/database" \
+  && DATABASE_URL="$SANDBOX_DB_B" python -m alembic upgrade 0088 \
+  && DATABASE_URL="$SANDBOX_DB_B" python -m alembic upgrade 0093 \
+  && DATABASE_URL="$SANDBOX_DB_B" python -m alembic upgrade 0109 )
+# start the app once against DB B, let lifespan run create_all, then stop it
+( cd "$REPO_ROOT/backend" \
+  && DATABASE_URL="$SANDBOX_DB_B" NAHLA_SKIP_DB_BOOTSTRAP=1 \
+     timeout 60 python -c "
+import asyncio, main
+async def _boot():
+    async with main.app.router.lifespan_context(main.app):
+        await asyncio.sleep(5)
+asyncio.run(_boot())
+" )
+psql "$SANDBOX_DB_B" -c "\d+ customer_address_provenance" > /tmp/stateB.before
+( cd "$REPO_ROOT/database" \
+  && DATABASE_URL="$SANDBOX_DB_B" python -m alembic upgrade 0110 )
+psql "$SANDBOX_DB_B" -c "\d+ customer_address_provenance" > /tmp/stateB.after
+diff /tmp/stateB.before /tmp/stateB.after || true
+# Expect ONLY: server defaults set, NOT NULL enforced, missing
+# FK/unique/index created. No column dropped, no existing value changed.
 ```
 
-Execution:
-
-```bash
-export NAHLA_INTERNAL_E2E_ENABLED=1 NAHLA_INTERNAL_E2E_CONFIRM=1
-export NAHLA_INTERNAL_E2E_DATABASE_URL="$SANDBOX_DB"
-export NAHLA_INTERNAL_E2E_TENANT_ALLOWLIST="$SANDBOX_TENANT"
-export NAHLA_INTERNAL_E2E_TEST_PHONE="$SYNTHETIC_PHONE"
-export NAHLA_INTERNAL_E2E_PHONE_ALLOWLIST="$SYNTHETIC_PHONE"
-export NAHLA_INTERNAL_E2E_PINNED_REVISION="$DEPLOYED_REVISION"
-export NAHLA_INTERNAL_E2E_EVIDENCE_HMAC_KEY=...
-export NAHLA_INTERNAL_E2E_ATTESTATION_HMAC_KEY=...
-export NAHLA_INTERNAL_E2E_ATTESTATION_JSON=... NAHLA_INTERNAL_E2E_ATTESTATION_SIGNATURE=...
-export NAHLA_INTERNAL_E2E_NETWORK_FIREWALL_CONFIRM=1
-export NAHLA_INTERNAL_E2E_LLM_ENABLED=1 NAHLA_INTERNAL_E2E_LLM_HOST_ALLOWLIST=...
-export NAHLA_INTERNAL_E2E_SESSION_DIR=/var/tmp/of2-validation
-export ORDER_FLOW_V2_ENFORCE_TENANTS="$SANDBOX_TENANT"
-
-python scripts/operators/internal_conversational_e2e_session.py \
-  preflight --tenant-id "$SANDBOX_TENANT"
-
-python scripts/operators/internal_conversational_e2e_session.py \
-  run --tenant-id "$SANDBOX_TENANT" --scenarios docs/engineering/of2-address-scenarios.json
-```
+Execution, from the repository root:
 
 Scenario manifest (`internal_conversational_e2e_scenarios_v2`), one turn:
 
@@ -221,12 +257,15 @@ table `create_all` may have been populating since deploy.
 ## 8. Offline coverage
 
 `tests/test_of2_validation_harness.py` covers valid capture, capture
-failure, invalid context, context isolation across turns and asyncio
-tasks, boundary observation, path/surface separation, evidence
-completeness and binding, signing and tamper rejection, and v2
-compatibility. Three of them drive the **real** `_post_wa` with a
-recording stub in place of the provider — never a real provider — so
-"never reaches dispatch" is observed rather than argued.
+failure, invalid context, isolation across turns and asyncio tasks,
+boundary observation, path/surface separation, evidence meaning and
+binding, signing and tamper rejection, v2 compatibility, runner identity
+refusal, denial serialization, injection firing at each seam, and the
+captured-send dedup lifecycle. Several drive the **real** `_post_wa` and
+the **real** composer/adapter chain with a recording stub in place of the
+provider — never a real provider — so "never reaches dispatch" and
+"observations survive the thread boundary" are observed rather than
+argued.
 
 `tests/test_salla_customer_address_candidates.py` gains two regressions
 for the repaired save sites; both fail on `8c9cb670` with

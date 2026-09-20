@@ -18,6 +18,7 @@ from services.internal_conversational_e2e_sql_error_audit import (
 from services.internal_conversational_e2e_contract import (
     CODE_PROVENANCE_INCOMPLETE,
     EGRESS_DENIAL_KINDS,
+    FAILURE_INJECTIONS,
     EVIDENCE_CHANNEL,
     EVIDENCE_SCHEMA_VERSION,
     SAFE_AUDIT_VALUE_RE,
@@ -425,7 +426,45 @@ class SandboxOf2TurnRequest:
     allow_llm_inference: bool = False
     failure_injection: str = "none"
     expects_address_turn: bool = False
+    expectations: Mapping[str, Any] = field(default_factory=dict)
     inbound_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _payload_digest(payload: Mapping[str, Any]) -> str:
+    """A digest of the payload that was captured, for binding only."""
+    import hashlib  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    try:
+        canonical = json.dumps(
+            dict(payload or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an undigestible payload fails the binding check
+        return ""
+
+
+def _latest_outbound_message_id(db: Any, *, conversation_id: int) -> str:
+    """The persisted row this turn wrote, by identity."""
+    try:
+        from models import MessageEvent  # noqa: PLC0415
+
+        row = (
+            db.query(MessageEvent)
+            .filter(
+                MessageEvent.conversation_id == int(conversation_id),
+                MessageEvent.direction == "outbound",
+            )
+            .order_by(MessageEvent.id.desc())
+            .first()
+        )
+        return str(getattr(row, "id", "") or "")
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence
+        return ""
 
 
 def _latest_outbound_metadata(db: Any, *, conversation_id: int) -> dict[str, Any]:
@@ -444,7 +483,10 @@ def _latest_outbound_metadata(db: Any, *, conversation_id: int) -> dict[str, Any
         )
         if row is None:
             return {}
-        return dict(getattr(row, "extra_metadata", None) or {})
+        stored = getattr(row, "extra_metadata", None)
+        # A row whose metadata is not a mapping carries no binding, which
+        # the evidence reports as unbound rather than crashing on.
+        return dict(stored) if isinstance(stored, Mapping) else {}
     except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unbound evidence below
         return {}
 
@@ -508,14 +550,18 @@ async def run_sandbox_of2_turn(
 ) -> SandboxTurnOutcome:
     """Run one OrderFlowV2 address turn through the real webhook handler."""
     from core.acceptance_compose_observer import (  # noqa: PLC0415
+        late_model_bound_arrivals,
         model_bound_observation,
         recorded_model_bound_calls,
     )
     from core.acceptance_execution_context import (  # noqa: PLC0415
         outbound_capture_sink,
     )
+    from core.acceptance_failure_injection import (  # noqa: PLC0415
+        arm_failure_injection,
+        injection_state,
+    )
     from services.internal_conversational_e2e_contract import (  # noqa: PLC0415
-        FAILURE_INJECTIONS,
         address_turn_evidence_blockers,
         classify_execution_path,
         delivered_surface,
@@ -535,16 +581,38 @@ async def run_sandbox_of2_turn(
     captured: list[Any] = []
     status = "evaluated"
 
+    # One timing accumulator per turn. Without this the direct runner
+    # inherits whatever the previous turn left bound, and every latency
+    # after the first would carry the one before it.
+    timing_token = None
+    try:
+        from core.turn_latency import (  # noqa: PLC0415
+            bind_turn_latency,
+            new_turn_latency,
+        )
+
+        timing_token = bind_turn_latency(
+            new_turn_latency(
+                tenant_id=int(request.tenant_id),
+                conversation_id=int(getattr(request.conversation, "id", 0) or 0) or None,
+                message_id=request.turn_ref,
+            )
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+        timing_token = None
+
     with internal_conversational_e2e_context(
         session_id=request.session_id,
         tenant_id=request.tenant_id,
         allow_llm_inference=request.allow_llm_inference,
     ), outbound_capture_sink(captured.append), model_bound_observation(), (
+        arm_failure_injection(request.failure_injection)
+    ), (
         internal_e2e_sql_error_turn(
             scenario_id=request.scenario_id,
             turn_index=request.turn_index,
         )
-    ):
+    ) as sql_error_scope:
         try:
             await handler(
                 request.phone_id,
@@ -563,8 +631,25 @@ async def run_sandbox_of2_turn(
             blockers.append("handler_exception")
             blockers.append(type(exc).__name__.lower()[:48])
         model_calls = [call.to_dict() for call in recorded_model_bound_calls()]
+        late_calls = late_model_bound_arrivals()
+        injection = dict(injection_state())
+        turn_sql_error_audit = sql_error_scope.summary
+        # ``recorded_egress_denials`` yields EgressDenialAudit dataclasses.
+        # ``to_audit_dict`` belongs to the EXCEPTION, not to them, so this
+        # serialises the fields the same way the Brain runner does — and
+        # a handler that catches a real denial no longer takes the whole
+        # turn down with an AttributeError.
         denial_audits = [
-            audit.to_audit_dict() for audit in recorded_egress_denials()
+            {
+                "code": "internal_e2e_egress_denied",
+                "denial_id": audit.denial_id,
+                "egress_kind": audit.egress_kind,
+                "operation": audit.operation,
+                "reason": audit.reason,
+                "requested_tenant_id": audit.requested_tenant_id,
+                "tenant_id": audit.tenant_id,
+            }
+            for audit in recorded_egress_denials()
         ]
         try:
             db.commit()
@@ -572,16 +657,24 @@ async def run_sandbox_of2_turn(
             db.rollback()
             blockers.append("sandbox_commit_failed")
 
+    if timing_token is not None:
+        try:
+            from core.turn_latency import reset_turn_latency  # noqa: PLC0415
+
+            reset_turn_latency(timing_token)
+        except Exception:  # noqa: BLE001  # noqa: silent-ok — turn latency fail-open
+            pass
+
     payload = dict(captured[-1].payload) if captured else {}
     _receipt_action_ids = _delivered_action_ids(payload)
     outbound_meta = _latest_outbound_metadata(
         db, conversation_id=int(getattr(request.conversation, "id", 0) or 0),
     )
-    injection = (
-        request.failure_injection
-        if request.failure_injection in FAILURE_INJECTIONS
-        else "none"
-    )
+    outbound_message_id = str(outbound_meta.get("_nahla_message_event_id") or "")
+    if not outbound_message_id:
+        outbound_message_id = _latest_outbound_message_id(
+            db, conversation_id=int(getattr(request.conversation, "id", 0) or 0),
+        )
 
     address_turn = {
         "turn_ref": request.turn_ref,
@@ -591,14 +684,19 @@ async def run_sandbox_of2_turn(
         "outbound_metadata_turn_ref": str(
             outbound_meta.get("address_turn_ref") or ""
         ),
+        "outbound_message_id": outbound_message_id,
         "transport": "captured" if captured else "not_captured",
         "delivery_ids": [str(record.delivery_id) for record in captured],
+        "captured_payload_digest": _payload_digest(payload) if captured else "",
         # Execution first, presentation second — and never the other way
         # round. A customer with no saved addresses gets an ordinary turn
         # with no choices, which is not a recovery.
         "execution_path": classify_execution_path(outbound_meta),
         "delivered_surface": delivered_surface(payload),
-        "failure_injection": injection,
+        "failure_injection": injection.get("kind") or "none",
+        "injection_state": injection,
+        "compose_entered": bool(model_calls),
+        "late_model_bound_arrivals": int(late_calls),
         "collection_field": str(
             outbound_meta.get("order_flow_v2_last_field")
             or (model_calls[0].get("collection_field") if model_calls else "")
@@ -623,9 +721,23 @@ async def run_sandbox_of2_turn(
     }
     blockers.extend(
         address_turn_evidence_blockers(
-            address_turn, expects_address_turn=request.expects_address_turn,
+            address_turn,
+            expects_address_turn=request.expects_address_turn,
+            expectations=dict(request.expectations or {}),
         )
     )
+    # The denials this scenario declared, compared against what happened.
+    observed = Counter(
+        (str(a.get("egress_kind") or ""), str(a.get("operation") or ""))
+        for a in denial_audits
+    )
+    expected = Counter(request.expected_denials)
+    if observed - expected:
+        blockers.append("unexpected_egress_denial")
+    if expected - observed:
+        blockers.append("expected_egress_denial_missing")
+    if int(turn_sql_error_audit.get("error_count") or 0):
+        blockers.append("runtime_sql_error")
 
     evidence = {
         "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -645,6 +757,15 @@ async def run_sandbox_of2_turn(
         "status": status,
         "address_turn": address_turn,
         "denial_audits": denial_audits,
+        "expected_denials": [
+            {"egress_kind": kind, "operation": operation}
+            for kind, operation in sorted(request.expected_denials)
+        ],
+        "observed_denial_counts": [
+            {"egress_kind": kind, "operation": operation, "count": count}
+            for (kind, operation), count in sorted(observed.items())
+        ],
+        "runtime_error_audit": turn_sql_error_audit,
         "captured_outbound": [record.to_audit_dict() for record in captured],
         "latency_ms": int((time.perf_counter() - started) * 1000),
         "mutations": mutations,
@@ -673,7 +794,12 @@ def _delivered_action_ids(payload: Mapping[str, Any]) -> list[str]:
 
 
 def _validate_of2_request(request: SandboxOf2TurnRequest) -> None:
-    """The same identity gate the Brain runner applies, plus the turn ref."""
+    """The same identity gate the Brain runner applies, enforced.
+
+    ``validate_explicit_tenant_id`` RETURNS blockers; it does not raise.
+    Calling it and discarding the result left tenant 1 and unallowlisted
+    tenants passing this gate, so every blocker it reports is raised here.
+    """
     try:
         uuid.UUID(request.session_id)
     except (TypeError, ValueError, AttributeError) as exc:
@@ -682,10 +808,44 @@ def _validate_of2_request(request: SandboxOf2TurnRequest) -> None:
         raise ValueError("scenario_id_invalid")
     if type(request.turn_index) is not int or request.turn_index < 0:
         raise ValueError("turn_index_invalid")
-    validate_explicit_tenant_id(request.tenant_id, allowed=request.allowed_tenants)
-    if not str(request.customer_phone or "").strip():
-        raise ValueError("customer_phone_invalid")
+    tenant_blockers = validate_explicit_tenant_id(
+        request.tenant_id,
+        request.allowed_tenants,
+    )
+    if tenant_blockers:
+        raise ValueError(tenant_blockers[0])
+    # The conversation this turn runs in must belong to the tenant the
+    # context authorises, or the turn would write into another tenant's
+    # conversation under this tenant's authority.
+    if int(getattr(request.conversation, "tenant_id", 0) or 0) != request.tenant_id:
+        raise ValueError("conversation_tenant_mismatch")
+    if not str(request.customer_phone or "").strip() or not str(request.text or "").strip():
+        raise ValueError("turn_input_invalid")
     if not SAFE_AUDIT_VALUE_RE.fullmatch(str(request.turn_ref or "")):
         raise ValueError("turn_ref_invalid")
     if not str(request.evidence_hmac_key or ""):
         raise ValueError("evidence_hmac_key_missing")
+    expected_denials: set[tuple[str, str]] = set()
+    for event in request.expected_denials:
+        if (
+            not isinstance(event, tuple)
+            or len(event) != 2
+            or event[0] not in EGRESS_DENIAL_KINDS
+            or not isinstance(event[1], str)
+            or not SAFE_AUDIT_VALUE_RE.fullmatch(event[1])
+        ):
+            raise ValueError("expected_denials_invalid")
+        expected_denials.add((event[0], event[1]))
+    if len(expected_denials) != len(request.expected_denials):
+        raise ValueError("expected_denials_invalid")
+    if request.failure_injection not in FAILURE_INJECTIONS:
+        raise ValueError("failure_injection_invalid")
+    if not request.allow_llm_inference:
+        raise ValueError("llm_inference_not_explicitly_enabled")
+    if (
+        not request.runtime_revision
+        or not str(request.database_identity_fingerprint or "").startswith("sha256:")
+        or not request.network_attestation_id
+        or not request.llm_allowed_hosts
+    ):
+        raise ValueError("sandbox_execution_attestation_incomplete")

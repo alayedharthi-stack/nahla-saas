@@ -8,7 +8,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 
 CONTRACT_VERSION = "internal_conversational_e2e_v1"
@@ -497,13 +497,18 @@ CODE_ADDRESS_EVIDENCE_UNBOUND = "address_turn_evidence_unbound"
 CODE_MODEL_CALL_EVIDENCE_INCOMPLETE = "model_bound_call_evidence_incomplete"
 
 ADDRESS_TURN_REQUIRED_FIELDS: tuple[str, ...] = (
+    "captured_payload_digest",
     "collection_field",
+    "compose_entered",
     "delivered_surface",
     "execution_path",
     "failure_injection",
     "model_bound_calls",
+    "outbound_message_id",
     "outbound_metadata_turn_ref",
+    "outbound_provenance",
     "receipt_action_ids",
+    "receipt_address_ids",
     "recorded_action_ids",
     "transport",
     "turn_ref",
@@ -522,55 +527,88 @@ MODEL_BOUND_CALL_REQUIRED_FIELDS: tuple[str, ...] = (
 )
 
 
-def address_turn_evidence_blockers(
-    record: Any,
-    *,
-    expects_address_turn: bool,
+CODE_ADDRESS_EXPECTATION_UNMET = "address_turn_expectation_unmet"
+CODE_ADDRESS_RECEIPT_MISMATCH = "address_turn_receipt_mismatch"
+CODE_ADDRESS_INJECTION_NOT_EXECUTED = "address_turn_injection_not_executed"
+CODE_ADDRESS_EXPECTATIONS_MISSING = "address_turn_expectations_missing"
+
+# What a scenario must state about an address turn before its evidence
+# means anything. Signing protects the bytes after they are written; it
+# says nothing about whether they describe the turn the scenario asked
+# for, which is why these are checked and not merely present.
+ADDRESS_EXPECTATION_FIELDS: tuple[str, ...] = (
+    "collection_field",
+    "response_goal",
+    "missing_field",
+)
+
+
+def _expected(expectations: Mapping[str, Any], key: str) -> str:
+    return str(expectations.get(key) or "").strip()
+
+
+def _model_call_blockers(
+    record: Mapping[str, Any],
+    expectations: Mapping[str, Any],
 ) -> list[str]:
-    """Why this turn's address evidence cannot be accepted.
-
-    ``address_turn`` is optional in the SCHEMA so that a v3 artifact for a
-    brain turn stays valid — but optional must not mean "absent is fine".
-    A scenario turn that declares ``expects_address_turn`` and produces no
-    record, or an incomplete one, is a failure of the run, not a silently
-    thinner artifact.
-    """
+    """Every model-bound call must match what the scenario asked for."""
     blockers: list[str] = []
-    if not expects_address_turn:
-        return blockers
-    if not isinstance(record, Mapping) or not record:
-        return [CODE_ADDRESS_EVIDENCE_MISSING]
-
-    missing = [f for f in ADDRESS_TURN_REQUIRED_FIELDS if f not in record]
-    if missing:
-        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
-    if str(record.get("execution_path") or "") not in EXECUTION_PATHS:
-        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
-    if str(record.get("delivered_surface") or "") not in DELIVERED_SURFACES:
-        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
-    if str(record.get("failure_injection") or "") not in FAILURE_INJECTIONS:
-        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
-    if str(record.get("transport") or "") != "captured":
-        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
-
     calls = record.get("model_bound_calls")
-    if not isinstance(calls, Sequence) or isinstance(calls, (str, bytes)) or not calls:
-        blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
-    else:
-        for call in calls:
-            if not isinstance(call, Mapping) or any(
-                field not in call for field in MODEL_BOUND_CALL_REQUIRED_FIELDS
-            ):
-                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
-                break
-            if str(call.get("observed_at") or "") != "orchestrator_adapter":
-                # Reconstructed from somewhere else is not observation.
-                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
-                break
+    calls = list(calls) if isinstance(calls, Sequence) and not isinstance(calls, (str, bytes)) else []
 
-    # The captured payload, the persisted outbound metadata and the
-    # presentation receipt must describe ONE turn. Three artifacts that
-    # cannot be tied together prove nothing about any of them.
+    provenance = dict(record.get("outbound_provenance") or {})
+    compose_entered = bool(record.get("compose_entered"))
+    # A turn where compose could not be ENTERED legitimately has no model
+    # call. That is a truthful outcome, not thin evidence — but it must
+    # then carry the fallback provenance that says so, rather than simply
+    # omitting everything.
+    if not calls:
+        if compose_entered:
+            return [CODE_MODEL_CALL_EVIDENCE_INCOMPLETE]
+        if not str(provenance.get("fallback_reason") or "").strip():
+            return [CODE_MODEL_CALL_EVIDENCE_INCOMPLETE]
+        return []
+
+    for call in calls:
+        if not isinstance(call, Mapping) or any(
+            field not in call for field in MODEL_BOUND_CALL_REQUIRED_FIELDS
+        ):
+            blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+            break
+        if str(call.get("observed_at") or "") != "orchestrator_adapter":
+            # Reconstructed from somewhere else is not observation.
+            blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+            break
+        if str(call.get("stage") or "") not in ("ordinary", "recovery"):
+            # ``unspecified`` means no branch declared itself, so the
+            # path this call belongs to was never established.
+            blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+            break
+        if not call.get("outcome_recorded"):
+            blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+            break
+
+    for call in calls:
+        if not isinstance(call, Mapping):
+            continue
+        for field in ADDRESS_EXPECTATION_FIELDS:
+            want = _expected(expectations, field)
+            if want and str(call.get(field) or "") != want:
+                blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+        want_status = _expected(expectations, "delivery_address_status")
+        if want_status and str(call.get("delivery_address_status") or "") != want_status:
+            blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+        if "requires_accepted_maps_reference" in expectations:
+            if bool(call.get("has_accepted_maps_reference")) != bool(
+                expectations["requires_accepted_maps_reference"]
+            ):
+                blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+    return blockers
+
+
+def _binding_blockers(record: Mapping[str, Any]) -> list[str]:
+    """One turn, three artifacts, tied by identity rather than by hope."""
+    blockers: list[str] = []
     turn_ref = str(record.get("turn_ref") or "")
     if not turn_ref or str(record.get("outbound_metadata_turn_ref") or "") != turn_ref:
         blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
@@ -579,7 +617,110 @@ def address_turn_evidence_blockers(
             if isinstance(call, Mapping) and str(call.get("turn_ref") or "") != turn_ref:
                 blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
                 break
+    # The captured payload has to be the payload this receipt came from,
+    # and the persisted row has to be the row this turn wrote.
+    if str(record.get("transport") or "") == "captured":
+        if not str(record.get("captured_payload_digest") or "").startswith("sha256:"):
+            blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+        if not record.get("delivery_ids"):
+            blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+        if not str(record.get("outbound_message_id") or "").strip():
+            blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+    return blockers
 
+
+def _receipt_blockers(record: Mapping[str, Any]) -> list[str]:
+    """What was offered on the wire is what was recorded as offered.
+
+    The two lists are compared as ADDRESS identities. Comparing action
+    ids against address ids — which is what the first cut stored — can
+    never be equal and so never failed, which is the same as not
+    checking.
+    """
+    delivered = record.get("receipt_address_ids")
+    recorded = record.get("recorded_action_ids")
+    if not isinstance(delivered, Sequence) or isinstance(delivered, (str, bytes)):
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    if not isinstance(recorded, Sequence) or isinstance(recorded, (str, bytes)):
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    if {str(v) for v in delivered} != {str(v) for v in recorded}:
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    return []
+
+
+def address_turn_evidence_blockers(
+    record: Any,
+    *,
+    expects_address_turn: bool,
+    expectations: Optional[Mapping[str, Any]] = None,
+) -> list[str]:
+    """Why this turn's address evidence cannot be accepted.
+
+    ``address_turn`` is optional in the SCHEMA so that a v3 artifact for
+    a brain turn stays valid — but optional must not mean "absent is
+    fine". A scenario turn that declares ``expects_address_turn`` and
+    produces no record, an incomplete one, one that contradicts what the
+    scenario asked for, or one whose artifacts cannot be tied together,
+    is a failure of the run rather than a thinner artifact.
+    """
+    blockers: list[str] = []
+    if not expects_address_turn:
+        return blockers
+    if not isinstance(record, Mapping) or not record:
+        return [CODE_ADDRESS_EVIDENCE_MISSING]
+
+    wants = dict(expectations or {})
+    # An OrderFlowV2 scenario has to say what it expects. Without that,
+    # every check below degrades to "some string is present", which is
+    # how a city turn asserting a missing DELIVERY ADDRESS passed.
+    if not any(_expected(wants, field) for field in ADDRESS_EXPECTATION_FIELDS):
+        blockers.append(CODE_ADDRESS_EXPECTATIONS_MISSING)
+
+    missing = [f for f in ADDRESS_TURN_REQUIRED_FIELDS if f not in record]
+    if missing:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("execution_path") or "") not in EXECUTION_PATHS:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("execution_path") or "") == PATH_UNRESOLVED:
+        # Nothing established which path ran, so no outcome can be filed.
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("delivered_surface") or "") not in DELIVERED_SURFACES:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("failure_injection") or "") not in FAILURE_INJECTIONS:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("transport") or "") != "captured":
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+
+    # Final-text provenance: what the customer received and why.
+    provenance = record.get("outbound_provenance")
+    provenance = dict(provenance) if isinstance(provenance, Mapping) else {}
+    if not provenance:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+
+    # An injection that was declared but never fired proves nothing about
+    # the mechanism it named, and must not be filed as a passing check.
+    injection = str(record.get("failure_injection") or FAILURE_INJECTION_NONE)
+    if injection != FAILURE_INJECTION_NONE:
+        state = record.get("injection_state")
+        state = dict(state) if isinstance(state, Mapping) else {}
+        if int(state.get("fired") or 0) < 1 or str(state.get("kind") or "") != injection:
+            blockers.append(CODE_ADDRESS_INJECTION_NOT_EXECUTED)
+
+    for want_key, record_key in (
+        ("expected_execution_path", "execution_path"),
+        ("expected_surface", "delivered_surface"),
+    ):
+        want = _expected(wants, want_key)
+        if want and str(record.get(record_key) or "") != want:
+            blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+
+    want_field = _expected(wants, "collection_field")
+    if want_field and str(record.get("collection_field") or "") != want_field:
+        blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+
+    blockers.extend(_model_call_blockers(record, wants))
+    blockers.extend(_binding_blockers(record))
+    blockers.extend(_receipt_blockers(record))
     return sorted(set(blockers))
 
 

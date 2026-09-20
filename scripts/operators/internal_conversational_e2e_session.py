@@ -31,6 +31,7 @@ from scripts.operators.deployment_revision_attestation_contract import (  # noqa
     evaluate_runtime_revision_attestation,
 )
 from services.internal_conversational_e2e_contract import (  # noqa: E402
+    ADDRESS_EXPECTATION_FIELDS,
     FAILURE_INJECTIONS,
     SCENARIO_SCHEMA_VERSION_V1,
     SCENARIO_SCHEMA_VERSION_V2,
@@ -262,12 +263,30 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
             failure_injection = str(turn.get("failure_injection") or "none")
             if failure_injection not in FAILURE_INJECTIONS:
                 raise ValueError("failure_injection_invalid")
+            # Never defaulted for an OrderFlowV2 turn. A default of false
+            # let a no-op handler with no capture and no model call
+            # report a PASS, which is exactly the claim the flag exists
+            # to prevent.
+            if mode == TURN_MODE_OF2 and "expects_address_turn" not in turn:
+                raise ValueError("expects_address_turn_required")
             expects_address_turn = bool(turn.get("expects_address_turn") or False)
             if expects_address_turn and mode != TURN_MODE_OF2:
                 # Only the OrderFlowV2 path can produce address evidence,
                 # so a Brain turn claiming it would declare a requirement
                 # nothing in the run could ever satisfy.
                 raise ValueError("expects_address_turn_invalid")
+            expectations = turn.get("expectations") or {}
+            if not isinstance(expectations, Mapping):
+                raise ValueError("expectations_invalid")
+            if expects_address_turn and not any(
+                str(expectations.get(field) or "").strip()
+                for field in ADDRESS_EXPECTATION_FIELDS
+            ):
+                # "Some string is present" is not an assertion. A turn
+                # that expects address evidence must say which field and
+                # which goal it expects, or the evidence cannot contradict
+                # anything.
+                raise ValueError("expectations_required")
             checked_turns.append(
                 {
                     "text": str(turn["text"]),
@@ -279,6 +298,13 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                     "mode": mode,
                     "failure_injection": failure_injection,
                     "expects_address_turn": expects_address_turn,
+                    "expectations": dict(expectations),
+                    "inbound_metadata": dict(turn.get("inbound_metadata") or {}),
+                    "captured_action_index": (
+                        int(turn["captured_action_index"])
+                        if isinstance(turn.get("captured_action_index"), int)
+                        else None
+                    ),
                 }
             )
         seen.add(scenario_id)
@@ -287,24 +313,39 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
 
 
 def _of2_path_report(turn_results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Natural and injected outcomes, never mixed into one rate.
+    """Natural outcomes and injected mechanism checks, never mixed.
 
-    An injected failure confirms a MECHANISM. Counting it beside naturally
-    observed outcomes would invent a failure rate the run never measured,
-    so the two carry separate denominators and are reported separately.
-    A small synthetic session is not a production rate either way, which is
-    why the window and the sample counts travel with every number.
+    Two corrections live here. An injected failure confirms a MECHANISM;
+    counting it beside naturally observed outcomes would invent a failure
+    rate the run never measured, so the two carry separate denominators.
+    And the denominator counts turns the OWNER established as address
+    collection turns — the previous count of "every record the runner
+    created" filed a customer-name turn as an address attempt.
+
+    Outcomes are distinguished rather than bucketed: healthy ordinary
+    composition and an ordinary provider-failure fallback are different
+    results and must not share a number.
     """
-    natural: dict[str, list[int]] = {}
-    injected: dict[str, list[int]] = {}
+    natural: dict[tuple[str, str], list[int]] = {}
+    injected: dict[tuple[str, str], list[int]] = {}
     surfaces: dict[str, int] = {}
     attempted = 0
+    not_address = 0
     for row in turn_results:
         address_turn = row.get("address_turn")
         if not isinstance(address_turn, Mapping) or not address_turn:
             continue
+        # The owner's own state patch decides this, not the existence of
+        # a record the runner writes for every OF2 invocation.
+        if str(address_turn.get("collection_field") or "") not in (
+            "delivery_address",
+            "city",
+        ):
+            not_address += 1
+            continue
         attempted += 1
         path = str(address_turn.get("execution_path") or "unresolved")
+        outcome = _of2_outcome(address_turn)
         surface = str(address_turn.get("delivered_surface") or "none")
         surfaces[surface] = surfaces.get(surface, 0) + 1
         timing = address_turn.get("turn_timing")
@@ -316,24 +357,25 @@ def _of2_path_report(turn_results: list[dict[str, Any]]) -> dict[str, Any]:
             if str(address_turn.get("failure_injection") or "none") == "none"
             else injected
         )
-        bucket.setdefault(path, []).append(latency)
+        bucket.setdefault((path, outcome), []).append(latency)
 
-    def _summary(bucket: dict[str, list[int]]) -> dict[str, Any]:
+    def _summary(bucket: dict[tuple[str, str], list[int]]) -> dict[str, Any]:
         total = sum(len(v) for v in bucket.values())
         return {
             "denominator": total,
-            "by_path": {
-                path: {
+            "by_path_and_outcome": {
+                f"{path}:{outcome}": {
                     "samples": len(samples),
                     "latency_ms_p50": _percentile(samples, 50),
                     "latency_ms_p95": _percentile(samples, 95),
                 }
-                for path, samples in sorted(bucket.items())
+                for (path, outcome), samples in sorted(bucket.items())
             },
         }
 
     return {
         "address_turns_attempted": attempted,
+        "non_address_turns_excluded": not_address,
         "natural": _summary(natural),
         "injected_mechanism_checks": _summary(injected),
         # A separate dimension on purpose: an ordinary turn for a customer
@@ -343,12 +385,55 @@ def _of2_path_report(turn_results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _of2_outcome(address_turn: Mapping[str, Any]) -> str:
+    """Success, fallback, refusal or unresolved — from the provenance."""
+    provenance = address_turn.get("outbound_provenance")
+    provenance = dict(provenance) if isinstance(provenance, Mapping) else {}
+    reason = str(provenance.get("fallback_reason") or "").strip()
+    if str(provenance.get("compose_source") or "") == "llm" and not reason:
+        return "composed"
+    if reason in (
+        "address_reply_unsupported_after_compose",
+        "address_reply_unverifiable_after_compose",
+    ):
+        return "refused_claim"
+    if reason:
+        return "fallback"
+    if address_turn.get("compose_entered"):
+        return "composed"
+    return "unresolved"
+
+
 def _percentile(samples: list[int], pct: int) -> Optional[int]:
     if not samples:
         return None
     ordered = sorted(samples)
     index = max(0, min(len(ordered) - 1, (pct * len(ordered)) // 100))
     return int(ordered[index])
+
+
+def _continuation_metadata(
+    turn: Mapping[str, Any], captured_action_ids: list[str],
+) -> dict[str, Any]:
+    """Replay a structured action taken from the previous captured payload.
+
+    Substituting a real delivered id — rather than one the manifest
+    invented — is the only way a continuation turn tests the offer the
+    customer was actually shown. An index with no captured id leaves the
+    placeholder in place, so the turn fails rather than silently
+    answering a showing that never happened.
+    """
+    metadata = dict(turn.get("inbound_metadata") or {})
+    index = turn.get("captured_action_index")
+    if index is None or not captured_action_ids:
+        return metadata
+    if not 0 <= int(index) < len(captured_action_ids):
+        return metadata
+    action_id = str(captured_action_ids[int(index)])
+    return {
+        key: (action_id if value == "__captured_action_id__" else value)
+        for key, value in metadata.items()
+    }
 
 
 def _conversation(db: Any, *, tenant_id: int, phone: str, session_id: str) -> tuple[Any, bool]:
@@ -490,6 +575,7 @@ async def run_session(
         )
         if created:
             runner_mutations.append("sandbox_conversation_created")
+        last_captured_action_ids: list[str] = []
         for scenario in scenarios:
             for turn_index, turn in enumerate(scenario["turns"]):
                 clear_last_turn_sql_error_audit()
@@ -520,10 +606,37 @@ async def run_session(
                             allow_llm_inference=llm_allowed,
                             failure_injection=turn["failure_injection"],
                             expects_address_turn=turn["expects_address_turn"],
+                            expectations=turn["expectations"],
+                            inbound_metadata=_continuation_metadata(
+                                turn, last_captured_action_ids,
+                            ),
                         ),
                     )
                     clear_last_turn_sql_error_audit()
-                    results.append(dict(outcome.evidence))
+                    of2_evidence = dict(outcome.evidence)
+                    # The same assertions the Brain path applies. Appending
+                    # and continuing skipped them entirely, so a turn that
+                    # returned early at a gate still reported the status it
+                    # was initialised with.
+                    of2_blockers: list[str] = []
+                    if of2_evidence["status"] != turn["expected_status"]:
+                        of2_blockers.append("unexpected_turn_status")
+                    if of2_blockers:
+                        of2_evidence["blockers"] = sorted(
+                            set(of2_evidence.get("blockers") or []) | set(of2_blockers)
+                        )
+                        of2_evidence["verdict"] = "fail"
+                    # A structured action the customer can only have taken
+                    # from what was actually delivered: the next turn
+                    # replays an id read back off THIS turn's captured
+                    # payload, never one invented by the scenario.
+                    last_captured_action_ids = list(
+                        (of2_evidence.get("address_turn") or {}).get(
+                            "receipt_action_ids"
+                        )
+                        or []
+                    )
+                    results.append(of2_evidence)
                     continue
                 outcome = await run_sandbox_turn(
                     db=db,

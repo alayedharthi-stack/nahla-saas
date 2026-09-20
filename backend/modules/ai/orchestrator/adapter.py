@@ -150,6 +150,15 @@ def generate_ai_reply(
 
     _observed = observe_model_bound_call(context_metadata=context_metadata)
     try:
+        # Inert in production. Under an internal-E2E context that armed
+        # one, this is where the injected provider fault actually fires —
+        # at the provider boundary, after the call is recorded as
+        # attempted, so the mechanism is exercised rather than labelled.
+        from core.acceptance_failure_injection import (  # noqa: PLC0415
+            maybe_inject_provider_failure,
+        )
+
+        maybe_inject_provider_failure()
         payload = _pipeline.run(request)
     except BaseException:
         record_model_bound_outcome(

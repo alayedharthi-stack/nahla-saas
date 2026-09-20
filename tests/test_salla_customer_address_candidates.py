@@ -3091,6 +3091,9 @@ def _webhook_send_block():
     from core.acceptance_compose_observer import (  # noqa: PLC0415
         compose_stage as _acceptance_compose_stage,
     )
+    from core.acceptance_failure_injection import (  # noqa: PLC0415
+        maybe_inject_guard_failure as _acceptance_inject_guard_failure,
+    )
 
     namespace = {
         "Optional": Optional, "Dict": Dict, "Any": Any,
@@ -3099,6 +3102,10 @@ def _webhook_send_block():
         # acceptance context, which is exactly the state these probes run
         # in, so the block behaves here as it does in production.
         "_acceptance_compose_stage": _acceptance_compose_stage,
+        # Both are the REAL helpers, not stand-ins: each is inert without
+        # an acceptance context, which is the state these probes run in,
+        # so the block behaves here exactly as it does in production.
+        "_acceptance_inject_guard_failure": _acceptance_inject_guard_failure,
     }
     exec(compile(module, "actual_webhook_send_block", "exec"), namespace)  # noqa: S102
     return namespace

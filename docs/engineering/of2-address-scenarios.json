@@ -1,0 +1,170 @@
+{
+  "scenario_schema_version": "internal_conversational_e2e_scenarios_v2",
+  "_readme": [
+    "Executable manifest for the OrderFlowV2 address validation harness.",
+    "Every OF2 turn must state expects_address_turn and, when true, the",
+    "field and goal it expects; an unstated expectation cannot be",
+    "contradicted by any evidence. failure_injection is one of none,",
+    "provider_error, provider_timeout, guard_boundary and installs a real",
+    "fault at the named seam. No turn asserts reply wording."
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "ordinary_delivery_address_one_saved",
+      "turns": [
+        {
+          "text": "ابغى اكمل الطلب",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": true,
+          "expectations": {
+            "collection_field": "delivery_address",
+            "response_goal": "collect_delivery_address",
+            "missing_field": "delivery_address",
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": []
+        }
+      ]
+    },
+    {
+      "scenario_id": "ordinary_no_saved_choices",
+      "turns": [
+        {
+          "text": "ابغى اكمل الطلب",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": true,
+          "expectations": {
+            "collection_field": "delivery_address",
+            "response_goal": "collect_delivery_address",
+            "missing_field": "delivery_address",
+            "expected_execution_path": "ordinary",
+            "expected_surface": "text"
+          },
+          "expected_denials": []
+        }
+      ]
+    },
+    {
+      "scenario_id": "city_only_accepted_address",
+      "turns": [
+        {
+          "text": "الرياض",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": true,
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "delivery_address_status": "accepted",
+            "requires_accepted_maps_reference": true,
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": []
+        }
+      ]
+    },
+    {
+      "scenario_id": "provider_failure_retains_choices",
+      "turns": [
+        {
+          "text": "ابغى اكمل الطلب",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "provider_error",
+          "expects_address_turn": true,
+          "expectations": {
+            "collection_field": "delivery_address",
+            "response_goal": "collect_delivery_address",
+            "missing_field": "delivery_address",
+            "expected_execution_path": "ordinary",
+            "expected_surface": "list"
+          },
+          "expected_denials": []
+        }
+      ]
+    },
+    {
+      "scenario_id": "provider_timeout_retains_choices",
+      "turns": [
+        {
+          "text": "ابغى اكمل الطلب",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "provider_timeout",
+          "expects_address_turn": true,
+          "expectations": {
+            "collection_field": "delivery_address",
+            "response_goal": "collect_delivery_address",
+            "missing_field": "delivery_address",
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": []
+        }
+      ]
+    },
+    {
+      "scenario_id": "guard_boundary_recovery_text_only",
+      "turns": [
+        {
+          "text": "الرياض",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "guard_boundary",
+          "expects_address_turn": true,
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "delivery_address_status": "accepted",
+            "requires_accepted_maps_reference": true,
+            "expected_execution_path": "recovery",
+            "expected_surface": "text"
+          },
+          "expected_denials": []
+        }
+      ]
+    },
+    {
+      "scenario_id": "continuation_after_captured_choice",
+      "_note": [
+        "Two turns: the first is offered saved addresses, the second replays",
+        "an action id taken from the first turn's CAPTURED payload. The",
+        "runner forwards scenario inbound_metadata, and the placeholder",
+        "below is substituted with the captured id of the offered address",
+        "at the index named by captured_action_index."
+      ],
+      "turns": [
+        {
+          "text": "ابغى اكمل الطلب",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": true,
+          "expectations": {
+            "collection_field": "delivery_address",
+            "response_goal": "collect_delivery_address",
+            "missing_field": "delivery_address",
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": []
+        },
+        {
+          "text": "اختيار العنوان",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": false,
+          "captured_action_index": 0,
+          "inbound_metadata": {"button_id": "__captured_action_id__"},
+          "expected_denials": []
+        }
+      ]
+    }
+  ]
+}
