@@ -15,7 +15,7 @@ sending any response event, which surfaces in Starlette as
 
     RuntimeError: No response returned.
 
-When a request burst (e.g. 360dialog flushing a backlog of webhooks
+When a request burst (e.g. Meta flushing a backlog of webhooks
 after a deploy) saturates the ``BaseHTTPMiddleware`` chain, even
 ``GET /alive`` and ``GET /healthz`` start failing intermittently
 because they share the same chain.

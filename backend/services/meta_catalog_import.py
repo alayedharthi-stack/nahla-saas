@@ -68,7 +68,7 @@ the short version is:
      the ``catalog_management`` scope when the merchant opted in.
 
   2. Platform-wide system user token (env ``WHATSAPP_TOKEN``) as
-     a fallback for 360dialog / coexistence merchants whose
+     a fallback for coexistence merchants whose
      ``conn.access_token`` is a ``D360-API-KEY`` — that field
      CANNOT authenticate against ``graph.facebook.com`` and is
      never sent there.
@@ -769,8 +769,8 @@ def is_unsupported_catalog_edge_error(meta_err: Optional[Dict[str, Any]]) -> boo
 #
 # Production incident (tenant=33, catalog_id=2426534581035003):
 # Meta rejected our call with ``code=190 — Invalid OAuth access token``.
-# Root cause: the merchant connected via 360dialog (coexistence), so
-# their ``WhatsAppConnection.access_token`` column holds a 360dialog
+# Root cause: the merchant connected via a retired provider, so
+# their ``WhatsAppConnection.access_token`` column holds that provider's
 # ``D360-API-KEY``, NOT a Meta Graph API token. The original importer
 # blindly read ``conn.access_token`` and sent it to
 # ``graph.facebook.com``, which can never authenticate a D360 key.
@@ -786,7 +786,7 @@ def is_unsupported_catalog_edge_error(meta_err: Optional[Dict[str, Any]]) -> boo
 #   2. ``platform_system_user`` — the platform-wide system user
 #      token in ``WA_TOKEN`` (env ``WHATSAPP_TOKEN``). Used as a
 #      fallback for merchants whose connection has no merchant-side
-#      Meta OAuth token (coexistence / 360dialog merchants, or
+#      Meta OAuth token (coexistence / retired-provider merchants, or
 #      merchants who signed up before catalog_management was added
 #      to the Embedded Signup config). Whether the platform's
 #      system user actually has catalog_management on the target
@@ -795,7 +795,7 @@ def is_unsupported_catalog_edge_error(meta_err: Optional[Dict[str, Any]]) -> boo
 #
 # What we NEVER do:
 #
-#   * ``conn.access_token`` for ``provider="dialog360"`` — that's a
+#   * ``conn.access_token`` for a retired provider — that's a
 #     D360-API-KEY, not a Graph token. Sending it would produce
 #     exactly the ``code=190`` error this incident surfaced.
 #
@@ -823,7 +823,7 @@ GRAPH_RESULT_UNSUPPORTED_CATALOG_EDGE  = "unsupported_catalog_edge"
 def _looks_like_meta_graph_token(token: str) -> bool:
     """True when *token* plausibly is a Meta Graph OAuth / system-user token.
 
-    Coexistence / 360dialog merchants normally store a short D360 API key in
+    Merchants left over from the retired provider store a short API key in
     ``access_token`` — those must never be sent to graph.facebook.com. A
     long ``EAA…`` token stored on the same row is treated as merchant Meta
     OAuth and preferred over the platform fallback.
@@ -1229,7 +1229,7 @@ def _select_graph_token(conn: Any) -> Dict[str, Any]:
             "token_source":     "merchant_meta_oauth"
                               | "platform_system_user"
                               | "none",
-            "provider":         "meta" | "dialog360" | "",
+            "provider":         "meta" | "unsupported" | "",
             "connection_type":  "direct" | "embedded" | "coexistence" | "",
             "token_tail":       last 4 chars or "<empty>",
             "token_len":        int,
@@ -1276,7 +1276,7 @@ def _select_graph_token(conn: Any) -> Dict[str, Any]:
             "reason": (
                 f"skipped — provider={provider or '<unset>'} and "
                 f"merchant access token is not a Meta Graph token "
-                f"(len={len(plain_token)}, typically a 360dialog D360-API-KEY). "
+                f"(len={len(plain_token)}, typically a retired provider's API key). "
                 f"Sending it to graph.facebook.com would trigger OAuthException code=190."
             ),
         })
@@ -1434,7 +1434,7 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
         )
     # ── Graph token selection (May 2026 #19e) ─────────────────
     # NOT a simple ``conn.access_token`` read anymore — for
-    # dialog360 / coexistence merchants that field holds a
+    # For a retired-provider connection that field holds a
     # D360-API-KEY which Meta rejects with code=190. See
     # ``_select_graph_token`` docstring for the full ordering.
     token_pick = _select_graph_token(conn)
@@ -1447,7 +1447,7 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
         raise MetaCatalogImportError(
             "meta_access_token_missing",
             "Meta catalog import requires a Meta Graph API access "
-            "token, not a 360dialog API key. No merchant Meta OAuth "
+            "token, not a retired provider API key. No merchant Meta OAuth "
             "token is on file for this WhatsApp connection and the "
             "platform system-user fallback (WA_TOKEN) is not "
             "configured.",

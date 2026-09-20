@@ -9,7 +9,7 @@ Exposes:
   fire-and-forget coroutine while keeping a live count of in-flight
   background tasks plus a lifetime total. Errors are logged but never
   bubble back into the request that spawned them. This is the helper
-  webhook handlers use to return 200 OK to Meta/360dialog instantly
+  webhook handlers use to return 200 OK to Meta instantly
   while the AI/state pipeline runs asynchronously behind the response.
 
   The helper enforces a HARD CAP on simultaneously-in-flight tasks
@@ -17,7 +17,7 @@ Exposes:
   ``NAHLA_MAX_BG_TASKS``). Past the cap the new task is REJECTED:
   the function logs ``[BG/rejected]`` and returns a no-op completed
   task. This protects the worker from "task explosion" — e.g. when
-  Meta or 360dialog flush a backlog of thousands of webhooks at the
+  Meta flushes a backlog of thousands of webhooks at the
   worker the moment a new deploy comes up — which would otherwise
   saturate the event loop and freeze /healthz, /auth/ping, login, etc.
 
@@ -132,7 +132,7 @@ def spawn_background(
             )
             # ── W2.0.1 (May 2026): Inbound-lifecycle telemetry. The
             # webhook path spawns _handle_whatsapp_body /
-            # _handle_360dialog_body via this helper; if we reject
+            # the webhook body handler via this helper; if we reject
             # here the upstream provider already saw a 200 OK and the
             # message will never be processed. This standalone event
             # surfaces the drop to the [INBOUND_LIFECYCLE] grep.

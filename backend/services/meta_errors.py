@@ -100,10 +100,10 @@ class ClassifiedError:
     # service_unavailable, transient exceptions).
     retryable:     bool = False
     # NEW: True when the failure originates from the WhatsApp
-    # provider's billing/account layer (360dialog or Meta's own
+    # provider's billing/account layer (Meta's own
     # account-level restrictions) — i.e. there is nothing the
     # merchant can do in the dashboard. The UI uses this to swap
-    # the normal "Retry" CTA for a "Contact 360dialog support"
+    # the normal "Retry" CTA for a "Contact provider support"
     # banner and to lock the campaign from further auto-dispatch.
     provider_billing_block: bool = False
 
@@ -305,7 +305,7 @@ ERRORS: Dict[str, ClassifiedError] = {
         is_recoverable=True,
         retryable=False,  # needs WBM intervention, not blind retry
         # Account-level Meta restriction on OUR WABA — same support
-        # workflow as client_payment_blocked: contact 360dialog.
+        # workflow as client_payment_blocked: contact provider support.
         provider_billing_block=True,
         quality_tier="critical",
         advice_ar="راجع تنبيهات WhatsApp Business Manager — قد يطلب التحقق.",
@@ -337,7 +337,7 @@ ERRORS: Dict[str, ClassifiedError] = {
         retryable=False,
         # An auth failure at this layer is almost always a token
         # rotation/suspension on the provider side — surface the
-        # 360dialog support workflow rather than asking the merchant
+        # provider support workflow rather than asking the merchant
         # to "just reconnect" when their credentials are fine.
         provider_billing_block=True,
         quality_tier="critical",
@@ -832,7 +832,7 @@ def should_suppress_on_repeat(key: Optional[str]) -> bool:
 def is_provider_billing_block(key: Optional[str]) -> bool:
     """Quick lookup: does this canonical key indicate a provider-side
     billing / account block that the merchant cannot resolve in the
-    dashboard? Used to trip the "Contact 360dialog" support banner."""
+    dashboard? Used to trip the "Contact provider support" banner."""
     if not key:
         return False
     entry = ERRORS.get(str(key).strip().lower())

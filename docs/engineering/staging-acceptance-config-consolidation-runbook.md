@@ -193,7 +193,7 @@ this governance PR or CI.
 |---------|----------|
 | Meta Cloud API direct webhooks | Canonical `nahla-saas` `BACKEND_URL` → `/webhook/whatsapp` |
 | Real-channel acceptance | Canonical `nahla-saas` (Meta direct only) |
-| 360dialog (legacy) | Transition observability only — **excluded from readiness** |
+| 360dialog (removed) | Provider removed; these variables are detected only so a stale environment **blocks** — never readiness |
 | Legacy `nahla-saas-staging` | Decommission after acceptance signoff — **manual**, no auto-delete |
 
 ## CI

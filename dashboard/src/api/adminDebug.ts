@@ -11,7 +11,7 @@ import { apiCall } from './client'
 // ── /admin/debug/whatsapp/send-template ─────────────────────────────
 // Fires a single template message at a real WhatsApp number, bypassing
 // the entire campaign engine. Returns the raw provider response so
-// support can read the exact Meta/360dialog error envelope.
+// support can read the exact Meta error envelope.
 
 export interface AdminDirectSendRequest {
   phone_number_id: string
@@ -24,7 +24,7 @@ export interface AdminDirectSendRequest {
 export interface AdminDirectSendResponse {
   ok:                  boolean
   http_status:         number
-  provider:            'meta_cloud' | '360dialog' | string
+  provider:            'meta_cloud' | 'unsupported' | string
   phone_number_id:     string
   tenant_id:           number
   template:            string

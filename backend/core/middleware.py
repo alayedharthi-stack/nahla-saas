@@ -58,7 +58,7 @@ def _is_bypass_path(path: str) -> bool:
     """True for paths that should skip every non-essential middleware.
 
     Exact match on ULTRA_LIGHT_PATHS, plus prefix match on /webhook/
-    so providers (Meta / 360dialog) always get a fast 200 even when
+    so the provider (Meta) always gets a fast 200 even when
     the rest of the chain is congested.
     """
     if path in ULTRA_LIGHT_PATHS:
@@ -104,7 +104,7 @@ async def _safe_call_next(
     * Any other ``Exception``           → log + 500-shaped fallback.
 
     Webhook paths (``/webhook/*``) get a 200 ``ok=false`` body
-    instead of 499/500 so 360dialog / Meta do NOT enter retry-storm
+    instead of 499/500 so Meta does NOT enter retry-storm
     mode on a transient cancellation. See ``_safe_fallback_response``.
 
     Note that we re-import ``anyio.EndOfStream`` lazily here in case
@@ -194,7 +194,7 @@ JWT_PUBLIC_PREFIXES = (
     "/merchant/widgets/",               # all widget JS/JSON endpoints
     "/salla-auto.js",                   # short alias (configured in Salla Partner Portal)
     "/static/salla-auto.js",            # legacy path (configured in Salla Partner Portal)
-    # WhatsApp / 360dialog fetch outbound media by anonymous GET on the
+    # WhatsApp fetches outbound media by anonymous GET on the
     # stored file_url. Must stay public; access is gated by unguessable id
     # + row existence inside stream_ai_media (see intelligence_libraries).
     "/intelligence/ai-media/file/",
@@ -484,7 +484,7 @@ def _safe_fallback_response(
     when a middleware would otherwise exit without a response.
 
     For webhook paths we override the requested ``status_code`` with
-    200 so upstream providers (360dialog, Meta) do not enter their
+    200 so the upstream provider (Meta) does not enter its
     retry loop on what is almost always a transient cancellation.
     The actual processing error (if any) has already been logged.
 
@@ -890,7 +890,7 @@ async def support_session_middleware(request: Request, call_next):
         return await _safe_call_next(request, call_next, name="support_session")
 
     # Bypass for ultra-light + webhook paths so a heavy DB session
-    # check never blocks a liveness probe or a 360dialog ack.
+    # check never blocks a liveness probe or a provider ack.
     if _is_bypass_path(request.url.path):
         return await _safe_call_next(request, call_next, name="support_session")
 

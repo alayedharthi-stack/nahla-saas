@@ -193,15 +193,21 @@ async def _inspect_connection(db, conn, now: datetime, idle_cutoff: datetime) ->
 
     # ── Rule 1: CRITICAL — webhook_verified=false while status=connected ──────
     if not conn.webhook_verified and conn.status == "connected":
-        # 360dialog Coexistence connections never go through Meta's
-        # subscribed_apps API, so `webhook_verified` is set by the
-        # partner-side webhook config flow, not by Graph probes. If the
-        # canonical record is missing the flag, stamp it here (if webhook
-        # traffic actually flowed recently the connection is healthy) and
-        # skip the Meta resubscribe attempt — calling Graph with a 360dialog
-        # API key produces a guaranteed 401 OAuthException, which we used to
-        # log every 5 minutes for every coexistence merchant.
-        if not _is_meta_graph_compatible(
+        # Coexistence connections do not go through Meta's subscribed_apps
+        # API, so `webhook_verified` is set by the connection flow rather than
+        # by Graph probes. If the canonical record is missing the flag, stamp
+        # it here (recent webhook traffic is the actual signal of life) and
+        # skip the Meta resubscribe attempt.
+        #
+        # A row naming a retired provider is NOT stamped: it has no working
+        # webhook to verify.
+        if _provider_is_retired(conn):
+            logger.warning(
+                "[Guardian] connection names a retired provider tenant=%s "
+                "provider=%s — not verified, not repaired here",
+                conn.tenant_id, getattr(conn, "provider", None),
+            )
+        elif not _is_meta_graph_compatible(
             provider=getattr(conn, "provider", None),
             connection_type=getattr(conn, "connection_type", None),
         ):
@@ -364,12 +370,17 @@ async def _check_all_merchant_wabas() -> None:
                 token_ctx = get_token_context(conn)
                 token = token_ctx.token
 
-                # 360dialog Coexistence: token is a 360dialog API key, not a
-                # Meta OAuth token. Graph API would always 401 — so we skip
-                # the subscribed_apps probe entirely and treat the connection
-                # as healthy when its own webhook traffic is flowing (the
-                # actual signal of life). This eliminates the recurring
-                # `401 OAuthException` log noise reported by the merchant.
+                # A coexistence connection does not use subscribed_apps, so
+                # the probe is skipped and its own webhook traffic is the
+                # signal of life. A row naming a retired provider is skipped
+                # too — and, below, never stamped verified.
+                if _provider_is_retired(conn):
+                    logger.warning(
+                        "[Guardian] SKIP subscribed_apps tenant=%s provider=%s — "
+                        "retired provider; this connection is not usable",
+                        conn.tenant_id, getattr(conn, "provider", None),
+                    )
+                    continue
                 if not _is_meta_graph_compatible(
                     provider=getattr(conn, "provider", None),
                     connection_type=getattr(conn, "connection_type", None),
@@ -378,17 +389,17 @@ async def _check_all_merchant_wabas() -> None:
                     logger.info(
                         "[Guardian] SKIP subscribed_apps tenant=%s "
                         "provider=%s connection_type=%s token_source=%s — "
-                        "non-Meta token, webhook subscription is managed by 360dialog",
+                        "non-Meta token; webhook subscription is not managed through Graph",
                         conn.tenant_id,
                         getattr(conn, "provider", None),
                         _normalize_connection_type(getattr(conn, "connection_type", None)),
                         token_ctx.source,
                     )
                     if not conn.webhook_verified:
-                        # 360dialog channels mark themselves verified once
-                        # the partner-side webhook config returns OK; if the
-                        # canonical record never got that flag, set it here
-                        # to avoid the IDLE rule forever flapping it.
+                        # A coexistence channel is marked verified by its own
+                        # connection flow; if the canonical record never got
+                        # that flag, set it here to avoid the IDLE rule
+                        # forever flapping it.
                         conn.webhook_verified = True
                         db.commit()
                     ok_count += 1
@@ -888,25 +899,42 @@ def _is_meta_graph_compatible(
 ) -> bool:
     """
     Return True only for connections whose token can call Meta's Graph API
-    (`graph.facebook.com/{id}/subscribed_apps`). For 360dialog Coexistence
-    the access_token is a 360dialog API key — NOT a Meta OAuth token —
-    so Graph calls always 401. The Guardian must skip these and never
-    treat the absence of a Meta subscription as a failure.
+    (`graph.facebook.com/{id}/subscribed_apps`). A row naming a retired
+    provider holds a credential Graph will always reject, and the Guardian
+    must never treat the absence of a Meta subscription as a failure for it.
 
     Skip rules (any of):
-      - provider in {dialog360, 360dialog}
+      - the stored provider is not one this platform supports
       - connection_type == 'coexistence'
-      - token_source == 'dialog360' / 'coexistence'
+      - token_source == 'coexistence'
     """
+    from services.whatsapp_platform.provider_utils import (  # noqa: PLC0415
+        WHATSAPP_PROVIDER_META,
+    )
+
     p = str(provider or "").strip().lower()
-    if p in {"dialog360", "360dialog"}:
+    if p not in {"", WHATSAPP_PROVIDER_META}:
         return False
     if _normalize_connection_type(connection_type) == "coexistence":
         return False
     ts = str(token_source or "").strip().lower()
-    if ts in {"dialog360", "360dialog", "coexistence"}:
+    if ts == "coexistence":
         return False
     return True
+
+
+def _provider_is_retired(conn: Any) -> bool:
+    """Whether this row names a WhatsApp provider the platform removed.
+
+    Such a connection is not healthy and not repairable from here: its
+    credential belongs to an integration that no longer exists. The Guardian
+    reports it and leaves it alone rather than stamping it verified.
+    """
+    from services.whatsapp_platform.provider_utils import (  # noqa: PLC0415
+        provider_is_supported,
+    )
+
+    return not provider_is_supported(conn)
 
 
 def _subscription_targets(

@@ -96,180 +96,6 @@ interface EmbeddedStatusPayload {
   phones?: EmbeddedPhone[]
 }
 
-function CoexistenceFlow({
-  status,
-  onConnected,
-}: {
-  status: WaConnection | null
-  onConnected: (payload?: { phone_number?: string; display_name?: string; connected_at?: string }) => void
-}) {
-  const { t, lang } = useLanguage()
-  const c = t(tr => tr.whatsappConnect.coexistence)
-  const [phone, setPhone] = useState(status?.phone_number ?? '')
-  const [displayName, setDisplayName] = useState(status?.display_name ?? '')
-  const [notes, setNotes] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const [localStatus, setLocalStatus] = useState<WaConnection | null>(status)
-
-  useEffect(() => { setLocalStatus(status) }, [status])
-
-  useEffect(() => {
-    if (localStatus?.status === 'connected') {
-      onConnected({
-        phone_number: localStatus.phone_number ?? undefined,
-        display_name: localStatus.display_name ?? undefined,
-        connected_at: localStatus.connected_at ?? undefined,
-      })
-    }
-  }, [localStatus, onConnected])
-
-  // Poll while waiting for team activation
-  useEffect(() => {
-    if (!localStatus || !['request_submitted', 'pending_activation', 'action_required'].includes(localStatus.status)) return
-    let cancelled = false
-    let timer: number | undefined
-    const poll = async () => {
-      try {
-        const next = await whatsappConnectApi.getCoexistenceStatus()
-        if (!cancelled) {
-          setLocalStatus(next)
-          if (next.status === 'connected') return
-        }
-      } catch { /* keep last known state */ }
-      if (!cancelled) timer = window.setTimeout(poll, 8000)
-    }
-    timer = window.setTimeout(poll, 4000)
-    return () => { cancelled = true; if (timer) window.clearTimeout(timer) }
-  }, [localStatus?.status])
-
-  const submitRequest = async () => {
-    if (!phone.trim()) { setError(c.phoneRequired); return }
-    setBusy(true); setError('')
-    try {
-      const result = await whatsappConnectApi.requestCoexistence({
-        phone_number: phone.trim(),
-        display_name: displayName.trim() || undefined,
-        has_whatsapp_business_app: true,
-        understands_keep_app_installed: true,
-        understands_open_every_13_days: true,
-        notes: notes.trim() || undefined,
-      })
-      setLocalStatus(result)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : c.submitFailed)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const current = localStatus
-  const tipsBlock = (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 space-y-2">
-      {[c.tipKeepApp, c.tipDontDelete, c.tipOpenPeriodically].map(tip => (
-        <div key={tip} className="flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> {tip}
-        </div>
-      ))}
-    </div>
-  )
-
-  // ── Connected ────────────────────────────────────────────────────────────
-  if (current?.status === 'connected') {
-    return (
-      <div className="space-y-4">
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
-          <p className="text-lg font-bold text-emerald-800">{c.connectedTitle}</p>
-          <p className="mt-2 text-sm text-emerald-700">
-            {c.connectedBody}
-          </p>
-          {current.phone_number && <p className="mt-3 text-sm font-mono text-emerald-800">{current.phone_number}</p>}
-        </div>
-        {tipsBlock}
-      </div>
-    )
-  }
-
-  // ── Submitted / pending ──────────────────────────────────────────────────
-  if (current?.status === 'request_submitted' || current?.status === 'pending_activation' || current?.status === 'action_required') {
-    const pendingTitle =
-      current.status === 'request_submitted' ? c.statusRequestSubmitted
-      : current.status === 'pending_activation' ? c.statusPendingActivation
-      : c.statusActionRequired
-    return (
-      <div className="space-y-4">
-        <div className={`rounded-2xl border p-5 ${current.status === 'action_required' ? 'border-amber-200 bg-amber-50' : 'border-blue-200 bg-blue-50'}`}>
-          <p className="text-lg font-bold text-slate-800">
-            {pendingTitle}
-          </p>
-          <p className="mt-2 text-sm text-slate-700">
-            {current.action_required_message
-              || current.last_error
-              || c.defaultPendingMessage}
-          </p>
-          {current.request_submitted_at && (
-            <p className="mt-3 text-xs text-slate-500">
-              {c.requestTimeLabel} {new Date(current.request_submitted_at).toLocaleString(lang === 'ar' ? 'ar-SA' : 'en-US')}
-            </p>
-          )}
-        </div>
-        {tipsBlock}
-      </div>
-    )
-  }
-
-  // ── Request form ─────────────────────────────────────────────────────────
-  return (
-    <div className="space-y-5">
-      <div className="text-center">
-        <p className="text-lg font-bold text-slate-800">{c.formTitle}</p>
-        <p className="mt-1 text-sm text-slate-500">
-          {c.formSubtitle}
-        </p>
-      </div>
-
-      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 space-y-2">
-        <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> {c.benefitSameNumber}</div>
-        <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> {c.benefitAiReplies}</div>
-        <div className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> {c.benefitActivationTime}</div>
-      </div>
-
-      <div className="space-y-3">
-        <input
-          value={phone}
-          onChange={e => setPhone(e.target.value)}
-          placeholder={c.phonePlaceholder}
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm"
-          dir="ltr"
-        />
-        <input
-          value={displayName}
-          onChange={e => setDisplayName(e.target.value)}
-          placeholder={c.displayNamePlaceholder}
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm"
-        />
-        <textarea
-          value={notes}
-          onChange={e => setNotes(e.target.value)}
-          placeholder={c.notesPlaceholder}
-          rows={3}
-          className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm"
-        />
-      </div>
-
-      {error && <ErrorBox msg={error} />}
-
-      <button
-        onClick={submitRequest}
-        disabled={busy}
-        className="w-full rounded-xl bg-violet-600 py-3.5 text-sm font-bold text-white transition-all hover:bg-violet-500 disabled:opacity-60"
-      >
-        {busy ? c.submitting : c.submitBtn}
-      </button>
-    </div>
-  )
-}
-
 function MetaOnboardingModeChoice({
   disabled,
   onChooseCoexistence,
@@ -707,7 +533,7 @@ function EmbeddedSignupFlow({
       // Catch the Meta BSP/Tech Provider entitlement error here too —
       // the backend already maps it, but a direct upstream 4xx may
       // leak through with the raw English copy. Show the
-      // "use 360dialog" fallback so the merchant never sees raw Meta
+      // fallback so the merchant never sees raw Meta
       // text in the dashboard.
       const lower = String(raw).toLowerCase()
       const isBspTp =
@@ -2037,7 +1863,7 @@ export default function WhatsAppConnect() {
 
   const handleDisconnect = useCallback(() => {
     const managedByOps =
-      status?.provider === 'dialog360' ||
+      status?.provider === 'unsupported' ||
       status?.connection_type === 'coexistence' ||
       status?.connection_type === 'assisted' ||
       isCoexistenceConnLabel(connLabel)

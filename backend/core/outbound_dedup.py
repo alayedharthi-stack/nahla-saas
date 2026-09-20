@@ -8,7 +8,7 @@ Why
 Several recovery / retry paths can cause the SAME logical AI reply to
 reach ``_post_wa`` more than once:
 
-1. Webhook redelivery (Meta / 360dialog retries an inbound POST that
+1. Webhook redelivery (Meta retries an inbound POST that
    times out at our edge). The inbound dedup cache catches most of
    these within its 10-minute TTL — but workers restart, the cache
    evicts, and a redelivery 11 minutes later regenerates the same

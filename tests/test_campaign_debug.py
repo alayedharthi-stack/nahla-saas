@@ -1339,7 +1339,7 @@ class TestAudienceFunnel:
         assert result["excluded_before_send_count"] == 4
 
 
-# ── 8. Provider-side billing/account block (360dialog escalation) ───
+# ── 8. Provider-side billing/account block (provider escalation) ────
 
 
 def _call_support_bundle(db, tenant_id, campaign_id):
@@ -1370,7 +1370,7 @@ class TestProviderBlock:
          flag so the UI can hide the retry CTA at row granularity.
       4. ``GET /campaigns/{id}/support-bundle`` returns a self-contained
          JSON payload (template + WABA + sample Meta payload) ready
-         for the merchant to paste into a 360dialog ticket.
+         for the merchant to paste into a provider ticket.
     """
 
     def _seed_blocked(self, db, *, status="completed"):
@@ -1443,7 +1443,7 @@ class TestProviderBlock:
         assert "مقيّد" in (pb["primary_label_ar"] or "")
         # The banner copy is fixed and present so every client
         # renders the same message.
-        assert "360dialog" in (pb["support_message_ar"] or "")
+        assert "Meta" in (pb["support_message_ar"] or "")
         # And first_seen/last_seen are populated.
         assert pb["first_seen_at"]
         assert pb["last_seen_at"]
@@ -1481,13 +1481,13 @@ class TestProviderBlock:
         assert fs["client_payment_blocked"]["provider_billing_block"] is True
         assert fs["not_on_whatsapp"]["provider_billing_block"] is False
 
-    def test_provider_block_hint_emitted_with_360dialog_copy(self):
+    def test_provider_block_hint_emitted_with_escalation_copy(self):
         db, _ = _make_db()
         t, tpl, c = self._seed_blocked(db)
         result = _call_debug(db, t.id, c.id)
         hints = result["hints"]
-        assert any("360dialog" in h for h in hints), (
-            "merchant must see the 360dialog escalation hint when "
+        assert any("Meta" in h for h in hints), (
+            "merchant must see the provider escalation hint when "
             "provider_billing_block rows are present"
         )
 
@@ -1499,7 +1499,7 @@ class TestProviderBlock:
         # Versioned envelope so external automation can pin the shape.
         assert bundle["kind"] == "nahla.campaign.support_bundle"
         assert bundle["version"] == "1"
-        assert bundle["support_provider"] == "360dialog"
+        assert bundle["support_provider"] == "meta"
         assert bundle["tenant_id"] == t.id
 
         # Campaign and template metadata round-trip into the bundle.

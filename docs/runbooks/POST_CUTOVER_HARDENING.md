@@ -134,7 +134,7 @@ lags. Schedule for low-traffic window.
    - Trigger a redeploy of `nahla-saas` automatically.
 
 3. While the redeploy is in flight, expect a 30–90s blip. Webhook providers
-   (Meta, 360dialog) will retry — no data loss.
+   (Meta) will retry — no data loss.
 
 4. Verify post-rotation:
 

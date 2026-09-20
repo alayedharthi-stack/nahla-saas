@@ -22,9 +22,9 @@ the silent failures merchants notice (Tenant 33, May 22 2026):
   * empty text after media normalize with no fallback reply
     → ``routers/whatsapp_webhook.py:2716``
     ``[TRACE][4/6] INBOUND_IGNORED_EMPTY_TEXT``
-  * 360dialog webhook unrouted (5 sub-reasons)
+  * webhook unrouted (5 sub-reasons)
     → ``routers/whatsapp_webhook.py:1088-1330``
-    ``[UNROUTED_D360_WEBHOOK]``
+    ``[UNROUTED_WEBHOOK]``
   * pre-brain handoff branch that returns without saving the inbound
     → ``routers/whatsapp_webhook.py:3686``
   * dispatcher exception thrown between conversation_create and the
@@ -141,12 +141,12 @@ def is_noise_inbound_type(normalized_type: Any) -> bool:
         return str(normalized_type).strip().lower() in NOISE_NORMALIZED_TYPES
     except Exception:  # noqa: BLE001
         return False
-# Set when a per-change branch in the 360dialog batch loop raised and
+# Set when a per-change branch in the webhook batch loop raised and
 # we contained the failure (rollback + continue) instead of letting it
 # kill sibling changes. Pre-fix May 2026 this was happening silently:
 # ``record_row_flush`` raised UnboundLocalError → the outer ``except``
 # rolled back the WHOLE batch while the handler still returned 200 OK,
-# so 360dialog never retried and writes were lost. The dashboard tab
+# so the provider never retried and writes were lost. The dashboard tab
 # "Inbound Drops" surfaces these going forward.
 DROP_BATCH_BRANCH_ISOLATED   = "batch_branch_isolated"
 

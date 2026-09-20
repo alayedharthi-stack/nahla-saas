@@ -6,7 +6,7 @@ enter the per-conversation lock or any DB write.
 
 Why
 ===
-Both Meta and 360dialog retry inbound webhooks aggressively. The same
+Meta retries inbound webhooks aggressively. The same
 ``msg_id`` can arrive 2–4 times within a few seconds (HTTP timeout, ack lag,
 upstream load-balancer retry). The existing ``IdempotencyGuard`` in
 ``Conversation.extra_metadata['recent_msg_ids']`` correctly detects these
@@ -55,7 +55,7 @@ _CACHE: Dict[Tuple[str, str], float] = {}
 _LOCK = threading.Lock()
 
 # Default window: 10 minutes is comfortably longer than any retry window
-# Meta or 360dialog uses, and far shorter than the 24 h conversation
+# Meta uses, and far shorter than the 24 h conversation
 # window so the cache cannot drift.
 _DEFAULT_TTL_SECONDS = 600.0
 # Sweep at most this many expired entries per insert so the worst-case

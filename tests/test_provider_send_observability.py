@@ -27,7 +27,7 @@ Module-level helpers in ``core.wa_provider_observability``:
   order.
 * ``_scrub_payload`` — masks the customer ``to`` phone.
 * ``_truncate_for_log`` — bounds OOM risk from huge payloads.
-* ``summarize_headers`` — maps D360-API-KEY → ``token_tail``,
+* ``summarize_headers`` — maps the bearer header → ``token_tail``,
   Authorization → ``token_tail`` (Bearer stripped).
 
 Service-layer helpers in ``services.whatsapp_platform.service``:
@@ -104,7 +104,7 @@ class TestRingBufferBasics:
             record_attempt(
                 tenant_id=33,
                 operation="send_message",
-                provider="dialog360",
+                provider="meta",
                 method="POST",
                 full_url="https://waba-v2.360dialog.io/messages",
                 path="messages",
@@ -127,14 +127,14 @@ class TestRingBufferBasics:
         from core.wa_provider_observability import get_recent_attempts, record_attempt
 
         record_attempt(
-            tenant_id=33, operation="op", provider="dialog360",
+            tenant_id=33, operation="op", provider="meta",
             method="POST", full_url="u", path="messages",
             request_payload=None, headers_summary={},
             response_status=200, response_body={}, parsed_wamid="A",
             classification="ok", duration_ms=1.0,
         )
         record_attempt(
-            tenant_id=99, operation="op", provider="dialog360",
+            tenant_id=99, operation="op", provider="meta",
             method="POST", full_url="u", path="messages",
             request_payload=None, headers_summary={},
             response_status=200, response_body={}, parsed_wamid="B",
@@ -153,7 +153,7 @@ class TestRingBufferBasics:
         N = _MAX_ATTEMPTS_PER_TENANT + 5
         for i in range(N):
             record_attempt(
-                tenant_id=33, operation="op", provider="dialog360",
+                tenant_id=33, operation="op", provider="meta",
                 method="POST", full_url="u", path="messages",
                 request_payload=None, headers_summary={},
                 response_status=200, response_body={},
@@ -186,18 +186,6 @@ class TestScrubPayload:
 
 
 class TestSummarizeHeaders:
-    def test_dialog360_header_summary(self):
-        from core.wa_provider_observability import summarize_headers
-        summary = summarize_headers(
-            {"D360-API-KEY": "d360_secret_tail_ABCD", "Content-Type": "application/json"},
-            token_source="merchant_oauth",
-        )
-        assert summary["auth_header_name"] == "D360-API-KEY"
-        assert summary["auth_header_tail"].endswith("ABCD")
-        # The secret middle must NOT leak.
-        assert "secret_tail" not in summary["auth_header_tail"]
-        assert summary["token_source"] == "merchant_oauth"
-
     def test_meta_bearer_does_not_retain_access_token_tail(self):
         from core.wa_provider_observability import summarize_headers
         summary = summarize_headers(
@@ -211,7 +199,7 @@ class TestSummarizeHeaders:
 
 
 class TestIsSendPath:
-    def test_dialog360_send_path(self):
+    def test_bare_messages_send_path(self):
         from services.whatsapp_platform.service import _is_send_path
         assert _is_send_path("messages") is True
         assert _is_send_path("/messages") is True
@@ -305,7 +293,7 @@ class TestClassifyResponse:
 # ── End-to-end provider_post_with_context behaviour ────────────────
 
 
-def _make_conn(*, provider="dialog360", phone_number_id="100543193146977"):
+def _make_conn(*, provider="meta", phone_number_id="100543193146977"):
     return MagicMock(
         provider=provider,
         phone_number_id=phone_number_id,
@@ -314,7 +302,7 @@ def _make_conn(*, provider="dialog360", phone_number_id="100543193146977"):
     )
 
 
-def _make_ctx(*, token="d360_fake_secret_TAIL", source="merchant_oauth"):
+def _make_ctx(*, token="EAAJ_fake_secret_TAIL", source="merchant_oauth"):
     ctx = MagicMock()
     ctx.token = token
     ctx.source = source
@@ -347,79 +335,6 @@ def _patch_httpx_post(*, status_code, json_body, raises=None):
 
 
 class TestProviderPostWithContext:
-    def test_dialog360_2xx_with_wamid_passes_through(self):
-        from services.whatsapp_platform.service import provider_post_with_context
-
-        success_body = {"messages": [{"id": "wamid.HBgN_OK"}]}
-        with _patch_httpx_post(status_code=200, json_body=success_body):
-            data = _run(provider_post_with_context(
-                _make_conn(), _make_ctx(),
-                tenant_id=33,
-                operation="send_message",
-                path="messages",
-                json={"to": "+966537970430", "type": "text", "text": {"body": "hi"}},
-            ))
-        # Body untouched, no injected error.
-        assert data == success_body
-        assert "error" not in data
-
-        from core.wa_provider_observability import get_recent_attempts
-        latest = get_recent_attempts(33)[0]
-        assert latest["classification"] == "ok"
-        assert latest["parsed_wamid"] == "wamid.HBgN_OK"
-
-    def test_dialog360_2xx_without_wamid_injects_error_envelope(self):
-        """The F18 production scenario — 200 OK, no wamid, no
-        error. Pre-F18 this was silently classified as success.
-        Now we add an ``error`` envelope so downstream treats it
-        as a failed send."""
-        from services.whatsapp_platform.service import provider_post_with_context
-
-        empty_body = {"messages": []}
-        with _patch_httpx_post(status_code=200, json_body=empty_body):
-            data = _run(provider_post_with_context(
-                _make_conn(), _make_ctx(),
-                tenant_id=33,
-                operation="send_message",
-                path="messages",
-                json={"to": "+966537970430"},
-            ))
-        # F18 contract: an ``error`` envelope MUST be present so that
-        # the existing ``"error" in resp_data`` checks in _post_wa
-        # treat the send as failed.
-        assert "error" in data
-        err = data["error"]
-        assert err.get("type") == "missing_wamid"
-        assert err.get("nahla_injected") is True
-
-        from core.wa_provider_observability import get_recent_attempts
-        latest = get_recent_attempts(33)[0]
-        assert latest["classification"] == "missing_wamid"
-        assert latest["parsed_wamid"] is None
-
-    def test_dialog360_non_2xx_records_non_2xx_classification(self):
-        from services.whatsapp_platform.service import provider_post_with_context
-
-        with _patch_httpx_post(status_code=401, json_body={"error": "unauthorized"}):
-            data = _run(provider_post_with_context(
-                _make_conn(), _make_ctx(),
-                tenant_id=33,
-                operation="send_message",
-                path="messages",
-                json={"to": "+966537970430"},
-            ))
-        # Provider body preserved; wire-layer may attach _nahla_* metadata.
-        assert data["error"] == "unauthorized"
-        assert data["_nahla_classification"] == "non_2xx"
-        assert data["_nahla_wamid"] is None
-        assert data["_nahla_is_send"] is True
-        assert isinstance(data["_nahla_duration_ms"], (int, float))
-
-        from core.wa_provider_observability import get_recent_attempts
-        latest = get_recent_attempts(33)[0]
-        assert latest["classification"] == "non_2xx"
-        assert latest["response_status"] == 401
-
     def test_meta_send_uses_phone_id_in_path_and_records_correctly(self):
         from services.whatsapp_platform.service import provider_post_with_context
 
@@ -437,9 +352,8 @@ class TestProviderPostWithContext:
         from core.wa_provider_observability import get_recent_attempts
         latest = get_recent_attempts(33)[0]
         assert latest["classification"] == "ok"
-        # The provider tag captures whichever string ``wa_provider``
-        # returned — for ``provider="meta"`` it's the meta sentinel.
-        assert latest["provider"]   != "dialog360"
+        # The provider tag captures whichever string ``wa_provider`` returned.
+        assert latest["provider"]   == "meta"
         # phone_number_id is captured for mismatch detection.
         assert latest["connection_phone_number_id"] == "100543193146977"
 
@@ -463,9 +377,9 @@ class TestProviderPostWithContext:
         assert "boom" in (latest.get("error_text") or "")
 
     def test_non_json_response_body_is_classified_as_provider_error(self):
-        """Some 360dialog edge cases (5xx HTML error pages from a
-        WAF) come back as 200 OK with HTML. The wire layer must NOT
-        explode and must classify it deterministically."""
+        """A 5xx HTML error page from a WAF comes back as 200 OK with
+        HTML. The wire layer must NOT explode and must classify it
+        deterministically."""
         from services.whatsapp_platform.service import provider_post_with_context
 
         # Build a response whose .json() raises but .text returns HTML.
@@ -531,11 +445,11 @@ def _seed_tenant_and_conn(db, *, tenant_id=33, phone_number_id="100543193146977"
     db.add(t); db.commit()
     conn = WhatsAppConnection(
         tenant_id=tenant_id,
-        provider="dialog360",
+        provider="meta",
         connection_type="coexistence",
         status="connected",
         phone_number_id=phone_number_id,
-        access_token="d360_supersecret_TAIL",
+        access_token="EAAJ_supersecret_TAIL",
     )
     db.add(conn); db.commit()
     return t, conn
@@ -575,7 +489,7 @@ class TestAdminLastProviderSendEndpoint:
 
         # Two ok, one missing_wamid.
         record_attempt(
-            tenant_id=33, operation="send_message", provider="dialog360",
+            tenant_id=33, operation="send_message", provider="meta",
             method="POST", full_url="https://waba-v2.360dialog.io/messages",
             path="messages",
             request_payload={"to": "+966537970430"}, headers_summary={},
@@ -583,7 +497,7 @@ class TestAdminLastProviderSendEndpoint:
             parsed_wamid="wamid.A", classification="ok", duration_ms=10.0,
         )
         record_attempt(
-            tenant_id=33, operation="send_message", provider="dialog360",
+            tenant_id=33, operation="send_message", provider="meta",
             method="POST", full_url="https://waba-v2.360dialog.io/messages",
             path="messages",
             request_payload={"to": "+966537970430"}, headers_summary={},
@@ -591,7 +505,7 @@ class TestAdminLastProviderSendEndpoint:
             parsed_wamid=None, classification="missing_wamid", duration_ms=11.0,
         )
         record_attempt(
-            tenant_id=33, operation="send_message", provider="dialog360",
+            tenant_id=33, operation="send_message", provider="meta",
             method="POST", full_url="https://waba-v2.360dialog.io/messages",
             path="messages",
             request_payload={"to": "+966537970430"}, headers_summary={},
@@ -618,7 +532,7 @@ class TestAdminLastProviderSendEndpoint:
         # the "merchant reconnected under a new number, old refs
         # still cached" failure mode.
         record_attempt(
-            tenant_id=33, operation="send_message", provider="dialog360",
+            tenant_id=33, operation="send_message", provider="meta",
             method="POST", full_url="https://waba-v2.360dialog.io/messages",
             path="messages",
             request_payload={"to": "+966537970430"}, headers_summary={},
@@ -635,7 +549,7 @@ class TestAdminLastProviderSendEndpoint:
         db = _make_db()
         _seed_tenant_and_conn(db)
         record_attempt(
-            tenant_id=33, operation="send_message", provider="dialog360",
+            tenant_id=33, operation="send_message", provider="meta",
             method="POST", full_url="https://waba-v2.360dialog.io/messages",
             path="messages",
             request_payload={"to": "+966537970430", "type": "text"},
@@ -657,7 +571,7 @@ class TestAdminLastProviderSendEndpoint:
         _seed_tenant_and_conn(db)
         for i in range(15):
             record_attempt(
-                tenant_id=33, operation="send_message", provider="dialog360",
+                tenant_id=33, operation="send_message", provider="meta",
                 method="POST", full_url="u", path="messages",
                 request_payload=None, headers_summary={},
                 response_status=200, response_body={"messages": [{"id": f"wamid.{i}"}]},

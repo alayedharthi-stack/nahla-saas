@@ -88,7 +88,7 @@ def record_row_flush(
         ``global _row_flush_count`` (alongside the meta counters), so
         every call raised ``UnboundLocalError`` and bubbled up into the
         outer webhook ``except`` — which then did ``db.rollback()`` while
-        still returning 200 OK to 360dialog. The provider never retried
+        still returning 200 OK to the provider, which never retried
         and ``smb_message_echoes`` writes (which use the SAME ``db``
         session as the metric call) were permanently lost.
     """

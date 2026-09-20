@@ -202,7 +202,7 @@ async def _global_exception_handler(_req: _Request, exc: Exception) -> _JSONResp
        middleware that doesn't catch it). We log this loudly so the
        operator can spot the pattern, then return a soft response.
 
-    2. Webhook paths (``/webhook/*``) — providers like 360dialog and
+    2. Webhook paths (``/webhook/*``) — providers like
        Meta interpret any non-2xx as a delivery failure and retry,
        which compounds load on the worker that just failed. We
        return HTTP 200 with ``ok=false`` so retries do NOT happen,

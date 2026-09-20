@@ -490,7 +490,7 @@ def _is_bsp_tp_entitlement_error(error: Dict[str, Any]) -> bool:
 
 _BSP_TP_FRIENDLY = (
     "لم يتم تفعيل صلاحية Embedded Signup المباشر بعد على تطبيق نحلة. "
-    "استخدم الربط عبر 360dialog حالياً، وسنُعلمك فور اكتمال اعتماد Meta."
+    "سنُعلمك فور اكتمال اعتماد Meta."
 )
 
 
@@ -504,7 +504,7 @@ def _meta_embedded_error_message(error: Dict[str, Any], fallback: str) -> str:
     # The BSP/TP entitlement error is the most common cause of the
     # "ربط مع Meta" popup failing in apps that have whatsapp_business_
     # messaging approved but were never onboarded as a Tech Provider.
-    # It's NOT actionable by the merchant — surface the 360dialog
+    # It's NOT actionable by the merchant — surface the
     # fallback so they know what to do next.
     if _is_bsp_tp_entitlement_error(error):
         return _BSP_TP_FRIENDLY
@@ -1665,7 +1665,7 @@ async def oauth_callback(
         )
         friendly = _meta_embedded_error_message(
             {"message": error_reason or error},
-            "تم إلغاء الربط مع Meta أو رفضته. يمكنك المحاولة لاحقاً أو استخدام الربط عبر 360dialog.",
+            "تم إلغاء الربط مع Meta أو رفضته. يمكنك المحاولة لاحقاً.",
         )
         logger.warning(
             "[EmbeddedSignup] oauth/callback Meta error tenant=%s error=%s reason=%s",
