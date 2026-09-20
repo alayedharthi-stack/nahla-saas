@@ -45,7 +45,6 @@ from core.tenant import (
 )
 from services.whatsapp_platform.provider_utils import (
     WHATSAPP_CONNECTION_TYPE_DIRECT,
-    WHATSAPP_PROVIDER_360DIALOG,
     wa_provider,
 )
 from services.whatsapp_platform.service import provider_list_templates, provider_submit_template
@@ -763,8 +762,6 @@ def _fetch_meta_templates(waba_id: str, access_token: str) -> Optional[List[Dict
 
 
 def _normalize_provider_template_list(conn: Any, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
-        return list(payload.get("waba_templates") or [])
     return list(payload.get("data") or [])
 
 

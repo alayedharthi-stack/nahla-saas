@@ -396,17 +396,6 @@ class TestWebhookWiringSource:
     def test_dispatcher_exception_wired(self):
         assert "DROP_DISPATCHER_EXCEPTION" in self.src
 
-    def test_webhook_unrouted_branches_wired(self):
-        # All five sub-reasons must reach the recorder.
-        for token in (
-            "ROUTE_UNROUTED_MISSING_PHONE",
-            "ROUTE_UNROUTED_UNKNOWN_PHONE",
-            "ROUTE_UNROUTED_AMBIGUOUS",
-            "ROUTE_UNROUTED_WRONG_PROVIDER",
-            "ROUTE_UNROUTED_BAD_SECRET",
-        ):
-            assert token in self.src, f"missing wiring constant: {token}"
-
     def test_observability_imports_are_local_to_drop_sites(self):
         """The wiring uses local imports (``from core.inbound_observability
         import ...`` inside the except branch) to keep startup cost zero
@@ -415,11 +404,12 @@ class TestWebhookWiringSource:
         force every cold-start to load the recorder + models even for
         merchants who never see a drop in months.
         """
-        # The recorder should be imported AT LEAST 5 times (one per
-        # wired site). If a future refactor moves to a module-scope
-        # import that's fine — but the count must not regress to 0.
+        # One local import per wired drop site. The count dropped from five
+        # to four when the retired 360dialog batch loop — and the five
+        # ``ROUTE_UNROUTED_*`` branches that lived only inside it — were
+        # removed; every surviving drop site still records.
         count = self.src.count("from core.inbound_observability import")
-        assert count >= 5, f"expected at least 5 local imports, got {count}"
+        assert count >= 4, f"expected at least 4 local imports, got {count}"
 
 
 # ── 6. Model contract ─────────────────────────────────────────────────

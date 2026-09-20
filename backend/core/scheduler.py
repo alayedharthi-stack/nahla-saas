@@ -1271,8 +1271,16 @@ async def _refresh_all_wa_tokens() -> None:
         now = datetime.now(timezone.utc)
         threshold = now + timedelta(days=14)
 
+        from services.whatsapp_platform.provider_utils import provider_is_supported
+
         for conn in connections:
             try:
+                if not provider_is_supported(conn):
+                    # A row left over from a retired provider holds no Meta
+                    # token to refresh; exchanging its credential at Meta's
+                    # OAuth endpoint is exactly what must not happen.
+                    skipped += 1
+                    continue
                 needs_refresh = False
                 if not conn.token_expires_at:
                     needs_refresh = True

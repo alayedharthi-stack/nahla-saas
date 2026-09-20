@@ -104,7 +104,7 @@ interface WaUsage {
 
 const TIER_SOURCE_LABEL: Record<string, string> = {
   meta_graph: 'Meta Cloud API',
-  dialog360:  '360dialog (Coexistence)',
+  unsupported: 'مزود غير مدعوم',
 }
 
 function trackOverviewCta(target: '/wa-usage' | '/billing') {
@@ -157,7 +157,7 @@ export default function Overview() {
   // collapsible panel so merchants can see WHY the cached tier doesn't
   // match what Meta Business Manager shows them. Provider-agnostic —
   // works the same whether we're talking to Meta directly or via a
-  // relay like 360dialog.
+  // relay.
   const [tierDiagnostics, setTierDiagnostics] = useState<{
     updated: boolean
     provider?: string

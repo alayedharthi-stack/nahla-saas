@@ -24,7 +24,7 @@ def access_token_present(conn: Any) -> bool:
 
 
 def read_access_token(conn: Any) -> str:
-    """Plaintext token for Meta / 360dialog API calls only."""
+    """Plaintext token for Meta API calls only."""
     stored = getattr(conn, "access_token", None)
     return decrypt_access_token(stored)
 

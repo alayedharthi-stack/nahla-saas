@@ -1350,15 +1350,16 @@ _META_TIER_STALE_HOURS = int(os.environ.get("NAHLA_META_TIER_STALE_HOURS", "6"))
 def _meta_tier_source(conn: Any) -> str:
     """Best-effort label for which provider the cached tier came from.
 
-    Reads ``WhatsAppConnection.provider`` (``'meta'`` or ``'dialog360'``).
+    Reads ``WhatsAppConnection.provider``.
     Does NOT promise the value is fresh — that's what ``last_synced_at`` and
     ``is_stale`` are for. The string is only displayed to the merchant for
     debuggability ("من أين هذا الرقم؟"), never used as a routing decision.
     """
-    provider = (getattr(conn, "provider", None) or "meta").strip().lower()
-    if provider in ("dialog360", "360dialog", "d360"):
-        return "dialog360"
-    return "meta_graph"
+    from services.whatsapp_platform.provider_utils import (  # noqa: PLC0415
+        WHATSAPP_PROVIDER_UNSUPPORTED, provider_is_supported,
+    )
+
+    return "meta_graph" if provider_is_supported(conn) else WHATSAPP_PROVIDER_UNSUPPORTED
 
 
 def _get_meta_tier(db: Session, tenant_id: int) -> dict:

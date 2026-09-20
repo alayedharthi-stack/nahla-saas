@@ -2183,7 +2183,7 @@ export default function Conversations() {
                             // edge") is shown ONLY when the wire layer
                             // confirmed BOTH:
                             //   1. ``sendStatus === 'sent'`` (200 from
-                            //      Meta / 360dialog) AND
+                            //      Meta) AND
                             //   2. ``wamid`` is a non-empty string
                             //
                             // Some providers occasionally return 2xx with a

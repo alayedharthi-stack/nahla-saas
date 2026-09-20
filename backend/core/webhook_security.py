@@ -3,7 +3,7 @@ core/webhook_security.py
 ────────────────────────
 Unified webhook signature verification for every external provider Nahla
 ingests (Meta WhatsApp Cloud API, Salla Communication app, Salla Sync OAuth
-app, Zid, Moyasar, HyperPay, 360dialog).
+app, Zid, Moyasar, HyperPay).
 
 Phase 1B introduces ONE library that every provider router must call so we
 get a single, auditable verification surface and consistent telemetry. The

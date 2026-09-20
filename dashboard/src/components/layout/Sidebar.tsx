@@ -108,7 +108,6 @@ const ADMIN_NAV_GROUPS: NavGroup[] = [
       { to: '/admin/ai-usage',         icon: BrainCircuit, label: tr => tr.nav.adminItems.aiUsage         },
       { to: '/admin/features',         icon: Flag,         label: tr => tr.nav.adminItems.features        },
       { to: '/admin/troubleshooting',  icon: Puzzle,       label: tr => tr.nav.adminItems.troubleshooting },
-      { to: '/admin/coexistence',      icon: Smartphone,   label: tr => tr.nav.adminItems.coexistence     },
       { to: '/admin/team',             icon: Layers,       label: tr => tr.nav.adminItems.team            },
       { to: '/admin/system',           icon: Activity,     label: tr => tr.nav.adminItems.system          },
       { to: '/admin/tools',            icon: Wrench,       label: tr => tr.nav.adminItems.tools           },

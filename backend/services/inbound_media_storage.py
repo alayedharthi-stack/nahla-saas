@@ -21,7 +21,7 @@ Design choices, in order of importance:
    ``<root>/<tenant_id>/<YYYYMM>/<sha256>.<ext>``. Two uploads of the
    same bytes share storage automatically (idempotency for free).
 2. **Tenant-scoped** — the ``tenant_id`` prefix in the path is a hard
-   boundary: a 360dialog leak that revealed a sha256 wouldn't let any
+   boundary: a provider leak that revealed a sha256 wouldn't let any
    *other* tenant fetch it because the URL also includes their id.
 3. **Stateless** — no database table. Metadata travels alongside the
    message via ``MessageEvent.extra_metadata.normalized_inbound`` so

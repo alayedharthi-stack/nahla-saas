@@ -326,7 +326,7 @@ const ERROR_CODES_EN: CampaignsListLabels['runtime']['errorCodes'] = {
   },
   account_locked: {
     label: 'WhatsApp Business account locked',
-    advice: 'Contact 360dialog / Meta support — dashboard retries will not help.',
+    advice: 'Contact Meta support — dashboard retries will not help.',
   },
   service_unavailable: {
     label: 'WhatsApp service temporarily unavailable',
@@ -337,7 +337,7 @@ const ERROR_CODES_EN: CampaignsListLabels['runtime']['errorCodes'] = {
     advice: 'Check header media URL and format in the template.',
   },
   auth_error: {
-    label: 'Authentication error with Meta / 360dialog',
+    label: 'Authentication error with Meta',
     advice: 'Reconnect WhatsApp or refresh the access token.',
   },
   no_message_id: {
@@ -441,7 +441,7 @@ const ERROR_CODES_AR: CampaignsListLabels['runtime']['errorCodes'] = {
   },
   account_locked: {
     label: 'حساب WhatsApp Business مقفل',
-    advice: 'تواصل مع 360dialog / دعم Meta — إعادة المحاولة من اللوحة لن تفيد.',
+    advice: 'تواصل مع دعم Meta — إعادة المحاولة من اللوحة لن تفيد.',
   },
   service_unavailable: {
     label: 'خدمة واتساب غير متاحة مؤقتاً',
@@ -452,7 +452,7 @@ const ERROR_CODES_AR: CampaignsListLabels['runtime']['errorCodes'] = {
     advice: 'تحقق من رابط وصيغة وسائط الهيدر في القالب.',
   },
   auth_error: {
-    label: 'خطأ مصادقة مع Meta / 360dialog',
+    label: 'خطأ مصادقة مع Meta',
     advice: 'أعد ربط واتساب أو حدّث رمز الوصول.',
   },
   no_message_id: {

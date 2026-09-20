@@ -859,57 +859,6 @@ def test_wa_life_22_guardian_finalization_failure_is_retryable(monkeypatch, db):
     assert t.subscription_status == TRIAL_STATUS_PENDING_WHATSAPP
 
 
-def test_wa_life_23_backfill_finalization_failure_fails_operation(monkeypatch, db):
-    import importlib.util
-
-    t = _tenant(db, name="قميص قطني أزرق")
-    conn = _conn(
-        db,
-        t.id,
-        status="configuring",
-        phone_number="+966500000037",
-        extra_metadata={"provider_details": {"channel_id": "CH-1"}},
-    )
-    conn.access_token = "tok"
-    db.commit()
-
-    spec = importlib.util.spec_from_file_location(
-        "backfill_coexistence_record",
-        BACKEND_DIR / "scripts" / "backfill_coexistence_record.py",
-    )
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    class _Session:
-        def close(self):
-            return None
-
-        def __getattr__(self, name):
-            return getattr(db, name)
-
-    monkeypatch.setattr(mod, "SessionLocal", lambda: _Session())
-    monkeypatch.setattr(
-        "core.whatsapp_connection_finalization.finalize_successful_whatsapp_connection",
-        lambda *_a, **_k: (_ for _ in ()).throw(WhatsAppConnectionFinalizationError("persist failed")),
-    )
-    rc = mod.backfill(
-        tenant_id=t.id,
-        waba_id="waba-generic-1",
-        channel_id="CH-1",
-        phone_number="+966500000037",
-        phone_number_id="pn-generic-1",
-        display_name="قميص قطني أزرق",
-        promote=True,
-        dry_run=False,
-    )
-    assert rc == 1
-    db.refresh(conn)
-    db.refresh(t)
-    assert conn.status != "connected"
-    assert t.subscription_status == TRIAL_STATUS_PENDING_WHATSAPP
-
-
 def test_wa_life_24_paid_tenant_remains_paid(db):
     test_wa_life_06_paid_tenant_remains_paid(db)
 
@@ -1186,37 +1135,6 @@ def test_wa_life_38_reconcile_finalizer_failure_raises(monkeypatch, db):
         )
 
 
-def test_wa_life_39_admin_verify_webhook_cannot_http_success_after_failure():
-    src = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
-    start = src.index("async def admin_coexistence_verify_webhook(")
-    end = src.index("\n@router.", start + 1)
-    body = src[start:end]
-    assert "_reconcile_connected_or_http(" in body
-    assert "_reconcile_coexistence_status(" not in body
-
-
-def test_wa_life_40_admin_auto_configure_cannot_http_success_after_failure():
-    src = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
-    start = src.index("async def admin_coexistence_auto_configure(")
-    end = src.index("\n@router.", start + 1)
-    body = src[start:end]
-    assert "_reconcile_connected_or_http(" in body
-    assert "_reconcile_coexistence_status(" not in body
-
-
-def test_wa_life_41_admin_manual_reconcile_and_diagnose_same_contract():
-    src = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
-    for name in (
-        "async def admin_coexistence_reconcile_status(",
-        "async def admin_coexistence_diagnose(",
-    ):
-        start = src.index(name)
-        end = src.index("\n@router.", start + 1)
-        body = src[start:end]
-        assert "_reconcile_connected_or_http(" in body, name
-        assert "_reconcile_coexistence_status(" not in body, name
-
-
 def test_wa_life_42_embedded_finalization_http_not_swallowed():
     embedded = (BACKEND_DIR / "routers" / "whatsapp_embedded.py").read_text(encoding="utf-8")
     connect = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
@@ -1241,19 +1159,19 @@ def test_wa_life_43_no_route_reports_success_after_finalizer_failure():
 
 
 def test_wa_life_44_no_success_commit_after_typed_finalization_failure():
+    """The reconciler must not swallow a typed finalization failure.
+
+    The admin verify-webhook half of this contract went with the 360dialog
+    admin surface it covered; the reconciler itself is unchanged and is still
+    pinned here.
+    """
     src = (BACKEND_DIR / "routers" / "whatsapp_connect.py").read_text(encoding="utf-8")
     recon = src[src.index("def _reconcile_coexistence_status("):src.index("def _has_recent_webhook_traffic(")]
     assert "except WhatsAppConnectionFinalizationError" not in recon
-    verify = src[src.index("async def admin_coexistence_verify_webhook("):src.index("async def admin_coexistence_reconcile_status(")]
-    assert "if not reconciled:\n        db.commit()" in verify
 
 
 def test_wa_life_45_guardian_finalization_failure_remains_retryable(monkeypatch, db):
     test_wa_life_22_guardian_finalization_failure_is_retryable(monkeypatch, db)
-
-
-def test_wa_life_46_backfill_finalization_failure_remains_non_success(monkeypatch, db):
-    test_wa_life_23_backfill_finalization_failure_fails_operation(monkeypatch, db)
 
 
 def test_wa_life_47_canonical_writer_audit_still_closed():

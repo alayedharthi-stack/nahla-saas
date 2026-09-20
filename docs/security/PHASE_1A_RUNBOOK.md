@@ -64,7 +64,8 @@ docs / past deploys. Treat them as compromised and rotate.
 4. **`DEBUG_ADMIN_TOKEN`** (only if you have ever set it) — also rotate.
 
 Optional but encouraged: rotate `API_SECRET_KEY`, `SALLA_WEBHOOK_SECRET`,
-`ZID_WEBHOOK_SECRET`, `D360_WEBHOOK_INTERNAL_SECRET`.
+`ZID_WEBHOOK_SECRET`. (`D360_WEBHOOK_INTERNAL_SECRET` was retired with the
+360dialog integration and is no longer read by this codebase.)
 
 ---
 

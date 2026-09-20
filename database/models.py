@@ -2318,11 +2318,12 @@ class WhatsAppConnection(Base):
     business_manager_id          = Column(String, nullable=True)
 
     # Provider / connection type ──────────────────────────────────────────────
-    # provider: 'meta' | 'dialog360'
+    # provider: 'meta' (the only supported value; other values are legacy
+    #           rows from retired integrations and are treated as unsupported)
     provider          = Column(String, nullable=False, default='meta')
     # connection_type: 'direct' (platform adds number to shared WABA)
     #                | 'embedded' (merchant's own WABA)
-    #                | 'coexistence' (merchant keeps WA Business App + API via 360dialog)
+    #                | 'coexistence' (merchant keeps WA Business App + API side by side)
     connection_type   = Column(String, nullable=True, default='direct')
 
     # Token — backend-only, NEVER send to frontend ────────────────────────────
@@ -2350,7 +2351,7 @@ class WhatsAppConnection(Base):
     # Guardian: last time a real inbound webhook was received for this tenant
     last_webhook_received_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Per-endpoint receipt (360dialog multi-URL setup) — avoids rewriting JSONB on every ping.
+    # Per-endpoint receipt — avoids rewriting JSONB on every ping.
     webhook_coexistence_received_at = Column(DateTime(timezone=True), nullable=True)
     webhook_status_received_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -2526,7 +2527,7 @@ class AiQualityEvent(Base):
     # Before this column existed, the table only held brain-side
     # answer-alignment mismatches and the owner dashboard showed
     # all-zeros whenever the failure happened BEFORE the brain ran
-    # (unsupported message types, empty text after normalize, 360dialog
+    # (unsupported message types, empty text after normalize,
     # routing failures, dispatcher exceptions). Adding ``category`` lets
     # the same table audit those silent drops too, without forking the
     # dashboard or duplicating the triage workflow. Legacy rows default
@@ -2539,7 +2540,7 @@ class AiQualityEvent(Base):
     #   * ``inbound_drop``      — silent drop in
     #     ``routers/whatsapp_webhook._dispatch_message`` /
     #     ``_handle_merchant_message``
-    #   * ``webhook_routing``   — 360dialog / Meta unrouted webhook
+    #   * ``webhook_routing``   — unrouted webhook
     #   * ``media_failure``     — reserved for a follow-up if needed
     category = Column(
         String(32),
@@ -3104,7 +3105,7 @@ class ManualCoupon(Base):
 
 
 class WaWebhookRaw(Base):
-    """Raw archive of every WhatsApp / 360dialog webhook payload.
+    """Raw archive of every WhatsApp webhook payload.
 
     Why a separate table (not just ``WebhookEvent``)
     ────────────────────────────────────────────────
@@ -3128,7 +3129,7 @@ class WaWebhookRaw(Base):
 
     Retention
     ─────────
-    No TTL at the DB layer — 360dialog/Meta delivery debugging often
+    No TTL at the DB layer — Meta delivery debugging often
     needs months of history. A separate background job will eventually
     move rows older than ~180 d to cold storage; until then keep an
     eye on table size via the ``ix_wa_webhook_raw_received_at`` index.
@@ -3161,24 +3162,21 @@ class WaWebhookRaw(Base):
         BigInteger().with_variant(Integer, "sqlite"),
         primary_key=True, autoincrement=True,
     )
-    # Nullable: some 360dialog channel/coexistence events don't carry
+    # Nullable: some channel/coexistence events don't carry
     # enough context to attribute to a tenant. We keep them anyway so
     # ops can debug; the analytics queries always filter `tenant_id
     # IS NOT NULL`.
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     # Provider that delivered this webhook. ``"meta"`` = direct Cloud
-    # API webhook, ``"360dialog"`` = 360dialog single-URL or its
-    # status-only / coexistence subpaths, ``"meta_legacy"`` = the
-    # pre-360dialog Meta-direct path still wired for older tenants.
+    # API webhook. Historical rows also carry values from retired
+    # integrations; they are kept for the archive and never routed on.
     provider = Column(String(32), nullable=False)
     # The HTTP path the webhook landed on — gives us a clean
-    # secondary key when 360dialog rolls out a new subpath without
-    # warning ("hey why is /webhook/whatsapp/360dialog/quality
-    # suddenly emitting events?").
+    # secondary key when a provider starts delivering on a new subpath.
     source_path = Column(String(255), nullable=True)
     # The parsed ``wamid`` if this payload was a status event for a
     # specific outbound message we sent. NULL for inbound messages
-    # and 360dialog coexistence/channel events.
+    # and coexistence/channel events.
     wamid = Column(String(255), nullable=True)
     # Coarse status family: ``"sent"`` | ``"delivered"`` | ``"read"``
     # | ``"failed"`` | ``"template_status"`` | ``"inbound"`` |
@@ -3197,8 +3195,8 @@ class WaWebhookRaw(Base):
     # Output of ``meta_errors.quality_tier_of`` for the classified
     # key — denormalised for fast roll-ups.
     quality_tier = Column(String(16), nullable=True)
-    # The full payload, exactly as Meta/360dialog sent it. Stored as
-    # text (not JSONB) because some 360dialog coexistence events
+    # The full payload, exactly as Meta sent it. Stored as
+    # text (not JSONB) because some coexistence events
     # ship as form-encoded blobs that aren't valid JSON, and we
     # never want the ingest path to fail on a parse error.
     raw_body = Column(Text, nullable=True)

@@ -560,7 +560,7 @@ export type DashboardMessageMedia =
   | DashboardMessageMediaVideo
   | DashboardMessageMediaDocument
 
-// ── Outbound send status (Meta / 360dialog wire-layer outcome) ──────
+// ── Outbound send status (Meta wire-layer outcome) ─────────────────
 // Surfaced per outbound MessageEvent so the UI can tell the merchant
 // whether the AI / manual reply ACTUALLY reached the customer. See
 // ``backend/core/outbound_send_status.py`` for how this is stamped
@@ -569,7 +569,7 @@ export type DashboardMessageMedia =
 // * 'queued'   → row persisted, provider POST hasn't returned yet.
 //                Render with a clock icon. Should flip to 'sent'
 //                or 'failed' within ~1s in steady state.
-// * 'sent'     → Meta / 360dialog returned 2xx + wamid. Render ✔✔.
+// * 'sent'     → Meta returned 2xx + wamid. Render ✔✔.
 // * 'failed'   → non-2xx / provider error envelope / missing wamid
 //                / transport exception / Nahla burst throttle. The
 //                ``sendError`` block carries the Arabic merchant
@@ -703,7 +703,7 @@ export interface DashboardMessage {
   media?: DashboardMessageMedia | null
   /** Canonical customer-visible structures persisted by the wire/presentation layer. */
   responseBundle?: MessageResponseBundle | null
-  /** Wire-layer outcome of the Meta/360dialog POST. Outbound rows only. */
+  /** Wire-layer outcome of the Meta POST. Outbound rows only. */
   sendStatus?: OutboundSendStatus
   /** Arabic error label + Meta code metadata when sendStatus === 'failed'. */
   sendError?: OutboundSendError | null
