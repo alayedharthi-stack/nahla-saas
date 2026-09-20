@@ -425,7 +425,6 @@ export default function AdminDashboard() {
             <QuickAction label="استخدام الذكاء"     sub="استهلاك AI لكل متجر"        icon={Activity}    to="/admin/ai-usage"     />
             <QuickAction label="تشخيص المشاكل"      sub="أخطاء التكاملات والـ sync"  icon={ShieldAlert} to="/admin/troubleshooting" />
             <QuickAction label="صحة النظام"         sub="API والـ webhooks والـ DB"   icon={Wifi}        to="/admin/system"       />
-            <QuickAction label="طلبات الـ Coexistence" sub="360dialog — تفعيل التجار" icon={Zap}      to="/admin/coexistence"  />
             <QuickAction label="الميزات التجريبية"  sub="Feature Flags للمنصة"       icon={TrendingUp}  to="/admin/features"     />
           </div>
         </div>

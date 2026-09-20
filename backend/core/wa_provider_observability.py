@@ -2,7 +2,7 @@
 core/wa_provider_observability.py
 ─────────────────────────────────
 In-memory ring buffer of recent outbound WhatsApp provider attempts
-(Meta + 360dialog), used by the read-only debug endpoint:
+(Meta), used by the read-only debug endpoint:
 
     GET /admin/debug/last-provider-send?tenant_id=<id>
 
@@ -240,7 +240,7 @@ def summarize_headers(
 ) -> Dict[str, Any]:
     """Build a sanitised snapshot of the headers we sent. We never
     return the raw secret — only the header NAME present plus the
-    masked tail of the bearer / D360-API-KEY so support can verify
+    masked tail of the bearer token so support can verify
     the right key is being used without it leaking.
 
     ``token_source`` (``"merchant_oauth"`` / ``"platform"`` /
@@ -257,10 +257,7 @@ def summarize_headers(
         return summary
     # Case-insensitive lookup — httpx may have normalised the casing.
     lowered = {k.lower(): v for k, v in headers.items()}
-    if "d360-api-key" in lowered:
-        summary["auth_header_name"] = "D360-API-KEY"
-        summary["auth_header_tail"] = _mask_token_tail(lowered["d360-api-key"])
-    elif "authorization" in lowered:
+    if "authorization" in lowered:
         summary["auth_header_name"] = "Authorization"
         summary["auth_header_tail"] = None
     summary["content_type"] = lowered.get("content-type")

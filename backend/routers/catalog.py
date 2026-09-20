@@ -2424,7 +2424,7 @@ async def merchant_catalog_import_from_meta(
         # dashboard pattern-matches on ``detail.code`` to render
         # the right remediation copy ("اربط واتساب أولاً" vs
         # "ضع Catalog ID" vs "أعد المصادقة" vs "نحتاج Meta OAuth
-        # token لإستيراد الكتالوج، لا يكفي 360dialog").
+        # token لإستيراد الكتالوج").
         status = {
             "connection_not_found":              404,
             "catalog_id_missing":                400,

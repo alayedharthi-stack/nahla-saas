@@ -2175,16 +2175,16 @@ function DebugTemplateLink({ templateId }: { templateId: string }) {
 
 // ── Provider-side billing/account block banner ─────────────────────
 // Rendered above the diagnostic dump when the campaign hit a Meta /
-// 360dialog provider restriction. The merchant cannot fix this from
+// provider restriction. The merchant cannot fix this from
 // the dashboard — the workflow is:
 //   1. Show the rose banner with the fixed Arabic copy
-//      ("مشكلة من مزود واتساب أو الدفع — تواصل مع 360dialog").
+//      ("مشكلة من مزود واتساب أو الدفع — تواصل مع دعم Meta").
 //   2. Hide the auto-retry CTA (handled in the caller via the
 //      ``providerBlocked`` flag — retrying just produces the same
 //      restriction and burns attempts).
 //   3. Surface the "نسخ تقرير الدعم" button which calls
 //      ``GET /campaigns/{id}/support-bundle`` and copies the full
-//      JSON to the clipboard, ready for a 360dialog ticket.
+//      JSON to the clipboard, ready for a support ticket.
 function ProviderBlockBanner({
   block,
   onCopyBundle,
@@ -3121,12 +3121,12 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   const failedCount = campaign.failed_count ?? 0
   // Provider-side billing/account block: when detected we MUST hide
   // the dispatch CTA (auto-retry is pointless — the recipient/WABA
-  // is restricted by Meta/360dialog), and instead surface the
+  // is restricted by Meta), and instead surface the
   // support-escalation workflow.
   const providerBlocked = !!providerBlock?.detected
 
   /**
-   * Fetch the support bundle for a 360dialog escalation and copy
+   * Fetch the support bundle for a provider escalation and copy
    * it as pretty-printed JSON to the merchant's clipboard. The
    * endpoint is read-only and idempotent, so we just call it on
    * demand instead of pre-fetching with the debug snapshot.
@@ -3432,8 +3432,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
             </button>
             {/* Hide the dispatch CTA entirely on provider-blocked
                 campaigns — retrying produces the same restriction
-                from Meta/360dialog and creates noise in the logs.
-                The merchant gets a "Contact 360dialog" workflow
+                from Meta and creates noise in the logs.
+                The merchant gets a "Contact support" workflow
                 instead, surfaced by ProviderBlockBanner below. */}
             {!providerBlocked && (isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty' || lifecycleKey === 'excluded_before_send') && (
               <div className="flex flex-col items-end gap-1" dir={dir}>

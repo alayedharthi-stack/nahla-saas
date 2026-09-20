@@ -138,7 +138,7 @@ class AiQualityCountByCategory(BaseModel):
 
     The owner panel renders one tab per category (``ai_mismatch`` for the
     original brain-mismatch panel, ``inbound_drop`` for pre-brain silent
-    drops, ``webhook_routing`` for 360dialog / Meta unrouted webhooks).
+    drops, ``webhook_routing`` for unrouted webhooks).
     Each tab shows its own count badge, which is exactly this row.
     """
     category: str

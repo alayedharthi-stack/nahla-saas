@@ -43,7 +43,6 @@ import AdminTenants from './pages/AdminTenants'
 import AdminAiUsage from './pages/AdminAiUsage'
 import AdminFeatures from './pages/AdminFeatures'
 import AdminTroubleshooting from './pages/AdminTroubleshooting'
-import AdminCoexistence from './pages/AdminCoexistence'
 import AdminSystemStatus from './pages/AdminSystemStatus'
 import AdminTools from './pages/AdminTools'
 import AdminWebhookHealth from './pages/AdminWebhookHealth'
@@ -243,7 +242,6 @@ export default function App() {
             <Route path="admin/ai-usage"     element={<AdminAiUsage />} />
             <Route path="admin/features"     element={<AdminFeatures />} />
             <Route path="admin/troubleshooting" element={<AdminTroubleshooting />} />
-            <Route path="admin/coexistence"  element={<AdminCoexistence />} />
             <Route path="admin/team"         element={<AdminTeam />} />
             <Route path="admin/system"       element={<AdminSystemStatus />} />
             <Route path="admin/tools"          element={<AdminTools />} />

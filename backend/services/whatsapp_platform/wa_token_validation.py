@@ -14,7 +14,11 @@ import httpx
 
 from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION
 from core.log_redaction import redact_exception
-from services.whatsapp_platform.provider_utils import WHATSAPP_PROVIDER_360DIALOG, wa_provider
+from services.whatsapp_platform.provider_utils import (
+    WHATSAPP_PROVIDER_UNSUPPORTED,
+    provider_is_supported,
+    raw_provider,
+)
 
 logger = logging.getLogger("nahla.wa_token_validation")
 
@@ -375,20 +379,24 @@ def admin_production_block_message(result: TokenValidationResult) -> str:
 
 async def validate_connection_health(conn: Any) -> TokenValidationResult:
     """Validate stored Meta token and update health fields without disconnecting."""
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
+    if not provider_is_supported(conn):
+        # A connection left over from a retired provider. It holds a credential
+        # this platform can no longer use, and calling it "valid" would put a
+        # dead channel on the merchant's dashboard as a working one.
         return TokenValidationResult(
-            is_valid=bool(getattr(conn, "access_token", None)),
-            production_ready=True,
-            token_status="valid",
-            token_type="D360_API_KEY",
-            token_source_label="dialog360",
+            is_valid=False,
+            production_ready=False,
+            token_status="unsupported_provider",
+            token_type=WHATSAPP_PROVIDER_UNSUPPORTED,
+            token_source_label=raw_provider(conn) or WHATSAPP_PROVIDER_UNSUPPORTED,
             expires_at=None,
             data_access_expires_at=None,
             scopes=[],
             app_id=None,
-            warnings=[],
-            error_code=None,
-            error_message=None,
+            warnings=["هذه القناة مرتبطة بمزوّد لم يعد مدعومًا. أعد الربط عبر Meta."],
+            error_code="unsupported_provider",
+            error_message="whatsapp connection provider is not supported; "
+                          "Meta WhatsApp Cloud API is the only supported provider",
             debug_info={},
         )
     from services.whatsapp_platform.wa_connection_secrets import read_access_token  # noqa: PLC0415

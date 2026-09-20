@@ -44,6 +44,11 @@ def _merchant_handler_db() -> MagicMock:
     db.rollback = MagicMock()
     db.add = MagicMock()
     db.flush = MagicMock()
+    # A real ``WhatsAppConnection`` row always names its provider, and the send
+    # path refuses a connection whose provider the platform does not support.
+    # A bare MagicMock would hand it an object that is not "meta", so the
+    # double says what a live Meta connection says.
+    db.query.return_value.filter_by.return_value.first.return_value.provider = "meta"
     return db
 
 

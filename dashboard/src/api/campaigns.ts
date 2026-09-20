@@ -239,7 +239,7 @@ export interface CampaignDebugSnapshot {
     retryable: boolean
     /** Provider-side billing/account restriction (client_payment_blocked,
      *  account_locked, auth_error, …). The merchant cannot fix this
-     *  from the dashboard — the workflow is to contact 360dialog
+     *  from the dashboard — the workflow is to contact Meta support
      *  with the support bundle attached. */
     provider_billing_block: boolean
     /** One-line action hint in Arabic ("ask for opt-in", etc.). */
@@ -265,7 +265,7 @@ export interface CampaignDebugSnapshot {
     /** Auto-retry policy flag, mirrors ``ClassifiedError.retryable``. */
     retryable: boolean
     /** Provider-side billing/account restriction marker (drives the
-     *  "Contact 360dialog" support banner + bundle CTA). */
+     *  "Contact support" banner + bundle CTA). */
     provider_billing_block: boolean
     advice_ar: string | null
     count: number
@@ -275,7 +275,7 @@ export interface CampaignDebugSnapshot {
    *  the dispatch CTA, and surface the "نسخ تقرير الدعم" button which
    *  fetches the support bundle. None of these errors are
    *  merchant-recoverable from the dashboard — the workflow is to
-   *  contact 360dialog with the support bundle attached. */
+   *  contact Meta support with the support bundle attached. */
   provider_block: {
     detected: boolean
     count: number
@@ -465,7 +465,7 @@ export interface CampaignDebugSnapshot {
 /** Provider-escalation support bundle. Returned by
  *  ``GET /campaigns/{id}/support-bundle``. The shape is versioned
  *  (``version: "1"``) and intentionally stable — merchants paste it
- *  straight into 360dialog tickets and downstream tooling may
+ *  straight into support tickets and downstream tooling may
  *  consume it as well. */
 export interface CampaignSupportBundle {
   version: string
@@ -849,7 +849,7 @@ export const campaignsApi = {
    *  call any number of times. The merchant clicks "نسخ تقرير الدعم"
    *  in the rose banner when ``debug.provider_block.detected`` is
    *  true; the UI copies this JSON straight to the clipboard so the
-   *  merchant can paste it into a 360dialog ticket. */
+   *  merchant can paste it into a support ticket. */
   supportBundle: (id: number) =>
     apiCall<CampaignSupportBundle>(`/campaigns/${id}/support-bundle`),
 

@@ -2,7 +2,7 @@
  * AdminDirectSendModal
  * ────────────────────
  * Admin-only modal that fires a single WhatsApp template message
- * directly through the live provider (Meta / 360dialog) using
+ * directly through the live provider (Meta) using
  * ``POST /admin/debug/whatsapp/send-template``, bypassing the
  * entire campaign engine.
  *
@@ -11,7 +11,7 @@
  *     + template name from the campaign row when opened from there).
  *   * Show the raw provider response in a pretty-printed JSON block
  *     so support can quote the exact error code/subcode/fbtrace_id
- *     into a 360dialog ticket without leaving the dashboard.
+ *     into a support ticket without leaving the dashboard.
  *   * Mask the destination phone in the visible echo, even though
  *     the backend already masks — defense in depth, and consistent
  *     screen-sharing safety.

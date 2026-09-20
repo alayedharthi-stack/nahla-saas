@@ -34,7 +34,7 @@ Layers protecting outbound replies from leakage:
      tokens (``[TRANSFER]``, ``[TEMPLATE:foo]``, …) at the brain
      boundary, persistence layer and wire layer.
   4. *This module*. Right before ``_post_wa`` ships a payload to
-     360dialog / Cloud API, we scan the outbound text for known
+     the Cloud API, we scan the outbound text for known
      leakage fingerprints and either rewrite to a clean segment
      (planner leak) or replace with a safe fallback (search leak).
      Logged as ``[EXTERNAL_RESEARCH_BLOCKED]`` /
