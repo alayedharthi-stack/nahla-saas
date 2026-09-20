@@ -26,22 +26,33 @@ database unless an owner applies it explicitly.
 
 Graph
 =====
-The repository intentionally carries two heads: ``0092`` (A1-Validate branch)
-and the integration-bootstrap chain this revision extends (``0108`` → ``0109``
-→ ``0110``). Do not use ``alembic upgrade head``. Apply with
-``alembic upgrade 0110`` on a database at ``0109``; ``alembic downgrade 0109``
-removes everything this revision created.
+This revision is numbered ``0111`` and revises ``0109``, **not** ``0110``.
+``0110`` is taken by the customer-address provenance revision on a separate
+branch, which also revises ``0109``; two revisions cannot share an id, and
+renumbering somebody else's branch is not this change's to do. Taking ``0111``
+as a *sibling* of ``0110`` rather than a child keeps both independent: either
+can be applied without the other, in either order, and neither PR has to wait
+for the other to merge.
+
+The repository therefore carries these heads: ``0092`` (A1-Validate branch),
+``0110`` (customer-address provenance, once merged) and ``0111`` (this one).
+Do not use ``alembic upgrade head`` — it is ambiguous with more than one head,
+which is why every runbook here names its target explicitly. Apply with
+``alembic upgrade 0111`` on a database at ``0109``; ``alembic downgrade 0109``
+removes everything this revision created and leaves ``0110`` alone.
 
 One source of truth
 ===================
 The tables are created from the package's own metadata rather than from a
 second hand-written copy of it, so the revision and
 ``core.commerce_runtime.handover_models`` cannot drift: there is only one
-definition. A pre-existing relation is verified against that same metadata by
-definition and refused when it differs — nothing is reconciled silently and
-nothing is stamped.
+definition. A pre-existing relation is verified against that same metadata —
+columns, **and the unique constraints, check constraints and indexes that carry
+the guarantees** — and refused when it differs. A table with the right columns
+and no unique index on the inbound identity would deduplicate nothing while
+looking correct, so "matching columns" is not the bar.
 
-Revision ID: 0110
+Revision ID: 0111
 Revises: 0109
 """
 
@@ -55,7 +66,7 @@ import sqlalchemy as sa
 
 from migration_inspector_helpers import has_table
 
-revision = "0110"
+revision = "0111"
 down_revision = "0109"
 branch_labels = None
 depends_on = None
@@ -113,8 +124,54 @@ def _reflected_shape(bind, name: str) -> dict:
     }
 
 
+def _declared_constraints(table) -> dict:
+    """The named guarantees this revision declares, by kind and name."""
+    from sqlalchemy import CheckConstraint, Index, UniqueConstraint  # noqa: PLC0415
+
+    unique, checks = set(), set()
+    for constraint in table.constraints:
+        if isinstance(constraint, UniqueConstraint) and constraint.name:
+            unique.add(str(constraint.name))
+        elif isinstance(constraint, CheckConstraint) and constraint.name:
+            checks.add(str(constraint.name))
+    indexes = {str(index.name) for index in table.indexes if index.name}
+    for index in table.indexes:
+        if index.unique and index.name:
+            unique.add(str(index.name))
+    return {"unique": unique, "check": checks, "index": indexes}
+
+
+def _reflected_constraints(bind, name: str) -> dict:
+    inspector = sa.inspect(bind)
+    unique, checks, indexes = set(), set(), set()
+    try:
+        unique |= {str(c["name"]) for c in inspector.get_unique_constraints(name) if c.get("name")}
+    except Exception:  # noqa: BLE001 - a dialect that cannot reflect them reports none
+        pass
+    try:
+        checks |= {str(c["name"]) for c in inspector.get_check_constraints(name) if c.get("name")}
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for index in inspector.get_indexes(name):
+            if not index.get("name"):
+                continue
+            indexes.add(str(index["name"]))
+            if index.get("unique"):
+                unique.add(str(index["name"]))
+    except Exception:  # noqa: BLE001
+        pass
+    return {"unique": unique, "check": checks, "index": indexes}
+
+
 def _differences(bind, table) -> list:
-    """How a pre-existing relation differs from the declared one, by name."""
+    """How a pre-existing relation differs from the declared one, by name.
+
+    Columns **and** the named guarantees. A relation whose columns match but
+    whose unique index on the inbound identity is missing would accept the same
+    provider message twice; a missing check constraint would let a disposed row
+    name no disposition. Neither is a compatible schema, so neither passes here.
+    """
     declared = _column_shape(table, bind.dialect)
     actual = _reflected_shape(bind, table.name)
     diffs = []
@@ -125,6 +182,12 @@ def _differences(bind, table) -> list:
             diffs.append(f"{table.name}.{column} is {actual[column]}, expected {shape}")
     for column in sorted(set(actual) - set(declared)):
         diffs.append(f"{table.name}.{column} is unexpected")
+
+    want = _declared_constraints(table)
+    have = _reflected_constraints(bind, table.name)
+    for kind in ("unique", "check", "index"):
+        for name in sorted(want[kind] - have[kind]):
+            diffs.append(f"{table.name} is missing the {kind} constraint {name}")
     return diffs
 
 
@@ -138,7 +201,7 @@ def upgrade() -> None:
         diffs.extend(_differences(bind, table))
     if diffs:
         raise IncompatibleSchema(
-            "0110 refuses to reconcile an incompatible pre-existing schema: " + "; ".join(diffs)
+            "0111 refuses to reconcile an incompatible pre-existing schema: " + "; ".join(diffs)
         )
 
     missing = [table for table in tables if not has_table(bind, table.name)]
@@ -152,7 +215,7 @@ def upgrade() -> None:
         else:
             remaining.extend(_differences(bind, table))
     if remaining:
-        raise IncompatibleSchema("0110 post-condition failed: " + "; ".join(remaining))
+        raise IncompatibleSchema("0111 post-condition failed: " + "; ".join(remaining))
 
 
 def downgrade() -> None:

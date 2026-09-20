@@ -353,36 +353,96 @@ def verified_connection(db: Any, *, tenant_id: int,
     return f"wa:{identifier}", str(connection.id)
 
 
-def tenant_for_phone_number_id(db: Any, *, phone_number_id: Any
-                               ) -> Optional[Tuple[int, str, str]]:
-    """``(tenant_id, channel_reference, connection_row_id)`` for an allowlisted
-    tenant that owns this connection, or ``None``.
+# What a scope lookup can conclude. The three are not interchangeable, and the
+# difference between the last two is the whole point: "this is not ours" is a
+# fact about the traffic, "I could not find out" is a fact about us.
+SCOPE_RESOLVED = "resolved"        # an allowlisted tenant owns this connection
+SCOPE_NOT_OURS = "not_ours"        # the platform knows: no allowlisted tenant owns it
+SCOPE_AMBIGUOUS = "ambiguous"      # more than one allowlisted tenant claims the number
+SCOPE_UNAVAILABLE = "unavailable"  # the lookup itself failed
+
+
+@dataclasses.dataclass(frozen=True)
+class ScopeLookup:
+    """Who owns a phone number id, or why that could not be established."""
+
+    status: str
+    tenant_id: int = 0
+    connection_ref: str = ""
+    connection_id: str = ""
+    detail: str = ""
+
+    @property
+    def resolved(self) -> bool:
+        return self.status == SCOPE_RESOLVED
+
+    @property
+    def decided(self) -> bool:
+        """Whether this is an answer about the traffic rather than about us."""
+        return self.status in {SCOPE_RESOLVED, SCOPE_NOT_OURS}
+
+
+def resolve_pilot_scope(db: Any, *, phone_number_id: Any) -> ScopeLookup:
+    """Which allowlisted tenant owns this connection — or why we cannot say.
 
     The reverse of :func:`verified_connection`, and deliberately narrower than a
     plain lookup: the connection row says which tenant owns the number, and the
     answer is given only when that tenant is one the pilot is configured for. A
     phone number id alone never selects a tenant for the runtime.
+
+    A failed lookup is **not** "not ours". Answering that would let an
+    unreachable database turn pilot-owned traffic into traffic nobody has to
+    keep, and the caller that acknowledges an inbound needs to tell the two
+    apart. Two allowlisted tenants claiming one number is likewise refused
+    rather than resolved to whichever row came back first.
     """
     identifier = str(phone_number_id or "").strip()
     tenants = tenant_allowlist()
-    if not identifier or db is None or not tenants:
-        return None
+    if not identifier:
+        return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_phone_number_id")
+    if not tenants:
+        return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_tenant_allowlist")
+    if db is None:
+        return ScopeLookup(status=SCOPE_UNAVAILABLE, detail="no_session")
     try:
         from database.models import WhatsAppConnection  # noqa: PLC0415
 
-        connection = (
+        connections = (
             db.query(WhatsAppConnection)
             .filter(WhatsAppConnection.phone_number_id == identifier)
             .filter(WhatsAppConnection.tenant_id.in_(sorted(tenants)))
-            .first()
+            .limit(2)
+            .all()
         )
-    except Exception as exc:  # noqa: BLE001 - an unresolvable connection selects nothing
-        logger.warning("[COMMERCE_RUNTIME_PILOT] tenant lookup failed phone_number_id=%s "
-                       "error=%s", identifier, type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - a failed lookup decides nothing
+        logger.error("[COMMERCE_RUNTIME_PILOT] scope lookup failed phone_number_id=%s "
+                     "error=%s — scope unavailable, not 'unrelated'",
+                     identifier, type(exc).__name__)
+        return ScopeLookup(status=SCOPE_UNAVAILABLE, detail=type(exc).__name__)
+    if not connections:
+        return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_allowlisted_tenant_owns_it")
+    if len(connections) > 1:
+        logger.error("[COMMERCE_RUNTIME_PILOT] scope ambiguous phone_number_id=%s — more "
+                     "than one allowlisted tenant claims it", identifier)
+        return ScopeLookup(status=SCOPE_AMBIGUOUS, detail="more_than_one_allowlisted_tenant")
+    connection = connections[0]
+    return ScopeLookup(status=SCOPE_RESOLVED, tenant_id=int(connection.tenant_id),
+                       connection_ref=f"wa:{identifier}", connection_id=str(connection.id))
+
+
+def tenant_for_phone_number_id(db: Any, *, phone_number_id: Any
+                               ) -> Optional[Tuple[int, str, str]]:
+    """``(tenant_id, channel_reference, connection_row_id)``, or ``None``.
+
+    The two-valued form, kept for callers that genuinely cannot act on the
+    difference. Anything that acknowledges an inbound must use
+    :func:`resolve_pilot_scope` instead: this one cannot tell "not ours" from
+    "could not find out".
+    """
+    found = resolve_pilot_scope(db, phone_number_id=phone_number_id)
+    if not found.resolved:
         return None
-    if connection is None:
-        return None
-    return int(connection.tenant_id), f"wa:{identifier}", str(connection.id)
+    return found.tenant_id, found.connection_ref, found.connection_id
 
 
 __all__ = [
@@ -395,4 +455,6 @@ __all__ = [
     "RECIPIENT_UNNORMALIZABLE", "TENANT_NOT_ALLOWLISTED", "evaluate_pilot_route", "pilot_budget",
     "pilot_enabled", "pilot_model", "recipient_allowlist", "tenant_allowlist",
     "tenant_for_phone_number_id", "verified_connection",
+    "SCOPE_AMBIGUOUS", "SCOPE_NOT_OURS", "SCOPE_RESOLVED", "SCOPE_UNAVAILABLE",
+    "ScopeLookup", "resolve_pilot_scope",
 ]

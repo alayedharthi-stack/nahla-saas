@@ -7,7 +7,7 @@ handover decided on nothing: the count comes back zero because the replica that
 was about to admit had not written its row yet.
 
 So the barrier lives in the database, in the runtime's **own** tables
-(``core.commerce_runtime.handover_models``, revision ``0110``). It used to live
+(``core.commerce_runtime.handover_models``, revision ``0111``). It used to live
 under a namespaced key in ``tenant_settings.metadata``; that document has other
 writers, every one of them read-modify-write over the whole JSON, and any of
 them could put back a copy taken before a drain and silently reopen it.
@@ -139,6 +139,7 @@ class WorkerReport:
     retired_at: Optional[_dt.datetime] = None
     retired_by: Optional[str] = None
     retired_reason: Optional[str] = None
+    retirement_evidence: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
     @property
     def retired(self) -> bool:
@@ -260,6 +261,15 @@ def convergence(barrier: Barrier, workers: Sequence[WorkerReport], *,
 
 
 # ── Sessions and locking ─────────────────────────────────────────────────────
+
+
+def _engine_of(session: Any) -> Any:
+    """The engine behind this session, or ``None`` for the process default."""
+    try:
+        bind = session.get_bind() if hasattr(session, "get_bind") else session
+        return getattr(bind, "engine", bind)
+    except Exception:  # noqa: silent-ok — a session that cannot name its engine falls back to the process default, which is the production case
+        return None
 
 
 def _dialect_of(bind: Any) -> str:
@@ -470,14 +480,20 @@ def settle(db: Any, *, tenant_id: int, expected_generation: Optional[int] = None
                                 evidence=dict(row.evidence))
 
 
-def reopen(db: Any, *, tenant_id: int,
-           expected_generation: Optional[int] = None) -> Optional[Barrier]:
+def reopen(db: Any, *, tenant_id: int, expected_generation: Optional[int] = None,
+           validate: Optional[Callable[[Any, Barrier], Tuple[List[str], Dict[str, Any]]]] = None,
+           ) -> Optional[Barrier]:
     """Admit new work again, on a fresh generation, keeping the audit trail.
 
     Checked and applied together: a drain that started between an operator's
     precheck and this call would otherwise be reopened on the strength of a
-    reading that was already stale. Returns ``None`` when the barrier is not the
-    settled one the caller decided about, and writes nothing.
+    reading that was already stale. State, generation **and** the work still
+    outstanding are all read inside the transaction that writes — an entry that
+    arrived during the settled window is an obligation nobody has met, and
+    reopening over it would bury it under new traffic.
+
+    Returns ``None`` when the barrier is not the settled one the caller decided
+    about, or when ``validate`` reports blockers, and writes nothing.
     """
     with _locked(db, tenant_id) as session:
         row = _barrier_row(session, tenant_id, for_update=True)
@@ -493,6 +509,13 @@ def reopen(db: Any, *, tenant_id: int,
                            "generation moved expected=%s found=%s",
                            tenant_id, expected_generation, current.generation)
             return None
+        if validate is not None:
+            blockers, _evidence = validate(session, current)
+            if blockers:
+                session.rollback()
+                logger.warning("[COMMERCE_RUNTIME_HANDOVER] reopen refused tenant=%s "
+                               "blockers=%s", tenant_id, blockers)
+                return None
         row.state = STATE_OPEN
         row.generation = int(row.generation) + 1
         row.opened_at = _now()
@@ -510,12 +533,69 @@ def reopen(db: Any, *, tenant_id: int,
 # ── The fleet ────────────────────────────────────────────────────────────────
 
 
+@dataclasses.dataclass(frozen=True)
+class ReleaseState:
+    """Whether the pilot may be switched off for this tenant, right now."""
+
+    tenant_id: int
+    barrier: Barrier
+    pending: int
+    arrived_after_settlement: int
+    blockers: Tuple[str, ...] = ()
+
+    @property
+    def released(self) -> bool:
+        return not self.blockers
+
+    def as_log_fields(self) -> Dict[str, Any]:
+        return {"tenant_id": self.tenant_id, "state": self.barrier.state,
+                "generation": self.barrier.generation, "pending": self.pending,
+                "arrived_after_settlement": self.arrived_after_settlement,
+                "released": self.released, "blockers": list(self.blockers)}
+
+
+def release_state(db: Any, *, tenant_id: int) -> ReleaseState:
+    """Whether the settlement verdict still holds, computed now.
+
+    A settlement is evidence about the instant it was taken. Switching the pilot
+    off on the strength of one taken ten minutes ago abandons everything that
+    arrived since — and something *does* arrive: an inbound in the settled
+    window is accepted and recorded rather than lost, which is exactly the case
+    the old verdict cannot see.
+
+    So the verdict is never stored and never cached. It is derived, every time
+    it is asked, from the barrier and from the entries this tenant holds: an
+    entry created after ``settled_at`` invalidates the release on its own, even
+    if an operator has since disposed of it, because the settlement that was
+    signed off did not account for it.
+    """
+    barrier = read_barrier(db, tenant_id=int(tenant_id))
+    pending = pending_count(db, tenant_id=int(tenant_id))
+    after = 0
+    if barrier.settled_at is not None:
+        after = int(db.query(hm.DeferredInbound)
+                    .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                            hm.DeferredInbound.namespace == NAMESPACE,
+                            hm.DeferredInbound.created_at > barrier.settled_at)
+                    .count())
+    blockers: List[str] = []
+    if barrier.state != STATE_SETTLED:
+        blockers.append(f"barrier_is_{barrier.state}_not_settled")
+    if pending:
+        blockers.append(f"deferred_pending={pending}")
+    if after:
+        blockers.append(f"arrived_after_settlement={after}")
+    return ReleaseState(tenant_id=int(tenant_id), barrier=barrier, pending=pending,
+                        arrived_after_settlement=after, blockers=tuple(blockers))
+
+
 def _worker_from_row(row: Any) -> WorkerReport:
     return WorkerReport(
         worker_id=str(row.worker_id), observed_generation=int(row.observed_generation),
         observed_state=str(row.observed_state), seen_at=_aware(row.seen_at),
         retired_at=_aware(row.retired_at), retired_by=row.retired_by,
         retired_reason=row.retired_reason,
+        retirement_evidence=dict(getattr(row, "retirement_evidence", None) or {}),
     )
 
 
@@ -576,25 +656,68 @@ def note_worker(db: Any, *, tenant_id: int, observed_generation: int, observed_s
                 row.retired_at = None
                 row.retired_by = None
                 row.retired_reason = None
+                row.retirement_evidence = {}
+                row.updated_at = _now()
             session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[COMMERCE_RUNTIME_HANDOVER] heartbeat failed tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
 
 
-def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str) -> bool:
-    """Take one worker out of the expected set, on the record.
+# What an operator has to be able to show before a worker leaves the expected
+# set. A name and a sentence are not evidence a process stopped.
+RETIREMENT_EVIDENCE_KEYS: Tuple[str, ...] = (
+    # The deployment or process this worker belonged to, as the platform that
+    # runs it names it — not the worker id, which is what we are retiring.
+    "deployment",
+    # How the stop was established: the command run, the console state read,
+    # the fencing applied. A sentence an on-call engineer can re-check.
+    "stop_verified_by",
+    # When that was observed, ISO-8601. A report after this moment means the
+    # process is not stopped and the retirement is refused.
+    "observed_at",
+)
 
-    This is the only way a worker leaves the fleet. It is a statement an
-    operator makes — "this process is stopped, and here is how I know" — and it
-    is stored with their name and their reason so the settlement evidence can
-    carry it.
+
+class RetirementRefused(ValueError):
+    """The evidence offered does not establish that this worker stopped."""
+
+
+def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str,
+                  evidence: Optional[Mapping[str, Any]] = None) -> bool:
+    """Take one worker out of the expected set, on evidence, on the record.
+
+    This is the only way a worker leaves the fleet, and it is the one place the
+    handover trusts a human instead of a reading — so what the human has to show
+    is spelled out rather than implied:
+
+    * **deployment** — the exact deployment or process identity, as the platform
+      that runs it names it. "some replica" retires nothing.
+    * **stop_verified_by** — how the stop or the fencing was actually
+      established. Elapsed silence is not in this set and never will be: a quiet
+      worker is a worker nobody has heard from, which is the case this whole
+      mechanism exists to distinguish from a stopped one.
+    * **observed_at** — when that was seen. If the worker has reported *since*
+      that moment it is demonstrably running, and the retirement is refused
+      rather than recorded.
+
+    Raises :class:`RetirementRefused` with the reason when the evidence does not
+    hold. Returns ``False`` only when there is no such worker for this tenant.
     """
     identity = str(name or "").strip()
     who = str(by or "").strip()
     why = str(reason or "").strip()
     if not identity or not who or not why:
-        return False
+        raise RetirementRefused("a retirement needs a worker, an operator and a reason")
+    supplied = dict(evidence or {})
+    missing = [key for key in RETIREMENT_EVIDENCE_KEYS
+               if not str(supplied.get(key) or "").strip()]
+    if missing:
+        raise RetirementRefused(f"evidence_missing:{','.join(missing)}")
+    observed = _parse_moment(supplied["observed_at"])
+    if observed is None:
+        raise RetirementRefused("observed_at must be an ISO-8601 moment")
+
     with _locked(db, tenant_id) as session:
         row = (session.query(hm.HandoverWorker)
                .filter(hm.HandoverWorker.tenant_id == int(tenant_id),
@@ -605,13 +728,54 @@ def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str) -
         if row is None:
             session.rollback()
             return False
-        row.retired_at = _now()
+        seen = _aware(row.seen_at)
+        if seen is not None and seen > observed:
+            session.rollback()
+            raise RetirementRefused(
+                f"worker reported at {seen.isoformat()}, after the stop was observed at "
+                f"{observed.isoformat()} — it is running")
+        moment = _now()
+        row.retired_at = moment
         row.retired_by = who
         row.retired_reason = why
+        row.retirement_evidence = dict(
+            supplied, recorded_at=moment.isoformat(),
+            last_report_at=None if seen is None else seen.isoformat())
+        row.updated_at = moment
         session.commit()
-    logger.warning("[COMMERCE_RUNTIME_HANDOVER] worker retired tenant=%s worker=%s by=%s",
-                   tenant_id, identity, who)
+    logger.warning("[COMMERCE_RUNTIME_HANDOVER] worker retired tenant=%s worker=%s by=%s "
+                   "deployment=%s", tenant_id, identity, who, supplied.get("deployment"))
     return True
+
+
+def _parse_moment(value: Any) -> Optional[_dt.datetime]:
+    """An ISO-8601 moment, or ``None``. Never guesses a timezone but UTC."""
+    if isinstance(value, _dt.datetime):
+        return _aware(value)
+    try:
+        return _aware(_dt.datetime.fromisoformat(str(value).strip().replace("Z", "+00:00")))
+    except (TypeError, ValueError):
+        return None
+
+
+def expected_fleet(workers: Sequence[WorkerReport], inventory: Sequence[str]
+                   ) -> Dict[str, Any]:
+    """Reconcile the workers that reported against the deployment inventory.
+
+    The barrier can only see processes that wrote a row. An expected worker that
+    never reported is invisible to convergence — it is exactly the replica that
+    would still be admitting — so the operator states what the deployment is
+    supposed to contain and this names both gaps.
+    """
+    active = {w.worker_id for w in workers if not w.retired}
+    expected = {str(name).strip() for name in inventory if str(name).strip()}
+    return {
+        "expected": sorted(expected),
+        "reporting": sorted(active),
+        "missing_from_fleet": sorted(expected - active),
+        "unexpected_in_fleet": sorted(active - expected) if expected else [],
+        "reconciled": bool(expected) and not (expected - active) and not (active - expected),
+    }
 
 
 # ── Deferred inbound ─────────────────────────────────────────────────────────
@@ -683,12 +847,36 @@ def record_inbound(db: Any, *, tenant_id: int, phone_number_id: str,
         return _deferred_from_row(row)
 
 
-def resolve_inbound(db: Any, *, tenant_id: int, channel_connection_ref: str,
-                    provider_message_id: str) -> bool:
-    """Mark one deferred inbound finished by the runtime itself.
+def accepted_inbound(db: Any, *, tenant_id: int, channel_connection_ref: str,
+                     provider_message_id: str) -> Optional[DeferredRecord]:
+    """The durable record for one inbound identity, whatever state it is in.
 
-    Called when the turn reaches a terminal: the record has done its job and
-    stops counting against settlement. It is never resolved because time passed.
+    Read on the caller's session. "Accepted" is the question — was the provider
+    told we had this message — not "is it still outstanding", so a resolved or
+    disposed row answers too.
+    """
+    identity = str(provider_message_id or "").strip()
+    connection = str(channel_connection_ref or "").strip()
+    if not identity or not connection:
+        return None
+    row = (db.query(hm.DeferredInbound)
+           .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                   hm.DeferredInbound.namespace == NAMESPACE,
+                   hm.DeferredInbound.channel_connection_ref == connection,
+                   hm.DeferredInbound.provider_message_id == identity)
+           .first())
+    return None if row is None else _deferred_from_row(row)
+
+
+def resolve_inbound(db: Any, *, tenant_id: int, channel_connection_ref: str,
+                    provider_message_id: str,
+                    evidence: Optional[Mapping[str, Any]] = None) -> bool:
+    """Mark one deferred inbound finished, against the record that finished it.
+
+    Called when the runtime's turn for this exact identity has an authoritative
+    terminal. It is never resolved because time passed, because a turn id
+    exists, or because a caller reported something: ``evidence`` is the terminal
+    the caller checked, and it is stored so the resolution can be audited.
     """
     identity = str(provider_message_id or "").strip()
     connection = str(channel_connection_ref or "").strip()
@@ -710,6 +898,8 @@ def resolve_inbound(db: Any, *, tenant_id: int, channel_connection_ref: str,
             row.state = hm.DEFERRED_RESOLVED
             row.resolved_at = _now()
             row.updated_at = _now()
+            if evidence:
+                row.disposition_evidence = dict(evidence)
             session.commit()
             return True
     except Exception as exc:  # noqa: BLE001
@@ -743,8 +933,82 @@ def pending_count(db: Any, *, tenant_id: int) -> int:
     return pending_count_on(db, tenant_id=tenant_id)
 
 
+# What each disposition has to be able to show. ``replayed`` and ``answered``
+# are claims about the customer's conversation and are checked against the
+# runtime's own terminal records; ``superseded`` is checked against another
+# entry this platform holds; ``not_required`` is the one operator judgement,
+# and it carries its authorisation instead of a delivery claim.
+DISPOSITION_EVIDENCE_KEYS: Mapping[str, Tuple[str, ...]] = {
+    "replayed": ("replayed_as_provider_message_id",),
+    "answered": ("answered_by_provider_message_id",),
+    "superseded": ("superseded_by_provider_message_id",),
+    "not_required": ("authorized_by", "why"),
+}
+
+
+def _verified_handling(session: Any, row: Any, kind: str,
+                       evidence: Mapping[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+    """Whether the operator's evidence is real, checked against the records.
+
+    A note is not proof of anything. ``replayed`` and ``answered`` each name a
+    provider message id; that identity is resolved against **this tenant and
+    this channel connection**, and it has to be a runtime turn that reached a
+    terminal. ``superseded`` names a later inbound for the same recipient that
+    this platform actually holds. ``not_required`` claims no delivery at all —
+    it is an operator's decision, stored with who authorised it and why, and it
+    is the only disposition that asserts nothing about the customer.
+    """
+    from core.commerce_runtime import recovery  # noqa: PLC0415
+
+    keys = DISPOSITION_EVIDENCE_KEYS.get(kind, ())
+    missing = [key for key in keys if not str(evidence.get(key) or "").strip()]
+    if missing:
+        return False, f"evidence_missing:{','.join(missing)}", {}
+
+    if kind == "not_required":
+        return True, "", {"authorized_by": str(evidence["authorized_by"]).strip(),
+                          "why": str(evidence["why"]).strip()}
+
+    if kind == "superseded":
+        identity = str(evidence["superseded_by_provider_message_id"]).strip()
+        later = (session.query(hm.DeferredInbound)
+                 .filter(hm.DeferredInbound.tenant_id == int(row.tenant_id),
+                         hm.DeferredInbound.namespace == NAMESPACE,
+                         hm.DeferredInbound.recipient == str(row.recipient),
+                         hm.DeferredInbound.provider_message_id == identity)
+                 .first())
+        if later is None:
+            return False, "superseding_inbound_not_found", {}
+        if int(later.id) == int(row.id):
+            return False, "an_entry_cannot_supersede_itself", {}
+        return True, "", {"superseded_by_entry_id": int(later.id),
+                          "superseded_by_provider_message_id": identity}
+
+    key = keys[0]
+    identity = str(evidence[key]).strip()
+    phone_number_id = str(row.channel_connection_ref).split(":", 1)[-1]
+    try:
+        # The same database this disposition is being written to, not whatever
+        # the process default points at: evidence checked against one database
+        # and recorded in another is not evidence.
+        found = recovery.admitted_turn_for(
+            tenant_id=int(row.tenant_id), phone_number_id=phone_number_id,
+            provider_message_id=identity, engine=_engine_of(session))
+    except Exception as exc:  # noqa: BLE001 - unverifiable is not verified
+        logger.warning("[COMMERCE_RUNTIME_HANDOVER] disposition evidence unverifiable "
+                       "tenant=%s error=%s", row.tenant_id, type(exc).__name__)
+        return False, "evidence_could_not_be_verified", {}
+    if found is None:
+        return False, "no_runtime_turn_for_that_identity", {}
+    if not found.finished:
+        return False, "that_turn_has_no_terminal", {}
+    return True, "", {key: identity, "turn_id": int(found.turn_id),
+                      "verified_against": "commerce_runtime_turn_terminals"}
+
+
 def dispose_inbound(db: Any, *, tenant_id: int, entry_ids: Sequence[int], disposition: str,
-                    evidence: Mapping[str, Any], by: str) -> DispositionResult:
+                    evidence: Mapping[str, Any], by: str,
+                    not_after: Optional[_dt.datetime] = None) -> DispositionResult:
     """Account for named entries, each checked against the state it is in.
 
     The reviewed shape stamped one free-text note across everything pending at
@@ -754,6 +1018,13 @@ def dispose_inbound(db: Any, *, tenant_id: int, entry_ids: Sequence[int], dispos
     the entries, the disposition is one of a closed set, and evidence travels
     with each row. An id that is not pending is refused by name rather than
     silently included.
+
+    ``evidence`` is checked, not merely recorded: a disposition that claims the
+    customer was replayed or answered has to name the identity that did it, and
+    that identity is resolved against this tenant's own terminal records before
+    the row is closed. ``not_after`` is the moment the operator inspected; an
+    entry created after it is refused even if its id was passed, so a selection
+    can never grow to include something nobody looked at.
     """
     who = str(by or "").strip()
     kind = str(disposition or "").strip()
@@ -764,6 +1035,7 @@ def dispose_inbound(db: Any, *, tenant_id: int, entry_ids: Sequence[int], dispos
 
     disposed: List[int] = []
     refused: Dict[int, str] = {}
+    cutoff = _aware(not_after)
     with _locked(db, tenant_id) as session:
         rows = {int(row.id): row for row in
                 session.query(hm.DeferredInbound)
@@ -781,9 +1053,18 @@ def dispose_inbound(db: Any, *, tenant_id: int, entry_ids: Sequence[int], dispos
             if str(row.state) != hm.DEFERRED_PENDING:
                 refused[entry] = f"already_{row.state}"
                 continue
+            created = _aware(row.created_at)
+            if cutoff is not None and created is not None and created > cutoff:
+                refused[entry] = "arrived_after_the_inspection"
+                continue
+            ok, why, verified = _verified_handling(session, row, kind, dict(evidence or {}))
+            if not ok:
+                refused[entry] = why
+                continue
             row.state = hm.DEFERRED_DISPOSED
             row.disposition = kind
-            row.disposition_evidence = dict(evidence or {})
+            row.disposition_evidence = dict(evidence or {}, verified=verified,
+                                            verified_at=moment.isoformat())
             row.disposed_by = who
             row.disposed_at = moment
             row.updated_at = moment
@@ -801,7 +1082,10 @@ __all__ = [
     "REASON_ACCEPTED", "REASON_ADMISSION_REFUSED", "REASON_DRAIN_BUFFERED",
     "REASON_PROCESS_DRAINING", "REASON_SETTLED_WINDOW", "STATES", "STATE_DRAINING",
     "STATE_OPEN", "STATE_SETTLED", "SettlementResult", "WORKER_LIVE_SECONDS", "WorkerReport",
-    "admits_new_work_on", "barrier_admits_new_work", "convergence", "dispose_inbound",
+    "DISPOSITION_EVIDENCE_KEYS", "RETIREMENT_EVIDENCE_KEYS", "ReleaseState",
+    "RetirementRefused", "expected_fleet", "release_state",
+    "accepted_inbound", "admits_new_work_on", "barrier_admits_new_work", "convergence",
+    "dispose_inbound",
     "fleet", "note_worker", "open_drain", "pending_count", "pending_count_on",
     "pending_inbound", "read_barrier", "record_inbound", "reopen", "resolve_inbound",
     "retire_worker", "settle", "worker_id",

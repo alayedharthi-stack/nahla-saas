@@ -74,7 +74,7 @@ def db() -> Any:
     engine = create_engine("sqlite:///:memory:", poolclass=StaticPool,
                            connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    # The handover lives in the runtime's own relations (revision 0110), so a
+    # The handover lives in the runtime's own relations (revision 0111), so a
     # fixture that creates only the application schema has no barrier to read.
     create_handover_tables(engine)
     session = sessionmaker(bind=engine)()
@@ -633,7 +633,9 @@ def test_a_draining_pilot_with_no_open_work_still_withholds_the_short_circuit(co
 # ── The dispatcher's COD routes are owners too (sticky COD ownership) ────────
 
 
-def drive_cod_button(db: Any, *, msg_id: str, kind: str = "interactive") -> Dict[str, Any]:
+def drive_cod_button(db: Any, *, msg_id: str, kind: str = "interactive",
+                     payload: str = "nahla_cod_confirm", context_wamid: str = "",
+                     correlated: str = "") -> Dict[str, Any]:
     """One COD button tap through the real dispatcher.
 
     ``consume_owned_cod_button_inbound`` is doubled so the branch is certain to
@@ -643,7 +645,7 @@ def drive_cod_button(db: Any, *, msg_id: str, kind: str = "interactive") -> Dict
     import routers.whatsapp_webhook as webhook
     import services.cod_confirmation as cod
 
-    seen: Dict[str, Any] = {"handled": [], "cod": [], "followup": []}
+    seen: Dict[str, Any] = {"handled": [], "cod": [], "followup": [], "correlated": []}
 
     async def _handler(**kwargs: Any) -> None:
         seen["handled"].append(kwargs)
@@ -658,7 +660,13 @@ def drive_cod_button(db: Any, *, msg_id: str, kind: str = "interactive") -> Dict
     async def _followup(**kwargs: Any) -> None:
         seen["followup"].append(kwargs)
 
-    payload = "nahla_cod_confirm"
+    def _correlate(_db: Any, **kwargs: Any) -> Any:
+        # The context-id correlation: it reads this tenant's recent COD sends to
+        # decide that a noncanonical payload *is* a COD reply. Observing it is
+        # how "the classification never ran" becomes checkable.
+        seen["correlated"].append(kwargs)
+        return correlated or ""
+
     if kind == "interactive":
         msg = {"from": SENDER, "id": msg_id, "type": "interactive",
                "interactive": {"type": "button_reply",
@@ -666,6 +674,8 @@ def drive_cod_button(db: Any, *, msg_id: str, kind: str = "interactive") -> Dict
     else:
         msg = {"from": SENDER, "id": msg_id, "type": "button",
                "button": {"payload": payload, "text": "تأكيد الطلب"}}
+        if context_wamid:
+            msg["context"] = {"id": context_wamid}
 
     with (
         patch.object(webhook, "get_db", return_value=iter([db])),
@@ -674,6 +684,7 @@ def drive_cod_button(db: Any, *, msg_id: str, kind: str = "interactive") -> Dict
         patch.object(webhook, "_post_wa", new=AsyncMock(return_value=True)),
         patch.object(webhook, "_send_cod_followup_message", _followup),
         patch.object(cod, "consume_owned_cod_button_inbound", _consume),
+        patch.object(cod, "resolve_owned_cod_button_payload_from_context", _correlate),
         patch.object(pg, "verified_connection", lambda _db, **kwargs: (f"wa:{PHONE_ID}", "17")),
         patch.object(recovery, "admitted_turn_for", lambda **kwargs: None),
     ):
@@ -713,3 +724,200 @@ def test_a_non_allowlisted_cod_button_tap_keeps_todays_behaviour(configured, mon
     seen = drive_cod_button(db, msg_id="wamid.codbtn.stranger")
     assert len(seen["cod"]) == 1 and len(seen["followup"]) == 1
     assert seen["handled"] == []
+
+
+# ── The correlation is a classification, and it is guarded too ───────────────
+
+
+def test_a_noncanonical_template_button_is_never_correlated_for_owned_traffic(
+        configured, db):
+    """The reviewed guard sat in front of the *action*, not the classification.
+
+    ``resolve_owned_cod_button_payload_from_context`` is what decides that a
+    payload nobody recognises, carrying a ``context.id``, is one of this
+    tenant's COD sends — it reads the tenant's own recent sends to reach that
+    verdict. Running it for a turn the runtime owns already puts a second owner
+    on the turn, so the claim is honoured before it, not after.
+    """
+    seen = drive_cod_button(db, msg_id="wamid.codtpl.noncanonical", kind="template",
+                            payload="bt_1a2b3c", context_wamid="wamid.cod.sent.earlier",
+                            correlated="nahla_cod_confirm")
+    assert seen["correlated"] == []                        # never classified
+    assert seen["cod"] == [] and seen["followup"] == []     # no mutation, no send
+    assert len(seen["handled"]) == 1
+    assert seen["handled"][0]["commerce_runtime_claim"] is not None
+
+
+def test_the_same_noncanonical_tap_is_correlated_and_consumed_while_the_pilot_is_off(
+        monkeypatch, db):
+    """Proof the correlation is real and reachable: only ownership stops it."""
+    from core.inbound_dedup import reset_cache
+
+    reset_cache()
+    monkeypatch.delenv(pg.ENV_ENABLED, raising=False)
+    seen = drive_cod_button(db, msg_id="wamid.codtpl.noncanonical.off", kind="template",
+                            payload="bt_1a2b3c", context_wamid="wamid.cod.sent.earlier",
+                            correlated="nahla_cod_confirm")
+    assert len(seen["correlated"]) == 1
+    assert seen["correlated"][0]["context_wamid"] == "wamid.cod.sent.earlier"
+    assert len(seen["cod"]) == 1 and len(seen["followup"]) == 1
+    assert seen["handled"] == []
+
+
+def test_readiness_failure_after_acceptance_holds_the_turn_instead_of_releasing_it(
+        configured, db, monkeypatch):
+    """A barrier that cannot be read is not evidence the runtime does not own this.
+
+    The guard has already said this tenant, recipient and connection are the
+    pilot's. If the handover state then cannot be read — the schema is not
+    there, the database will not answer — handing the turn to the COD route or
+    the legacy brain is how a conversation the runtime may still be answering
+    gets a second answer. The claim is held instead, and nothing executes.
+    """
+    from core.commerce_runtime import handover
+
+    def _unreadable(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("relation \"commerce_runtime_handover_barrier\" does not exist")
+
+    monkeypatch.setattr(handover, "read_barrier", _unreadable)
+    seen = drive_cod_button(db, msg_id="wamid.codbtn.noschema")
+    claim = seen["handled"][0]["commerce_runtime_claim"]
+    assert claim is not None
+    assert claim.basis == "ownership_unavailable"
+    assert seen["cod"] == [] and seen["followup"] == []
+    assert seen["correlated"] == []
+
+
+def test_traffic_that_was_never_the_pilots_is_unchanged_when_readiness_fails(
+        configured, db, monkeypatch):
+    """The hold is scoped: it covers what the guard established, and nothing else."""
+    from core.commerce_runtime import handover
+
+    monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")
+
+    def _unreadable(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("no barrier here either")
+
+    monkeypatch.setattr(handover, "read_barrier", _unreadable)
+    seen = drive_cod_button(db, msg_id="wamid.codbtn.noschema.stranger")
+    assert len(seen["cod"]) == 1 and len(seen["followup"]) == 1   # today's behaviour
+    assert seen["handled"] == []
+
+
+# ── Recovery, end to end: an acceptance nobody admitted is handed back ───────
+
+
+def accept(db: Any, identity: str, *, text: str = "وين طلبي؟") -> Any:
+    """The webhook's own acceptance, for real."""
+    from services import commerce_runtime_acceptance as acceptance
+
+    body = {"entry": [{"id": "WABA", "changes": [{"field": "messages", "value": {
+        "metadata": {"phone_number_id": PHONE_ID},
+        "messages": [{"id": identity, "from": SENDER, "type": "text",
+                      "text": {"body": text}}],
+    }}]}]}
+    outcome = acceptance.record_before_acknowledging(body, session_factory=lambda: db)
+    assert outcome.ok and outcome.recorded == (identity,)
+    return outcome
+
+
+def test_an_accepted_inbound_nobody_admitted_passes_both_dedup_boundaries(configured, db):
+    """The deduplication question, asked for a record rather than a turn.
+
+    The acknowledgement was written before the webhook answered; no turn was
+    ever admitted. A "is there an unfinished turn" check answers no for that —
+    which is why the reviewed shape could never replay one. Both boundaries now
+    ask the wider question, for an allowlisted tenant and recipient only.
+    """
+    from core.inbound_dedup import is_duplicate_inbound, reset_cache
+    import routers.whatsapp_webhook as webhook
+
+    reset_cache()
+    accept(db, "wamid.accepted.only")
+    # First sighting marks it; the next one is the duplicate a retry or a
+    # recovery replay arrives as.
+    assert is_duplicate_inbound(phone_number_id=PHONE_ID,
+                                msg_id="wamid.accepted.only") is False
+    assert is_duplicate_inbound(phone_number_id=PHONE_ID,
+                                msg_id="wamid.accepted.only") is True
+
+    with patch("database.session.SessionLocal", lambda: db):
+        assert webhook._duplicate_is_unfinished_runtime_work(
+            phone_number_id=PHONE_ID, sender=SENDER,
+            msg_id="wamid.accepted.only") is True
+        # A record that has been resolved is finished work, and stays a duplicate.
+        from core.commerce_runtime import handover
+
+        assert handover.resolve_inbound(db, tenant_id=db.tenant_id,
+                                        channel_connection_ref=f"wa:{PHONE_ID}",
+                                        provider_message_id="wamid.accepted.only") is True
+        assert webhook._duplicate_is_unfinished_runtime_work(
+            phone_number_id=PHONE_ID, sender=SENDER,
+            msg_id="wamid.accepted.only") is False
+
+
+def test_nothing_outside_the_allowlist_is_ever_let_through_for_recovery(configured, db,
+                                                                       monkeypatch):
+    import routers.whatsapp_webhook as webhook
+
+    accept(db, "wamid.scoped.only")
+    monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")
+    with patch("database.session.SessionLocal", lambda: db):
+        assert webhook._duplicate_is_unfinished_runtime_work(
+            phone_number_id=PHONE_ID, sender=SENDER,
+            msg_id="wamid.scoped.only") is False
+
+
+def test_the_recovery_run_rebuilds_the_provider_body_from_what_was_stored(configured, db):
+    """A replay is the inbound itself, not a note that one was lost."""
+    from services import commerce_runtime_recovery as runner
+
+    accept(db, "wamid.replayable", text="عندكم قميص قطني أزرق؟")
+    from core.commerce_runtime import handover
+
+    record = handover.pending_inbound(db, tenant_id=db.tenant_id)[0]
+    body = runner._webhook_body(record)
+    assert body is not None
+    value = body["entry"][0]["changes"][0]["value"]
+    assert value["metadata"]["phone_number_id"] == PHONE_ID
+    message = value["messages"][0]
+    assert message["id"] == "wamid.replayable"
+    assert message["from"] == SENDER
+    assert message["text"] == {"body": "عندكم قميص قطني أزرق؟"}
+    assert body["_nahla_recovery"] is True
+
+
+def test_a_record_with_nothing_replayable_is_reported_not_invented(configured, db):
+    from services import commerce_runtime_recovery as runner
+    from core.commerce_runtime import handover
+
+    handover.record_inbound(
+        db, tenant_id=db.tenant_id, phone_number_id=PHONE_ID,
+        channel_connection_ref=f"wa:{PHONE_ID}", recipient=NORMALIZED,
+        provider_message_id="wamid.empty", payload={}, reason=handover.REASON_ACCEPTED,
+        barrier_generation=0)
+    record = [r for r in handover.pending_inbound(db, tenant_id=db.tenant_id)
+              if r.provider_message_id == "wamid.empty"][0]
+    assert runner._webhook_body(record) is None
+
+    outcome = runner.recover_tenant(db, tenant_id=db.tenant_id, dry_run=False)
+    assert outcome.counted().get(runner.SKIPPED_NOT_REPLAYABLE) == 1
+
+
+def test_the_recovery_run_hands_the_inbound_back_to_the_dispatcher(configured, db):
+    """The whole lifecycle: accepted, acknowledged, never admitted, replayed."""
+    from services import commerce_runtime_recovery as runner
+
+    accept(db, "wamid.handed.back")
+    replayed: List[Any] = []
+
+    async def _dispatcher(body: Any) -> None:
+        replayed.append(body)
+
+    with patch.object(runner, "_replay", _dispatcher):
+        outcome = runner.recover_tenant(db, tenant_id=db.tenant_id, dry_run=False)
+
+    assert outcome.counted() == {runner.REPLAYED: 1}
+    assert len(replayed) == 1
+    assert replayed[0]["entry"][0]["changes"][0]["value"]["messages"][0]["id"] == \
+        "wamid.handed.back"

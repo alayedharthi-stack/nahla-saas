@@ -144,12 +144,24 @@ def test_an_engine_that_cannot_name_itself_is_probed_every_time():
 
 
 def test_the_runtime_requires_every_relation_it_actually_uses():
+    """All twelve, and exactly the twelve the runtime reads or writes.
+
+    The handover three are in the set because the runtime cannot decide whether
+    to admit a turn without the barrier, and cannot keep an acknowledgement
+    without the deferred table. A database holding the first nine would admit
+    turns it has nowhere to record acceptance for.
+    """
+    from core.commerce_runtime import handover_models as hm
     from core.commerce_runtime import models as m
     from core.commerce_runtime.repositories import LEDGER_RELATIONS
 
-    assert len(entry.REQUIRED_RELATIONS) == 9
-    assert set(entry.REQUIRED_RELATIONS) == set(LEDGER_RELATIONS) | {
-        m.CONVERSATIONS_TABLE, m.TURNS_TABLE, m.TERMINALS_TABLE}
+    assert len(entry.REQUIRED_RELATIONS) == 12
+    assert set(entry.REQUIRED_RELATIONS) == (
+        set(LEDGER_RELATIONS)
+        | {m.CONVERSATIONS_TABLE, m.TURNS_TABLE, m.TERMINALS_TABLE}
+        | set(hm.HANDOVER_TABLES)
+    )
+    assert set(entry.HANDOVER_RELATIONS) == set(hm.HANDOVER_TABLES)
 
 
 class _SchemaEngine:

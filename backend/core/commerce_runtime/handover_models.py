@@ -31,7 +31,7 @@ been told we accepted survives a worker that dies a millisecond later.
 Like the foundation and the ledgers, these live on ``RuntimeBase`` metadata,
 outside the application's ``models.Base``: production startup materialises
 ``models.Base`` and pins ``alembic upgrade 0093``, so nothing here reaches a
-database until revision ``0110`` is applied on purpose.
+database until revision ``0111`` is applied on purpose.
 
 PostgreSQL semantics are assumed (``now()``, row locks, JSONB, partial indexes).
 """
@@ -165,7 +165,14 @@ class HandoverWorker(RuntimeBase):
     retired_at = Column(DateTime(timezone=True), nullable=True)
     retired_by = Column(String(200), nullable=True)
     retired_reason = Column(Text, nullable=True)
+    # What the operator showed: the deployment identity, how the stop was
+    # verified, and when it was observed. Elapsed silence is deliberately not a
+    # value this can hold — a quiet worker is one nobody has heard from, which
+    # is the case the fleet table exists to keep apart from a stopped one.
+    retirement_evidence = Column(JSONB, nullable=False, default=dict,
+                                 server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "namespace", "worker_id",
@@ -173,9 +180,10 @@ class HandoverWorker(RuntimeBase):
         CheckConstraint(_NAMESPACE_SQL, name="ck_commerce_runtime_handover_workers_namespace"),
         CheckConstraint("observed_generation >= 0",
                         name="ck_commerce_runtime_handover_workers_generation"),
+        # Written as an equality on purpose: with OR'd clauses a NULL on one
+        # side evaluates to NULL and a CHECK passes on NULL.
         CheckConstraint(
-            "(retired_at IS NULL AND retired_by IS NULL) OR "
-            "(retired_at IS NOT NULL AND retired_by IS NOT NULL)",
+            "((retired_at IS NOT NULL) = (retired_by IS NOT NULL))",
             name="ck_commerce_runtime_handover_workers_retirement"),
         Index("ix_commerce_runtime_handover_workers_active", "tenant_id", "namespace",
               postgresql_where=text("retired_at IS NULL")),

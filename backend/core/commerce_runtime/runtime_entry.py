@@ -64,17 +64,36 @@ HANDOVER_BARRIER = "handover_barrier_closed"
 ADMISSION_CONFLICT = "admission_conflict"
 INTERNAL_ERROR = "internal_error"
 
-# Every relation the runtime needs, foundation and ledgers together.
-REQUIRED_RELATIONS: Tuple[str, ...] = (
+# Every relation the runtime needs: foundation, ledgers and handover together.
+#
+# All twelve, not nine. The handover three are not optional extras — the
+# barrier decides whether a turn may be admitted at all, and the deferred table
+# is where an accepted inbound lives between the acknowledgement and the answer.
+# A database holding the first nine can admit turns it cannot record acceptance
+# for, which is the shape that acknowledges a customer and keeps nothing.
+FOUNDATION_RELATIONS: Tuple[str, ...] = (
     "commerce_runtime_conversations",
     "commerce_runtime_turns",
     "commerce_runtime_turn_terminals",
+)
+
+LEDGER_RELATIONS: Tuple[str, ...] = (
     "commerce_runtime_effects",
     "commerce_runtime_effect_attempts",
     "commerce_runtime_effect_results",
     "commerce_runtime_delivery_sequences",
     "commerce_runtime_delivery_attempts",
     "commerce_runtime_delivery_receipts",
+)
+
+HANDOVER_RELATIONS: Tuple[str, ...] = (
+    "commerce_runtime_handover_barrier",
+    "commerce_runtime_handover_workers",
+    "commerce_runtime_deferred_inbound",
+)
+
+REQUIRED_RELATIONS: Tuple[str, ...] = (
+    FOUNDATION_RELATIONS + LEDGER_RELATIONS + HANDOVER_RELATIONS
 )
 
 _schema_state: Dict[str, str] = {}
@@ -130,9 +149,11 @@ class TurnReport:
 def runtime_schema_available(engine: Any) -> bool:
     """Whether this database actually holds the commerce runtime's tables.
 
-    All nine are required together: the three foundation relations the runtime
-    admits, claims and completes turns in, and the six ledger relations it
-    reserves and records delivery in. A database holding some of them is
+    All **twelve** are required together: the three foundation relations the
+    runtime admits, claims and completes turns in, the six ledger relations it
+    reserves and records delivery in, and the three handover relations that
+    decide whether a turn may be admitted and hold an inbound between the
+    acknowledgement and the answer. A database holding some of them is
     ``partial`` and stays unavailable — the runtime never runs half-present, and
     a foundation-only database is exactly the shape that would otherwise pass a
     turns-plus-ledgers check while having no terminals table.
@@ -624,6 +645,7 @@ def whatsapp_text_transport(send: Any, *, recipient: str) -> dd.Transport:
 __all__ = [
     "ADMISSION_CONFLICT", "ALREADY_TERMINAL", "CHANNEL", "CONTEXT_UNAVAILABLE", "HANDLED",
     "HANDOVER_BARRIER",
+    "FOUNDATION_RELATIONS", "HANDOVER_RELATIONS", "LEDGER_RELATIONS",
     "INTERNAL_ERROR", "LINK_UNVERIFIED", "MODEL_UNCONFIGURED", "REQUIRED_RELATIONS",
     "ABANDONED_SESSION_REAP_SECONDS", "ExclusiveCloser",
     "LEASE_SECONDS", "NAMESPACE", "OWNERSHIP_UNAVAILABLE", "SCHEMA_UNAVAILABLE", "TurnReport",

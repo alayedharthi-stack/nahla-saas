@@ -39,6 +39,7 @@ from sqlalchemy.dialects.postgresql import JSONB  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from core import webhook_security as _security  # noqa: E402
 from core.commerce_runtime import handover  # noqa: E402
 from core.commerce_runtime import pilot_guard as pg  # noqa: E402
 from core.commerce_runtime.handover_models import create_handover_tables  # noqa: E402
@@ -146,7 +147,13 @@ def test_a_pilot_scoped_inbound_is_durable_with_what_a_replay_needs(configured, 
     assert record.recipient == NORMALIZED
     assert record.phone_number_id == PHONE_ID
     assert record.channel_connection_ref == f"wa:{PHONE_ID}"
-    assert record.payload == {"text": "عندكم قميص؟", "type": "text"}
+    assert record.payload["text"] == "عندكم قميص؟"
+    assert record.payload["type"] == "text"
+    assert record.payload["connection_id"] == "1"
+    # Enough of the inbound itself to rebuild a provider body and replay it.
+    assert record.payload["raw"]["id"] == "wamid.scoped"
+    assert record.payload["raw"]["from"] == SENDER
+    assert record.payload["raw"]["text"] == {"body": "عندكم قميص؟"}
     assert record.reason == handover.REASON_ACCEPTED
 
 
@@ -237,32 +244,10 @@ def call_meta(body_payload: Dict[str, Any], spawned: List[Any]) -> Any:
         patch("core.runtime_perf.spawn_background", _spawn),
         patch.object(webhook, "_record_signature_audit", lambda *a, **k: None),
         patch.object(webhook, "_meta_should_reject", lambda _r: False),
-        patch.object(webhook, "evaluate_replay", lambda *a, **k: False),
+        patch.object(webhook, "evaluate_replay_claim",
+                     lambda *a, **k: _security.ReplayVerdict(reject=False, claimed=False)),
     ):
         return asyncio.run(webhook.whatsapp_incoming(request))
-
-
-def call_360(body_payload: Dict[str, Any], spawned: List[Any]) -> Any:
-    """The real 360dialog route, with only the background spawn observed."""
-    import asyncio
-
-    import routers.whatsapp_webhook as webhook
-    from fastapi import Request
-
-    async def _receive() -> Dict[str, Any]:
-        import json
-        return {"type": "http.request", "body": json.dumps(body_payload).encode()}
-
-    request = Request({"type": "http", "method": "POST",
-                       "path": "/webhook/whatsapp/360dialog",
-                       "headers": [], "query_string": b""}, receive=_receive)
-
-    def _spawn(coro: Any, name: str = "") -> None:
-        spawned.append(name)
-        coro.close()
-
-    with patch("core.runtime_perf.spawn_background", _spawn):
-        return asyncio.run(webhook._safe_360dialog_ack(request, scope="any", name="t"))
 
 
 _REAL_RECORDER = acceptance.record_before_acknowledging
@@ -275,50 +260,236 @@ def bound(monkeypatch: pytest.MonkeyPatch, db: Any) -> None:
                         functools.partial(_REAL_RECORDER, session_factory=sessions(db)))
 
 
-@pytest.mark.parametrize("call", [call_meta, call_360])
-def test_a_scoped_inbound_is_recorded_before_the_route_answers(configured, db, bound, call):
+def test_a_scoped_inbound_is_recorded_before_the_route_answers(configured, db, bound):
     spawned: List[Any] = []
-    response = call(body(message("wamid.route")), spawned)
+    response = call_meta(body(message("wamid.route")), spawned)
     assert response.status_code == 200
     assert spawned                                        # processing was scheduled
     assert [r.provider_message_id for r in handover.pending_inbound(db, tenant_id=db.tenant_id)] \
         == ["wamid.route"]
 
 
-@pytest.mark.parametrize("call", [call_meta, call_360])
 def test_a_route_that_cannot_record_answers_retryable_and_spawns_nothing(
-        configured, db, bound, call, monkeypatch):
+        configured, db, bound, monkeypatch):
     monkeypatch.setattr(handover, "record_inbound", lambda *a, **k: None)
     spawned: List[Any] = []
-    response = call(body(message("wamid.unpersisted")), spawned)
+    response = call_meta(body(message("wamid.unpersisted")), spawned)
     assert response.status_code == 503
     assert spawned == []                                  # nothing was half-processed
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
 
 
-@pytest.mark.parametrize("call", [call_meta, call_360])
 def test_a_mixed_batch_that_fails_is_refused_whole_rather_than_split(
-        configured, db, bound, call, monkeypatch):
+        configured, db, bound, monkeypatch):
     """The unaffected messages are not lost: the batch is redelivered intact."""
     monkeypatch.setattr(handover, "record_inbound", lambda *a, **k: None)
     spawned: List[Any] = []
-    response = call(mixed_body((PHONE_ID, [message("wamid.mine")]),
+    response = call_meta(mixed_body((PHONE_ID, [message("wamid.mine")]),
                                (OTHER_PHONE_ID, [message("wamid.theirs")])), spawned)
     assert response.status_code == 503
     assert spawned == []
 
 
-@pytest.mark.parametrize("call", [call_meta, call_360])
-def test_a_route_carrying_nothing_of_ours_answers_200_as_before(configured, db, bound, call):
+def test_a_route_carrying_nothing_of_ours_answers_200_as_before(configured, db, bound):
     spawned: List[Any] = []
-    response = call(body(message("wamid.stranger", sender=STRANGER)), spawned)
+    response = call_meta(body(message("wamid.stranger", sender=STRANGER)), spawned)
     assert response.status_code == 200 and spawned
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
 
 
-@pytest.mark.parametrize("call", [call_meta, call_360])
-def test_the_routes_are_untouched_while_the_pilot_is_off(db, bound, call, monkeypatch):
+def test_the_routes_are_untouched_while_the_pilot_is_off(db, bound, monkeypatch):
     monkeypatch.delenv(pg.ENV_ENABLED, raising=False)
     spawned: List[Any] = []
-    response = call(body(message("wamid.off")), spawned)
+    response = call_meta(body(message("wamid.off")), spawned)
     assert response.status_code == 200 and spawned
+
+
+# ── Authenticated, and unambiguous about whose the traffic is ────────────────
+
+
+def test_a_scope_lookup_that_fails_is_not_unrelated_traffic(configured, db, monkeypatch):
+    """The reviewed shape answered ``None`` for both, and a failed lookup then
+    acknowledged pilot-owned work with nothing recorded for it."""
+    def _down(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("could not resolve the connection")
+
+    monkeypatch.setattr(pg, "resolve_pilot_scope", _down)
+    outcome = acceptance.record_before_acknowledging(body(message("wamid.blind")),
+                                                     session_factory=sessions(db))
+    assert outcome.ok is False
+    assert outcome.reason.startswith("error:") or outcome.reason == "scope_undecidable"
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
+def test_a_lookup_that_returns_unavailable_refuses_rather_than_acknowledging(
+        configured, db, monkeypatch):
+    monkeypatch.setattr(pg, "resolve_pilot_scope",
+                        lambda *_a, **_k: pg.ScopeLookup(status=pg.SCOPE_UNAVAILABLE,
+                                                         detail="OperationalError"))
+    outcome = acceptance.record_before_acknowledging(body(message("wamid.unavailable")),
+                                                     session_factory=sessions(db))
+    assert outcome.ok is False and outcome.reason == "scope_undecidable"
+
+
+def test_two_allowlisted_tenants_on_one_number_is_ambiguous_not_a_pick(
+        configured, db, monkeypatch):
+    """A phone number id claimed by two allowlisted tenants selects neither."""
+    monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, f"{db.tenant_id},{db.other_tenant_id}")
+    other = (db.query(WhatsAppConnection)
+             .filter(WhatsAppConnection.tenant_id == db.other_tenant_id).first())
+    other.phone_number_id = PHONE_ID                      # the same number, two tenants
+    db.commit()
+    found = pg.resolve_pilot_scope(db, phone_number_id=PHONE_ID)
+    assert found.status == pg.SCOPE_AMBIGUOUS and found.resolved is False
+
+    outcome = acceptance.record_before_acknowledging(body(message("wamid.ambiguous")),
+                                                     session_factory=sessions(db))
+    assert outcome.ok is False and outcome.reason == "scope_undecidable"
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
+def test_verified_out_of_scope_traffic_is_still_acknowledged_untouched(configured, db):
+    """The distinction cuts both ways: a *decided* "not ours" changes nothing."""
+    found = pg.resolve_pilot_scope(db, phone_number_id=OTHER_PHONE_ID)
+    assert found.status == pg.SCOPE_NOT_OURS and found.decided is True
+    outcome = acceptance.record_before_acknowledging(
+        body(message("wamid.theirs"), phone_number_id=OTHER_PHONE_ID),
+        session_factory=sessions(db))
+    assert outcome.ok is True and outcome.scoped == 0
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
+def test_the_verified_connection_travels_into_persistence(configured, db):
+    """Not a reference rebuilt from the payload: the row the guard checked."""
+    outcome = acceptance.record_before_acknowledging(body(message("wamid.verified")),
+                                                     session_factory=sessions(db))
+    assert outcome.ok
+    record = handover.pending_inbound(db, tenant_id=db.tenant_id)[0]
+    verified = pg.verified_connection(db, tenant_id=db.tenant_id, phone_number_id=PHONE_ID)
+    assert verified is not None
+    assert record.channel_connection_ref == verified[0]
+    assert record.payload["connection_id"] == verified[1]
+
+
+# ── A refusal the provider can retry ─────────────────────────────────────────
+
+
+class _Redis:
+    """Enough of Redis for the nonce: SET NX EX, DELETE."""
+
+    def __init__(self) -> None:
+        self.keys: Dict[str, str] = {}
+
+    def set(self, key: str, value: str, nx: bool = False, ex: int = 0) -> Any:
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = value
+        return True
+
+    def delete(self, key: str) -> int:
+        return 1 if self.keys.pop(key, None) is not None else 0
+
+
+@pytest.fixture()
+def replay_protected(monkeypatch: pytest.MonkeyPatch) -> _Redis:
+    """Replay protection on, rejecting — the state this defect appears in."""
+    import core.redis_client as redis_client
+    from core import config as core_config
+
+    store = _Redis()
+    monkeypatch.setattr(redis_client, "get_redis", lambda: store)
+    monkeypatch.setattr(core_config, "WEBHOOK_REPLAY_PROTECTION_ENABLED", True, raising=False)
+    monkeypatch.setattr(core_config, "WEBHOOK_REPLAY_REJECT_ENABLED", True, raising=False)
+    return store
+
+
+def call_meta_protected(body_payload: Dict[str, Any], spawned: List[Any]) -> Any:
+    """The Meta route with real replay protection — only the spawn is observed."""
+    import asyncio
+    import json as _json
+
+    import routers.whatsapp_webhook as webhook
+    from fastapi import Request
+
+    raw = _json.dumps(body_payload).encode()
+
+    async def _receive() -> Dict[str, Any]:
+        return {"type": "http.request", "body": raw}
+
+    request = Request({"type": "http", "method": "POST", "path": "/webhook/whatsapp",
+                       "headers": [], "query_string": b""}, receive=_receive)
+
+    def _spawn(coro: Any, name: str = "") -> None:
+        spawned.append(name)
+        coro.close()
+
+    with (
+        patch("core.runtime_perf.spawn_background", _spawn),
+        patch.object(webhook, "_record_signature_audit", lambda *a, **k: None),
+        patch.object(webhook, "_meta_should_reject", lambda _r: False),
+    ):
+        return asyncio.run(webhook.whatsapp_incoming(request))
+
+
+def test_a_refused_acceptance_gives_the_nonce_back_so_the_retry_is_a_retry(
+        configured, db, bound, replay_protected, monkeypatch):
+    """The defect: the first request claims the nonce, fails to persist and
+    answers 503; without giving the nonce back the provider's identical retry
+    is dropped as a replay — a 200 for a message nothing ever processed."""
+    real_record = handover.record_inbound
+    broken = {"now": True}
+    monkeypatch.setattr(handover, "record_inbound",
+                        lambda *a, **k: None if broken["now"] else real_record(*a, **k))
+    spawned: List[Any] = []
+    payload = body(message("wamid.retryable"))
+    first = call_meta_protected(payload, spawned)
+    assert first.status_code == 503 and spawned == []
+    assert replay_protected.keys == {}, "the nonce this request claimed was given back"
+
+    # The provider retries the identical body. It must be able to persist.
+    broken["now"] = False
+    second = call_meta_protected(payload, spawned)
+    assert second.status_code == 200
+    assert spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+
+
+def test_an_accepted_request_keeps_its_nonce_so_a_lost_ack_is_still_idempotent(
+        configured, db, bound, replay_protected):
+    """Commit succeeded, the acknowledgement was lost, the provider retries."""
+    spawned: List[Any] = []
+    payload = body(message("wamid.acked"))
+    assert call_meta_protected(payload, spawned).status_code == 200
+    assert len(replay_protected.keys) == 1                 # the nonce is held
+
+    again = call_meta_protected(payload, spawned)
+    assert again.status_code == 200
+    assert spawned == ["webhook_meta"]                     # processed exactly once
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+
+
+def test_a_rejected_signature_never_reaches_acceptance(configured, db, bound):
+    """Authentication is before authoritative persistence, not after it."""
+    import asyncio
+    import json as _json
+
+    import routers.whatsapp_webhook as webhook
+    from fastapi import Request
+
+    async def _receive() -> Dict[str, Any]:
+        return {"type": "http.request",
+                "body": _json.dumps(body(message("wamid.forged"))).encode()}
+
+    request = Request({"type": "http", "method": "POST", "path": "/webhook/whatsapp",
+                       "headers": [], "query_string": b""}, receive=_receive)
+    spawned: List[Any] = []
+    with (
+        patch("core.runtime_perf.spawn_background",
+              lambda coro, name="": (spawned.append(name), coro.close())),
+        patch.object(webhook, "_record_signature_audit", lambda *a, **k: None),
+        patch.object(webhook, "_meta_should_reject", lambda _r: True),
+    ):
+        response = asyncio.run(webhook.whatsapp_incoming(request))
+    assert response.status_code == 200                     # Meta's retry storm is not invited
+    assert spawned == []
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0

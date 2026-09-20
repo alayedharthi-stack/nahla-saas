@@ -1,7 +1,7 @@
 """Closed contract for applying the commerce runtime schema to a pilot database.
 
 Revisions ``0108`` (foundation), ``0109`` (effect and delivery ledgers) and
-``0110`` (the handover's barrier, worker fleet and deferred inbound) are merged
+``0111`` (the handover's barrier, worker fleet and deferred inbound) are merged
 and their reconciliation is proven on real PostgreSQL, but the normal bootstrap
 target stays pinned at ``0093``: production applies nothing until an operator
 runs this job deliberately. Nothing in the application can advance the schema
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-TARGET_REVISION = "0110"
+TARGET_REVISION = "0111"
 FOUNDATION_REVISION = "0108"
 LEDGER_REVISION = "0109"
 
@@ -59,7 +59,7 @@ LEDGER_RELATIONS: Tuple[str, ...] = (
     "commerce_runtime_delivery_attempts",
     "commerce_runtime_delivery_receipts",
 )
-# Revision 0110: the handover's own state, which the pilot's routing and the
+# Revision 0111: the handover's own state, which the pilot's routing and the
 # operator procedure both read. Without them the barrier cannot be read, and a
 # barrier that cannot be read refuses new work — so the pilot answers nothing.
 HANDOVER_RELATIONS: Tuple[str, ...] = (
@@ -78,7 +78,7 @@ DEFAULT_TIMEOUT_SEC = 900
 MIN_TIMEOUT_SEC = 120
 MAX_TIMEOUT_SEC = 3600
 
-LOG_PREFIX = "[commerce-runtime-0110]"
+LOG_PREFIX = "[commerce-runtime-0111]"
 
 RESULT_SUCCESS = "SUCCESS"
 RESULT_ALREADY_APPLIED = "ALREADY_APPLIED"

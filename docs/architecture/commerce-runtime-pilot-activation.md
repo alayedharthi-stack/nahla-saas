@@ -218,7 +218,7 @@ never widen what one turn may spend.
 Switching the pilot off decides who takes **new** turns; it says nothing about
 the turns the runtime already admitted, nor about the messages the provider has
 already been told we have. Both are durable state, and both live in the
-runtime's **own** relations (revision `0110`):
+runtime's **own** relations (revision `0111`):
 
 | Relation | What it holds |
 | --- | --- |
@@ -370,13 +370,21 @@ otherwise be printed for every message on the platform.
 
 ## 6. Schema availability
 
-Revisions `0108` and `0109` create the runtime's tables but are not part of the
-normal bootstrap target, so a database may legitimately not have them. The
-runtime probes **all nine** relations it uses — the three foundation relations
-and the six ledger relations — and treats *absent* or *partial* as unavailable:
-it refuses the turn (`runtime_schema_unavailable`) rather than running
-half-present. Checking fewer would pass on a foundation-only database that has
-no terminals table, which is exactly the shape revision `0108` leaves behind.
+Revisions `0108`, `0109` and `0111` create the runtime's tables but are not part
+of the normal bootstrap target, so a database may legitimately not have them.
+The runtime probes **all twelve** relations it uses — the three foundation
+relations, the six ledger relations and the three handover relations — and
+treats *absent* or *partial* as unavailable: it refuses the turn
+(`runtime_schema_unavailable`) rather than running half-present. Checking fewer
+would pass on a foundation-only database that has no terminals table, which is
+exactly the shape revision `0108` leaves behind — or on a nine-relation database
+that can admit turns but has nowhere to record an acceptance.
+
+Readiness decides whether a turn *runs*. It does not release ownership already
+established: fresh HTTP traffic on a database without the schema was never
+pilot-scoped and keeps today's behaviour, while a turn the guard or a durable
+acceptance record has established as the runtime's is held rather than handed
+over (§3).
 
 The probe is cached per engine so a disabled pilot costs nothing per turn. That
 cache is per process and is not invalidated by applying the migration, so the

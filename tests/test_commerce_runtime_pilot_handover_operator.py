@@ -128,6 +128,16 @@ def barrier(db: Any) -> handover.Barrier:
     return handover.read_barrier(db, tenant_id=db.tenant_id)
 
 
+# What retiring a worker has to be able to show. A name and a sentence are not
+# evidence a process stopped; these three are what an on-call engineer can
+# re-check afterwards.
+STOP_EVIDENCE = {
+    "deployment": "railway:nahla-backend@deploy-1234",
+    "stop_verified_by": "railway deployment status=REMOVED, replicas=0",
+    "observed_at": "2099-01-01T00:00:00+00:00",
+}
+
+
 def report(db: Any, *, generation: Optional[int] = None, name: str = "worker-a",
            observed_state: Optional[str] = None) -> None:
     """One worker says what it read. The reading is the argument, not a re-read."""
@@ -296,8 +306,12 @@ def test_retiring_a_worker_is_an_operator_statement_with_a_reason(configured, db
         session.commit()
 
     assert run(["retire", "--worker", "worker-gone"]) == job.EXIT_USAGE   # no by, no reason
+    # A name and a sentence are not evidence a process stopped.
     assert run(["retire", "--worker", "worker-gone", "--by", "owner",
-                "--reason", "terminated in deploy 1234"]) == job.EXIT_OK
+                "--reason", "terminated in deploy 1234"]) == job.EXIT_USAGE
+    assert run(["retire", "--worker", "worker-gone", "--by", "owner",
+                "--reason", "terminated in deploy 1234",
+                "--evidence", json.dumps(STOP_EVIDENCE)]) == job.EXIT_OK
 
     result = handover.convergence(barrier(db), handover.fleet(db, tenant_id=db.tenant_id))
     assert result["retired"] == ["worker-gone"] and result["converged"] is True
@@ -311,14 +325,61 @@ def test_retiring_a_worker_is_an_operator_statement_with_a_reason(configured, db
 def test_a_retired_worker_that_reports_again_is_back_in_the_fleet(configured, db):
     report(db, name="worker-a")
     assert handover.retire_worker(db, tenant_id=db.tenant_id, name="worker-a",
-                                  by="owner", reason="believed stopped") is True
+                                  by="owner", reason="believed stopped",
+                                  evidence=STOP_EVIDENCE) is True
     report(db, name="worker-a")
     assert handover.fleet(db, tenant_id=db.tenant_id)[0].retired is False
 
 
 def test_retiring_a_worker_nobody_has_heard_of_is_refused(configured, db):
-    assert run(["retire", "--worker", "ghost", "--by", "owner", "--reason", "x"]) \
-        == job.EXIT_USAGE
+    assert run(["retire", "--worker", "ghost", "--by", "owner", "--reason", "x",
+                "--evidence", json.dumps(STOP_EVIDENCE)]) == job.EXIT_USAGE
+
+
+def test_a_worker_that_reported_after_the_stop_was_observed_cannot_be_retired(
+        configured, db):
+    """It is demonstrably running, whatever the operator believes."""
+    report(db, name="worker-live")
+    stale_evidence = dict(STOP_EVIDENCE,
+                          observed_at="2020-01-01T00:00:00+00:00")
+    with pytest.raises(handover.RetirementRefused) as refused:
+        handover.retire_worker(db, tenant_id=db.tenant_id, name="worker-live",
+                               by="owner", reason="believed stopped",
+                               evidence=stale_evidence)
+    assert "it is running" in str(refused.value)
+    assert handover.fleet(db, tenant_id=db.tenant_id)[0].retired is False
+
+
+def test_the_retirement_evidence_is_stored_with_the_row(configured, db):
+    report(db, name="worker-gone")
+    with handover._own_session(db) as session:
+        row = (session.query(hm.HandoverWorker)
+               .filter(hm.HandoverWorker.worker_id == "worker-gone").first())
+        row.seen_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+        session.commit()
+    assert handover.retire_worker(db, tenant_id=db.tenant_id, name="worker-gone",
+                                  by="owner", reason="scaled to zero",
+                                  evidence=STOP_EVIDENCE) is True
+    worker = handover.fleet(db, tenant_id=db.tenant_id)[0]
+    assert worker.retirement_evidence["deployment"] == STOP_EVIDENCE["deployment"]
+    assert worker.retirement_evidence["stop_verified_by"] == STOP_EVIDENCE["stop_verified_by"]
+    assert worker.retirement_evidence["recorded_at"]
+
+
+def test_the_expected_deployment_inventory_names_a_replica_that_never_reported(
+        configured, db, monkeypatch):
+    """Convergence can only see processes that wrote a row.
+
+    A replica that never reported is invisible to it — and is exactly the one
+    that would still be admitting — so the operator states what the deployment
+    contains and the reconciliation names the gap.
+    """
+    report(db, name="worker-a")
+    monkeypatch.setenv(job.ENV_EXPECTED_WORKERS, "worker-a,worker-b")
+    entry = job.inspect(db, [db.tenant_id])[0]
+    assert entry["fleet_inventory"]["missing_from_fleet"] == ["worker-b"]
+    assert entry["fleet_inventory"]["reconciled"] is False
+    assert "workers_expected_but_never_reported:worker-b" in job.blockers_for(entry)
 
 
 # ── Settlement validates and transitions together (H1) ───────────────────────
@@ -480,8 +541,14 @@ def test_pending_deferred_work_blocks_settlement_until_it_is_disposed(configured
     assert run(["settle"]) == job.EXIT_BLOCKED
     assert "deferred_pending=1" in job.blockers_for(job.inspect(db, [db.tenant_id])[0])
 
+    # A free-text note is not proof of a replay: the disposition that claims one
+    # has to name the identity that carried it, and that identity has to resolve
+    # to a runtime turn with a terminal.
     assert run(["dispose", "--entry", str(entry.id), "--disposition", "replayed",
                 "--evidence", json.dumps({"replayed_at": "2026-09-20T00:00:00Z"}),
+                "--by", "owner"]) == job.EXIT_BLOCKED
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "not_required",
+                "--evidence", json.dumps({"authorized_by": "owner", "why": "the customer asked again and was answered"}),
                 "--by", "owner"]) == job.EXIT_OK
     assert run(["settle"]) == job.EXIT_OK
 
@@ -501,15 +568,40 @@ def test_a_disposition_needs_named_entries_a_kind_and_an_operator(configured, db
 def test_evidence_travels_with_the_entry_it_describes(configured, db):
     drain_and_converge(db)
     entry = defer(db, identity="wamid.evidenced")
+    # ``answered`` claims the customer was answered: naming a support ticket is
+    # not that claim's evidence, and it is refused.
     assert run(["dispose", "--entry", str(entry.id), "--disposition", "answered",
                 "--evidence", json.dumps({"answered_by": "support", "ticket": "T-91"}),
+                "--by", "owner"]) == job.EXIT_BLOCKED
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "not_required",
+                "--evidence", json.dumps({"authorized_by": "owner",
+                                          "why": "duplicate of a message already answered",
+                                          "ticket": "T-91"}),
                 "--by", "owner"]) == job.EXIT_OK
     with handover._own_session(db) as session:
         row = session.query(hm.DeferredInbound).filter(
             hm.DeferredInbound.id == entry.id).first()
-    assert row.state == hm.DEFERRED_DISPOSED and row.disposition == "answered"
-    assert row.disposition_evidence == {"answered_by": "support", "ticket": "T-91"}
+    assert row.state == hm.DEFERRED_DISPOSED and row.disposition == "not_required"
+    assert row.disposition_evidence["ticket"] == "T-91"
+    assert row.disposition_evidence["verified"]["authorized_by"] == "owner"
+    assert row.disposition_evidence["verified"]["why"]
     assert row.disposed_by == "owner"
+
+
+def test_a_later_message_can_supersede_an_earlier_one_only_if_it_exists(configured, db):
+    drain_and_converge(db)
+    first = defer(db, identity="wamid.first")
+    assert run(["dispose", "--entry", str(first.id), "--disposition", "superseded",
+                "--evidence", json.dumps({"superseded_by_provider_message_id": "wamid.ghost"}),
+                "--by", "owner"]) == job.EXIT_BLOCKED
+    later = defer(db, identity="wamid.later")
+    assert run(["dispose", "--entry", str(first.id), "--disposition", "superseded",
+                "--evidence", json.dumps({"superseded_by_provider_message_id": "wamid.later"}),
+                "--by", "owner"]) == job.EXIT_OK
+    with handover._own_session(db) as session:
+        row = session.query(hm.DeferredInbound).filter(
+            hm.DeferredInbound.id == first.id).first()
+    assert row.disposition_evidence["verified"]["superseded_by_entry_id"] == later.id
 
 
 def test_an_entry_that_arrives_after_the_operator_looked_is_not_disposed_of(configured, db):
@@ -519,26 +611,51 @@ def test_an_entry_that_arrives_after_the_operator_looked_is_not_disposed_of(conf
     # The operator reads 'status', then a second message arrives.
     later = defer(db, identity="wamid.arrived.later")
 
-    assert run(["dispose", "--entry", str(seen.id), "--disposition", "replayed",
-                "--evidence", "{}", "--by", "owner"]) == job.EXIT_OK
+    assert run(["dispose", "--entry", str(seen.id), "--disposition", "not_required",
+                "--evidence", json.dumps({"authorized_by": "owner", "why": "the customer asked again and was answered"}),
+                "--by", "owner"]) == job.EXIT_OK
     pending = handover.pending_inbound(db, tenant_id=db.tenant_id)
     assert [e.id for e in pending] == [later.id]          # untouched, still owed an answer
     assert run(["settle"]) == job.EXIT_BLOCKED
 
 
+def test_an_entry_created_after_the_inspection_is_refused_even_when_named(
+        configured, db):
+    """``--as-of`` is the moment the operator read 'status'.
+
+    Passing a later entry's id then refuses it by name instead of disposing of
+    something nobody looked at.
+    """
+    drain_and_converge(db)
+    cutoff = dt.datetime.now(dt.timezone.utc)
+    later = defer(db, identity="wamid.after.cutoff")
+    with handover._own_session(db) as session:
+        row = session.query(hm.DeferredInbound).filter(
+            hm.DeferredInbound.id == later.id).first()
+        row.created_at = cutoff + dt.timedelta(seconds=30)
+        session.commit()
+    assert run(["dispose", "--entry", str(later.id), "--disposition", "not_required",
+                "--evidence", json.dumps({"authorized_by": "owner", "why": "the customer asked again and was answered"}),
+                "--by", "owner", "--as-of", cutoff.isoformat()]) == job.EXIT_BLOCKED
+    assert handover.pending_inbound(db, tenant_id=db.tenant_id)[0].id == later.id
+
+
 def test_disposing_an_entry_twice_is_refused_by_name(configured, db):
     drain_and_converge(db)
     entry = defer(db, identity="wamid.once")
-    assert run(["dispose", "--entry", str(entry.id), "--disposition", "replayed",
-                "--evidence", "{}", "--by", "owner"]) == job.EXIT_OK
-    assert run(["dispose", "--entry", str(entry.id), "--disposition", "replayed",
-                "--evidence", "{}", "--by", "owner"]) == job.EXIT_BLOCKED
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "not_required",
+                "--evidence", json.dumps({"authorized_by": "owner", "why": "the customer asked again and was answered"}),
+                "--by", "owner"]) == job.EXIT_OK
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "not_required",
+                "--evidence", json.dumps({"authorized_by": "owner", "why": "the customer asked again and was answered"}),
+                "--by", "owner"]) == job.EXIT_BLOCKED
 
 
 def test_disposing_an_entry_that_does_not_exist_is_refused(configured, db):
     drain_and_converge(db)
-    assert run(["dispose", "--entry", "99999", "--disposition", "replayed",
-                "--evidence", "{}", "--by", "owner"]) == job.EXIT_BLOCKED
+    assert run(["dispose", "--entry", "99999", "--disposition", "not_required",
+                "--evidence", json.dumps({"authorized_by": "owner", "why": "the customer asked again and was answered"}),
+                "--by", "owner"]) == job.EXIT_BLOCKED
 
 
 def test_a_runtime_that_finishes_its_own_turn_resolves_the_record(configured, db):
@@ -564,8 +681,10 @@ def test_disposed_history_does_not_consume_the_pending_capacity(configured, db,
     second = defer(db, identity="wamid.b")
     assert defer(db, identity="wamid.c") is None          # full: refused, not dropped
     assert run(["dispose", "--entry", str(first.id), "--entry", str(second.id),
-                "--disposition", "replayed", "--evidence", "{}", "--by", "owner"]) \
-        == job.EXIT_OK
+                "--disposition", "not_required",
+                "--evidence", json.dumps({"authorized_by": "owner",
+                                          "why": "the customer asked again and was answered"}),
+                "--by", "owner"]) == job.EXIT_OK
     assert defer(db, identity="wamid.c") is not None      # room again, history kept
     with handover._own_session(db) as session:
         assert session.query(hm.DeferredInbound).count() == 3

@@ -1,4 +1,4 @@
-"""Revision 0110 on real PostgreSQL: it creates exactly what the package
+"""Revision 0111 on real PostgreSQL: it creates exactly what the package
 declares, refuses an incompatible pre-existing relation rather than reconciling
 it, is reversible, and leaves revision 0109's schema untouched.
 
@@ -25,11 +25,11 @@ from tests.commerce_reliability.test_commerce_runtime_foundation_pg import (
 )
 
 PREVIOUS_REVISION = "0109"
-THIS_REVISION = "0110"
+THIS_REVISION = "0111"
 MIGRATION_PATH = (REPO_ROOT / "database" / "migrations" / "versions"
-                  / "0110_commerce_runtime_handover.py")
+                  / "0111_commerce_runtime_handover.py")
 
-# Everything revision 0109 leaves behind. A downgrade of 0110 must not touch
+# Everything revision 0109 leaves behind. A downgrade of 0111 must not touch
 # any of it.
 LEDGER_RELATIONS = (
     "commerce_runtime_conversations", "commerce_runtime_turns",
@@ -41,7 +41,7 @@ LEDGER_RELATIONS = (
 
 
 def _migration_module():
-    spec = importlib.util.spec_from_file_location("migration_0110_under_test", MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location("migration_0111_under_test", MIGRATION_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -177,3 +177,59 @@ def test_the_upgrade_is_idempotent_on_a_database_that_already_has_it(database_at
     _alembic(dsn, THIS_REVISION)
     assert set(hm.HANDOVER_TABLES) <= _relations(engine)
     assert THIS_REVISION in _current_revisions(engine)
+
+
+def test_a_relation_with_the_right_columns_and_no_unique_index_is_refused(
+        database_at_0109) -> None:
+    """Matching columns is not a compatible schema.
+
+    The unique index on the inbound identity is what makes an acknowledgement
+    idempotent; a table with every column and no index would accept the same
+    provider message twice while looking correct to a column-only check.
+    """
+    dsn, engine = database_at_0109
+    module = _migration_module()
+    with engine.begin() as conn:
+        # The declared table, created without its constraints or indexes.
+        table = next(t for t in hm.HANDOVER_TABLE_OBJECTS if t.name == hm.DEFERRED_TABLE)
+        columns = ", ".join(
+            f'"{c.name}" {c.type.compile(dialect=conn.dialect)}'
+            f'{"" if c.nullable else " NOT NULL"}'
+            f'{"" if c.server_default is None else " DEFAULT " + str(c.server_default.arg)}'
+            for c in table.columns if c.name != "id")
+        conn.execute(text(f"CREATE TABLE {hm.DEFERRED_TABLE} "
+                          f"(id BIGSERIAL PRIMARY KEY, {columns})"))
+
+    with engine.connect() as conn:
+        diffs = module._differences(conn, table)
+    assert any("uq_commerce_runtime_deferred_inbound_identity" in d for d in diffs), diffs
+    assert any("ix_commerce_runtime_deferred_inbound_pending" in d for d in diffs), diffs
+
+    with pytest.raises(Exception) as caught:
+        _alembic(dsn, THIS_REVISION)
+    assert "refuses to reconcile" in str(caught.value)
+    assert THIS_REVISION not in _current_revisions(engine)
+
+
+def test_a_relation_missing_a_check_constraint_is_refused(database_at_0109) -> None:
+    """The check is what stops a disposed row naming no disposition."""
+    dsn, engine = database_at_0109
+    _alembic(dsn, THIS_REVISION)
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {hm.DEFERRED_TABLE} "
+                          f"DROP CONSTRAINT ck_commerce_runtime_deferred_inbound_disposition"))
+    module = _migration_module()
+    table = next(t for t in hm.HANDOVER_TABLE_OBJECTS if t.name == hm.DEFERRED_TABLE)
+    with engine.connect() as conn:
+        diffs = module._differences(conn, table)
+    assert any("ck_commerce_runtime_deferred_inbound_disposition" in d for d in diffs), diffs
+
+
+def test_the_worker_row_carries_its_retirement_evidence(database_at_0109) -> None:
+    """Silence never retires a worker, and the reason it did not is on the row."""
+    dsn, engine = database_at_0109
+    _alembic(dsn, THIS_REVISION)
+    inspector = inspect(engine)
+    columns = {c["name"] for c in inspector.get_columns(hm.WORKERS_TABLE)}
+    assert "retirement_evidence" in columns
+    assert "updated_at" in columns

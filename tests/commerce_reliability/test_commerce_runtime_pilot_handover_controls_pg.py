@@ -28,9 +28,11 @@ WhatsApp transport are scripted and named as such; nothing here sends anything.
 from __future__ import annotations
 
 import dataclasses
+import json
 import threading
 import time
 import uuid
+from unittest.mock import patch
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -62,7 +64,7 @@ from tests.commerce_reliability.test_commerce_runtime_pilot_pg import (
     timed_out,
 )
 
-REVISION = "0110"
+REVISION = "0111"
 PHONE = "+966500000042"
 PHONE_ID = "1555000424"
 QUESTION = "عندكم قميص قطني أزرق؟"
@@ -167,6 +169,16 @@ class Store:
                     pass
 
         return _held()
+
+
+# What retiring a worker has to be able to show. Silence is deliberately not in
+# it: a quiet worker is one nobody has heard from, which is the case the fleet
+# table exists to keep apart from a stopped one.
+STOP_EVIDENCE = {
+    "deployment": "railway:nahla-backend@deploy-1234",
+    "stop_verified_by": "railway deployment status=REMOVED, replicas=0",
+    "observed_at": "2099-01-01T00:00:00+00:00",
+}
 
 
 @pytest.fixture(scope="module")
@@ -583,8 +595,13 @@ def test_control_b_a_buffered_inbound_is_disposed_before_anything_settles(config
 
     assert settle(store) == job.EXIT_BLOCKED
     entry = pending(store)[0]
+    # A free-text note is not proof of a replay. ``not_required`` is the one
+    # disposition that claims no delivery, and it carries its authorisation.
     assert job.main(["dispose", "--entry", str(entry.id), "--disposition", "replayed",
                      "--evidence", '{"replayed_at": "2026-09-20T00:00:00Z"}',
+                     "--by", "owner"]) == job.EXIT_BLOCKED
+    assert job.main(["dispose", "--entry", str(entry.id), "--disposition", "not_required",
+                     "--evidence", '{"authorized_by": "owner", "why": "answered by hand from the operator console"}',
                      "--by", "owner"]) == job.EXIT_OK
     assert settle(store) == job.EXIT_OK
 
@@ -822,8 +839,9 @@ def test_h4_disposition_is_per_entry_and_leaves_a_later_arrival_alone(configured
     drain_and_converge(store)
     seen = defer(store, identity="wamid.inspected")
     later = defer(store, identity="wamid.after.inspection")
-    assert job.main(["dispose", "--entry", str(seen.id), "--disposition", "replayed",
-                     "--evidence", '{"by_hand": true}', "--by", "owner"]) == job.EXIT_OK
+    assert job.main(["dispose", "--entry", str(seen.id), "--disposition", "not_required",
+                     "--evidence", '{"authorized_by": "owner", "why": "answered by hand from the operator console"}',
+                     "--by", "owner"]) == job.EXIT_OK
     assert [e.id for e in pending(store)] == [later.id]
     assert settle(store) == job.EXIT_BLOCKED
 
@@ -910,8 +928,278 @@ def test_h3_retirement_is_recorded_and_carried_into_the_evidence(configured, sto
     drain_and_converge(store)
     assert settle(store) == job.EXIT_BLOCKED              # worker-gone is behind
 
+    # A name and a sentence are not evidence a process stopped.
     assert job.main(["retire", "--worker", "worker-gone", "--by", "owner",
-                     "--reason", "terminated in deploy 1234"]) == job.EXIT_OK
+                     "--reason", "terminated in deploy 1234"]) == job.EXIT_USAGE
+    assert job.main(["retire", "--worker", "worker-gone", "--by", "owner",
+                     "--reason", "terminated in deploy 1234",
+                     "--evidence", json.dumps(STOP_EVIDENCE)]) == job.EXIT_OK
     assert settle(store) == job.EXIT_OK
     assert evidence(store)["retired_workers"] == [
         {"worker_id": "worker-gone", "by": "owner", "reason": "terminated in deploy 1234"}]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# A disposition that claims the customer was handled is checked against the
+# records that would show it
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_replayed_disposition_is_verified_against_a_real_terminal(configured, store):
+    """``replayed`` names the identity that carried the replay, and that
+    identity has to resolve to a runtime turn with a terminal for this tenant
+    and this connection. A plausible-looking id that does not is refused."""
+    drain_and_converge(store)
+    entry_row = defer(store, identity="wamid.needs.proof")
+
+    assert job.main(["dispose", "--entry", str(entry_row.id), "--disposition", "replayed",
+                     "--evidence", '{"replayed_as_provider_message_id": "wamid.never.ran"}',
+                     "--by", "owner"]) == job.EXIT_BLOCKED
+
+    # A turn that really ran, and really reached a terminal.
+    replayed_id = "wamid.replayed." + uuid.uuid4().hex
+    report = store.run_turn(transport=Transport([accepted("wamid.out.1")]),
+                            provider_message_id=replayed_id)
+    assert report.reason == entry.HANDLED
+    found = recovery.admitted_turn_for(tenant_id=store.tenant_id,
+                                       phone_number_id=str(store.connection_id),
+                                       provider_message_id=replayed_id,
+                                       engine=store.engine)
+    assert found is not None and found.finished is True
+
+    assert job.main(["dispose", "--entry", str(entry_row.id), "--disposition", "replayed",
+                     "--evidence", json.dumps(
+                         {"replayed_as_provider_message_id": replayed_id}),
+                     "--by", "owner"]) == job.EXIT_OK
+    db = store.session()
+    try:
+        row = handover.accepted_inbound(
+            db, tenant_id=store.tenant_id,
+            channel_connection_ref=f"wa:{store.connection_id}",
+            provider_message_id="wamid.needs.proof")
+    finally:
+        db.close()
+    assert row is not None and row.disposition == "replayed"
+    assert row.disposition_evidence["verified"]["turn_id"] == found.turn_id
+    assert row.disposition_evidence["verified"]["verified_against"] == \
+        "commerce_runtime_turn_terminals"
+
+
+def test_a_turn_without_a_terminal_cannot_evidence_a_replay(configured, store):
+    """An admitted turn is not a handled one."""
+    drain_and_converge(store)
+    entry_row = defer(store, identity="wamid.open.turn")
+    turn_id, _sequence = store.reserve_reply("نص محجوز")
+    assert turn_id
+    db = store.session()
+    try:
+        open_identity = db.execute(text(
+            "SELECT provider_message_id FROM commerce_runtime_turns WHERE id = :t"),
+            {"t": turn_id}).scalar()
+    finally:
+        db.close()
+    assert job.main(["dispose", "--entry", str(entry_row.id), "--disposition", "replayed",
+                     "--evidence", json.dumps(
+                         {"replayed_as_provider_message_id": open_identity}),
+                     "--by", "owner"]) == job.EXIT_BLOCKED
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The release verdict is taken now, not read from a settlement
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_an_inbound_in_the_settled_window_invalidates_the_release(configured, store):
+    """The settlement was honest about the instant it was taken.
+
+    Switching the pilot off on the strength of it ten minutes later abandons
+    whatever arrived since — and something does arrive: an inbound in the
+    settled window is recorded rather than lost. The release verdict is
+    therefore derived at the moment it matters, so the arrival blocks it.
+    """
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_OK
+    assert job.main(["release"]) == job.EXIT_OK
+
+    late = defer(store, identity="wamid.settled.window",
+                 reason=handover.REASON_SETTLED_WINDOW)
+    assert late is not None
+
+    db = store.session()
+    try:
+        state = handover.release_state(db, tenant_id=store.tenant_id)
+    finally:
+        db.close()
+    assert state.released is False
+    assert state.arrived_after_settlement == 1
+    assert any(b.startswith("deferred_pending=") for b in state.blockers)
+    assert job.main(["release"]) == job.EXIT_BLOCKED
+
+
+def test_reopening_over_work_nobody_met_is_refused(configured, store):
+    """Reopening buries a pending entry under the traffic it lets back in."""
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_OK
+    late = defer(store, identity="wamid.before.reopen",
+                 reason=handover.REASON_SETTLED_WINDOW)
+    assert late is not None
+
+    assert job.main(["reopen"]) == job.EXIT_BLOCKED
+    assert barrier_of(store).state == handover.STATE_SETTLED
+
+    assert job.main(["dispose", "--entry", str(late.id), "--disposition", "not_required",
+                     "--evidence", json.dumps(
+                         {"authorized_by": "owner", "why": "answered by hand"}),
+                     "--by", "owner"]) == job.EXIT_OK
+    assert job.main(["reopen"]) == job.EXIT_OK
+    assert barrier_of(store).state == handover.STATE_OPEN
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Recovery: an accepted inbound nobody finished, worked by the operator path
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_recovery_closes_an_entry_whose_turn_already_reached_a_terminal(configured, store):
+    """Completed work is never repeated; the obligation is closed against it."""
+    from services import commerce_runtime_recovery as runner
+
+    identity = "wamid.finished." + uuid.uuid4().hex
+    report = store.run_turn(transport=Transport([accepted("wamid.out.2")]),
+                            provider_message_id=identity)
+    assert report.reason == entry.HANDLED
+    entry_row = defer(store, identity=identity, reason=handover.REASON_ACCEPTED)
+    assert entry_row is not None
+
+    db = store.session()
+    try:
+        outcome = runner.recover_tenant(db, tenant_id=store.tenant_id, dry_run=False)
+    finally:
+        db.close()
+    assert outcome.counted() == {runner.RESOLVED_ALREADY_FINISHED: 1}
+    assert pending(store) == ()
+
+
+def test_recovery_refuses_to_replay_into_a_closed_barrier(configured, store):
+    """Selected before a drain, refused at admission: nothing is replayed."""
+    from services import commerce_runtime_recovery as runner
+
+    drain_and_converge(store)
+    entry_row = defer(store, identity="wamid.during.drain")
+    assert entry_row is not None
+
+    db = store.session()
+    try:
+        outcome = runner.recover_tenant(db, tenant_id=store.tenant_id, dry_run=False)
+    finally:
+        db.close()
+    assert outcome.counted() == {runner.SKIPPED_BARRIER_CLOSED: 1}
+    assert [e.id for e in pending(store)] == [entry_row.id]
+
+
+def test_recovery_leaves_an_unknown_delivery_alone(configured, store):
+    """An ``unknown`` outcome is not "did not arrive".
+
+    The case is a worker that sent, could not establish what the provider did
+    with it, and stopped before recording a terminal. The turn is therefore
+    unfinished *and* carries a send that may already have reached the customer.
+    Replaying it risks a second delivery, so the entry is left for an operator
+    with the evidence in front of them rather than handed back.
+    """
+    from services import commerce_runtime_recovery as runner
+
+    # A turn that sent, could not establish what the provider did with it, and
+    # was never completed. Terminals are immutable by trigger, so this is built
+    # the way it really happens rather than by deleting one afterwards.
+    turn_id, sequence_id = store.reserve_reply("مصير غير معروف")
+    with store.owned(turn_id=turn_id) as token:
+        outcome = dd.dispatch_reserved_delivery(
+            ledgers=store.ledgers, tenant_id=store.tenant_id, namespace=entry.NAMESPACE,
+            conversation_id=store.runtime_conversation_id, token=token,
+            sequence_id=sequence_id, transport=Transport([timed_out()]),
+            recorded_by="recovery-control")
+    assert outcome.status == dd.SENT_UNKNOWN
+    assert store.state().unknown_outcomes == 1
+
+    db = store.session()
+    try:
+        identity = db.execute(text(
+            "SELECT provider_message_id FROM commerce_runtime_turns WHERE id = :t"),
+            {"t": turn_id}).scalar()
+    finally:
+        db.close()
+    unfinished = recovery.admitted_turn_for(
+        tenant_id=store.tenant_id, phone_number_id=str(store.connection_id),
+        provider_message_id=identity, engine=store.engine)
+    assert unfinished is not None and unfinished.finished is False
+
+    entry_row = defer(store, identity=identity, reason=handover.REASON_ACCEPTED)
+    assert entry_row is not None
+
+    db = store.session()
+    try:
+        assert runner._unknown_delivery(store.tenant_id, unfinished.turn_id,
+                                        store.engine) is True
+        outcome = runner.recover_tenant(db, tenant_id=store.tenant_id, dry_run=False)
+    finally:
+        db.close()
+    assert outcome.counted() == {runner.SKIPPED_UNKNOWN_DELIVERY: 1}
+    assert [e.id for e in pending(store)] == [entry_row.id]
+
+
+def test_a_dry_run_decides_everything_except_the_replay(configured, store):
+    from services import commerce_runtime_recovery as runner
+
+    entry_row = defer(store, identity="wamid.dry", reason=handover.REASON_ACCEPTED)
+    assert entry_row is not None
+    replays: List[Any] = []
+
+    async def _never(_body: Any) -> None:
+        replays.append(_body)
+
+    db = store.session()
+    try:
+        with patch.object(runner, "_replay", _never):
+            outcome = runner.recover_tenant(db, tenant_id=store.tenant_id, dry_run=True)
+    finally:
+        db.close()
+    assert outcome.counted() == {runner.REPLAYED: 1}
+    assert replays == []                                  # nothing was handed back
+    assert [e.id for e in pending(store)] == [entry_row.id]
+
+
+def test_two_runners_do_not_replay_the_same_entry(configured, store):
+    """The per-entry advisory lock: the second runner skips rather than races."""
+    from services import commerce_runtime_recovery as runner
+
+    entry_row = defer(store, identity="wamid.contended", reason=handover.REASON_ACCEPTED)
+    assert entry_row is not None
+    held = threading.Event()
+    release = threading.Event()
+    outcomes: Dict[str, Any] = {}
+
+    def _first() -> None:
+        db = store.session()
+        try:
+            db.execute(text("SELECT pg_advisory_xact_lock(:ns, :e)"),
+                       {"ns": runner.ENTRY_LOCK_NAMESPACE, "e": entry_row.id})
+            held.set()
+            release.wait(timeout=10)
+            db.rollback()
+        finally:
+            db.close()
+
+    worker = threading.Thread(target=_first)
+    worker.start()
+    assert held.wait(timeout=10)
+    db = store.session()
+    try:
+        with patch.object(runner, "_replay", lambda _b: None):
+            outcomes["second"] = runner.recover_tenant(
+                db, tenant_id=store.tenant_id, dry_run=False)
+    finally:
+        db.close()
+        release.set()
+        worker.join(timeout=10)
+    assert outcomes["second"].counted() == {runner.SKIPPED_IN_FLIGHT: 1}
+    assert [e.id for e in pending(store)] == [entry_row.id]

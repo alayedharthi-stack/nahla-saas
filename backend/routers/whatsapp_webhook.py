@@ -45,7 +45,8 @@ from core.config import (
 from core.webhook_audit import record_result as _record_signature_audit
 from core.webhook_security import (
     SignatureStatus,
-    evaluate_replay,
+    evaluate_replay_claim,
+    release_replay_nonce,
     verify_meta_signature,
 )
 from core.conversation_lock import conversation_lock
@@ -733,11 +734,13 @@ async def whatsapp_incoming(request: Request):
                 status_code=200,
             )
 
-        # Replay protection (Phase 1B-5) — flag-gated. ``evaluate_replay``
-        # is a no-op until ``WEBHOOK_REPLAY_PROTECTION_ENABLED=true``, and
-        # only returns True when ``WEBHOOK_REPLAY_REJECT_ENABLED`` is ALSO
-        # true (the audit-then-reject staging).
-        if evaluate_replay(
+        # Replay protection (Phase 1B-5) — flag-gated. ``evaluate_replay_claim``
+        # is a no-op until ``WEBHOOK_REPLAY_PROTECTION_ENABLED=true``, and only
+        # rejects when ``WEBHOOK_REPLAY_REJECT_ENABLED`` is ALSO true (the
+        # audit-then-reject staging). It additionally reports whether *this*
+        # request claimed the nonce, so a request that turns out not to be an
+        # acceptance can give it back — see the 503 path below.
+        _replay = evaluate_replay_claim(
             "meta",
             raw_body,
             request_meta={
@@ -745,7 +748,8 @@ async def whatsapp_incoming(request: Request):
                        or (request.client.host if request.client else None)),
                 "user_agent": request.headers.get("user-agent", "")[:120],
             },
-        ):
+        )
+        if _replay.reject:
             try:
                 from core.inbound_lifecycle import (  # noqa: PLC0415
                     EVENT_HTTP_REPLAY_REJECT, emit_standalone_event,
@@ -775,6 +779,18 @@ async def whatsapp_incoming(request: Request):
         # redelivery finds none of the batch already processed.
         _accepted = await _accept_pilot_inbound(body, provider="meta")
         if not _accepted.ok:
+            # The work was not made durable, so this request is not an
+            # acceptance and must not look like one. The nonce this request
+            # claimed goes back with it: without that, the provider's identical
+            # retry would be dropped as a replay — a 200 for a message nothing
+            # ever processed, which is the exact silent loss the 503 exists to
+            # prevent. Nothing is spawned either, so the redelivery finds no
+            # part of the batch already processed.
+            release_replay_nonce(_replay)
+            logger.error("[COMMERCE_RUNTIME_ACCEPT] meta not acknowledged reason=%s "
+                         "recorded=%s failed=%s replay_nonce_released=%s",
+                         _accepted.reason, len(_accepted.recorded),
+                         len(_accepted.failed), _replay.claimed)
             return JSONResponse(
                 {"status": "retry", "reason": "inbound_not_persisted"}, status_code=503)
 
@@ -4499,31 +4515,27 @@ async def _dispatch_message(
                 _context_wamid = str(
                     (msg.get("context") or {}).get("id") or ""
                 ).strip()
-                try:
-                    from services.cod_confirmation import (  # noqa: PLC0415
-                        consume_owned_cod_button_inbound,
-                        is_owned_cod_button_payload,
-                        resolve_owned_cod_button_payload_from_context,
+                # The claim is honoured BEFORE the classification, not only
+                # before the action. ``resolve_owned_cod_button_payload_from_context``
+                # is a correlation against this tenant's recent COD sends: it is
+                # what decides that a noncanonical payload carrying a
+                # ``context.id`` *is* a COD reply, and the consuming action acts
+                # on that decision. Running it for a turn this runtime owns
+                # already puts a second owner on the turn.
+                if _runtime_claim is not None:
+                    logger.info(
+                        "[COD_BUTTON_ROUTE] skipped tenant=%s sender=%s basis=%s — the "
+                        "commerce runtime owns this inbound; no COD classification, "
+                        "correlation, order mutation or follow-up",
+                        resolved_tenant_id, sender, _runtime_claim.basis,
                     )
-                except Exception as exc:
-                    logger.error("[Webhook] COD template-button import failed: %s", exc)
                 else:
-                    if is_owned_cod_button_payload(_btn_payload):
-                        _owned_btn_payload = _btn_payload
-                        _cod_correlation = "payload"
-                    else:
-                        _owned_btn_payload = (
-                            resolve_owned_cod_button_payload_from_context(
-                                db,
-                                tenant_id=resolved_tenant_id,
-                                customer_phone=sender,
-                                button_text=_wa_text,
-                                context_wamid=_context_wamid,
-                            )
-                            or ""
-                        )
-                        _cod_correlation = "context_wamid"
-                    if _runtime_claim is None and is_owned_cod_button_payload(_owned_btn_payload):
+                    _owned_btn_payload, _cod_correlation = _classify_owned_cod_button(
+                        db, tenant_id=resolved_tenant_id, sender=sender,
+                        button_payload=_btn_payload, button_text=_wa_text,
+                        context_wamid=_context_wamid,
+                    )
+                    if _owned_btn_payload:
                         async def _cod_tpl_followup(decision, order):
                             await _send_cod_followup_message(
                                 phone_id=used_pid, to=sender,
@@ -4539,6 +4551,9 @@ async def _dispatch_message(
                             str((msg.get("context") or {}).get("id") or "-")[-24:],
                         )
                         try:
+                            from services.cod_confirmation import (  # noqa: PLC0415
+                                consume_owned_cod_button_inbound,
+                            )
                             await consume_owned_cod_button_inbound(
                                 db,
                                 tenant_id=resolved_tenant_id,
@@ -15788,6 +15803,42 @@ def _resolve_wa_conn_by_phone_id(_db, phone_id: str):
     return None, None
 
 
+def _classify_owned_cod_button(db, *, tenant_id, sender: str, button_payload: str,
+                               button_text: str, context_wamid: str):
+    """Whether this template-button tap is one of *this tenant's* COD sends.
+
+    Two ways in, and both of them are classification: a canonical owned payload,
+    or a correlation of a noncanonical payload against the tenant's recent COD
+    sends using the ``context.id`` the customer's client echoed back. The second
+    reads this tenant's order and message state to reach its verdict, which is
+    why it is a competing owner's decision and not a formatting detail — the
+    caller decides ownership before either of them runs.
+
+    Returns ``(owned_payload, correlation)``; an empty payload means this tap is
+    not a COD reply. Never raises.
+    """
+    try:
+        from services.cod_confirmation import (  # noqa: PLC0415
+            is_owned_cod_button_payload,
+            resolve_owned_cod_button_payload_from_context,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[Webhook] COD template-button import failed: %s", exc)
+        return "", "unavailable"
+    try:
+        if is_owned_cod_button_payload(button_payload):
+            return button_payload, "payload"
+        resolved = resolve_owned_cod_button_payload_from_context(
+            db, tenant_id=tenant_id, customer_phone=sender,
+            button_text=button_text, context_wamid=context_wamid,
+        ) or ""
+        if resolved and is_owned_cod_button_payload(resolved):
+            return resolved, "context_wamid"
+    except Exception as exc:  # noqa: BLE001 - an unclassifiable tap is not a COD reply
+        logger.error("[Webhook] COD template-button classification failed: %s", exc)
+    return "", "none"
+
+
 def _commerce_runtime_claims_inbound(db, *, tenant_id, phone_id: str, to: str,
                                      text: str, wa_msg_id) -> bool:
     """Whether the commerce runtime owns this inbound, asked before any owner acts.
@@ -15843,10 +15894,13 @@ def _duplicate_is_unfinished_runtime_work(
     """Whether a duplicate the platform is about to drop must be let through.
 
     The commerce runtime keys a turn by the inbound provider message id, so a
-    turn it admitted and never finished can only be reached by the retry that
-    carries that id. This asks whether such a turn exists, and nothing else: it
-    sends nothing, writes nothing, and answers ``False`` for anything it cannot
-    establish, which leaves deduplication exactly as it is today.
+    turn it admitted and never finished can only be reached by the event that
+    carries that id — a provider retry, or a recovery replay of an inbound the
+    platform accepted and nobody admitted. Both are asked about here, for an
+    allowlisted tenant and recipient only: an unfinished turn, or a durable
+    acceptance record still pending. It sends nothing, writes nothing, and
+    answers ``False`` for anything it cannot establish, which leaves
+    deduplication exactly as it is today.
     """
     try:
         from core.commerce_runtime.recovery import (  # noqa: PLC0415

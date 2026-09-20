@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import dataclasses
+import datetime as _dt
 import hashlib
 import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -53,6 +54,16 @@ OWNED_PREFIX = "owned_"
 # whether it holds unfinished work would be a query for every inbound message
 # on the platform, so these answer without one.
 NO_RUNTIME_WORK_POSSIBLE = frozenset({"pilot_disabled", "tenant_not_allowlisted"})
+
+# The bases a claim can be established on, most to least specific.
+BASIS_CONFIGURED = "configured"
+BASIS_ADMITTED_OPEN = "admitted_open"
+BASIS_ADMITTED_FINISHED = "admitted_finished"
+BASIS_DRAIN_BUFFERED = "drain_buffered"
+# Established that this inbound is the runtime's, then could not read the state
+# that decides what to do with it. The turn is held — refused execution, and
+# given to nobody else.
+BASIS_OWNERSHIP_UNAVAILABLE = "ownership_unavailable"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -361,6 +372,61 @@ class RuntimeClaim:
             return True
 
 
+def _established_scope(db: Any, *, tenant_id: Any, phone_id: str, to: str,
+                       wa_msg_id: Optional[str]) -> Optional[RuntimeClaim]:
+    """A held claim when this inbound is established as the runtime's, else ``None``.
+
+    Asked only after something failed, and deliberately from the two sources
+    that do not depend on what failed:
+
+    * the **guard** — an allowlisted tenant and recipient on a verified
+      connection, with a model configured. That is configuration plus one
+      connection row, and it is what "this traffic is the pilot's" means
+      everywhere else;
+    * a **durable acceptance record** already written for this exact provider
+      message id. The provider was told we had it; something owes it an answer.
+
+    Either one is enough. Neither says the turn can be executed — that is the
+    point: the claim it returns holds the turn and refuses execution.
+    """
+    from core.commerce_runtime import pilot_guard  # noqa: PLC0415
+
+    try:
+        recipient = pilot_guard.normalize_recipient(to)
+        identity = str(wa_msg_id or "").strip()
+        if not recipient or not identity:
+            return None
+        held = RuntimeClaim(tenant_id=int(tenant_id), recipient=recipient,
+                            provider_message_id=identity,
+                            basis=BASIS_OWNERSHIP_UNAVAILABLE)
+    except Exception:  # noqa: silent-ok — without a normalised recipient and a provider message id there is no scope to hold a claim against
+        return None
+
+    try:
+        decision = pilot_guard.evaluate_pilot_route(
+            db, tenant_id=tenant_id, customer_phone=to, phone_number_id=phone_id,
+            inbound_text="_")
+        if decision.permitted or decision.reason == pilot_guard.PILOT_DRAINING:
+            return held
+    except Exception:  # noqa: BLE001 - fall through to the durable record
+        logger.warning("[COMMERCE_RUNTIME_PILOT] guard unreadable while establishing scope "
+                       "tenant=%s", tenant_id)
+
+    try:
+        from core.commerce_runtime import handover  # noqa: PLC0415
+
+        accepted = handover.accepted_inbound(
+            db, tenant_id=int(tenant_id),
+            channel_connection_ref=f"wa:{str(phone_id or '').strip()}",
+            provider_message_id=held.provider_message_id)
+        if accepted is not None:
+            return held
+    except Exception:  # noqa: BLE001 - an unreadable record establishes nothing
+        logger.warning("[COMMERCE_RUNTIME_PILOT] deferred record unreadable while "
+                       "establishing scope tenant=%s", tenant_id)
+    return None
+
+
 def commerce_runtime_claims_inbound(
     db: Any,
     *,
@@ -452,7 +518,7 @@ def commerce_runtime_claims_inbound(
                 "[COMMERCE_RUNTIME_PILOT] claiming inbound the runtime already owns "
                 "turn=%s finished=%s tenant=%s guard_reason=%s",
                 owned.turn_id, owned.finished, tenant_id, decision.reason)
-            return claim("admitted_finished" if owned.finished else "admitted_open")
+            return claim(BASIS_ADMITTED_FINISHED if owned.finished else BASIS_ADMITTED_OPEN)
 
         if deferring:
             # Draining does not release this conversation to the legacy path:
@@ -483,15 +549,34 @@ def commerce_runtime_claims_inbound(
                 logger.warning("[COMMERCE_RUNTIME_PILOT] deferred during handover tenant=%s "
                                "generation=%s barrier=%s reason=%s entry=%s",
                                tenant_id, barrier.generation, barrier.state, reason, record.id)
-            return claim("drain_buffered")
+            return claim(BASIS_DRAIN_BUFFERED)
 
         if decision.permitted:
-            return claim("configured")
+            return claim(BASIS_CONFIGURED)
         return None
-    except Exception:  # noqa: BLE001 - an undecidable claim is not a claim
-        logger.warning("[COMMERCE_RUNTIME_PILOT] ownership claim check failed tenant=%s",
-                       tenant_id)
-        return None
+    except Exception:
+        # Up to the guard, an undecidable question is not a claim: nothing
+        # established that this inbound was ever the runtime's, and the
+        # dispatcher keeps the owners it has today.
+        #
+        # After the guard has said this tenant, recipient and connection are
+        # the pilot's, the opposite is true. A barrier that cannot be read, a
+        # schema that is not there, a ledger that will not answer — none of
+        # them are evidence that the runtime does not own this turn, and
+        # handing it to the legacy path or the COD route on the strength of a
+        # failed read is how a conversation the runtime may still be answering
+        # gets a second answer. The obligation is kept and execution is
+        # refused: nobody answers, and the operator is told.
+        established = _established_scope(db, tenant_id=tenant_id, phone_id=phone_id, to=to,
+                                         wa_msg_id=wa_msg_id)
+        if established is None:
+            logger.warning("[COMMERCE_RUNTIME_PILOT] ownership claim check failed tenant=%s "
+                           "— nothing established, the dispatcher is unchanged", tenant_id)
+            return None
+        logger.error("[COMMERCE_RUNTIME_PILOT] ownership state unreadable tenant=%s "
+                     "provider_message_id=%s — the turn is held, not released",
+                     tenant_id, established.provider_message_id)
+        return established
 
 
 async def maybe_handle_with_commerce_runtime(
@@ -649,10 +734,30 @@ def _settle_deferred(db: Any, *, tenant_id: int, decision: Any, phone_id: str, r
                    reason=handover.REASON_ADMISSION_REFUSED,
                    generation=handover.read_barrier(db, tenant_id=tenant_id).generation)
             return
-        if getattr(report, "turn_id", None) is not None:
-            handover.resolve_inbound(db, tenant_id=tenant_id,
-                                     channel_connection_ref=connection,
-                                     provider_message_id=identity)
+        # A turn id is not completion evidence. It means a row was admitted,
+        # not that anything reached a terminal — ``ownership_unavailable``,
+        # ``admission_conflict`` and an internal error all carry one. The
+        # obligation is closed only against the authoritative terminal record
+        # for this exact tenant, channel and provider message id, and the
+        # terminal it was closed against is stored with it.
+        from core.commerce_runtime import recovery  # noqa: PLC0415
+
+        owned = recovery.admitted_turn_for(
+            tenant_id=int(tenant_id), phone_number_id=phone_id,
+            provider_message_id=identity)
+        if owned is not None and owned.finished:
+            handover.resolve_inbound(
+                db, tenant_id=tenant_id, channel_connection_ref=connection,
+                provider_message_id=identity,
+                evidence={"terminal_for_turn_id": int(owned.turn_id),
+                          "reported_reason": str(getattr(report, "reason", "")),
+                          "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat()})
+            return
+        logger.warning(
+            "[COMMERCE_RUNTIME_PILOT] deferred record stays pending tenant=%s "
+            "provider_message_id=%s reason=%s turn=%s — no terminal to close it against",
+            tenant_id, identity, getattr(report, "reason", ""),
+            None if owned is None else owned.turn_id)
     except Exception as exc:  # noqa: BLE001 - the turn is finished either way
         logger.warning("[COMMERCE_RUNTIME_PILOT] deferred bookkeeping failed tenant=%s "
                        "error=%s", tenant_id, type(exc).__name__)

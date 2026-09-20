@@ -99,31 +99,60 @@ def _text_of(message: Mapping[str, Any]) -> str:
     return ""
 
 
-def _scoped_tenant(db: Any, *, phone_number_id: str, recipient: str) -> Optional[Any]:
-    """The pilot decision for this message, or ``None`` when it is not ours.
+# What one message in the batch turned out to be.
+IN_SCOPE = "in_scope"            # pilot traffic: it must be durable before we ack
+OUT_OF_SCOPE = "out_of_scope"    # verified as not the pilot's: untouched, as today
+UNDECIDABLE = "undecidable"      # the lookup failed, or two tenants claim the number
 
-    Uses the pilot's own guard, so "scoped" here means exactly what it means
-    everywhere else: an allowlisted tenant and recipient on a verified
-    connection, with a model configured.
+
+def _classify(db: Any, *, phone_number_id: str, recipient: str) -> Tuple[str, Any, str]:
+    """``(verdict, target, detail)`` for one message.
+
+    Three outcomes, because two would be a lie. "Verified out of scope" is a
+    statement about the traffic — an allowlisted tenant does not own this
+    connection, or this recipient is not one the pilot answers — and that
+    traffic keeps exactly the behaviour it has today. "Undecidable" is a
+    statement about *us*: the scope lookup failed, or more than one allowlisted
+    tenant claims the number. Treating the second as the first is how
+    pilot-owned work gets acknowledged and dropped, so it is answered
+    separately and the request is not acknowledged as accepted.
+
+    The connection that comes back is the **verified** one — the row the guard
+    checked — and it is what travels into persistence. Nothing re-derives a
+    channel reference from the payload.
     """
     from core.commerce_runtime import pilot_guard  # noqa: PLC0415
 
-    connection = pilot_guard.tenant_for_phone_number_id(db, phone_number_id=phone_number_id)
-    if connection is None:
-        return None
-    tenant_id, connection_ref, _connection_id = connection
-    decision = pilot_guard.evaluate_pilot_route(
-        db, tenant_id=tenant_id, customer_phone=recipient,
-        phone_number_id=phone_number_id, inbound_text="_",
-    )
+    scope = pilot_guard.resolve_pilot_scope(db, phone_number_id=phone_number_id)
+    if scope.status == pilot_guard.SCOPE_NOT_OURS:
+        return OUT_OF_SCOPE, None, scope.detail
+    if not scope.resolved:
+        return UNDECIDABLE, None, f"scope_{scope.status}:{scope.detail}"
+
+    try:
+        decision = pilot_guard.evaluate_pilot_route(
+            db, tenant_id=scope.tenant_id, customer_phone=recipient,
+            phone_number_id=phone_number_id, inbound_text="_",
+        )
+    except Exception as exc:  # noqa: BLE001 - an unanswerable guard decides nothing
+        logger.error("[COMMERCE_RUNTIME_ACCEPT] guard failed tenant=%s error=%s",
+                     scope.tenant_id, type(exc).__name__)
+        return UNDECIDABLE, None, f"guard_error:{type(exc).__name__}"
+
     if decision.reason in {pilot_guard.PILOT_DISABLED, pilot_guard.TENANT_NOT_ALLOWLISTED,
                            pilot_guard.RECIPIENT_MISSING,
                            pilot_guard.RECIPIENT_UNNORMALIZABLE,
                            pilot_guard.RECIPIENT_NOT_ALLOWLISTED,
                            pilot_guard.CONNECTION_NOT_VERIFIED}:
-        return None
-    return (tenant_id, connection_ref or f"wa:{phone_number_id}",
-            decision.recipient or pilot_guard.normalize_recipient(recipient))
+        return OUT_OF_SCOPE, None, decision.reason
+    if decision.reason == pilot_guard.GUARD_ERROR:
+        return UNDECIDABLE, None, decision.reason
+    normalized = decision.recipient or pilot_guard.normalize_recipient(recipient)
+    if not normalized:
+        return OUT_OF_SCOPE, None, pilot_guard.RECIPIENT_UNNORMALIZABLE
+    return IN_SCOPE, (scope.tenant_id,
+                      decision.connection_ref or scope.connection_ref,
+                      normalized, scope.connection_id), decision.reason
 
 
 def record_before_acknowledging(body: Mapping[str, Any], *,
@@ -151,6 +180,7 @@ def record_before_acknowledging(body: Mapping[str, Any], *,
 
     recorded: List[str] = []
     failed: List[str] = []
+    undecided: List[str] = []
     scoped = 0
     db = None
     try:
@@ -162,19 +192,38 @@ def record_before_acknowledging(body: Mapping[str, Any], *,
             phone_number_id = item["phone_number_id"]
             if not identity or not recipient or not phone_number_id:
                 continue                                  # not addressable; not ours to hold
-            target = _scoped_tenant(db, phone_number_id=phone_number_id, recipient=recipient)
-            if target is None:
-                continue                                  # unrelated traffic, untouched
-            tenant_id, connection_ref, normalized = target
+            verdict, target, detail = _classify(
+                db, phone_number_id=phone_number_id, recipient=recipient)
+            if verdict == OUT_OF_SCOPE:
+                continue                                  # verified unrelated, untouched
+            if verdict == UNDECIDABLE:
+                # Not "not ours". We could not establish whose this is, and an
+                # acknowledgement would end the provider's retries for a message
+                # that may be the pilot's and has nothing recorded for it.
+                logger.error("[COMMERCE_RUNTIME_ACCEPT] scope undecidable "
+                             "phone_number_id=%s detail=%s — refusing to acknowledge",
+                             phone_number_id, detail)
+                undecided.append(identity or "(no id)")
+                continue
+            tenant_id, connection_ref, normalized, connection_id = target
             scoped += 1
+            try:
+                generation = handover.read_barrier(db, tenant_id=tenant_id).generation
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[COMMERCE_RUNTIME_ACCEPT] barrier unreadable tenant=%s "
+                             "error=%s — refusing to acknowledge",
+                             tenant_id, type(exc).__name__)
+                failed.append(identity)
+                continue
             record = handover.record_inbound(
                 db, tenant_id=tenant_id, phone_number_id=phone_number_id,
                 channel_connection_ref=connection_ref, recipient=normalized,
                 provider_message_id=identity,
-                payload={"text": _text_of(message), "type": str(message.get("type") or "")},
+                payload={"text": _text_of(message), "type": str(message.get("type") or ""),
+                         "connection_id": connection_id,
+                         "raw": _replayable(message)},
                 reason=handover.REASON_ACCEPTED,
-                barrier_generation=handover.read_barrier(
-                    db, tenant_id=tenant_id).generation)
+                barrier_generation=generation)
             if record is None:
                 failed.append(identity)
             else:
@@ -191,6 +240,9 @@ def record_before_acknowledging(body: Mapping[str, Any], *,
             except Exception:  # noqa: BLE001 - a session we cannot close is dropped
                 logger.warning("[COMMERCE_RUNTIME_ACCEPT] session close failed")
 
+    if undecided:
+        return Acceptance(accepted=False, recorded=tuple(recorded), failed=tuple(undecided),
+                          scoped=scoped, reason="scope_undecidable")
     if failed:
         logger.error("[COMMERCE_RUNTIME_ACCEPT] %s pilot inbound(s) were not persisted "
                      "— refusing to acknowledge the batch", len(failed))
@@ -201,4 +253,24 @@ def record_before_acknowledging(body: Mapping[str, Any], *,
     return Acceptance(accepted=True, recorded=tuple(recorded), scoped=scoped, reason="recorded")
 
 
-__all__ = ["Acceptance", "record_before_acknowledging"]
+def _replayable(message: Mapping[str, Any]) -> Dict[str, Any]:
+    """The inbound itself, kept small enough to store and whole enough to replay.
+
+    Recovery rebuilds a provider webhook body from this, so it keeps the parts a
+    dispatcher reads — id, sender, type, timestamp, the typed payload and the
+    reply context — and drops everything else rather than archiving a payload of
+    unbounded size next to every accepted message.
+    """
+    keep = ("id", "from", "type", "timestamp", "text", "button", "interactive",
+            "context", "image", "document", "audio", "video", "sticker", "location",
+            "order", "referral")
+    out: Dict[str, Any] = {}
+    for key in keep:
+        value = message.get(key)
+        if value not in (None, "", {}, []):
+            out[key] = value
+    return out
+
+
+__all__ = ["Acceptance", "IN_SCOPE", "OUT_OF_SCOPE", "UNDECIDABLE",
+           "record_before_acknowledging"]

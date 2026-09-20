@@ -45,7 +45,7 @@ from tests.commerce_reliability.test_commerce_runtime_foundation_pg import (
     _drop_database,
 )
 
-REVISION = "0110"
+REVISION = "0111"
 PHONE = "+966500000001"
 QUESTION = "عندكم حذاء رياضي أبيض؟"
 PRODUCT_TITLE = "حذاء رياضي أبيض"

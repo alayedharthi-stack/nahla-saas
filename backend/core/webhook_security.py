@@ -396,6 +396,92 @@ def check_replay(
         return False
 
 
+@dataclass(frozen=True)
+class ReplayVerdict:
+    """Whether to reject, and whether *this* request took the nonce.
+
+    ``claimed`` is what makes a refusal recoverable. ``check_replay`` claims the
+    nonce with ``SET NX``: the first request through wins it, and every later
+    copy of the same body is a replay. If the winner then fails to accept the
+    work and answers a retryable status, the provider's redelivery is the
+    *same* body — and without giving the nonce back it would be dropped as a
+    replay, which looks to the provider exactly like success. Only the request
+    that claimed it may release it.
+    """
+
+    reject: bool
+    claimed: bool = False
+    key: str = ""
+
+
+def replay_nonce_key(provider: str, raw_body: bytes) -> str:
+    """The exact key ``check_replay`` uses. One definition, two callers."""
+    return f"webhook:nonce:{provider}:{_body_fingerprint(provider, raw_body)}"
+
+
+def evaluate_replay_claim(
+    provider: str,
+    raw_body: bytes,
+    *,
+    tenant_id: Optional[int] = None,
+    request_meta: Optional[dict] = None,
+    ttl_seconds: int = 86400,
+) -> ReplayVerdict:
+    """:func:`evaluate_replay`, plus whether this request claimed the nonce.
+
+    Same protection, same flags, same audit row. The difference is that the
+    caller can hand the nonce back with :func:`release_replay_nonce` when it
+    turns out it could not accept the work.
+    """
+    from core.config import (  # noqa: PLC0415
+        WEBHOOK_REPLAY_PROTECTION_ENABLED,
+        WEBHOOK_REPLAY_REJECT_ENABLED,
+    )
+    if not WEBHOOK_REPLAY_PROTECTION_ENABLED:
+        return ReplayVerdict(reject=False, claimed=False)
+
+    key = replay_nonce_key(provider, raw_body)
+    if not check_replay(provider, raw_body, ttl_seconds=ttl_seconds):
+        # Either this request claimed the nonce, or Redis is absent and nothing
+        # is claimed at all. Releasing a key that was never set is a no-op, so
+        # the distinction costs nothing and the recoverable case is covered.
+        return ReplayVerdict(reject=False, claimed=True, key=key)
+
+    try:
+        from core.webhook_audit import record_replay  # noqa: PLC0415
+        record_replay(provider, tenant_id=tenant_id, request_meta=request_meta or {})
+    except Exception as exc:  # noqa: BLE001 — audit is best-effort
+        logger.warning("[webhook_security] replay audit record failed: %s", exc)
+
+    return ReplayVerdict(reject=bool(WEBHOOK_REPLAY_REJECT_ENABLED), claimed=False, key=key)
+
+
+def release_replay_nonce(verdict: ReplayVerdict) -> bool:
+    """Give back a nonce this request claimed but could not accept.
+
+    Called on exactly one path: the request is answered with a retryable status
+    because the work was not made durable. Giving the nonce back is what keeps
+    the provider's identical retry a real retry instead of a silent drop.
+
+    A verdict that did not claim anything releases nothing — a concurrent
+    duplicate must still be a duplicate. Never raises: a nonce that cannot be
+    released expires on its own TTL, which delays a retry rather than losing it.
+    """
+    if not verdict.claimed or not verdict.key:
+        return False
+    try:
+        from core.redis_client import get_redis  # noqa: PLC0415
+
+        client = get_redis()
+        if client is None:
+            return False
+        client.delete(verdict.key)
+        return True
+    except Exception as exc:  # noqa: BLE001 — the TTL is the backstop
+        logger.warning("[webhook_security] could not release replay nonce: %s", exc)
+        return False
+
+
 def evaluate_replay(
     provider: str,
     raw_body: bytes,

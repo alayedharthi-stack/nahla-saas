@@ -168,6 +168,60 @@ def admitted_turn_for(
         return None
 
 
+@dataclasses.dataclass(frozen=True)
+class Recoverable:
+    """Why a duplicate the platform would drop has to be let through."""
+
+    tenant_id: int
+    provider_message_id: str
+    basis: str                     # unfinished_turn | accepted_not_admitted
+    turn_id: Optional[int] = None
+
+
+# The two bases. Both mean "a customer is owed something and this event is the
+# only one that can reach it"; they differ in how far the work got.
+BASIS_UNFINISHED_TURN = "unfinished_turn"
+BASIS_ACCEPTED_NOT_ADMITTED = "accepted_not_admitted"
+
+
+def accepted_but_unadmitted(*, tenant_id: int, phone_number_id: Any,
+                            provider_message_id: Any, session: Any = None) -> bool:
+    """Whether a durable acceptance for this identity is still pending.
+
+    The acceptance record is written before the webhook answers, and it is
+    resolved only against a terminal. One that is still pending therefore means
+    exactly this: the provider was told we had the message, and nothing has
+    finished it. That is work to recover even though no turn was ever admitted —
+    the very case a "is there an unfinished turn" check answers ``no`` to.
+    """
+    pmid = str(provider_message_id or "").strip()
+    channel = channel_connection_ref(phone_number_id)
+    if not pmid or channel == f"{CHANNEL_REF_PREFIX}:":
+        return False
+    owns_session = session is None
+    try:
+        from core.commerce_runtime import handover  # noqa: PLC0415
+
+        if owns_session:
+            from database.session import SessionLocal  # noqa: PLC0415
+
+            session = SessionLocal()
+        record = handover.accepted_inbound(
+            session, tenant_id=int(tenant_id), channel_connection_ref=channel,
+            provider_message_id=pmid)
+        return record is not None and record.pending
+    except Exception as exc:  # noqa: BLE001 - an unreadable record establishes nothing
+        logger.warning("[COMMERCE_RUNTIME_RECOVERY] acceptance lookup failed tenant=%s "
+                       "error=%s", tenant_id, type(exc).__name__)
+        return False
+    finally:
+        if owns_session and session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("[COMMERCE_RUNTIME_RECOVERY] session close failed")
+
+
 def duplicate_carries_unfinished_work(
     *,
     phone_number_id: Any,
@@ -215,6 +269,19 @@ def duplicate_carries_unfinished_work(
                 "tenant=%s turn=%s provider_message_id=%s — allowing it through to be finished",
                 found.tenant_id, found.turn_id, found.provider_message_id)
             return found
+        # No turn — but the acknowledgement may still have promised one. An
+        # accepted inbound that was never admitted is the case a turn lookup
+        # cannot see, and it is precisely what a recovery replay carries.
+        if accepted_but_unadmitted(tenant_id=tenant_id, phone_number_id=phone_number_id,
+                                   provider_message_id=provider_message_id):
+            logger.warning(
+                "[COMMERCE_RUNTIME_RECOVERY] duplicate inbound carries an accepted inbound "
+                "nobody admitted tenant=%s provider_message_id=%s — allowing it through",
+                tenant_id, provider_message_id)
+            return AdmittedInbound(tenant_id=int(tenant_id), turn_id=0,
+                                   conversation_id=0,
+                                   provider_message_id=str(provider_message_id or "").strip(),
+                                   finished=False)
     return None
 
 
@@ -366,7 +433,9 @@ def handover_settled(states: Any) -> bool:
 
 
 __all__ = [
-    "AdmittedInbound", "CHANNEL_REF_PREFIX", "HandoverState", "MAX_TENANTS_CONSIDERED",
+    "AdmittedInbound", "BASIS_ACCEPTED_NOT_ADMITTED", "BASIS_UNFINISHED_TURN",
+    "CHANNEL_REF_PREFIX", "HandoverState", "MAX_TENANTS_CONSIDERED", "Recoverable",
+    "accepted_but_unadmitted",
     "NAMESPACE", "TooManyTenants", "UnfinishedTurn", "admitted_turn_for",
     "channel_connection_ref", "duplicate_carries_unfinished_work",
     "handover_settled", "handover_state", "handover_state_on", "unfinished_turn_for",

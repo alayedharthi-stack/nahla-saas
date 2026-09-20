@@ -277,7 +277,7 @@
       "id": "commerce_runtime_handover_migration",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py",
-      "origin": "PR #1099 — revision 0110: the handover's durable barrier, worker fleet and deferred inbound, created from the package's own metadata, refused rather than reconciled on a mismatch, and reversible",
+      "origin": "PR #1099 — revision 0111: the handover's durable barrier, worker fleet and deferred inbound, created from the package's own metadata, refused rather than reconciled on a mismatch, and reversible",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -291,7 +291,10 @@
         "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_retired_worker_must_name_who_retired_it",
         "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_an_incompatible_pre_existing_relation_is_refused_and_not_stamped",
         "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_downgrade_removes_what_it_made_and_leaves_0109_alone",
-        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_upgrade_is_idempotent_on_a_database_that_already_has_it"
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_upgrade_is_idempotent_on_a_database_that_already_has_it",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_relation_with_the_right_columns_and_no_unique_index_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_relation_missing_a_check_constraint_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_worker_row_carries_its_retirement_evidence"
       ]
     },
     {
@@ -329,7 +332,16 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_h5_a_record_the_runtime_finished_stops_counting",
         "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_h5_an_inbound_arriving_in_the_settled_window_is_recorded_not_lost",
         "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_h3_a_worker_that_observed_the_open_barrier_is_behind_after_a_drain",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_h3_retirement_is_recorded_and_carried_into_the_evidence"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_h3_retirement_is_recorded_and_carried_into_the_evidence",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_a_replayed_disposition_is_verified_against_a_real_terminal",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_a_turn_without_a_terminal_cannot_evidence_a_replay",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_an_inbound_in_the_settled_window_invalidates_the_release",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_reopening_over_work_nobody_met_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_recovery_closes_an_entry_whose_turn_already_reached_a_terminal",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_recovery_refuses_to_replay_into_a_closed_barrier",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_recovery_leaves_an_unknown_delivery_alone",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_a_dry_run_decides_everything_except_the_replay",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_two_runners_do_not_replay_the_same_entry"
       ]
     },
     {

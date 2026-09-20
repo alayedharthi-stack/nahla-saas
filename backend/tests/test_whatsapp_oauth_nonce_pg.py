@@ -91,8 +91,8 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert 'down_revision = "0102"' in source
     assert "down_revision = (\"0092\"" not in source
     assert "down_revision = ('0092'" not in source
-    assert APPLICATION_ALEMBIC_HEAD == "0110"
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0110"})
+    assert APPLICATION_ALEMBIC_HEAD == "0111"
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111"})
     assert INTEGRATION_BOOTSTRAP_TARGET == "0093"
     prev = os.getcwd()
     try:
@@ -106,10 +106,10 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         rev_0107 = script.get_revision("0107")
         rev_0108 = script.get_revision("0108")
         rev_0109 = script.get_revision("0109")
-        rev_0110 = script.get_revision("0110")
+        rev_0110 = script.get_revision("0111")
     finally:
         os.chdir(prev)
-    assert heads == frozenset({"0092", "0110"})
+    assert heads == frozenset({"0092", "0111"})
     assert rev.down_revision == _PARENT
     assert not isinstance(rev.down_revision, tuple)
     assert rev_0104 is not None
@@ -128,7 +128,7 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert rev_0108 is not None
     assert rev_0108.down_revision == "0107"
     assert not isinstance(rev_0108.down_revision, tuple)
-    # 0109 (commerce runtime ledgers) and 0110 (the handover), both dormant,
+    # 0109 (commerce runtime ledgers) and 0111 (the handover), both dormant,
     # extend 0108 linearly —
     # it must not merge the abandoned 0092 branch or open a new head.
     assert rev_0109 is not None
