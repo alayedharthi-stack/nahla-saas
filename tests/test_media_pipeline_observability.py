@@ -122,7 +122,7 @@ class TestDownloadInstrumentation:
 
         caplog.set_level(logging.INFO, logger=NORMALIZER_LOGGER)
         result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=MagicMock(),
+            db=MagicMock(), wa_conn=MagicMock(provider="meta"),
             tenant_id=33, media_id="mid-1", mime_type="image/jpeg",
         ))
         assert result is not None
@@ -137,6 +137,58 @@ class TestDownloadInstrumentation:
         assert "[MEDIA_DOWNLOAD_FETCH]" in records
         assert "bytes=1008" in records
         assert "content_type=image/jpeg" in records
+
+    def test_a_retired_provider_connection_is_refused_before_the_meta_hop(
+            self, caplog, monkeypatch):
+        """A row left over from the removed 360dialog integration holds a
+        credential Meta never issued. Downloading its media through Meta would
+        hand one provider's key to another provider's API, so the download is
+        refused before any request is built — no token is resolved and no hop
+        is attempted."""
+        from modules.ai.media import normalizer
+
+        resolved = {"called": False}
+
+        async def _token(*_a, **_k):
+            resolved["called"] = True
+            return MagicMock(token="d360-key")
+
+        monkeypatch.setattr(normalizer, "get_token_for_operation", _token)
+        opened = {"count": 0}
+
+        def _client(*_a, **_k):
+            opened["count"] += 1
+            raise AssertionError("no provider request may be built")
+
+        monkeypatch.setattr(normalizer.httpx, "AsyncClient", _client)
+
+        caplog.set_level(logging.WARNING, logger=NORMALIZER_LOGGER)
+        result = _run(normalizer._download_meta_media(
+            db=MagicMock(), wa_conn=MagicMock(provider="dialog360"),
+            tenant_id=33, media_id="mid-1", mime_type="image/jpeg",
+        ))
+        assert result is None
+        assert resolved["called"] is False, "no token may be resolved for it"
+        assert opened["count"] == 0, "no client may be opened for it"
+        records = " | ".join(r.getMessage() for r in caplog.records)
+        assert "[MEDIA_DOWNLOAD_UNSUPPORTED_PROVIDER]" in records, records
+
+    def test_a_connection_with_no_provider_value_is_still_meta(self, monkeypatch):
+        """Every Meta row written before the provider column existed holds an
+        empty value. Those are Meta, and they keep working."""
+        from modules.ai.media import normalizer
+
+        monkeypatch.setattr(normalizer, "get_token_for_operation",
+                            AsyncMock(return_value=MagicMock(token="t")))
+        cdn = self._cdn_resp(body=b"\x89PNG\r\n\x1a\n" + b"x" * 10)
+        meta = self._meta_resp(url="https://lookaside.fbsbx.com/abc", mime="image/png")
+        monkeypatch.setattr(normalizer.httpx, "AsyncClient",
+                            MagicMock(return_value=self._async_client_returning(meta, cdn)))
+        result = _run(normalizer._download_meta_media(
+            db=MagicMock(), wa_conn=MagicMock(provider=None),
+            tenant_id=33, media_id="mid-1", mime_type="image/jpeg",
+        ))
+        assert result is not None and result["bytes"].startswith(b"\x89PNG")
 
     def test_html_error_page_with_200_ok_is_rejected(self, caplog, monkeypatch):
         """The CDN's expired-URL failure mode: 200 OK serving an
@@ -156,7 +208,7 @@ class TestDownloadInstrumentation:
 
         caplog.set_level(logging.WARNING, logger=NORMALIZER_LOGGER)
         result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=MagicMock(),
+            db=MagicMock(), wa_conn=MagicMock(provider="meta"),
             tenant_id=33, media_id="mid-1", mime_type="image/jpeg",
         ))
         assert result is None, "HTML response must be rejected"
@@ -180,7 +232,7 @@ class TestDownloadInstrumentation:
 
         caplog.set_level(logging.WARNING, logger=NORMALIZER_LOGGER)
         result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=MagicMock(),
+            db=MagicMock(), wa_conn=MagicMock(provider="meta"),
             tenant_id=33, media_id="mid-1", mime_type="image/jpeg",
         ))
         assert result is None
@@ -237,163 +289,6 @@ class TestDownloadInstrumentation:
         assert captured["headers"].get("Authorization") == "Bearer META-TOKEN-xyz"
         assert "D360-API-KEY" not in captured["headers"]
 
-    def test_dialog360_provider_uses_waba_v2_and_d360_key(self, caplog, monkeypatch):
-        """360dialog tenants must hit ``waba-v2.360dialog.io/{media_id}``
-        with a ``D360-API-KEY`` header — NOT ``Authorization: Bearer``.
-        This is the specific regression that caused
-        ``401 Unauthorized`` in production: a 360dialog API key
-        was being sent to Meta's Graph API as a Bearer token."""
-        from modules.ai.media import normalizer
-        from core.config import D360_API_BASE_URL
-
-        captured = {"url": None, "headers": None}
-
-        # Mock 360dialog responses. 360dialog's resolved URL points
-        # BACK at waba-v2.360dialog.io, not a public CDN.
-        meta = MagicMock()
-        meta.status_code = 200
-        meta.content = b"x"
-        meta.json.return_value = {
-            "url": "https://waba-v2.360dialog.io/abc/raw",
-            "mime_type": "image/jpeg",
-        }
-        meta.raise_for_status = MagicMock()
-        cdn = self._cdn_resp(body=b"\xff\xd8\xff" + b"x" * 100)
-        client = AsyncMock()
-
-        async def _recording_get(url, headers=None, **kw):
-            if captured["url"] is None:
-                captured["url"] = url
-                captured["headers"] = dict(headers or {})
-                return meta
-            return cdn
-
-        client.get = _recording_get
-        ctx = AsyncMock()
-        ctx.__aenter__.return_value = client
-        ctx.__aexit__.return_value = None
-
-        monkeypatch.setattr(normalizer, "get_token_for_operation",
-                            AsyncMock(return_value=MagicMock(token="D360-KEY-abc")))
-        monkeypatch.setattr(normalizer.httpx, "AsyncClient",
-                            MagicMock(return_value=ctx))
-
-        wa_conn = MagicMock(provider="dialog360")
-        caplog.set_level(logging.INFO, logger=NORMALIZER_LOGGER)
-        result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-d360-1", mime_type="image/jpeg",
-        ))
-        assert result is not None
-        # URL: bare path on waba-v2 base. NO /v20.0/. NO graph.facebook.com.
-        expected_base = D360_API_BASE_URL.rstrip("/")
-        assert captured["url"] == f"{expected_base}/m-d360-1", captured["url"]
-        # Headers: D360-API-KEY ONLY. NO Authorization: Bearer.
-        assert captured["headers"].get("D360-API-KEY") == "D360-KEY-abc"
-        assert "Authorization" not in captured["headers"], (
-            "360dialog must not receive a Bearer header — this is the "
-            "exact bug that caused 401 in production"
-        )
-        # Log line includes provider=dialog360 so operators can grep
-        # by provider when diagnosing per-tenant download issues.
-        records = " | ".join(r.getMessage() for r in caplog.records)
-        assert "provider=dialog360" in records
-
-    def test_dialog360_hop2_keeps_d360_key_when_url_resolves_back_to_360dialog(self, caplog, monkeypatch):
-        """360dialog's hop-2 URL lands at ``waba-v2.360dialog.io``,
-        which still requires ``D360-API-KEY`` to read. We must
-        attach the same auth header on the second GET; otherwise
-        hop-2 returns 401 even though hop-1 succeeded."""
-        from modules.ai.media import normalizer
-
-        meta = MagicMock()
-        meta.status_code = 200
-        meta.content = b"x"
-        meta.json.return_value = {
-            "url": "https://waba-v2.360dialog.io/abc/raw",
-            "mime_type": "image/jpeg",
-        }
-        meta.raise_for_status = MagicMock()
-        cdn = self._cdn_resp(body=b"\xff\xd8\xff" + b"x" * 100)
-        client = AsyncMock()
-
-        seen_headers: List[Dict[str, str]] = []
-
-        async def _recording_get(url, headers=None, **kw):
-            seen_headers.append(dict(headers or {}))
-            return meta if len(seen_headers) == 1 else cdn
-
-        client.get = _recording_get
-        ctx = AsyncMock()
-        ctx.__aenter__.return_value = client
-        ctx.__aexit__.return_value = None
-
-        monkeypatch.setattr(normalizer, "get_token_for_operation",
-                            AsyncMock(return_value=MagicMock(token="D360-KEY")))
-        monkeypatch.setattr(normalizer.httpx, "AsyncClient",
-                            MagicMock(return_value=ctx))
-
-        wa_conn = MagicMock(provider="dialog360")
-        result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-d360-2", mime_type="image/jpeg",
-        ))
-        assert result is not None
-        # Hop 1: resolve — D360-API-KEY present.
-        assert seen_headers[0].get("D360-API-KEY") == "D360-KEY"
-        # Hop 2: fetch — D360-API-KEY ALSO present.
-        assert seen_headers[1].get("D360-API-KEY") == "D360-KEY", (
-            "360dialog hop-2 lost the auth header — will 401 on real "
-            "waba-v2.360dialog.io responses"
-        )
-
-    def test_dialog360_hop2_drops_auth_when_url_is_unknown_third_party(self, monkeypatch):
-        """If 360dialog returns a URL on a host NEITHER 360dialog
-        NOR Meta's known CDN footprint, we must NOT leak the API
-        key. The fetch is attempted bare and relies on signed-URL
-        semantics. (Lookaside IS allowed — see the F10 attempt
-        loop tests below.)"""
-        from modules.ai.media import normalizer
-
-        meta = MagicMock()
-        meta.status_code = 200
-        meta.content = b"x"
-        meta.json.return_value = {
-            "url": "https://random-cdn.example.com/abc?sig=xyz",
-            "mime_type": "image/jpeg",
-        }
-        meta.raise_for_status = MagicMock()
-        cdn = self._cdn_resp(body=b"\xff\xd8\xff" + b"x" * 100)
-        client = AsyncMock()
-
-        seen_headers: List[Dict[str, str]] = []
-
-        async def _recording_get(url, headers=None, **kw):
-            seen_headers.append(dict(headers or {}))
-            return meta if len(seen_headers) == 1 else cdn
-
-        client.get = _recording_get
-        ctx = AsyncMock()
-        ctx.__aenter__.return_value = client
-        ctx.__aexit__.return_value = None
-
-        monkeypatch.setattr(normalizer, "get_token_for_operation",
-                            AsyncMock(return_value=MagicMock(token="D360-KEY")))
-        monkeypatch.setattr(normalizer.httpx, "AsyncClient",
-                            MagicMock(return_value=ctx))
-
-        wa_conn = MagicMock(provider="dialog360")
-        _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-d360-3", mime_type="image/jpeg",
-        ))
-        # Hop-2 to an unknown third-party host MUST NOT carry the
-        # API key. Only the bare-GET attempt runs.
-        assert "D360-API-KEY" not in seen_headers[1], (
-            "Leaked 360dialog API key to a non-360dialog, non-Meta host"
-        )
-        assert "Authorization" not in seen_headers[1]
-
     # ── F11: 360dialog hop-2 lookaside → waba-v2 host rewrite ──
     #
     # 360dialog's official docs (
@@ -413,187 +308,6 @@ class TestDownloadInstrumentation:
     # F9 hardcoded Meta (401). F10 added a Bearer fallback that
     # still hit lookaside (401). F11 implements the documented
     # contract.
-
-    def test_dialog360_hop2_rewrites_lookaside_host_to_waba_v2(self, caplog, monkeypatch):
-        """The hop-2 GET MUST target ``waba-v2.360dialog.io`` —
-        NOT lookaside — preserving path + query exactly. Header
-        MUST be ``D360-API-KEY`` only (no Bearer). Single
-        attempt — no fallback loop."""
-        from modules.ai.media import normalizer
-
-        meta = MagicMock()
-        meta.status_code = 200
-        meta.content = b"x"
-        # 360dialog's hop-1 returns a lookaside URL with the
-        # ``mid`` query param that the rewrite MUST preserve —
-        # the path + query are the actual content selector;
-        # losing them = wrong file.
-        meta.json.return_value = {
-            "url": "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=ATTM123&ext=ZZZ&hash=ABC",
-            "mime_type": "image/jpeg",
-        }
-        meta.raise_for_status = MagicMock()
-        good = self._cdn_resp(body=b"\xff\xd8\xff" + b"x" * 1000)
-
-        seen: List[Dict[str, Any]] = []
-
-        async def _recording_get(url, headers=None, **kw):
-            seen.append({"url": url, "headers": dict(headers or {})})
-            return meta if len(seen) == 1 else good
-
-        client = AsyncMock()
-        client.get = _recording_get
-        ctx = AsyncMock()
-        ctx.__aenter__.return_value = client
-        ctx.__aexit__.return_value = None
-
-        monkeypatch.setattr(normalizer, "get_token_for_operation",
-                            AsyncMock(return_value=MagicMock(token="D360-KEY-1")))
-        monkeypatch.setattr(normalizer.httpx, "AsyncClient",
-                            MagicMock(return_value=ctx))
-
-        wa_conn = MagicMock(provider="dialog360")
-        caplog.set_level(logging.INFO, logger=NORMALIZER_LOGGER)
-        result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-rewrite", mime_type="image/jpeg",
-        ))
-        assert result is not None
-
-        # Hop-2 must target waba-v2.360dialog.io.
-        hop2_url = seen[1]["url"]
-        assert hop2_url.startswith("https://waba-v2.360dialog.io/"), (
-            f"hop-2 went to {hop2_url!r} — should have been rewritten "
-            f"from lookaside to waba-v2.360dialog.io per 360dialog docs"
-        )
-        # Path + query MUST be preserved EXACTLY (the ``mid``
-        # parameter is the content selector).
-        assert hop2_url == (
-            "https://waba-v2.360dialog.io/whatsapp_business/attachments/"
-            "?mid=ATTM123&ext=ZZZ&hash=ABC"
-        ), f"path/query mangled by rewrite: {hop2_url!r}"
-        # Header MUST be D360-API-KEY only. No Bearer.
-        assert seen[1]["headers"].get("D360-API-KEY") == "D360-KEY-1"
-        assert "Authorization" not in seen[1]["headers"], (
-            "Bearer header must NOT be sent for 360dialog hop-2 — "
-            "the docs are explicit"
-        )
-
-        records = " | ".join(r.getMessage() for r in caplog.records)
-        # Diagnostic log line names the rewrite and the
-        # destination host so a future investigation can
-        # confirm the contract is in force without reading
-        # source.
-        assert "[MEDIA_DOWNLOAD_FETCH_HOST]" in records
-        assert "rewrite=lookaside_to_waba_v2" in records
-        assert "fetch_host=waba-v2.360dialog.io" in records
-        assert "auth=d360_key" in records
-        # Single attempt — no [MEDIA_DOWNLOAD_FETCH_401] retry line.
-        assert "[MEDIA_DOWNLOAD_FETCH_401]" not in records
-
-    def test_dialog360_hop2_uses_waba_v2_url_asis_when_already_360dialog(self, caplog, monkeypatch):
-        """If 360dialog's hop-1 ever returns a native
-        waba-v2.360dialog.io URL (not lookaside), we MUST use
-        it as-is with D360-API-KEY. No rewrite needed."""
-        from modules.ai.media import normalizer
-
-        meta = MagicMock()
-        meta.status_code = 200
-        meta.content = b"x"
-        meta.json.return_value = {
-            "url": "https://waba-v2.360dialog.io/some/native/path?mid=NATIVE",
-            "mime_type": "image/jpeg",
-        }
-        meta.raise_for_status = MagicMock()
-        good = self._cdn_resp(body=b"\xff\xd8\xff" + b"x" * 500)
-
-        seen: List[Dict[str, Any]] = []
-
-        async def _recording_get(url, headers=None, **kw):
-            seen.append({"url": url, "headers": dict(headers or {})})
-            return meta if len(seen) == 1 else good
-
-        client = AsyncMock()
-        client.get = _recording_get
-        ctx = AsyncMock()
-        ctx.__aenter__.return_value = client
-        ctx.__aexit__.return_value = None
-
-        monkeypatch.setattr(normalizer, "get_token_for_operation",
-                            AsyncMock(return_value=MagicMock(token="D360-KEY")))
-        monkeypatch.setattr(normalizer.httpx, "AsyncClient",
-                            MagicMock(return_value=ctx))
-
-        wa_conn = MagicMock(provider="dialog360")
-        caplog.set_level(logging.INFO, logger=NORMALIZER_LOGGER)
-        result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-native", mime_type="image/jpeg",
-        ))
-        assert result is not None
-        # URL passed through unchanged.
-        assert seen[1]["url"] == "https://waba-v2.360dialog.io/some/native/path?mid=NATIVE"
-        assert seen[1]["headers"].get("D360-API-KEY") == "D360-KEY"
-        assert "Authorization" not in seen[1]["headers"]
-        records = " | ".join(r.getMessage() for r in caplog.records)
-        assert "rewrite=asis" in records
-
-    def test_dialog360_hop2_returns_none_on_persistent_401(self, caplog, monkeypatch):
-        """A 401 after host-rewrite + D360-API-KEY is a real
-        auth/config issue (wrong key, expired media_id, gateway
-        outage). We log explicitly and return None — no
-        fallback to Bearer, no fallback to lookaside."""
-        from modules.ai.media import normalizer
-
-        meta = MagicMock()
-        meta.status_code = 200
-        meta.content = b"x"
-        meta.json.return_value = {
-            "url": "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=X",
-            "mime_type": "image/jpeg",
-        }
-        meta.raise_for_status = MagicMock()
-
-        bad = MagicMock()
-        bad.status_code = 401
-        bad.content = b""
-        bad.headers = {}
-        bad.raise_for_status = MagicMock()
-
-        seen: List[Dict[str, Any]] = []
-
-        async def _recording_get(url, headers=None, **kw):
-            seen.append({"url": url, "headers": dict(headers or {})})
-            return meta if len(seen) == 1 else bad
-
-        client = AsyncMock()
-        client.get = _recording_get
-        ctx = AsyncMock()
-        ctx.__aenter__.return_value = client
-        ctx.__aexit__.return_value = None
-
-        monkeypatch.setattr(normalizer, "get_token_for_operation",
-                            AsyncMock(return_value=MagicMock(token="D360-KEY")))
-        monkeypatch.setattr(normalizer.httpx, "AsyncClient",
-                            MagicMock(return_value=ctx))
-
-        wa_conn = MagicMock(provider="dialog360")
-        caplog.set_level(logging.WARNING, logger=NORMALIZER_LOGGER)
-        result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=wa_conn,
-            tenant_id=33, media_id="m-401-real", mime_type="image/jpeg",
-        ))
-        assert result is None
-        # Hop-1 + ONE hop-2 attempt — no Bearer fallback, no loop.
-        assert len(seen) == 2
-        records = " | ".join(r.getMessage() for r in caplog.records)
-        assert "[MEDIA_DOWNLOAD_FETCH_401]" in records
-        # The 401 log line names the host so operators can tell
-        # whether the rewrite took effect or not.
-        assert "fetch_host=waba-v2.360dialog.io" in records
-        # No `[MEDIA_DOWNLOAD_FETCH_EXHAUSTED]` line — that was
-        # F10's multi-attempt vocabulary. F11 is single-attempt.
-        assert "[MEDIA_DOWNLOAD_FETCH_EXHAUSTED]" not in records
 
     def test_no_token_value_logged_anywhere(self, caplog, monkeypatch):
         """Sensitive-data invariant: the token value MUST NEVER
@@ -708,7 +422,7 @@ class TestDownloadInstrumentation:
 
         caplog.set_level(logging.INFO, logger=NORMALIZER_LOGGER)
         result = _run(normalizer._download_meta_media(
-            db=MagicMock(), wa_conn=MagicMock(),
+            db=MagicMock(), wa_conn=MagicMock(provider="meta"),
             tenant_id=33, media_id="mid-1", mime_type="image/jpeg",
         ))
         assert result is None
