@@ -34,6 +34,16 @@ logger = logging.getLogger("nahla.order_flow_v2.address_reply_recovery")
 RECOVERY_TOPIC = "customer_delivery_address"
 RECOVERY_RESPONSE_GOAL = "collect_delivery_address"
 
+# One goal per field the turn can actually be collecting. Projecting a
+# city question as a missing delivery address handed the composer two
+# contradictory operational facts — "the address is accepted, here is its
+# map link" and "the delivery address is missing" — before it generated
+# anything.
+_FIELD_RESPONSE_GOALS = {
+    "delivery_address": "collect_delivery_address",
+    "city": "collect_delivery_city",
+}
+
 # The composer is given a bounded slice of the turn. A recovery that hangs
 # is a turn that goes unanswered, which is the failure being repaired.
 RECOVERY_TIMEOUT_SECONDS = 8.0
@@ -91,6 +101,13 @@ def _emergency_fallback_text() -> str:
     return text or str(empty_reply_fallback() or "").strip()
 
 
+def response_goal_for_field(field_name: str) -> str:
+    """The collection goal this turn is actually pursuing."""
+    return _FIELD_RESPONSE_GOALS.get(
+        str(field_name or "").strip(), RECOVERY_RESPONSE_GOAL
+    )
+
+
 def _build_compose_inputs(
     *,
     tenant_id: int,
@@ -98,6 +115,7 @@ def _build_compose_inputs(
     message: str,
     conversation: Any,
     known_facts: Optional[Dict[str, Any]],
+    response_goal: str = RECOVERY_RESPONSE_GOAL,
 ):
     """A decision, a result and a context the existing composer accepts.
 
@@ -119,11 +137,12 @@ def _build_compose_inputs(
     from modules.ai.brain.types import BrainReplyState  # noqa: PLC0415
 
     facts = {k: v for k, v in (known_facts or {}).items() if v not in (None, "")}
+    goal = str(response_goal or RECOVERY_RESPONSE_GOAL)
     decision = Decision(
         action=ACTION_LLM_REPLY,
         args={
             "topic": RECOVERY_TOPIC,
-            "response_goal": RECOVERY_RESPONSE_GOAL,
+            "response_goal": goal,
         },
     )
     result = ActionResult(success=True, data={"trusted_facts": facts})
@@ -140,15 +159,15 @@ def _build_compose_inputs(
         store_name=str(getattr(commerce_facts, "store_name", "") or ""),
         stage="checkout",
         known_facts=dict(facts),
-        intent_name=RECOVERY_RESPONSE_GOAL,
-        response_goal=RECOVERY_RESPONSE_GOAL,
-        recommended_next_step=RECOVERY_RESPONSE_GOAL,
+        intent_name=goal,
+        response_goal=goal,
+        recommended_next_step=goal,
     )
     ctx = BrainContext(
         tenant_id=int(tenant_id),
         customer_phone=str(customer_phone or ""),
         message=str(message or ""),
-        intent=Intent(name=RECOVERY_RESPONSE_GOAL, confidence=1.0),
+        intent=Intent(name=goal, confidence=1.0),
         state=state,
         facts=commerce_facts,
         reply_state=reply_state,
@@ -175,6 +194,7 @@ async def compose_address_recovery_reply(
     turn_ref: str = "",
     composer: Any = None,
     timeout_seconds: float = RECOVERY_TIMEOUT_SECONDS,
+    response_goal: str = RECOVERY_RESPONSE_GOAL,
 ) -> RecoveredReply:
     """Compose an honest answer for a turn whose reply was refused.
 
@@ -194,6 +214,7 @@ async def compose_address_recovery_reply(
             message=message,
             conversation=conversation,
             known_facts=known_facts,
+            response_goal=response_goal,
         )
         attempted = True
         candidate = str(
@@ -271,16 +292,24 @@ async def compose_address_recovery_reply(
 ADDRESS_REPLY_FIELDS = frozenset({"delivery_address", "city"})
 
 
-def is_address_collection_turn(result: Any) -> bool:
-    """True when this reply's job is to ask about the delivery address."""
+def address_collection_field(result: Any) -> str:
+    """Which address field this reply is collecting, or ``""``."""
     field_name = str(
         (getattr(result, "state_patch", None) or {}).get("order_flow_v2_last_field") or ""
     )
-    return field_name in ADDRESS_REPLY_FIELDS
+    return field_name if field_name in ADDRESS_REPLY_FIELDS else ""
+
+
+def is_address_collection_turn(result: Any) -> bool:
+    """True when this reply's job is to ask about the delivery address."""
+    return bool(address_collection_field(result))
 
 
 def address_turn_facts(
-    *, order_prep: Optional[Dict[str, Any]], presentation: Any = None,
+    *,
+    order_prep: Optional[Dict[str, Any]],
+    presentation: Any = None,
+    field_name: str = "delivery_address",
 ) -> Dict[str, Any]:
     """The trusted facts an address turn is about.
 
@@ -292,7 +321,7 @@ def address_turn_facts(
         k: v for k, v in dict(order_prep or {}).items()
         if v not in (None, "", [], {})
     }
-    facts["missing_field"] = "delivery_address"
+    facts["missing_field"] = str(field_name or "delivery_address")
     choices = list(getattr(presentation, "choices", ()) or ())
     if choices:
         facts["saved_address_choices"] = [
@@ -318,6 +347,7 @@ async def compose_address_turn_reply(
     turn_ref: str = "",
     composer: Any = None,
     timeout_seconds: float = RECOVERY_TIMEOUT_SECONDS,
+    response_goal: str = RECOVERY_RESPONSE_GOAL,
 ) -> RecoveredReply:
     """Compose the ORDINARY address turn, not only the refused one.
 
@@ -341,18 +371,30 @@ async def compose_address_turn_reply(
         turn_ref=turn_ref,
         composer=composer,
         timeout_seconds=timeout_seconds,
+        response_goal=response_goal,
     )
 
 
 def _compose_text_source(result: Any, candidate: str) -> str:
     """Who actually wrote this string — ``llm``, or something else.
 
-    A non-empty return from ``compose`` is not proof of model authorship.
-    ``DefaultComposer`` catches orchestration failures itself and returns
-    the platform's generic emergency line, and it records what it did in
-    the provenance it attaches to ``result.data``. That record is read
-    here rather than assumed, and the approved fallback text is detected
-    directly as a second, independent check.
+    A non-empty return from ``compose`` is not proof of model authorship,
+    and neither is the outbound policy's ``text_source``: that is
+    INFERRED from having entered the LLM path, so an internal timeout —
+    which returns a fixed sentence and records ``chosen_path=llm_timeout``
+    without ever producing a candidate — still reads as ``llm``.
+
+    What is not inferred is the candidate the producer itself recorded.
+    ``stamp_general_llm_compose_metadata`` writes ``compose_reply_candidate``
+    only when a model actually generated text, so the question "did a
+    model write this?" is answered by "is there a recorded candidate, and
+    is this string derived from it?". Every branch that returns platform
+    wording — timeout, empty generation, internal emergency line — leaves
+    no candidate behind and is therefore never attributed to the model.
+
+    The approved fallback text is checked directly as a second,
+    independent signal. No customer wording is compared beyond that one
+    known platform line.
     """
     from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
 
@@ -362,18 +404,40 @@ def _compose_text_source(result: Any, candidate: str) -> str:
     try:
         if is_compose_failure_fallback(text):
             return "fallback_deterministic"
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — the policy read below is the other half of this check
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — the provenance read below is the other half of this check
         pass
     try:
-        policy = dict((getattr(result, "data", None) or {}).get("outbound_text_policy") or {})
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable policy is "unknown", which is handled as not-LLM
+        data = dict(getattr(result, "data", None) or {})
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unreadable provenance is "unknown", which is handled as not-LLM
         return "unknown"
-    if not policy:
+    if not data:
         return "unknown"
+
+    policy = dict(data.get("outbound_text_policy") or {})
     if policy.get("deterministic_text_detected"):
         return "fallback_deterministic"
-    source = str(policy.get("text_source") or "").strip().lower()
-    return source or "unknown"
+
+    recorded = str(data.get("compose_reply_candidate") or "").strip()
+    if not recorded:
+        # The producer reached a branch that returned its own wording:
+        # a timeout, an empty generation, an internal fallback. No model
+        # candidate exists, whatever the inferred policy says.
+        return "fallback_deterministic"
+    if not _derived_from(recorded, text):
+        return "fallback_deterministic"
+    return "llm"
+
+
+def _derived_from(recorded: str, final_text: str) -> bool:
+    """True when the delivered text really comes from that candidate."""
+    try:
+        from core.outbound_text_policy import (  # noqa: PLC0415
+            _final_text_is_llm_derived,
+        )
+
+        return bool(_final_text_is_llm_derived(recorded, final_text))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — falls back to the strict comparison below
+        return str(recorded or "").strip() == str(final_text or "").strip()
 
 
 def _revalidate(
@@ -428,8 +492,10 @@ __all__ = [
     "FALLBACK_REASON_UNSUPPORTED_AFTER_COMPOSE",
     "FALLBACK_REASON_UNVERIFIABLE_AFTER_COMPOSE",
     "RecoveredReply",
+    "address_collection_field",
     "address_turn_facts",
     "compose_address_recovery_reply",
     "compose_address_turn_reply",
     "is_address_collection_turn",
+    "response_goal_for_field",
 ]

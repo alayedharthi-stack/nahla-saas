@@ -3603,3 +3603,163 @@ def test_a_non_address_turn_is_left_to_its_existing_owner():
     assert "اسمك الكامل" in _payload_text(sent[0])
     assert _payload_text(sent[0]) != _COMPOSED_ADDRESS_QUESTION
     assert saved[0]["metadata"].get("address_reply_composed") is not True
+
+
+# ── G1–G3: the composer's own outcome, the entry boundary, and the field ──
+
+
+def _model_state(seen):
+    """The brain state the composer actually bound into the model call."""
+    if not seen:
+        return {}
+    return dict((seen[0].get("context_metadata") or {}).get("brain_state") or {})
+
+
+def _address_turn(db, tenant, convo, *, field="delivery_address"):
+    """A real owner turn collecting one address field, with facts on file."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    result = _owner_turn(db, tenant, convo, live=True, missing=(field,))
+    prep = {"city": "الرياض", "short_address": "RRRD1234", **result.state_patch}
+    if field == "city":
+        prep.pop("city", None)
+        prep["missing_fields"] = ["city"]
+        prep["google_maps_url"] = "https://maps.google.com/?q=24.7136,46.6753"
+        prep["delivery_address_status"] = "accepted"
+    convo.extra_metadata = {
+        **(convo.extra_metadata or {}),
+        "brain_state": {"stage": "checkout", "order_prep": prep},
+    }
+    flag_modified(convo, "extra_metadata")
+    db.commit()
+    return result
+
+
+def test_an_adapter_timeout_is_never_recorded_as_a_model_candidate():
+    """G1: ``text_source`` is INFERRED from entering the LLM path.
+
+    The composer's internal timeout branch returns a fixed sentence and
+    records ``chosen_path=llm_timeout`` without ever producing a
+    candidate, so an inferred ``llm`` read attributed platform wording to
+    the model. Authorship now comes from the candidate the producer
+    itself recorded, which that branch never writes.
+    """
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    result = _address_turn(db, tenant, convo)
+
+    seen = []
+
+    def _time_out(**kwargs):
+        seen.append(kwargs)
+        raise TimeoutError("isolated adapter timeout")
+
+    patches = _fake_provider()
+    patches[0] = (patches[0][0], {"side_effect": _time_out})
+    sent, saved = _run_send_block(db, tenant, convo, result, patches=patches)
+
+    assert len(seen) == 1, "the adapter must actually have been reached"
+    body = _payload_text(sent[0])
+    assert "تأخّر الرد" not in body, body
+    assert is_compose_failure_fallback(body)
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "fallback_deterministic"
+    assert meta["llm_candidate_present"] is False
+    assert meta["fallback_reason"] == "address_reply_compose_failed"
+    # Generation WAS attempted here — that is the difference from G2.
+    assert meta["address_claim_compose_attempted"] is True
+
+
+@pytest.mark.parametrize(
+    "extra,label",
+    [
+        ([("modules.ai.order_flow_v2.address_reply_recovery"
+           ".compose_address_turn_reply",
+           {"side_effect": RuntimeError("isolated entry error")})], "invocation"),
+        ([("builtins.__import__",
+           {"side_effect": _import_blocker(
+               "modules.ai.order_flow_v2.address_reply_recovery")})], "import"),
+    ],
+)
+def test_compose_that_cannot_be_entered_never_revives_the_old_prose(extra, label):
+    """G2: the ordinary address body is no longer this path's to write.
+
+    The webhook initialised the reply to the owner's deterministic text
+    and left it untouched when the compose block raised, so an import or
+    entry failure quietly restored the prose ownership this path had just
+    given up — with no compose provenance at all.
+    """
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    result = _address_turn(db, tenant, convo)
+
+    seen = []
+    sent, saved = _run_send_block(
+        db, tenant, convo, result, patches=_fake_provider(calls=seen) + list(extra),
+    )
+
+    assert not seen, (label, "nothing may claim generation was attempted")
+    body = _payload_text(sent[0])
+    assert "شاركنا عنوان التوصيل" not in body, (label, body)
+    assert is_compose_failure_fallback(body), (label, body)
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "fallback_deterministic"
+    assert meta["fallback_reason"] == "address_reply_compose_unavailable"
+    assert meta["address_claim_compose_attempted"] is False
+    assert meta["llm_candidate_present"] is False
+
+    # Continuity: the customer can still choose from the saved addresses.
+    delivered = delivered_address_action_ids(sent[0])
+    offered, _ = _offered_revisions(tenant_id=tenant.id, conversation=convo,
+                                    offer_id=result.address_presentation.offer_id)
+    assert {structured_consent_action({"button_id": i})[1] for i in delivered} == set(offered)
+    assert set(offered) == {a.address_id, b.address_id}
+
+
+def test_a_city_turn_is_not_projected_as_a_missing_delivery_address():
+    """G3: the turn's real collection field reaches the composer.
+
+    A city question was handed ``missing_field=delivery_address`` beside
+    an accepted address and its map link — two contradictory operational
+    facts, supplied before anything was generated.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    result = _address_turn(db, tenant, convo, field="city")
+    assert result.state_patch.get("order_flow_v2_last_field") == "city"
+
+    seen = []
+    _run_send_block(db, tenant, convo, result, patches=_fake_provider(calls=seen))
+
+    state = _model_state(seen)
+    known = dict(state.get("known_facts") or {})
+    assert known.get("missing_field") == "city"
+    assert state.get("response_goal") == "collect_delivery_city"
+    # The address already on file is still supplied, not erased.
+    assert known.get("delivery_address_status") == "accepted"
+
+
+def test_a_delivery_address_turn_keeps_its_own_field_and_goal():
+    """G3's other half: the delivery-address turn is unchanged."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    result = _address_turn(db, tenant, convo)
+
+    seen = []
+    _run_send_block(db, tenant, convo, result, patches=_fake_provider(calls=seen))
+
+    state = _model_state(seen)
+    assert dict(state.get("known_facts") or {}).get("missing_field") == "delivery_address"
+    assert state.get("response_goal") == "collect_delivery_address"

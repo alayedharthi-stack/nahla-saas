@@ -8018,14 +8018,22 @@ async def _handle_merchant_message(
                 # structural about this turn — the action ids, the choice
                 # labels, the paging, the receipt — stays platform-owned
                 # and is untouched.
-                try:
-                    from modules.ai.order_flow_v2.address_reply_recovery import (  # noqa: PLC0415
-                        address_turn_facts,
-                        compose_address_turn_reply,
-                        is_address_collection_turn,
-                    )
+                _of2_is_address_turn = bool(
+                    (getattr(_of2_result, "state_patch", None) or {}).get(
+                        "order_flow_v2_last_field"
+                    ) in ("delivery_address", "city")
+                )
+                if _of2_is_address_turn:
+                    _of2_composed = None
+                    try:
+                        from modules.ai.order_flow_v2.address_reply_recovery import (  # noqa: PLC0415
+                            address_collection_field,
+                            address_turn_facts,
+                            compose_address_turn_reply,
+                            response_goal_for_field,
+                        )
 
-                    if is_address_collection_turn(_of2_result):
+                        _of2_field = address_collection_field(_of2_result)
                         _of2_composed = await compose_address_turn_reply(
                             db,
                             tenant_id=int(tenant_id),
@@ -8042,20 +8050,62 @@ async def _handle_merchant_message(
                                 presentation=getattr(
                                     _of2_result, "address_presentation", None
                                 ),
+                                field_name=_of2_field,
                             ),
                             turn_ref=str(wa_msg_id or ""),
+                            response_goal=response_goal_for_field(_of2_field),
                         )
-                        if _of2_composed.spoke:
-                            _of2_reply = _of2_composed.text
-                            _of2_provenance.update(_of2_composed.as_metadata())
-                            _of2_provenance.pop("address_reply_recovered", None)
-                            _of2_provenance["address_reply_composed"] = True
-                except Exception:  # noqa: BLE001  # noqa: silent-ok — the deterministic reply still stands behind this turn, and the guard below still judges whatever is sent
-                    logger.exception(
-                        "[ORDER_FLOW_V2] address reply compose failed tenant=%s to=%s",
-                        tenant_id,
-                        to,
-                    )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — handled immediately below, where the turn falls to the approved line rather than to the prose this path no longer owns
+                        logger.exception(
+                            "[ORDER_FLOW_V2] address reply compose unavailable "
+                            "tenant=%s to=%s",
+                            tenant_id,
+                            to,
+                        )
+                    if _of2_composed is not None and _of2_composed.spoke:
+                        _of2_reply = _of2_composed.text
+                        _of2_provenance.update(_of2_composed.as_metadata())
+                        _of2_provenance.pop("address_reply_recovered", None)
+                        _of2_provenance["address_reply_composed"] = True
+                    else:
+                        # Compose could not even be entered — its import
+                        # failed, its inputs could not be built, or it
+                        # raised on the way in. Falling back to the
+                        # deterministic reply would quietly restore the
+                        # prose ownership this path just gave up, so the
+                        # approved minimal line speaks instead. It is
+                        # recorded as what it is: NO generation was
+                        # attempted, which is a different fact from a
+                        # provider that tried and failed.
+                        try:
+                            from core.fallback_policy import (  # noqa: PLC0415
+                                empty_reply_fallback,
+                                operational_compose_error_fallback,
+                            )
+
+                            _of2_reply = str(
+                                operational_compose_error_fallback() or ""
+                            ).strip() or str(empty_reply_fallback() or "").strip()
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — with no approved line available the suppression flag below refuses the turn instead of sending unowned prose
+                            _of2_reply = ""
+                        _of2_provenance.update({
+                            "compose_source": "fallback_deterministic",
+                            "response_mode": "fallback_deterministic",
+                            "chosen_path": "order_flow_v2_address_reply",
+                            "llm_candidate_present": False,
+                            "address_claim_compose_attempted": False,
+                            "address_reply_composed": False,
+                            "fallback_reason": "address_reply_compose_unavailable",
+                            "fallback_action_type": "order_flow_v2_address_reply",
+                            "final_customer_text_source": "fallback_deterministic",
+                            "final_text_transformed": True,
+                            "final_transform_reasons": ["address_reply_compose_unavailable"],
+                        })
+                        if not _of2_reply:
+                            _of2_provenance["address_claim_send_suppressed"] = True
+                            _of2_provenance["address_save_claim_suppress_reason"] = (
+                                "address_reply_compose_unavailable"
+                            )
                 try:
                     from modules.ai.order_flow_v2.outbound_guards import (  # noqa: PLC0415
                         apply_order_flow_v2_outbound_guards,
