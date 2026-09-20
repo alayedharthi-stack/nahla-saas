@@ -1,18 +1,19 @@
 """Closed contract for applying the commerce runtime schema to a pilot database.
 
-Revisions ``0108`` (foundation) and ``0109`` (effect and delivery ledgers) are
-merged and their reconciliation is proven on real PostgreSQL, but the normal
-bootstrap target stays pinned at ``0093``: production applies nothing until an
-operator runs this job deliberately. Nothing in the application can advance the
-schema past the pinned target, and that is on purpose.
+Revisions ``0108`` (foundation), ``0109`` (effect and delivery ledgers) and
+``0110`` (the handover's barrier, worker fleet and deferred inbound) are merged
+and their reconciliation is proven on real PostgreSQL, but the normal bootstrap
+target stays pinned at ``0093``: production applies nothing until an operator
+runs this job deliberately. Nothing in the application can advance the schema
+past the pinned target, and that is on purpose.
 
 This contract states exactly what the job may do:
 
-* it **adds nine new tables** and nothing else — no column is added to an
+* it **adds twelve new tables** and nothing else — no column is added to an
   existing table, no existing index or constraint is changed, and no row of
   existing data is read, written or backfilled;
 * it refuses unless the database is at an accepted starting revision and the
-  nine relations are either all absent (a fresh apply) or all present at the
+  twelve relations are either all absent (a fresh apply) or all present at the
   target (a no-op re-run);
 * a partial state is refused rather than repaired, because a half-present
   schema is exactly what the runtime itself fails closed on.
@@ -25,8 +26,9 @@ from __future__ import annotations
 
 from typing import Tuple
 
-TARGET_REVISION = "0109"
+TARGET_REVISION = "0110"
 FOUNDATION_REVISION = "0108"
+LEDGER_REVISION = "0109"
 
 # The integration branch states this job accepts as a starting point. Anything
 # else — including a state this repository has not seen — is refused with the
@@ -36,6 +38,8 @@ ACCEPTED_START_REVISIONS: Tuple[frozenset, ...] = (
     frozenset({"0088", "0107"}),
     frozenset({FOUNDATION_REVISION}),
     frozenset({"0088", FOUNDATION_REVISION}),
+    frozenset({LEDGER_REVISION}),
+    frozenset({"0088", LEDGER_REVISION}),
 )
 ALREADY_APPLIED_REVISIONS: Tuple[frozenset, ...] = (
     frozenset({TARGET_REVISION}),
@@ -55,16 +59,26 @@ LEDGER_RELATIONS: Tuple[str, ...] = (
     "commerce_runtime_delivery_attempts",
     "commerce_runtime_delivery_receipts",
 )
-RUNTIME_RELATIONS: Tuple[str, ...] = FOUNDATION_RELATIONS + LEDGER_RELATIONS
+# Revision 0110: the handover's own state, which the pilot's routing and the
+# operator procedure both read. Without them the barrier cannot be read, and a
+# barrier that cannot be read refuses new work — so the pilot answers nothing.
+HANDOVER_RELATIONS: Tuple[str, ...] = (
+    "commerce_runtime_handover_barrier",
+    "commerce_runtime_handover_workers",
+    "commerce_runtime_deferred_inbound",
+)
+RUNTIME_RELATIONS: Tuple[str, ...] = (
+    FOUNDATION_RELATIONS + LEDGER_RELATIONS + HANDOVER_RELATIONS
+)
 
 CONFIRMATION_ENV = "NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM"
-CONFIRMATION_TOKEN = "RUN_COMMERCE_RUNTIME_0109"
+CONFIRMATION_TOKEN = "RUN_COMMERCE_RUNTIME_0110"
 
 DEFAULT_TIMEOUT_SEC = 900
 MIN_TIMEOUT_SEC = 120
 MAX_TIMEOUT_SEC = 3600
 
-LOG_PREFIX = "[commerce-runtime-0109]"
+LOG_PREFIX = "[commerce-runtime-0110]"
 
 RESULT_SUCCESS = "SUCCESS"
 RESULT_ALREADY_APPLIED = "ALREADY_APPLIED"
@@ -120,12 +134,15 @@ LIBPQ_TARGET_ENV_VARS: Tuple[str, ...] = (
 def expected_relations_at(revisions: frozenset) -> Tuple[str, ...]:
     """The relations a database at an accepted starting revision must already have.
 
-    ``0107`` predates the runtime entirely, so none of the nine may exist.
+    ``0107`` predates the runtime entirely, so none of the twelve may exist.
     ``0108`` *is* the foundation revision, so exactly its three must exist and
-    none of the ledger six. Without this the two rules contradicted each other:
-    ``0108`` was an accepted start, and a database at ``0108`` was then refused
-    as a partial schema, so that start could never proceed.
+    nothing later. ``0109`` is the ledger revision, so its six must exist too
+    and none of the handover three. Without this the two rules contradicted each
+    other: each was an accepted start, and a database at one of them was then
+    refused as a partial schema, so that start could never proceed.
     """
+    if LEDGER_REVISION in revisions:
+        return FOUNDATION_RELATIONS + LEDGER_RELATIONS
     if FOUNDATION_REVISION in revisions:
         return FOUNDATION_RELATIONS
     return ()
@@ -158,7 +175,7 @@ __all__ = [
     "ACCEPTED_START_REVISIONS", "ALREADY_APPLIED_REVISIONS", "CONFIRMATION_ENV",
     "CONFIRMATION_TOKEN", "DEFAULT_TIMEOUT_SEC", "EXIT_FAILED", "EXIT_PRECONDITION",
     "EXIT_SUCCESS", "EXIT_USAGE", "FOUNDATION_RELATIONS",
-    "FOUNDATION_REVISION", "LEDGER_RELATIONS", "LOG_PREFIX", "LOOPBACK_HOSTNAMES",
+    "FOUNDATION_REVISION", "HANDOVER_RELATIONS", "LEDGER_RELATIONS", "LEDGER_REVISION", "LOG_PREFIX", "LOOPBACK_HOSTNAMES",
     "MAX_TIMEOUT_SEC",
     "LIBPQ_TARGET_ENV_VARS", "TARGET_OVERRIDE_QUERY_KEYS",
     "MIN_TIMEOUT_SEC", "RESULT_ALREADY_APPLIED", "RESULT_FAILED", "RESULT_FAILED_PRECONDITION",

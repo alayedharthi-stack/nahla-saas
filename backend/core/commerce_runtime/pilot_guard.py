@@ -353,6 +353,38 @@ def verified_connection(db: Any, *, tenant_id: int,
     return f"wa:{identifier}", str(connection.id)
 
 
+def tenant_for_phone_number_id(db: Any, *, phone_number_id: Any
+                               ) -> Optional[Tuple[int, str, str]]:
+    """``(tenant_id, channel_reference, connection_row_id)`` for an allowlisted
+    tenant that owns this connection, or ``None``.
+
+    The reverse of :func:`verified_connection`, and deliberately narrower than a
+    plain lookup: the connection row says which tenant owns the number, and the
+    answer is given only when that tenant is one the pilot is configured for. A
+    phone number id alone never selects a tenant for the runtime.
+    """
+    identifier = str(phone_number_id or "").strip()
+    tenants = tenant_allowlist()
+    if not identifier or db is None or not tenants:
+        return None
+    try:
+        from database.models import WhatsAppConnection  # noqa: PLC0415
+
+        connection = (
+            db.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.phone_number_id == identifier)
+            .filter(WhatsAppConnection.tenant_id.in_(sorted(tenants)))
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001 - an unresolvable connection selects nothing
+        logger.warning("[COMMERCE_RUNTIME_PILOT] tenant lookup failed phone_number_id=%s "
+                       "error=%s", identifier, type(exc).__name__)
+        return None
+    if connection is None:
+        return None
+    return int(connection.tenant_id), f"wa:{identifier}", str(connection.id)
+
+
 __all__ = [
     "AI_GATE_SKIPPED", "CONNECTION_NOT_VERIFIED", "DEADLINE_CEILING_SECONDS", "EMPTY_INBOUND",
     "ENV_DRAINING", "PILOT_DRAINING", "pilot_draining", "pilot_owns_open_work",
@@ -362,5 +394,5 @@ __all__ = [
     "PILOT_DISABLED", "PilotDecision", "RECIPIENT_MISSING", "RECIPIENT_NOT_ALLOWLISTED",
     "RECIPIENT_UNNORMALIZABLE", "TENANT_NOT_ALLOWLISTED", "evaluate_pilot_route", "pilot_budget",
     "pilot_enabled", "pilot_model", "recipient_allowlist", "tenant_allowlist",
-    "verified_connection",
+    "tenant_for_phone_number_id", "verified_connection",
 ]

@@ -39,6 +39,8 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from core.commerce_runtime import pilot_guard as pg  # noqa: E402
 from core.commerce_runtime import recovery  # noqa: E402
+from core.commerce_runtime.handover_models import create_handover_tables  # noqa: E402
+from core.commerce_runtime.models import RuntimeBase  # noqa: E402
 from database.models import Base, Tenant, WhatsAppConnection  # noqa: E402
 
 PHONE_ID = "PID_RECOVERY"
@@ -48,11 +50,20 @@ MODEL = "model-configured-for-this-pilot"
 
 
 @event.listens_for(Base.metadata, "before_create")
+@event.listens_for(RuntimeBase.metadata, "before_create")
 def _remap_jsonb(target: Any, connection: Any, **kw: Any) -> None:
+    """SQLite has no JSONB and cannot parse a ``::jsonb`` cast in a default.
+
+    The columns are JSON here and JSONB on PostgreSQL, where these tables are
+    actually proved; the values the code writes are identical either way.
+    """
     for table in target.sorted_tables:
         for col in table.columns:
             if isinstance(col.type, JSONB):
                 col.type = JSON()
+            default = getattr(col.server_default, "arg", None)
+            if default is not None and "::" in str(default):
+                col.server_default = None
 
 
 @pytest.fixture()
@@ -63,6 +74,9 @@ def db() -> Any:
     engine = create_engine("sqlite:///:memory:", poolclass=StaticPool,
                            connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    # The handover lives in the runtime's own relations (revision 0110), so a
+    # fixture that creates only the application schema has no barrier to read.
+    create_handover_tables(engine)
     session = sessionmaker(bind=engine)()
     tenant = Tenant(name="متجر تجريبي عام", is_active=True)
     session.add(tenant)
@@ -489,9 +503,13 @@ def test_a_draining_pilot_takes_no_new_turn_and_gives_it_to_nobody(configured, m
         db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to=SENDER, text="سؤال جديد",
         wa_msg_id="wamid.new")
     assert claim is not None and claim.basis == "drain_buffered"
-    buffered = handover.read_barrier(db, tenant_id=db.tenant_id).undisposed_buffered
-    assert [e["provider_message_id"] for e in buffered] == ["wamid.new"]
-    assert buffered[0]["reason"] == "process_draining"
+    pending = handover.pending_inbound(db, tenant_id=db.tenant_id)
+    assert [e.provider_message_id for e in pending] == ["wamid.new"]
+    assert pending[0].reason == handover.REASON_PROCESS_DRAINING
+    # Identity and payload, not a line in a list: enough to replay it.
+    assert pending[0].recipient == NORMALIZED
+    assert pending[0].phone_number_id == PHONE_ID
+    assert pending[0].payload == {"text": "سؤال جديد"}
 
 
 def test_a_drained_process_still_leaves_traffic_it_never_owned_alone(configured, monkeypatch, db):
@@ -508,7 +526,7 @@ def test_a_drained_process_still_leaves_traffic_it_never_owned_alone(configured,
     assert seam.commerce_runtime_claims_inbound(
         db, tenant_id=db.tenant_id, phone_id=PHONE_ID, to="966500009999", text="سؤال",
         wa_msg_id="wamid.stranger") is None
-    assert handover.read_barrier(db, tenant_id=db.tenant_id).buffered == ()
+    assert handover.pending_inbound(db, tenant_id=db.tenant_id) == ()
 
 
 def test_a_claim_check_that_raises_is_not_a_claim(configured, monkeypatch, db):
@@ -610,3 +628,88 @@ def test_a_draining_pilot_with_no_open_work_still_withholds_the_short_circuit(co
     assert seen["short_circuit"] == []
     assert len(seen["handled"]) == 1
     assert seen["handled"][0]["commerce_runtime_claim"].basis == "drain_buffered"
+
+
+# ── The dispatcher's COD routes are owners too (sticky COD ownership) ────────
+
+
+def drive_cod_button(db: Any, *, msg_id: str, kind: str = "interactive") -> Dict[str, Any]:
+    """One COD button tap through the real dispatcher.
+
+    ``consume_owned_cod_button_inbound`` is doubled so the branch is certain to
+    be observable; the branch itself, the payload predicate, the dispatcher and
+    the ownership claim are real.
+    """
+    import routers.whatsapp_webhook as webhook
+    import services.cod_confirmation as cod
+
+    seen: Dict[str, Any] = {"handled": [], "cod": [], "followup": []}
+
+    async def _handler(**kwargs: Any) -> None:
+        seen["handled"].append(kwargs)
+
+    async def _consume(_db: Any, **kwargs: Any) -> Any:
+        seen["cod"].append(kwargs)
+        followup = kwargs.get("followup_send")
+        if followup is not None:
+            await followup("confirm", object())
+        return cod.COD_INBOUND_CONSUMED
+
+    async def _followup(**kwargs: Any) -> None:
+        seen["followup"].append(kwargs)
+
+    payload = "nahla_cod_confirm"
+    if kind == "interactive":
+        msg = {"from": SENDER, "id": msg_id, "type": "interactive",
+               "interactive": {"type": "button_reply",
+                               "button_reply": {"id": payload, "title": "تأكيد الطلب"}}}
+    else:
+        msg = {"from": SENDER, "id": msg_id, "type": "button",
+               "button": {"payload": payload, "text": "تأكيد الطلب"}}
+
+    with (
+        patch.object(webhook, "get_db", return_value=iter([db])),
+        patch.object(webhook, "_is_platform_tenant", return_value=False),
+        patch.object(webhook, "_handle_merchant_message", side_effect=_handler),
+        patch.object(webhook, "_post_wa", new=AsyncMock(return_value=True)),
+        patch.object(webhook, "_send_cod_followup_message", _followup),
+        patch.object(cod, "consume_owned_cod_button_inbound", _consume),
+        patch.object(pg, "verified_connection", lambda _db, **kwargs: (f"wa:{PHONE_ID}", "17")),
+        patch.object(recovery, "admitted_turn_for", lambda **kwargs: None),
+    ):
+        asyncio.run(webhook._dispatch_message(
+            PHONE_ID, msg, {"metadata": {"phone_number_id": PHONE_ID}}))
+    return seen
+
+
+def test_the_cod_button_route_takes_the_tap_while_the_pilot_is_off(monkeypatch, db):
+    """Proof the dispatcher's COD owner is real: it consumes and answers."""
+    from core.inbound_dedup import reset_cache
+
+    reset_cache()
+    monkeypatch.delenv(pg.ENV_ENABLED, raising=False)
+    seen = drive_cod_button(db, msg_id="wamid.codbtn.off")
+    assert len(seen["cod"]) == 1                           # it consumed the tap
+    assert len(seen["followup"]) == 1                      # and answered the customer
+    assert seen["handled"] == []                           # the handler was never reached
+
+
+def test_a_claimed_cod_button_tap_never_reaches_the_cod_route(configured, db):
+    seen = drive_cod_button(db, msg_id="wamid.codbtn.claimed")
+    assert seen["cod"] == [] and seen["followup"] == []
+    assert len(seen["handled"]) == 1
+    assert seen["handled"][0]["commerce_runtime_claim"] is not None
+
+
+def test_a_claimed_template_button_tap_never_reaches_the_cod_route(configured, db):
+    seen = drive_cod_button(db, msg_id="wamid.codtpl.claimed", kind="template")
+    assert seen["cod"] == [] and seen["followup"] == []
+    assert len(seen["handled"]) == 1
+    assert seen["handled"][0]["commerce_runtime_claim"] is not None
+
+
+def test_a_non_allowlisted_cod_button_tap_keeps_todays_behaviour(configured, monkeypatch, db):
+    monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")
+    seen = drive_cod_button(db, msg_id="wamid.codbtn.stranger")
+    assert len(seen["cod"]) == 1 and len(seen["followup"]) == 1
+    assert seen["handled"] == []

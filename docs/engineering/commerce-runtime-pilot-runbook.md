@@ -10,7 +10,7 @@ below is set. Contract: `docs/architecture/commerce-runtime-pilot-activation.md`
 
 | # | Precondition | How to check |
 | --- | --- | --- |
-| 1 | **All nine** runtime relations exist in the target database | the query below returns nine non-null values |
+| 1 | **All twelve** runtime relations exist in the target database | the query below returns twelve non-null values |
 | 2 | The Anthropic key is present, and the pilot's **own** model is configured | `ANTHROPIC_API_KEY` present; `COMMERCE_RUNTIME_PILOT_MODEL` set to the approved model — the pilot never inherits `CLAUDE_MODEL` or any repository fallback |
 | 3 | The test store's tenant id is known **from configuration**, not from a name | read the tenant id from the store's own connection row (step 3.1) |
 | 4 | The test conversations' phone numbers are known | the owner's own test handsets, nothing else |
@@ -40,23 +40,41 @@ SELECT to_regclass('public.commerce_runtime_conversations'),
        to_regclass('public.commerce_runtime_effect_results'),
        to_regclass('public.commerce_runtime_delivery_sequences'),
        to_regclass('public.commerce_runtime_delivery_attempts'),
-       to_regclass('public.commerce_runtime_delivery_receipts');
+       to_regclass('public.commerce_runtime_delivery_receipts'),
+       to_regclass('public.commerce_runtime_handover_barrier'),
+       to_regclass('public.commerce_runtime_handover_workers'),
+       to_regclass('public.commerce_runtime_deferred_inbound');
 ```
 
-The service probes the same nine once per database and caches the answer, and
+The first nine are the runtime's own state (revisions `0108` and `0109`); the
+last three are the handover's (revision `0110`). **The pilot does not run
+without the handover three.** Its routing reads the barrier on every inbound,
+and a barrier that cannot be read refuses new work — so on a database at `0109`
+the pilot claims nothing and the legacy path answers everything. That is the
+safe direction, and it is also silent, so check for all twelve rather than
+assuming the pilot is live because the flag is on.
+
+The service probes the first nine once per database and caches the answer, and
 logs `[COMMERCE_RUNTIME] schema probe state=… missing=…` when it does. The cache
 is per process and is **not** invalidated by applying the migration: after §1.2
 runs, restart the service (or redeploy it) so the next probe sees the new
 schema. Until it does, every turn reports `runtime_schema_unavailable` and the
 legacy path answers, which is the safe direction.
 
-Revisions `0108` and `0109` are merged and validated, but the normal bootstrap
-target is pinned at `0093`, so a database that has never had them applied will
-report `runtime_schema_unavailable` and the pilot will answer nothing. Applying
-them is a deliberate operator step, taken with the owner's knowledge; §1.2 is
-the job that does it. It creates only new tables — it alters no existing table,
-changes no existing index or constraint, and reads, writes or backfills no
-existing data.
+Revisions `0108`, `0109` and `0110` are merged and validated, but the normal
+bootstrap target is pinned at `0093`, so a database that has never had them
+applied will report `runtime_schema_unavailable` and the pilot will answer
+nothing. Applying them is a deliberate operator step, taken with the owner's
+knowledge; §1.2 is the job that does it. It creates only new tables — it alters
+no existing table, changes no existing index or constraint, and reads, writes or
+backfills no existing data.
+
+**Rollout dependency.** `0110` is required before activation, not optional. It
+adds the three handover relations and nothing else, it is reversible
+(`alembic downgrade 0109` drops exactly what it created), and it is refused
+rather than reconciled when a relation of that name already exists with a
+different shape. It has been applied and reversed in isolated databases only;
+applying it to the shared pilot database is a separate authorisation.
 
 ### 1.2 Applying the schema (owner-approved, one-off)
 
@@ -67,7 +85,7 @@ whose only variables are the pilot database's `DATABASE_URL`, the confirmation
 token, and the database the operator is authorising this run to touch.
 
 ```bash
-NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0109 \
+NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0110 \
 NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET=<host>[:<port>]/<database> \
   python -m scripts.operators.commerce_runtime_pilot_migration
 ```
@@ -95,12 +113,12 @@ It is fail-closed at both ends and refuses rather than repairs:
 | `DATABASE_URL` carries a target-changing query parameter (`host`, `hostaddr`, `port`, `dbname`, `service`, …) | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
 | current revision is not one the contract accepts | `RESULT=FAILED_PRECONDITION`, exit 3, the observed value is printed |
 | the relations present are not the ones the current revision creates | `RESULT=FAILED_PRECONDITION`, exit 3 — a schema that does not match its revision is never repaired |
-| revision `0108` with exactly its three foundation relations | accepted: that is what `0108` creates, and the job upgrades it to `0109` |
-| all nine exist and the revision is already `0109` | `RESULT=ALREADY_APPLIED`, exit 0, Alembic is not run |
-| `alembic upgrade 0109` ran and all nine relations and the revision are verified | `RESULT=SUCCESS`, exit 0 |
+| revision `0108` with exactly its three foundation relations, or `0109` with those plus the ledger six | accepted: that is what each revision creates, and the job upgrades to `0110` |
+| all twelve exist and the revision is already `0110` | `RESULT=ALREADY_APPLIED`, exit 0, Alembic is not run |
+| `alembic upgrade 0110` ran and all twelve relations and the revision are verified | `RESULT=SUCCESS`, exit 0 |
 | anything else after the upgrade | `RESULT=FAILED`, exit 4, with what was observed |
 
-Every line is prefixed `[commerce-runtime-0109]`. Rolling the schema back is
+Every line is prefixed `[commerce-runtime-0110]`. Rolling the schema back is
 `alembic downgrade 0107`, which the revision's own reversibility proofs cover;
 it is only safe while the pilot is off and no runtime rows exist.
 
@@ -219,7 +237,9 @@ One line per routed turn:
 | `reason=handover_barrier_closed` | the tenant's shared barrier is draining; no turn was admitted and nothing was written |
 | `reason=unfinished_…` | the guard refused a turn this runtime has **not finished**; it was kept from the legacy path and answered nothing |
 | `reason=owned_…` | the guard refused a turn this runtime admitted and already finished; it was kept from the legacy path, which must not answer it a second time |
-| `route=commerce_runtime_claim` | ownership was claimed at the dispatcher, so none of the dispatcher's own short circuits ran for this turn |
+| `route=commerce_runtime_claim` | ownership was claimed at the dispatcher, so none of the dispatcher's own short circuits ran for this turn — the COD button routes included |
+| `cod branches skipped` | the merchant handler saw a claim for this inbound, so COD classification, the order transition and its follow-up send did not run |
+| `deferred during handover … entry=N` | the inbound was recorded for the operator and answered by nobody; `N` is the id `dispose` takes |
 
 The customer's text never appears in the log line; only `reply_chars`.
 
@@ -228,6 +248,8 @@ Two further lines matter:
 | Line | Reading |
 | --- | --- |
 | `[Idempotency] ALLOW duplicate inbound for commerce-runtime recovery` | a provider retry was let through because it carries an unfinished turn; nothing is resent, the ledger still decides |
+| `[COMMERCE_RUNTIME_ACCEPT] recorded=N scoped=N` | N pilot-scoped inbounds were made durable **before** the webhook answered 200 |
+| `[COMMERCE_RUNTIME_ACCEPT] not acknowledging: reason=…` | a pilot-scoped inbound could not be recorded, so the request was answered `503` and nothing in that batch was processed; the provider will redeliver it |
 | `[COMMERCE_RUNTIME] tool session handed to the reaper` | a tool call was abandoned on its timeout and its database session is being closed by the reaper once that call returns |
 
 **The model's reply and the text on the wire are two different things.** The
@@ -308,11 +330,32 @@ From this moment:
   finished — that is what makes this a handover rather than an abandonment.
 
 **Step 2 — converge.** Let every replica read the new barrier. A worker records
-the generation it is running the first time it evaluates a route after the
-change, so convergence is **observed** here rather than asserted. No restart is
-required for this; a replica reports as soon as it sees one inbound for that
-tenant. `status` names the workers still behind or silent, and settlement
-refuses while any of them are.
+**the generation it observed**, the first time it evaluates a route after the
+change — its own reading, not a value re-derived when the row is written, so a
+heartbeat that arrives after the drain still says what that worker saw. No
+restart is required; a replica reports as soon as it sees one inbound for that
+tenant.
+
+`status` names every worker in the expected set and how it stands:
+`on_generation`, `behind`, or `stale`. **Silence is not retirement.** A worker
+that has stopped reporting blocks settlement until an operator says, on the
+record, that it is gone:
+
+```bash
+python -m scripts.operators.commerce_runtime_pilot_handover retire \
+    --worker "<worker id from status>" --by "<operator>" \
+    --reason "terminated in deploy 1234"
+```
+
+The name and the reason are required, they are stored on the worker row, and
+they are copied into the settlement evidence. A retired worker that reports
+again is back in the expected set: retirement is a statement about a process
+that has stopped, not a way to stop looking at one.
+
+What this proves is bounded, and the wording matters: the shared admission lock
+orders this job against the workers that take it. It does not prove a fleet was
+rolled out or shut down. Only a worker's own report, or an operator's recorded
+retirement, says that.
 
 **Step 3 — status.**
 
@@ -325,24 +368,47 @@ outstanding work including `unknown` outcomes, buffered inbounds awaiting
 disposition, and the list of blockers. Exits 0 with `RESULT=REPORTED`; it is a
 report, not a verdict.
 
-**Step 4 — dispose of the buffered work.**
+**Step 4 — dispose of the deferred work, by name.**
+
+`status` lists every pending entry with its id, the recipient, the provider's
+own message id and why it was deferred. Dispose of the ones you have actually
+dealt with:
 
 ```bash
 python -m scripts.operators.commerce_runtime_pilot_handover dispose \
-    --note "replayed by hand on <date>" --by "<operator>"
+    --entry 41 --entry 42 --disposition replayed \
+    --evidence '{"replayed_at": "2026-09-20T09:12:00Z", "by_hand": true}' \
+    --by "<operator>"
 ```
 
-Buffered work is never acknowledged and dropped. Settlement is blocked until
-each entry carries a disposition, and the note is required — `--note` missing is
-`RESULT=FAILED_PRECONDITION`, exit 2.
+`--disposition` is one of a closed set, and each names evidence the operator
+has:
 
-One case the counts cannot show: if the barrier itself could not be written when
+| Disposition | What it asserts |
+| --- | --- |
+| `replayed` | the message was re-delivered and handled; the evidence says how |
+| `answered` | the customer was answered through another path |
+| `superseded` | a later message from the same customer replaced it |
+| `not_required` | it was established that no answer was owed |
+
+The entries are named, so a message that arrived while you were looking is
+**not** disposed of: it is still pending and still blocks. An id that is not
+pending is refused by name (`already_disposed`, `no_such_entry`) rather than
+silently swept in with the rest. The evidence is stored on the entry it
+describes; a free-text note is not proof of a replay, and there is no longer a
+command that would accept one.
+
+Nothing is acknowledged and dropped. Disposed and resolved entries stay in
+`commerce_runtime_deferred_inbound` as history and stop counting against the
+pending limit, so the audit trail does not have to be deleted to make room.
+
+One case the counts cannot show: if the record itself could not be written when
 an inbound was refused, that message was withheld from every owner but never
 recorded. It is logged, once, at error level:
 
 ```text
-[COMMERCE_RUNTIME_HANDOVER] could not buffer inbound tenant=… provider_message_id=…
-  error=… — withheld but UNRECORDED; account for it by hand before settling
+[COMMERCE_RUNTIME_PILOT] could not defer inbound tenant=… provider_message_id=…
+  — withheld but UNRECORDED; account for it by hand before settling
 ```
 
 Grep for `UNRECORDED` over the drain window before settling. A hit is a message
@@ -354,10 +420,18 @@ an operator has to account for; `settle` cannot see it and will not block on it.
 python -m scripts.operators.commerce_runtime_pilot_handover settle
 ```
 
+`settle` does not act on the report it prints. It prints what it found, and then
+**re-decides inside the transaction that writes**: the barrier is re-read under
+the tenant's lock, the generation the report showed is re-checked, the
+convergence and every count are recomputed on that same session, and only then
+is the transition written. Work that commits between the report and the write is
+therefore seen, and the evidence stored describes the state that was actually
+settled rather than the state as it looked a moment earlier.
+
 | Result | Exit | Meaning |
 | --- | --- | --- |
-| `RESULT=SETTLED` | 0 | the barrier is draining, every live worker is on the current generation, every count is zero, and nothing buffered is undisposed. The evidence snapshot has been written |
-| `RESULT=BLOCKED` | 1 | at least one concrete reason, named per tenant (below) |
+| `RESULT=SETTLED` | 0 | the barrier is draining, every expected worker is on the current generation, every count is zero, and nothing deferred is pending — all re-checked at the moment of the write. The evidence snapshot has been written in the same transaction |
+| `RESULT=BLOCKED` | 1 | at least one concrete reason, named per tenant (below). A `settle_refused` line means the state moved while settling: run `status` and settle again |
 | `RESULT=FAILED_PRECONDITION` | 2 | no tenant allowlist, or more tenants configured than it will inspect |
 | `RESULT=FAILED` | 3 | the database could not be read — never read as "settled" |
 
@@ -368,12 +442,13 @@ Blocker names, each actionable:
 | `barrier_is_open_not_draining` | run `drain` first |
 | `no_worker_has_reported_this_generation` | wait for step 2; nothing has confirmed the drain reached the fleet |
 | `workers_behind:<ids>` | those replicas are still running the previous generation |
-| `workers_not_seen_since_drain:<ids>` | alive within the liveness window but not heard from since the drain — disposition unknown, which is a reason to stay blocked, not to assume they are gone |
+| `workers_stale_retire_or_wait:<ids>` | not heard from since the drain, or not at all recently — wait for the report, or retire the worker on the record |
 | `open_turns=N` | admitted turns with no terminal |
 | `reserved_undispatched=N` | replies reserved that nothing dispatched |
 | `unresolved_attempts=N` | sends with no receipt at all |
 | `unknown_outcomes=N` | sends whose recorded outcome is `unknown`; establish what the provider actually did and record it on that attempt |
-| `buffered_awaiting_disposition=N` | run `dispose` |
+| `deferred_pending=N` | accepted inbounds nobody has finished or accounted for; run `dispose` |
+| `generation_moved:expected=X,found=Y` | the barrier changed between the report and the write; run `status` again |
 | `work_counts_unavailable` | the runtime relations could not be counted |
 
 `settle` writes the evidence snapshot — generation, convergence, counts, buffered
@@ -397,7 +472,15 @@ python -m scripts.operators.commerce_runtime_pilot_handover reopen
 
 Admits new work again on a fresh generation, keeping the audit trail. It refuses
 unless the barrier is settled, because reopening before settlement would discard
-the evidence.
+the evidence — and it re-checks, under the same lock that applies the change,
+that the barrier is still the settled one it was asked about. A drain that
+started between the check and the write is therefore never reopened over;
+`RESULT=BLOCKED` with `state_moved_since_the_precheck` says so.
+
+**Between settlement and reopening** the tenant admits no new work. An inbound
+arriving in that window is recorded as `settled_window` and is answered by
+nobody until the barrier reopens or an operator disposes of it. It is not lost:
+it carries the same identity and payload as any other deferred entry.
 
 ### 5.2 What this proves, and what it does not
 
@@ -472,11 +555,25 @@ as well as through the ledger.
 * It claims nothing about a saved or adopted address; that work is separate and
   separately approved.
 * While it owns a conversation it owns **every** inbound turn in it, including
-  ones the dispatcher's payment-receipt, payment-evidence, map-image and
-  payment-claim short circuits would otherwise take. Those are skipped for an
+  ones the dispatcher's payment-receipt, payment-evidence, map-image,
+  payment-claim and **cash-on-delivery** branches would otherwise take. The COD
+  routes are owners, not formatters: they transition an order and send the
+  customer a follow-up. For an allowlisted recipient a "نعم" is the runtime's
+  turn, so `handle_cod_reply` does not run and no follow-up is sent. The pilot
+  has no commerce-write tool, so it cannot confirm an order itself — it answers
+  from what it can observe. For every other recipient COD behaves exactly as it
+  does today. Those are skipped for an
   allowlisted recipient rather than racing the runtime; the pilot's read-only
   tools include no payment evidence, so it answers such a turn from what it can
   actually observe.
 * A recovered send whose transmitted text could not be read back is kept in the
   store for the operator and is **not** shown to the model as a prior assistant
   turn: its body is the reserved intent, which the send path may have rewritten.
+* A pilot-scoped inbound is written to `commerce_runtime_deferred_inbound`
+  **before** the webhook answers 200, and the record is resolved when the turn
+  reaches a terminal. Until then it counts as work outstanding, exactly like an
+  admitted turn with no terminal. If that record cannot be written the webhook
+  answers `503` instead of 200 and processes nothing from that request, so the
+  provider redelivers the whole batch; the existing deduplication is what stops
+  the unaffected messages in it being processed twice. Nothing in this path runs
+  while the pilot is off.

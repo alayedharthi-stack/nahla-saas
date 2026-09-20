@@ -31,15 +31,18 @@ def observation(*, revisions=("0107",), present=()) -> Dict[str, Any]:
 
 
 def test_the_job_targets_a_pinned_revision_and_never_head():
-    assert k.TARGET_REVISION == "0109"
+    assert k.TARGET_REVISION == "0110"
     argv = k.build_upgrade_argv(python_executable="python")
-    assert argv == ["python", "-m", "alembic", "upgrade", "0109"]
+    assert argv == ["python", "-m", "alembic", "upgrade", "0110"]
     assert "head" not in argv
 
 
-def test_the_nine_relations_are_the_whole_change():
-    assert len(k.RUNTIME_RELATIONS) == 9
-    assert set(k.RUNTIME_RELATIONS) == set(k.FOUNDATION_RELATIONS) | set(k.LEDGER_RELATIONS)
+def test_the_twelve_relations_are_the_whole_change():
+    assert len(k.RUNTIME_RELATIONS) == 12
+    assert k.RUNTIME_RELATIONS[-3:] == k.HANDOVER_RELATIONS
+    assert set(k.RUNTIME_RELATIONS) == (set(k.FOUNDATION_RELATIONS)
+                                        | set(k.LEDGER_RELATIONS)
+                                        | set(k.HANDOVER_RELATIONS))
     assert all(name.startswith("commerce_runtime_") for name in k.RUNTIME_RELATIONS)
 
 
@@ -76,8 +79,8 @@ def test_only_known_starting_revisions_are_accepted(revisions, accepted):
 
 
 def test_an_already_applied_database_is_recognised_rather_than_migrated_again():
-    assert k.already_applied(frozenset({"0109"})) is True
-    assert k.already_applied(frozenset({"0088", "0109"})) is True
+    assert k.already_applied(frozenset({"0110"})) is True
+    assert k.already_applied(frozenset({"0088", "0110"})) is True
     assert k.already_applied(frozenset({"0108"})) is False
 
 
@@ -218,7 +221,7 @@ def test_the_subprocess_and_the_inspection_engine_are_given_the_same_target(monk
         return 0
 
     states = [observation(revisions=("0107",), present=()),
-              observation(revisions=("0109",), present=k.RUNTIME_RELATIONS)]
+              observation(revisions=("0110",), present=k.RUNTIME_RELATIONS)]
 
     def _observe(url: str) -> Dict[str, Any]:
         seen.setdefault("observed", url)
@@ -385,7 +388,7 @@ def test_the_foundation_revision_is_a_startable_state_and_not_a_refused_one(monk
     ``0108`` holding them is on its way to the target, not half-applied."""
     calls = _prepare(monkeypatch,
                      observation(revisions=("0108",), present=k.FOUNDATION_RELATIONS),
-                     observation(revisions=("0109",), present=k.RUNTIME_RELATIONS))
+                     observation(revisions=("0110",), present=k.RUNTIME_RELATIONS))
     assert job.main([]) == k.EXIT_SUCCESS
     assert len(calls) == 1
     assert f"RESULT={k.RESULT_SUCCESS}" in capsys.readouterr().out
@@ -418,15 +421,15 @@ def _prepare(monkeypatch, before, after=None, rc=0):
 def test_a_fresh_accepted_database_is_migrated_and_verified(monkeypatch, capsys):
     calls = _prepare(monkeypatch,
                      observation(revisions=("0107",), present=()),
-                     observation(revisions=("0109",), present=k.RUNTIME_RELATIONS))
+                     observation(revisions=("0110",), present=k.RUNTIME_RELATIONS))
     assert job.main([]) == k.EXIT_SUCCESS
     assert len(calls) == 1
     out = capsys.readouterr().out
-    assert f"RESULT={k.RESULT_SUCCESS}" in out and "relations=9" in out
+    assert f"RESULT={k.RESULT_SUCCESS}" in out and "relations=12" in out
 
 
 def test_an_already_migrated_database_is_a_no_op_and_runs_nothing(monkeypatch, capsys):
-    calls = _prepare(monkeypatch, observation(revisions=("0109",), present=k.RUNTIME_RELATIONS))
+    calls = _prepare(monkeypatch, observation(revisions=("0110",), present=k.RUNTIME_RELATIONS))
     assert job.main([]) == k.EXIT_SUCCESS
     assert calls == []
     assert f"RESULT={k.RESULT_ALREADY_APPLIED}" in capsys.readouterr().out
@@ -453,7 +456,7 @@ def test_an_unexpected_starting_revision_is_refused_with_what_was_observed(monke
 def test_a_non_zero_alembic_exit_is_a_failure_even_if_the_tables_appeared(monkeypatch, capsys):
     _prepare(monkeypatch,
              observation(revisions=("0107",), present=()),
-             observation(revisions=("0109",), present=k.RUNTIME_RELATIONS),
+             observation(revisions=("0110",), present=k.RUNTIME_RELATIONS),
              rc=1)
     assert job.main([]) == k.EXIT_FAILED
     assert f"RESULT={k.RESULT_FAILED}" in capsys.readouterr().out
@@ -462,7 +465,7 @@ def test_a_non_zero_alembic_exit_is_a_failure_even_if_the_tables_appeared(monkey
 def test_a_zero_exit_that_left_the_schema_incomplete_is_still_a_failure(monkeypatch, capsys):
     _prepare(monkeypatch,
              observation(revisions=("0107",), present=()),
-             observation(revisions=("0109",), present=k.FOUNDATION_RELATIONS))
+             observation(revisions=("0108",), present=k.FOUNDATION_RELATIONS))
     assert job.main([]) == k.EXIT_FAILED
     out = capsys.readouterr().out
     assert f"RESULT={k.RESULT_FAILED}" in out and "missing" in out
@@ -479,7 +482,7 @@ def test_a_zero_exit_that_did_not_reach_the_target_revision_is_a_failure(monkeyp
 def test_every_line_the_job_prints_is_grep_able_under_one_prefix(monkeypatch, capsys):
     _prepare(monkeypatch,
              observation(revisions=("0107",), present=()),
-             observation(revisions=("0109",), present=k.RUNTIME_RELATIONS))
+             observation(revisions=("0110",), present=k.RUNTIME_RELATIONS))
     job.main([])
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
     assert lines and all(line.startswith(k.LOG_PREFIX) for line in lines)

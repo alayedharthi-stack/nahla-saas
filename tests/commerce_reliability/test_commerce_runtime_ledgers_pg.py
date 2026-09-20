@@ -266,7 +266,10 @@ def ledgers(pg_admin_dsn: str):
 
 
 def test_migration_0109_applies_on_0108_and_is_reversible(pg_admin_dsn: str) -> None:
-    assert _script_heads() == {OTHER_HEAD, THIS_REVISION}, "0109 must extend 0108 and leave 0092 untouched"
+    # 0109 is no longer the chain's head — 0110 extends it — but it must still
+    # sit on the integration branch and leave the A1-Validate head alone.
+    assert OTHER_HEAD in _script_heads() and len(_script_heads()) == 2, \
+        "0109 must stay on the integration branch and leave 0092 untouched"
     name, dsn = _create_database(pg_admin_dsn)
     try:
         _alembic(dsn, FOUNDATION_REVISION)

@@ -103,11 +103,18 @@ live in two places.
 `commerce_runtime_claims_inbound` asks whether this runtime owns the inbound —
 either because the pilot is configured for this tenant and recipient on a
 verified connection, or because this runtime already admitted this exact inbound
-message. A claim routes the turn straight to `_handle_merchant_message` and none
-of the dispatcher's short circuits run: payment receipt, payment evidence, map
-image, payment claim, address and payment method all mutate order state and send
-*before* the handler is entered, so a decision taken only inside the handler
-never sees those turns at all. The claim answers nothing by itself.
+message. It is asked **before every competing branch**, which is earlier than it
+used to be: the dispatcher's cash-on-delivery button routes sit above the
+payment short circuits, and both act before the merchant handler is entered. A
+claim routes the turn straight to `_handle_merchant_message` and none of them
+run — payment receipt, payment evidence, map image, payment claim, address,
+payment method, and the two COD routes all mutate order state and send, so a
+decision taken only inside the handler never sees those turns at all. Inside the
+handler the same claim is checked once more, above the COD text-reply
+interception, which is an owner for the same reason: it transitions the order
+and sends the customer a follow-up. The claim answers nothing by itself, and the
+pilot has no commerce-write tool, so a claimed COD turn is answered from what
+the runtime can observe rather than by confirming an order.
 
 **The claim is sticky, and it is scoped.** It is carried into the handler and
 honoured only for the exact turn it was established for — tenant, normalised
@@ -206,68 +213,95 @@ never widen what one turn may spend.
 
 ---
 
-### 3.5 Handover
+### 3.5 Handover, and what an acknowledgement promises
 
 Switching the pilot off decides who takes **new** turns; it says nothing about
-the turns the runtime already admitted. A handover is therefore a procedure, not
-a flag, and it is performed against a **shared barrier** in the database —
-`core.commerce_runtime.handover`, stored under one namespaced key in the
-tenant's own `tenant_settings` row, so it needs no migration. Its states are
-`open → draining → settled → open`.
+the turns the runtime already admitted, nor about the messages the provider has
+already been told we have. Both are durable state, and both live in the
+runtime's **own** relations (revision `0110`):
 
-A per-process environment flag cannot be the mechanism. It cannot say the same
-word to every replica at the same moment, it cannot be observed from outside the
-process holding it, and it changes at a moment nobody can name; a handover
-decided on one is a handover decided on nothing. `COMMERCE_RUNTIME_PILOT_DRAINING`
+| Relation | What it holds |
+| --- | --- |
+| `commerce_runtime_handover_barrier` | whether this tenant admits new work, on which generation, and the evidence its settlement rested on |
+| `commerce_runtime_handover_workers` | one row per process, carrying the generation and state **it observed**, and — if retired — who retired it and why |
+| `commerce_runtime_deferred_inbound` | one row per accepted inbound nobody has finished, with the identity and payload a replay needs |
+
+They were previously a namespaced key inside `tenant_settings.metadata`. That
+document has other writers, each of them read-modify-write over the whole JSON,
+so any of them could put back a copy taken before a drain and silently reopen
+it. Coordinating every settings writer would mean rewriting code with nothing to
+do with this handover; the runtime's own state belongs where only the runtime
+writes, and that is what the migration does.
+
+**The barrier.** `open → draining → settled → open`. A per-process environment
+flag cannot be the mechanism: it cannot say the same word to every replica at
+the same moment, it cannot be observed from outside the process holding it, and
+it changes at a moment nobody can name. `COMMERCE_RUNTIME_PILOT_DRAINING`
 remains, and takes one process out of rotation, but it is not the handover.
 
-**Draining withholds; it does not release.** While a tenant is draining, an
-inbound for a conversation this pilot would otherwise own is *buffered* —
-recorded durably, answered by nobody — and settlement is blocked until each
-buffered entry carries a recorded disposition. Releasing such a conversation to
-the legacy path is the one thing a handover must not do: the runtime being
-handed over from may still have a send in flight, and a second answer from a
-second runtime is precisely the outcome being prevented. Traffic the pilot would
-not have owned is untouched: the drain is evaluated after the tenant and
-recipient allowlists, so a recipient outside them keeps exactly the behaviour it
-has today.
+**Draining withholds; it does not release.** While a tenant is draining — or is
+settled and not yet reopened — an inbound for a conversation this pilot would
+otherwise own is *deferred*: recorded durably, answered by nobody, and settlement
+is blocked until each entry carries a checked disposition. Releasing such a
+conversation to the legacy path is the one thing a handover must not do: the
+runtime being handed over from may still have a send in flight. Traffic the pilot
+would not have owned is untouched — the drain is evaluated after the tenant and
+recipient allowlists.
 
 **No turn is admitted that a post-drain check cannot see.** The barrier is read
 on the admission transaction's **own connection**, under a tenant-scoped
-advisory lock which the drain takes exclusively. The database therefore orders
-the two, and there are only two orderings: the admission got the shared lock
-first, so the drain waits and the turn is visible to every count taken
-afterwards; or the drain committed first, so the read sees `draining` and the
-admission is refused with nothing written (`handover_barrier_closed`). An
-invocation that selected the runtime *before* the drain cannot slip between a
-zero count and a settlement. A re-entry for a turn already admitted never
+advisory lock which a transition takes exclusively. There are only two
+orderings: the admission got the shared lock first, so the transition waits and
+the turn is visible to every count taken afterwards; or the transition committed
+first, so the read sees `draining` and the admission is refused with nothing
+written (`handover_barrier_closed`). A re-entry for a turn already admitted never
 reaches the barrier, which is what lets a draining runtime still finish its own
 work.
 
-`scripts/operators/commerce_runtime_pilot_handover.py` is the executable
-procedure — `status | drain | dispose | settle | reopen`. `settle` exits 0 only
-when the barrier is draining, every live worker has reported the current
-generation, every count is zero, and nothing buffered is undisposed; otherwise
-it exits 1 and names each blocker. The counts are admitted turns with no
-terminal, reserved intents nothing dispatched, attempts with no established
-outcome, and attempts whose established outcome is `unknown`. The last counts
-because an unknown send may still be with the provider and may still deliver;
-treating a recorded unknown as resolved would be claiming non-delivery on no
-evidence, so it blocks rather than ageing out. `settle` writes its evidence
-snapshot before anything reopens, and `reopen` refuses unless the barrier is
-settled.
+**Every transition validates where it writes.** `settle` re-reads the barrier
+under the lock, re-checks the generation the operator decided on, recounts the
+work and the pending deferred entries on that same session, and only then writes
+the transition and its evidence — so the evidence describes the state that was
+actually settled, and work committing between the report and the write blocks
+instead of being settled over. `reopen` re-checks under the same lock that the
+barrier is still the settled one it was asked about, so a drain that started in
+between is never reopened over.
 
-What the job can prove is bounded, and it says so rather than overstating it.
-Convergence is evidence from the workers themselves — each records the barrier
-generation it is running the first time it evaluates a route after the change —
-not a statement that they were restarted; a worker last seen before the drain
-and still inside the liveness window has an *unknown* disposition and blocks
-settlement by name. Counts are the database's account of recorded work. Neither
-can see a request already on the wire to the provider. There is no attestation
-step and no attestation variable: the verdict rests on the procedure having been
-executed, never on an assertion that the fleet is quiesced. The job also refuses
-an allowlist larger than it will inspect, rather than reporting on a silent
-subset.
+**Convergence is observed, and silence is not retirement.** A worker records the
+generation and state **it read**, passed in by the worker itself rather than
+re-derived when the row is written — a heartbeat that arrives after a drain
+still says what that worker saw. The expected set is every worker row that has
+not been retired; a worker that stops reporting is *stale* and blocks, and only
+an operator retires one, naming themselves and their reason, which the
+settlement evidence then carries. Shared admission locking orders this job
+against the workers that take it; it does not prove a fleet was rolled out or
+shut down.
+
+**Disposition is per entry and evidenced.** Each deferred row is named by id and
+disposed of individually, with a disposition from a closed set (`replayed`,
+`answered`, `superseded`, `not_required`) and evidence stored on the row. An
+entry that arrived after the operator last looked is not in their list and is
+not disposed of. Disposed and resolved rows stay as history and stop counting
+against the pending limit, so the audit trail need not be deleted to make room.
+An `unknown` delivery outcome still blocks settlement and is never resolved by
+elapsed time.
+
+**An acknowledgement is a promise.** Both webhook entry points acknowledge first
+and process in the background. For the legacy path that is right; for a
+pilot-scoped message it is not, because the 200 ends the provider's retries
+before anything durable exists. A pilot-scoped inbound is therefore written to
+`commerce_runtime_deferred_inbound` **before** the route answers, and resolved
+when its turn reaches a terminal; until then it counts as outstanding work.
+When that record cannot be written the route answers `503` and spawns nothing,
+so the provider redelivers the whole batch and the existing deduplication keeps
+the unaffected messages in it from being processed twice. Nothing in this path
+runs while the pilot is off.
+
+`scripts/operators/commerce_runtime_pilot_handover.py` is the executable
+procedure — `status | drain | retire | dispose | settle | reopen`. `settle` exits
+0 only when every one of those conditions holds at the instant of the write;
+otherwise it exits 1 and names each blocker. There is no attestation step and no
+attestation variable: the verdict rests on the procedure having been executed.
 
 The emergency stop — switching the pilot off outright — remains available. It
 stops this process from taking new turns and from recovering; it is not

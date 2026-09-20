@@ -230,6 +230,7 @@ class HandoverState:
     reserved_undispatched: int      # a reply reserved that was never sent
     unresolved_attempts: int        # a send with no outcome receipt at all
     unknown_outcomes: int = 0       # a send whose recorded outcome is *unknown*
+    deferred_pending: int = 0       # accepted inbound nobody has finished or disposed of
 
     @property
     def settled(self) -> bool:
@@ -242,13 +243,15 @@ class HandoverState:
         resolved is claiming something no evidence supports.
         """
         return (self.open_turns == 0 and self.reserved_undispatched == 0
-                and self.unresolved_attempts == 0 and self.unknown_outcomes == 0)
+                and self.unresolved_attempts == 0 and self.unknown_outcomes == 0
+                and self.deferred_pending == 0)
 
     def as_log_fields(self) -> dict:
         return {"tenant_id": self.tenant_id, "open_turns": self.open_turns,
                 "reserved_undispatched": self.reserved_undispatched,
                 "unresolved_attempts": self.unresolved_attempts,
-                "unknown_outcomes": self.unknown_outcomes, "settled": self.settled}
+                "unknown_outcomes": self.unknown_outcomes,
+                "deferred_pending": self.deferred_pending, "settled": self.settled}
 
 
 _OPEN_TURNS_SQL = """
@@ -290,6 +293,15 @@ WHERE a.tenant_id = :tenant AND a.namespace = :ns
 """
 
 
+# Accepted inbound nobody has finished or accounted for. The provider was told
+# we had these messages, so an unresolved one is a customer owed an answer just
+# as much as an admitted turn with no terminal is.
+_DEFERRED_PENDING_SQL = """
+SELECT count(*) FROM commerce_runtime_deferred_inbound d
+WHERE d.tenant_id = :tenant AND d.namespace = :ns AND d.state = 'pending'
+"""
+
+
 def handover_state(*, tenant_ids: Any = None, engine: Any = None) -> tuple:
     """What each tenant still has in flight, for the handover procedure.
 
@@ -316,20 +328,34 @@ def handover_state(*, tenant_ids: Any = None, engine: Any = None) -> tuple:
 
         engine = default_engine
     tenants = _scoped_tenants(tenant_ids)
-    states = []
     with engine.connect() as conn:
-        for tenant_id in tenants:
-            params = {"tenant": tenant_id, "ns": NAMESPACE}
-            states.append(HandoverState(
-                tenant_id=tenant_id,
-                open_turns=int(conn.execute(sa_text(_OPEN_TURNS_SQL), params).scalar() or 0),
-                reserved_undispatched=int(
-                    conn.execute(sa_text(_RESERVED_UNDISPATCHED_SQL), params).scalar() or 0),
-                unresolved_attempts=int(
-                    conn.execute(sa_text(_UNRESOLVED_ATTEMPTS_SQL), params).scalar() or 0),
-                unknown_outcomes=int(
-                    conn.execute(sa_text(_UNKNOWN_OUTCOMES_SQL), params).scalar() or 0),
-            ))
+        return handover_state_on(conn, tenant_ids=tenants)
+
+
+def handover_state_on(conn: Any, *, tenant_ids: Any = None) -> tuple:
+    """The same counts, taken on a connection the caller already holds.
+
+    This is the form a settlement uses: counting inside the transaction that
+    performs the transition is what stops work committing between the count and
+    the decision it justified.
+    """
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    states = []
+    for tenant_id in _scoped_tenants(tenant_ids):
+        params = {"tenant": tenant_id, "ns": NAMESPACE}
+        states.append(HandoverState(
+            tenant_id=tenant_id,
+            open_turns=int(conn.execute(sa_text(_OPEN_TURNS_SQL), params).scalar() or 0),
+            reserved_undispatched=int(
+                conn.execute(sa_text(_RESERVED_UNDISPATCHED_SQL), params).scalar() or 0),
+            unresolved_attempts=int(
+                conn.execute(sa_text(_UNRESOLVED_ATTEMPTS_SQL), params).scalar() or 0),
+            unknown_outcomes=int(
+                conn.execute(sa_text(_UNKNOWN_OUTCOMES_SQL), params).scalar() or 0),
+            deferred_pending=int(
+                conn.execute(sa_text(_DEFERRED_PENDING_SQL), params).scalar() or 0),
+        ))
     return tuple(states)
 
 
@@ -343,5 +369,5 @@ __all__ = [
     "AdmittedInbound", "CHANNEL_REF_PREFIX", "HandoverState", "MAX_TENANTS_CONSIDERED",
     "NAMESPACE", "TooManyTenants", "UnfinishedTurn", "admitted_turn_for",
     "channel_connection_ref", "duplicate_carries_unfinished_work",
-    "handover_settled", "handover_state", "unfinished_turn_for",
+    "handover_settled", "handover_state", "handover_state_on", "unfinished_turn_for",
 ]

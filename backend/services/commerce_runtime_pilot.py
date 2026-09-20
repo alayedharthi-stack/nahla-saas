@@ -420,7 +420,12 @@ def commerce_runtime_claims_inbound(
         from core.commerce_runtime import handover  # noqa: PLC0415
 
         barrier = handover.read_barrier(db, tenant_id=int(tenant_id))
-        handover.note_worker(db, tenant_id=int(tenant_id), state=barrier.state)
+        # Report the barrier this process *observed*, exactly as observed. A
+        # heartbeat that re-read the generation at write time would claim
+        # convergence this worker has not reached.
+        handover.note_worker(db, tenant_id=int(tenant_id),
+                             observed_generation=barrier.generation,
+                             observed_state=barrier.state)
 
         # Only a conversation this pilot would otherwise own is affected by a
         # handover. Everything else — a recipient outside the allowlist, an
@@ -428,14 +433,17 @@ def commerce_runtime_claims_inbound(
         # keeps exactly the behaviour it has today, drain or no drain.
         process_draining = decision.reason == pilot_guard.PILOT_DRAINING
         affected = decision.permitted or process_draining
-        draining = affected and (barrier.draining or process_draining)
+        # A conversation is deferred when it is one this pilot would own and the
+        # tenant is not admitting new work: draining, settled-but-not-reopened,
+        # or this process taken out of rotation.
+        deferring = affected and (barrier.draining or barrier.settled or process_draining)
 
         # A turn this runtime already admitted is never new work, so a drain
         # does not buffer it: draining is what finishes outstanding work, and
         # withholding a redelivery of it from its own runtime is how it would be
         # abandoned instead.
         owned = None
-        if draining or not decision.permitted:
+        if deferring or not decision.permitted:
             owned = _admitted_runtime_turn(
                 tenant_id=int(tenant_id), phone_id=phone_id, wa_msg_id=wa_msg_id,
                 refusal=decision.reason)
@@ -446,18 +454,35 @@ def commerce_runtime_claims_inbound(
                 owned.turn_id, owned.finished, tenant_id, decision.reason)
             return claim("admitted_finished" if owned.finished else "admitted_open")
 
-        if draining:
+        if deferring:
             # Draining does not release this conversation to the legacy path:
             # the runtime it is handing over from may still have a send in
             # flight, and a second answer is exactly what must not happen. The
-            # inbound is recorded and answered by nobody.
-            handover.buffer_inbound(
-                db, tenant_id=int(tenant_id), provider_message_id=identity,
-                recipient=recipient,
-                reason="handover_draining" if barrier.draining else "process_draining")
-            logger.warning("[COMMERCE_RUNTIME_PILOT] buffered during handover tenant=%s "
-                           "generation=%s barrier=%s process_draining=%s",
-                           tenant_id, barrier.generation, barrier.state, process_draining)
+            # inbound is recorded with its own identity and payload, and
+            # answered by nobody until an operator disposes of it.
+            #
+            # A tenant that is *settled* is in the window between "nothing is
+            # outstanding" and an operator reopening ingress. New work must not
+            # start there either, and it must not be lost: it is recorded the
+            # same way.
+            reason = (handover.REASON_DRAIN_BUFFERED if barrier.draining
+                      else handover.REASON_PROCESS_DRAINING if process_draining
+                      else handover.REASON_SETTLED_WINDOW)
+            record = _defer(db, tenant_id=int(tenant_id), decision=decision, phone_id=phone_id,
+                            recipient=recipient, identity=identity, text=text,
+                            reason=reason, generation=barrier.generation)
+            if record is None:
+                # Nothing durable was written, so nothing may be answered and
+                # nothing may be claimed as accounted for. The turn is still
+                # withheld — releasing it to another owner while a send may be
+                # in flight is the worse failure — and the operator is told.
+                logger.error("[COMMERCE_RUNTIME_PILOT] could not defer inbound tenant=%s "
+                             "provider_message_id=%s — withheld but UNRECORDED; account for "
+                             "it by hand before settling", tenant_id, identity)
+            else:
+                logger.warning("[COMMERCE_RUNTIME_PILOT] deferred during handover tenant=%s "
+                               "generation=%s barrier=%s reason=%s entry=%s",
+                               tenant_id, barrier.generation, barrier.state, reason, record.id)
             return claim("drain_buffered")
 
         if decision.permitted:
@@ -547,10 +572,17 @@ async def maybe_handle_with_commerce_runtime(
     if not _barrier_admits_new_work(db, tenant_id=int(tenant_id)):
         owned = admitted()
         if owned is None or not owned.unfinished:
-            logger.warning("[COMMERCE_RUNTIME_PILOT] handover barrier closed tenant=%s — "
-                           "no new turn, and the turn is given to nobody else", tenant_id)
+            from core.commerce_runtime import handover  # noqa: PLC0415
             from core.commerce_runtime import runtime_entry as _entry  # noqa: PLC0415
 
+            recorded = _defer(
+                db, tenant_id=int(tenant_id), decision=decision, phone_id=phone_id,
+                recipient=str(decision.recipient or to), identity=_inbound_identity(wa_msg_id, convo),
+                text=text, reason=handover.REASON_ADMISSION_REFUSED,
+                generation=handover.read_barrier(db, tenant_id=int(tenant_id)).generation)
+            logger.warning("[COMMERCE_RUNTIME_PILOT] handover barrier closed tenant=%s "
+                           "deferred=%s — no new turn, and the turn is given to nobody else",
+                           tenant_id, None if recorded is None else recorded.id)
             return PilotResult(handled=True, reason=_entry.HANDOVER_BARRIER)
 
     # From here the commerce runtime owns the turn. Nothing below may raise back
@@ -566,6 +598,64 @@ async def maybe_handle_with_commerce_runtime(
         logger.exception("[COMMERCE_RUNTIME_PILOT] turn failed after the route was taken tenant=%s",
                          tenant_id)
         return PilotResult(handled=True, reason="internal_error")
+
+
+def _defer(db: Any, *, tenant_id: int, decision: Any, phone_id: str, recipient: str,
+           identity: str, text: str, reason: str, generation: int) -> Optional[Any]:
+    """Record one inbound the runtime accepted but will not start now.
+
+    Durable, scoped and recoverable: the connection this arrived on, the
+    recipient, the provider's own message id and the text, so a replay is a
+    replay rather than a note that something was lost. Never raises.
+    """
+    from core.commerce_runtime import handover  # noqa: PLC0415
+
+    try:
+        return handover.record_inbound(
+            db, tenant_id=int(tenant_id), phone_number_id=str(phone_id or ""),
+            channel_connection_ref=str(decision.connection_ref or f"wa:{phone_id}"),
+            recipient=str(recipient), provider_message_id=str(identity),
+            payload={"text": str(text or "")}, reason=str(reason),
+            barrier_generation=int(generation))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[COMMERCE_RUNTIME_PILOT] deferred record failed tenant=%s error=%s",
+                     tenant_id, type(exc).__name__)
+        return None
+
+
+def _inbound_identity(wa_msg_id: Optional[str], convo: Any) -> str:
+    """The identity a deferred record and an admitted turn agree on."""
+    return (str(wa_msg_id or "").strip()
+            or f"conversation-{int(getattr(convo, 'id', 0) or 0)}:no-wamid")
+
+
+def _settle_deferred(db: Any, *, tenant_id: int, decision: Any, phone_id: str, recipient: str,
+                     identity: str, text: str, report: Any) -> None:
+    """Close the durable record this turn was accepted under, or open one.
+
+    A turn that reached a terminal is finished, so its record stops counting
+    against settlement. One the barrier refused at admission never started, so a
+    record is written for it instead: the provider was told we had the message
+    and nothing has answered it.
+    """
+    from core.commerce_runtime import handover  # noqa: PLC0415
+    from core.commerce_runtime import runtime_entry as _entry  # noqa: PLC0415
+
+    connection = str(getattr(decision, "connection_ref", "") or f"wa:{phone_id}")
+    try:
+        if getattr(report, "reason", "") == _entry.HANDOVER_BARRIER:
+            _defer(db, tenant_id=tenant_id, decision=decision, phone_id=phone_id,
+                   recipient=recipient, identity=identity, text=text,
+                   reason=handover.REASON_ADMISSION_REFUSED,
+                   generation=handover.read_barrier(db, tenant_id=tenant_id).generation)
+            return
+        if getattr(report, "turn_id", None) is not None:
+            handover.resolve_inbound(db, tenant_id=tenant_id,
+                                     channel_connection_ref=connection,
+                                     provider_message_id=identity)
+    except Exception as exc:  # noqa: BLE001 - the turn is finished either way
+        logger.warning("[COMMERCE_RUNTIME_PILOT] deferred bookkeeping failed tenant=%s "
+                       "error=%s", tenant_id, type(exc).__name__)
 
 
 def _barrier_admits_new_work(db: Any, *, tenant_id: int) -> bool:
@@ -635,6 +725,9 @@ async def _own_turn(
         )
 
     report = await asyncio.to_thread(run)
+    _settle_deferred(db, tenant_id=int(tenant_id), decision=decision, phone_id=phone_id,
+                     recipient=str(decision.recipient or to),
+                     identity=provider_message_id, text=text, report=report)
     _record(db=db, trace=trace, convo=convo, tenant_id=int(tenant_id), to=to, report=report,
             wire=wire)
     logger.info("[COMMERCE_RUNTIME_PILOT] route=commerce_runtime %s", report.as_log_fields())

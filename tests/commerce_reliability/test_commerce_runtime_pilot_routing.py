@@ -117,6 +117,7 @@ def drive(seen: Seen, *, event_id: str, text: str = "عندكم فستان؟",
         harness = stack.enter_context(H.incident_ctx(
             brain_return=H._brain_return(reply=H.GROUNDED_TEXT), script=H._script_accept_all))
         competing(stack, seen, **kwargs)
+        install_handover_rows(harness)
         for gate in gates:
             stack.enter_context(gate)
         H.run_turn(harness, text=text, event_id=event_id, phone=CUSTOMER)
@@ -273,34 +274,55 @@ def test_the_turn_after_a_failed_sync_is_still_processed(pilot_on):
 # ── A claim is sticky: it silences, it never transfers (F2/F3, re-review) ────
 
 
-def draining_barrier(harness: Any, *, generation: int = 4) -> None:
-    """Give this tenant's settings row a drained barrier, in its real shape.
+class _BarrierRow:
+    """One handover barrier row, in its real shape."""
 
-    Only the row lookup is a double — the payload, and every line that reads it,
-    are production. The durable barrier itself is proved on real PostgreSQL in
+    def __init__(self, state: str, generation: int = 4) -> None:
+        from core.commerce_runtime import handover
+
+        self.tenant_id = TENANT
+        self.namespace = handover.NAMESPACE
+        self.state = state
+        self.generation = generation
+        self.opened_at = None
+        self.settled_at = None
+        self.evidence: Dict[str, Any] = {}
+
+
+def install_handover_rows(harness: Any, *, barrier: Any = None) -> None:
+    """Answer the handover reads with rows, not with a bare mock.
+
+    Only the row *lookup* is a double — the rows are the production shape and
+    every line that reads them is production. The durable tables themselves are
+    proved on real PostgreSQL in
     ``test_commerce_runtime_pilot_handover_controls_pg.py``.
     """
     from unittest.mock import MagicMock
 
-    from core.commerce_runtime import handover
-
-    class _Row:
-        tenant_id = TENANT
-        extra_metadata = {handover.SETTINGS_KEY: {
-            "state": handover.STATE_DRAINING, "generation": generation,
-            "opened_at": "2026-09-19T00:00:00+00:00"}}
-
     ordinary = harness.db.query
+    answers = {"HandoverBarrier": barrier, "HandoverWorker": None, "DeferredInbound": None}
 
     def _query(model: Any, *rest: Any) -> Any:
-        if str(getattr(model, "__name__", "")) == "TenantSettings":
-            chain = MagicMock()
-            chain.filter.return_value.first.return_value = _Row()
-            chain.filter.return_value.with_for_update.return_value.first.return_value = _Row()
-            return chain
-        return ordinary(model, *rest)
+        name = str(getattr(model, "__name__", ""))
+        if name not in answers:
+            return ordinary(model, *rest)
+        row = answers[name]
+        chain = MagicMock()
+        for tail in (chain.filter.return_value,
+                     chain.filter.return_value.order_by.return_value,
+                     chain.filter.return_value.with_for_update.return_value):
+            tail.first.return_value = row
+            tail.all.return_value = [] if row is None else [row]
+            tail.count.return_value = 0
+        return chain
 
     harness.db.query = MagicMock(side_effect=_query)
+
+
+def draining_barrier(harness: Any, *, generation: int = 4) -> None:
+    from core.commerce_runtime import handover
+
+    install_handover_rows(harness, barrier=_BarrierRow(handover.STATE_DRAINING, generation))
 
 
 def composed(seen: Seen, *, event_id: str, seam_outcome: Any,
@@ -336,8 +358,7 @@ def composed(seen: Seen, *, event_id: str, seam_outcome: Any,
         competing(stack, seen)
         for gate in gates:
             stack.enter_context(gate)
-        if barrier:
-            draining_barrier(harness)
+        draining_barrier(harness) if barrier else install_handover_rows(harness)
 
         # The production claim, established for real.
         claims.append(seam.commerce_runtime_claims_inbound(
@@ -497,3 +518,116 @@ def test_a_claim_for_this_turn_is_honoured_and_an_uncheckable_one_is_held():
         seam.RuntimeClaim(tenant_id=TENANT, recipient="x", provider_message_id="y",
                           basis="configured"),
         tenant_id=TENANT, to=CUSTOMER, wa_msg_id="y") is False   # recipient really differs
+
+
+# ── COD is an owner too, and it acts before the seam ─────────────────────────
+#
+# The cash-on-delivery branches are not "another reply path". They transition an
+# order and send a customer-visible follow-up, and they sit *above* the pilot
+# seam in the merchant handler. An allowlisted "نعم" therefore never reached the
+# runtime at all: the order moved and the customer was answered by COD.
+
+
+def cod_seen() -> Dict[str, List[Any]]:
+    return {"classified": [], "handled": [], "followup": []}
+
+
+def cod_watched(stack: ExitStack, record: Dict[str, List[Any]], *,
+                order: Any = None) -> None:
+    """Watch the three COD entry points the handler can reach, for real.
+
+    ``classify_cod_reply`` is left alone — "نعم" really is a confirm — so what
+    is observed is whether the branch *runs*, not whether it would match.
+    """
+    import routers.whatsapp_webhook as webhook
+    import services.cod_confirmation as cod
+
+    real_classify = cod.classify_cod_reply
+
+    def _classify(text: str) -> Any:
+        decision = real_classify(text)
+        record["classified"].append({"text": text, "decision": decision})
+        return decision
+
+    async def _handle(_db: Any, **kwargs: Any) -> Any:
+        record["handled"].append(kwargs)
+        return ("confirm", order if order is not None else object())
+
+    async def _followup(**kwargs: Any) -> None:
+        record["followup"].append(kwargs)
+
+    stack.enter_context(patch.object(cod, "classify_cod_reply", _classify))
+    stack.enter_context(patch.object(cod, "handle_cod_reply", _handle))
+    stack.enter_context(patch.object(webhook, "_send_cod_followup_message", _followup))
+
+
+def drive_cod(seen: Seen, record: Dict[str, List[Any]], *, event_id: str,
+              text: str = "نعم", claim: Any = "establish") -> Any:
+    """One real inbound "نعم", through the production claim and the real handler."""
+    import asyncio
+
+    from core.inbound_lifecycle import EVENT_MESSAGE_SAVED, inbound_lifecycle_trace, \
+        record_lifecycle
+    import routers.whatsapp_webhook as webhook
+    import services.commerce_runtime_pilot as seam
+
+    claims: List[Any] = []
+
+    async def _seam(**kwargs: Any) -> Any:
+        seen.pilot_asked.append(kwargs)
+        return seam.PilotResult(handled=True, reason=entry.HANDLED, report=report())
+
+    with ExitStack() as stack:
+        harness = stack.enter_context(H.incident_ctx(
+            brain_return=H._brain_return(reply=H.GROUNDED_TEXT), script=H._script_accept_all))
+        competing(stack, seen)
+        install_handover_rows(harness)
+        cod_watched(stack, record)
+
+        claims.append(
+            seam.commerce_runtime_claims_inbound(
+                harness.db, tenant_id=TENANT, phone_id=H.PHONE_ID, to=CUSTOMER, text=text,
+                wa_msg_id=event_id)
+            if claim == "establish" else claim)
+
+        stack.enter_context(patch.object(seam, "maybe_handle_with_commerce_runtime", _seam))
+        with inbound_lifecycle_trace(
+            provider="meta", phone_number_id=H.PHONE_ID,
+            msg={"id": event_id, "type": "text", "text": {"body": text}, "from": CUSTOMER},
+        ):
+            record_lifecycle(EVENT_MESSAGE_SAVED, conversation_id=42)
+            asyncio.run(webhook._handle_merchant_message(
+                phone_id=H.PHONE_ID, to=CUSTOMER, text=text, tenant_id=TENANT,
+                db=harness.db, wa_msg_id=event_id, commerce_runtime_claim=claims[0],
+            ))
+    harness.claims = claims                              # type: ignore[attr-defined]
+    return harness
+
+
+def test_the_cod_branch_takes_an_allowlisted_yes_while_the_pilot_is_off(pilot_off):
+    """Proof the competing owner is real: it decides, acts and answers."""
+    seen, record = Seen(), cod_seen()
+    harness = drive_cod(seen, record, event_id="wamid.cod.off", claim=None)
+    assert harness.claims == [None]
+    assert len(record["handled"]) == 1                   # the order transition ran
+    assert len(record["followup"]) == 1                  # and the customer was answered
+    assert seen.pilot_asked == []                        # the seam was never reached
+
+
+def test_an_allowlisted_yes_is_the_runtime_s_and_never_reaches_cod(pilot_on):
+    """The claim is honoured above COD: no classification, no action, no send."""
+    seen, record = Seen(), cod_seen()
+    harness = drive_cod(seen, record, event_id="wamid.cod.claimed")
+    assert harness.claims[0] is not None and harness.claims[0].basis == "configured"
+    assert record["classified"] == []                    # not even asked
+    assert record["handled"] == [] and record["followup"] == []
+    assert len(seen.pilot_asked) == 1                    # the runtime got the turn
+    assert seen.v2_owner == []
+
+
+def test_a_non_allowlisted_yes_keeps_todays_cod_behaviour(pilot_on, monkeypatch):
+    monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")
+    seen, record = Seen(), cod_seen()
+    harness = drive_cod(seen, record, event_id="wamid.cod.stranger")
+    assert harness.claims == [None]
+    assert len(record["handled"]) == 1 and len(record["followup"]) == 1

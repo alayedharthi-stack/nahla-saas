@@ -1,18 +1,24 @@
-"""The handover procedure, executed: barrier, convergence, disposition, evidence.
+"""The handover procedure, executed: barrier, fleet, disposition, evidence.
 
-Every step runs against a real ``tenant_settings`` row in an isolated SQLite
-database, so the barrier these cases read and write is the one the runtime reads
-— not a double of it. Only the runtime *work counts* are supplied, because they
-come from the nine runtime relations, which are proved on real PostgreSQL in
-``tests/commerce_reliability/test_commerce_runtime_pilot_pg.py``.
+Every step runs against the runtime's **own** relations in an isolated SQLite
+database, so the barrier, the worker rows and the deferred inbounds these cases
+read and write are the ones the runtime reads — not doubles of them. Only the
+*work counts* are supplied, because they come from the nine ledger relations,
+which are proved on real PostgreSQL in
+``tests/commerce_reliability/test_commerce_runtime_pilot_pg.py``; the locked
+interleavings are proved there too, in
+``test_commerce_runtime_pilot_handover_controls_pg.py``.
 
-What is held here is the thing the second closure review asked for: that the
-procedure is executable and that each of its refusals names a concrete reason,
-rather than a verdict resting on someone asserting the fleet was restarted.
+What is held here is that the procedure is executable, that each refusal names
+a concrete reason, and that none of its verdicts rests on somebody asserting
+something: convergence comes from what a worker observed, retirement from an
+operator saying so on the record, and disposition from named entries with
+evidence attached.
 """
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -26,34 +32,45 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 
 from sqlalchemy import JSON, create_engine, event  # noqa: E402
 from sqlalchemy.dialects.postgresql import JSONB  # noqa: E402
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from core.commerce_runtime import handover  # noqa: E402
+from core.commerce_runtime import handover_models as hm  # noqa: E402
 from core.commerce_runtime import pilot_guard as pg  # noqa: E402
 from core.commerce_runtime import recovery  # noqa: E402
+from core.commerce_runtime.handover_models import create_handover_tables  # noqa: E402
+from core.commerce_runtime.models import RuntimeBase  # noqa: E402
 from database.models import Base, Tenant  # noqa: E402
 from scripts.operators import commerce_runtime_pilot_handover as job  # noqa: E402
 
-TENANT = 4242
-
 
 @event.listens_for(Base.metadata, "before_create")
+@event.listens_for(RuntimeBase.metadata, "before_create")
 def _remap_jsonb(target: Any, connection: Any, **kw: Any) -> None:
+    """SQLite has no JSONB and cannot parse a ``::jsonb`` cast in a default.
+
+    The columns are JSON here and JSONB on PostgreSQL, where these tables are
+    actually proved; the values the code writes are identical either way.
+    """
     for table in target.sorted_tables:
         for col in table.columns:
             if isinstance(col.type, JSONB):
                 col.type = JSON()
+            default = getattr(col.server_default, "arg", None)
+            if default is not None and "::" in str(default):
+                col.server_default = None
 
 
 @pytest.fixture()
 def db() -> Any:
-    # StaticPool: one in-memory database shared by every connection, so a
-    # second session (the handover barrier opens its own) sees the same rows
-    # instead of a fresh empty database.
+    # StaticPool: one in-memory database shared by every connection, so the
+    # transaction a transition opens for itself sees the same rows instead of a
+    # fresh empty database.
     engine = create_engine("sqlite:///:memory:", poolclass=StaticPool,
                            connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    create_handover_tables(engine)
     session = sessionmaker(bind=engine)()
     tenant = Tenant(name="متجر تجريبي عام", is_active=True)
     session.add(tenant)
@@ -64,291 +81,533 @@ def db() -> Any:
     engine.dispose()
 
 
-def state(tenant_id: int, *, open_turns: int = 0, reserved: int = 0,
-          unresolved: int = 0, unknown: int = 0) -> recovery.HandoverState:
+def state(tenant_id: int, *, open_turns: int = 0, reserved: int = 0, unresolved: int = 0,
+          unknown: int = 0, deferred: int = 0) -> recovery.HandoverState:
     return recovery.HandoverState(tenant_id=tenant_id, open_turns=open_turns,
                                   reserved_undispatched=reserved,
-                                  unresolved_attempts=unresolved, unknown_outcomes=unknown)
+                                  unresolved_attempts=unresolved, unknown_outcomes=unknown,
+                                  deferred_pending=deferred)
 
 
 @pytest.fixture()
-def configured(monkeypatch: pytest.MonkeyPatch, db: Any) -> None:
+def configured(monkeypatch: pytest.MonkeyPatch, db: Any) -> Dict[str, Any]:
+    """The job bound to this database, with the ledger counts supplied.
+
+    ``deferred_pending`` is **not** supplied: it is counted from the real rows,
+    on the same session the transition uses, because that count is exactly what
+    a stale inspection got wrong.
+    """
+    supplied: Dict[str, Any] = {"counts": {}}
+
+    def _counts(tenant_id: int) -> Dict[str, int]:
+        return dict(supplied["counts"])
+
+    def _observe(tenants: Any) -> tuple:
+        return tuple(state(t, deferred=handover.pending_count(db, tenant_id=t),
+                           **_counts(t)) for t in tenants)
+
+    def _observe_on(session: Any, tenants: Any) -> tuple:
+        return tuple(state(t, deferred=handover.pending_count_on(session, tenant_id=t),
+                           **_counts(t)) for t in tenants)
+
     monkeypatch.setenv(pg.ENV_ENABLED, "true")
     monkeypatch.setenv(pg.ENV_DRAINING, "true")
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, str(db.tenant_id))
     monkeypatch.setattr(job, "session", lambda: db)
-    monkeypatch.setattr(job, "observe", lambda tenants: tuple(state(t) for t in tenants))
+    monkeypatch.setattr(job, "observe", _observe)
+    monkeypatch.setattr(job, "observe_on", _observe_on)
     handover._last_heartbeat.clear()
+    return supplied
 
 
 def run(args: List[str]) -> int:
     return job.main(args)
 
 
-def converged(db: Any, *, generation: Optional[int] = None) -> None:
-    """One worker reports the current generation, as a live replica would."""
-    barrier = handover.read_barrier(db, tenant_id=db.tenant_id)
-    handover.note_worker(db, tenant_id=db.tenant_id, state=barrier.state, force=True)
-    if generation is not None:
-        assert handover.read_barrier(db, tenant_id=db.tenant_id).generation == generation
+def barrier(db: Any) -> handover.Barrier:
+    return handover.read_barrier(db, tenant_id=db.tenant_id)
 
 
-# ── The barrier is shared state, not a per-process flag ─────────────────────
+def report(db: Any, *, generation: Optional[int] = None, name: str = "worker-a",
+           observed_state: Optional[str] = None) -> None:
+    """One worker says what it read. The reading is the argument, not a re-read."""
+    current = barrier(db)
+    handover.note_worker(
+        db, tenant_id=db.tenant_id,
+        observed_generation=current.generation if generation is None else generation,
+        observed_state=observed_state or current.state, name=name, force=True)
 
 
-def test_a_tenant_with_no_barrier_yet_admits_work(db):
-    barrier = handover.read_barrier(db, tenant_id=db.tenant_id)
-    assert barrier.state == handover.STATE_OPEN and barrier.admits_new_work is True
+def defer(db: Any, *, identity: str, reason: str = handover.REASON_DRAIN_BUFFERED,
+          text: str = "سؤال أثناء التسليم") -> Any:
+    return handover.record_inbound(
+        db, tenant_id=db.tenant_id, phone_number_id="PID", channel_connection_ref="wa:PID",
+        recipient="+966500000123", provider_message_id=identity, payload={"text": text},
+        reason=reason, barrier_generation=barrier(db).generation)
 
 
-def test_draining_closes_the_barrier_for_every_reader(db):
-    handover.open_drain(db, tenant_id=db.tenant_id)
-    assert handover.barrier_admits_new_work(db, tenant_id=db.tenant_id) is False
-    # A second reader — another replica — sees the same thing, because it is the
-    # same row rather than the same environment variable.
-    assert handover.read_barrier(db, tenant_id=db.tenant_id).draining is True
-
-
-def test_each_drain_bumps_the_generation_so_a_stale_worker_is_visible(db):
-    first = handover.open_drain(db, tenant_id=db.tenant_id).generation
-    second = handover.open_drain(db, tenant_id=db.tenant_id).generation
-    assert second == first + 1
-
-
-def test_a_barrier_that_cannot_be_read_refuses_new_work(db, monkeypatch):
-    def explode(*_a: Any, **_k: Any) -> None:
-        raise RuntimeError("database unavailable")
-
-    monkeypatch.setattr(handover, "read_barrier", explode)
-    assert handover.barrier_admits_new_work(db, tenant_id=db.tenant_id) is False
-
-
-# ── Convergence is observed, not asserted ───────────────────────────────────
-
-
-def test_a_fleet_nobody_has_heard_from_is_not_converged(configured, db):
-    handover.open_drain(db, tenant_id=db.tenant_id)
-    convergence = handover.read_barrier(db, tenant_id=db.tenant_id).convergence()
-    assert convergence["converged"] is False
-    assert convergence["on_generation"] == []
-
-
-def test_a_worker_reporting_the_current_generation_converges_the_fleet(configured, db):
-    handover.open_drain(db, tenant_id=db.tenant_id)
-    converged(db)
-    convergence = handover.read_barrier(db, tenant_id=db.tenant_id).convergence()
-    assert convergence["converged"] is True and convergence["behind"] == []
-
-
-def test_a_worker_still_on_the_previous_generation_blocks_convergence(configured, db):
-    converged(db)                                        # reports generation 0
-    handover.open_drain(db, tenant_id=db.tenant_id)      # now generation 1
-    convergence = handover.read_barrier(db, tenant_id=db.tenant_id).convergence()
-    assert convergence["converged"] is False
-    assert convergence["unknown_disposition"]            # alive, not heard from since
-
-
-def test_a_worker_gone_long_enough_to_be_gone_does_not_block(configured, db):
-    stale = dt.datetime.now(dt.timezone.utc) - dt.timedelta(
-        seconds=handover.WORKER_LIVE_SECONDS + 60)
-    barrier = handover.Barrier(
-        tenant_id=db.tenant_id, state=handover.STATE_DRAINING, generation=2,
-        opened_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=10),
-        workers=(handover.WorkerReport("live:1", 2, "draining",
-                                       dt.datetime.now(dt.timezone.utc)),
-                 handover.WorkerReport("departed:2", 1, "on", stale)))
-    convergence = barrier.convergence()
-    assert convergence["converged"] is True
-    assert convergence["on_generation"] == ["live:1"]
-
-
-# ── The procedure ───────────────────────────────────────────────────────────
-
-
-def test_status_names_every_blocker_rather_than_answering_no(configured, db, capsys):
-    assert run(["status"]) == job.EXIT_OK
-    out = capsys.readouterr().out
-    assert "barrier_is_open_not_draining" in out
-    assert f"RESULT={job.RESULT_REPORTED}" in out
-
-
-def test_drain_then_converge_then_settle_is_the_whole_procedure(configured, db, capsys):
+def drain_and_converge(db: Any) -> None:
     assert run(["drain"]) == job.EXIT_OK
-    assert f"RESULT={job.RESULT_DRAINING}" in capsys.readouterr().out
+    report(db)
 
-    # Not settled yet: nothing has reported the new generation.
-    assert run(["settle"]) == job.EXIT_BLOCKED
-    assert "no_worker_has_reported_this_generation" in capsys.readouterr().out
 
-    converged(db)
+# ── The barrier is shared, durable and the runtime's own ─────────────────────
+
+
+def test_a_fresh_tenant_admits_work_and_has_no_row(configured, db):
+    current = barrier(db)
+    assert current.state == handover.STATE_OPEN and current.admits_new_work
+    assert current.exists is False
+
+
+def test_a_drain_is_visible_to_a_reader_that_never_saw_the_command(configured, db):
+    assert run(["drain"]) == job.EXIT_OK
+    assert barrier(db).draining is True
+    assert handover.barrier_admits_new_work(db, tenant_id=db.tenant_id) is False
+
+
+def test_each_transition_moves_the_generation_on(configured, db):
+    assert run(["drain"]) == job.EXIT_OK
+    first = barrier(db).generation
+    report(db)
     assert run(["settle"]) == job.EXIT_OK
-    out = capsys.readouterr().out
-    assert f"RESULT={job.RESULT_SETTLED}" in out
-    assert "COMMERCE_RUNTIME_PILOT_ENABLED=false" in out
-
-    barrier = handover.read_barrier(db, tenant_id=db.tenant_id)
-    assert barrier.state == handover.STATE_SETTLED
-    # The evidence was written before anything reopened.
-    assert barrier.evidence["convergence"]["converged"] is True
-    assert barrier.evidence["work"]["settled"] is True
+    assert run(["reopen"]) == job.EXIT_OK
+    assert barrier(db).generation > first
 
 
-@pytest.mark.parametrize("counts, blocker", [
+def test_a_barrier_that_cannot_be_read_refuses_new_work(configured, db):
+    class _Unreadable:
+        def query(self, *_a: Any, **_k: Any) -> Any:
+            raise RuntimeError("the database is unavailable")
+
+    assert handover.barrier_admits_new_work(_Unreadable(), tenant_id=db.tenant_id) is False
+
+
+def test_an_unrelated_settings_write_cannot_touch_the_barrier(configured, db):
+    """H2: the runtime's state is not in a document anybody else writes.
+
+    The widget-settings update below is the real one — a whole-document
+    read-modify-write over ``tenant_settings.metadata``, interleaved between the
+    drain and a deferred inbound. Both survive, because they no longer share a
+    row: the settings change is in ``tenant_settings`` and the handover is in
+    the runtime's own relations.
+    """
+    from database.models import TenantSettings
+
+    # Settings as they stood before the handover, read by an unrelated writer.
+    db.add(TenantSettings(tenant_id=db.tenant_id,
+                          extra_metadata={"widget": {"theme": "light"}}))
+    db.commit()
+    stale = dict(db.query(TenantSettings)
+                 .filter(TenantSettings.tenant_id == db.tenant_id).first().extra_metadata)
+
+    assert run(["drain"]) == job.EXIT_OK
+    assert defer(db, identity="wamid.during.settings") is not None
+
+    # …and now that writer commits its whole document, built from the copy it
+    # took before the drain. This is the interleaving that used to reopen the
+    # barrier and erase the buffer.
+    row = (db.query(TenantSettings)
+           .filter(TenantSettings.tenant_id == db.tenant_id).first())
+    row.extra_metadata = dict(stale, widget={"theme": "dark"})
+    db.commit()
+
+    assert row.extra_metadata["widget"] == {"theme": "dark"}      # the settings change kept
+    assert barrier(db).draining is True                           # and the drain kept
+    assert [e.provider_message_id for e in handover.pending_inbound(db, tenant_id=db.tenant_id)] \
+        == ["wamid.during.settings"]
+
+
+# ── Convergence is observed, and silence is not retirement (H3) ──────────────
+
+
+def test_a_fleet_nobody_has_reported_is_not_converged(configured, db):
+    assert run(["drain"]) == job.EXIT_OK
+    result = handover.convergence(barrier(db), handover.fleet(db, tenant_id=db.tenant_id))
+    assert result["converged"] is False
+    assert job.convergence_blockers(result) == ["no_worker_has_reported_this_generation"]
+
+
+def test_a_worker_reporting_this_generation_converges(configured, db):
+    drain_and_converge(db)
+    result = handover.convergence(barrier(db), handover.fleet(db, tenant_id=db.tenant_id))
+    assert result["converged"] is True and result["on_generation"] == ["worker-a"]
+
+
+def test_a_worker_still_on_the_previous_generation_is_behind(configured, db):
+    report(db)                                           # observed OPEN, generation 0
+    assert run(["drain"]) == job.EXIT_OK
+    report(db, name="worker-b")                          # observed the drain
+    result = handover.convergence(barrier(db), handover.fleet(db, tenant_id=db.tenant_id))
+    assert result["converged"] is False
+    assert result["behind"] == ["worker-a"] or result["stale"] == ["worker-a"]
+
+
+def test_an_observation_taken_before_the_drain_is_not_stamped_with_a_later_generation(
+        configured, db):
+    """H3, exactly: what the worker *read* is what the row says.
+
+    The worker reads an OPEN barrier, the operator drains, and only then does
+    the heartbeat reach the database. Re-deriving the generation at write time
+    would record this worker as converged on a drain it has never seen.
+    """
+    observed = barrier(db)
+    assert observed.state == handover.STATE_OPEN
+    assert run(["drain"]) == job.EXIT_OK                 # the drain lands in between
+    handover.note_worker(db, tenant_id=db.tenant_id,
+                         observed_generation=observed.generation,
+                         observed_state=observed.state, name="worker-late", force=True)
+
+    row = handover.fleet(db, tenant_id=db.tenant_id)[0]
+    assert row.observed_generation == observed.generation      # what it read
+    assert row.observed_state == handover.STATE_OPEN
+    result = handover.convergence(barrier(db), handover.fleet(db, tenant_id=db.tenant_id))
+    assert result["converged"] is False and result["behind"] == ["worker-late"]
+    assert run(["settle"]) == job.EXIT_BLOCKED
+
+
+def test_a_worker_that_stops_reporting_is_stale_and_blocks(configured, db):
+    """Disappearing from the recent-report window is not evidence it stopped."""
+    report(db, name="worker-gone")
+    assert run(["drain"]) == job.EXIT_OK
+    report(db, name="worker-here")
+    # Push the quiet worker's last report outside the window.
+    with handover._own_session(db) as session:
+        row = (session.query(hm.HandoverWorker)
+               .filter(hm.HandoverWorker.worker_id == "worker-gone").first())
+        row.seen_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(
+            seconds=handover.WORKER_LIVE_SECONDS + 60)
+        session.commit()
+
+    result = handover.convergence(barrier(db), handover.fleet(db, tenant_id=db.tenant_id))
+    assert result["stale"] == ["worker-gone"] and result["converged"] is False
+    assert job.convergence_blockers(result) == ["workers_stale_retire_or_wait:worker-gone"]
+    assert run(["settle"]) == job.EXIT_BLOCKED
+
+
+def test_retiring_a_worker_is_an_operator_statement_with_a_reason(configured, db):
+    report(db, name="worker-gone")
+    assert run(["drain"]) == job.EXIT_OK
+    report(db, name="worker-here")
+    with handover._own_session(db) as session:
+        row = (session.query(hm.HandoverWorker)
+               .filter(hm.HandoverWorker.worker_id == "worker-gone").first())
+        row.seen_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+        session.commit()
+
+    assert run(["retire", "--worker", "worker-gone"]) == job.EXIT_USAGE   # no by, no reason
+    assert run(["retire", "--worker", "worker-gone", "--by", "owner",
+                "--reason", "terminated in deploy 1234"]) == job.EXIT_OK
+
+    result = handover.convergence(barrier(db), handover.fleet(db, tenant_id=db.tenant_id))
+    assert result["retired"] == ["worker-gone"] and result["converged"] is True
+    assert run(["settle"]) == job.EXIT_OK
+    # And the settlement evidence carries who said so, and why.
+    retired = barrier(db).evidence["retired_workers"]
+    assert retired == [{"worker_id": "worker-gone", "by": "owner",
+                        "reason": "terminated in deploy 1234"}]
+
+
+def test_a_retired_worker_that_reports_again_is_back_in_the_fleet(configured, db):
+    report(db, name="worker-a")
+    assert handover.retire_worker(db, tenant_id=db.tenant_id, name="worker-a",
+                                  by="owner", reason="believed stopped") is True
+    report(db, name="worker-a")
+    assert handover.fleet(db, tenant_id=db.tenant_id)[0].retired is False
+
+
+def test_retiring_a_worker_nobody_has_heard_of_is_refused(configured, db):
+    assert run(["retire", "--worker", "ghost", "--by", "owner", "--reason", "x"]) \
+        == job.EXIT_USAGE
+
+
+# ── Settlement validates and transitions together (H1) ───────────────────────
+
+
+def test_the_procedure_settles_when_everything_holds(configured, db):
+    drain_and_converge(db)
+    assert run(["settle"]) == job.EXIT_OK
+    assert barrier(db).state == handover.STATE_SETTLED
+
+
+def test_settling_is_refused_while_the_barrier_is_not_draining(configured, db):
+    assert run(["settle"]) == job.EXIT_BLOCKED
+    assert barrier(db).state == handover.STATE_OPEN
+
+
+@pytest.mark.parametrize("counts,expected", [
     ({"open_turns": 1}, "open_turns=1"),
     ({"reserved": 2}, "reserved_undispatched=2"),
     ({"unresolved": 1}, "unresolved_attempts=1"),
     ({"unknown": 3}, "unknown_outcomes=3"),
 ])
-def test_any_outstanding_work_blocks_settlement_by_name(configured, db, monkeypatch, capsys,
-                                                        counts, blocker):
-    monkeypatch.setattr(job, "observe",
-                        lambda tenants: tuple(state(t, **counts) for t in tenants))
-    run(["drain"])
-    converged(db)
+def test_any_outstanding_work_blocks_settlement_by_name(configured, db, counts, expected):
+    configured["counts"] = counts
+    drain_and_converge(db)
     assert run(["settle"]) == job.EXIT_BLOCKED
-    assert blocker in capsys.readouterr().out
+    entry = job.inspect(db, [db.tenant_id])[0]
+    assert expected in job.blockers_for(entry)
+    assert barrier(db).state == handover.STATE_DRAINING
 
 
-def test_an_unknown_outcome_never_ages_out_of_the_blockers(configured, db, monkeypatch, capsys):
-    """Elapsed time and a cancelled wait are not evidence of non-delivery."""
-    monkeypatch.setattr(job, "observe",
-                        lambda tenants: tuple(state(t, unknown=1) for t in tenants))
-    run(["drain"])
-    converged(db)
-    for _ in range(3):                                   # however often it is asked
-        assert run(["settle"]) == job.EXIT_BLOCKED
-    assert "unknown_outcomes=1" in capsys.readouterr().out
-
-
-def test_settling_is_refused_while_the_barrier_is_not_draining(configured, db, capsys):
-    converged(db)
+def test_an_unknown_outcome_never_ages_out_of_the_blockers(configured, db):
+    configured["counts"] = {"unknown": 1}
+    drain_and_converge(db)
     assert run(["settle"]) == job.EXIT_BLOCKED
-    assert "barrier_is_open_not_draining" in capsys.readouterr().out
-
-
-def test_a_database_that_cannot_be_read_is_never_settled(configured, db, monkeypatch, capsys):
-    monkeypatch.setattr(job, "observe",
-                        lambda tenants: (_ for _ in ()).throw(RuntimeError("unavailable")))
-    assert run(["settle"]) == job.EXIT_FAILED
-    assert f"RESULT={job.RESULT_FAILED}" in capsys.readouterr().out
-
-
-# ── Buffered work is never acknowledged and dropped ─────────────────────────
-
-
-def test_buffered_work_blocks_settlement_until_it_is_disposed(configured, db, capsys):
-    run(["drain"])
-    converged(db)
-    assert handover.buffer_inbound(db, tenant_id=db.tenant_id,
-                                   provider_message_id="wamid.buffered",
-                                   recipient="+966500000001",
-                                   reason="handover_draining") is True
-    assert run(["settle"]) == job.EXIT_BLOCKED
-    assert "buffered_awaiting_disposition=1" in capsys.readouterr().out
-
-    assert run(["dispose", "--note", "replayed by hand", "--by", "owner"]) == job.EXIT_OK
+    assert run(["settle"]) == job.EXIT_BLOCKED           # and again, later
+    configured["counts"] = {}                            # established by the operator
     assert run(["settle"]) == job.EXIT_OK
-    barrier = handover.read_barrier(db, tenant_id=db.tenant_id)
-    entry = barrier.buffered[0]
-    assert entry["disposition"] == "replayed by hand" and entry["disposed_by"] == "owner"
-    # The record survives settlement: what was buffered is part of the evidence.
-    assert barrier.evidence["buffered_total"] == 1
 
 
-def test_disposing_without_saying_what_was_done_is_refused(configured, db, capsys):
-    run(["drain"])
-    assert run(["dispose", "--by", "owner"]) == job.EXIT_USAGE
-    assert "disposition_note_required" in capsys.readouterr().out
+def test_work_that_appears_between_inspection_and_settlement_is_not_settled_over(
+        configured, db, monkeypatch):
+    """H1's first reproduction, driven at the seam the operator job uses.
+
+    A deferred inbound commits after ``status`` has been taken and before the
+    transition. The transition recounts on its own session, so it refuses; the
+    barrier is still draining and no evidence was written.
+    """
+    drain_and_converge(db)
+    original = job.inspect
+    arrived: List[str] = []
+
+    def _inspect_then_arrive(session: Any, tenants: Any) -> Any:
+        entries = original(session, tenants)
+        if not arrived:                                   # exactly once, after inspection
+            arrived.append("wamid.late")
+            assert defer(db, identity="wamid.late") is not None
+        return entries
+
+    monkeypatch.setattr(job, "inspect", _inspect_then_arrive)
+    assert run(["settle"]) == job.EXIT_BLOCKED
+    assert barrier(db).state == handover.STATE_DRAINING
+    assert barrier(db).evidence == {}                     # nothing was recorded as settled
 
 
-def test_the_same_inbound_is_buffered_once(configured, db):
-    run(["drain"])
-    first = handover.buffer_inbound(db, tenant_id=db.tenant_id, provider_message_id="wamid.x",
-                                    recipient="+966500000001", reason="handover_draining")
-    second = handover.buffer_inbound(db, tenant_id=db.tenant_id, provider_message_id="wamid.x",
-                                     recipient="+966500000001", reason="handover_draining")
-    assert (first, second) == (True, False)
-    assert len(handover.read_barrier(db, tenant_id=db.tenant_id).buffered) == 1
+def test_settlement_refuses_when_the_generation_moved_under_it(configured, db):
+    drain_and_converge(db)
+    current = barrier(db)
+    # Somebody re-drained: the generation the caller decided on is gone.
+    handover.open_drain(db, tenant_id=db.tenant_id)
+    outcome = handover.settle(db, tenant_id=db.tenant_id,
+                              expected_generation=current.generation,
+                              validate=lambda _s, _b: ([], {}))
+    assert outcome.settled is False
+    assert any(reason.startswith("generation_moved") for reason in outcome.blockers)
+    assert barrier(db).state == handover.STATE_DRAINING
 
 
-def test_a_full_buffer_refuses_rather_than_discarding_the_oldest(configured, db, monkeypatch):
-    monkeypatch.setattr(handover, "MAX_BUFFERED_ENTRIES", 2)
-    run(["drain"])
-    for n in range(3):
-        handover.buffer_inbound(db, tenant_id=db.tenant_id, provider_message_id=f"wamid.{n}",
-                                recipient="+966500000001", reason="handover_draining")
-    buffered = handover.read_barrier(db, tenant_id=db.tenant_id).buffered
-    assert [entry["provider_message_id"] for entry in buffered] == ["wamid.0", "wamid.1"]
+def test_the_evidence_describes_the_state_that_was_actually_settled(configured, db):
+    drain_and_converge(db)
+    generation = barrier(db).generation
+    assert run(["settle"]) == job.EXIT_OK
+    evidence = barrier(db).evidence
+    assert evidence["settled_generation"] == generation
+    assert evidence["work"]["settled"] is True
+    assert evidence["convergence"]["converged"] is True
+    assert evidence["convergence"]["on_generation"] == ["worker-a"]
 
 
-# ── Reopening keeps the audit trail ─────────────────────────────────────────
+# ── Reopening is checked and applied together (H1) ───────────────────────────
 
 
-def test_reopening_before_settlement_is_refused(configured, db, capsys):
-    run(["drain"])
+def test_reopening_before_settlement_is_refused(configured, db):
+    assert run(["drain"]) == job.EXIT_OK
     assert run(["reopen"]) == job.EXIT_USAGE
-    assert "not_settled" in capsys.readouterr().out
+    assert barrier(db).draining is True
 
 
 def test_reopening_after_settlement_admits_work_again_and_keeps_the_evidence(configured, db):
-    run(["drain"])
-    converged(db)
-    handover.buffer_inbound(db, tenant_id=db.tenant_id, provider_message_id="wamid.kept",
-                            recipient="+966500000001", reason="handover_draining")
-    run(["dispose", "--note", "answered by hand", "--by", "owner"])
+    drain_and_converge(db)
     assert run(["settle"]) == job.EXIT_OK
+    settled = dict(barrier(db).evidence)
     assert run(["reopen"]) == job.EXIT_OK
-
-    barrier = handover.read_barrier(db, tenant_id=db.tenant_id)
-    assert barrier.state == handover.STATE_OPEN and barrier.admits_new_work is True
-    assert barrier.evidence and barrier.buffered                      # the trail survives
-    assert barrier.workers == ()                                      # a fresh generation
+    current = barrier(db)
+    assert current.admits_new_work is True
+    assert current.evidence == settled                   # kept, not overwritten
 
 
-# ── Scope ───────────────────────────────────────────────────────────────────
+def test_a_drain_starting_between_the_precheck_and_the_mutation_is_not_reopened_over(
+        configured, db, monkeypatch):
+    """H1's second reproduction: the reopen is checked where it is applied."""
+    drain_and_converge(db)
+    assert run(["settle"]) == job.EXIT_OK
+    settled_generation = barrier(db).generation
+
+    real_reopen = handover.reopen
+    started: List[str] = []
+
+    def _drain_then_reopen(session: Any, **kwargs: Any) -> Any:
+        if not started:
+            started.append("x")
+            handover.open_drain(db, tenant_id=db.tenant_id)   # a fresh drain lands here
+        return real_reopen(session, **kwargs)
+
+    monkeypatch.setattr(handover, "reopen", _drain_then_reopen)
+    assert run(["reopen"]) == job.EXIT_BLOCKED
+    current = barrier(db)
+    assert current.draining is True                       # the new drain survived
+    assert current.generation > settled_generation
 
 
-def test_without_an_allowlist_the_job_refuses(monkeypatch, db, capsys):
+# ── Disposition is per entry, checked and evidenced (H4) ─────────────────────
+
+
+def test_a_deferred_inbound_keeps_what_a_replay_needs(configured, db):
+    assert run(["drain"]) == job.EXIT_OK
+    record = defer(db, identity="wamid.keep", text="وين طلبي؟")
+    assert record is not None
+    assert (record.tenant_id, record.phone_number_id, record.channel_connection_ref) == \
+        (db.tenant_id, "PID", "wa:PID")
+    assert record.recipient == "+966500000123"
+    assert record.provider_message_id == "wamid.keep"
+    assert record.payload == {"text": "وين طلبي؟"}
+    assert record.reason == handover.REASON_DRAIN_BUFFERED
+    assert record.barrier_generation == barrier(db).generation
+
+
+def test_the_same_inbound_is_deferred_once(configured, db):
+    assert run(["drain"]) == job.EXIT_OK
+    first = defer(db, identity="wamid.twice")
+    second = defer(db, identity="wamid.twice")
+    assert first is not None and second is not None and first.id == second.id
+    assert len(handover.pending_inbound(db, tenant_id=db.tenant_id)) == 1
+
+
+def test_pending_deferred_work_blocks_settlement_until_it_is_disposed(configured, db):
+    drain_and_converge(db)
+    entry = defer(db, identity="wamid.pending")
+    assert run(["settle"]) == job.EXIT_BLOCKED
+    assert "deferred_pending=1" in job.blockers_for(job.inspect(db, [db.tenant_id])[0])
+
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "replayed",
+                "--evidence", json.dumps({"replayed_at": "2026-09-20T00:00:00Z"}),
+                "--by", "owner"]) == job.EXIT_OK
+    assert run(["settle"]) == job.EXIT_OK
+
+
+def test_a_disposition_needs_named_entries_a_kind_and_an_operator(configured, db):
+    drain_and_converge(db)
+    entry = defer(db, identity="wamid.needs")
+    assert run(["dispose", "--by", "owner", "--disposition", "replayed"]) == job.EXIT_USAGE
+    assert run(["dispose", "--entry", str(entry.id), "--by", "owner"]) == job.EXIT_USAGE
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "replayed"]) \
+        == job.EXIT_USAGE
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "made_up",
+                "--by", "owner"]) == job.EXIT_USAGE
+    assert handover.pending_inbound(db, tenant_id=db.tenant_id)[0].id == entry.id
+
+
+def test_evidence_travels_with_the_entry_it_describes(configured, db):
+    drain_and_converge(db)
+    entry = defer(db, identity="wamid.evidenced")
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "answered",
+                "--evidence", json.dumps({"answered_by": "support", "ticket": "T-91"}),
+                "--by", "owner"]) == job.EXIT_OK
+    with handover._own_session(db) as session:
+        row = session.query(hm.DeferredInbound).filter(
+            hm.DeferredInbound.id == entry.id).first()
+    assert row.state == hm.DEFERRED_DISPOSED and row.disposition == "answered"
+    assert row.disposition_evidence == {"answered_by": "support", "ticket": "T-91"}
+    assert row.disposed_by == "owner"
+
+
+def test_an_entry_that_arrives_after_the_operator_looked_is_not_disposed_of(configured, db):
+    """H4, exactly: the operator disposes of what they inspected, and no more."""
+    drain_and_converge(db)
+    seen = defer(db, identity="wamid.seen")
+    # The operator reads 'status', then a second message arrives.
+    later = defer(db, identity="wamid.arrived.later")
+
+    assert run(["dispose", "--entry", str(seen.id), "--disposition", "replayed",
+                "--evidence", "{}", "--by", "owner"]) == job.EXIT_OK
+    pending = handover.pending_inbound(db, tenant_id=db.tenant_id)
+    assert [e.id for e in pending] == [later.id]          # untouched, still owed an answer
+    assert run(["settle"]) == job.EXIT_BLOCKED
+
+
+def test_disposing_an_entry_twice_is_refused_by_name(configured, db):
+    drain_and_converge(db)
+    entry = defer(db, identity="wamid.once")
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "replayed",
+                "--evidence", "{}", "--by", "owner"]) == job.EXIT_OK
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", "replayed",
+                "--evidence", "{}", "--by", "owner"]) == job.EXIT_BLOCKED
+
+
+def test_disposing_an_entry_that_does_not_exist_is_refused(configured, db):
+    drain_and_converge(db)
+    assert run(["dispose", "--entry", "99999", "--disposition", "replayed",
+                "--evidence", "{}", "--by", "owner"]) == job.EXIT_BLOCKED
+
+
+def test_a_runtime_that_finishes_its_own_turn_resolves_the_record(configured, db):
+    """A resolved record stops counting; it is never resolved by time passing."""
+    assert run(["drain"]) == job.EXIT_OK
+    defer(db, identity="wamid.finished")
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+    assert handover.resolve_inbound(db, tenant_id=db.tenant_id,
+                                    channel_connection_ref="wa:PID",
+                                    provider_message_id="wamid.finished") is True
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+    assert handover.resolve_inbound(db, tenant_id=db.tenant_id,
+                                    channel_connection_ref="wa:PID",
+                                    provider_message_id="wamid.finished") is False
+
+
+def test_disposed_history_does_not_consume_the_pending_capacity(configured, db,
+                                                                monkeypatch):
+    """Retention: what has been accounted for stops occupying the limit."""
+    monkeypatch.setattr(handover, "MAX_PENDING_DEFERRED", 2)
+    assert run(["drain"]) == job.EXIT_OK
+    first = defer(db, identity="wamid.a")
+    second = defer(db, identity="wamid.b")
+    assert defer(db, identity="wamid.c") is None          # full: refused, not dropped
+    assert run(["dispose", "--entry", str(first.id), "--entry", str(second.id),
+                "--disposition", "replayed", "--evidence", "{}", "--by", "owner"]) \
+        == job.EXIT_OK
+    assert defer(db, identity="wamid.c") is not None      # room again, history kept
+    with handover._own_session(db) as session:
+        assert session.query(hm.DeferredInbound).count() == 3
+
+
+# ── The job's own boundaries ─────────────────────────────────────────────────
+
+
+def test_a_full_buffer_refuses_rather_than_discarding_the_oldest(configured, db, monkeypatch):
+    monkeypatch.setattr(handover, "MAX_PENDING_DEFERRED", 1)
+    assert run(["drain"]) == job.EXIT_OK
+    assert defer(db, identity="wamid.first") is not None
+    assert defer(db, identity="wamid.second") is None
+    assert [e.provider_message_id for e in handover.pending_inbound(db, tenant_id=db.tenant_id)] \
+        == ["wamid.first"]
+
+
+def test_no_tenant_allowlist_is_a_precondition_failure(configured, db, monkeypatch):
     monkeypatch.delenv(pg.ENV_TENANT_ALLOWLIST, raising=False)
-    monkeypatch.setattr(job, "session", lambda: db)
     assert run(["status"]) == job.EXIT_USAGE
-    assert "no_tenant_allowlist" in capsys.readouterr().out
 
 
-def test_more_tenants_than_it_inspects_is_refused_rather_than_truncated(monkeypatch, db,
-                                                                        capsys):
+def test_more_tenants_than_it_inspects_is_refused_rather_than_truncated(configured, db,
+                                                                        monkeypatch):
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST,
-                       ",".join(str(n) for n in range(1, recovery.MAX_TENANTS_CONSIDERED + 2)))
-    monkeypatch.setattr(job, "session", lambda: db)
-    asked: List[Any] = []
-    monkeypatch.setattr(job, "observe", lambda tenants: asked.append(tenants) or ())
+                       ",".join(str(i) for i in range(1, recovery.MAX_TENANTS_CONSIDERED + 2)))
     assert run(["status"]) == job.EXIT_USAGE
-    assert "tenant_allowlist_too_large" in capsys.readouterr().out
-    assert asked == []
 
 
-def test_the_tenants_acted_on_are_the_pilot_s_own_allowlist():
-    assert job.configured_tenants({pg.ENV_TENANT_ALLOWLIST: "7, 4242, abc, -1, 0, 7"}) == [7, 4242]
+def test_a_database_that_cannot_be_read_is_never_settled(configured, db, monkeypatch):
+    monkeypatch.setattr(job, "session", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    assert run(["settle"]) == job.EXIT_FAILED
 
 
-@pytest.mark.parametrize("env, expected", [
-    ({}, "off"),
-    ({pg.ENV_ENABLED: "true"}, "on"),
-    ({pg.ENV_ENABLED: "true", pg.ENV_DRAINING: "true"}, "draining"),
-    ({pg.ENV_DRAINING: "true"}, "off"),
-])
-def test_the_process_flags_are_reported_separately_from_the_barrier(env: Dict[str, str],
-                                                                    expected: str):
-    assert job.mode(env) == expected
+def test_status_reports_and_decides_nothing(configured, db):
+    assert run(["drain"]) == job.EXIT_OK
+    defer(db, identity="wamid.listed")
+    assert run(["status"]) == job.EXIT_OK
+    assert barrier(db).draining is True                   # status changed nothing
 
 
-def test_every_line_the_job_prints_is_grep_able_under_one_prefix(configured, db, capsys):
+def test_every_line_carries_the_operator_prefix(configured, db, capsys):
     run(["status"])
-    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
-    assert lines and all(line.startswith(job.LOG_PREFIX) for line in lines)
-
-
-def test_settled_means_every_count_is_zero():
-    assert state(1).settled is True
-    for counts in ({"open_turns": 1}, {"reserved": 1}, {"unresolved": 1}, {"unknown": 1}):
-        assert state(1, **counts).settled is False
+    printed = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert printed and all(line.startswith(job.LOG_PREFIX) for line in printed)

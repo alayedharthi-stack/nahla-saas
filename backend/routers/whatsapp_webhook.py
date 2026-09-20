@@ -769,6 +769,15 @@ async def whatsapp_incoming(request: Request):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[webhook/meta] body parse failed (returning 200): %s", exc)
             body = {}
+        # Durable before acknowledged. A 200 ends the provider's retries, so a
+        # pilot-scoped message is written down first; if it cannot be, this
+        # request is answered as *not* accepted and nothing is spawned, so the
+        # redelivery finds none of the batch already processed.
+        _accepted = await _accept_pilot_inbound(body, provider="meta")
+        if not _accepted.ok:
+            return JSONResponse(
+                {"status": "retry", "reason": "inbound_not_persisted"}, status_code=503)
+
         try:
             from core.runtime_perf import spawn_background  # noqa: PLC0415
             spawn_background(_handle_whatsapp_body(body), name="webhook_meta")
@@ -903,6 +912,14 @@ async def _safe_360dialog_ack(request: Request, *, scope: str, name: str):
             )
             headers = {}
 
+        # Same contract as the Meta route: a pilot-scoped inbound is durable
+        # before this request says 200, and a request that could not record one
+        # is answered as retryable instead of claiming an acceptance.
+        _accepted = await _accept_pilot_inbound(body, provider=f"360dialog/{scope}")
+        if not _accepted.ok:
+            return JSONResponse(
+                {"status": "retry", "reason": "inbound_not_persisted"}, status_code=503)
+
         try:
             from core.runtime_perf import spawn_background  # noqa: PLC0415
             spawn_background(
@@ -998,6 +1015,32 @@ def _scope_accepts(scope: str, family: str) -> bool:
     if scope == "status":
         return family == "status"
     return False
+
+
+async def _accept_pilot_inbound(body: Dict[str, Any], *, provider: str) -> Any:
+    """Record every pilot-scoped message in this body before it is acknowledged.
+
+    Off by default and free when the pilot is disabled. Never raises: an
+    unexpected failure is reported as *not accepted*, which is the safe
+    direction — the provider redelivers and the existing deduplication keeps
+    the unaffected messages from being processed twice.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+
+    from services.commerce_runtime_acceptance import (  # noqa: PLC0415
+        Acceptance, record_before_acknowledging,
+    )
+
+    try:
+        accepted = await _asyncio.to_thread(record_before_acknowledging, body)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[COMMERCE_RUNTIME_ACCEPT] %s acceptance check failed: %s "
+                     "— answering retryable", provider, type(exc).__name__)
+        return Acceptance(accepted=False, reason=f"error:{type(exc).__name__}")
+    if not accepted.ok:
+        logger.error("[COMMERCE_RUNTIME_ACCEPT] %s not acknowledging: reason=%s failed=%s",
+                     provider, accepted.reason, len(accepted.failed))
+    return accepted
 
 
 async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
@@ -4114,6 +4157,33 @@ async def _dispatch_message(
         except Exception:
             pass
 
+        # ── Commerce runtime ownership claim ──────────────────────────────────────
+        # THE ownership decision, taken here because this is the first point at
+        # which every competing owner is still below it. The branches that
+        # follow are not formatters: the COD routes transition an order and send
+        # the customer a follow-up, and the payment receipt / evidence / map /
+        # claim short circuits mutate order state and send, all before the
+        # merchant handler is entered. A decision taken after any of them would
+        # never see those turns at all.
+        #
+        # The claim answers nothing by itself. It is scoped to this exact inbound
+        # and is carried into the handler, where every gate that can silence the
+        # turn still decides. Without a claim nothing below changes.
+        _runtime_claim = None
+        if not _is_platform_tenant(db, resolved_tenant_id):
+            _claim_text = (getattr(normalized_inbound, "text", "") or "").strip() \
+                or (_wa_text or "").strip()
+            _runtime_claim = _commerce_runtime_claims_inbound(
+                db, tenant_id=resolved_tenant_id, phone_id=used_pid, to=sender,
+                text=_claim_text, wa_msg_id=msg_id,
+            )
+            if _runtime_claim is not None:
+                logger.info(
+                    "[WEBHOOK_ROUTE] route=commerce_runtime_claim tenant=%s from=%s "
+                    "msg_id=%s basis=%s",
+                    resolved_tenant_id, sender, msg_id, _runtime_claim.basis,
+                )
+
         # ── Handle interactive button replies ──────────────────────────────────────
         if normalized_inbound.normalized_type == "interactive":
             interactive = msg.get("interactive", {})
@@ -4137,7 +4207,7 @@ async def _dispatch_message(
                 except Exception as exc:
                     logger.error("[Webhook] COD button import failed: %s", exc)
                 else:
-                    if is_owned_cod_button_payload(btn_id):
+                    if _runtime_claim is None and is_owned_cod_button_payload(btn_id):
                         async def _cod_followup(decision, order):
                             await _send_cod_followup_message(
                                 phone_id=used_pid, to=sender,
@@ -4167,6 +4237,7 @@ async def _dispatch_message(
                         wa_message_ts=_wa_msg_ts,
                         wa_msg_id=msg_id or None,
                         inbound_metadata={"button_id": btn_id, "button_provenance": btn_id},
+                        commerce_runtime_claim=_runtime_claim,
                     )
                     return
 
@@ -4179,6 +4250,7 @@ async def _dispatch_message(
                         wa_message_ts=_wa_msg_ts,
                         wa_msg_id=msg_id or None,
                         inbound_metadata={"button_id": btn_id, "button_provenance": btn_id},
+                        commerce_runtime_claim=_runtime_claim,
                     )
                     return
 
@@ -4198,6 +4270,7 @@ async def _dispatch_message(
                         tenant_id=resolved_tenant_id, db=db,
                         wa_message_ts=_wa_msg_ts,
                         wa_msg_id=msg_id or None,
+                        commerce_runtime_claim=_runtime_claim,
                     )
                     return
 
@@ -4218,6 +4291,7 @@ async def _dispatch_message(
                             "button_title": btn_txt,
                             "button_provenance": btn_id,
                         },
+                        commerce_runtime_claim=_runtime_claim,
                     )
                     return
 
@@ -4240,6 +4314,7 @@ async def _dispatch_message(
                         tenant_id=resolved_tenant_id, db=db,
                         wa_message_ts=_wa_msg_ts,
                         wa_msg_id=msg_id or None,
+                        commerce_runtime_claim=_runtime_claim,
                     )
             return
 
@@ -4369,6 +4444,7 @@ async def _dispatch_message(
                     inbound_persist_body=str(_loc_turn.get("brain_text") or ""),
                     wa_message_ts=_wa_msg_ts,
                     wa_msg_id=msg_id or None,
+                    commerce_runtime_claim=_runtime_claim,
                 )
                 return
 
@@ -4447,7 +4523,7 @@ async def _dispatch_message(
                             or ""
                         )
                         _cod_correlation = "context_wamid"
-                    if is_owned_cod_button_payload(_owned_btn_payload):
+                    if _runtime_claim is None and is_owned_cod_button_payload(_owned_btn_payload):
                         async def _cod_tpl_followup(decision, order):
                             await _send_cod_followup_message(
                                 phone_id=used_pid, to=sender,
@@ -4484,6 +4560,7 @@ async def _dispatch_message(
                     tenant_id=resolved_tenant_id, db=db,
                     wa_message_ts=_wa_msg_ts,
                     wa_msg_id=msg_id or None,
+                    commerce_runtime_claim=_runtime_claim,
                 )
                 return
             logger.info(
@@ -4794,27 +4871,11 @@ async def _dispatch_message(
         # production environment that hasn't explicitly enabled the
         # platform-brain workspace.
         if not _is_platform_tenant(db, resolved_tenant_id):
-            # ── Commerce runtime ownership claim ──────────────────────
-            # THE ownership decision, taken here because this is the last
-            # point at which it can be exclusive. Every short circuit below —
-            # payment receipt, payment evidence, map image, payment claim,
-            # address, payment method — mutates order state and sends before
-            # the merchant handler is entered. Asking inside that handler
-            # therefore never sees those turns at all.
-            #
-            # A claim routes the turn straight to the merchant handler, where
-            # the commerce runtime seam runs and where every gate that can
-            # silence a turn still decides. It answers nothing by itself.
-            _runtime_claim = _commerce_runtime_claims_inbound(
-                db, tenant_id=resolved_tenant_id, phone_id=used_pid, to=sender,
-                text=text or "", wa_msg_id=msg_id,
-            )
+            # The claim established above, acted on here: the turn goes straight
+            # to the merchant handler with the fully prepared text, and every
+            # short circuit below — payment receipt, payment evidence, map
+            # image, payment claim, address, payment method — is skipped.
             if _runtime_claim is not None:
-                logger.info(
-                    "[WEBHOOK_ROUTE] route=commerce_runtime_claim tenant=%s from=%s "
-                    "msg_id=%s basis=%s",
-                    resolved_tenant_id, sender, msg_id, _runtime_claim.basis,
-                )
                 await _handle_merchant_message(
                     phone_id=used_pid, to=sender, text=text,
                     tenant_id=resolved_tenant_id, db=db,
@@ -7179,6 +7240,12 @@ async def _handle_merchant_message(
         return
 
 
+    # The dispatcher's ownership claim, re-checked once for this turn and used
+    # by every owner below. It is established before any of them and scoped to
+    # this exact inbound; see the seam block for what it does and does not mean.
+    _claim_holds = _commerce_runtime_claim_holds(
+        commerce_runtime_claim, tenant_id=tenant_id, to=to, wa_msg_id=wa_msg_id)
+
     # ── COD reply interception ────────────────────────────────────────────────
     # Some WhatsApp clients render QUICK_REPLY taps as plain text rather
     # than interactive button payloads. We pattern-match the message
@@ -7186,41 +7253,51 @@ async def _handle_merchant_message(
     # store's AI assistant would happily reply "ok!" without ever
     # transitioning the order. classify_cod_reply returns None on any
     # unrelated text, so this guard is safe to run on every message.
-    try:
-        from services.cod_confirmation import (  # noqa: PLC0415
-            classify_cod_reply, handle_cod_reply, is_owned_cod_button_payload,
-        )
-        if is_owned_cod_button_payload(text):
-            decision, order = await handle_cod_reply(
-                db,
-                tenant_id=tenant_id,
-                customer_phone=to,
-                text=text,
-                button_payload=text,
+    #
+    # It is an *owner*, not a formatter: it transitions the order and sends the
+    # customer a follow-up. So it runs only when the commerce runtime has not
+    # claimed this inbound. A claimed turn belongs to one runtime, and a second
+    # owner acting on it is the double answer the claim exists to prevent.
+    # Without a claim nothing here changes at all.
+    if _claim_holds:
+        logger.info("[COMMERCE_RUNTIME_PILOT] cod branches skipped tenant=%s — "
+                    "the runtime claimed this inbound", tenant_id)
+    else:
+        try:
+            from services.cod_confirmation import (  # noqa: PLC0415
+                classify_cod_reply, handle_cod_reply, is_owned_cod_button_payload,
             )
-            if order is not None:
-                await _send_cod_followup_message(
-                    phone_id=phone_id, to=to, decision=decision, order=order,
-                    _tenant_id=tenant_id, _db=db,
+            if is_owned_cod_button_payload(text):
+                decision, order = await handle_cod_reply(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    text=text,
+                    button_payload=text,
                 )
-            return
-        if classify_cod_reply(text) is not None:
-            decision, order = await handle_cod_reply(
-                db,
-                tenant_id=tenant_id,
-                customer_phone=to,
-                text=text,
-                button_payload=text,
-            )
-            if order is not None:
-                await _send_cod_followup_message(
-                    phone_id=phone_id, to=to, decision=decision, order=order,
-                    _tenant_id=tenant_id, _db=db,
-                )
+                if order is not None:
+                    await _send_cod_followup_message(
+                        phone_id=phone_id, to=to, decision=decision, order=order,
+                        _tenant_id=tenant_id, _db=db,
+                    )
                 return
-            # Title-only fallback with no pending order continues to AI.
-    except Exception as exc:
-        logger.error("[Merchant] COD text-reply handler failed: %s", exc)
+            if classify_cod_reply(text) is not None:
+                decision, order = await handle_cod_reply(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    text=text,
+                    button_payload=text,
+                )
+                if order is not None:
+                    await _send_cod_followup_message(
+                        phone_id=phone_id, to=to, decision=decision, order=order,
+                        _tenant_id=tenant_id, _db=db,
+                    )
+                    return
+                # Title-only fallback with no pending order continues to AI.
+        except Exception as exc:
+            logger.error("[Merchant] COD text-reply handler failed: %s", exc)
 
     try:
         from core.store_knowledge import build_ai_context  # noqa: PLC0415
@@ -7982,8 +8059,6 @@ async def _handle_merchant_message(
         # which would answer a message this runtime owns and may already have
         # answered. The claim is scoped, and is honoured only for the turn it
         # was established for.
-        _claim_holds = _commerce_runtime_claim_holds(
-            commerce_runtime_claim, tenant_id=tenant_id, to=to, wa_msg_id=wa_msg_id)
         try:
             from services.commerce_runtime_pilot import (  # noqa: PLC0415
                 maybe_handle_with_commerce_runtime,

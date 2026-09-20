@@ -6,33 +6,42 @@ it, and it changes at a moment nobody can name. A handover decided on one is a
 handover decided on nothing: the count comes back zero because the replica that
 was about to admit had not written its row yet.
 
-So the barrier lives in the database, where every replica reads it and one
-operator writes it. It uses an existing table — the tenant's own settings row,
-under one namespaced key — so it needs no migration and no new infrastructure.
+So the barrier lives in the database, in the runtime's **own** tables
+(``core.commerce_runtime.handover_models``, revision ``0110``). It used to live
+under a namespaced key in ``tenant_settings.metadata``; that document has other
+writers, every one of them read-modify-write over the whole JSON, and any of
+them could put back a copy taken before a drain and silently reopen it.
+Coordinating all of them would mean rewriting settings code with nothing to do
+with this handover. Runtime state belongs where only the runtime writes.
 
     open  →  draining  →  settled  →  open
 
 **draining** is not "new turns go to legacy". While a tenant is draining, an
-inbound for an affected recipient is *buffered*: recorded durably, answered by
-nobody, and left for the operator to dispose of. Releasing it to the legacy path
-would be the one thing a handover must not do — answering, on a second runtime,
-a conversation whose first runtime may still have a send in flight.
+inbound for an affected recipient is *deferred*: recorded durably with its own
+identity and payload, answered by nobody, and left for the operator to dispose
+of. Releasing it to the legacy path would be the one thing a handover must not
+do — answering, on a second runtime, a conversation whose first runtime may
+still have a send in flight.
 
 Three things are recorded, and each exists because a count alone cannot say it:
 
-* **workers** — one row per process that has evaluated a route, with the barrier
-  generation it saw. Convergence is then observable: every live worker reporting
-  the current generation is evidence that the drain reached the fleet, where an
-  attestation is only a statement that it did.
-* **buffered** — every inbound refused because of the drain. Nothing is
-  acknowledged and quietly dropped; settlement is blocked until each entry has a
-  recorded disposition.
-* **evidence** — the settlement snapshot, written *before* ingress reopens, so
-  what the handover was decided on survives the handover.
+* **workers** — one row per process that has evaluated a route, carrying the
+  generation and state **it observed**. Convergence is then observable: every
+  live worker reporting the current generation is evidence that the drain
+  reached the fleet, where an attestation is only a statement that it did. A
+  worker that has gone quiet is *stale*, never "gone": only an operator retires
+  one, and that decision is recorded with their name on it.
+* **deferred inbound** — one row per accepted message nobody has finished, with
+  tenant, channel connection, recipient, the provider's own message id and the
+  payload a replay needs. Nothing is acknowledged and quietly dropped;
+  settlement is blocked until each row has a checked disposition.
+* **evidence** — the settlement snapshot, written in the same transaction as
+  the transition it describes, so it can never describe a state that was
+  already stale when it was recorded.
 
-Every write takes the tenant's settings row with ``FOR UPDATE``, so two
-operators cannot interleave. Every read is ordinary. Nothing here sends
-anything.
+Every transition validates and applies in **one** transaction under the
+tenant's advisory lock: the state and generation it expected, the work still
+pending, and the write, decided together. Nothing here sends anything.
 """
 from __future__ import annotations
 
@@ -43,39 +52,52 @@ import logging
 import os
 import socket
 import threading
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from core.commerce_runtime import handover_models as hm
 
 logger = logging.getLogger("nahla.commerce_runtime.handover")
 
-SETTINGS_KEY = "commerce_runtime_handover"
+NAMESPACE = "live"
 
-STATE_OPEN = "open"
-STATE_DRAINING = "draining"
-STATE_SETTLED = "settled"
-STATES: Tuple[str, ...] = (STATE_OPEN, STATE_DRAINING, STATE_SETTLED)
+STATE_OPEN = hm.STATE_OPEN
+STATE_DRAINING = hm.STATE_DRAINING
+STATE_SETTLED = hm.STATE_SETTLED
+STATES: Tuple[str, ...] = hm.BARRIER_STATES
 
-# A worker seen more recently than this is treated as live. One seen before the
-# drain opened and still inside this window has an unknown disposition: it may
-# be running on the old generation, and that is a concrete reason to stay
-# blocked rather than a reason to assume it is gone.
+REASON_ACCEPTED = hm.REASON_ACCEPTED
+REASON_DRAIN_BUFFERED = hm.REASON_DRAIN_BUFFERED
+REASON_PROCESS_DRAINING = hm.REASON_PROCESS_DRAINING
+REASON_ADMISSION_REFUSED = hm.REASON_ADMISSION_REFUSED
+REASON_SETTLED_WINDOW = hm.REASON_SETTLED_WINDOW
+
+DISPOSITIONS: Tuple[str, ...] = hm.DISPOSITIONS
+
+# A worker heard from more recently than this is treated as reporting. One last
+# heard from before that is **stale**, not gone: it blocks a handover until an
+# operator retires it deliberately.
 WORKER_LIVE_SECONDS = 900.0
 
 # How often one process writes its heartbeat. The pilot is owner-only, so this
 # is a handful of rows; the throttle keeps it off the per-turn write path.
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 
-MAX_BUFFERED_ENTRIES = 500
+# How many pending deferred rows one tenant may hold before the runtime stops
+# accepting new work for it. Disposed and resolved history does not count: the
+# pending index is partial, and retention is a separate operator decision.
+MAX_PENDING_DEFERRED = 500
 
 # A tenant-scoped advisory lock, taken for the length of a transaction. It is
 # what makes the barrier and an admission *ordered* rather than merely close
-# together: a writer takes it exclusively, an admitter takes it shared, and the
-# database decides which happened first. An advisory key needs no row, so the
-# ordering holds even for a tenant whose settings row does not exist yet —
-# which is exactly the tenant a row lock would fail to protect.
+# together: a transition takes it exclusively, an admission or a deferred write
+# takes it shared, and the database decides which happened first. An advisory
+# key needs no row, so the ordering holds even for a tenant whose barrier row
+# does not exist yet — which is exactly the tenant a row lock would fail to
+# protect.
 #
-# PostgreSQL only. On any other dialect the lock is skipped and the barrier is
-# still read; the pilot runs on PostgreSQL, and the operator procedure states
-# this.
+# PostgreSQL only. On any other dialect the lock is skipped and the state is
+# still read and written; the pilot runs on PostgreSQL, and the operator
+# procedure states this.
 ADVISORY_LOCK_NAMESPACE = 0x6E68_4C56 & 0x7FFF_FFFF      # "nhLV", kept positive
 
 _heartbeat_lock = threading.Lock()
@@ -91,11 +113,11 @@ def _now() -> _dt.datetime:
     return _dt.datetime.now(_dt.timezone.utc)
 
 
-def _iso(moment: _dt.datetime) -> str:
-    return moment.isoformat()
-
-
-def _parse(moment: Any) -> Optional[_dt.datetime]:
+def _aware(moment: Any) -> Optional[_dt.datetime]:
+    if moment is None:
+        return None
+    if isinstance(moment, _dt.datetime):
+        return moment if moment.tzinfo else moment.replace(tzinfo=_dt.timezone.utc)
     try:
         parsed = _dt.datetime.fromisoformat(str(moment))
     except (TypeError, ValueError):
@@ -103,17 +125,28 @@ def _parse(moment: Any) -> Optional[_dt.datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=_dt.timezone.utc)
 
 
+# ── Values ───────────────────────────────────────────────────────────────────
+
+
 @dataclasses.dataclass(frozen=True)
 class WorkerReport:
-    """What one process last said about which barrier generation it is running."""
+    """What one process last said about the barrier **it** read."""
 
     worker_id: str
-    generation: int
-    state: str
+    observed_generation: int
+    observed_state: str
     seen_at: Optional[_dt.datetime]
+    retired_at: Optional[_dt.datetime] = None
+    retired_by: Optional[str] = None
+    retired_reason: Optional[str] = None
 
-    def live(self, *, now: Optional[_dt.datetime] = None,
-             window: float = WORKER_LIVE_SECONDS) -> bool:
+    @property
+    def retired(self) -> bool:
+        return self.retired_at is not None
+
+    def reporting(self, *, now: Optional[_dt.datetime] = None,
+                  window: float = WORKER_LIVE_SECONDS) -> bool:
+        """Whether this worker has been heard from recently enough to count."""
         if self.seen_at is None:
             return False
         return ((now or _now()) - self.seen_at).total_seconds() <= window
@@ -128,96 +161,105 @@ class Barrier:
     generation: int
     opened_at: Optional[_dt.datetime] = None
     settled_at: Optional[_dt.datetime] = None
-    workers: Tuple[WorkerReport, ...] = ()
-    buffered: Tuple[Mapping[str, Any], ...] = ()
     evidence: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    exists: bool = True
 
     @property
     def draining(self) -> bool:
         return self.state == STATE_DRAINING
 
     @property
+    def settled(self) -> bool:
+        return self.state == STATE_SETTLED
+
+    @property
     def admits_new_work(self) -> bool:
         """Whether a new turn may be claimed and admitted for this tenant."""
         return self.state == STATE_OPEN
 
+
+@dataclasses.dataclass(frozen=True)
+class DeferredRecord:
+    """One accepted inbound nobody has finished, by identity."""
+
+    id: int
+    tenant_id: int
+    channel_connection_ref: str
+    phone_number_id: str
+    recipient: str
+    provider_message_id: str
+    payload: Mapping[str, Any]
+    reason: str
+    state: str
+    barrier_generation: Optional[int]
+    disposition: Optional[str]
+    disposition_evidence: Mapping[str, Any]
+    created_at: Optional[_dt.datetime]
+
     @property
-    def undisposed_buffered(self) -> Tuple[Mapping[str, Any], ...]:
-        return tuple(entry for entry in self.buffered if not entry.get("disposition"))
-
-    def convergence(self, *, now: Optional[_dt.datetime] = None) -> Dict[str, Any]:
-        """Whether every live worker is running this generation, and the evidence.
-
-        ``converged`` is only true when something positively says so: at least
-        one worker has reported *since the drain opened*, every such report
-        carries the current generation, and no worker last seen before it is
-        still inside the live window with an unknown disposition.
-        """
-        moment = now or _now()
-        current, opened = self.generation, self.opened_at
-        on_generation, behind, unknown = [], [], []
-        for report in self.workers:
-            if not report.live(now=moment):
-                continue                                   # gone long enough to be gone
-            if opened is not None and report.seen_at is not None and report.seen_at < opened:
-                unknown.append(report.worker_id)           # alive, but not heard from since
-            elif report.generation == current:
-                on_generation.append(report.worker_id)
-            else:
-                behind.append(report.worker_id)
-        converged = bool(on_generation) and not behind and not unknown
-        return {"converged": converged, "generation": current,
-                "on_generation": sorted(on_generation), "behind": sorted(behind),
-                "unknown_disposition": sorted(unknown)}
+    def pending(self) -> bool:
+        return self.state == hm.DEFERRED_PENDING
 
 
-def _empty(tenant_id: int) -> Barrier:
-    return Barrier(tenant_id=int(tenant_id), state=STATE_OPEN, generation=0)
+@dataclasses.dataclass(frozen=True)
+class DispositionResult:
+    """What a disposition attempt actually did, per entry."""
+
+    disposed: Tuple[int, ...] = ()
+    refused: Mapping[int, str] = dataclasses.field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return not self.refused
 
 
-def _from_payload(tenant_id: int, payload: Any) -> Barrier:
-    record = payload if isinstance(payload, dict) else {}
-    state = str(record.get("state") or STATE_OPEN)
-    if state not in STATES:
-        state = STATE_OPEN
-    workers = []
-    for name, raw in (record.get("workers") or {}).items():
-        entry = raw if isinstance(raw, dict) else {}
-        try:
-            generation = int(entry.get("generation", -1))
-        except (TypeError, ValueError):
-            generation = -1
-        workers.append(WorkerReport(worker_id=str(name), generation=generation,
-                                    state=str(entry.get("state") or ""),
-                                    seen_at=_parse(entry.get("seen_at"))))
-    try:
-        generation = int(record.get("generation", 0))
-    except (TypeError, ValueError):
-        generation = 0
-    buffered = tuple(entry for entry in (record.get("buffered") or []) if isinstance(entry, dict))
-    return Barrier(
-        tenant_id=int(tenant_id), state=state, generation=generation,
-        opened_at=_parse(record.get("opened_at")), settled_at=_parse(record.get("settled_at")),
-        workers=tuple(sorted(workers, key=lambda w: w.worker_id)), buffered=buffered,
-        evidence=dict(record.get("evidence") or {}),
-    )
+@dataclasses.dataclass(frozen=True)
+class SettlementResult:
+    """The outcome of one settle attempt, and why."""
+
+    settled: bool
+    barrier: Barrier
+    blockers: Tuple[str, ...] = ()
+    evidence: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
 
-def _to_payload(barrier: Barrier) -> Dict[str, Any]:
-    return {
-        "state": barrier.state,
-        "generation": int(barrier.generation),
-        "opened_at": _iso(barrier.opened_at) if barrier.opened_at else None,
-        "settled_at": _iso(barrier.settled_at) if barrier.settled_at else None,
-        "workers": {w.worker_id: {"generation": w.generation, "state": w.state,
-                                  "seen_at": _iso(w.seen_at) if w.seen_at else None}
-                    for w in barrier.workers},
-        "buffered": [dict(entry) for entry in barrier.buffered],
-        "evidence": dict(barrier.evidence),
-    }
+def convergence(barrier: Barrier, workers: Sequence[WorkerReport], *,
+                now: Optional[_dt.datetime] = None) -> Dict[str, Any]:
+    """Whether every worker in the expected set is running this generation.
+
+    The **expected set** is every worker row that has not been retired. A
+    retired worker is excluded because an operator said so, with a reason on
+    the record; nothing is excluded for having gone quiet.
+
+    ``converged`` is only true when something positively says so: at least one
+    worker has reported *since the drain opened*, every reporting worker carries
+    the current generation, and no expected worker is stale.
+    """
+    moment = now or _now()
+    current, opened = barrier.generation, barrier.opened_at
+    on_generation: List[str] = []
+    behind: List[str] = []
+    stale: List[str] = []
+    for report in workers:
+        if report.retired:
+            continue                                   # retired on the record, by name
+        if not report.reporting(now=moment):
+            stale.append(report.worker_id)             # quiet is not gone
+        elif opened is not None and report.seen_at is not None and report.seen_at < opened:
+            stale.append(report.worker_id)             # alive, but not heard from since
+        elif report.observed_generation == current:
+            on_generation.append(report.worker_id)
+        else:
+            behind.append(report.worker_id)
+    converged = bool(on_generation) and not behind and not stale
+    return {"converged": converged, "generation": current,
+            "expected": sorted(r.worker_id for r in workers if not r.retired),
+            "retired": sorted(r.worker_id for r in workers if r.retired),
+            "on_generation": sorted(on_generation), "behind": sorted(behind),
+            "stale": sorted(stale)}
 
 
-# ── Reading ──────────────────────────────────────────────────────────────────
+# ── Sessions and locking ─────────────────────────────────────────────────────
 
 
 def _dialect_of(bind: Any) -> str:
@@ -232,7 +274,7 @@ def _dialect_of(bind: Any) -> str:
 
 
 def _take_advisory_lock(bind: Any, *, tenant_id: int, exclusive: bool) -> None:
-    """Order this transaction against the tenant's other barrier transactions."""
+    """Order this transaction against the tenant's other handover transactions."""
     from sqlalchemy import text as _text  # noqa: PLC0415
 
     if _dialect_of(bind) != "postgresql":
@@ -242,49 +284,66 @@ def _take_advisory_lock(bind: Any, *, tenant_id: int, exclusive: bool) -> None:
                  {"ns": ADVISORY_LOCK_NAMESPACE, "tenant": int(tenant_id)})
 
 
-def admits_new_work_on(conn: Any, *, tenant_id: int) -> bool:
-    """Whether new work may be admitted, read **on the caller's connection**.
+@contextlib.contextmanager
+def _own_session(db: Any) -> Any:
+    """A short transaction of the handover's own, on the caller's bind.
 
-    This is the form the runtime's admission uses, and the reason the guarantee
-    is statable at all. Taking the shared advisory lock inside the admitting
-    transaction serialises it against a drain:
-
-    * the drain got the exclusive lock first — this read blocks until the drain
-      commits, then sees ``draining`` and the admission is refused;
-    * this transaction got the shared lock first — the drain blocks until the
-      admission commits, so the turn is already visible to everything the drain
-      does afterwards, the settlement count included.
-
-    There is no third ordering, so no turn can be admitted that a check made
-    after the drain would not see. Fails **closed**.
+    A handover write has to be durable the instant it is made: a drain every
+    replica can see, a deferred inbound that outlives the request that was
+    refused. Committing the *caller's* session to get that would commit whatever
+    else it had staged and end a transaction it still owns, so the write is made
+    on a session of its own and the caller's is left exactly as it was.
     """
-    from sqlalchemy import text as _text  # noqa: PLC0415
+    from sqlalchemy.orm import Session  # noqa: PLC0415
 
+    bind = db.get_bind() if hasattr(db, "get_bind") else db
+    session = Session(bind=bind)
     try:
-        _take_advisory_lock(conn, tenant_id=int(tenant_id), exclusive=False)
-        row = conn.execute(
-            _text("SELECT metadata FROM tenant_settings WHERE tenant_id = :tenant"),
-            {"tenant": int(tenant_id)},
-        ).scalar_one_or_none()
-        payload = row if isinstance(row, dict) else {}
-        return _from_payload(tenant_id, payload.get(SETTINGS_KEY)).admits_new_work
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[COMMERCE_RUNTIME_HANDOVER] barrier unreadable on the admission "
-                       "connection tenant=%s error=%s — refusing new work",
-                       tenant_id, type(exc).__name__)
-        return False
+        yield session
+    finally:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001
+            logger.warning("[COMMERCE_RUNTIME_HANDOVER] session close failed")
+
+
+@contextlib.contextmanager
+def _locked(db: Any, tenant_id: int, *, exclusive: bool = True) -> Any:
+    """One transaction, holding the tenant's advisory lock for its whole length."""
+    with _own_session(db) as session:
+        _take_advisory_lock(session, tenant_id=int(tenant_id), exclusive=exclusive)
+        yield session
+
+
+# ── Barrier: reading ─────────────────────────────────────────────────────────
+
+
+def _barrier_from_row(tenant_id: int, row: Any) -> Barrier:
+    if row is None:
+        return Barrier(tenant_id=int(tenant_id), state=STATE_OPEN, generation=0, exists=False)
+    return Barrier(
+        tenant_id=int(tenant_id), state=str(row.state), generation=int(row.generation),
+        opened_at=_aware(row.opened_at), settled_at=_aware(row.settled_at),
+        evidence=dict(row.evidence or {}),
+    )
+
+
+def _barrier_row(session: Any, tenant_id: int, *, for_update: bool = False) -> Any:
+    query = (session.query(hm.HandoverBarrier)
+             .filter(hm.HandoverBarrier.tenant_id == int(tenant_id),
+                     hm.HandoverBarrier.namespace == NAMESPACE))
+    if for_update:
+        query = query.with_for_update()
+    return query.first()
 
 
 def read_barrier(db: Any, *, tenant_id: int) -> Barrier:
-    """The tenant's barrier. A row that does not exist is an open barrier."""
-    from database.models import TenantSettings  # noqa: PLC0415
+    """The tenant's barrier. A row that does not exist is an open barrier.
 
-    row = (db.query(TenantSettings)
-           .filter(TenantSettings.tenant_id == int(tenant_id))
-           .first())
-    if row is None:
-        return _empty(tenant_id)
-    return _from_payload(tenant_id, (row.extra_metadata or {}).get(SETTINGS_KEY))
+    Read on the caller's own session: a read has nothing to commit, so it neither
+    needs a transaction of its own nor may end the caller's.
+    """
+    return _barrier_from_row(tenant_id, _barrier_row(db, tenant_id))
 
 
 def barrier_admits_new_work(db: Any, *, tenant_id: int) -> bool:
@@ -302,57 +361,50 @@ def barrier_admits_new_work(db: Any, *, tenant_id: int) -> bool:
         return False
 
 
-# ── Writing ──────────────────────────────────────────────────────────────────
+def admits_new_work_on(conn: Any, *, tenant_id: int) -> bool:
+    """Whether new work may be admitted, read **on the caller's connection**.
 
+    This is the form the runtime's admission uses, and the reason the guarantee
+    is statable at all. Taking the shared advisory lock inside the admitting
+    transaction serialises it against a transition:
 
-@contextlib.contextmanager
-def _own_session(db: Any) -> Any:
-    """A short transaction of the barrier's own, on the caller's bind.
+    * the drain got the exclusive lock first — this read blocks until the drain
+      commits, then sees ``draining`` and the admission is refused;
+    * this transaction got the shared lock first — the drain blocks until the
+      admission commits, so the turn is already visible to everything the drain
+      does afterwards, the settlement count included.
 
-    A barrier write has to be durable the instant it is made: a drain every
-    replica can see, a buffered inbound that outlives the request that was
-    refused. Committing the *caller's* session to get that would commit whatever
-    else it had staged and end a transaction it still owns, so the write is made
-    on a session of its own and the caller's is left exactly as it was.
+    There is no third ordering, so no turn can be admitted that a check made
+    after the drain would not see. Fails **closed**.
     """
-    from sqlalchemy.orm import Session  # noqa: PLC0415
+    from sqlalchemy import text as _text  # noqa: PLC0415
 
-    bind = db.get_bind() if hasattr(db, "get_bind") else db
-    session = Session(bind=bind)
     try:
-        yield session
-    finally:
-        try:
-            session.close()
-        except Exception:  # noqa: BLE001
-            logger.warning("[COMMERCE_RUNTIME_HANDOVER] barrier session close failed")
+        _take_advisory_lock(conn, tenant_id=int(tenant_id), exclusive=False)
+        state = conn.execute(
+            _text(f"SELECT state FROM {hm.BARRIER_TABLE} "
+                  f"WHERE tenant_id = :tenant AND namespace = :ns"),
+            {"tenant": int(tenant_id), "ns": NAMESPACE},
+        ).scalar_one_or_none()
+        return state is None or str(state) == STATE_OPEN
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[COMMERCE_RUNTIME_HANDOVER] barrier unreadable on the admission "
+                       "connection tenant=%s error=%s — refusing new work",
+                       tenant_id, type(exc).__name__)
+        return False
 
 
-def _mutate(db: Any, tenant_id: int, change: Any) -> Optional[Barrier]:
-    """Apply ``change`` to the tenant's barrier under a row lock. Commits."""
-    from database.models import TenantSettings  # noqa: PLC0415
-    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+# ── Barrier: transitions ─────────────────────────────────────────────────────
 
-    with _own_session(db) as session:
-        _take_advisory_lock(session, tenant_id=int(tenant_id), exclusive=True)
-        row = (session.query(TenantSettings)
-               .filter(TenantSettings.tenant_id == int(tenant_id))
-               .with_for_update()
-               .first())
-        if row is None:
-            row = TenantSettings(tenant_id=int(tenant_id), extra_metadata={})
-            session.add(row)
-            session.flush()
-        metadata = dict(row.extra_metadata or {})
-        updated = change(_from_payload(tenant_id, metadata.get(SETTINGS_KEY)))
-        if updated is None:
-            session.rollback()
-            return None
-        metadata[SETTINGS_KEY] = _to_payload(updated)
-        row.extra_metadata = metadata
-        flag_modified(row, "extra_metadata")
-        session.commit()
-        return updated
+
+def _ensure_barrier(session: Any, tenant_id: int) -> Any:
+    row = _barrier_row(session, tenant_id, for_update=True)
+    if row is None:
+        row = hm.HandoverBarrier(tenant_id=int(tenant_id), namespace=NAMESPACE,
+                                 state=STATE_OPEN, generation=0, evidence={})
+        session.add(row)
+        session.flush()
+    return row
 
 
 def open_drain(db: Any, *, tenant_id: int) -> Barrier:
@@ -361,19 +413,130 @@ def open_drain(db: Any, *, tenant_id: int) -> Barrier:
     The generation is bumped so a worker still reporting the previous one is
     visibly behind rather than indistinguishable from a converged fleet.
     """
-    def change(current: Barrier) -> Barrier:
-        return dataclasses.replace(
-            current, state=STATE_DRAINING, generation=current.generation + 1,
-            opened_at=_now(), settled_at=None, evidence={})
-
-    barrier = _mutate(db, tenant_id, change)
+    with _locked(db, tenant_id) as session:
+        row = _ensure_barrier(session, tenant_id)
+        row.state = STATE_DRAINING
+        row.generation = int(row.generation) + 1
+        row.opened_at = _now()
+        row.settled_at = None
+        row.evidence = {}
+        row.updated_at = _now()
+        session.commit()
+        barrier = _barrier_from_row(tenant_id, row)
     logger.warning("[COMMERCE_RUNTIME_HANDOVER] drain opened tenant=%s generation=%s",
-                   tenant_id, barrier.generation if barrier else None)
-    return barrier if barrier is not None else _empty(tenant_id)
+                   tenant_id, barrier.generation)
+    return barrier
 
 
-def note_worker(db: Any, *, tenant_id: int, state: str, force: bool = False) -> None:
-    """Record that this process is running the barrier it just read.
+def settle(db: Any, *, tenant_id: int, expected_generation: Optional[int] = None,
+           validate: Optional[Callable[[Any, Barrier], Tuple[List[str], Dict[str, Any]]]] = None,
+           ) -> SettlementResult:
+    """Validate and settle in **one** transaction, under the tenant's lock.
+
+    The reviewed shape inspected first and wrote afterwards, so a deferred entry
+    committing in between was settled over and the evidence described a state
+    that had already changed. Here the barrier is re-read under the lock, the
+    generation the caller decided on is re-checked, ``validate`` recounts the
+    work on this same session, and the transition and its evidence are written
+    from what was just read — or nothing is written at all.
+    """
+    with _locked(db, tenant_id) as session:
+        row = _ensure_barrier(session, tenant_id)
+        current = _barrier_from_row(tenant_id, row)
+        blockers: List[str] = []
+        evidence: Dict[str, Any] = {}
+
+        if current.state != STATE_DRAINING:
+            blockers.append(f"barrier_is_{current.state}_not_draining")
+        if expected_generation is not None and int(expected_generation) != current.generation:
+            blockers.append(
+                f"generation_moved:expected={expected_generation},found={current.generation}")
+        if validate is not None:
+            found, evidence = validate(session, current)
+            blockers.extend(found)
+
+        if blockers:
+            session.rollback()
+            return SettlementResult(settled=False, barrier=current, blockers=tuple(blockers))
+
+        settled_at = _now()
+        row.state = STATE_SETTLED
+        row.settled_at = settled_at
+        row.evidence = dict(evidence, settled_generation=current.generation,
+                            settled_at=settled_at.isoformat())
+        row.updated_at = settled_at
+        session.commit()
+        return SettlementResult(settled=True, barrier=_barrier_from_row(tenant_id, row),
+                                evidence=dict(row.evidence))
+
+
+def reopen(db: Any, *, tenant_id: int,
+           expected_generation: Optional[int] = None) -> Optional[Barrier]:
+    """Admit new work again, on a fresh generation, keeping the audit trail.
+
+    Checked and applied together: a drain that started between an operator's
+    precheck and this call would otherwise be reopened on the strength of a
+    reading that was already stale. Returns ``None`` when the barrier is not the
+    settled one the caller decided about, and writes nothing.
+    """
+    with _locked(db, tenant_id) as session:
+        row = _barrier_row(session, tenant_id, for_update=True)
+        current = _barrier_from_row(tenant_id, row)
+        if row is None or current.state != STATE_SETTLED:
+            session.rollback()
+            logger.warning("[COMMERCE_RUNTIME_HANDOVER] reopen refused tenant=%s state=%s",
+                           tenant_id, current.state)
+            return None
+        if expected_generation is not None and int(expected_generation) != current.generation:
+            session.rollback()
+            logger.warning("[COMMERCE_RUNTIME_HANDOVER] reopen refused tenant=%s "
+                           "generation moved expected=%s found=%s",
+                           tenant_id, expected_generation, current.generation)
+            return None
+        row.state = STATE_OPEN
+        row.generation = int(row.generation) + 1
+        row.opened_at = _now()
+        row.settled_at = None
+        row.updated_at = _now()
+        session.commit()
+        barrier = _barrier_from_row(tenant_id, row)
+    # The fleet must re-observe the new generation before anything is claimed
+    # converged again; the rows stay so the audit trail survives the reopen.
+    logger.warning("[COMMERCE_RUNTIME_HANDOVER] ingress reopened tenant=%s generation=%s",
+                   tenant_id, barrier.generation)
+    return barrier
+
+
+# ── The fleet ────────────────────────────────────────────────────────────────
+
+
+def _worker_from_row(row: Any) -> WorkerReport:
+    return WorkerReport(
+        worker_id=str(row.worker_id), observed_generation=int(row.observed_generation),
+        observed_state=str(row.observed_state), seen_at=_aware(row.seen_at),
+        retired_at=_aware(row.retired_at), retired_by=row.retired_by,
+        retired_reason=row.retired_reason,
+    )
+
+
+def fleet(db: Any, *, tenant_id: int) -> Tuple[WorkerReport, ...]:
+    """Every worker known for this tenant, retired ones included."""
+    rows = (db.query(hm.HandoverWorker)
+            .filter(hm.HandoverWorker.tenant_id == int(tenant_id),
+                    hm.HandoverWorker.namespace == NAMESPACE)
+            .order_by(hm.HandoverWorker.worker_id)
+            .all())
+    return tuple(_worker_from_row(row) for row in rows)
+
+
+def note_worker(db: Any, *, tenant_id: int, observed_generation: int, observed_state: str,
+                name: Optional[str] = None, force: bool = False) -> None:
+    """Record the barrier this process **observed**, exactly as it observed it.
+
+    The generation and state are the caller's reading, passed in. They are
+    deliberately not re-derived here: stamping the row with whatever the
+    database says *now* would turn "I have not seen the drain" into "I am
+    converged", which is the one thing this row exists to prevent.
 
     Throttled per process and per tenant, and never fatal: a heartbeat that
     cannot be written makes the fleet look unconverged, which blocks a handover
@@ -388,108 +551,258 @@ def note_worker(db: Any, *, tenant_id: int, state: str, force: bool = False) -> 
             if (time.monotonic() - last) < HEARTBEAT_INTERVAL_SECONDS:
                 return
             _last_heartbeat[key] = time.monotonic()
-    name = worker_id()
-
-    def change(current: Barrier) -> Barrier:
-        workers = {w.worker_id: w for w in current.workers}
-        workers[name] = WorkerReport(worker_id=name, generation=current.generation,
-                                     state=str(state), seen_at=_now())
-        return dataclasses.replace(current, workers=tuple(
-            sorted(workers.values(), key=lambda w: w.worker_id)))
+    identity = str(name or worker_id())
 
     try:
-        _mutate(db, tenant_id, change)
+        with _own_session(db) as session:
+            row = (session.query(hm.HandoverWorker)
+                   .filter(hm.HandoverWorker.tenant_id == int(tenant_id),
+                           hm.HandoverWorker.namespace == NAMESPACE,
+                           hm.HandoverWorker.worker_id == identity)
+                   .with_for_update()
+                   .first())
+            if row is None:
+                row = hm.HandoverWorker(
+                    tenant_id=int(tenant_id), namespace=NAMESPACE, worker_id=identity,
+                    observed_generation=int(observed_generation),
+                    observed_state=str(observed_state), seen_at=_now())
+                session.add(row)
+            else:
+                row.observed_generation = int(observed_generation)
+                row.observed_state = str(observed_state)
+                row.seen_at = _now()
+                # A worker that reports again is back in the fleet. Retirement
+                # is a statement about a process that is gone; this one is not.
+                row.retired_at = None
+                row.retired_by = None
+                row.retired_reason = None
+            session.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[COMMERCE_RUNTIME_HANDOVER] heartbeat failed tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
 
 
-def buffer_inbound(db: Any, *, tenant_id: int, provider_message_id: str, recipient: str,
-                   reason: str) -> bool:
-    """Record an inbound this tenant refused because it is draining.
+def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str) -> bool:
+    """Take one worker out of the expected set, on the record.
 
-    Buffering is what makes refusing honest: the message is not answered and is
-    not forgotten either. Settlement is blocked until every entry has a recorded
-    disposition, so nothing here is acknowledged and quietly dropped.
+    This is the only way a worker leaves the fleet. It is a statement an
+    operator makes — "this process is stopped, and here is how I know" — and it
+    is stored with their name and their reason so the settlement evidence can
+    carry it.
+    """
+    identity = str(name or "").strip()
+    who = str(by or "").strip()
+    why = str(reason or "").strip()
+    if not identity or not who or not why:
+        return False
+    with _locked(db, tenant_id) as session:
+        row = (session.query(hm.HandoverWorker)
+               .filter(hm.HandoverWorker.tenant_id == int(tenant_id),
+                       hm.HandoverWorker.namespace == NAMESPACE,
+                       hm.HandoverWorker.worker_id == identity)
+               .with_for_update()
+               .first())
+        if row is None:
+            session.rollback()
+            return False
+        row.retired_at = _now()
+        row.retired_by = who
+        row.retired_reason = why
+        session.commit()
+    logger.warning("[COMMERCE_RUNTIME_HANDOVER] worker retired tenant=%s worker=%s by=%s",
+                   tenant_id, identity, who)
+    return True
+
+
+# ── Deferred inbound ─────────────────────────────────────────────────────────
+
+
+def _deferred_from_row(row: Any) -> DeferredRecord:
+    return DeferredRecord(
+        id=int(row.id), tenant_id=int(row.tenant_id),
+        channel_connection_ref=str(row.channel_connection_ref),
+        phone_number_id=str(row.phone_number_id), recipient=str(row.recipient),
+        provider_message_id=str(row.provider_message_id), payload=dict(row.payload or {}),
+        reason=str(row.reason), state=str(row.state),
+        barrier_generation=None if row.barrier_generation is None else int(row.barrier_generation),
+        disposition=row.disposition, disposition_evidence=dict(row.disposition_evidence or {}),
+        created_at=_aware(row.created_at),
+    )
+
+
+def record_inbound(db: Any, *, tenant_id: int, phone_number_id: str,
+                   channel_connection_ref: str, recipient: str, provider_message_id: str,
+                   payload: Mapping[str, Any], reason: str,
+                   barrier_generation: Optional[int] = None) -> Optional[DeferredRecord]:
+    """Record one accepted inbound durably, by identity. Idempotent.
+
+    This is what makes an acknowledgement a promise: the row exists before the
+    provider is told we have the message, so a worker that dies a millisecond
+    later has left something recoverable behind rather than a gap.
+
+    Returns the record (existing or new), or ``None`` when it could not be
+    written — which the caller must treat as **not accepted**.
     """
     identity = str(provider_message_id or "").strip()
-    if not identity:
-        return False
+    connection = str(channel_connection_ref or "").strip()
+    if not identity or not connection:
+        return None
+    if str(reason) not in hm.DEFERRED_REASONS:
+        raise ValueError(f"unknown deferred reason {reason!r}")
 
-    def change(current: Barrier) -> Optional[Barrier]:
-        if any(entry.get("provider_message_id") == identity for entry in current.buffered):
-            return None                                    # already recorded
-        if len(current.buffered) >= MAX_BUFFERED_ENTRIES:
-            logger.error("[COMMERCE_RUNTIME_HANDOVER] buffer full tenant=%s; refusing to drop "
-                         "the oldest entry", tenant_id)
+    with _locked(db, tenant_id, exclusive=False) as session:
+        existing = (session.query(hm.DeferredInbound)
+                    .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                            hm.DeferredInbound.namespace == NAMESPACE,
+                            hm.DeferredInbound.channel_connection_ref == connection,
+                            hm.DeferredInbound.provider_message_id == identity)
+                    .first())
+        if existing is not None:
+            session.rollback()
+            return _deferred_from_row(existing)
+
+        pending = (session.query(hm.DeferredInbound)
+                   .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                           hm.DeferredInbound.namespace == NAMESPACE,
+                           hm.DeferredInbound.state == hm.DEFERRED_PENDING)
+                   .count())
+        if pending >= MAX_PENDING_DEFERRED:
+            session.rollback()
+            logger.error("[COMMERCE_RUNTIME_HANDOVER] pending deferred work is at its limit "
+                         "tenant=%s pending=%s — refusing to accept more",
+                         tenant_id, pending)
             return None
-        entry = {"provider_message_id": identity, "recipient": str(recipient or ""),
-                 "reason": str(reason), "buffered_at": _iso(_now()), "disposition": None}
-        return dataclasses.replace(current, buffered=current.buffered + (entry,))
 
-    try:
-        return _mutate(db, tenant_id, change) is not None
-    except Exception as exc:  # noqa: BLE001
-        # The inbound is still withheld — releasing it to another owner while a
-        # send may be in flight is the worse failure — but it is now withheld
-        # *unrecorded*, so settlement cannot see it. This line is the record:
-        # an operator must account for this message by hand.
-        logger.error("[COMMERCE_RUNTIME_HANDOVER] could not buffer inbound tenant=%s "
-                     "provider_message_id=%s error=%s — withheld but UNRECORDED; "
-                     "account for it by hand before settling",
-                     tenant_id, identity, type(exc).__name__)
-        return False
+        row = hm.DeferredInbound(
+            tenant_id=int(tenant_id), namespace=NAMESPACE, channel_connection_ref=connection,
+            phone_number_id=str(phone_number_id or ""), recipient=str(recipient or ""),
+            provider_message_id=identity, payload=dict(payload or {}), reason=str(reason),
+            state=hm.DEFERRED_PENDING, barrier_generation=barrier_generation)
+        session.add(row)
+        session.commit()
+        return _deferred_from_row(row)
 
 
-def dispose_buffered(db: Any, *, tenant_id: int, disposition: str, by: str) -> int:
-    """Record what the operator did with the buffered inbounds. Returns the count."""
-    stamped = {"disposition": str(disposition), "disposed_by": str(by),
-               "disposed_at": _iso(_now())}
+def resolve_inbound(db: Any, *, tenant_id: int, channel_connection_ref: str,
+                    provider_message_id: str) -> bool:
+    """Mark one deferred inbound finished by the runtime itself.
 
-    def change(current: Barrier) -> Optional[Barrier]:
-        pending = current.undisposed_buffered
-        if not pending:
-            return None
-        buffered = tuple(dict(entry, **stamped) if not entry.get("disposition") else entry
-                         for entry in current.buffered)
-        return dataclasses.replace(current, buffered=buffered)
-
-    before = len(read_barrier(db, tenant_id=tenant_id).undisposed_buffered)
-    _mutate(db, tenant_id, change)
-    return before
-
-
-def record_settlement(db: Any, *, tenant_id: int, evidence: Mapping[str, Any]) -> Barrier:
-    """Preserve what the handover was decided on, then mark it settled.
-
-    Written before ingress reopens, so the evidence outlives the state it
-    describes.
+    Called when the turn reaches a terminal: the record has done its job and
+    stops counting against settlement. It is never resolved because time passed.
     """
-    def change(current: Barrier) -> Barrier:
-        return dataclasses.replace(current, state=STATE_SETTLED, settled_at=_now(),
-                                   evidence=dict(evidence))
+    identity = str(provider_message_id or "").strip()
+    connection = str(channel_connection_ref or "").strip()
+    if not identity or not connection:
+        return False
+    try:
+        with _own_session(db) as session:
+            row = (session.query(hm.DeferredInbound)
+                   .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                           hm.DeferredInbound.namespace == NAMESPACE,
+                           hm.DeferredInbound.channel_connection_ref == connection,
+                           hm.DeferredInbound.provider_message_id == identity,
+                           hm.DeferredInbound.state == hm.DEFERRED_PENDING)
+                   .with_for_update()
+                   .first())
+            if row is None:
+                session.rollback()
+                return False
+            row.state = hm.DEFERRED_RESOLVED
+            row.resolved_at = _now()
+            row.updated_at = _now()
+            session.commit()
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[COMMERCE_RUNTIME_HANDOVER] could not resolve deferred inbound "
+                       "tenant=%s error=%s", tenant_id, type(exc).__name__)
+        return False
 
-    barrier = _mutate(db, tenant_id, change)
-    return barrier if barrier is not None else _empty(tenant_id)
+
+def pending_inbound(db: Any, *, tenant_id: int, limit: int = 200) -> Tuple[DeferredRecord, ...]:
+    """Every deferred inbound still pending for this tenant, oldest first."""
+    rows = (db.query(hm.DeferredInbound)
+            .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                    hm.DeferredInbound.namespace == NAMESPACE,
+                    hm.DeferredInbound.state == hm.DEFERRED_PENDING)
+            .order_by(hm.DeferredInbound.created_at, hm.DeferredInbound.id)
+            .limit(int(limit))
+            .all())
+    return tuple(_deferred_from_row(row) for row in rows)
 
 
-def reopen(db: Any, *, tenant_id: int) -> Barrier:
-    """Admit new work again, on a fresh generation, keeping the audit trail."""
-    def change(current: Barrier) -> Barrier:
-        return dataclasses.replace(current, state=STATE_OPEN,
-                                   generation=current.generation + 1,
-                                   opened_at=_now(), settled_at=None, workers=())
+def pending_count_on(session: Any, *, tenant_id: int) -> int:
+    """Pending deferred inbounds, counted on a session the caller already holds."""
+    return int(session.query(hm.DeferredInbound)
+               .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                       hm.DeferredInbound.namespace == NAMESPACE,
+                       hm.DeferredInbound.state == hm.DEFERRED_PENDING)
+               .count())
 
-    barrier = _mutate(db, tenant_id, change)
-    logger.warning("[COMMERCE_RUNTIME_HANDOVER] ingress reopened tenant=%s generation=%s",
-                   tenant_id, barrier.generation if barrier else None)
-    return barrier if barrier is not None else _empty(tenant_id)
+
+def pending_count(db: Any, *, tenant_id: int) -> int:
+    return pending_count_on(db, tenant_id=tenant_id)
+
+
+def dispose_inbound(db: Any, *, tenant_id: int, entry_ids: Sequence[int], disposition: str,
+                    evidence: Mapping[str, Any], by: str) -> DispositionResult:
+    """Account for named entries, each checked against the state it is in.
+
+    The reviewed shape stamped one free-text note across everything pending at
+    that moment, which meant an entry that arrived while the operator was
+    looking was disposed of without anyone having seen it, and the note itself
+    was the only evidence that anything had been done. Here the operator names
+    the entries, the disposition is one of a closed set, and evidence travels
+    with each row. An id that is not pending is refused by name rather than
+    silently included.
+    """
+    who = str(by or "").strip()
+    kind = str(disposition or "").strip()
+    wanted = [int(entry) for entry in entry_ids]
+    if not who or kind not in DISPOSITIONS or not wanted:
+        return DispositionResult(refused={entry: "invalid_request" for entry in wanted}
+                                 or {0: "invalid_request"})
+
+    disposed: List[int] = []
+    refused: Dict[int, str] = {}
+    with _locked(db, tenant_id) as session:
+        rows = {int(row.id): row for row in
+                session.query(hm.DeferredInbound)
+                .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                        hm.DeferredInbound.namespace == NAMESPACE,
+                        hm.DeferredInbound.id.in_(wanted))
+                .with_for_update()
+                .all()}
+        moment = _now()
+        for entry in wanted:
+            row = rows.get(entry)
+            if row is None:
+                refused[entry] = "not_this_tenant_s_entry"
+                continue
+            if str(row.state) != hm.DEFERRED_PENDING:
+                refused[entry] = f"already_{row.state}"
+                continue
+            row.state = hm.DEFERRED_DISPOSED
+            row.disposition = kind
+            row.disposition_evidence = dict(evidence or {})
+            row.disposed_by = who
+            row.disposed_at = moment
+            row.updated_at = moment
+            disposed.append(entry)
+        if disposed:
+            session.commit()
+        else:
+            session.rollback()
+    return DispositionResult(disposed=tuple(disposed), refused=refused)
 
 
 __all__ = [
-    "ADVISORY_LOCK_NAMESPACE", "Barrier", "HEARTBEAT_INTERVAL_SECONDS", "MAX_BUFFERED_ENTRIES", "SETTINGS_KEY",
-    "STATES", "STATE_DRAINING", "STATE_OPEN", "STATE_SETTLED", "WORKER_LIVE_SECONDS",
-    "WorkerReport", "admits_new_work_on", "barrier_admits_new_work", "buffer_inbound",
-    "dispose_buffered",
-    "note_worker", "open_drain", "read_barrier", "record_settlement", "reopen", "worker_id",
+    "ADVISORY_LOCK_NAMESPACE", "Barrier", "DISPOSITIONS", "DeferredRecord",
+    "DispositionResult", "HEARTBEAT_INTERVAL_SECONDS", "MAX_PENDING_DEFERRED", "NAMESPACE",
+    "REASON_ACCEPTED", "REASON_ADMISSION_REFUSED", "REASON_DRAIN_BUFFERED",
+    "REASON_PROCESS_DRAINING", "REASON_SETTLED_WINDOW", "STATES", "STATE_DRAINING",
+    "STATE_OPEN", "STATE_SETTLED", "SettlementResult", "WORKER_LIVE_SECONDS", "WorkerReport",
+    "admits_new_work_on", "barrier_admits_new_work", "convergence", "dispose_inbound",
+    "fleet", "note_worker", "open_drain", "pending_count", "pending_count_on",
+    "pending_inbound", "read_barrier", "record_inbound", "reopen", "resolve_inbound",
+    "retire_worker", "settle", "worker_id",
 ]

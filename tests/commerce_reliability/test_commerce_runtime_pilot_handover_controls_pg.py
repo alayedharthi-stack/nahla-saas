@@ -62,7 +62,7 @@ from tests.commerce_reliability.test_commerce_runtime_pilot_pg import (
     timed_out,
 )
 
-REVISION = "0109"
+REVISION = "0110"
 PHONE = "+966500000042"
 PHONE_ID = "1555000424"
 QUESTION = "عندكم قميص قطني أزرق؟"
@@ -224,6 +224,9 @@ def configured(monkeypatch: pytest.MonkeyPatch, store: Store) -> None:
     monkeypatch.setattr(job, "session", store.session)
     monkeypatch.setattr(job, "observe", lambda tenants: recovery.handover_state(
         tenant_ids=list(tenants), engine=store.engine))
+    monkeypatch.setattr(job, "observe_on", lambda conn, tenants: recovery.handover_state_on(
+        conn, tenant_ids=list(tenants)))
+    handover._last_heartbeat.clear()
 
 
 # ── Operator steps, run for real ─────────────────────────────────────────────
@@ -234,8 +237,10 @@ def drain_and_converge(store: Store) -> None:
     db = store.session()
     try:
         handover.open_drain(db, tenant_id=store.tenant_id)
-        barrier = handover.read_barrier(db, tenant_id=store.tenant_id)
-        handover.note_worker(db, tenant_id=store.tenant_id, state=barrier.state, force=True)
+        observed = handover.read_barrier(db, tenant_id=store.tenant_id)
+        handover.note_worker(db, tenant_id=store.tenant_id,
+                             observed_generation=observed.generation,
+                             observed_state=observed.state, name="worker-a", force=True)
     finally:
         db.close()
 
@@ -248,6 +253,36 @@ def evidence(store: Store) -> Dict[str, Any]:
     db = store.session()
     try:
         return dict(handover.read_barrier(db, tenant_id=store.tenant_id).evidence)
+    finally:
+        db.close()
+
+
+def barrier_of(store: Store) -> Any:
+    db = store.session()
+    try:
+        return handover.read_barrier(db, tenant_id=store.tenant_id)
+    finally:
+        db.close()
+
+
+def pending(store: Store) -> Any:
+    db = store.session()
+    try:
+        return handover.pending_inbound(db, tenant_id=store.tenant_id)
+    finally:
+        db.close()
+
+
+def defer(store: Store, *, identity: str,
+          reason: str = handover.REASON_DRAIN_BUFFERED) -> Any:
+    db = store.session()
+    try:
+        return handover.record_inbound(
+            db, tenant_id=store.tenant_id, phone_number_id=PHONE_ID,
+            channel_connection_ref=f"wa:{store.connection_id}", recipient=PHONE,
+            provider_message_id=identity, payload={"text": QUESTION}, reason=reason,
+            barrier_generation=handover.read_barrier(
+                db, tenant_id=store.tenant_id).generation)
     finally:
         db.close()
 
@@ -484,8 +519,9 @@ def test_control_b_the_corrected_route_withholds_it_from_every_owner(configured,
         assert claim is not None and claim.basis == "drain_buffered"
         assert claim.applies_to(tenant_id=store.tenant_id, recipient=PHONE,
                                 provider_message_id="wamid.during.handover")
-        buffered = handover.read_barrier(db, tenant_id=store.tenant_id).undisposed_buffered
-        assert [e["provider_message_id"] for e in buffered] == ["wamid.during.handover"]
+        deferred = handover.pending_inbound(db, tenant_id=store.tenant_id)
+        assert [e.provider_message_id for e in deferred] == ["wamid.during.handover"]
+        assert deferred[0].payload == {"text": "وين ردّي؟"}
 
         # Settlement is blocked, and says so by name, while the send is out.
         assert settle(store) == job.EXIT_BLOCKED
@@ -541,16 +577,19 @@ def test_control_b_a_buffered_inbound_is_disposed_before_anything_settles(config
             db, tenant_id=store.tenant_id, phone_id=PHONE_ID, to=PHONE,
             text="سؤال أثناء التسليم", wa_msg_id="wamid.buffered.one")
         assert claim is not None and claim.basis == "drain_buffered"
+        db.commit()
     finally:
         db.close()
 
     assert settle(store) == job.EXIT_BLOCKED
-    assert job.main(["dispose", "--note", "replayed by hand", "--by", "owner"]) == job.EXIT_OK
+    entry = pending(store)[0]
+    assert job.main(["dispose", "--entry", str(entry.id), "--disposition", "replayed",
+                     "--evidence", '{"replayed_at": "2026-09-20T00:00:00Z"}',
+                     "--by", "owner"]) == job.EXIT_OK
     assert settle(store) == job.EXIT_OK
 
     recorded = evidence(store)
-    assert recorded["buffered_total"] == 1
-    assert recorded["buffered_dispositions"] == ["replayed by hand"]
+    assert recorded["work"]["deferred_pending"] == 0
     assert recorded["convergence"]["converged"] is True
 
 
@@ -606,7 +645,7 @@ def test_control_b_a_drain_leaves_another_merchant_completely_alone(configured, 
             db, tenant_id=other, phone_id=PHONE_ID + "9", to=PHONE,
             text="عطر ورد 100ml موجود؟", wa_msg_id="wamid.other.tenant")
         assert claim is not None and claim.basis == "configured"
-        assert handover.read_barrier(db, tenant_id=other).buffered == ()
+        assert handover.pending_inbound(db, tenant_id=other) == ()
     finally:
         db.close()
 
@@ -657,3 +696,222 @@ def test_control_b_a_send_recorded_unknown_never_ages_out_of_the_blockers(config
 
 
 __all__: List[str] = []
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# H1 — the transition is validated where it is written
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_h1_a_deferred_entry_committing_between_inspection_and_settlement_blocks(
+        configured, store, monkeypatch):
+    """The reviewed shape settled over it and recorded evidence that was stale.
+
+    Here the inspection happens, a deferred inbound commits, and only then does
+    the transition run. It recounts on its own locked session, refuses, and
+    writes nothing — so the barrier is still draining and the tenant still owes
+    that customer an answer.
+    """
+    drain_and_converge(store)
+    original = job.inspect
+    arrived: List[str] = []
+
+    def _inspect_then_arrive(session: Any, tenants: Any) -> Any:
+        entries = original(session, tenants)
+        if not arrived:
+            arrived.append("wamid.between")
+            assert defer(store, identity="wamid.between") is not None
+        return entries
+
+    monkeypatch.setattr(job, "inspect", _inspect_then_arrive)
+    assert settle(store) == job.EXIT_BLOCKED
+    assert barrier_of(store).draining is True
+    assert evidence(store) == {}
+    assert [e.provider_message_id for e in pending(store)] == ["wamid.between"]
+
+
+def test_h1_a_settlement_whose_generation_moved_writes_nothing(configured, store):
+    """The generation the operator decided on is re-checked under the lock."""
+    drain_and_converge(store)
+    decided = barrier_of(store).generation
+    db = store.session()
+    try:
+        handover.open_drain(db, tenant_id=store.tenant_id)      # somebody re-drained
+        outcome = handover.settle(db, tenant_id=store.tenant_id,
+                                  expected_generation=decided,
+                                  validate=lambda _s, _b: ([], {"note": "would have settled"}))
+    finally:
+        db.close()
+    assert outcome.settled is False
+    assert any(reason.startswith("generation_moved") for reason in outcome.blockers)
+    assert barrier_of(store).draining is True and evidence(store) == {}
+
+
+def test_h1_the_evidence_is_the_state_that_was_settled(configured, store):
+    drain_and_converge(store)
+    generation = barrier_of(store).generation
+    assert settle(store) == job.EXIT_OK
+    recorded = evidence(store)
+    assert recorded["settled_generation"] == generation
+    assert recorded["work"]["settled"] is True and recorded["work"]["deferred_pending"] == 0
+    assert recorded["convergence"]["converged"] is True
+    assert recorded["convergence"]["on_generation"] == ["worker-a"]
+
+
+def test_h1_a_drain_between_the_reopen_precheck_and_the_mutation_survives(
+        configured, store, monkeypatch):
+    """The second reproduction: reopening is decided where it is applied."""
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_OK
+    settled_generation = barrier_of(store).generation
+
+    real_reopen = handover.reopen
+    started: List[str] = []
+
+    def _drain_then_reopen(session: Any, **kwargs: Any) -> Any:
+        if not started:
+            started.append("x")
+            db = store.session()
+            try:
+                handover.open_drain(db, tenant_id=store.tenant_id)
+            finally:
+                db.close()
+        return real_reopen(session, **kwargs)
+
+    monkeypatch.setattr(handover, "reopen", _drain_then_reopen)
+    assert job.main(["reopen"]) == job.EXIT_BLOCKED
+    current = barrier_of(store)
+    assert current.draining is True                       # the fresh drain was not reopened over
+    assert current.generation > settled_generation
+
+
+def test_h1_two_settlements_racing_produce_exactly_one_transition(configured, store):
+    """The advisory lock orders them; the loser sees the generation has moved."""
+    drain_and_converge(store)
+    decided = barrier_of(store).generation
+    outcomes: List[Any] = []
+    lock = threading.Lock()
+
+    def attempt() -> None:
+        db = store.session()
+        try:
+            result = handover.settle(db, tenant_id=store.tenant_id,
+                                     expected_generation=decided,
+                                     validate=lambda _s, _b: ([], {}))
+        finally:
+            db.close()
+        with lock:
+            outcomes.append(result)
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert sorted(o.settled for o in outcomes) == [False, True]
+    assert barrier_of(store).state == handover.STATE_SETTLED
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# H4 / H5 — identity, evidence and durable acceptance, on the real relations
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_h4_disposition_is_per_entry_and_leaves_a_later_arrival_alone(configured, store):
+    drain_and_converge(store)
+    seen = defer(store, identity="wamid.inspected")
+    later = defer(store, identity="wamid.after.inspection")
+    assert job.main(["dispose", "--entry", str(seen.id), "--disposition", "replayed",
+                     "--evidence", '{"by_hand": true}', "--by", "owner"]) == job.EXIT_OK
+    assert [e.id for e in pending(store)] == [later.id]
+    assert settle(store) == job.EXIT_BLOCKED
+
+
+def test_h5_an_unresolved_accepted_record_blocks_settlement(configured, store):
+    """A message the provider was told we had, and nobody has answered."""
+    drain_and_converge(store)
+    record = defer(store, identity="wamid.accepted", reason=handover.REASON_ACCEPTED)
+    assert record is not None
+    assert store.state().deferred_pending == 1
+    assert settle(store) == job.EXIT_BLOCKED
+    assert "deferred_pending=1" in job.blockers_for(job.inspect(store.session(),
+                                                                [store.tenant_id])[0])
+
+
+def test_h5_a_record_the_runtime_finished_stops_counting(configured, store):
+    drain_and_converge(store)
+    defer(store, identity="wamid.finished", reason=handover.REASON_ACCEPTED)
+    db = store.session()
+    try:
+        assert handover.resolve_inbound(
+            db, tenant_id=store.tenant_id,
+            channel_connection_ref=f"wa:{store.connection_id}",
+            provider_message_id="wamid.finished") is True
+    finally:
+        db.close()
+    assert store.state().deferred_pending == 0
+    assert settle(store) == job.EXIT_OK
+
+
+def test_h5_an_inbound_arriving_in_the_settled_window_is_recorded_not_lost(configured, store,
+                                                                           monkeypatch):
+    """Between settlement and reopening, new work is still somebody's problem."""
+    from services import commerce_runtime_pilot as seam
+
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_OK
+    assert barrier_of(store).settled is True
+
+    db = store.session()
+    try:
+        claim = seam.commerce_runtime_claims_inbound(
+            db, tenant_id=store.tenant_id, phone_id=PHONE_ID, to=PHONE,
+            text="سؤال بعد التسوية", wa_msg_id="wamid.settled.window")
+        db.commit()
+    finally:
+        db.close()
+    assert claim is not None and claim.basis == "drain_buffered"
+    entry = pending(store)[0]
+    assert entry.provider_message_id == "wamid.settled.window"
+    assert entry.reason == handover.REASON_SETTLED_WINDOW
+    # It is not lost, and it is not answered: the operator disposes of it or the
+    # reopened runtime replays it from this record.
+    assert entry.payload == {"text": "سؤال بعد التسوية"}
+
+
+def test_h3_a_worker_that_observed_the_open_barrier_is_behind_after_a_drain(configured, store):
+    """The heartbeat reaches the database after the drain, and still says OPEN."""
+    db = store.session()
+    try:
+        observed = handover.read_barrier(db, tenant_id=store.tenant_id)
+        handover.open_drain(db, tenant_id=store.tenant_id)
+        handover.note_worker(db, tenant_id=store.tenant_id,
+                             observed_generation=observed.generation,
+                             observed_state=observed.state, name="worker-late", force=True)
+        workers = handover.fleet(db, tenant_id=store.tenant_id)
+        result = handover.convergence(handover.read_barrier(db, tenant_id=store.tenant_id),
+                                      workers)
+    finally:
+        db.close()
+    assert workers[0].observed_state == handover.STATE_OPEN
+    assert result["converged"] is False and result["behind"] == ["worker-late"]
+    assert settle(store) == job.EXIT_BLOCKED
+
+
+def test_h3_retirement_is_recorded_and_carried_into_the_evidence(configured, store):
+    db = store.session()
+    try:
+        handover.note_worker(db, tenant_id=store.tenant_id, observed_generation=0,
+                             observed_state=handover.STATE_OPEN, name="worker-gone",
+                             force=True)
+    finally:
+        db.close()
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_BLOCKED              # worker-gone is behind
+
+    assert job.main(["retire", "--worker", "worker-gone", "--by", "owner",
+                     "--reason", "terminated in deploy 1234"]) == job.EXIT_OK
+    assert settle(store) == job.EXIT_OK
+    assert evidence(store)["retired_workers"] == [
+        {"worker_id": "worker-gone", "by": "owner", "reason": "terminated in deploy 1234"}]

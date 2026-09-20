@@ -26,17 +26,22 @@ class _Connection:
     id = 17
 
 
-class _Settings:
-    """The tenant's settings row, carrying whatever handover barrier a case sets."""
+class _Barrier:
+    """The tenant's handover barrier row, in its real shape."""
 
-    def __init__(self, payload: Dict[str, Any]) -> None:
+    def __init__(self, state: str, generation: int = 3) -> None:
         self.tenant_id = TENANT
-        self.extra_metadata = dict(payload)
+        self.namespace = "live"
+        self.state = state
+        self.generation = generation
+        self.opened_at = None
+        self.settled_at = None
+        self.evidence: Dict[str, Any] = {}
 
 
-# The barrier this tenant's settings row carries. Empty is an open barrier,
-# which is the state every case but the handover ones runs in.
-BARRIER: Dict[str, Any] = {}
+# The barrier row this tenant has. ``None`` — no row — is an open barrier, which
+# is the state every case but the handover ones runs in.
+BARRIER: List[Any] = [None]
 
 
 class _Query:
@@ -46,16 +51,25 @@ class _Query:
     def filter(self, *_a: Any) -> "_Query":
         return self
 
+    def order_by(self, *_a: Any) -> "_Query":
+        return self
+
     def first(self) -> Any:
         return self._row
 
+    def all(self) -> List[Any]:
+        return [] if self._row is None else [self._row]
+
 
 class _Db:
-    """The two rows this seam actually reads: the connection and the barrier."""
+    """The rows this seam actually reads: the connection and the barrier."""
 
     def query(self, model: Any) -> _Query:
-        if str(getattr(model, "__name__", "")) == "TenantSettings":
-            return _Query(_Settings(dict(BARRIER)) if BARRIER else None)
+        name = str(getattr(model, "__name__", ""))
+        if name == "HandoverBarrier":
+            return _Query(BARRIER[0])
+        if name in {"HandoverWorker", "DeferredInbound"}:
+            return _Query(None)
         return _Query(_Connection())
 
 
@@ -124,15 +138,14 @@ read: List[Dict[str, Any]] = []
 @pytest.fixture(autouse=True)
 def _clear_reads() -> None:
     read.clear()
-    BARRIER.clear()
+    BARRIER[0] = None
 
 
-def draining_barrier() -> Dict[str, Any]:
-    """The payload a drained tenant's settings row carries, in its real shape."""
+def draining_barrier() -> Any:
+    """The row a drained tenant carries, in its real shape."""
     from core.commerce_runtime import handover
 
-    return {handover.SETTINGS_KEY: {"state": handover.STATE_DRAINING, "generation": 3,
-                                    "opened_at": "2026-09-19T00:00:00+00:00"}}
+    return _Barrier(handover.STATE_DRAINING)
 
 
 def call(*, trace: Optional[_Trace] = None, text: str = "عندكم حذاء؟",

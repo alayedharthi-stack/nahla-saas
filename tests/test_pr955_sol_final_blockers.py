@@ -389,7 +389,14 @@ class TestRecognizedCodButtonAlwaysConsumed:
         block = src[interactive:generic]
         assert "is_owned_cod_button_payload(btn_id)" in block
         assert "consume_owned_cod_button_inbound" in block
-        owned_at = block.index("if is_owned_cod_button_payload(btn_id)")
+        # PR #1099: the branch is now reached only when the commerce runtime has
+        # not claimed this inbound. Everything this case asserted still holds —
+        # the branch exists, it is guarded, and it returns — and the claim is
+        # asserted too so the guard cannot be dropped silently either.
+        owned_at = block.index("is_owned_cod_button_payload(btn_id)")
+        guard_at = block.index("if _runtime_claim is None and "
+                               "is_owned_cod_button_payload(btn_id)")
+        assert guard_at <= owned_at
         return_at = block.index("return", owned_at)
         assert "except" in block[owned_at:return_at]
         assert block[return_at:return_at + 6] == "return"
@@ -398,7 +405,8 @@ class TestRecognizedCodButtonAlwaysConsumed:
         rescue_block = src[rescue:merchant]
         assert "is_owned_cod_button_payload(_btn_payload)" in rescue_block
         assert "consume_owned_cod_button_inbound" in rescue_block
-        owned_tpl = rescue_block.index("if is_owned_cod_button_payload(_btn_payload)")
+        owned_tpl = rescue_block.index("if _runtime_claim is None and "
+                                       "is_owned_cod_button_payload(_owned_btn_payload)")
         assert rescue_block.find("return", owned_tpl) > 0
         assert "classify_cod_reply(_wa_text)" not in rescue_block
 
