@@ -196,6 +196,8 @@ def ephemeral_migration_engine() -> Iterator[Engine]:
         admin_engine.dispose()
 
 
+from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
+
 def test_migration_0087_expand_not_valid_constraints(ephemeral_migration_engine: Engine) -> None:
     _seed_legacy_rows_at_0086(ephemeral_migration_engine)
     _run_alembic(ephemeral_migration_engine, "0087")
@@ -250,7 +252,7 @@ def test_migration_chain_0086_seed_0087_target_repository_0098_head(
     finally:
         os.chdir(prev_cwd)
     heads = set(script.get_heads())
-    assert heads == _REPOSITORY_ALEMBIC_HEADS
+    assert repository_heads_expected(heads) and _REPOSITORY_ALEMBIC_HEADS <= heads
     # Ephemeral DB stops at A1-Expand 0087; integration bootstrap pins 0093.
     # Application Alembic head is 0106 (extends 0105 → 0104 → 0103); sibling 0092 stays parallel.
     assert "0111" in heads

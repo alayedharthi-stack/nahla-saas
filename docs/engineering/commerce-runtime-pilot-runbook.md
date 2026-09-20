@@ -15,6 +15,7 @@ below is set. Contract: `docs/architecture/commerce-runtime-pilot-activation.md`
 | 3 | The test store's tenant id is known **from configuration**, not from a name | read the tenant id from the store's own connection row (step 3.1) |
 | 4 | The test conversations' phone numbers are known | the owner's own test handsets, nothing else |
 | 5 | The deployed revision contains the pilot | the merge commit of the pilot PR is the deployed commit |
+| 6 | **`META_APP_SECRET` is set and matches the Meta app** | the signature audit shows `valid` for live traffic. A pilot obligation is taken only from a request whose `X-Hub-Signature-256` **verified** — whatever `META_WEBHOOK_ENFORCE_SIGNATURE` says for the legacy path. With the secret missing or wrong, every pilot-scoped inbound is answered `503 pilot_scope_unauthenticated`, nothing is recorded and nothing is processed, and Meta retries until the secret is fixed |
 
 Choosing the model closes one precondition, not the activation. Every row above
 is a separate prerequisite, and the owner's own authorisation of the tenant, the
@@ -81,10 +82,11 @@ backfills no existing data.
 
 **Rollout dependency.** `0111` is required before activation, not optional. It
 adds the three handover relations and nothing else, it is reversible
-(`alembic downgrade 0109` drops exactly what it created), and it is refused
-rather than reconciled when a relation of that name already exists with a
-different shape. It has been applied and reversed in isolated databases only;
-applying it to the shared pilot database is a separate authorisation.
+(`alembic downgrade 0111@-1` drops exactly what it created — see §1.3 for why
+that spelling and no other), and it is refused rather than reconciled when a
+relation of that name already exists with a different definition. It has been
+applied and reversed in isolated databases only; applying it to the shared
+pilot database is a separate authorisation.
 
 ### 1.2 Applying the schema (owner-approved, one-off)
 
@@ -95,7 +97,7 @@ whose only variables are the pilot database's `DATABASE_URL`, the confirmation
 token, and the database the operator is authorising this run to touch.
 
 ```bash
-NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0110 \
+NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0111 \
 NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET=<host>[:<port>]/<database> \
   python -m scripts.operators.commerce_runtime_pilot_migration
 ```
@@ -123,14 +125,42 @@ It is fail-closed at both ends and refuses rather than repairs:
 | `DATABASE_URL` carries a target-changing query parameter (`host`, `hostaddr`, `port`, `dbname`, `service`, …) | `RESULT=FAILED_PRECONDITION`, exit 2, nothing runs |
 | current revision is not one the contract accepts | `RESULT=FAILED_PRECONDITION`, exit 3, the observed value is printed |
 | the relations present are not the ones the current revision creates | `RESULT=FAILED_PRECONDITION`, exit 3 — a schema that does not match its revision is never repaired |
-| revision `0108` with exactly its three foundation relations, or `0109` with those plus the ledger six | accepted: that is what each revision creates, and the job upgrades to `0111` |
-| all twelve exist and the revision is already `0111` | `RESULT=ALREADY_APPLIED`, exit 0, Alembic is not run |
+| revision `0108` with exactly its three foundation relations, or `0109` **or `0110`** with those plus the ledger six | accepted: that is what each revision creates, and the job upgrades to `0111` |
+| all twelve exist and the revision set is `{0111}` or `{0110, 0111}` (with or without `0088`) | `RESULT=ALREADY_APPLIED`, exit 0, Alembic is not run |
 | `alembic upgrade 0111` ran and all twelve relations and the revision are verified | `RESULT=SUCCESS`, exit 0 |
 | anything else after the upgrade | `RESULT=FAILED`, exit 4, with what was observed |
 
-Every line is prefixed `[commerce-runtime-0111]`. Rolling the schema back is
-`alembic downgrade 0107`, which the revision's own reversibility proofs cover;
-it is only safe while the pilot is off and no runtime rows exist.
+Every line is prefixed `[commerce-runtime-0111]`. The confirmation token names
+the revision it authorises, `RUN_COMMERCE_RUNTIME_0111`, and nothing else is a
+confirmation.
+
+### 1.3 The address sibling, and rolling back only the runtime
+
+`0110` (customer-address provenance, PR #1096) and `0111` (this runtime's
+handover) are **siblings**: both revise `0109`, neither depends on the other, and
+neither PR waits for the other. Every one of these applied states is valid and
+the job accepts or recognises each:
+
+| Applied | `alembic_version` | Meaning |
+| --- | --- | --- |
+| neither | `{0109}` | the ledger revision; a start state for `0111` |
+| address first | `{0110}` | still a start state for `0111` — the runtime upgrade never requires or applies the address one |
+| runtime first | `{0111}` | already applied; `0110` may be applied afterwards by its own job |
+| both, either order | `{0110, 0111}` | already applied; two heads is how Alembic represents two branches |
+
+`alembic upgrade head` was already forbidden here; with two application heads
+it is ambiguous as well.
+
+**Rolling back the runtime revision alone is `alembic downgrade 0111@-1` and
+nothing else.** This was proved on real PostgreSQL with both siblings applied
+rather than read off the documentation: `alembic downgrade 0109` *and*
+`alembic downgrade 0111-1` both resolve to the common ancestor and remove
+`0110` too — the `customer_address_provenance` table with it — whereas
+`0111@-1` steps one revision back along this branch only and leaves `0110` and
+its table in place. `scripts.operators.commerce_runtime_pilot_migration_contract.build_downgrade_argv`
+is the one spelling, and `test_commerce_runtime_handover_migration_pg` holds it
+to that on a combined schema. A rollback is only safe while the pilot is off
+and no runtime rows exist.
 
 ### 1.1 Reading the verified tenant and connection
 
@@ -307,7 +337,8 @@ created by revision `0111`. It used to live under a namespaced key in
 them read-modify-write over the whole JSON, and any of them could put back a
 copy taken before a drain and silently reopen it. `tenant_settings` is **not**
 the handover's authority and no longer holds any part of it. Its states are
-`open → draining → settled → open`.
+`open → draining → settled → released → open` (a reopen is also allowed from
+`settled`; a re-drain from any state).
 
 **Draining is not "new turns go to legacy."** While a tenant is draining, an
 inbound for an affected recipient is *buffered*: recorded durably, answered by
@@ -357,15 +388,20 @@ that has stopped reporting blocks settlement until an operator says, on the
 record, that it is gone:
 
 ```bash
+# 1. capture the platform's own record of the stop, verbatim, to a file
+railway deployment list --service nahla-backend --json > /tmp/deploy-1234.json
+#    (or, for a fenced process: ps -o pid,stat,cmd -p <pid> > /tmp/worker.txt)
+# 2. retire, naming the deployment the record is about and handing the record over
 python -m scripts.operators.commerce_runtime_pilot_handover retire \
     --worker "<worker id from status>" --by "<operator>" \
     --reason "terminated in deploy 1234" \
     --evidence '{"deployment": "railway:nahla-backend@deploy-1234",
-                 "stop_verified_by": "railway deployment status=REMOVED, replicas=0",
-                 "observed_at": "2026-09-20T09:05:00Z"}'
+                 "stop_verified_by": "railway deployment list: deploy-1234 status=REMOVED, replicas=0",
+                 "observed_at": "2026-09-20T09:05:00Z"}' \
+    --stop-record /tmp/deploy-1234.json
 ```
 
-**Retirement needs evidence, not a sentence.** Three keys are required and the
+**Retirement needs evidence, not a sentence.** Four keys are required and the
 command refuses without them:
 
 | Key | What it has to say |
@@ -373,14 +409,18 @@ command refuses without them:
 | `deployment` | the exact deployment or process identity, as the platform that runs it names it. "some replica" retires nothing. |
 | `stop_verified_by` | how the stop or the fencing was actually established — the command run, the console state read — in a form an on-call engineer can re-check. |
 | `observed_at` | when that was seen, ISO-8601. |
+| `stop_record` (`--stop-record <file>`) | the platform's **own record** of the stop, captured to a file and retained verbatim on the worker row with its SHA-256 and size (≤ 64 KiB). It must name the `deployment` value; a listing that never mentions the deployment proves nothing about it and is refused (`stop_record_does_not_name_the_deployment`). |
 
-Elapsed silence is deliberately not one of them. If the worker has reported
-**after** `observed_at` the retirement is refused with
-`worker reported at …, after the stop was observed at … — it is running`: it is
-demonstrably alive, whatever was believed when the command was typed. The
-evidence is stored on the worker row and the name and reason are copied into the
-settlement evidence. A retired worker that reports again is back in the expected
-set.
+Operator-typed strings are statements; the stop record is what the statements
+rest on, and it stays on the row for whoever audits the handover later. What
+this does **not** do is query Railway itself: the record is what the operator
+captured, and the procedure above is how to capture it. Elapsed silence is
+deliberately not evidence. If the worker has reported **after** `observed_at`
+the retirement is refused with `worker reported at …, after the stop was
+observed at … — it is running`: it is demonstrably alive, whatever was believed
+when the command was typed. The evidence is stored on the worker row and the
+name, reason and evidence are copied into the settlement evidence. A retired
+worker that reports again is back in the expected set.
 
 **Reconcile against what the deployment is supposed to contain.** Convergence
 can only see processes that wrote a row, so a replica that never reported is
@@ -393,8 +433,11 @@ export COMMERCE_RUNTIME_PILOT_EXPECTED_WORKERS="host-a:7,host-b:7"
 
 `status` then prints `fleet_expected=… reporting=… missing=… unexpected=…
 reconciled=…`, and a worker in the inventory that has never reported becomes the
-blocker `workers_expected_but_never_reported:<id>`. With the variable unset it
-prints `fleet_expected=UNSTATED` rather than implying a reconciliation happened.
+blocker `workers_expected_but_never_reported:<id>`. **The inventory is
+required, not advisory:** `settle` and `release` read the fleet inside their own
+transaction and reconcile it against this variable themselves, so with it unset
+they refuse with `expected_worker_inventory_unstated` whatever `status` said.
+Silence about the fleet is not evidence about the fleet.
 
 What this proves is bounded, and the wording matters: the shared admission lock
 orders this job against the workers that take it. It does not prove a fleet was
@@ -498,7 +541,9 @@ Blocker names, each actionable:
 | `reserved_undispatched=N` | replies reserved that nothing dispatched |
 | `unresolved_attempts=N` | sends with no receipt at all |
 | `unknown_outcomes=N` | sends whose recorded outcome is `unknown`; establish what the provider actually did and record it on that attempt |
-| `deferred_pending=N` | accepted inbounds nobody has finished or accounted for; run `dispose` |
+| `deferred_pending=N` | accepted inbounds nobody has finished or accounted for; run `recover --apply` or `dispose` |
+| `expected_worker_inventory_unstated` | set `COMMERCE_RUNTIME_PILOT_EXPECTED_WORKERS` to the deployment's replicas |
+| `workers_expected_but_never_reported:<ids>` | a replica in the inventory never wrote a row — it may still be admitting; find it, or retire it on the record |
 | `generation_moved:expected=X,found=Y` | the barrier changed between the report and the write; run `status` again |
 | `work_counts_unavailable` | the runtime relations could not be counted |
 
@@ -524,7 +569,7 @@ Each entry gets one outcome, and each one is a fact about that entry:
 | --- | --- |
 | `already_finished` | a turn for this identity reached a terminal. **Completed work is never repeated** — the record is closed against that terminal instead |
 | `replayed` | the provider's own body was rebuilt from the stored payload and handed to the dispatcher, which admitted it under the same identity |
-| `barrier_closed` | this tenant is not admitting work (draining, or settled and not reopened). Nothing is replayed into a closed barrier |
+| `barrier_closed` | the barrier is **settled or released**; the detail says `run 'drain', then 'recover --apply'`. A draining barrier is *not* closed to recovery (below) |
 | `unknown_delivery` | the turn holds a send whose outcome nobody established. `unknown` is not "did not arrive", so replaying risks a second delivery; account for it by hand |
 | `in_flight` | another runner holds this entry (a per-entry advisory lock); it will be picked up next run |
 | `not_replayable` | the stored payload cannot be rebuilt into a message. Nothing is invented |
@@ -537,6 +582,23 @@ a replay, not a resend: the delivery ledger still refuses to dispatch an attempt
 whose outcome is pending, accepted or unknown, so an uncertain send stays
 uncertain.
 
+**Recovery works while the barrier is draining.** A drain stops *new* work; an
+inbound the provider was told we had is not new work — the settlement already
+counts it — so refusing it while draining would leave the customer with nobody
+able to answer. For each entry the runner states a **recovery grant** (this
+tenant, this channel connection, this provider message id, this entry) for the
+duration of that one replay. The claim and the seam honour it only when the
+identity matches **and** a pending durable acceptance exists for it, and the
+admission itself is still read on the admitting connection under the shared
+lock: open or draining admits it, settled or released refuses it. A turn this
+runtime already admitted and never finished is replayed the same way, drain or
+no drain. Nothing else is admitted through a closed barrier.
+
+**An arrival after settlement is not a trap.** It is recorded as
+`settled_window`, it blocks `release`, and the way out is the same three steps:
+`drain` (the barrier goes back to draining on a new generation), `recover
+--apply` (the entry is met), `settle` (the counts are re-taken). Then `release`.
+
 `recover` requires the same tenant allowlist as every other command, and it
 reads and writes only this pilot's own tables plus the dispatcher it hands work
 to. It sends nothing itself.
@@ -547,22 +609,36 @@ to. It sends nothing itself.
 python -m scripts.operators.commerce_runtime_pilot_handover release
 ```
 
-A settlement is evidence about the instant it was taken. Switching the pilot off
-on the strength of one taken ten minutes ago abandons whatever arrived since —
-and something does arrive: an inbound in the settled window is accepted and
-recorded rather than lost. `release` therefore derives the verdict **now**, from
-the barrier and the entries this tenant holds, and never from a stored one:
+A settlement is evidence about the instant it was taken, and the switch is
+flipped some time later. In between, an inbound can be accepted — recorded,
+then abandoned by the configuration change. So `release` is not a verdict the
+operator reads and acts on; it is a **transition**, written under the tenant's
+exclusive lock, and acceptance takes the shared lock and reads it: from the
+instant it commits, a new pilot-scoped inbound for the tenant is answered
+`503 pilot_released` and **nothing is recorded** for it. Once the switch is off
+the same request is the legacy path's, exactly as today. Nothing accepted can
+fall between the two steps, because from `release` onward nothing is accepted.
+
+Written only when, on that same transaction: the barrier is settled on the
+generation `status` showed; nothing is pending; nothing arrived after
+`settled_at`; the fleet is converged and reconciled against
+`COMMERCE_RUNTIME_PILOT_EXPECTED_WORKERS`; and every work count is zero.
 
 | Result | Exit | Meaning |
 | --- | --- | --- |
-| `RESULT=RELEASED` | 0 | settled, nothing pending, nothing arrived after `settled_at`. Switching off abandons nothing |
-| `RESULT=HELD` | 1 | named blockers: `barrier_is_…_not_settled`, `deferred_pending=N`, `arrived_after_settlement=N` |
+| `RESULT=RELEASED` | 0 | the transition is written; new pilot-scoped inbounds are refused (retryable) until the switch is off. Re-running is idempotent |
+| `RESULT=HELD` | 1 | named blockers: `barrier_is_…_not_settled`, `deferred_pending=N`, `arrived_after_settlement=N`, the fleet blockers above, or a work count. Drain again if the barrier is settled, `recover`/`dispose`, `settle`, then re-run |
 
 Only after `release` exits 0:
 
 ```bash
 COMMERCE_RUNTIME_PILOT_ENABLED=false
 ```
+
+Between `release` and the switch, expect `pilot_released` refusals in the log
+for any pilot-scoped inbound; Meta retries them and the legacy path answers
+once the switch is off. If the handover is abandoned instead, `reopen` takes
+the barrier from `released` back to `open` and acceptance resumes.
 
 The rollback is complete when a message from a previously allowlisted handset
 produces a `route=legacy` line and the legacy brain's own trace source.
@@ -574,8 +650,8 @@ python -m scripts.operators.commerce_runtime_pilot_handover reopen
 ```
 
 Admits new work again on a fresh generation, keeping the audit trail. It refuses
-unless the barrier is settled, because reopening before settlement would discard
-the evidence — and it re-checks, under the same lock that applies the change,
+unless the barrier is settled or released, because reopening before settlement
+would discard the evidence — and it re-checks, under the same lock that applies the change,
 that the barrier is still the settled one it was asked about **and that nothing
 is still pending**. A drain that started between the check and the write is
 therefore never reopened over (`RESULT=BLOCKED` with
@@ -604,6 +680,18 @@ has a disposition — not on anyone asserting that the fleet is quiesced.
 
 The job is read-only apart from the barrier itself: it sends no message, answers
 no customer and changes no runtime configuration.
+
+**What a 200 from the Meta route promises for pilot-scoped work.** Three
+things, each answered `503` (retryable, nothing recorded, nothing spawned, the
+replay nonce given back) when they do not hold: the request's
+`X-Hub-Signature-256` **verified** (`pilot_scope_unauthenticated` otherwise —
+the legacy path's audit mode does not extend to the pilot); the tenant's barrier
+is not `released` (`pilot_released`); and every pilot-scoped message in the
+batch was written down (`inbound_not_persisted`). One more rule closes the gap
+a nonce cannot: when replay protection says a body was seen before, the route
+first checks that every pilot-scoped message in it is **on record**; one that is
+not — the process that took the first attempt died before writing it — is
+treated as a first attempt, whatever the nonce says.
 
 **Emergency stop.** `COMMERCE_RUNTIME_PILOT_ENABLED=false` stops **this process**
 from taking new turns and from recovering. It is the right move when the pilot

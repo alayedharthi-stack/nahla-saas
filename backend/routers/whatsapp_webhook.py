@@ -49,6 +49,7 @@ from core.webhook_security import (
     release_replay_nonce,
     verify_meta_signature,
 )
+from core import webhook_security as _security
 from core.conversation_lock import conversation_lock
 from core.conversation_engine import (
     # Actions
@@ -740,6 +741,15 @@ async def whatsapp_incoming(request: Request):
         # audit-then-reject staging). It additionally reports whether *this*
         # request claimed the nonce, so a request that turns out not to be an
         # acceptance can give it back — see the 503 path below.
+        try:
+            import json as _json  # noqa: PLC0415
+            body = _json.loads(raw_body) if raw_body else {}
+            if not isinstance(body, dict):
+                body = {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[webhook/meta] body parse failed (returning 200): %s", exc)
+            body = {}
+
         _replay = evaluate_replay_claim(
             "meta",
             raw_body,
@@ -750,34 +760,45 @@ async def whatsapp_incoming(request: Request):
             },
         )
         if _replay.reject:
-            try:
-                from core.inbound_lifecycle import (  # noqa: PLC0415
-                    EVENT_HTTP_REPLAY_REJECT, emit_standalone_event,
+            # A nonce says a request with this body reached us; it does not say
+            # the process that took it lived long enough to write anything
+            # down. Before a nonce alone answers 200, every pilot-scoped
+            # message in the body has to be on record. One that is not is a
+            # first attempt whatever the nonce says: the acceptance below runs
+            # for it, and the nonce stays where the dead process left it.
+            _durable = await _durable_pilot_status(body, provider="meta")
+            if _durable.retryable:
+                logger.error(
+                    "[COMMERCE_RUNTIME_ACCEPT] meta replay carries pilot-scoped work with "
+                    "no durable acceptance scoped=%s undurable=%s undecidable=%s — a nonce "
+                    "is not an acceptance; treating the request as a first attempt",
+                    _durable.scoped, len(_durable.undurable), len(_durable.undecidable))
+                _replay = _security.ReplayVerdict(reject=False, claimed=False, key=_replay.key)
+            else:
+                try:
+                    from core.inbound_lifecycle import (  # noqa: PLC0415
+                        EVENT_HTTP_REPLAY_REJECT, emit_standalone_event,
+                    )
+                    emit_standalone_event(
+                        EVENT_HTTP_REPLAY_REJECT,
+                        provider="meta",
+                    )
+                except Exception:
+                    pass
+                return JSONResponse(
+                    {"status": "ignored", "reason": "replay"},
+                    status_code=200,
                 )
-                emit_standalone_event(
-                    EVENT_HTTP_REPLAY_REJECT,
-                    provider="meta",
-                )
-            except Exception:
-                pass
-            return JSONResponse(
-                {"status": "ignored", "reason": "replay"},
-                status_code=200,
-            )
 
-        try:
-            import json as _json  # noqa: PLC0415
-            body = _json.loads(raw_body) if raw_body else {}
-            if not isinstance(body, dict):
-                body = {}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[webhook/meta] body parse failed (returning 200): %s", exc)
-            body = {}
         # Durable before acknowledged. A 200 ends the provider's retries, so a
         # pilot-scoped message is written down first; if it cannot be, this
         # request is answered as *not* accepted and nothing is spawned, so the
-        # redelivery finds none of the batch already processed.
-        _accepted = await _accept_pilot_inbound(body, provider="meta")
+        # redelivery finds none of the batch already processed. The signature
+        # verdict travels in: a pilot obligation is taken only from a request
+        # whose signature was **valid**, whatever the legacy path's audit mode
+        # lets through for everything else.
+        _accepted = await _accept_pilot_inbound(
+            body, provider="meta", authenticated=bool(result.is_valid))
         if not _accepted.ok:
             # The work was not made durable, so this request is not an
             # acceptance and must not look like one. The nonce this request
@@ -788,11 +809,10 @@ async def whatsapp_incoming(request: Request):
             # part of the batch already processed.
             release_replay_nonce(_replay)
             logger.error("[COMMERCE_RUNTIME_ACCEPT] meta not acknowledged reason=%s "
-                         "recorded=%s failed=%s replay_nonce_released=%s",
+                         "recorded=%s failed=%s replay_nonce_released=%s signature=%s",
                          _accepted.reason, len(_accepted.recorded),
-                         len(_accepted.failed), _replay.claimed)
-            return JSONResponse(
-                {"status": "retry", "reason": "inbound_not_persisted"}, status_code=503)
+                         len(_accepted.failed), _replay.claimed, result.status.value)
+            return _pilot_refusal_response(_accepted, signature=result)
 
         try:
             from core.runtime_perf import spawn_background  # noqa: PLC0415
@@ -1033,13 +1053,17 @@ def _scope_accepts(scope: str, family: str) -> bool:
     return False
 
 
-async def _accept_pilot_inbound(body: Dict[str, Any], *, provider: str) -> Any:
+async def _accept_pilot_inbound(body: Dict[str, Any], *, provider: str,
+                                authenticated: bool = False) -> Any:
     """Record every pilot-scoped message in this body before it is acknowledged.
 
     Off by default and free when the pilot is disabled. Never raises: an
     unexpected failure is reported as *not accepted*, which is the safe
     direction — the provider redelivers and the existing deduplication keeps
     the unaffected messages from being processed twice.
+
+    ``authenticated`` is whether the provider's signature on this request was
+    **valid**. Nothing pilot-scoped is recorded or processed without it.
     """
     import asyncio as _asyncio  # noqa: PLC0415
 
@@ -1048,7 +1072,8 @@ async def _accept_pilot_inbound(body: Dict[str, Any], *, provider: str) -> Any:
     )
 
     try:
-        accepted = await _asyncio.to_thread(record_before_acknowledging, body)
+        accepted = await _asyncio.to_thread(
+            record_before_acknowledging, body, authenticated=bool(authenticated))
     except Exception as exc:  # noqa: BLE001
         logger.error("[COMMERCE_RUNTIME_ACCEPT] %s acceptance check failed: %s "
                      "— answering retryable", provider, type(exc).__name__)
@@ -1057,6 +1082,57 @@ async def _accept_pilot_inbound(body: Dict[str, Any], *, provider: str) -> Any:
         logger.error("[COMMERCE_RUNTIME_ACCEPT] %s not acknowledging: reason=%s failed=%s",
                      provider, accepted.reason, len(accepted.failed))
     return accepted
+
+
+async def _durable_pilot_status(body: Dict[str, Any], *, provider: str) -> Any:
+    """Whether every pilot-scoped message in this body is already on record.
+
+    Asked when replay protection says the body was seen before. Never raises:
+    what cannot be established is reported as *not durable*, so the request is
+    treated as a first attempt rather than dropped on the strength of a nonce.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+
+    from services.commerce_runtime_acceptance import (  # noqa: PLC0415
+        DurableStatus, durable_status,
+    )
+
+    try:
+        return await _asyncio.to_thread(durable_status, body)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[COMMERCE_RUNTIME_ACCEPT] %s durable status failed: %s — a nonce "
+                     "alone will not answer this request", provider, type(exc).__name__)
+        return DurableStatus(undecidable=(f"error:{type(exc).__name__}",))
+
+
+def _pilot_refusal_response(accepted: Any, *, signature: Any = None) -> JSONResponse:
+    """The retryable answer for a request the pilot could not take, by reason.
+
+    Every one of these is 503: the work was not made durable, so the provider
+    must send it again. The reason names what an operator has to fix, and an
+    unauthenticated pilot-scoped request is also written to the lifecycle
+    audit as a signature rejection, because that is what it is.
+    """
+    from services.commerce_runtime_acceptance import (  # noqa: PLC0415
+        REFUSED_RELEASED, REFUSED_UNAUTHENTICATED,
+    )
+
+    reason = "inbound_not_persisted"
+    if accepted.reason == REFUSED_UNAUTHENTICATED:
+        reason = "pilot_scope_unauthenticated"
+        try:
+            from core.inbound_lifecycle import (  # noqa: PLC0415
+                EVENT_HTTP_SIGNATURE_REJECT, emit_standalone_event,
+            )
+            emit_standalone_event(
+                EVENT_HTTP_SIGNATURE_REJECT, provider="meta",
+                detail=f"pilot_scope:{getattr(getattr(signature, 'status', None), 'value', '')}",
+            )
+        except Exception:
+            pass
+    elif accepted.reason == REFUSED_RELEASED:
+        reason = "pilot_released"
+    return JSONResponse({"status": "retry", "reason": reason}, status_code=503)
 
 
 async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:

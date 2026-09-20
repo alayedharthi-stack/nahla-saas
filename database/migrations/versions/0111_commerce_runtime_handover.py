@@ -38,8 +38,17 @@ The repository therefore carries these heads: ``0092`` (A1-Validate branch),
 ``0110`` (customer-address provenance, once merged) and ``0111`` (this one).
 Do not use ``alembic upgrade head`` — it is ambiguous with more than one head,
 which is why every runbook here names its target explicitly. Apply with
-``alembic upgrade 0111`` on a database at ``0109``; ``alembic downgrade 0109``
-removes everything this revision created and leaves ``0110`` alone.
+``alembic upgrade 0111`` on a database at ``0109`` **or** at ``0110``: the two
+siblings are independent, and either order — runtime first, address first, or
+both — is a valid applied state.
+
+Rolling back **this revision only** is ``alembic downgrade 0111@-1``. The
+branch-qualified spelling matters and was proved on real PostgreSQL rather than
+assumed: with both siblings applied, ``alembic downgrade 0109`` and
+``alembic downgrade 0111-1`` both resolve to the common ancestor and remove
+``0110`` as well — the address provenance table with it — whereas ``0111@-1``
+steps one revision back along this branch alone and leaves ``0110`` and its
+table exactly as they were.
 
 One source of truth
 ===================
@@ -47,10 +56,15 @@ The tables are created from the package's own metadata rather than from a
 second hand-written copy of it, so the revision and
 ``core.commerce_runtime.handover_models`` cannot drift: there is only one
 definition. A pre-existing relation is verified against that same metadata —
-columns, **and the unique constraints, check constraints and indexes that carry
-the guarantees** — and refused when it differs. A table with the right columns
-and no unique index on the inbound identity would deduplicate nothing while
-looking correct, so "matching columns" is not the bar.
+columns, **and the primary key, unique constraints, check constraints, foreign
+keys and indexes that carry the guarantees, by definition and not by name** —
+and refused when it differs. A table with the right columns and no unique index
+on the inbound identity would deduplicate nothing while looking correct; one
+whose unique constraint has the right name over the wrong columns, or whose
+check has the right name and a wider expression, is the same defect wearing the
+right label. So the declared table is created in a scratch schema on the same
+server, reflected, and compared with the pre-existing relation as PostgreSQL
+itself spells both — the reference is never a hand-typed copy of the intent.
 
 Revision ID: 0111
 Revises: 0109
@@ -60,6 +74,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 
 from alembic import op
 import sqlalchemy as sa
@@ -124,53 +139,74 @@ def _reflected_shape(bind, name: str) -> dict:
     }
 
 
-def _declared_constraints(table) -> dict:
-    """The named guarantees this revision declares, by kind and name."""
-    from sqlalchemy import CheckConstraint, Index, UniqueConstraint  # noqa: PLC0415
-
-    unique, checks = set(), set()
-    for constraint in table.constraints:
-        if isinstance(constraint, UniqueConstraint) and constraint.name:
-            unique.add(str(constraint.name))
-        elif isinstance(constraint, CheckConstraint) and constraint.name:
-            checks.add(str(constraint.name))
-    indexes = {str(index.name) for index in table.indexes if index.name}
-    for index in table.indexes:
-        if index.unique and index.name:
-            unique.add(str(index.name))
-    return {"unique": unique, "check": checks, "index": indexes}
+def _normalized_sql(value) -> str:
+    """One spelling for an expression, whichever side it was reflected from."""
+    return " ".join(str(value or "").split()).lower()
 
 
-def _reflected_constraints(bind, name: str) -> dict:
+def _guarantees(bind, name: str, schema=None) -> dict:
+    """The guarantees a relation carries, **by definition**.
+
+    Primary key columns; unique constraints by name and columns; check
+    constraints by name and expression; foreign keys by name, columns and
+    target; indexes by name, columns, uniqueness and partial predicate. Names
+    alone are what a relation created by hand to *look* right would match.
+    """
     inspector = sa.inspect(bind)
-    unique, checks, indexes = set(), set(), set()
+    primary = inspector.get_pk_constraint(name, schema=schema) or {}
+    unique = {str(c["name"]): tuple(c.get("column_names") or ())
+              for c in inspector.get_unique_constraints(name, schema=schema) if c.get("name")}
+    checks = {str(c["name"]): _normalized_sql(c.get("sqltext"))
+              for c in inspector.get_check_constraints(name, schema=schema) if c.get("name")}
+    foreign = {}
+    for fk in inspector.get_foreign_keys(name, schema=schema):
+        key = str(fk.get("name") or f"fk:{','.join(fk.get('constrained_columns') or ())}")
+        foreign[key] = (tuple(fk.get("constrained_columns") or ()),
+                        str(fk.get("referred_table") or ""),
+                        tuple(fk.get("referred_columns") or ()))
+    indexes = {}
+    for index in inspector.get_indexes(name, schema=schema):
+        if not index.get("name"):
+            continue
+        where = (index.get("dialect_options") or {}).get("postgresql_where")
+        indexes[str(index["name"])] = (tuple(index.get("column_names") or ()),
+                                       bool(index.get("unique")), _normalized_sql(where))
+    return {
+        "primary_key": tuple(primary.get("constrained_columns") or ()),
+        "unique": unique, "check": checks, "foreign_key": foreign, "index": indexes,
+    }
+
+
+def _reference_guarantees(bind, table) -> dict:
+    """The declared table's guarantees, as **this server** spells them.
+
+    The declared definition is created in a scratch schema on the same
+    database, reflected with the same inspector, and dropped again — so a
+    declared ``state IN ('a', 'b')`` and the pre-existing relation's
+    ``((state)::text = ANY (ARRAY[...]))`` are compared in one normal form
+    rather than a Python string against PostgreSQL's rewrite of it.
+    """
+    scratch = f"nahla_0111_ref_{uuid.uuid4().hex[:8]}"
+    bind.execute(sa.text(f'CREATE SCHEMA "{scratch}"'))
     try:
-        unique |= {str(c["name"]) for c in inspector.get_unique_constraints(name) if c.get("name")}
-    except Exception:  # noqa: BLE001 - a dialect that cannot reflect them reports none
-        pass
-    try:
-        checks |= {str(c["name"]) for c in inspector.get_check_constraints(name) if c.get("name")}
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        for index in inspector.get_indexes(name):
-            if not index.get("name"):
-                continue
-            indexes.add(str(index["name"]))
-            if index.get("unique"):
-                unique.add(str(index["name"]))
-    except Exception:  # noqa: BLE001
-        pass
-    return {"unique": unique, "check": checks, "index": indexes}
+        reference = table.to_metadata(sa.MetaData(), schema=scratch)
+        reference.create(bind)
+        return _guarantees(bind, reference.name, schema=scratch)
+    finally:
+        bind.execute(sa.text(f'DROP SCHEMA "{scratch}" CASCADE'))
 
 
 def _differences(bind, table) -> list:
-    """How a pre-existing relation differs from the declared one, by name.
+    """How a pre-existing relation differs from the declared one.
 
-    Columns **and** the named guarantees. A relation whose columns match but
-    whose unique index on the inbound identity is missing would accept the same
-    provider message twice; a missing check constraint would let a disposed row
-    name no disposition. Neither is a compatible schema, so neither passes here.
+    Columns, **and every guarantee by definition**: a relation whose unique
+    constraint is named right over the wrong columns would accept the same
+    provider message twice; a check with the right name and a wider expression
+    would let a disposed row name no disposition; an index with the right name
+    and no partial predicate would not be the pending index at all. None of
+    those is a compatible schema, so none of them passes here. A guarantee the
+    declaration does not make — an extra unique or check constraint — is
+    refused as well: a stricter relation refuses rows the runtime writes.
     """
     declared = _column_shape(table, bind.dialect)
     actual = _reflected_shape(bind, table.name)
@@ -183,11 +219,21 @@ def _differences(bind, table) -> list:
     for column in sorted(set(actual) - set(declared)):
         diffs.append(f"{table.name}.{column} is unexpected")
 
-    want = _declared_constraints(table)
-    have = _reflected_constraints(bind, table.name)
-    for kind in ("unique", "check", "index"):
-        for name in sorted(want[kind] - have[kind]):
+    want = _reference_guarantees(bind, table)
+    have = _guarantees(bind, table.name)
+    if want["primary_key"] != have["primary_key"]:
+        diffs.append(f"{table.name} primary key is {have['primary_key']}, "
+                     f"expected {want['primary_key']}")
+    for kind in ("unique", "check", "foreign_key", "index"):
+        for name in sorted(set(want[kind]) - set(have[kind])):
             diffs.append(f"{table.name} is missing the {kind} constraint {name}")
+        for name in sorted(set(want[kind]) & set(have[kind])):
+            if want[kind][name] != have[kind][name]:
+                diffs.append(f"{table.name} {kind} constraint {name} is {have[kind][name]}, "
+                             f"expected {want[kind][name]}")
+        if kind in ("unique", "check", "foreign_key"):
+            for name in sorted(set(have[kind]) - set(want[kind])):
+                diffs.append(f"{table.name} carries an undeclared {kind} constraint {name}")
     return diffs
 
 

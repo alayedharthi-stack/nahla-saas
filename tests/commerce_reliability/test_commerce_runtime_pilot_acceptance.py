@@ -58,14 +58,37 @@ MODEL = "model-configured-for-this-pilot"
 @event.listens_for(Base.metadata, "before_create")
 @event.listens_for(RuntimeBase.metadata, "before_create")
 def _remap_jsonb(target: Any, connection: Any, **kw: Any) -> None:
-    """SQLite has no JSONB and cannot parse a ``::jsonb`` cast in a default."""
+    """SQLite has no JSONB and cannot parse a ``::jsonb`` cast in a default.
+
+    The remap is for the SQLite create only and is **undone** afterwards
+    (below): the Table objects are shared by every module in the process, and
+    a PostgreSQL case collected after this one must create the declared
+    JSONB columns with their declared defaults, not this dialect's stand-ins.
+    """
+    if getattr(getattr(connection, "dialect", None), "name", "") != "sqlite":
+        return
     for table in target.sorted_tables:
         for col in table.columns:
             if isinstance(col.type, JSONB):
+                _REMAPPED.setdefault(col, (col.type, col.server_default))
                 col.type = JSON()
             default = getattr(col.server_default, "arg", None)
             if default is not None and "::" in str(default):
+                _REMAPPED.setdefault(col, (col.type, col.server_default))
                 col.server_default = None
+
+
+_REMAPPED: Dict[Any, Any] = {}
+
+
+@event.listens_for(Base.metadata, "after_create")
+@event.listens_for(RuntimeBase.metadata, "after_create")
+def _restore_jsonb(target: Any, connection: Any, **kw: Any) -> None:
+    """Put back what ``_remap_jsonb`` changed, once the SQLite create is done."""
+    for col, (col_type, server_default) in list(_REMAPPED.items()):
+        col.type = col_type
+        col.server_default = server_default
+    _REMAPPED.clear()
 
 
 @pytest.fixture()
@@ -133,14 +156,14 @@ def sessions(db: Any) -> Any:
 def test_nothing_happens_while_the_pilot_is_off(db, monkeypatch):
     monkeypatch.delenv(pg.ENV_ENABLED, raising=False)
     outcome = acceptance.record_before_acknowledging(body(message("wamid.off")),
-                                                     session_factory=sessions(db))
+                                                     session_factory=sessions(db), authenticated=True)
     assert outcome.ok and outcome.reason == "pilot_disabled"
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
 
 
 def test_a_pilot_scoped_inbound_is_durable_with_what_a_replay_needs(configured, db):
     outcome = acceptance.record_before_acknowledging(
-        body(message("wamid.scoped", text="عندكم قميص؟")), session_factory=sessions(db))
+        body(message("wamid.scoped", text="عندكم قميص؟")), session_factory=sessions(db), authenticated=True)
     assert outcome.ok and outcome.recorded == ("wamid.scoped",)
     record = handover.pending_inbound(db, tenant_id=db.tenant_id)[0]
     assert record.provider_message_id == "wamid.scoped"
@@ -159,7 +182,7 @@ def test_a_pilot_scoped_inbound_is_durable_with_what_a_replay_needs(configured, 
 
 def test_an_unrelated_recipient_is_neither_recorded_nor_refused(configured, db):
     outcome = acceptance.record_before_acknowledging(
-        body(message("wamid.stranger", sender=STRANGER)), session_factory=sessions(db))
+        body(message("wamid.stranger", sender=STRANGER)), session_factory=sessions(db), authenticated=True)
     assert outcome.ok and outcome.recorded == () and outcome.scoped == 0
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
 
@@ -167,7 +190,7 @@ def test_an_unrelated_recipient_is_neither_recorded_nor_refused(configured, db):
 def test_another_tenant_s_connection_is_left_alone(configured, db):
     outcome = acceptance.record_before_acknowledging(
         body(message("wamid.other"), phone_number_id=OTHER_PHONE_ID),
-        session_factory=sessions(db))
+        session_factory=sessions(db), authenticated=True)
     assert outcome.ok and outcome.recorded == ()
     assert handover.pending_count(db, tenant_id=db.other_tenant_id) == 0
 
@@ -177,7 +200,7 @@ def test_a_mixed_batch_records_only_the_scoped_messages(configured, db):
         mixed_body((PHONE_ID, [message("wamid.mine"), message("wamid.stranger",
                                                               sender=STRANGER)]),
                    (OTHER_PHONE_ID, [message("wamid.theirs")])),
-        session_factory=sessions(db))
+        session_factory=sessions(db), authenticated=True)
     assert outcome.ok and outcome.recorded == ("wamid.mine",) and outcome.scoped == 1
     assert [r.provider_message_id for r in handover.pending_inbound(db, tenant_id=db.tenant_id)] \
         == ["wamid.mine"]
@@ -188,15 +211,15 @@ def test_a_statuses_only_body_records_nothing(configured, db):
         "metadata": {"phone_number_id": PHONE_ID},
         "statuses": [{"id": "wamid.status", "status": "delivered"}],
     }}]}]}
-    outcome = acceptance.record_before_acknowledging(payload, session_factory=sessions(db))
+    outcome = acceptance.record_before_acknowledging(payload, session_factory=sessions(db), authenticated=True)
     assert outcome.ok and outcome.reason == "no_messages"
 
 
 def test_a_provider_retry_records_the_same_inbound_once(configured, db):
     first = acceptance.record_before_acknowledging(body(message("wamid.retry")),
-                                                   session_factory=sessions(db))
+                                                   session_factory=sessions(db), authenticated=True)
     second = acceptance.record_before_acknowledging(body(message("wamid.retry")),
-                                                    session_factory=sessions(db))
+                                                    session_factory=sessions(db), authenticated=True)
     assert first.ok and second.ok
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
 
@@ -204,7 +227,7 @@ def test_a_provider_retry_records_the_same_inbound_once(configured, db):
 def test_a_record_that_cannot_be_written_is_not_an_acceptance(configured, db, monkeypatch):
     monkeypatch.setattr(handover, "record_inbound", lambda *a, **k: None)
     outcome = acceptance.record_before_acknowledging(body(message("wamid.lost")),
-                                                     session_factory=sessions(db))
+                                                     session_factory=sessions(db), authenticated=True)
     assert outcome.ok is False and outcome.failed == ("wamid.lost",)
     assert outcome.reason == "not_persisted"
 
@@ -215,26 +238,30 @@ def test_a_database_that_raises_is_not_an_acceptance(configured, db, monkeypatch
 
     monkeypatch.setattr(handover, "record_inbound", _boom)
     outcome = acceptance.record_before_acknowledging(body(message("wamid.down")),
-                                                     session_factory=sessions(db))
+                                                     session_factory=sessions(db), authenticated=True)
     assert outcome.ok is False and outcome.reason.startswith("error:")
 
 
 # ── The routes, driven for real ──────────────────────────────────────────────
 
 
-def call_meta(body_payload: Dict[str, Any], spawned: List[Any]) -> Any:
+# The signature is real: every request below is signed with this secret using
+# Meta's own scheme, verified by the route's own evaluator. Nothing stubs the
+# authentication decision.
+from tests.commerce_reliability.runtime_support import (  # noqa: E402
+    META_TEST_APP_SECRET as APP_SECRET,
+    meta_webhook_request as meta_request,
+)
+
+
+def call_meta(body_payload: Dict[str, Any], spawned: List[Any], *,
+              signature: str = "valid") -> Any:
     """The real Meta route, with only the background spawn observed."""
     import asyncio
 
     import routers.whatsapp_webhook as webhook
-    from fastapi import Request
 
-    async def _receive() -> Dict[str, Any]:
-        import json
-        return {"type": "http.request", "body": json.dumps(body_payload).encode()}
-
-    request = Request({"type": "http", "method": "POST", "path": "/webhook/whatsapp",
-                       "headers": [], "query_string": b""}, receive=_receive)
+    request = meta_request(body_payload, signature=signature)
 
     def _spawn(coro: Any, name: str = "") -> None:
         spawned.append(name)
@@ -242,8 +269,8 @@ def call_meta(body_payload: Dict[str, Any], spawned: List[Any]) -> Any:
 
     with (
         patch("core.runtime_perf.spawn_background", _spawn),
+        patch.object(webhook, "META_APP_SECRET", APP_SECRET),
         patch.object(webhook, "_record_signature_audit", lambda *a, **k: None),
-        patch.object(webhook, "_meta_should_reject", lambda _r: False),
         patch.object(webhook, "evaluate_replay_claim",
                      lambda *a, **k: _security.ReplayVerdict(reject=False, claimed=False)),
     ):
@@ -251,13 +278,19 @@ def call_meta(body_payload: Dict[str, Any], spawned: List[Any]) -> Any:
 
 
 _REAL_RECORDER = acceptance.record_before_acknowledging
+_REAL_DURABLE = acceptance.durable_status
 
 
 @pytest.fixture()
 def bound(monkeypatch: pytest.MonkeyPatch, db: Any) -> None:
-    """Point the real recorder at this database. Nothing else is doubled."""
+    """Point the real recorder — and the real durable-status question the
+    replay path asks — at this database. Nothing else is doubled; in
+    particular the route, not this fixture, states whether the signature
+    verified."""
     monkeypatch.setattr(acceptance, "record_before_acknowledging",
                         functools.partial(_REAL_RECORDER, session_factory=sessions(db)))
+    monkeypatch.setattr(acceptance, "durable_status",
+                        functools.partial(_REAL_DURABLE, session_factory=sessions(db)))
 
 
 def test_a_scoped_inbound_is_recorded_before_the_route_answers(configured, db, bound):
@@ -315,7 +348,7 @@ def test_a_scope_lookup_that_fails_is_not_unrelated_traffic(configured, db, monk
 
     monkeypatch.setattr(pg, "resolve_pilot_scope", _down)
     outcome = acceptance.record_before_acknowledging(body(message("wamid.blind")),
-                                                     session_factory=sessions(db))
+                                                     session_factory=sessions(db), authenticated=True)
     assert outcome.ok is False
     assert outcome.reason.startswith("error:") or outcome.reason == "scope_undecidable"
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
@@ -327,7 +360,7 @@ def test_a_lookup_that_returns_unavailable_refuses_rather_than_acknowledging(
                         lambda *_a, **_k: pg.ScopeLookup(status=pg.SCOPE_UNAVAILABLE,
                                                          detail="OperationalError"))
     outcome = acceptance.record_before_acknowledging(body(message("wamid.unavailable")),
-                                                     session_factory=sessions(db))
+                                                     session_factory=sessions(db), authenticated=True)
     assert outcome.ok is False and outcome.reason == "scope_undecidable"
 
 
@@ -343,7 +376,7 @@ def test_two_allowlisted_tenants_on_one_number_is_ambiguous_not_a_pick(
     assert found.status == pg.SCOPE_AMBIGUOUS and found.resolved is False
 
     outcome = acceptance.record_before_acknowledging(body(message("wamid.ambiguous")),
-                                                     session_factory=sessions(db))
+                                                     session_factory=sessions(db), authenticated=True)
     assert outcome.ok is False and outcome.reason == "scope_undecidable"
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
 
@@ -354,7 +387,7 @@ def test_verified_out_of_scope_traffic_is_still_acknowledged_untouched(configure
     assert found.status == pg.SCOPE_NOT_OURS and found.decided is True
     outcome = acceptance.record_before_acknowledging(
         body(message("wamid.theirs"), phone_number_id=OTHER_PHONE_ID),
-        session_factory=sessions(db))
+        session_factory=sessions(db), authenticated=True)
     assert outcome.ok is True and outcome.scoped == 0
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
 
@@ -362,7 +395,7 @@ def test_verified_out_of_scope_traffic_is_still_acknowledged_untouched(configure
 def test_the_verified_connection_travels_into_persistence(configured, db):
     """Not a reference rebuilt from the payload: the row the guard checked."""
     outcome = acceptance.record_before_acknowledging(body(message("wamid.verified")),
-                                                     session_factory=sessions(db))
+                                                     session_factory=sessions(db), authenticated=True)
     assert outcome.ok
     record = handover.pending_inbound(db, tenant_id=db.tenant_id)[0]
     verified = pg.verified_connection(db, tenant_id=db.tenant_id, phone_number_id=PHONE_ID)
@@ -406,18 +439,10 @@ def replay_protected(monkeypatch: pytest.MonkeyPatch) -> _Redis:
 def call_meta_protected(body_payload: Dict[str, Any], spawned: List[Any]) -> Any:
     """The Meta route with real replay protection — only the spawn is observed."""
     import asyncio
-    import json as _json
 
     import routers.whatsapp_webhook as webhook
-    from fastapi import Request
 
-    raw = _json.dumps(body_payload).encode()
-
-    async def _receive() -> Dict[str, Any]:
-        return {"type": "http.request", "body": raw}
-
-    request = Request({"type": "http", "method": "POST", "path": "/webhook/whatsapp",
-                       "headers": [], "query_string": b""}, receive=_receive)
+    request = meta_request(body_payload)
 
     def _spawn(coro: Any, name: str = "") -> None:
         spawned.append(name)
@@ -425,8 +450,8 @@ def call_meta_protected(body_payload: Dict[str, Any], spawned: List[Any]) -> Any
 
     with (
         patch("core.runtime_perf.spawn_background", _spawn),
+        patch.object(webhook, "META_APP_SECRET", APP_SECRET),
         patch.object(webhook, "_record_signature_audit", lambda *a, **k: None),
-        patch.object(webhook, "_meta_should_reject", lambda _r: False),
     ):
         return asyncio.run(webhook.whatsapp_incoming(request))
 
@@ -469,27 +494,173 @@ def test_an_accepted_request_keeps_its_nonce_so_a_lost_ack_is_still_idempotent(
 
 
 def test_a_rejected_signature_never_reaches_acceptance(configured, db, bound):
-    """Authentication is before authoritative persistence, not after it."""
+    """Enforce mode: authentication is before authoritative persistence."""
     import asyncio
-    import json as _json
 
     import routers.whatsapp_webhook as webhook
-    from fastapi import Request
 
-    async def _receive() -> Dict[str, Any]:
-        return {"type": "http.request",
-                "body": _json.dumps(body(message("wamid.forged"))).encode()}
-
-    request = Request({"type": "http", "method": "POST", "path": "/webhook/whatsapp",
-                       "headers": [], "query_string": b""}, receive=_receive)
+    request = meta_request(body(message("wamid.forged")), signature="invalid")
     spawned: List[Any] = []
     with (
         patch("core.runtime_perf.spawn_background",
               lambda coro, name="": (spawned.append(name), coro.close())),
+        patch.object(webhook, "META_APP_SECRET", APP_SECRET),
+        patch.object(webhook, "META_WEBHOOK_ENFORCE_SIGNATURE", True),
         patch.object(webhook, "_record_signature_audit", lambda *a, **k: None),
-        patch.object(webhook, "_meta_should_reject", lambda _r: True),
     ):
         response = asyncio.run(webhook.whatsapp_incoming(request))
     assert response.status_code == 200                     # Meta's retry storm is not invited
     assert spawned == []
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
+# ── Authentication is a condition of the obligation, not of the audit ────────
+#
+# The route's own signature evaluator runs on every request below; nothing
+# stubs the decision. What is held: a pilot-scoped batch is recorded and
+# processed only when the signature **verified**, whatever the legacy path's
+# audit mode lets through for everything else.
+
+
+@pytest.mark.parametrize("signature", ["missing", "invalid"])
+def test_pilot_scoped_work_is_refused_retryable_without_a_valid_signature(
+        configured, db, bound, signature):
+    spawned: List[Any] = []
+    response = call_meta(body(message(f"wamid.{signature}")), spawned, signature=signature)
+    assert response.status_code == 503
+    assert response.body and b"pilot_scope_unauthenticated" in bytes(response.body)
+    assert spawned == []                                  # not processed either
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
+def test_a_valid_signature_records_and_processes(configured, db, bound):
+    spawned: List[Any] = []
+    response = call_meta(body(message("wamid.signed")), spawned, signature="valid")
+    assert response.status_code == 200 and spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+
+
+def test_verified_out_of_scope_traffic_keeps_the_legacy_audit_mode(configured, db, bound):
+    """A stranger's message with a bad signature is exactly what it is today:
+    audited, processed by the legacy path, recorded by nobody."""
+    spawned: List[Any] = []
+    response = call_meta(body(message("wamid.stranger.unsigned", sender=STRANGER)), spawned,
+                         signature="invalid")
+    assert response.status_code == 200 and spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
+def test_an_unavailable_scope_with_a_valid_signature_is_refused_retryable(
+        configured, db, bound, monkeypatch):
+    def _down(*_a: Any, **_k: Any) -> Any:
+        return pg.ScopeLookup(status=pg.SCOPE_UNAVAILABLE, detail="db_down")
+
+    monkeypatch.setattr(pg, "resolve_pilot_scope", _down)
+    spawned: List[Any] = []
+    response = call_meta(body(message("wamid.blind.signed")), spawned)
+    assert response.status_code == 503 and spawned == []
+
+
+def test_a_failed_second_lookup_does_not_become_out_of_scope(configured, db, monkeypatch):
+    """Acceptance resolved the connection once. The guard is handed that row
+    rather than looking it up again, so a failed second read cannot turn a
+    verified association into ``connection_not_verified`` and drop the message."""
+    def _lookup_fails(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("second lookup: connection reset")
+
+    monkeypatch.setattr(pg, "verified_connection", _lookup_fails)
+    outcome = acceptance.record_before_acknowledging(
+        body(message("wamid.once.verified")), session_factory=sessions(db), authenticated=True)
+    assert outcome.ok and outcome.recorded == ("wamid.once.verified",)
+    record = handover.pending_inbound(db, tenant_id=db.tenant_id)[0]
+    assert record.channel_connection_ref == f"wa:{PHONE_ID}"
+
+
+def test_the_recorder_takes_no_obligation_unless_told_the_signature_verified(configured, db):
+    """The default is fail-closed: a caller that says nothing records nothing."""
+    outcome = acceptance.record_before_acknowledging(
+        body(message("wamid.unstated")), session_factory=sessions(db))
+    assert outcome.ok is False and outcome.reason == acceptance.REFUSED_UNAUTHENTICATED
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
+# ── A nonce is not an acceptance ─────────────────────────────────────────────
+
+
+def test_a_nonce_left_by_a_dead_process_does_not_answer_200(configured, db, bound,
+                                                             replay_protected):
+    """The reproduction: a process claimed the nonce and died before writing
+    anything down. The provider's identical retry must persist and process."""
+    import json as _json
+
+    payload = body(message("wamid.orphaned.nonce"))
+    raw = _json.dumps(payload).encode()
+    replay_protected.keys[_security.replay_nonce_key("meta", raw)] = "1"   # the dead process's
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+    spawned: List[Any] = []
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200
+    assert spawned == ["webhook_meta"]
+    assert [r.provider_message_id for r in handover.pending_inbound(db, tenant_id=db.tenant_id)] \
+        == ["wamid.orphaned.nonce"]
+
+    # A completed duplicate is still a duplicate: the record exists now.
+    again = call_meta_protected(payload, spawned)
+    assert again.status_code == 200 and spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+
+
+def test_a_nonce_for_unrelated_traffic_is_still_a_replay(configured, db, bound,
+                                                          replay_protected):
+    """Nothing pilot-scoped in the body: the nonce keeps its meaning."""
+    import json as _json
+
+    payload = body(message("wamid.stranger.replay", sender=STRANGER))
+    replay_protected.keys[_security.replay_nonce_key("meta", _json.dumps(payload).encode())] = "1"
+    spawned: List[Any] = []
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200 and spawned == []
+    assert bytes(response.body) and b"replay" in bytes(response.body)
+
+
+def test_an_unreadable_durable_status_retries_rather_than_drops(configured, db, bound,
+                                                                 replay_protected, monkeypatch):
+    import json as _json
+
+    payload = body(message("wamid.unreadable.status"))
+    replay_protected.keys[_security.replay_nonce_key("meta", _json.dumps(payload).encode())] = "1"
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("status store unavailable")
+
+    monkeypatch.setattr(acceptance, "durable_status", _boom)
+    spawned: List[Any] = []
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200 and spawned == ["webhook_meta"]
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+
+
+# ── After release, nothing new is accepted for the tenant ────────────────────
+
+
+def test_after_release_a_new_inbound_is_refused_not_accepted_and_abandoned(
+        configured, db, bound, monkeypatch):
+    from core.commerce_runtime import handover_models as hm
+
+    handover.open_drain(db, tenant_id=db.tenant_id)
+    row = db.query(hm.HandoverBarrier).filter_by(tenant_id=db.tenant_id).one()
+    row.state = hm.STATE_RELEASED
+    db.commit()
+
+    spawned: List[Any] = []
+    response = call_meta(body(message("wamid.after.release")), spawned)
+    assert response.status_code == 503
+    assert b"pilot_released" in bytes(response.body)
+    assert spawned == [] and handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+    # Once the switch is off, the same request is the legacy path's.
+    monkeypatch.delenv(pg.ENV_ENABLED)
+    response = call_meta(body(message("wamid.after.release")), spawned)
+    assert response.status_code == 200 and spawned == ["webhook_meta"]
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0

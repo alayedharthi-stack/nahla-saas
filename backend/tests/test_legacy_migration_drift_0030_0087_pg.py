@@ -53,6 +53,8 @@ def _staging_env_for_pg() -> dict[str, str]:
     }
 
 
+from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
+
 def test_clean_chain_upgrade_0030_to_0087(
     ephemeral_legacy_migration_engine_0030: Engine,
 ) -> None:
@@ -76,7 +78,7 @@ def test_repository_parallel_heads_0088_0089_while_expand_runner_stops_at_0087()
         heads = set(ScriptDirectory("migrations").get_heads())
     finally:
         os.chdir(prev_cwd)
-    assert heads == frozenset({"0092", "0111"})
+    assert repository_heads_expected(heads)
     assert FINAL_TARGET == "0087"
 
 

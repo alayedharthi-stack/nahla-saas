@@ -294,7 +294,16 @@
         "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_upgrade_is_idempotent_on_a_database_that_already_has_it",
         "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_relation_with_the_right_columns_and_no_unique_index_is_refused",
         "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_relation_missing_a_check_constraint_is_refused",
-        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_worker_row_carries_its_retirement_evidence"
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_worker_row_carries_its_retirement_evidence",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_correct_pre_existing_relation_has_no_differences",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_unique_constraint_with_the_right_name_over_the_wrong_columns_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_check_constraint_with_the_right_name_and_a_wider_expression_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_pending_index_with_the_right_name_but_no_predicate_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_a_primary_key_over_the_wrong_columns_is_refused",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_an_undeclared_constraint_is_refused_rather_than_tolerated",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_siblings_apply_in_either_order_and_the_runtime_rolls_back_alone[address_first]",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_siblings_apply_in_either_order_and_the_runtime_rolls_back_alone[runtime_first]",
+        "tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py::test_the_common_ancestor_spellings_would_take_the_sibling_with_them"
       ]
     },
     {
@@ -341,7 +350,20 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_recovery_refuses_to_replay_into_a_closed_barrier",
         "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_recovery_leaves_an_unknown_delivery_alone",
         "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_a_dry_run_decides_everything_except_the_replay",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_two_runners_do_not_replay_the_same_entry"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_two_runners_do_not_replay_the_same_entry",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_the_composed_lifecycle_accept_interrupt_recover_settle_release",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_a_recovery_replay_runs_through_both_dedup_boundaries_only_once",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_a_pending_arrival_after_settlement_is_met_by_drain_recover_settle",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_an_unauthenticated_request_takes_no_pilot_obligation",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_recovery_admission_follows_the_barrier_on_the_admitting_connection",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_after_release_the_record_write_itself_refuses",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_a_release_racing_an_acceptance_sees_it_or_refuses_it",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_an_answered_disposition_must_name_this_customers_own_conversation",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_an_answer_recorded_before_the_message_arrived_did_not_answer_it",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_supersession_needs_the_same_connection_and_customer_and_a_later_arrival",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_settlement_refuses_without_a_stated_inventory",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_settlement_names_a_replica_in_the_inventory_that_never_reported",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py::test_retirement_needs_a_stop_record_that_names_the_deployment"
       ]
     },
     {

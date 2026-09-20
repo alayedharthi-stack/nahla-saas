@@ -5,7 +5,7 @@ applies a production migration: a service built from a pinned branch, with
 ``restartPolicyType: NEVER``, whose only variable is the pilot database's
 ``DATABASE_URL``.
 
-    NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0109 \
+    NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0111 \
     NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET=<host>/<database> \
         python -m scripts.operators.commerce_runtime_pilot_migration
 

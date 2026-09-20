@@ -33,7 +33,7 @@ import threading
 import time
 import uuid
 from unittest.mock import patch
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -66,7 +66,10 @@ from tests.commerce_reliability.test_commerce_runtime_pilot_pg import (
 
 REVISION = "0111"
 PHONE = "+966500000042"
-PHONE_ID = "1555000424"
+# Meta phone-number ids are globally unique; the route drops an id that
+# resolves to more than one connection as ambiguous. Every merchant in this
+# module therefore gets a phone id of its own, built on this prefix.
+PHONE_ID_PREFIX = "1555"
 QUESTION = "عندكم قميص قطني أزرق؟"
 
 
@@ -79,6 +82,7 @@ class Store:
     ledgers: LedgerRepository
     tenant_id: int
     connection_id: int
+    phone_id: str
     customer_id: int
     conversation_id: int
 
@@ -178,7 +182,12 @@ STOP_EVIDENCE = {
     "deployment": "railway:nahla-backend@deploy-1234",
     "stop_verified_by": "railway deployment status=REMOVED, replicas=0",
     "observed_at": "2099-01-01T00:00:00+00:00",
+    # The platform's own record, captured verbatim. It names the deployment.
+    "stop_record": ('[{"deployment": "railway:nahla-backend@deploy-1234", '
+                    '"status": "REMOVED", "replicas": 0}]'),
 }
+# The deployment inventory every settlement and release is reconciled against.
+EXPECTED_WORKERS = "worker-a"
 
 
 @pytest.fixture(scope="module")
@@ -198,6 +207,7 @@ def database(pg_admin_dsn: str) -> Any:
 def store(database: Any) -> Any:
     """A merchant of this case's own, so every count belongs to this case."""
     engine = database
+    phone_id = PHONE_ID_PREFIX + str(uuid.uuid4().int)[:11]
     with engine.begin() as conn:
         tenant_id = int(conn.execute(
             text("INSERT INTO tenants (name, is_active, is_platform_tenant) "
@@ -206,7 +216,7 @@ def store(database: Any) -> Any:
         connection_id = int(conn.execute(
             text("INSERT INTO whatsapp_connections (tenant_id, phone_number_id, status) "
                  "VALUES (:t, :p, 'connected') RETURNING id"),
-            {"t": tenant_id, "p": PHONE_ID}).scalar_one())
+            {"t": tenant_id, "p": phone_id}).scalar_one())
         customer_id = int(conn.execute(
             text("INSERT INTO customers (tenant_id, phone, normalized_phone, name) "
                  "VALUES (:t, :p, :p, :n) RETURNING id"),
@@ -219,7 +229,7 @@ def store(database: Any) -> Any:
     handover._last_heartbeat.clear()
     yield Store(engine=engine, session_factory=sessionmaker(bind=engine, expire_on_commit=False),
                 ledgers=LedgerRepository(engine), tenant_id=tenant_id,
-                connection_id=connection_id, customer_id=customer_id,
+                connection_id=connection_id, phone_id=phone_id, customer_id=customer_id,
                 conversation_id=conversation_id)
     entry.reset_schema_probe()
 
@@ -233,6 +243,7 @@ def configured(monkeypatch: pytest.MonkeyPatch, store: Store) -> None:
     monkeypatch.setenv(pgd.ENV_RECIPIENT_ALLOWLIST, PHONE)
     monkeypatch.setenv(pgd.ENV_MODEL, MODEL)
     monkeypatch.delenv(pgd.ENV_DRAINING, raising=False)
+    monkeypatch.setenv(job.ENV_EXPECTED_WORKERS, EXPECTED_WORKERS)
     monkeypatch.setattr(job, "session", store.session)
     monkeypatch.setattr(job, "observe", lambda tenants: recovery.handover_state(
         tenant_ids=list(tenants), engine=store.engine))
@@ -290,7 +301,7 @@ def defer(store: Store, *, identity: str,
     db = store.session()
     try:
         return handover.record_inbound(
-            db, tenant_id=store.tenant_id, phone_number_id=PHONE_ID,
+            db, tenant_id=store.tenant_id, phone_number_id=store.phone_id,
             channel_connection_ref=f"wa:{store.connection_id}", recipient=PHONE,
             provider_message_id=identity, payload={"text": QUESTION}, reason=reason,
             barrier_generation=handover.read_barrier(
@@ -502,7 +513,7 @@ def test_control_b_the_reviewed_shape_still_says_the_legacy_path_owns_it(configu
         try:
             decision = pgd.evaluate_pilot_route(
                 db, tenant_id=store.tenant_id, customer_phone=PHONE,
-                phone_number_id=PHONE_ID, inbound_text="وين ردّي؟")
+                phone_number_id=store.phone_id, inbound_text="وين ردّي؟")
         finally:
             db.close()
         assert decision.reason == pgd.PILOT_DRAINING
@@ -526,7 +537,7 @@ def test_control_b_the_corrected_route_withholds_it_from_every_owner(configured,
     db = store.session()
     try:
         claim = seam.commerce_runtime_claims_inbound(
-            db, tenant_id=store.tenant_id, phone_id=PHONE_ID, to=PHONE,
+            db, tenant_id=store.tenant_id, phone_id=store.phone_id, to=PHONE,
             text="وين ردّي؟", wa_msg_id="wamid.during.handover")
         assert claim is not None and claim.basis == "drain_buffered"
         assert claim.applies_to(tenant_id=store.tenant_id, recipient=PHONE,
@@ -586,7 +597,7 @@ def test_control_b_a_buffered_inbound_is_disposed_before_anything_settles(config
     db = store.session()
     try:
         claim = seam.commerce_runtime_claims_inbound(
-            db, tenant_id=store.tenant_id, phone_id=PHONE_ID, to=PHONE,
+            db, tenant_id=store.tenant_id, phone_id=store.phone_id, to=PHONE,
             text="سؤال أثناء التسليم", wa_msg_id="wamid.buffered.one")
         assert claim is not None and claim.basis == "drain_buffered"
         db.commit()
@@ -651,7 +662,7 @@ def test_control_b_a_drain_leaves_another_merchant_completely_alone(configured, 
         conn.execute(
             text("INSERT INTO whatsapp_connections (tenant_id, phone_number_id, status) "
                  "VALUES (:t, :p, 'connected')"),
-            {"t": other, "p": PHONE_ID + "9"})
+            {"t": other, "p": store.phone_id + "9"})
 
     drain_and_converge(store)
     monkeypatch.setenv(pgd.ENV_TENANT_ALLOWLIST, f"{store.tenant_id},{other}")
@@ -659,7 +670,7 @@ def test_control_b_a_drain_leaves_another_merchant_completely_alone(configured, 
     try:
         assert handover.read_barrier(db, tenant_id=other).admits_new_work is True
         claim = seam.commerce_runtime_claims_inbound(
-            db, tenant_id=other, phone_id=PHONE_ID + "9", to=PHONE,
+            db, tenant_id=other, phone_id=store.phone_id + "9", to=PHONE,
             text="عطر ورد 100ml موجود؟", wa_msg_id="wamid.other.tenant")
         assert claim is not None and claim.basis == "configured"
         assert handover.pending_inbound(db, tenant_id=other) == ()
@@ -814,7 +825,8 @@ def test_h1_two_settlements_racing_produce_exactly_one_transition(configured, st
         try:
             result = handover.settle(db, tenant_id=store.tenant_id,
                                      expected_generation=decided,
-                                     validate=lambda _s, _b: ([], {}))
+                                     validate=lambda _s, _b: ([], {}),
+                                     expected_workers=[EXPECTED_WORKERS])
         finally:
             db.close()
         with lock:
@@ -884,7 +896,7 @@ def test_h5_an_inbound_arriving_in_the_settled_window_is_recorded_not_lost(confi
     db = store.session()
     try:
         claim = seam.commerce_runtime_claims_inbound(
-            db, tenant_id=store.tenant_id, phone_id=PHONE_ID, to=PHONE,
+            db, tenant_id=store.tenant_id, phone_id=store.phone_id, to=PHONE,
             text="سؤال بعد التسوية", wa_msg_id="wamid.settled.window")
         db.commit()
     finally:
@@ -935,8 +947,13 @@ def test_h3_retirement_is_recorded_and_carried_into_the_evidence(configured, sto
                      "--reason", "terminated in deploy 1234",
                      "--evidence", json.dumps(STOP_EVIDENCE)]) == job.EXIT_OK
     assert settle(store) == job.EXIT_OK
-    assert evidence(store)["retired_workers"] == [
-        {"worker_id": "worker-gone", "by": "owner", "reason": "terminated in deploy 1234"}]
+    retired = evidence(store)["retired_workers"]
+    assert [(r["worker_id"], r["by"], r["reason"]) for r in retired] == [
+        ("worker-gone", "owner", "terminated in deploy 1234")]
+    # ...and what the operator showed, retained with its digest.
+    assert retired[0]["evidence"]["deployment"] == STOP_EVIDENCE["deployment"]
+    assert retired[0]["evidence"]["stop_record_sha256"]
+    assert retired[0]["evidence"]["stop_record"] == STOP_EVIDENCE["stop_record"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -950,33 +967,44 @@ def test_a_replayed_disposition_is_verified_against_a_real_terminal(configured, 
     identity has to resolve to a runtime turn with a terminal for this tenant
     and this connection. A plausible-looking id that does not is refused."""
     drain_and_converge(store)
-    entry_row = defer(store, identity="wamid.needs.proof")
+    identity = "wamid.needs.proof." + uuid.uuid4().hex
+    entry_row = defer(store, identity=identity)
 
     assert job.main(["dispose", "--entry", str(entry_row.id), "--disposition", "replayed",
-                     "--evidence", '{"replayed_as_provider_message_id": "wamid.never.ran"}',
-                     "--by", "owner"]) == job.EXIT_BLOCKED
+                     "--evidence", json.dumps({"replayed_as_provider_message_id": identity}),
+                     "--by", "owner"]) == job.EXIT_BLOCKED          # nothing ran yet
 
-    # A turn that really ran, and really reached a terminal.
-    replayed_id = "wamid.replayed." + uuid.uuid4().hex
+    # A turn for *another* inbound that really ran and really reached a
+    # terminal proves nothing about this one: a replay is of this entry's own
+    # identity, and naming a different message is refused by name.
+    other_id = "wamid.other." + uuid.uuid4().hex
+    assert store.run_turn(transport=Transport([accepted("wamid.out.0")]),
+                          provider_message_id=other_id).reason == entry.HANDLED
+    disposed = handover.dispose_inbound(
+        store.session(), tenant_id=store.tenant_id, entry_ids=[entry_row.id],
+        disposition="replayed", evidence={"replayed_as_provider_message_id": other_id},
+        by="owner")
+    assert disposed.refused == {entry_row.id: "replayed_identity_is_not_this_inbound"}
+
+    # The replay of this entry, under this entry's identity, reaching a terminal.
     report = store.run_turn(transport=Transport([accepted("wamid.out.1")]),
-                            provider_message_id=replayed_id)
+                            provider_message_id=identity)
     assert report.reason == entry.HANDLED
     found = recovery.admitted_turn_for(tenant_id=store.tenant_id,
                                        phone_number_id=str(store.connection_id),
-                                       provider_message_id=replayed_id,
+                                       provider_message_id=identity,
                                        engine=store.engine)
     assert found is not None and found.finished is True
 
     assert job.main(["dispose", "--entry", str(entry_row.id), "--disposition", "replayed",
-                     "--evidence", json.dumps(
-                         {"replayed_as_provider_message_id": replayed_id}),
+                     "--evidence", json.dumps({"replayed_as_provider_message_id": identity}),
                      "--by", "owner"]) == job.EXIT_OK
     db = store.session()
     try:
         row = handover.accepted_inbound(
             db, tenant_id=store.tenant_id,
             channel_connection_ref=f"wa:{store.connection_id}",
-            provider_message_id="wamid.needs.proof")
+            provider_message_id=identity)
     finally:
         db.close()
     assert row is not None and row.disposition == "replayed"
@@ -1019,7 +1047,6 @@ def test_an_inbound_in_the_settled_window_invalidates_the_release(configured, st
     """
     drain_and_converge(store)
     assert settle(store) == job.EXIT_OK
-    assert job.main(["release"]) == job.EXIT_OK
 
     late = defer(store, identity="wamid.settled.window",
                  reason=handover.REASON_SETTLED_WINDOW)
@@ -1032,6 +1059,10 @@ def test_an_inbound_in_the_settled_window_invalidates_the_release(configured, st
         db.close()
     assert state.released is False
     assert state.arrived_after_settlement == 1
+    # And the transition itself refuses, inside its own transaction, and writes
+    # nothing: the barrier is still settled, not released.
+    assert job.main(["release"]) == job.EXIT_BLOCKED
+    assert barrier_of(store).state == handover.STATE_SETTLED
     assert any(b.startswith("deferred_pending=") for b in state.blockers)
     assert job.main(["release"]) == job.EXIT_BLOCKED
 
@@ -1081,11 +1112,17 @@ def test_recovery_closes_an_entry_whose_turn_already_reached_a_terminal(configur
 
 
 def test_recovery_refuses_to_replay_into_a_closed_barrier(configured, store):
-    """Selected before a drain, refused at admission: nothing is replayed."""
+    """A settled barrier takes nothing back; the run says to drain first.
+
+    Draining is *not* closed to recovery — accepted work is what a drain
+    exists to finish (proved end to end below). Settled and released are.
+    """
     from services import commerce_runtime_recovery as runner
 
     drain_and_converge(store)
-    entry_row = defer(store, identity="wamid.during.drain")
+    assert settle(store) == job.EXIT_OK
+    entry_row = defer(store, identity="wamid.after.settlement",
+                      reason=handover.REASON_SETTLED_WINDOW)
     assert entry_row is not None
 
     db = store.session()
@@ -1203,3 +1240,522 @@ def test_two_runners_do_not_replay_the_same_entry(configured, store):
         worker.join(timeout=10)
     assert outcomes["second"].counted() == {runner.SKIPPED_IN_FLIGHT: 1}
     assert [e.id for e in pending(store)] == [entry_row.id]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The composed lifecycle, through the supported commands, on real PostgreSQL:
+# authenticated acceptance → acknowledgement → interruption → recovery →
+# verified outcome → settlement → release → refusal of what arrives after.
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# What is real: the Meta route's signature evaluator, the acceptance record,
+# the dispatcher (``_handle_whatsapp_body`` → ``_dispatch_message`` → the
+# ownership claim), the pilot seam, the runtime admission under the recovery
+# grant, ownership, the agent loop, the delivery ledger, the terminal, the
+# deferred record's resolution, and the operator job. What is doubled, and
+# named as such: the Anthropic HTTP call and the WhatsApp transport (scripted),
+# the legacy merchant handler's own gates (a thin stub that hands the turn to
+# the real seam with the store's conversation), the background spawn (never
+# run — that *is* the interruption), and the process default engine (pointed
+# at this case's database).
+
+import contextlib
+import functools
+
+from services import commerce_runtime_acceptance as acceptance_service
+from tests.commerce_reliability.runtime_support import (
+    META_TEST_APP_SECRET as APP_SECRET,
+    meta_webhook_request as meta_request,
+)
+
+SENDER = PHONE.lstrip("+")
+
+
+def inbound_body(identity: str, *, phone_id: str, text: str = QUESTION) -> Dict[str, Any]:
+    return {"object": "whatsapp_business_account", "entry": [{"id": "WABA", "changes": [{
+        "field": "messages",
+        "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {"phone_number_id": phone_id, "display_phone_number": ""},
+            "messages": [{"id": identity, "from": SENDER, "type": "text",
+                          "timestamp": "1700000000", "text": {"body": text}}],
+        },
+    }]}]}
+
+
+@contextlib.contextmanager
+def bound_to(store: Store, monkeypatch: pytest.MonkeyPatch, *, spawned: List[Any],
+             handled: List[Any], runtime_calls: List[Any]):
+    """Everything the route and the dispatcher would read from the process
+    default, pointed at this case's database; the two doubles, scripted."""
+    import database.session as db_session
+    import routers.whatsapp_webhook as webhook
+    import services.commerce_runtime_pilot as seam
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(db_session, "engine", store.engine)
+    monkeypatch.setattr(db_session, "SessionLocal", store.session_factory)
+    monkeypatch.setattr(acceptance_service, "record_before_acknowledging",
+                        functools.partial(acceptance_service.record_before_acknowledging,
+                                          session_factory=store.session_factory))
+    monkeypatch.setattr(acceptance_service, "durable_status",
+                        functools.partial(acceptance_service.durable_status,
+                                          session_factory=store.session_factory))
+
+    def _spawn(coro: Any, name: str = "") -> None:
+        spawned.append(name)
+        coro.close()                       # acknowledged; the process dies before this runs
+
+    async def _handler(**kwargs: Any) -> None:
+        from database.models import Conversation
+
+        db = kwargs["db"]
+        convo = db.get(Conversation, store.conversation_id)
+        handled.append(kwargs)
+        await seam.maybe_handle_with_commerce_runtime(
+            db=db, tenant_id=kwargs["tenant_id"], phone_id=kwargs["phone_id"],
+            to=kwargs["to"], text=kwargs["text"], convo=convo,
+            wa_msg_id=kwargs.get("wa_msg_id"), inbound_metadata=kwargs.get("inbound_metadata"),
+            trace=None, legacy_already_answered=False, ai_gate_skipped=False)
+
+    real_run = entry.run_commerce_runtime_turn
+
+    def _run(**kwargs: Any) -> Any:
+        kwargs["anthropic_provider"] = ScriptedAnthropic([step([reply("تفضل", call_id="r1")])])
+        kwargs["transport"] = Transport([accepted("wamid.out." + uuid.uuid4().hex[:8])])
+        runtime_calls.append(kwargs)
+        return real_run(**kwargs)
+
+    with (
+        patch("core.runtime_perf.spawn_background", _spawn),
+        patch.object(webhook, "META_APP_SECRET", APP_SECRET),
+        patch.object(webhook, "_record_signature_audit", lambda *a, **k: None),
+        patch.object(webhook, "get_db", lambda: iter([store.session()])),
+        patch.object(webhook, "_is_platform_tenant", lambda db, tenant_id: False),
+        patch.object(webhook, "_handle_merchant_message", _handler),
+        patch.object(webhook, "_post_wa", new=AsyncMock(return_value={"messages": []})),
+        patch.object(entry, "run_commerce_runtime_turn", _run),
+    ):
+        yield
+
+
+def accept_through_the_route(store: Store, identity: str, *, signature: str = "valid") -> Any:
+    """The real Meta route, signed for real. Returns the HTTP response."""
+    import asyncio
+
+    import routers.whatsapp_webhook as webhook
+
+    return asyncio.run(webhook.whatsapp_incoming(
+        meta_request(inbound_body(identity, phone_id=store.phone_id), signature=signature)))
+
+
+def accepted_record(store: Store, identity: str) -> Any:
+    db = store.session()
+    try:
+        return handover.accepted_inbound(db, tenant_id=store.tenant_id,
+                                         channel_connection_ref=f"wa:{store.phone_id}",
+                                         provider_message_id=identity)
+    finally:
+        db.close()
+
+
+def terminal_for(store: Store, identity: str) -> Any:
+    return recovery.admitted_turn_for(tenant_id=store.tenant_id, phone_number_id=store.phone_id,
+                                      provider_message_id=identity, engine=store.engine)
+
+
+def test_the_composed_lifecycle_accept_interrupt_recover_settle_release(configured, store,
+                                                                         monkeypatch):
+    """One customer message, from the wire to the switch, through the commands."""
+    spawned: List[Any] = []
+    handled: List[Any] = []
+    runtime_calls: List[Any] = []
+    identity = "wamid.lifecycle." + uuid.uuid4().hex
+
+    with bound_to(store, monkeypatch, spawned=spawned, handled=handled,
+                  runtime_calls=runtime_calls):
+        # 1. Authenticated acceptance, acknowledged before anything runs.
+        response = accept_through_the_route(store, identity)
+        assert response.status_code == 200
+        assert spawned == ["webhook_meta"]                 # scheduled, never executed
+        record = accepted_record(store, identity)
+        assert record is not None and record.pending
+        assert record.payload["raw"]["id"] == identity      # replayable, not just a note
+
+        # 2. Interruption: the process died before background execution.
+        assert terminal_for(store, identity) is None
+        assert handled == []
+
+        # 3. The operator drains — accepted work is what the drain has to meet.
+        drain_and_converge(store)
+        assert settle(store) == job.EXIT_BLOCKED             # deferred_pending=1
+
+        # 4. Recovery, through the supported command, while draining.
+        assert job.main(["recover"]) == job.EXIT_OK          # the plan
+        assert accepted_record(store, identity).pending      # a plan replays nothing
+        assert job.main(["recover", "--apply"]) == job.EXIT_OK
+
+        # 5. The outcome is verified against the authoritative records.
+        assert len(handled) == 1
+        assert handled[0]["commerce_runtime_claim"].basis == "recovery_admitted"
+        assert len(runtime_calls) == 1
+        finished = terminal_for(store, identity)
+        assert finished is not None and finished.finished is True
+        resolved = accepted_record(store, identity)
+        assert resolved is not None and resolved.state == "resolved"
+        assert resolved.disposition_evidence["terminal_for_turn_id"] == finished.turn_id
+        assert store.state().open_turns == 0 and store.state().deferred_pending == 0
+
+        # 6. Settlement, then the release transition.
+        assert settle(store) == job.EXIT_OK
+        assert job.main(["release"]) == job.EXIT_OK
+        assert barrier_of(store).state == handover.STATE_RELEASED
+
+        # 7. A message arriving after the release is refused, not accepted and
+        #    abandoned: retryable, nothing recorded, nothing spawned.
+        late = "wamid.after.release." + uuid.uuid4().hex
+        response = accept_through_the_route(store, late)
+        assert response.status_code == 503
+        assert json.loads(bytes(response.body))["reason"] == "pilot_released"
+        assert accepted_record(store, late) is None
+        assert spawned == ["webhook_meta"]
+        assert job.main(["release"]) == job.EXIT_OK          # idempotent
+
+        # 8. And once the switch is off, the same message is the legacy path's.
+        monkeypatch.delenv(pgd.ENV_ENABLED)
+        response = accept_through_the_route(store, late)
+        assert response.status_code == 200
+        assert spawned == ["webhook_meta", "webhook_meta"]
+        assert accepted_record(store, late) is None
+
+
+def test_a_recovery_replay_runs_through_both_dedup_boundaries_only_once(configured, store,
+                                                                         monkeypatch):
+    """A second ``recover --apply`` after the first finished the turn repeats
+    nothing: the record is resolved, the turn has a terminal, and the runner
+    closes rather than replays."""
+    spawned: List[Any] = []
+    handled: List[Any] = []
+    runtime_calls: List[Any] = []
+    identity = "wamid.once." + uuid.uuid4().hex
+    with bound_to(store, monkeypatch, spawned=spawned, handled=handled,
+                  runtime_calls=runtime_calls):
+        assert accept_through_the_route(store, identity).status_code == 200
+        drain_and_converge(store)
+        assert job.main(["recover", "--apply"]) == job.EXIT_OK
+        assert len(runtime_calls) == 1
+        assert job.main(["recover", "--apply"]) == job.EXIT_OK
+        assert len(runtime_calls) == 1                       # nothing repeated
+        assert accepted_record(store, identity).state == "resolved"
+
+
+def test_a_pending_arrival_after_settlement_is_met_by_drain_recover_settle(configured, store,
+                                                                            monkeypatch):
+    """The trap the review named: recovery needed an open barrier, reopening
+    needed nothing pending. The way out is drain → recover → settle → release."""
+    spawned: List[Any] = []
+    handled: List[Any] = []
+    runtime_calls: List[Any] = []
+    identity = "wamid.settled.arrival." + uuid.uuid4().hex
+    with bound_to(store, monkeypatch, spawned=spawned, handled=handled,
+                  runtime_calls=runtime_calls):
+        drain_and_converge(store)
+        assert settle(store) == job.EXIT_OK
+        # The arrival in the settled window: accepted, recorded, answered by nobody.
+        assert accept_through_the_route(store, identity).status_code == 200
+        assert accepted_record(store, identity).pending
+        assert job.main(["release"]) == job.EXIT_BLOCKED        # arrived_after_settlement
+        assert job.main(["recover", "--apply"]) == job.EXIT_OK  # ...but nothing replays
+        assert accepted_record(store, identity).pending         # settled: run 'drain' first
+        assert runtime_calls == []
+
+        assert job.main(["drain"]) == job.EXIT_OK
+        db = store.session()
+        try:
+            observed = handover.read_barrier(db, tenant_id=store.tenant_id)
+            handover.note_worker(db, tenant_id=store.tenant_id,
+                                 observed_generation=observed.generation,
+                                 observed_state=observed.state, name="worker-a", force=True)
+        finally:
+            db.close()
+        assert job.main(["recover", "--apply"]) == job.EXIT_OK
+        assert len(runtime_calls) == 1
+        assert accepted_record(store, identity).state == "resolved"
+        assert settle(store) == job.EXIT_OK
+        assert job.main(["release"]) == job.EXIT_OK
+        assert job.main(["reopen"]) == job.EXIT_OK
+        assert barrier_of(store).admits_new_work is True
+
+
+def test_an_unauthenticated_request_takes_no_pilot_obligation(configured, store, monkeypatch):
+    """Audit mode for the legacy path does not extend to the pilot: with the
+    signature missing or wrong, nothing pilot-scoped is recorded or spawned,
+    and the request is answered retryable."""
+    spawned: List[Any] = []
+    with bound_to(store, monkeypatch, spawned=spawned, handled=[], runtime_calls=[]):
+        for signature in ("missing", "invalid"):
+            identity = f"wamid.{signature}." + uuid.uuid4().hex
+            response = accept_through_the_route(store, identity, signature=signature)
+            assert response.status_code == 503
+            assert json.loads(bytes(response.body))["reason"] == "pilot_scope_unauthenticated"
+            assert accepted_record(store, identity) is None
+        assert spawned == []
+        identity = "wamid.valid." + uuid.uuid4().hex
+        assert accept_through_the_route(store, identity).status_code == 200
+        assert accepted_record(store, identity) is not None
+        assert spawned == ["webhook_meta"]
+
+
+def test_recovery_admission_follows_the_barrier_on_the_admitting_connection(configured, store):
+    """Open and draining admit accepted work under a grant; settled and released
+    refuse it — read on the admitting transaction's own connection."""
+    def admits() -> bool:
+        with store.engine.connect() as conn:
+            with conn.begin():
+                return handover.admits_recovery_on(conn, tenant_id=store.tenant_id)
+
+    assert admits() is True                                  # open (no row yet)
+    drain_and_converge(store)
+    assert admits() is True                                  # draining
+    assert settle(store) == job.EXIT_OK
+    assert admits() is False                                 # settled
+    assert job.main(["release"]) == job.EXIT_OK
+    assert admits() is False                                 # released
+    assert job.main(["reopen"]) == job.EXIT_OK
+    assert admits() is True
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Release is a transition acceptance reads
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_after_release_the_record_write_itself_refuses(configured, store):
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_OK
+    assert job.main(["release"]) == job.EXIT_OK
+    with pytest.raises(handover.BarrierReleased):
+        defer(store, identity="wamid.too.late", reason=handover.REASON_SETTLED_WINDOW)
+    assert pending(store) == ()
+    outcome = acceptance_service.record_before_acknowledging(
+        inbound_body("wamid.too.late.2", phone_id=store.phone_id),
+        session_factory=store.session_factory,
+        authenticated=True)
+    assert outcome.ok is False and outcome.reason == acceptance_service.REFUSED_RELEASED
+
+
+def test_a_release_racing_an_acceptance_sees_it_or_refuses_it(configured, store):
+    """Two orderings, no third: the insert commits first and the release counts
+    it as pending, or the release commits first and the insert is refused."""
+    drain_and_converge(store)
+    assert settle(store) == job.EXIT_OK
+    outcomes: Dict[str, Any] = {}
+    started = threading.Event()
+
+    def accept() -> None:
+        started.wait(5)
+        try:
+            outcomes["record"] = defer(store, identity="wamid.race",
+                                       reason=handover.REASON_SETTLED_WINDOW)
+        except handover.BarrierReleased:
+            outcomes["record"] = "refused"
+
+    def release() -> None:
+        started.set()
+        outcomes["release"] = job.main(["release"])
+
+    threads = [threading.Thread(target=accept), threading.Thread(target=release)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    if outcomes["release"] == job.EXIT_OK:
+        assert outcomes["record"] == "refused" and pending(store) == ()
+    else:
+        assert outcomes["record"] != "refused" and len(pending(store)) == 1
+        assert barrier_of(store).state == handover.STATE_SETTLED
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Disposition evidence is bound to the entry it accounts for
+# ═════════════════════════════════════════════════════════════════════════════
+
+OTHER_PHONE = "+966500000043"
+
+
+def second_customer(store: Store) -> Tuple[int, int]:
+    with store.engine.begin() as conn:
+        customer_id = int(conn.execute(
+            text("INSERT INTO customers (tenant_id, phone, normalized_phone, name) "
+                 "VALUES (:t, :p, :p, :n) RETURNING id"),
+            {"t": store.tenant_id, "p": OTHER_PHONE, "n": "نورة عبدالله"}).scalar_one())
+        conversation_id = int(conn.execute(
+            text("INSERT INTO conversations (tenant_id, customer_id, external_id, status) "
+                 "VALUES (:t, :c, :e, 'active') RETURNING id"),
+            {"t": store.tenant_id, "c": customer_id, "e": OTHER_PHONE}).scalar_one())
+    return customer_id, conversation_id
+
+
+def run_turn_for(store: Store, *, conversation_id: int, customer_id: int, phone: str,
+                 provider_message_id: str) -> entry.TurnReport:
+    return entry.run_commerce_runtime_turn(
+        engine=store.engine, session_factory=store.session_factory,
+        tenant_id=store.tenant_id, conversation_id=conversation_id,
+        connection_ref=f"wa:{store.connection_id}", connection_id=str(store.connection_id),
+        customer_id=customer_id, normalized_customer_phone=phone,
+        provider_message_id=provider_message_id, inbound_text=QUESTION,
+        inbound_metadata={"source": "disposition-binding"},
+        transport=Transport([accepted("wamid.out." + uuid.uuid4().hex[:8])]),
+        instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+        budget=ac.LoopBudget(max_steps=3, max_tool_calls=4, tool_timeout_seconds=10.0,
+                             provider_timeout_seconds=15.0, deadline_seconds=45.0),
+        anthropic_provider=ScriptedAnthropic([step([reply("تفضل", call_id="r1")])]),
+    )
+
+
+def dispose(store: Store, entry_id: int, kind: str, evidence: Dict[str, Any]) -> Any:
+    db = store.session()
+    try:
+        return handover.dispose_inbound(db, tenant_id=store.tenant_id, entry_ids=[entry_id],
+                                        disposition=kind, evidence=evidence, by="owner")
+    finally:
+        db.close()
+
+
+def test_an_answered_disposition_must_name_this_customers_own_conversation(configured, store):
+    """Another conversation's terminal proves nothing about this entry."""
+    drain_and_converge(store)
+    entry_row = defer(store, identity="wamid.owed." + uuid.uuid4().hex)
+
+    other_customer, other_conversation = second_customer(store)
+    theirs = "wamid.theirs." + uuid.uuid4().hex
+    assert run_turn_for(store, conversation_id=other_conversation, customer_id=other_customer,
+                        phone=OTHER_PHONE, provider_message_id=theirs).reason == entry.HANDLED
+    refused = dispose(store, entry_row.id, "answered",
+                      {"answered_by_provider_message_id": theirs})
+    assert refused.refused == {entry_row.id: "turn_belongs_to_another_customer"}
+
+    ours = "wamid.ours." + uuid.uuid4().hex
+    assert store.run_turn(transport=Transport([accepted("wamid.out.a")]),
+                          provider_message_id=ours).reason == entry.HANDLED
+    done = dispose(store, entry_row.id, "answered", {"answered_by_provider_message_id": ours})
+    assert done.disposed == (entry_row.id,)
+    db = store.session()
+    try:
+        row = handover.accepted_inbound(db, tenant_id=store.tenant_id,
+                                        channel_connection_ref=f"wa:{store.connection_id}",
+                                        provider_message_id=entry_row.provider_message_id)
+    finally:
+        db.close()
+    assert row.disposition == "answered"
+    assert row.disposition_evidence["verified"]["app_conversation_id"] == store.conversation_id
+
+
+def test_an_answer_recorded_before_the_message_arrived_did_not_answer_it(configured, store):
+    drain_and_converge(store)
+    earlier = "wamid.earlier." + uuid.uuid4().hex
+    assert store.run_turn(transport=Transport([accepted("wamid.out.e")]),
+                          provider_message_id=earlier).reason == entry.HANDLED
+    time.sleep(0.05)
+    entry_row = defer(store, identity="wamid.later.arrival." + uuid.uuid4().hex)
+    refused = dispose(store, entry_row.id, "answered",
+                      {"answered_by_provider_message_id": earlier})
+    assert refused.refused == {entry_row.id: "answering_terminal_predates_this_inbound"}
+
+
+def test_supersession_needs_the_same_connection_and_customer_and_a_later_arrival(configured,
+                                                                               store):
+    drain_and_converge(store)
+    first = defer(store, identity="wamid.first." + uuid.uuid4().hex)
+    time.sleep(0.01)
+    second = defer(store, identity="wamid.second." + uuid.uuid4().hex)
+
+    # Later supersedes earlier.
+    done = dispose(store, first.id, "superseded",
+                   {"superseded_by_provider_message_id": second.provider_message_id})
+    assert done.disposed == (first.id,)
+    # Earlier does not supersede later.
+    refused = dispose(store, second.id, "superseded",
+                      {"superseded_by_provider_message_id": first.provider_message_id})
+    assert refused.refused == {second.id: "superseding_inbound_is_not_later"}
+    # Another connection's later message is not this conversation's.
+    db = store.session()
+    try:
+        elsewhere = handover.record_inbound(
+            db, tenant_id=store.tenant_id, phone_number_id="OTHER_PID",
+            channel_connection_ref="wa:OTHER_PID", recipient=PHONE,
+            provider_message_id="wamid.elsewhere." + uuid.uuid4().hex,
+            payload={"text": QUESTION}, reason=handover.REASON_DRAIN_BUFFERED,
+            barrier_generation=1)
+    finally:
+        db.close()
+    refused = dispose(store, second.id, "superseded",
+                      {"superseded_by_provider_message_id": elsewhere.provider_message_id})
+    assert refused.refused == {second.id: "superseding_inbound_not_found"}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The fleet is accounted for inside the transition, and retirement rests on a
+# retained record
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def test_settlement_refuses_without_a_stated_inventory(configured, store, monkeypatch):
+    drain_and_converge(store)
+    monkeypatch.delenv(job.ENV_EXPECTED_WORKERS)
+    assert settle(store) == job.EXIT_BLOCKED
+    assert barrier_of(store).state == handover.STATE_DRAINING
+    db = store.session()
+    try:
+        # The authoritative call, with no inventory, refuses on its own — no
+        # CLI precheck is involved.
+        outcome = handover.settle(db, tenant_id=store.tenant_id, expected_workers=None)
+    finally:
+        db.close()
+    assert outcome.settled is False
+    assert handover.BLOCKER_INVENTORY_UNSTATED in outcome.blockers
+
+
+def test_settlement_names_a_replica_in_the_inventory_that_never_reported(configured, store,
+                                                                         monkeypatch):
+    drain_and_converge(store)
+    monkeypatch.setenv(job.ENV_EXPECTED_WORKERS, "worker-a,worker-b")
+    assert settle(store) == job.EXIT_BLOCKED
+    db = store.session()
+    try:
+        outcome = handover.settle(db, tenant_id=store.tenant_id,
+                                  expected_workers=["worker-a", "worker-b"])
+    finally:
+        db.close()
+    assert "workers_expected_but_never_reported:worker-b" in outcome.blockers
+    assert outcome.evidence["fleet_inventory"]["missing_from_fleet"] == ["worker-b"]
+
+
+def test_retirement_needs_a_stop_record_that_names_the_deployment(configured, store):
+    db = store.session()
+    try:
+        handover.note_worker(db, tenant_id=store.tenant_id, observed_generation=0,
+                             observed_state=handover.STATE_OPEN, name="worker-gone",
+                             force=True)
+        sentence_only = {k: v for k, v in STOP_EVIDENCE.items() if k != "stop_record"}
+        with pytest.raises(handover.RetirementRefused) as caught:
+            handover.retire_worker(db, tenant_id=store.tenant_id, name="worker-gone",
+                                   by="owner", reason="gone", evidence=sentence_only)
+        assert "stop_record" in str(caught.value)
+        elsewhere = dict(STOP_EVIDENCE, stop_record='[{"deployment": "some-other-deploy"}]')
+        with pytest.raises(handover.RetirementRefused) as caught:
+            handover.retire_worker(db, tenant_id=store.tenant_id, name="worker-gone",
+                                   by="owner", reason="gone", evidence=elsewhere)
+        assert "stop_record_does_not_name_the_deployment" in str(caught.value)
+        assert handover.retire_worker(db, tenant_id=store.tenant_id, name="worker-gone",
+                                      by="owner", reason="gone", evidence=STOP_EVIDENCE)
+        worker = next(w for w in handover.fleet(db, tenant_id=store.tenant_id)
+                      if w.worker_id == "worker-gone")
+    finally:
+        db.close()
+    import hashlib
+
+    assert worker.retirement_evidence["stop_record"] == STOP_EVIDENCE["stop_record"]
+    assert worker.retirement_evidence["stop_record_sha256"] == hashlib.sha256(
+        STOP_EVIDENCE["stop_record"].encode()).hexdigest()

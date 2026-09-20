@@ -29,6 +29,13 @@ from typing import Tuple
 TARGET_REVISION = "0111"
 FOUNDATION_REVISION = "0108"
 LEDGER_REVISION = "0109"
+# The customer-address provenance revision (PR #1096) is a **sibling** of the
+# target: both revise ``0109``. Applying it replaces ``0109`` in
+# ``alembic_version`` with ``0110`` on that branch, so a database that took the
+# address revision first is at ``{0110}`` — a valid start for this job — and
+# one that took both is at ``{0110, 0111}``. The runtime upgrade never depends
+# on the address one being applied, and never applies it.
+ADDRESS_SIBLING_REVISION = "0110"
 
 # The integration branch states this job accepts as a starting point. Anything
 # else — including a state this repository has not seen — is refused with the
@@ -40,11 +47,22 @@ ACCEPTED_START_REVISIONS: Tuple[frozenset, ...] = (
     frozenset({"0088", FOUNDATION_REVISION}),
     frozenset({LEDGER_REVISION}),
     frozenset({"0088", LEDGER_REVISION}),
+    frozenset({ADDRESS_SIBLING_REVISION}),
+    frozenset({"0088", ADDRESS_SIBLING_REVISION}),
 )
 ALREADY_APPLIED_REVISIONS: Tuple[frozenset, ...] = (
     frozenset({TARGET_REVISION}),
     frozenset({"0088", TARGET_REVISION}),
+    frozenset({ADDRESS_SIBLING_REVISION, TARGET_REVISION}),
+    frozenset({"0088", ADDRESS_SIBLING_REVISION, TARGET_REVISION}),
 )
+
+# Rolling back **this revision only**. The branch-qualified spelling is the
+# whole point: with both siblings applied, ``downgrade 0109`` and
+# ``downgrade 0111-1`` both resolve to the common ancestor and remove the
+# address revision and its table as well. ``0111@-1`` steps back along this
+# branch alone. Proved on real PostgreSQL, not inferred from the docs.
+RUNTIME_ONLY_DOWNGRADE_TARGET = "0111@-1"
 
 FOUNDATION_RELATIONS: Tuple[str, ...] = (
     "commerce_runtime_conversations",
@@ -72,7 +90,7 @@ RUNTIME_RELATIONS: Tuple[str, ...] = (
 )
 
 CONFIRMATION_ENV = "NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM"
-CONFIRMATION_TOKEN = "RUN_COMMERCE_RUNTIME_0110"
+CONFIRMATION_TOKEN = "RUN_COMMERCE_RUNTIME_0111"
 
 DEFAULT_TIMEOUT_SEC = 900
 MIN_TIMEOUT_SEC = 120
@@ -141,7 +159,9 @@ def expected_relations_at(revisions: frozenset) -> Tuple[str, ...]:
     other: each was an accepted start, and a database at one of them was then
     refused as a partial schema, so that start could never proceed.
     """
-    if LEDGER_REVISION in revisions:
+    if LEDGER_REVISION in revisions or ADDRESS_SIBLING_REVISION in revisions:
+        # The address sibling revises 0109, so a database carrying it has the
+        # ledger nine and none of the handover three.
         return FOUNDATION_RELATIONS + LEDGER_RELATIONS
     if FOUNDATION_REVISION in revisions:
         return FOUNDATION_RELATIONS
@@ -163,6 +183,13 @@ def build_upgrade_argv(*, python_executable: str) -> list:
     return [python_executable, "-m", "alembic", "upgrade", TARGET_REVISION]
 
 
+def build_downgrade_argv(*, python_executable: str) -> list:
+    """The one rollback spelling: this revision alone, never the ancestor."""
+    if "@" not in RUNTIME_ONLY_DOWNGRADE_TARGET:
+        raise ValueError("downgrade_target_must_be_branch_qualified")
+    return [python_executable, "-m", "alembic", "downgrade", RUNTIME_ONLY_DOWNGRADE_TARGET]
+
+
 def clamp_timeout(seconds: object) -> int:
     try:
         value = int(seconds)  # type: ignore[arg-type]
@@ -172,7 +199,8 @@ def clamp_timeout(seconds: object) -> int:
 
 
 __all__ = [
-    "ACCEPTED_START_REVISIONS", "ALREADY_APPLIED_REVISIONS", "CONFIRMATION_ENV",
+    "ACCEPTED_START_REVISIONS", "ADDRESS_SIBLING_REVISION", "ALREADY_APPLIED_REVISIONS",
+    "CONFIRMATION_ENV", "RUNTIME_ONLY_DOWNGRADE_TARGET", "build_downgrade_argv",
     "CONFIRMATION_TOKEN", "DEFAULT_TIMEOUT_SEC", "EXIT_FAILED", "EXIT_PRECONDITION",
     "EXIT_SUCCESS", "EXIT_USAGE", "FOUNDATION_RELATIONS",
     "FOUNDATION_REVISION", "HANDOVER_RELATIONS", "LEDGER_RELATIONS", "LEDGER_REVISION", "LOG_PREFIX", "LOOPBACK_HOSTNAMES",

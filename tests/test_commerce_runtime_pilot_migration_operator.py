@@ -37,6 +37,36 @@ def test_the_job_targets_a_pinned_revision_and_never_head():
     assert "head" not in argv
 
 
+def test_the_confirmation_token_names_the_revision_the_job_applies():
+    """The token is the operator's statement of *which* revision they authorise."""
+    assert k.CONFIRMATION_TOKEN == f"RUN_COMMERCE_RUNTIME_{k.TARGET_REVISION}"
+    assert k.LOG_PREFIX == f"[commerce-runtime-{k.TARGET_REVISION}]"
+
+
+def test_the_rollback_is_this_branch_alone_never_the_common_ancestor():
+    """``0111@-1`` steps back along this branch; ``0109`` or ``0111-1`` would
+    also remove the address sibling when it is applied (proved on PostgreSQL in
+    ``test_commerce_runtime_handover_migration_pg``)."""
+    argv = k.build_downgrade_argv(python_executable="python")
+    assert argv == ["python", "-m", "alembic", "downgrade", "0111@-1"]
+    assert k.RUNTIME_ONLY_DOWNGRADE_TARGET.startswith(k.TARGET_REVISION + "@")
+    assert "0109" not in argv and "head" not in argv
+
+
+def test_the_address_sibling_is_a_start_state_and_never_a_dependency():
+    """Runtime first, address first, or both: all valid; none required."""
+    assert k.ADDRESS_SIBLING_REVISION == "0110"
+    assert k.start_state_accepted(frozenset({"0110"}))
+    assert k.start_state_accepted(frozenset({"0088", "0110"}))
+    assert k.expected_relations_at(frozenset({"0110"})) == (
+        k.FOUNDATION_RELATIONS + k.LEDGER_RELATIONS)
+    assert k.already_applied(frozenset({"0110", "0111"}))
+    assert k.already_applied(frozenset({"0088", "0110", "0111"}))
+    # A database at 0109 and 0110 at once cannot exist: 0110 replaces 0109 on
+    # its branch. It is not accepted rather than guessed at.
+    assert not k.start_state_accepted(frozenset({"0109", "0110"}))
+
+
 def test_the_twelve_relations_are_the_whole_change():
     assert len(k.RUNTIME_RELATIONS) == 12
     assert k.RUNTIME_RELATIONS[-3:] == k.HANDOVER_RELATIONS
@@ -69,6 +99,8 @@ def test_the_target_matches_the_repository_s_application_head():
     (frozenset({"0107"}), True),
     (frozenset({"0088", "0107"}), True),
     (frozenset({"0108"}), True),
+    (frozenset({"0110"}), True),
+    (frozenset({"0088", "0110"}), True),
     (frozenset({"0093"}), False),
     (frozenset({"0105"}), False),
     (frozenset({"0092", "0107"}), False),
@@ -81,7 +113,9 @@ def test_only_known_starting_revisions_are_accepted(revisions, accepted):
 def test_an_already_applied_database_is_recognised_rather_than_migrated_again():
     assert k.already_applied(frozenset({"0111"})) is True
     assert k.already_applied(frozenset({"0088", "0111"})) is True
+    assert k.already_applied(frozenset({"0110", "0111"})) is True
     assert k.already_applied(frozenset({"0108"})) is False
+    assert k.already_applied(frozenset({"0110"})) is False
 
 
 @pytest.mark.parametrize("value, expected", [

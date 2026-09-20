@@ -64,6 +64,10 @@ BASIS_DRAIN_BUFFERED = "drain_buffered"
 # that decides what to do with it. The turn is held — refused execution, and
 # given to nobody else.
 BASIS_OWNERSHIP_UNAVAILABLE = "ownership_unavailable"
+# Accepted work handed back by a recovery run while the barrier is draining:
+# not new work, admitted under a grant the runner states for one replay and the
+# seam verifies against the durable record before honouring.
+BASIS_RECOVERY_ADMITTED = "recovery_admitted"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -372,59 +376,66 @@ class RuntimeClaim:
             return True
 
 
-def _established_scope(db: Any, *, tenant_id: Any, phone_id: str, to: str,
-                       wa_msg_id: Optional[str]) -> Optional[RuntimeClaim]:
-    """A held claim when this inbound is established as the runtime's, else ``None``.
+def _established_by_record(db: Any, *, tenant_id: Any, phone_id: str, recipient: str,
+                           identity: str) -> Optional[RuntimeClaim]:
+    """A held claim when a durable acceptance record names this inbound, else ``None``.
 
-    Asked only after something failed, and deliberately from the two sources
-    that do not depend on what failed:
-
-    * the **guard** — an allowlisted tenant and recipient on a verified
-      connection, with a model configured. That is configuration plus one
-      connection row, and it is what "this traffic is the pilot's" means
-      everywhere else;
-    * a **durable acceptance record** already written for this exact provider
-      message id. The provider was told we had it; something owes it an answer.
-
-    Either one is enough. Neither says the turn can be executed — that is the
-    point: the claim it returns holds the turn and refuses execution.
+    Asked only after something failed and only when the guard did **not**
+    already decide positively — one read of one row, never a second evaluation
+    of the guard. The provider was told we had this message; something owes it
+    an answer, and that something is not another owner.
     """
-    from core.commerce_runtime import pilot_guard  # noqa: PLC0415
-
-    try:
-        recipient = pilot_guard.normalize_recipient(to)
-        identity = str(wa_msg_id or "").strip()
-        if not recipient or not identity:
-            return None
-        held = RuntimeClaim(tenant_id=int(tenant_id), recipient=recipient,
-                            provider_message_id=identity,
-                            basis=BASIS_OWNERSHIP_UNAVAILABLE)
-    except Exception:  # noqa: silent-ok — without a normalised recipient and a provider message id there is no scope to hold a claim against
-        return None
-
-    try:
-        decision = pilot_guard.evaluate_pilot_route(
-            db, tenant_id=tenant_id, customer_phone=to, phone_number_id=phone_id,
-            inbound_text="_")
-        if decision.permitted or decision.reason == pilot_guard.PILOT_DRAINING:
-            return held
-    except Exception:  # noqa: BLE001 - fall through to the durable record
-        logger.warning("[COMMERCE_RUNTIME_PILOT] guard unreadable while establishing scope "
-                       "tenant=%s", tenant_id)
-
     try:
         from core.commerce_runtime import handover  # noqa: PLC0415
 
         accepted = handover.accepted_inbound(
             db, tenant_id=int(tenant_id),
             channel_connection_ref=f"wa:{str(phone_id or '').strip()}",
-            provider_message_id=held.provider_message_id)
+            provider_message_id=identity)
         if accepted is not None:
-            return held
+            return RuntimeClaim(tenant_id=int(tenant_id), recipient=recipient,
+                                provider_message_id=identity,
+                                basis=BASIS_OWNERSHIP_UNAVAILABLE)
     except Exception:  # noqa: BLE001 - an unreadable record establishes nothing
         logger.warning("[COMMERCE_RUNTIME_PILOT] deferred record unreadable while "
                        "establishing scope tenant=%s", tenant_id)
     return None
+
+
+def _recovery_grant(db: Any, *, tenant_id: Any, phone_id: str, identity: str,
+                    barrier: Any) -> Optional[Any]:
+    """The recovery grant covering this exact inbound, verified, or ``None``.
+
+    A grant is the runner's statement that it is replaying one accepted entry.
+    It is honoured only when it names this tenant, this channel connection and
+    this provider message id, when the barrier is open or draining (never
+    settled or released), and when a **pending durable acceptance** exists for
+    the identity — the grant authorises nothing the database does not already
+    owe. Never raises.
+    """
+    try:
+        from core.commerce_runtime import handover  # noqa: PLC0415
+        from services import commerce_runtime_recovery as runner  # noqa: PLC0415
+
+        grant = runner.current_grant()
+        if grant is None:
+            return None
+        channel = f"wa:{str(phone_id or '').strip()}"
+        if not grant.names(tenant_id=tenant_id, channel_connection_ref=channel,
+                           provider_message_id=identity):
+            return None
+        if getattr(barrier, "state", None) not in (handover.STATE_OPEN, handover.STATE_DRAINING):
+            return None
+        record = handover.accepted_inbound(
+            db, tenant_id=int(tenant_id), channel_connection_ref=channel,
+            provider_message_id=identity)
+        if record is None or not record.pending:
+            return None
+        return grant
+    except Exception:  # noqa: BLE001 - an unverifiable grant authorises nothing
+        logger.warning("[COMMERCE_RUNTIME_PILOT] recovery grant could not be verified "
+                       "tenant=%s", tenant_id)
+        return None
 
 
 def commerce_runtime_claims_inbound(
@@ -460,20 +471,30 @@ def commerce_runtime_claims_inbound(
     quota — still runs inside the handler and still decides. Never raises: a
     question that cannot be answered yields no claim, which leaves the
     dispatcher exactly as it is today.
+
+    The scope decision is captured the moment it is made. Everything after it
+    is a dependent read that can fail — the barrier, the fleet row, the ledger —
+    and when one does, the held claim is built from **that** decision, not from
+    a second evaluation of the guard that could fail in its own way and release
+    a turn the first one had already established as the runtime's.
     """
     from core.commerce_runtime import pilot_guard  # noqa: PLC0415
 
     try:
         recipient = pilot_guard.normalize_recipient(to)
         identity = str(wa_msg_id or "").strip()
-        if not recipient or not identity:
-            # Nothing to scope a claim to. The dispatcher keeps its own owners.
-            return None
+    except Exception:  # noqa: silent-ok — without a normalised recipient and a provider message id there is no scope to claim
+        return None
+    if not recipient or not identity:
+        # Nothing to scope a claim to. The dispatcher keeps its own owners.
+        return None
 
-        def claim(basis: str) -> RuntimeClaim:
-            return RuntimeClaim(tenant_id=int(tenant_id), recipient=recipient,
-                                provider_message_id=identity, basis=basis)
+    def claim(basis: str) -> RuntimeClaim:
+        return RuntimeClaim(tenant_id=int(tenant_id), recipient=recipient,
+                            provider_message_id=identity, basis=basis)
 
+    decision = None
+    try:
         decision = pilot_guard.evaluate_pilot_route(
             db, tenant_id=tenant_id, customer_phone=to, phone_number_id=phone_id,
             inbound_text=text,
@@ -501,8 +522,9 @@ def commerce_runtime_claims_inbound(
         affected = decision.permitted or process_draining
         # A conversation is deferred when it is one this pilot would own and the
         # tenant is not admitting new work: draining, settled-but-not-reopened,
-        # or this process taken out of rotation.
-        deferring = affected and (barrier.draining or barrier.settled or process_draining)
+        # released, or this process taken out of rotation.
+        deferring = affected and (barrier.draining or barrier.settled or barrier.released
+                                  or process_draining)
 
         # A turn this runtime already admitted is never new work, so a drain
         # does not buffer it: draining is what finishes outstanding work, and
@@ -521,6 +543,19 @@ def commerce_runtime_claims_inbound(
             return claim(BASIS_ADMITTED_FINISHED if owned.finished else BASIS_ADMITTED_OPEN)
 
         if deferring:
+            # Accepted work a recovery run is handing back is not new work: the
+            # provider was told we had it and the settlement counts it. Under a
+            # verified grant it is claimed for the runtime rather than deferred
+            # a second time.
+            grant = _recovery_grant(db, tenant_id=int(tenant_id), phone_id=phone_id,
+                                    identity=identity, barrier=barrier)
+            if grant is not None:
+                logger.warning(
+                    "[COMMERCE_RUNTIME_PILOT] claiming accepted inbound under a recovery "
+                    "grant entry=%s tenant=%s barrier=%s", grant.entry_id, tenant_id,
+                    barrier.state)
+                return claim(BASIS_RECOVERY_ADMITTED)
+
             # Draining does not release this conversation to the legacy path:
             # the runtime it is handing over from may still have a send in
             # flight, and a second answer is exactly what must not happen. The
@@ -566,17 +601,26 @@ def commerce_runtime_claims_inbound(
         # handing it to the legacy path or the COD route on the strength of a
         # failed read is how a conversation the runtime may still be answering
         # gets a second answer. The obligation is kept and execution is
-        # refused: nobody answers, and the operator is told.
-        established = _established_scope(db, tenant_id=tenant_id, phone_id=phone_id, to=to,
-                                         wa_msg_id=wa_msg_id)
-        if established is None:
-            logger.warning("[COMMERCE_RUNTIME_PILOT] ownership claim check failed tenant=%s "
-                           "— nothing established, the dispatcher is unchanged", tenant_id)
-            return None
-        logger.error("[COMMERCE_RUNTIME_PILOT] ownership state unreadable tenant=%s "
-                     "provider_message_id=%s — the turn is held, not released",
-                     tenant_id, established.provider_message_id)
-        return established
+        # refused: nobody answers, and the operator is told. The decision that
+        # is held is the one already taken — nothing is evaluated again.
+        if decision is not None and (decision.permitted
+                                     or decision.reason == pilot_guard.PILOT_DRAINING):
+            logger.exception(
+                "[COMMERCE_RUNTIME_PILOT] ownership established, then a dependent read "
+                "failed tenant=%s provider_message_id=%s — holding the turn; nobody "
+                "answers it until the runtime can", tenant_id, identity)
+            return claim(BASIS_OWNERSHIP_UNAVAILABLE)
+        established = _established_by_record(db, tenant_id=tenant_id, phone_id=phone_id,
+                                             recipient=recipient, identity=identity)
+        if established is not None:
+            logger.exception(
+                "[COMMERCE_RUNTIME_PILOT] a durable acceptance names this inbound and its "
+                "ownership could not be evaluated tenant=%s provider_message_id=%s — "
+                "holding the turn", tenant_id, identity)
+            return established
+        logger.warning("[COMMERCE_RUNTIME_PILOT] ownership could not be decided and "
+                       "nothing establishes it tenant=%s — dispatcher unchanged", tenant_id)
+        return None
 
 
 async def maybe_handle_with_commerce_runtime(
@@ -622,13 +666,36 @@ async def maybe_handle_with_commerce_runtime(
                 refusal=decision.reason))
         return looked_up[0]
 
+    grant = None
+    identity = _inbound_identity(wa_msg_id, convo)
+
+    def granted() -> Optional[Any]:
+        """A verified recovery grant for this exact inbound, asked at most once."""
+        nonlocal grant
+        if grant is None:
+            try:
+                from core.commerce_runtime import handover  # noqa: PLC0415
+
+                barrier = handover.read_barrier(db, tenant_id=int(tenant_id))
+            except Exception:  # noqa: silent-ok — an unreadable barrier grants nothing; the caller then defers exactly as it would without a grant, and the barrier read below logs the failure
+                return None
+            grant = _recovery_grant(db, tenant_id=int(tenant_id), phone_id=phone_id,
+                                    identity=identity, barrier=barrier)
+        return grant
+
     if not decision.permitted and decision.reason == pilot_guard.PILOT_DRAINING:
         # A draining pilot takes no new turns and finishes its own. Only a turn
-        # this runtime actually admitted and never finished re-enters here.
+        # this runtime actually admitted and never finished re-enters here —
+        # or accepted work a recovery run is handing back under a verified
+        # grant, which is not new work either.
         owned = admitted()
         if owned is not None and owned.unfinished:
             logger.warning("[COMMERCE_RUNTIME_PILOT] draining: finishing turn=%s tenant=%s",
                            owned.turn_id, tenant_id)
+            decision = route(finishing_open_work=True)
+        elif owned is None and granted() is not None:
+            logger.warning("[COMMERCE_RUNTIME_PILOT] draining: meeting accepted entry=%s "
+                           "under a recovery grant tenant=%s", grant.entry_id, tenant_id)
             decision = route(finishing_open_work=True)
 
     if not decision.permitted:
@@ -656,19 +723,28 @@ async def maybe_handle_with_commerce_runtime(
     # admitted is *not* new work and still runs: that is what a drain is for.
     if not _barrier_admits_new_work(db, tenant_id=int(tenant_id)):
         owned = admitted()
-        if owned is None or not owned.unfinished:
+        if (owned is None or not owned.unfinished) and (owned is not None or granted() is None):
             from core.commerce_runtime import handover  # noqa: PLC0415
             from core.commerce_runtime import runtime_entry as _entry  # noqa: PLC0415
 
             recorded = _defer(
                 db, tenant_id=int(tenant_id), decision=decision, phone_id=phone_id,
-                recipient=str(decision.recipient or to), identity=_inbound_identity(wa_msg_id, convo),
+                recipient=str(decision.recipient or to), identity=identity,
                 text=text, reason=handover.REASON_ADMISSION_REFUSED,
                 generation=handover.read_barrier(db, tenant_id=int(tenant_id)).generation)
             logger.warning("[COMMERCE_RUNTIME_PILOT] handover barrier closed tenant=%s "
                            "deferred=%s — no new turn, and the turn is given to nobody else",
                            tenant_id, None if recorded is None else recorded.id)
             return PilotResult(handled=True, reason=_entry.HANDOVER_BARRIER)
+        if owned is None and grant is not None:
+            # Accepted, never admitted, and a recovery run is handing it back:
+            # the barrier is draining and this is the work a drain exists to
+            # finish. Admission is still ordered against the barrier on the
+            # admitting connection — open or draining admits it, settled or
+            # released refuses it.
+            logger.warning("[COMMERCE_RUNTIME_PILOT] barrier closed to new work; admitting "
+                           "accepted entry=%s under a recovery grant tenant=%s",
+                           grant.entry_id, tenant_id)
 
     # From here the commerce runtime owns the turn. Nothing below may raise back
     # to the caller: if it did, the legacy brain would run for an inbound message
@@ -677,7 +753,7 @@ async def maybe_handle_with_commerce_runtime(
         return await _own_turn(
             db=db, tenant_id=int(tenant_id), phone_id=phone_id, to=to, text=text, convo=convo,
             wa_msg_id=wa_msg_id, inbound_metadata=inbound_metadata, trace=trace,
-            decision=decision, customer_name=customer_name,
+            decision=decision, customer_name=customer_name, recovery_grant=grant,
         )
     except Exception:  # noqa: BLE001 - the turn stays ours; it is simply a failed turn
         logger.exception("[COMMERCE_RUNTIME_PILOT] turn failed after the route was taken tenant=%s",
@@ -783,6 +859,7 @@ async def _own_turn(
     trace: Any,
     decision: Any,
     customer_name: str,
+    recovery_grant: Any = None,
 ) -> PilotResult:
     from core.commerce_runtime import pilot_guard  # noqa: PLC0415
     from core.commerce_runtime import runtime_entry as entry  # noqa: PLC0415
@@ -804,6 +881,11 @@ async def _own_turn(
         """
         from core.commerce_runtime import handover  # noqa: PLC0415
 
+        if recovery_grant is not None:
+            # Accepted work under a recovery grant: admitted while the barrier
+            # is open or draining, refused while it is settled or released —
+            # read on this same connection, under the same shared lock.
+            return handover.admits_recovery_on(conn, tenant_id=int(tenant_id))
         return handover.admits_new_work_on(conn, tenant_id=int(tenant_id))
 
     def run() -> Any:

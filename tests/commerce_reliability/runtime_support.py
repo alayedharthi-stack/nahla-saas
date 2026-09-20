@@ -552,3 +552,43 @@ def no_products_templates() -> List[str]:
     from modules.ai.brain.compose import templates as T  # noqa: PLC0415
 
     return [T.no_products(variant=i) for i in range(3)]
+
+
+# ── Signed Meta webhook requests ─────────────────────────────────────────────
+#
+# Shared by the SQLite acceptance suite and the PostgreSQL handover controls.
+# Lives here, not in either test module: importing a test module registers its
+# SQLAlchemy listeners in the importing process.
+
+# The signature is real: every request built here is signed with this secret
+# using Meta's own scheme and verified by the route's own evaluator.
+META_TEST_APP_SECRET = "test-app-secret-for-signed-webhooks"
+
+
+def signed_meta_header(raw: bytes, *, secret: str = META_TEST_APP_SECRET) -> str:
+    import hashlib
+    import hmac
+
+    return "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+
+
+def meta_webhook_request(body_payload, *, signature: str = "valid"):
+    """A request to the Meta route. ``signature`` is ``valid``, ``invalid`` or
+    ``missing``; the header is computed for real in the first case."""
+    import json as _json
+
+    from fastapi import Request
+
+    raw = _json.dumps(body_payload).encode()
+    headers = []
+    if signature == "valid":
+        headers.append((b"x-hub-signature-256", signed_meta_header(raw).encode()))
+    elif signature == "invalid":
+        headers.append((b"x-hub-signature-256",
+                        signed_meta_header(raw, secret="somebody-else").encode()))
+
+    async def _receive():
+        return {"type": "http.request", "body": raw}
+
+    return Request({"type": "http", "method": "POST", "path": "/webhook/whatsapp",
+                    "headers": headers, "query_string": b""}, receive=_receive)

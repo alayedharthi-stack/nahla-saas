@@ -140,9 +140,24 @@ def test_a_missing_phone_number_id_cannot_be_verified(configured):
     assert route(_Db(), phone_number_id="").reason == pg.CONNECTION_NOT_VERIFIED
 
 
-def test_a_guard_that_cannot_decide_refuses(configured):
+def test_a_connection_lookup_that_fails_is_undecidable_not_unverified(configured):
+    """A failed read is a fact about us, not about the tenant.
+
+    ``connection_not_verified`` is a verified negative — the tenant does not
+    own this number — and acceptance treats it as "not ours". A lookup that
+    raised established nothing of the kind, so the guard says ``guard_error``
+    and the caller that acknowledges inbounds refuses rather than drops.
+    """
     decision = route(_Db(explode=True))
-    assert decision.permitted is False and decision.reason == pg.CONNECTION_NOT_VERIFIED
+    assert decision.permitted is False and decision.reason == pg.GUARD_ERROR
+
+
+def test_a_verified_row_the_caller_already_holds_is_not_looked_up_again(configured):
+    """Acceptance resolved the connection once; a second lookup that fails must
+    not turn that verified association into ``connection_not_verified``."""
+    decision = route(_Db(explode=True), verified=(f"wa:{PHONE_ID}", "17"))
+    assert decision.permitted is True
+    assert decision.connection_ref == f"wa:{PHONE_ID}" and decision.connection_id == "17"
 
 
 def test_an_unexpected_guard_error_refuses_rather_than_raising(configured, monkeypatch):

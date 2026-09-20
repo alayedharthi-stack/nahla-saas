@@ -51,15 +51,36 @@ def _remap_jsonb(target: Any, connection: Any, **kw: Any) -> None:
     """SQLite has no JSONB and cannot parse a ``::jsonb`` cast in a default.
 
     The columns are JSON here and JSONB on PostgreSQL, where these tables are
-    actually proved; the values the code writes are identical either way.
+    actually proved; the values the code writes are identical either way. The
+    remap is for the SQLite create only and is **undone** afterwards (below):
+    the Table objects are shared by every module in the process, and a
+    PostgreSQL case collected after this one must create the declared JSONB
+    columns with their declared defaults, not this dialect's stand-ins.
     """
+    if getattr(getattr(connection, "dialect", None), "name", "") != "sqlite":
+        return
     for table in target.sorted_tables:
         for col in table.columns:
             if isinstance(col.type, JSONB):
+                _REMAPPED.setdefault(col, (col.type, col.server_default))
                 col.type = JSON()
             default = getattr(col.server_default, "arg", None)
             if default is not None and "::" in str(default):
+                _REMAPPED.setdefault(col, (col.type, col.server_default))
                 col.server_default = None
+
+
+_REMAPPED: Dict[Any, Any] = {}
+
+
+@event.listens_for(Base.metadata, "after_create")
+@event.listens_for(RuntimeBase.metadata, "after_create")
+def _restore_jsonb(target: Any, connection: Any, **kw: Any) -> None:
+    """Put back what ``_remap_jsonb`` changed, once the SQLite create is done."""
+    for col, (col_type, server_default) in list(_REMAPPED.items()):
+        col.type = col_type
+        col.server_default = server_default
+    _REMAPPED.clear()
 
 
 @pytest.fixture()
@@ -112,6 +133,21 @@ def configured(monkeypatch: pytest.MonkeyPatch, db: Any) -> Dict[str, Any]:
 
     monkeypatch.setenv(pg.ENV_ENABLED, "true")
     monkeypatch.setenv(pg.ENV_DRAINING, "true")
+
+    # The deployment inventory is required by ``settle`` and ``release`` — its
+    # own cases below state it through the environment and prove the refusal.
+    # The cases here are about other things, so unless one states an inventory
+    # it is taken to be exactly the fleet that reported.
+    real_expected = job.expected_workers
+
+    def _expected(environ: Any = None) -> List[str]:
+        stated = real_expected(environ)
+        if stated:
+            return stated
+        return sorted(w.worker_id for w in handover.fleet(db, tenant_id=db.tenant_id)
+                      if not w.retired)
+
+    monkeypatch.setattr(job, "expected_workers", _expected)
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, str(db.tenant_id))
     monkeypatch.setattr(job, "session", lambda: db)
     monkeypatch.setattr(job, "observe", _observe)
@@ -136,6 +172,9 @@ STOP_EVIDENCE = {
     "stop_verified_by": "railway deployment status=REMOVED, replicas=0",
     "observed_at": "2099-01-01T00:00:00+00:00",
 }
+# The platform's own record of the stop, retained verbatim; it names the deployment.
+STOP_EVIDENCE["stop_record"] = (
+    '[{"deployment": "' + STOP_EVIDENCE["deployment"] + '", "status": "REMOVED"}]')
 
 
 def report(db: Any, *, generation: Optional[int] = None, name: str = "worker-a",
@@ -316,10 +355,12 @@ def test_retiring_a_worker_is_an_operator_statement_with_a_reason(configured, db
     result = handover.convergence(barrier(db), handover.fleet(db, tenant_id=db.tenant_id))
     assert result["retired"] == ["worker-gone"] and result["converged"] is True
     assert run(["settle"]) == job.EXIT_OK
-    # And the settlement evidence carries who said so, and why.
+    # And the settlement evidence carries who said so, why, and what they showed.
     retired = barrier(db).evidence["retired_workers"]
-    assert retired == [{"worker_id": "worker-gone", "by": "owner",
-                        "reason": "terminated in deploy 1234"}]
+    assert [(r["worker_id"], r["by"], r["reason"]) for r in retired] == [
+        ("worker-gone", "owner", "terminated in deploy 1234")]
+    assert retired[0]["evidence"]["deployment"] == STOP_EVIDENCE["deployment"]
+    assert retired[0]["evidence"]["stop_record_sha256"]
 
 
 def test_a_retired_worker_that_reports_again_is_back_in_the_fleet(configured, db):

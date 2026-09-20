@@ -44,6 +44,7 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
     APPLICATION_ALEMBIC_HEAD,
     INTEGRATION_BOOTSTRAP_TARGET,
     REPOSITORY_ALEMBIC_HEADS,
+    repository_heads_expected,
 )
 from tests.legacy_migration_drift_postgres_fixtures import (  # noqa: E402
     connect_engine,
@@ -92,7 +93,7 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert "down_revision = (\"0092\"" not in source
     assert "down_revision = ('0092'" not in source
     assert APPLICATION_ALEMBIC_HEAD == "0111"
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111"})
+    assert repository_heads_expected(REPOSITORY_ALEMBIC_HEADS)
     assert INTEGRATION_BOOTSTRAP_TARGET == "0093"
     prev = os.getcwd()
     try:
@@ -109,7 +110,7 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         rev_0110 = script.get_revision("0111")
     finally:
         os.chdir(prev)
-    assert heads == frozenset({"0092", "0111"})
+    assert repository_heads_expected(heads)
     assert rev.down_revision == _PARENT
     assert not isinstance(rev.down_revision, tuple)
     assert rev_0104 is not None

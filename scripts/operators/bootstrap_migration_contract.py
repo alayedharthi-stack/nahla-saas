@@ -17,7 +17,23 @@ validated-staging state ``{0088, 0093}``; it must not select ``0092``.
 from __future__ import annotations
 
 APPLICATION_ALEMBIC_HEAD = "0111"
+# The customer-address provenance revision is a sibling of the application
+# head: both revise ``0109``. It lives on its own branch until that merges, so
+# the repository's heads are ``{0092, 0111}`` here and ``{0092, 0110, 0111}``
+# once it has. Both are expected; anything else is not.
+ADDRESS_ALEMBIC_HEAD = "0110"
 REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD})
+TOLERATED_REPOSITORY_ALEMBIC_HEADS = REPOSITORY_ALEMBIC_HEADS | {ADDRESS_ALEMBIC_HEAD}
+
+
+def repository_heads_expected(heads) -> bool:
+    """Whether the script directory's heads are the ones this repository knows.
+
+    ``0092`` and ``0111`` must both be present; ``0110`` may be — it is the
+    address sibling, present once its branch has merged — and nothing else may.
+    """
+    found = frozenset(str(h) for h in heads)
+    return REPOSITORY_ALEMBIC_HEADS <= found <= TOLERATED_REPOSITORY_ALEMBIC_HEADS
 INTEGRATION_BOOTSTRAP_TARGET = "0093"
 NORMAL_BOOTSTRAP_REVISIONS = frozenset({"0093"})
 VALIDATED_STAGING_BOOTSTRAP_REVISIONS = frozenset({"0088", "0093"})

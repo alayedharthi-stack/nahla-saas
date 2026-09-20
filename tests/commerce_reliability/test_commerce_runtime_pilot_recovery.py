@@ -55,15 +55,36 @@ def _remap_jsonb(target: Any, connection: Any, **kw: Any) -> None:
     """SQLite has no JSONB and cannot parse a ``::jsonb`` cast in a default.
 
     The columns are JSON here and JSONB on PostgreSQL, where these tables are
-    actually proved; the values the code writes are identical either way.
+    actually proved; the values the code writes are identical either way. The
+    remap is for the SQLite create only and is **undone** afterwards (below):
+    the Table objects are shared by every module in the process, and a
+    PostgreSQL case collected after this one must create the declared JSONB
+    columns with their declared defaults, not this dialect's stand-ins.
     """
+    if getattr(getattr(connection, "dialect", None), "name", "") != "sqlite":
+        return
     for table in target.sorted_tables:
         for col in table.columns:
             if isinstance(col.type, JSONB):
+                _REMAPPED.setdefault(col, (col.type, col.server_default))
                 col.type = JSON()
             default = getattr(col.server_default, "arg", None)
             if default is not None and "::" in str(default):
+                _REMAPPED.setdefault(col, (col.type, col.server_default))
                 col.server_default = None
+
+
+_REMAPPED: Dict[Any, Any] = {}
+
+
+@event.listens_for(Base.metadata, "after_create")
+@event.listens_for(RuntimeBase.metadata, "after_create")
+def _restore_jsonb(target: Any, connection: Any, **kw: Any) -> None:
+    """Put back what ``_remap_jsonb`` changed, once the SQLite create is done."""
+    for col, (col_type, server_default) in list(_REMAPPED.items()):
+        col.type = col_type
+        col.server_default = server_default
+    _REMAPPED.clear()
 
 
 @pytest.fixture()
@@ -816,7 +837,8 @@ def accept(db: Any, identity: str, *, text: str = "وين طلبي؟") -> Any:
         "messages": [{"id": identity, "from": SENDER, "type": "text",
                       "text": {"body": text}}],
     }}]}]}
-    outcome = acceptance.record_before_acknowledging(body, session_factory=lambda: db)
+    outcome = acceptance.record_before_acknowledging(body, session_factory=lambda: db,
+                                                     authenticated=True)
     assert outcome.ok and outcome.recorded == (identity,)
     return outcome
 
@@ -921,3 +943,122 @@ def test_the_recovery_run_hands_the_inbound_back_to_the_dispatcher(configured, d
     assert len(replayed) == 1
     assert replayed[0]["entry"][0]["changes"][0]["value"]["messages"][0]["id"] == \
         "wamid.handed.back"
+
+
+# ── Ownership, once established, is not re-decided by a failure ──────────────
+
+
+def test_a_positive_decision_survives_every_later_read_failing(configured, db, monkeypatch):
+    """The reviewer's case: the guard permits, the barrier read fails, and every
+    lookup after it fails too — including the guard itself, were it asked
+    again. The held claim is built from the decision already taken; nothing is
+    evaluated a second time, and COD consumes nothing."""
+    from core.commerce_runtime import handover
+
+    evaluations: List[Any] = []
+    real_route = pg.evaluate_pilot_route
+
+    def _once(*args: Any, **kwargs: Any) -> Any:
+        evaluations.append(kwargs.get("inbound_text"))
+        if len(evaluations) > 1:
+            raise RuntimeError("the guard would fail on a second evaluation")
+        return real_route(*args, **kwargs)
+
+    def _unreadable(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("relation does not exist")
+
+    monkeypatch.setattr(pg, "evaluate_pilot_route", _once)
+    monkeypatch.setattr(handover, "read_barrier", _unreadable)
+    monkeypatch.setattr(handover, "accepted_inbound", _unreadable)
+    seen = drive_cod_button(db, msg_id="wamid.codbtn.everything.down")
+    claim = seen["handled"][0]["commerce_runtime_claim"]
+    assert claim is not None and claim.basis == "ownership_unavailable"
+    assert claim.provider_message_id == "wamid.codbtn.everything.down"
+    assert len(evaluations) == 1                          # decided once, held from that
+    assert seen["cod"] == [] and seen["followup"] == [] and seen["correlated"] == []
+
+
+def test_a_negative_decision_plus_a_failed_read_claims_nothing(configured, db, monkeypatch):
+    """The hold is scoped to what the guard established. A recipient outside
+    the allowlist gets today's behaviour whatever fails afterwards, and the one
+    durable read that could still establish scope — the acceptance record —
+    finds nothing."""
+    from core.commerce_runtime import handover
+
+    monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, "+966500009999")
+
+    def _unreadable(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("relation does not exist")
+
+    monkeypatch.setattr(handover, "read_barrier", _unreadable)
+    seen = drive_cod_button(db, msg_id="wamid.codbtn.stranger.down")
+    assert len(seen["cod"]) == 1 and len(seen["followup"]) == 1
+    assert seen["handled"] == []
+
+
+def test_a_durable_record_holds_the_turn_when_the_guard_could_not_decide(configured, db,
+                                                                          monkeypatch):
+    """Undecidable is not negative: with an acceptance on record for this exact
+    inbound, the turn is held for the runtime rather than given to COD."""
+    from core.commerce_runtime import handover
+
+    accept(db, "wamid.codbtn.recorded.undecidable")
+
+    def _undecidable(*_a: Any, **kwargs: Any) -> Any:
+        return pg._refused(pg.GUARD_ERROR, kwargs.get("tenant_id"))
+
+    def _unreadable(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("barrier unreadable")
+
+    monkeypatch.setattr(pg, "evaluate_pilot_route", _undecidable)
+    monkeypatch.setattr(handover, "read_barrier", _unreadable)
+    seen = drive_cod_button(db, msg_id="wamid.codbtn.recorded.undecidable")
+    claim = seen["handled"][0]["commerce_runtime_claim"]
+    assert claim is not None and claim.basis == "ownership_unavailable"
+    assert seen["cod"] == [] and seen["followup"] == []
+
+
+# ── A recovery grant names one identity and needs a pending record ───────────
+
+
+def test_a_recovery_grant_is_honoured_for_its_own_identity_only(configured, db):
+    from core.commerce_runtime import handover
+    from services import commerce_runtime_recovery as runner
+
+    accept(db, "wamid.granted")
+    record = handover.accepted_inbound(db, tenant_id=db.tenant_id,
+                                       channel_connection_ref=f"wa:{PHONE_ID}",
+                                       provider_message_id="wamid.granted")
+    handover.open_drain(db, tenant_id=db.tenant_id)
+
+    with runner.granted(record):
+        # This identity, under this grant, while draining: claimed for the runtime.
+        seen = deliver(db, msg_id="wamid.granted")
+        assert seen["handled"][0]["commerce_runtime_claim"].basis == "recovery_admitted"
+        # Another identity under the same grant: deferred, as any new work is.
+        seen = deliver(db, msg_id="wamid.not.granted")
+        assert seen["handled"][0]["commerce_runtime_claim"].basis == "drain_buffered"
+        assert handover.accepted_inbound(db, tenant_id=db.tenant_id,
+                                         channel_connection_ref=f"wa:{PHONE_ID}",
+                                         provider_message_id="wamid.not.granted") is not None
+
+    # No grant in force: an accepted identity is deferred, not admitted. (A
+    # redelivery of ``wamid.granted`` itself is now a duplicate the in-memory
+    # boundary drops, which is right; a second accepted inbound shows the rule.)
+    accept(db, "wamid.granted.later")
+    seen = deliver(db, msg_id="wamid.granted.later")
+    assert seen["handled"][0]["commerce_runtime_claim"].basis == "drain_buffered"
+
+
+def test_a_grant_without_a_pending_record_authorises_nothing(configured, db):
+    """The grant restates what the database owes; it cannot invent an obligation."""
+    from core.commerce_runtime import handover
+    from services import commerce_runtime_recovery as runner
+    from types import SimpleNamespace
+
+    handover.open_drain(db, tenant_id=db.tenant_id)
+    forged = SimpleNamespace(tenant_id=db.tenant_id, channel_connection_ref=f"wa:{PHONE_ID}",
+                             provider_message_id="wamid.never.accepted", id=999)
+    with runner.granted(forged):
+        seen = deliver(db, msg_id="wamid.never.accepted")
+    assert seen["handled"][0]["commerce_runtime_claim"].basis == "drain_buffered"

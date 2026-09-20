@@ -175,6 +175,8 @@ def ephemeral_attach_engine() -> Iterator[Engine]:
         admin_engine.dispose()
 
 
+from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
+
 def test_repository_has_parallel_heads_0092_and_0098() -> None:
     prev_cwd = os.getcwd()
     try:
@@ -182,7 +184,7 @@ def test_repository_has_parallel_heads_0092_and_0098() -> None:
         script = ScriptDirectory(str(_DATABASE / "migrations"))
     finally:
         os.chdir(prev_cwd)
-    assert set(script.get_heads()) == _REPOSITORY_ALEMBIC_HEADS
+    assert repository_heads_expected(script.get_heads())
 
 
 def test_upgrade_command_never_uses_head_literal() -> None:

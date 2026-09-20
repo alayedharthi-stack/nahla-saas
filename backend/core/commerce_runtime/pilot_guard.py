@@ -256,6 +256,7 @@ def evaluate_pilot_route(
     legacy_already_answered: bool = False,
     ai_gate_skipped: bool = False,
     finishing_open_work: bool = False,
+    verified: Optional[Tuple[str, str]] = None,
 ) -> PilotDecision:
     """Decide, once, whether the commerce runtime owns this inbound turn.
 
@@ -301,10 +302,18 @@ def evaluate_pilot_route(
         if not model:
             return _refused(MODEL_NOT_CONFIGURED, tenant, recipient)
 
-        verified = verified_connection(db, tenant_id=tenant, phone_number_id=phone_number_id)
-        if verified is None:
-            return _refused(CONNECTION_NOT_VERIFIED, tenant, recipient)
-        connection_ref, connection_id = verified
+        if verified is not None:
+            # The caller already holds the verified row — resolved by
+            # ``resolve_pilot_scope`` a moment ago — and passes it in rather
+            # than having it looked up a second time. A second lookup that
+            # fails would answer ``connection_not_verified``, and a verified
+            # association must not turn into "not ours" on a failed read.
+            connection_ref, connection_id = str(verified[0]), str(verified[1])
+        else:
+            found = verified_connection(db, tenant_id=tenant, phone_number_id=phone_number_id)
+            if found is None:
+                return _refused(CONNECTION_NOT_VERIFIED, tenant, recipient)
+            connection_ref, connection_id = found
 
         if legacy_already_answered:
             return _refused(LEGACY_ALREADY_ANSWERED, tenant, recipient)
@@ -320,6 +329,10 @@ def evaluate_pilot_route(
         logger.warning("[COMMERCE_RUNTIME_PILOT] guard error tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
         return _refused(GUARD_ERROR, tenant_id)
+
+
+class ConnectionLookupUnavailable(RuntimeError):
+    """The connection row could not be read. Not the same as "no such row"."""
 
 
 def verified_connection(db: Any, *, tenant_id: int,
@@ -345,9 +358,13 @@ def verified_connection(db: Any, *, tenant_id: int,
             .first()
         )
     except Exception as exc:  # noqa: BLE001 - an unverifiable connection is not a verified one
+        # ...and it is not an *unverified* one either. "No such connection" is
+        # a fact about the tenant; "the lookup failed" is a fact about us, and
+        # answering the first for the second is how pilot-owned traffic becomes
+        # traffic nobody has to keep. The guard turns this into ``guard_error``.
         logger.warning("[COMMERCE_RUNTIME_PILOT] connection lookup failed tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
-        return None
+        raise ConnectionLookupUnavailable(type(exc).__name__) from exc
     if connection is None:
         return None
     return f"wa:{identifier}", str(connection.id)
@@ -416,8 +433,8 @@ def resolve_pilot_scope(db: Any, *, phone_number_id: Any) -> ScopeLookup:
         )
     except Exception as exc:  # noqa: BLE001 - a failed lookup decides nothing
         logger.error("[COMMERCE_RUNTIME_PILOT] scope lookup failed phone_number_id=%s "
-                     "error=%s — scope unavailable, not 'unrelated'",
-                     identifier, type(exc).__name__)
+                     "error=%s detail=%s — scope unavailable, not 'unrelated'",
+                     identifier, type(exc).__name__, str(exc)[:200])
         return ScopeLookup(status=SCOPE_UNAVAILABLE, detail=type(exc).__name__)
     if not connections:
         return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_allowlisted_tenant_owns_it")
@@ -446,7 +463,8 @@ def tenant_for_phone_number_id(db: Any, *, phone_number_id: Any
 
 
 __all__ = [
-    "AI_GATE_SKIPPED", "CONNECTION_NOT_VERIFIED", "DEADLINE_CEILING_SECONDS", "EMPTY_INBOUND",
+    "AI_GATE_SKIPPED", "CONNECTION_NOT_VERIFIED", "ConnectionLookupUnavailable",
+    "DEADLINE_CEILING_SECONDS", "EMPTY_INBOUND",
     "ENV_DRAINING", "PILOT_DRAINING", "pilot_draining", "pilot_owns_open_work",
     "ENV_ENABLED", "ENV_RECIPIENT_ALLOWLIST", "ENV_TENANT_ALLOWLIST", "GUARD_ERROR",
     "ENV_MODEL", "LEGACY_ALREADY_ANSWERED", "MAX_STEPS_CEILING", "MAX_TOOL_CALLS_CEILING",

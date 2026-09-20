@@ -32,10 +32,15 @@ step is a command:
                 A worker that has stopped is retired explicitly:
 
                 python -m ... handover retire --worker <id> \\
-                    --by "<operator>" --reason "terminated in deploy 1234"
+                    --by "<operator>" --reason "terminated in deploy 1234" \\
+                    --evidence '{"deployment": "...", "stop_verified_by": "...",
+                                 "observed_at": "..."}' \\
+                    --stop-record /path/to/captured-deployment-listing.json
 
                 Silence never retires a worker. A stale one blocks settlement
-                until somebody says, on the record, that it is gone.
+                until somebody says, on the record, that it is gone — and shows
+                the platform's own record of the stop, which is retained on the
+                worker row with its digest.
 
     3. STATUS   python -m ... commerce_runtime_pilot_handover status
                 Shows, per tenant: barrier state and generation, worker
@@ -57,8 +62,22 @@ step is a command:
                 the moment of the write. Exits 0 only when all of them hold, and
                 the evidence it stores is the state it actually settled.
 
-    6. STOP     COMMERCE_RUNTIME_PILOT_ENABLED=false
-                Only after step 5 exits 0.
+    5b. RECOVER python -m ... commerce_runtime_pilot_handover recover --apply
+                Hands accepted-but-unfinished inbounds back to the dispatcher.
+                Works while the barrier is open **or draining** — accepted work
+                is not new work. A tenant that is settled or released takes
+                nothing back: run ``drain`` first, recover, then settle again.
+
+    6. RELEASE  python -m ... commerce_runtime_pilot_handover release
+                A transition, not a verdict: written under the tenant's lock
+                only when the settlement still holds — nothing pending, nothing
+                arrived since, fleet converged and reconciled against
+                COMMERCE_RUNTIME_PILOT_EXPECTED_WORKERS. From that instant
+                acceptance refuses new pilot-scoped work (retryable), so
+                nothing accepted can fall between this step and the next.
+
+    7. STOP     COMMERCE_RUNTIME_PILOT_ENABLED=false
+                Only after step 6 exits 0.
 
     (later)     python -m ... commerce_runtime_pilot_handover reopen
                 Admits new work again on a fresh generation, keeping the audit
@@ -264,11 +283,15 @@ def blockers_for(entry: Dict[str, Any]) -> List[str]:
     """Every concrete reason this tenant is not settled. Never a bare 'no'."""
     from core.commerce_runtime import handover
 
-    barrier, work, convergence = entry["barrier"], entry["work"], entry["convergence"]
+    barrier, work = entry["barrier"], entry["work"]
     reasons: List[str] = []
     if barrier.state != handover.STATE_DRAINING:
         reasons.append(f"barrier_is_{barrier.state}_not_draining")
-    reasons.extend(convergence_blockers(convergence))
+    # The same verdict ``settle`` and ``release`` compute for themselves inside
+    # their transaction: this report can never say less than they will.
+    fleet_reasons, _evidence = handover.fleet_blockers(
+        barrier, entry["workers"], expected_workers())
+    reasons.extend(fleet_reasons)
     if work is None:
         reasons.append("work_counts_unavailable")
     else:
@@ -276,10 +299,6 @@ def blockers_for(entry: Dict[str, Any]) -> List[str]:
             count = getattr(work, field, 0)
             if count:
                 reasons.append(f"{field}={count}")
-    inventory = entry.get("fleet_inventory") or {}
-    if inventory.get("missing_from_fleet"):
-        reasons.append("workers_expected_but_never_reported:"
-                       + ",".join(inventory["missing_from_fleet"]))
     return reasons
 
 
@@ -339,6 +358,19 @@ def cmd_retire(db: Any, tenants: Sequence[int], args: Any) -> int:
     except ValueError:
         result(RESULT_FAILED_PRECONDITION, reason="evidence_must_be_a_json_object")
         return EXIT_USAGE
+    stop_record_path = str(getattr(args, "stop_record", "") or "").strip()
+    if stop_record_path:
+        # The platform's own record of the stop, captured to a file by the
+        # operator and retained verbatim on the worker row. A path that cannot
+        # be read is a refusal, not an empty record.
+        try:
+            with open(stop_record_path, "r", encoding="utf-8") as handle:
+                evidence["stop_record"] = handle.read()
+        except OSError as exc:
+            result(RESULT_FAILED_PRECONDITION, reason="stop_record_unreadable",
+                   path=stop_record_path, error=type(exc).__name__)
+            return EXIT_USAGE
+        evidence.setdefault("stop_record_source", stop_record_path)
 
     retired: List[int] = []
     try:
@@ -349,8 +381,9 @@ def cmd_retire(db: Any, tenants: Sequence[int], args: Any) -> int:
     except handover.RetirementRefused as refused:
         result(RESULT_FAILED_PRECONDITION, reason="retirement_refused", detail=str(refused),
                required=list(handover.RETIREMENT_EVIDENCE_KEYS),
-               hint="name the deployment, how the stop was verified, and when it was "
-                    "observed; elapsed silence is not one of them")
+               hint="name the deployment, how the stop was verified, when it was "
+                    "observed, and pass the captured platform record with "
+                    "--stop-record; elapsed silence is not one of them")
         return EXIT_USAGE
     if not retired:
         result(RESULT_FAILED_PRECONDITION, reason="worker_not_found", worker=name)
@@ -435,7 +468,7 @@ def cmd_settle(db: Any, tenants: Sequence[int], _args: Any) -> int:
         tenant_id = entry["tenant_id"]
         outcome = handover.settle(
             db, tenant_id=tenant_id, expected_generation=entry["barrier"].generation,
-            validate=_validator(tenant_id))
+            validate=_validator(tenant_id), expected_workers=expected_workers())
         if not outcome.settled:
             blocked[tenant_id] = list(outcome.blockers)
             emit(f"tenant={tenant_id} settle_refused={list(outcome.blockers)}")
@@ -448,55 +481,30 @@ def cmd_settle(db: Any, tenants: Sequence[int], _args: Any) -> int:
                next_step="the state moved while settling; run 'status' and settle again")
         return EXIT_BLOCKED
     result(RESULT_SETTLED, tenants=len(settled),
-           next_step="COMMERCE_RUNTIME_PILOT_ENABLED=false")
+           next_step="run 'release', then COMMERCE_RUNTIME_PILOT_ENABLED=false")
     return EXIT_OK
 
 
 def _validator(tenant_id: int):
-    """Recount and re-check convergence on the settling transaction's session.
+    """Recount the work on the transaction's own session.
 
     Everything this returns was read inside the transaction that is about to
     write, so the evidence describes the state actually settled rather than the
-    state as it looked when the operator last ran ``status``.
+    state as it looked when the operator last ran ``status``. The fleet is not
+    judged here: ``settle`` and ``release`` read it and reconcile it against
+    the stated inventory themselves, so no caller can leave it out.
     """
-    from core.commerce_runtime import handover
 
-    def validate(session: Any, barrier: Any):
+    def validate(session: Any, _barrier: Any):
         reasons: List[str] = []
-        workers = _fleet_on(session, tenant_id)
-        convergence = handover.convergence(barrier, workers)
-        reasons.extend(convergence_blockers(convergence))
-
         work = observe_on(session, [tenant_id])[0]
         for field in WORK_FIELDS:
             count = getattr(work, field, 0)
             if count:
                 reasons.append(f"{field}={count}")
-
-        evidence = {
-            "convergence": convergence,
-            "work": work.as_log_fields(),
-            "retired_workers": [
-                {"worker_id": w.worker_id, "by": w.retired_by, "reason": w.retired_reason}
-                for w in workers if w.retired
-            ],
-        }
-        return reasons, evidence
+        return reasons, {"work": work.as_log_fields()}
 
     return validate
-
-
-def _fleet_on(session: Any, tenant_id: int):
-    """The fleet, read on a session the caller already holds."""
-    from core.commerce_runtime import handover
-    from core.commerce_runtime import handover_models as hm
-
-    rows = (session.query(hm.HandoverWorker)
-            .filter(hm.HandoverWorker.tenant_id == int(tenant_id),
-                    hm.HandoverWorker.namespace == handover.NAMESPACE)
-            .order_by(hm.HandoverWorker.worker_id)
-            .all())
-    return tuple(handover._worker_from_row(row) for row in rows)
 
 
 def cmd_recover(db: Any, tenants: Sequence[int], args: Any) -> int:
@@ -538,18 +546,37 @@ def cmd_release(db: Any, tenants: Sequence[int], _args: Any) -> int:
     from core.commerce_runtime import handover
 
     held: Dict[int, List[str]] = {}
+    released: List[int] = []
     for tenant_id in tenants:
         state = handover.release_state(db, tenant_id=tenant_id)
         emit(" ".join(f"{key}={value}" for key, value in state.as_log_fields().items()))
-        if not state.released:
-            held[tenant_id] = list(state.blockers)
+        if state.barrier.released:
+            # Already written on a previous run; nothing accepted since, by
+            # construction. Re-running is idempotent and says so.
+            released.append(tenant_id)
+            emit(f"tenant={tenant_id} already_released_at={state.barrier.released_at}")
+            continue
+        # The verdict is taken again inside the transaction that writes it —
+        # pending entries, arrivals since settlement, the fleet against the
+        # inventory, and the work counts, all on that session.
+        outcome = handover.release(
+            db, tenant_id=tenant_id, expected_generation=state.barrier.generation,
+            expected_workers=expected_workers(), validate=_validator(tenant_id))
+        if not outcome.released:
+            held[tenant_id] = list(outcome.blockers)
+            emit(f"tenant={tenant_id} release_refused={list(outcome.blockers)}")
+            continue
+        released.append(tenant_id)
+        emit(f"tenant={tenant_id} barrier=released released_at="
+             f"{outcome.barrier.released_at} generation={outcome.barrier.generation}")
     if held:
-        result(RESULT_HELD, blockers=held,
-               next_step="run 'recover' or 'dispose' for the entries above, settle again, "
-                         "then re-run 'release'")
+        result(RESULT_HELD, blockers=held, released=released,
+               next_step="run 'recover' or 'dispose' for the entries above (drain first if "
+                         "the barrier is settled), settle again, then re-run 'release'")
         return EXIT_BLOCKED
-    result(RESULT_RELEASED, tenants=len(list(tenants)),
-           next_step="COMMERCE_RUNTIME_PILOT_ENABLED=false")
+    result(RESULT_RELEASED, tenants=len(released),
+           next_step="COMMERCE_RUNTIME_PILOT_ENABLED=false — new pilot-scoped inbounds are "
+                     "answered retryable until the switch is off")
     return EXIT_OK
 
 
@@ -559,7 +586,7 @@ def cmd_reopen(db: Any, tenants: Sequence[int], _args: Any) -> int:
     barriers = {tenant_id: handover.read_barrier(db, tenant_id=tenant_id)
                 for tenant_id in tenants}
     for tenant_id, barrier in barriers.items():
-        if barrier.state != handover.STATE_SETTLED:
+        if barrier.state not in (handover.STATE_SETTLED, handover.STATE_RELEASED):
             result(RESULT_FAILED_PRECONDITION, tenant_id=tenant_id,
                    reason=f"barrier_is_{barrier.state}_not_settled",
                    hint="reopening before settlement would discard the evidence")
@@ -616,6 +643,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Any:
     parser.add_argument("--evidence", default="{}",
                         help="a JSON object recording how the entry was handled")
     parser.add_argument("--worker", default="", help="the worker id to retire")
+    parser.add_argument("--stop-record", dest="stop_record", default="",
+                        help="'retire' only: a file holding the platform's own record of the "
+                             "stop (deployment listing, process fencing output), retained "
+                             "verbatim on the worker row")
     parser.add_argument("--reason", default="", help="why that worker is gone")
     parser.add_argument("--by", default="", help="who is making this statement")
     parser.add_argument("--as-of", dest="as_of", default="",

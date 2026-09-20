@@ -233,11 +233,24 @@ it. Coordinating every settings writer would mean rewriting code with nothing to
 do with this handover; the runtime's own state belongs where only the runtime
 writes, and that is what the migration does.
 
-**The barrier.** `open → draining → settled → open`. A per-process environment
-flag cannot be the mechanism: it cannot say the same word to every replica at
-the same moment, it cannot be observed from outside the process holding it, and
-it changes at a moment nobody can name. `COMMERCE_RUNTIME_PILOT_DRAINING`
-remains, and takes one process out of rotation, but it is not the handover.
+**The barrier.** `open → draining → settled → released → open`. A per-process
+environment flag cannot be the mechanism: it cannot say the same word to every
+replica at the same moment, it cannot be observed from outside the process
+holding it, and it changes at a moment nobody can name.
+`COMMERCE_RUNTIME_PILOT_DRAINING` remains, and takes one process out of
+rotation, but it is not the handover.
+
+**Release is a transition acceptance reads.** A settlement is evidence about
+the instant it was taken; the switch is flipped later, and an inbound accepted
+in between would be recorded and then abandoned. So `release` is written under
+the tenant's exclusive lock — only when the settlement still holds, nothing is
+pending, nothing arrived after it, and the fleet is converged *and reconciled
+against the stated deployment inventory* — and `record_inbound` reads the
+barrier under the shared lock in the same transaction that would insert. Either
+the release committed first and the inbound is refused (`503 pilot_released`,
+nothing recorded), or the insert committed first and the release counts it as
+pending and refuses. There is no third ordering, so nothing accepted can fall
+between the release and the configuration change.
 
 **Draining withholds; it does not release.** While a tenant is draining — or is
 settled and not yet reopened — an inbound for a conversation this pilot would
@@ -258,6 +271,26 @@ written (`handover_barrier_closed`). A re-entry for a turn already admitted neve
 reaches the barrier, which is what lets a draining runtime still finish its own
 work.
 
+**Accepted work is not new work.** An inbound the provider was told we had —
+recorded before the 200, or deferred when a drain refused it — is an obligation
+the settlement already counts, and a drain that refused to admit it could never
+be met: recovery would need the barrier open, reopening would need nothing
+pending. The recovery runner therefore states a **grant** for one replay — this
+tenant, this channel connection, this provider message id, this entry — and the
+claim and the seam honour it only when the identity matches, a pending durable
+acceptance exists for it, and the barrier read on the admitting connection is
+open **or draining**. Settled and released still refuse; the operator drains
+again first. The grant authorises nothing the database does not already owe.
+
+**Ownership, once established, is not re-decided by a failure.** The scope
+decision is captured the moment the guard makes it; every read after it — the
+barrier, the fleet row, the ledger — can fail, and when one does the held claim
+is built from *that* decision. Nothing evaluates the guard a second time on the
+failure path, because a second evaluation can fail in its own way and release a
+turn the first had already established as the runtime's. A connection lookup
+that raises is `guard_error` — undecidable — and never `connection_not_verified`,
+which acceptance would read as a verified negative.
+
 **Every transition validates where it writes.** `settle` re-reads the barrier
 under the lock, re-checks the generation the operator decided on, recounts the
 work and the pending deferred entries on that same session, and only then writes
@@ -271,20 +304,32 @@ between is never reopened over.
 generation and state **it read**, passed in by the worker itself rather than
 re-derived when the row is written — a heartbeat that arrives after a drain
 still says what that worker saw. The expected set is every worker row that has
-not been retired; a worker that stops reporting is *stale* and blocks, and only
-an operator retires one, naming themselves and their reason, which the
-settlement evidence then carries. Shared admission locking orders this job
-against the workers that take it; it does not prove a fleet was rolled out or
-shut down.
+not been retired, reconciled — inside `settle` and `release` themselves, not
+only in the operator's report — against the deployment inventory the operator
+states; a replica in the inventory that never wrote a row blocks, and an
+unstated inventory blocks. A worker that stops reporting is *stale* and blocks,
+and only an operator retires one, naming themselves, their reason, the
+deployment, how the stop was verified, when — and handing over the platform's
+own record of the stop, which is retained on the row with its digest. Shared
+admission locking orders this job against the workers that take it; it does not
+prove a fleet was rolled out or shut down, and the stop record is what the
+operator captured rather than something this platform fetched.
 
-**Disposition is per entry and evidenced.** Each deferred row is named by id and
-disposed of individually, with a disposition from a closed set (`replayed`,
-`answered`, `superseded`, `not_required`) and evidence stored on the row. An
-entry that arrived after the operator last looked is not in their list and is
-not disposed of. Disposed and resolved rows stay as history and stop counting
-against the pending limit, so the audit trail need not be deleted to make room.
-An `unknown` delivery outcome still blocks settlement and is never resolved by
-elapsed time.
+**Disposition is per entry and evidenced — and bound to the entry.** Each
+deferred row is named by id and disposed of individually, with a disposition
+from a closed set (`replayed`, `answered`, `superseded`, `not_required`) and
+evidence checked against the records before the row closes. `replayed` names
+this entry's own provider message id and requires the runtime turn admitted for
+it to have reached a terminal; `answered` names another turn that must be the
+same tenant's, on the same channel connection, in a conversation bound to the
+same customer, with a terminal recorded no earlier than this message arrived —
+another conversation's terminal proves nothing about this one; `superseded`
+names a later entry for the same tenant, connection and recipient, later in
+arrival order — an older message replaces nothing. An entry that arrived after
+the operator last looked is not in their list and is not disposed of. Disposed
+and resolved rows stay as history and stop counting against the pending limit.
+An `unknown` delivery outcome still blocks settlement, is never replayed over,
+and is never resolved by elapsed time.
 
 **An acknowledgement is a promise.** Both webhook entry points acknowledge first
 and process in the background. For the legacy path that is right; for a
@@ -297,11 +342,25 @@ so the provider redelivers the whole batch and the existing deduplication keeps
 the unaffected messages in it from being processed twice. Nothing in this path
 runs while the pilot is off.
 
+Three more things the promise never covers. **A sender we could not
+authenticate:** a pilot obligation is recorded and processed only when the
+request's `X-Hub-Signature-256` verified — the legacy path's audit mode does not
+extend to the pilot — and otherwise the request is `503 pilot_scope_unauthenticated`
+with nothing recorded. **A released tenant:** after `release`, `503
+pilot_released`, nothing recorded, until the switch is off. **A nonce:** replay
+protection claims its nonce before anything is durable, so a process that dies
+in between leaves a nonce and no record; before a nonce alone answers 200, the
+route checks that every pilot-scoped message in the body is on record, and one
+that is not is a first attempt. Concurrent and completed duplicates stay
+idempotent — the record is written once and the dispatcher's deduplication
+holds.
+
 `scripts/operators/commerce_runtime_pilot_handover.py` is the executable
-procedure — `status | drain | retire | dispose | settle | reopen`. `settle` exits
-0 only when every one of those conditions holds at the instant of the write;
-otherwise it exits 1 and names each blocker. There is no attestation step and no
-attestation variable: the verdict rests on the procedure having been executed.
+procedure — `status | drain | retire | dispose | recover | settle | release |
+reopen`. `settle` and `release` exit 0 only when every one of those conditions
+holds at the instant of the write; otherwise they exit 1 and name each blocker.
+There is no attestation step and no attestation variable: the verdict rests on
+the procedure having been executed.
 
 The emergency stop — switching the pilot off outright — remains available. It
 stops this process from taking new turns and from recovering; it is not
@@ -390,6 +449,17 @@ The probe is cached per engine so a disabled pilot costs nothing per turn. That
 cache is per process and is not invalidated by applying the migration, so the
 service is restarted after it; until then every turn refuses, which is the safe
 direction.
+
+Revision `0111` verifies a pre-existing relation of one of its names by
+**definition**, not by name: primary-key columns, unique-constraint columns,
+check-constraint expressions, foreign keys and index columns, uniqueness and
+partial predicates are compared against the declared table created in a scratch
+schema on the same server and reflected the same way, so both sides are spelled
+by PostgreSQL. A relation with the right names over the wrong columns, a wider
+check, or a non-partial "pending" index is refused rather than reconciled.
+`0111` and the address revision `0110` are siblings of `0109`; rolling back the
+runtime alone is `alembic downgrade 0111@-1` (§1.3 of the runbook says why the
+common-ancestor spellings are wrong).
 
 ---
 

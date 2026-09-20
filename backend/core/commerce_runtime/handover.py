@@ -63,6 +63,7 @@ NAMESPACE = "live"
 STATE_OPEN = hm.STATE_OPEN
 STATE_DRAINING = hm.STATE_DRAINING
 STATE_SETTLED = hm.STATE_SETTLED
+STATE_RELEASED = hm.STATE_RELEASED
 STATES: Tuple[str, ...] = hm.BARRIER_STATES
 
 REASON_ACCEPTED = hm.REASON_ACCEPTED
@@ -164,6 +165,7 @@ class Barrier:
     settled_at: Optional[_dt.datetime] = None
     evidence: Mapping[str, Any] = dataclasses.field(default_factory=dict)
     exists: bool = True
+    released_at: Optional[_dt.datetime] = None
 
     @property
     def draining(self) -> bool:
@@ -172,6 +174,10 @@ class Barrier:
     @property
     def settled(self) -> bool:
         return self.state == STATE_SETTLED
+
+    @property
+    def released(self) -> bool:
+        return self.state == STATE_RELEASED
 
     @property
     def admits_new_work(self) -> bool:
@@ -335,6 +341,7 @@ def _barrier_from_row(tenant_id: int, row: Any) -> Barrier:
         tenant_id=int(tenant_id), state=str(row.state), generation=int(row.generation),
         opened_at=_aware(row.opened_at), settled_at=_aware(row.settled_at),
         evidence=dict(row.evidence or {}),
+        released_at=_aware(getattr(row, "released_at", None)),
     )
 
 
@@ -404,6 +411,42 @@ def admits_new_work_on(conn: Any, *, tenant_id: int) -> bool:
         return False
 
 
+def admits_recovery_on(conn: Any, *, tenant_id: int) -> bool:
+    """Whether **accepted** work may be admitted, read on the caller's connection.
+
+    The form a recovery replay's admission uses. A drain stops new work; an
+    inbound the provider was already told we had is not new work, and refusing
+    it while draining would leave the customer with nobody able to answer. So
+    open *or draining* admits it, ordered against a transition by the same
+    shared lock as :func:`admits_new_work_on`. Settled and released do not: a
+    settlement has been signed off and a release has been verified, and neither
+    may be admitted over. Fails **closed**.
+    """
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    try:
+        _take_advisory_lock(conn, tenant_id=int(tenant_id), exclusive=False)
+        state = conn.execute(
+            _text(f"SELECT state FROM {hm.BARRIER_TABLE} "
+                  f"WHERE tenant_id = :tenant AND namespace = :ns"),
+            {"tenant": int(tenant_id), "ns": NAMESPACE},
+        ).scalar_one_or_none()
+        return state is None or str(state) in (STATE_OPEN, STATE_DRAINING)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[COMMERCE_RUNTIME_HANDOVER] barrier unreadable on the recovery "
+                       "admission connection tenant=%s error=%s — refusing",
+                       tenant_id, type(exc).__name__)
+        return False
+
+
+class BarrierReleased(RuntimeError):
+    """The tenant's release has been verified; nothing new is accepted for it."""
+
+    def __init__(self, tenant_id: int) -> None:
+        self.tenant_id = int(tenant_id)
+        super().__init__(f"tenant {tenant_id} is released: no new pilot work is accepted")
+
+
 # ── Barrier: transitions ─────────────────────────────────────────────────────
 
 
@@ -429,6 +472,7 @@ def open_drain(db: Any, *, tenant_id: int) -> Barrier:
         row.generation = int(row.generation) + 1
         row.opened_at = _now()
         row.settled_at = None
+        row.released_at = None
         row.evidence = {}
         row.updated_at = _now()
         session.commit()
@@ -440,15 +484,23 @@ def open_drain(db: Any, *, tenant_id: int) -> Barrier:
 
 def settle(db: Any, *, tenant_id: int, expected_generation: Optional[int] = None,
            validate: Optional[Callable[[Any, Barrier], Tuple[List[str], Dict[str, Any]]]] = None,
+           expected_workers: Optional[Sequence[str]] = None,
            ) -> SettlementResult:
     """Validate and settle in **one** transaction, under the tenant's lock.
 
     The reviewed shape inspected first and wrote afterwards, so a deferred entry
     committing in between was settled over and the evidence described a state
     that had already changed. Here the barrier is re-read under the lock, the
-    generation the caller decided on is re-checked, ``validate`` recounts the
-    work on this same session, and the transition and its evidence are written
-    from what was just read — or nothing is written at all.
+    generation the caller decided on is re-checked, the fleet is read on this
+    same session and reconciled against the deployment inventory the operator
+    states, ``validate`` recounts the work on this same session, and the
+    transition and its evidence are written from what was just read — or
+    nothing is written at all.
+
+    ``expected_workers`` is required for a settlement to succeed: convergence
+    can only see processes that wrote a row, and the replica that never reported
+    is exactly the one still admitting. An unstated inventory is a blocker, not
+    a warning, whichever command asked.
     """
     with _locked(db, tenant_id) as session:
         row = _ensure_barrier(session, tenant_id)
@@ -461,13 +513,18 @@ def settle(db: Any, *, tenant_id: int, expected_generation: Optional[int] = None
         if expected_generation is not None and int(expected_generation) != current.generation:
             blockers.append(
                 f"generation_moved:expected={expected_generation},found={current.generation}")
+        fleet_found, evidence = fleet_blockers(current, fleet_on(session, tenant_id),
+                                               expected_workers)
+        blockers.extend(fleet_found)
         if validate is not None:
-            found, evidence = validate(session, current)
+            found, more = validate(session, current)
             blockers.extend(found)
+            evidence = dict(evidence, **dict(more or {}))
 
         if blockers:
             session.rollback()
-            return SettlementResult(settled=False, barrier=current, blockers=tuple(blockers))
+            return SettlementResult(settled=False, barrier=current, blockers=tuple(blockers),
+                                    evidence=evidence)
 
         settled_at = _now()
         row.state = STATE_SETTLED
@@ -498,7 +555,7 @@ def reopen(db: Any, *, tenant_id: int, expected_generation: Optional[int] = None
     with _locked(db, tenant_id) as session:
         row = _barrier_row(session, tenant_id, for_update=True)
         current = _barrier_from_row(tenant_id, row)
-        if row is None or current.state != STATE_SETTLED:
+        if row is None or current.state not in (STATE_SETTLED, STATE_RELEASED):
             session.rollback()
             logger.warning("[COMMERCE_RUNTIME_HANDOVER] reopen refused tenant=%s state=%s",
                            tenant_id, current.state)
@@ -520,6 +577,7 @@ def reopen(db: Any, *, tenant_id: int, expected_generation: Optional[int] = None
         row.generation = int(row.generation) + 1
         row.opened_at = _now()
         row.settled_at = None
+        row.released_at = None
         row.updated_at = _now()
         session.commit()
         barrier = _barrier_from_row(tenant_id, row)
@@ -554,8 +612,95 @@ class ReleaseState:
                 "released": self.released, "blockers": list(self.blockers)}
 
 
+@dataclasses.dataclass(frozen=True)
+class ReleaseResult:
+    """The outcome of one release attempt, and why."""
+
+    released: bool
+    barrier: Barrier
+    blockers: Tuple[str, ...] = ()
+    evidence: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+
+
+def release(db: Any, *, tenant_id: int, expected_generation: Optional[int] = None,
+            expected_workers: Optional[Sequence[str]] = None,
+            validate: Optional[Callable[[Any, Barrier], Tuple[List[str], Dict[str, Any]]]] = None,
+            ) -> ReleaseResult:
+    """Verify the settlement still holds and write ``released``, in one transaction.
+
+    A settlement is evidence about the instant it was taken, and the operator
+    switches the pilot off some time later. In between, an inbound can be
+    accepted — recorded, and then abandoned by the configuration change. So the
+    release is not a verdict the operator reads and acts on; it is a
+    **transition** written under the tenant's exclusive lock, and acceptance
+    takes the shared lock and reads it: from the instant this commits, no new
+    pilot-scoped inbound is accepted for the tenant — the provider is answered
+    retryable and nothing is recorded — and once the switch is off the same
+    request is the legacy path's, as it is today. Nothing accepted can fall
+    between the two.
+
+    Written only when, on this same session: the barrier is settled on the
+    generation the operator decided about, nothing is pending, nothing arrived
+    after ``settled_at``, the fleet is converged and reconciled against the
+    stated inventory, and ``validate`` (the work counts) finds nothing.
+    """
+    with _locked(db, tenant_id) as session:
+        row = _barrier_row(session, tenant_id, for_update=True)
+        current = _barrier_from_row(tenant_id, row)
+        blockers: List[str] = []
+        evidence: Dict[str, Any] = {}
+        if row is None or current.state != STATE_SETTLED:
+            blockers.append(f"barrier_is_{current.state}_not_settled")
+        if expected_generation is not None and int(expected_generation) != current.generation:
+            blockers.append(
+                f"generation_moved:expected={expected_generation},found={current.generation}")
+        pending = pending_count_on(session, tenant_id=int(tenant_id))
+        if pending:
+            blockers.append(f"deferred_pending={pending}")
+        after = _arrived_after(session, tenant_id=int(tenant_id), moment=current.settled_at)
+        if after:
+            blockers.append(f"arrived_after_settlement={after}")
+        fleet_found, evidence = fleet_blockers(current, fleet_on(session, tenant_id),
+                                               expected_workers)
+        blockers.extend(fleet_found)
+        if validate is not None:
+            found, more = validate(session, current)
+            blockers.extend(found)
+            evidence = dict(evidence, **dict(more or {}))
+        if blockers:
+            session.rollback()
+            return ReleaseResult(released=False, barrier=current, blockers=tuple(blockers),
+                                 evidence=evidence)
+        moment = _now()
+        row.state = STATE_RELEASED
+        row.released_at = moment
+        row.evidence = dict(row.evidence or {}, release=dict(
+            evidence, released_at=moment.isoformat(), released_generation=current.generation,
+            pending=pending, arrived_after_settlement=after))
+        row.updated_at = moment
+        session.commit()
+        barrier = _barrier_from_row(tenant_id, row)
+    logger.warning("[COMMERCE_RUNTIME_HANDOVER] released tenant=%s generation=%s — no new "
+                   "pilot work is accepted; switch the pilot off now",
+                   tenant_id, barrier.generation)
+    return ReleaseResult(released=True, barrier=barrier, evidence=dict(barrier.evidence))
+
+
+def _arrived_after(session: Any, *, tenant_id: int, moment: Any) -> int:
+    if moment is None:
+        return 0
+    return int(session.query(hm.DeferredInbound)
+               .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
+                       hm.DeferredInbound.namespace == NAMESPACE,
+                       hm.DeferredInbound.created_at > moment)
+               .count())
+
+
 def release_state(db: Any, *, tenant_id: int) -> ReleaseState:
-    """Whether the settlement verdict still holds, computed now.
+    """Whether the settlement verdict still holds, computed now — a **report**.
+
+    :func:`release` is the transition; this is the same question asked without
+    writing, for ``status``. A barrier already released reports no blockers.
 
     A settlement is evidence about the instant it was taken. Switching the pilot
     off on the strength of one taken ten minutes ago abandons everything that
@@ -571,14 +716,11 @@ def release_state(db: Any, *, tenant_id: int) -> ReleaseState:
     """
     barrier = read_barrier(db, tenant_id=int(tenant_id))
     pending = pending_count(db, tenant_id=int(tenant_id))
-    after = 0
-    if barrier.settled_at is not None:
-        after = int(db.query(hm.DeferredInbound)
-                    .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
-                            hm.DeferredInbound.namespace == NAMESPACE,
-                            hm.DeferredInbound.created_at > barrier.settled_at)
-                    .count())
+    after = _arrived_after(db, tenant_id=int(tenant_id), moment=barrier.settled_at)
     blockers: List[str] = []
+    if barrier.released:
+        return ReleaseState(tenant_id=int(tenant_id), barrier=barrier, pending=pending,
+                            arrived_after_settlement=after, blockers=())
     if barrier.state != STATE_SETTLED:
         blockers.append(f"barrier_is_{barrier.state}_not_settled")
     if pending:
@@ -597,6 +739,61 @@ def _worker_from_row(row: Any) -> WorkerReport:
         retired_reason=row.retired_reason,
         retirement_evidence=dict(getattr(row, "retirement_evidence", None) or {}),
     )
+
+
+def fleet_on(session: Any, tenant_id: int) -> Tuple[WorkerReport, ...]:
+    """The fleet, read on a session the caller already holds — the form a
+    transition uses, so the workers it judges are the ones in its transaction."""
+    rows = (session.query(hm.HandoverWorker)
+            .filter(hm.HandoverWorker.tenant_id == int(tenant_id),
+                    hm.HandoverWorker.namespace == NAMESPACE)
+            .order_by(hm.HandoverWorker.worker_id)
+            .all())
+    return tuple(_worker_from_row(row) for row in rows)
+
+
+BLOCKER_INVENTORY_UNSTATED = "expected_worker_inventory_unstated"
+
+
+def fleet_blockers(barrier: Barrier, workers: Sequence[WorkerReport],
+                   inventory: Optional[Sequence[str]]) -> Tuple[List[str], Dict[str, Any]]:
+    """Every reason the fleet is not accounted for, and the evidence read.
+
+    The authoritative form: a transition calls this itself on the workers it
+    read inside its own transaction, so no command can settle or release
+    without it. Convergence is what the workers reported; the inventory is
+    what the deployment is supposed to contain, stated by the operator. A
+    worker in the inventory that never wrote a row is the blocker
+    ``workers_expected_but_never_reported``; an inventory that was never stated
+    is ``expected_worker_inventory_unstated`` — silence about the fleet is not
+    evidence about the fleet.
+    """
+    reasons: List[str] = []
+    converged = convergence(barrier, workers)
+    if not converged["converged"]:
+        if converged["behind"]:
+            reasons.append(f"workers_behind:{','.join(converged['behind'])}")
+        if converged["stale"]:
+            reasons.append(f"workers_stale_retire_or_wait:{','.join(converged['stale'])}")
+        if not converged["on_generation"]:
+            reasons.append("no_worker_has_reported_this_generation")
+    stated = [str(name).strip() for name in (inventory or ()) if str(name).strip()]
+    reconciled = expected_fleet(workers, stated)
+    if not stated:
+        reasons.append(BLOCKER_INVENTORY_UNSTATED)
+    elif reconciled["missing_from_fleet"]:
+        reasons.append("workers_expected_but_never_reported:"
+                       + ",".join(reconciled["missing_from_fleet"]))
+    evidence = {
+        "convergence": converged,
+        "fleet_inventory": reconciled,
+        "retired_workers": [
+            {"worker_id": w.worker_id, "by": w.retired_by, "reason": w.retired_reason,
+             "evidence": dict(w.retirement_evidence)}
+            for w in workers if w.retired
+        ],
+    }
+    return reasons, evidence
 
 
 def fleet(db: Any, *, tenant_id: int) -> Tuple[WorkerReport, ...]:
@@ -676,7 +873,15 @@ RETIREMENT_EVIDENCE_KEYS: Tuple[str, ...] = (
     # When that was observed, ISO-8601. A report after this moment means the
     # process is not stopped and the retirement is refused.
     "observed_at",
+    # The platform's own record of the stop, captured and retained: the output
+    # of the deployment listing or the process fencing, verbatim. It has to
+    # name the deployment above, and it is stored with its digest. A sentence
+    # typed by an operator is a statement; this is what the statement rests on.
+    "stop_record",
 )
+
+# A stop record is retained on the worker row, so it is bounded.
+STOP_RECORD_MAX_BYTES = 64 * 1024
 
 
 class RetirementRefused(ValueError):
@@ -717,6 +922,19 @@ def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str,
     observed = _parse_moment(supplied["observed_at"])
     if observed is None:
         raise RetirementRefused("observed_at must be an ISO-8601 moment")
+    record = str(supplied["stop_record"])
+    encoded = record.encode("utf-8")
+    if len(encoded) > STOP_RECORD_MAX_BYTES:
+        raise RetirementRefused(f"stop_record_too_large:{len(encoded)}>{STOP_RECORD_MAX_BYTES}")
+    deployment = str(supplied["deployment"]).strip()
+    if deployment not in record:
+        # The record has to be *about* this deployment. A captured listing that
+        # never mentions it proves nothing about it.
+        raise RetirementRefused("stop_record_does_not_name_the_deployment")
+    import hashlib  # noqa: PLC0415
+
+    supplied["stop_record_sha256"] = hashlib.sha256(encoded).hexdigest()
+    supplied["stop_record_bytes"] = len(encoded)
 
     with _locked(db, tenant_id) as session:
         row = (session.query(hm.HandoverWorker)
@@ -824,6 +1042,14 @@ def record_inbound(db: Any, *, tenant_id: int, phone_number_id: str,
         if existing is not None:
             session.rollback()
             return _deferred_from_row(existing)
+
+        # Read under the shared lock this transaction already holds, so it is
+        # ordered against the release: either the release committed first and
+        # this refuses, or this commits first and the release sees the row.
+        gate = _barrier_row(session, tenant_id)
+        if gate is not None and str(gate.state) == STATE_RELEASED:
+            session.rollback()
+            raise BarrierReleased(int(tenant_id))
 
         pending = (session.query(hm.DeferredInbound)
                    .filter(hm.DeferredInbound.tenant_id == int(tenant_id),
@@ -971,9 +1197,13 @@ def _verified_handling(session: Any, row: Any, kind: str,
 
     if kind == "superseded":
         identity = str(evidence["superseded_by_provider_message_id"]).strip()
+        # The same tenant, the same channel connection **and** the same
+        # recipient: another customer's later message, or the same customer on
+        # another connection, supersedes nothing here.
         later = (session.query(hm.DeferredInbound)
                  .filter(hm.DeferredInbound.tenant_id == int(row.tenant_id),
                          hm.DeferredInbound.namespace == NAMESPACE,
+                         hm.DeferredInbound.channel_connection_ref == str(row.channel_connection_ref),
                          hm.DeferredInbound.recipient == str(row.recipient),
                          hm.DeferredInbound.provider_message_id == identity)
                  .first())
@@ -981,11 +1211,26 @@ def _verified_handling(session: Any, row: Any, kind: str,
             return False, "superseding_inbound_not_found", {}
         if int(later.id) == int(row.id):
             return False, "an_entry_cannot_supersede_itself", {}
+        earlier_at, later_at = _aware(row.created_at), _aware(later.created_at)
+        # Chronology is part of the claim: an older message does not replace a
+        # newer one, whatever it says. Two entries recorded in the same clock
+        # tick are ordered by arrival — the surrogate key is assigned in
+        # insertion order and never reused.
+        is_later = (earlier_at is not None and later_at is not None
+                    and (later_at > earlier_at
+                         or (later_at == earlier_at and int(later.id) > int(row.id))))
+        if not is_later:
+            return False, "superseding_inbound_is_not_later", {}
         return True, "", {"superseded_by_entry_id": int(later.id),
-                          "superseded_by_provider_message_id": identity}
+                          "superseded_by_provider_message_id": identity,
+                          "superseded_by_created_at": later_at.isoformat()}
 
     key = keys[0]
     identity = str(evidence[key]).strip()
+    if kind == "replayed" and identity != str(row.provider_message_id):
+        # A replay handles *this* inbound, under its own identity. Naming
+        # another message is an "answered" claim, and is checked as one.
+        return False, "replayed_identity_is_not_this_inbound", {}
     phone_number_id = str(row.channel_connection_ref).split(":", 1)[-1]
     try:
         # The same database this disposition is being written to, not whatever
@@ -1002,8 +1247,73 @@ def _verified_handling(session: Any, row: Any, kind: str,
         return False, "no_runtime_turn_for_that_identity", {}
     if not found.finished:
         return False, "that_turn_has_no_terminal", {}
-    return True, "", {key: identity, "turn_id": int(found.turn_id),
-                      "verified_against": "commerce_runtime_turn_terminals"}
+    bound, why, binding = _turn_binding(session, row, found)
+    if not bound:
+        return False, why, {}
+    if kind == "answered":
+        terminal_at = _aware(binding.get("terminal_recorded_at"))
+        arrived_at = _aware(row.created_at)
+        if terminal_at is None or arrived_at is None or terminal_at < arrived_at:
+            # An answer recorded before this message arrived did not answer it.
+            return False, "answering_terminal_predates_this_inbound", {}
+    return True, "", dict(binding, **{key: identity, "turn_id": int(found.turn_id),
+                                      "verified_against": "commerce_runtime_turn_terminals"})
+
+
+def _turn_binding(session: Any, row: Any, found: Any) -> Tuple[bool, str, Dict[str, Any]]:
+    """Whether a runtime turn belongs to **this entry's** conversation.
+
+    A terminal proves a turn was handled. It says nothing about *whose* turn
+    unless the turn is bound to the same tenant, the same channel connection
+    and the same customer as the entry: another conversation's terminal cannot
+    account for this one. The runtime conversation names the application
+    conversation it was admitted for, and that names the customer.
+    """
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    from core.commerce_runtime import conversation_link as cl  # noqa: PLC0415
+    from core.commerce_runtime import pilot_guard as pg  # noqa: PLC0415
+
+    engine = _engine_of(session)
+    try:
+        with engine.connect() as conn:
+            turn = conn.execute(sa_text(
+                "SELECT channel_connection_ref, conversation_id FROM commerce_runtime_turns "
+                "WHERE id = :id AND tenant_id = :tenant"),
+                {"id": int(found.turn_id), "tenant": int(row.tenant_id)}).mappings().first()
+            if turn is None:
+                return False, "no_runtime_turn_for_that_identity", {}
+            if str(turn["channel_connection_ref"]) != str(row.channel_connection_ref):
+                return False, "turn_is_on_another_connection", {}
+            ref = conn.execute(sa_text(
+                "SELECT conversation_ref FROM commerce_runtime_conversations "
+                "WHERE id = :id AND tenant_id = :tenant"),
+                {"id": int(turn["conversation_id"]), "tenant": int(row.tenant_id)}).scalar()
+            parsed = cl.parse_conversation_ref(ref)
+            if parsed is None:
+                return False, "turn_conversation_is_not_bound_to_an_application_conversation", {}
+            _channel, app_conversation_id = parsed
+            phones = conn.execute(sa_text(
+                "SELECT c.normalized_phone, c.phone FROM conversations v "
+                "JOIN customers c ON c.id = v.customer_id "
+                "WHERE v.id = :id AND v.tenant_id = :tenant"),
+                {"id": int(app_conversation_id), "tenant": int(row.tenant_id)}).first()
+            if phones is None:
+                return False, "turn_conversation_has_no_customer", {}
+            candidates = {pg.normalize_recipient(p) for p in phones if p}
+            if pg.normalize_recipient(row.recipient) not in candidates:
+                return False, "turn_belongs_to_another_customer", {}
+            terminal_at = conn.execute(sa_text(
+                "SELECT recorded_at FROM commerce_runtime_turn_terminals "
+                "WHERE turn_id = :id AND tenant_id = :tenant"),
+                {"id": int(found.turn_id), "tenant": int(row.tenant_id)}).scalar()
+    except Exception as exc:  # noqa: BLE001 - unverifiable is not verified
+        logger.warning("[COMMERCE_RUNTIME_HANDOVER] turn binding unverifiable tenant=%s "
+                       "error=%s", row.tenant_id, type(exc).__name__)
+        return False, "evidence_could_not_be_verified", {}
+    moment = _aware(terminal_at)
+    return True, "", {"app_conversation_id": int(app_conversation_id),
+                      "terminal_recorded_at": None if moment is None else moment.isoformat()}
 
 
 def dispose_inbound(db: Any, *, tenant_id: int, entry_ids: Sequence[int], disposition: str,
@@ -1084,6 +1394,8 @@ __all__ = [
     "STATE_OPEN", "STATE_SETTLED", "SettlementResult", "WORKER_LIVE_SECONDS", "WorkerReport",
     "DISPOSITION_EVIDENCE_KEYS", "RETIREMENT_EVIDENCE_KEYS", "ReleaseState",
     "RetirementRefused", "expected_fleet", "release_state",
+    "BLOCKER_INVENTORY_UNSTATED", "BarrierReleased", "ReleaseResult", "STATE_RELEASED",
+    "STOP_RECORD_MAX_BYTES", "admits_recovery_on", "fleet_blockers", "fleet_on", "release",
     "accepted_inbound", "admits_new_work_on", "barrier_admits_new_work", "convergence",
     "dispose_inbound",
     "fleet", "note_worker", "open_drain", "pending_count", "pending_count_on",

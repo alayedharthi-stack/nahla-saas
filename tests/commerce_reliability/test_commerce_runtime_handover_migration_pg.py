@@ -157,7 +157,7 @@ def test_an_incompatible_pre_existing_relation_is_refused_and_not_stamped(
     assert THIS_REVISION not in _current_revisions(engine)
 
 
-def test_the_downgrade_removes_what_it_made_and_leaves_0109_alone(database_at_0109) -> None:
+def test_the_downgrade_removes_what_it_made_and_leaves_0109_alone(database_at_0109) -> None:  # noqa: E501
     dsn, engine = database_at_0109
     _alembic(dsn, THIS_REVISION)
     _alembic(dsn, PREVIOUS_REVISION, downgrade=True)
@@ -233,3 +233,228 @@ def test_the_worker_row_carries_its_retirement_evidence(database_at_0109) -> Non
     columns = {c["name"] for c in inspector.get_columns(hm.WORKERS_TABLE)}
     assert "retirement_evidence" in columns
     assert "updated_at" in columns
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Guarantees are compared by definition, not by name
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Each case creates the declared relation from the package's own metadata and
+# then alters ONE guarantee while keeping its name — the shape a relation made
+# by hand to look right would have — and holds the revision to refusing it.
+
+
+def _declared(engine) -> None:
+    with engine.begin() as conn:
+        hm.RuntimeBase.metadata.create_all(conn, tables=list(hm.HANDOVER_TABLE_OBJECTS))
+
+
+def _table(name: str):
+    return next(t for t in hm.HANDOVER_TABLE_OBJECTS if t.name == name)
+
+
+def _refused(dsn, engine, table_name: str, needle: str) -> None:
+    module = _migration_module()
+    with engine.connect() as conn:
+        diffs = module._differences(conn, _table(table_name))
+    assert any(needle in d for d in diffs), diffs
+    with pytest.raises(Exception) as caught:
+        _alembic(dsn, THIS_REVISION)
+    assert "refuses to reconcile" in str(caught.value)
+    assert THIS_REVISION not in _current_revisions(engine)
+
+
+def test_a_correct_pre_existing_relation_has_no_differences(database_at_0109) -> None:
+    dsn, engine = database_at_0109
+    _declared(engine)
+    module = _migration_module()
+    with engine.connect() as conn:
+        for table in hm.HANDOVER_TABLE_OBJECTS:
+            assert module._differences(conn, table) == []
+    _alembic(dsn, THIS_REVISION)
+    assert THIS_REVISION in _current_revisions(engine)
+
+
+def test_a_unique_constraint_with_the_right_name_over_the_wrong_columns_is_refused(
+        database_at_0109) -> None:
+    """The identity constraint that deduplicates acknowledgements, missing a
+    column: the same provider message on two connections would collide, and
+    the same message twice on one connection would not."""
+    dsn, engine = database_at_0109
+    _declared(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {hm.DEFERRED_TABLE} DROP CONSTRAINT "
+                          f"uq_commerce_runtime_deferred_inbound_identity"))
+        conn.execute(text(f"ALTER TABLE {hm.DEFERRED_TABLE} ADD CONSTRAINT "
+                          f"uq_commerce_runtime_deferred_inbound_identity "
+                          f"UNIQUE (tenant_id, namespace, provider_message_id)"))
+    _refused(dsn, engine, hm.DEFERRED_TABLE,
+             "unique constraint uq_commerce_runtime_deferred_inbound_identity is")
+
+
+def test_a_check_constraint_with_the_right_name_and_a_wider_expression_is_refused(
+        database_at_0109) -> None:
+    dsn, engine = database_at_0109
+    _declared(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {hm.DEFERRED_TABLE} DROP CONSTRAINT "
+                          f"ck_commerce_runtime_deferred_inbound_state"))
+        conn.execute(text(f"ALTER TABLE {hm.DEFERRED_TABLE} ADD CONSTRAINT "
+                          f"ck_commerce_runtime_deferred_inbound_state "
+                          f"CHECK (state IN ('pending', 'resolved', 'disposed', 'forgotten'))"))
+    _refused(dsn, engine, hm.DEFERRED_TABLE,
+             "check constraint ck_commerce_runtime_deferred_inbound_state is")
+
+
+def test_the_pending_index_with_the_right_name_but_no_predicate_is_refused(
+        database_at_0109) -> None:
+    dsn, engine = database_at_0109
+    _declared(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP INDEX ix_commerce_runtime_deferred_inbound_pending"))
+        conn.execute(text(f"CREATE INDEX ix_commerce_runtime_deferred_inbound_pending "
+                          f"ON {hm.DEFERRED_TABLE} (tenant_id, namespace)"))
+    _refused(dsn, engine, hm.DEFERRED_TABLE,
+             "index constraint ix_commerce_runtime_deferred_inbound_pending is")
+
+
+def test_a_primary_key_over_the_wrong_columns_is_refused(database_at_0109) -> None:
+    dsn, engine = database_at_0109
+    _declared(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {hm.BARRIER_TABLE} DROP CONSTRAINT "
+                          f"commerce_runtime_handover_barrier_pkey"))
+        conn.execute(text(f"ALTER TABLE {hm.BARRIER_TABLE} ADD PRIMARY KEY (tenant_id)"))
+    _refused(dsn, engine, hm.BARRIER_TABLE, "primary key is")
+
+
+def test_an_undeclared_constraint_is_refused_rather_than_tolerated(database_at_0109) -> None:
+    """A stricter relation refuses rows the runtime writes; it is not compatible."""
+    dsn, engine = database_at_0109
+    _declared(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {hm.WORKERS_TABLE} ADD CONSTRAINT "
+                          f"ck_somebody_elses_rule CHECK (observed_generation < 5)"))
+    _refused(dsn, engine, hm.WORKERS_TABLE, "undeclared check constraint ck_somebody_elses_rule")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The address sibling: either order applies, and only 0111@-1 rolls back the
+# runtime alone
+# ═════════════════════════════════════════════════════════════════════════════
+
+import os
+import tempfile
+
+from scripts.operators import commerce_runtime_pilot_migration_contract as contract
+
+ADDRESS_REVISION = contract.ADDRESS_SIBLING_REVISION
+STAND_IN_TABLE = "stand_in_address_sibling"
+
+
+def _script_has(revision: str) -> bool:
+    from alembic.script import ScriptDirectory
+    from alembic.script.revision import ResolutionError
+    from alembic.util.exc import CommandError
+    from tests.commerce_reliability.test_commerce_runtime_foundation_pg import _alembic_config
+
+    script = ScriptDirectory.from_config(_alembic_config("postgresql://unused"))
+    try:
+        return script.get_revision(revision) is not None
+    except (ResolutionError, CommandError):
+        # ``ScriptDirectory`` wraps the resolution error in a ``CommandError``;
+        # either spelling means the same thing here: not in this repository.
+        return False
+
+
+@pytest.fixture
+def sibling_location():
+    """Where the address sibling lives for this run.
+
+    Once PR #1096 has merged, ``0110`` is in the repository and is used as it
+    is. Until then a stand-in with the same graph position — revision ``0110``
+    revising ``0109``, creating one table — stands in for it, so the proof is
+    about the branch topology and not about which PR merged first. Two ``0110``
+    revisions would be an Alembic error, so exactly one is ever in play.
+    """
+    if _script_has(ADDRESS_REVISION):
+        yield None, "customer_address_provenance"
+        return
+    with tempfile.TemporaryDirectory() as folder:
+        with open(os.path.join(folder, "0110_stand_in_address_sibling.py"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(
+                '"""Stand-in for the customer-address provenance sibling (test only)."""\n'
+                "from alembic import op\nimport sqlalchemy as sa\n\n"
+                f'revision = "{ADDRESS_REVISION}"\ndown_revision = "0109"\n'
+                "branch_labels = None\ndepends_on = None\n\n\n"
+                "def upgrade() -> None:\n"
+                f'    op.create_table("{STAND_IN_TABLE}", sa.Column("id", sa.Integer, primary_key=True))\n\n\n'
+                "def downgrade() -> None:\n"
+                f'    op.drop_table("{STAND_IN_TABLE}")\n')
+        yield folder, STAND_IN_TABLE
+
+
+def _alembic_with(dsn: str, revision: str, *, extra_location, downgrade: bool = False) -> None:
+    from alembic import command
+    from tests.commerce_reliability.test_commerce_runtime_foundation_pg import _alembic_config
+
+    cfg = _alembic_config(dsn)
+    if extra_location:
+        cfg.set_main_option(
+            "version_locations",
+            f"{REPO_ROOT / 'database' / 'migrations' / 'versions'} {extra_location}")
+    previous_cwd, previous_url = os.getcwd(), os.environ.get("DATABASE_URL")
+    os.chdir(REPO_ROOT / "database")
+    os.environ["DATABASE_URL"] = dsn
+    try:
+        (command.downgrade if downgrade else command.upgrade)(cfg, revision)
+    finally:
+        os.chdir(previous_cwd)
+        if previous_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_url
+
+
+@pytest.mark.parametrize("order", ["address_first", "runtime_first"])
+def test_the_siblings_apply_in_either_order_and_the_runtime_rolls_back_alone(
+        database_at_0109, sibling_location, order) -> None:
+    dsn, engine = database_at_0109
+    location, address_table = sibling_location
+    sequence = ([ADDRESS_REVISION, THIS_REVISION] if order == "address_first"
+                else [THIS_REVISION, ADDRESS_REVISION])
+    for revision in sequence:
+        _alembic_with(dsn, revision, extra_location=location)
+    assert _current_revisions(engine) == {ADDRESS_REVISION, THIS_REVISION}
+    assert set(hm.HANDOVER_TABLES) <= _relations(engine)
+    assert address_table in _relations(engine)
+    # The contract's start-state and applied-state vocabulary agrees with the
+    # database's own account of itself.
+    assert contract.already_applied(frozenset(_current_revisions(engine)))
+
+    # The one runtime-only rollback spelling.
+    argv = contract.build_downgrade_argv(python_executable="python")
+    target = argv[-1]
+    assert argv[-2] == "downgrade" and target == contract.RUNTIME_ONLY_DOWNGRADE_TARGET
+    _alembic_with(dsn, target, extra_location=location, downgrade=True)
+
+    remaining = _relations(engine)
+    assert not (remaining & set(hm.HANDOVER_TABLES))      # the runtime's three are gone
+    assert address_table in remaining                       # the sibling's table is not
+    assert set(LEDGER_RELATIONS) <= remaining
+    assert _current_revisions(engine) == {ADDRESS_REVISION}  # ...and its revision stands
+    assert contract.start_state_accepted(frozenset(_current_revisions(engine)))
+
+
+def test_the_common_ancestor_spellings_would_take_the_sibling_with_them(
+        database_at_0109, sibling_location) -> None:
+    """Why the contract names ``0111@-1`` and nothing else: proved, not read."""
+    dsn, engine = database_at_0109
+    location, address_table = sibling_location
+    for spelling in ("0109", f"{THIS_REVISION}-1"):
+        _alembic_with(dsn, ADDRESS_REVISION, extra_location=location)
+        _alembic_with(dsn, THIS_REVISION, extra_location=location)
+        _alembic_with(dsn, spelling, extra_location=location, downgrade=True)
+        assert address_table not in _relations(engine), spelling
+        assert _current_revisions(engine) == {"0109"}, spelling

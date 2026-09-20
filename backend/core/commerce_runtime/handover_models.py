@@ -68,7 +68,13 @@ HANDOVER_TABLES = (BARRIER_TABLE, WORKERS_TABLE, DEFERRED_TABLE)
 STATE_OPEN = "open"
 STATE_DRAINING = "draining"
 STATE_SETTLED = "settled"
-BARRIER_STATES = (STATE_OPEN, STATE_DRAINING, STATE_SETTLED)
+# The operator has verified, under the lock, that the settlement still holds and
+# the fleet is accounted for, and has been told the pilot may be switched off.
+# From this instant acceptance refuses new pilot-scoped work outright — the
+# provider is answered retryable, nothing is recorded — so nothing accepted can
+# be abandoned by the configuration change that follows.
+STATE_RELEASED = "released"
+BARRIER_STATES = (STATE_OPEN, STATE_DRAINING, STATE_SETTLED, STATE_RELEASED)
 
 # What a deferred inbound is waiting for, and what became of it.
 DEFERRED_PENDING = "pending"        # accepted, not yet finished by anybody
@@ -96,7 +102,7 @@ DISPOSITIONS = (DISPOSITION_REPLAYED, DISPOSITION_ANSWERED, DISPOSITION_SUPERSED
                 DISPOSITION_NOT_REQUIRED)
 
 _NAMESPACE_SQL = "namespace IN ('live', 'shadow')"
-_BARRIER_STATE_SQL = "state IN ('open', 'draining', 'settled')"
+_BARRIER_STATE_SQL = "state IN ('open', 'draining', 'settled', 'released')"
 _DEFERRED_STATE_SQL = "state IN ('pending', 'resolved', 'disposed')"
 # Written as an equality rather than two OR'd clauses on purpose: with an OR,
 # ``state = 'disposed'`` and a NULL disposition evaluates to NULL, and a CHECK
@@ -127,6 +133,9 @@ class HandoverBarrier(RuntimeBase):
                         server_default=text("0"))
     opened_at = Column(DateTime(timezone=True), nullable=True)
     settled_at = Column(DateTime(timezone=True), nullable=True)
+    # When the release was verified and written. Acceptance reads it under the
+    # shared lock, so an inbound cannot be accepted after it.
+    released_at = Column(DateTime(timezone=True), nullable=True)
     # The snapshot the settlement decision rested on, written in the same
     # transaction as the transition it describes.
     evidence = Column(JSONB, nullable=False, default=dict,
@@ -265,5 +274,5 @@ __all__ = [
     "HANDOVER_TABLES", "HANDOVER_TABLE_OBJECTS", "HandoverBarrier", "HandoverWorker",
     "REASON_ACCEPTED", "REASON_ADMISSION_REFUSED", "REASON_DRAIN_BUFFERED",
     "REASON_PROCESS_DRAINING", "REASON_SETTLED_WINDOW", "STATE_DRAINING", "STATE_OPEN",
-    "STATE_SETTLED", "WORKERS_TABLE", "create_handover_tables",
+    "STATE_RELEASED", "STATE_SETTLED", "WORKERS_TABLE", "create_handover_tables",
 ]

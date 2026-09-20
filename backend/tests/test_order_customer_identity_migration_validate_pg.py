@@ -163,6 +163,8 @@ def ephemeral_validate_engine() -> Iterator[Engine]:
         admin_engine.dispose()
 
 
+from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
+
 def test_repository_has_parallel_heads_0092_and_0098() -> None:
     prev_cwd = os.getcwd()
     try:
@@ -326,8 +328,7 @@ def test_migration_0088_never_selected_by_head_literal() -> None:
         script = ScriptDirectory(str(_DATABASE / "migrations"))
     finally:
         os.chdir(prev_cwd)
-    for head in script.get_heads():
-        assert head in _REPOSITORY_ALEMBIC_HEADS
+    assert repository_heads_expected(script.get_heads())
     assert "head" not in {"0092", "0111"}
 
 
