@@ -736,6 +736,31 @@ def test_a_record_is_resolved_only_by_a_verified_answer_never_by_a_caller(config
             == "no_runtime_turn_for_that_identity"
 
 
+@pytest.mark.parametrize("kind", ["not_required", "unanswered"])
+def test_a_no_response_disposition_refuses_when_the_evidence_cannot_be_read(configured, db, kind):
+    """The residual finding's shape on the operator's own database: the
+    runtime's records cannot be read at the moment of the disposition. That
+    is not absence, and the entry stays pending — the same entry closes once
+    the read succeeds and says there is no turn."""
+    from core.commerce_runtime import recovery as core_recovery
+
+    assert run(["drain"]) == job.EXIT_OK
+    entry = defer(db, identity="wamid.unreadable")
+
+    def _boom(**_kwargs):
+        raise RuntimeError("ledger unavailable")
+    with pytest.MonkeyPatch.context() as unreadable:
+        unreadable.setattr(core_recovery, "admitted_turn_for", _boom)
+        assert run(["dispose", "--entry", str(entry.id), "--disposition", kind,
+                    "--evidence", json.dumps({"authorized_by": "owner", "why": "closing"}),
+                    "--by", "owner"]) == job.EXIT_BLOCKED
+        assert handover.pending_count(db, tenant_id=db.tenant_id) == 1
+    assert run(["dispose", "--entry", str(entry.id), "--disposition", kind,
+                "--evidence", json.dumps({"authorized_by": "owner", "why": "closing"}),
+                "--by", "owner"]) == job.EXIT_OK
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+
 def test_disposed_history_does_not_consume_the_pending_capacity(configured, db,
                                                                 monkeypatch):
     """Retention: what has been accounted for stops occupying the limit."""

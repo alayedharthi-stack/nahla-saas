@@ -118,12 +118,29 @@ def unfinished_turn_for(
     return admitted if admitted is not None and admitted.unfinished else None
 
 
+class EvidenceUnavailable(RuntimeError):
+    """The runtime's records could not be read. That is not "no turn"."""
+
+
+def _turn_table_present(engine: Any) -> bool:
+    """Whether this database holds the runtime's turn table — read now, on
+    the engine handed in, raising when the catalogue cannot be read. The
+    cached schema probe is for admission, where a failed probe keeps the
+    runtime off; a decision that *closes* something must not read a cached
+    failure as absence."""
+    from sqlalchemy import inspect as sa_inspect  # noqa: PLC0415
+
+    with engine.begin() as conn:
+        return bool(sa_inspect(conn).has_table("commerce_runtime_turns"))
+
+
 def admitted_turn_for(
     *,
     tenant_id: int,
     phone_number_id: Any,
     provider_message_id: Any,
     engine: Any = None,
+    strict: bool = False,
 ) -> Optional[AdmittedInbound]:
     """Any turn this runtime admitted for this inbound identity, finished or not.
 
@@ -134,8 +151,13 @@ def admitted_turn_for(
     the runtime already owns and already answered becomes new work for the
     legacy path.
 
-    Read-only and never raises: anything it cannot establish is ``None``, which
-    keeps every caller on its existing behaviour.
+    Read-only. By default it never raises: anything it cannot establish is
+    ``None``, which keeps every routing caller on its existing behaviour — a
+    turn nobody can see is not routed to the runtime. A caller that is about
+    to **close** an obligation on the answer asks with ``strict=True``: then
+    ``None`` is answered only after the turn table was found and read and
+    holds no turn for this identity, and a read that fails raises
+    :class:`EvidenceUnavailable` instead — a failed read is not absence.
     """
     pmid = str(provider_message_id or "").strip()
     channel = channel_connection_ref(phone_number_id)
@@ -149,7 +171,10 @@ def admitted_turn_for(
             from database.session import engine as default_engine  # noqa: PLC0415
 
             engine = default_engine
-        if not runtime_schema_available(engine):
+        if strict:
+            if not _turn_table_present(engine):
+                return None
+        elif not runtime_schema_available(engine):
             return None
         foundation = LedgerRepository(engine).foundation
         admitted = foundation.find_admitted_turn(
@@ -165,6 +190,8 @@ def admitted_turn_for(
     except Exception as exc:  # noqa: BLE001 - an unreadable ledger establishes nothing
         logger.warning("[COMMERCE_RUNTIME_RECOVERY] lookup failed tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
+        if strict:
+            raise EvidenceUnavailable(type(exc).__name__) from exc
         return None
 
 
@@ -432,7 +459,7 @@ def handover_settled(states: Any) -> bool:
     return bool(states) and all(state.settled for state in states)
 
 
-__all__ = [
+__all__ = ["EvidenceUnavailable", 
     "AdmittedInbound", "BASIS_ACCEPTED_NOT_ADMITTED", "BASIS_UNFINISHED_TURN",
     "CHANNEL_REF_PREFIX", "HandoverState", "MAX_TENANTS_CONSIDERED", "Recoverable",
     "accepted_but_unadmitted",

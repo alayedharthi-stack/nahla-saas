@@ -957,10 +957,17 @@ STOP_RECORD_REQUIRED_KEYS: Tuple[str, ...] = (
 )
 # A state word the platform uses for a deployment or process that is no longer
 # running. Anything else — running, deploying, sleeping, an unknown word — is
-# not evidence of a stop and is refused by name.
+# not evidence of a stop and is refused by name. Of the inactive words only
+# the **fenced** ones establish what a retirement rests on: the platform will
+# not run that deployment or process again under the same identity. A stopped,
+# exited or crashed one can be started again — and a crashed container is, by
+# the service's restart policy — so those are inactive and refused as well.
 STOP_RECORD_INACTIVE_STATES = frozenset({
     "stopped", "removed", "exited", "crashed", "failed", "terminated", "inactive",
-    "dead", "skipped",
+    "dead", "skipped", "deleted",
+})
+STOP_RECORD_FENCED_STATES = frozenset({
+    "removed", "terminated", "dead", "failed", "skipped", "deleted",
 })
 
 
@@ -975,9 +982,12 @@ def _validated_stop_record(record: str, *, deployment: str,
     A digest proves which bytes were retained, not that a process stopped. So
     the record is read: it has to be a structured document about **this**
     deployment, naming the incarnation, carrying a state word the platform uses
-    for something no longer running, reporting **zero** active replicas, and
-    observed at the moment the retirement claims. A record that says the
-    deployment is running is a contradiction and is refused as one.
+    for something it will not run again (inactive is not enough — a stopped or
+    crashed process can be started again), reporting **zero** active replicas,
+    and observed at the moment the retirement claims. A record that says the
+    deployment is running is a contradiction and is refused as one — and so is
+    a record whose retained capture says so while its summary says otherwise,
+    because the capture, not the summary, is the platform's word.
     """
     import json  # noqa: PLC0415
 
@@ -998,6 +1008,8 @@ def _validated_stop_record(record: str, *, deployment: str,
     state = str(document["state"]).strip().lower()
     if state not in STOP_RECORD_INACTIVE_STATES:
         raise RetirementRefused(f"stop_record_state_is_not_inactive:{state}")
+    if state not in STOP_RECORD_FENCED_STATES:
+        raise RetirementRefused(f"stop_record_state_is_not_a_fence:{state}")
     try:
         replicas = int(document["active_replicas"])
     except (TypeError, ValueError) as exc:
@@ -1010,9 +1022,55 @@ def _validated_stop_record(record: str, *, deployment: str,
     if seen != observed:
         raise RetirementRefused("stop_record_observation_differs_from_observed_at")
     raw = document.get("raw")
-    if raw is not None and not isinstance(raw, str):
-        raise RetirementRefused("stop_record_raw_must_be_text")
-    return {"state": state, "incarnation": str(document["incarnation"]).strip()}
+    if raw is not None:
+        if not isinstance(raw, str):
+            raise RetirementRefused("stop_record_raw_must_be_text")
+        _raw_capture_agrees(raw, deployment=deployment)
+    basis = str(document.get("active_replicas_basis") or "unstated").strip()
+    return {"state": state, "incarnation": str(document["incarnation"]).strip(),
+            "active_replicas_basis": basis}
+
+
+def _raw_capture_agrees(raw: str, *, deployment: str) -> None:
+    """The platform's capture retained under ``raw``, re-read.
+
+    The record's summary is what an operator tool wrote; the capture is what
+    the platform said. A summary that says *removed, zero replicas* over a
+    capture that names another deployment, a running or restartable status,
+    or a replica still active is a contradiction, and the capture wins: the
+    retirement is refused by name. A capture that is not a document cannot be
+    re-read and is refused too.
+    """
+    import json  # noqa: PLC0415
+
+    from core.commerce_runtime import stop_evidence as se  # noqa: PLC0415
+
+    try:
+        capture = json.loads(raw)
+    except ValueError as exc:
+        raise RetirementRefused("stop_record_raw_not_structured") from exc
+    found = se.find_deployment(capture, deployment)
+    if found is None:
+        listed = se.deployments_in(capture)
+        if any(str(item.get("id") or "").strip() for item in listed):
+            # The capture names deployments, and none of them is this one.
+            raise RetirementRefused("stop_record_raw_names_another_deployment")
+        if len(listed) == 1:
+            found = listed[0]
+        elif isinstance(capture, dict) and ("status" in capture or "state" in capture):
+            found = capture
+        else:
+            raise RetirementRefused("stop_record_raw_not_structured")
+    kind, word = se.state_for(se.status_word(found))
+    if kind == "active":
+        raise RetirementRefused(f"stop_record_raw_state_is_active:{word}")
+    if kind == "restartable":
+        raise RetirementRefused(f"stop_record_raw_state_is_not_a_fence:{word}")
+    if kind != "fenced":
+        raise RetirementRefused(f"stop_record_raw_state_unrecognised:{word or '(none)'}")
+    measured, _key, _configured = se.replica_evidence(found)
+    if measured is not None and measured > 0:
+        raise RetirementRefused(f"stop_record_raw_reports_active_replicas:{measured}")
 
 
 def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str,
@@ -1066,6 +1124,7 @@ def retire_worker(db: Any, *, tenant_id: int, name: str, by: str, reason: str,
     supplied["stop_record_bytes"] = len(encoded)
     supplied["stop_record_state"] = structured["state"]
     supplied["stop_record_incarnation"] = structured["incarnation"]
+    supplied["stop_record_active_replicas_basis"] = structured["active_replicas_basis"]
 
     with _locked(db, tenant_id) as session:
         row = (session.query(hm.HandoverWorker)
@@ -1300,7 +1359,14 @@ def verify_handling(db: Any, *, tenant_id: int, entry_id: int) -> Tuple[bool, st
 
 
 def _verified_answer(session: Any, row: Any, identity: str) -> Tuple[bool, str, Dict[str, Any]]:
-    """The runtime turn for ``identity``, checked as an answer to ``row``."""
+    """The runtime turn for ``identity``, checked as an answer to ``row``.
+
+    The lookup is the **strict** one: ``None`` means the turn table was found
+    and read and holds no turn for this identity, and a read that fails is
+    reported as unverifiable — never as absence. Every caller closes or
+    refuses on this answer, so a failed read has to be told apart from an
+    empty one.
+    """
     from core.commerce_runtime import recovery  # noqa: PLC0415
 
     phone_number_id = str(row.channel_connection_ref).split(":", 1)[-1]
@@ -1309,12 +1375,48 @@ def _verified_answer(session: Any, row: Any, identity: str) -> Tuple[bool, str, 
         # the process default points at.
         found = recovery.admitted_turn_for(
             tenant_id=int(row.tenant_id), phone_number_id=phone_number_id,
-            provider_message_id=identity, engine=_engine_of(session))
+            provider_message_id=identity, engine=_engine_of(session), strict=True)
     except Exception as exc:  # noqa: BLE001 - unverifiable is not verified
         logger.warning("[COMMERCE_RUNTIME_HANDOVER] handling evidence unverifiable "
                        "tenant=%s error=%s", row.tenant_id, type(exc).__name__)
         return False, "evidence_could_not_be_verified", {}
     return handling_verdict(session, row, found)
+
+
+# What the validator has to have **read** before a no-response disposition
+# may rest on it. "The records hold no turn for this inbound" and "its
+# terminal records a reply that was not accepted" are both positive findings;
+# a read that failed, a turn that is not bound to this entry, a turn without a
+# terminal yet and a send whose outcome is unknown are none of them.
+VERIFIED_ABSENCE = "no_runtime_turn_for_that_identity"
+NOT_ANSWERED_TRANSPORTS = frozenset({"rejected_definitive", "not_attempted"})
+
+
+def _no_response_verdict(ok: bool, why: str, found: Mapping[str, Any]) -> Tuple[bool, str]:
+    """Whether ``not_required``/``unanswered`` may close the entry, given the
+    answer validator's verdict on the entry's own turn. Refuses by name
+    otherwise; unavailable evidence is never permission."""
+    if ok:
+        return False, "the_runtime_answered_this_inbound"
+    if why == VERIFIED_ABSENCE:
+        return True, ""
+    if why.startswith("terminal_is_not_an_accepted_reply:"):
+        transport = str(found.get("transport_outcome") or "")
+        if transport in NOT_ANSWERED_TRANSPORTS:
+            return True, ""
+        if transport == "unknown":
+            # A send nobody established the outcome of may have arrived.
+            # "Unanswered" would be a claim nobody can make; it stays pending.
+            return False, "delivery_outcome_unknown"
+        if transport == ANSWER_TRANSPORT_OUTCOME:
+            # The provider accepted a reply even though the turn did not
+            # complete: the customer may well have it. Not "no response".
+            return False, ("the_provider_accepted_a_reply:"
+                           f"processing={found.get('processing_outcome') or ''}")
+        return False, f"transport_outcome_unrecognised:{transport or '(none)'}"
+    # Unverifiable, unbound, or a turn with no terminal yet: nothing about
+    # this inbound was established, and nothing is closed on it.
+    return False, why
 
 
 # What a terminal has to say before it counts as having answered a customer.
@@ -1424,9 +1526,11 @@ def _verified_handling(session: Any, row: Any, kind: str,
     provider message id; that identity is resolved against **this tenant and
     this channel connection**, and it has to be a runtime turn that reached a
     terminal. ``superseded`` names a later inbound for the same recipient that
-    this platform actually holds. ``not_required`` claims no delivery at all —
-    it is an operator's decision, stored with who authorised it and why, and it
-    is the only disposition that asserts nothing about the customer.
+    this platform actually holds. ``not_required`` and ``unanswered`` assert
+    that nothing answered this inbound: they are an operator's decision, stored
+    with who authorised it and why, and they rest on the runtime's records
+    having been **read** — no turn, or a reply that was not accepted. Records
+    that could not be read permit nothing.
     """
     from core.commerce_runtime import recovery  # noqa: PLC0415
 
@@ -1435,18 +1539,23 @@ def _verified_handling(session: Any, row: Any, kind: str,
     if missing:
         return False, f"evidence_missing:{','.join(missing)}", {}
 
-    if kind == "not_required":
-        # No delivery was owed — an operator's judgement, which cannot stand
-        # when the runtime's own turn did in fact answer this inbound: then
-        # the record is ``answered``, whatever anyone decided about it. Nor
-        # when a send's outcome is unknown: it may have arrived.
-        ok, _why, found = _verified_answer(session, row, str(row.provider_message_id))
-        if ok:
-            return False, "the_runtime_answered_this_inbound", {}
-        if found.get("transport_outcome") == "unknown":
-            return False, "delivery_outcome_unknown", {}
+    if kind in ("not_required", "unanswered"):
+        # ``not_required``: no delivery was owed — an operator's judgement.
+        # ``unanswered``: the customer was **not** answered, closed knowingly.
+        # Neither can stand when the runtime's own turn did answer this
+        # inbound (then the record is ``answered``, whatever anyone decided),
+        # nor when a send's outcome is unknown (it may have arrived) — and
+        # neither rests on evidence that could not be read: the records have
+        # to have been read and to say there is no turn, or that its reply
+        # was not accepted. What was read is stored with the row.
+        ok, why, found = _verified_answer(session, row, str(row.provider_message_id))
+        permitted, refusal = _no_response_verdict(ok, why, found)
+        if not permitted:
+            return False, refusal, {}
         return True, "", {"authorized_by": str(evidence["authorized_by"]).strip(),
-                          "why": str(evidence["why"]).strip()}
+                          "why": str(evidence["why"]).strip(),
+                          "runtime_terminal": why,
+                          **({"runtime_turn_id": found["turn_id"]} if found.get("turn_id") else {})}
 
     if kind == "superseded":
         identity = str(evidence["superseded_by_provider_message_id"]).strip()
@@ -1477,23 +1586,6 @@ def _verified_handling(session: Any, row: Any, kind: str,
         return True, "", {"superseded_by_entry_id": int(later.id),
                           "superseded_by_provider_message_id": identity,
                           "superseded_by_created_at": later_at.isoformat()}
-
-    if kind == "unanswered":
-        # The one disposition that says the customer was **not** answered. It
-        # is refused when the runtime's own turn for this inbound did answer —
-        # then the truthful record is ``answered`` — and otherwise stores what
-        # the runtime's terminal, if any, actually recorded.
-        ok, why, found = _verified_answer(session, row, str(row.provider_message_id))
-        if ok:
-            return False, "the_runtime_answered_this_inbound", {}
-        if found.get("transport_outcome") == "unknown":
-            # A send nobody established the outcome of may have arrived.
-            # "Unanswered" would be a claim nobody can make; it stays pending.
-            return False, "delivery_outcome_unknown", {}
-        return True, "", {"authorized_by": str(evidence["authorized_by"]).strip(),
-                          "why": str(evidence["why"]).strip(),
-                          "runtime_terminal": why,
-                          **({"runtime_turn_id": found["turn_id"]} if found.get("turn_id") else {})}
 
     key = keys[0]
     identity = str(evidence[key]).strip()
@@ -1701,6 +1793,7 @@ __all__ = [
     "RetirementRefused", "expected_fleet", "release_state",
     "BLOCKER_INVENTORY_UNSTATED", "BarrierReleased", "ReleaseResult", "STATE_RELEASED",
     "STOP_RECORD_MAX_BYTES", "STOP_RECORD_REQUIRED_KEYS", "STOP_RECORD_INACTIVE_STATES",
+    "STOP_RECORD_FENCED_STATES",
     "ANSWER_PROCESSING_OUTCOME", "ANSWER_TRANSPORT_OUTCOME", "CUSTOMER_REACHED",
     "handling_verdict", "verify_handling", "worker_deployment",
     "admits_recovery_on", "fleet_blockers", "fleet_on", "release",

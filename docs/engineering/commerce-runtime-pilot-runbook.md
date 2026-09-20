@@ -401,7 +401,9 @@ railway deployment list --service nahla-saas --environment production --json \
     > /tmp/deployments.json
 
 # 4. build the structured stop record. It is REFUSED (exit 3, nothing written)
-#    while the platform still reports the deployment as SUCCESS/DEPLOYING/SLEEPING.
+#    while the platform still reports the deployment as SUCCESS/DEPLOYING/SLEEPING,
+#    as CRASHED (restartable under the restart policy: remove it instead), or
+#    with any replica or instance reported running.
 python -m scripts.operators.commerce_runtime_worker_stop_record \
     --deployment 477f560f-a47c-4750-966e-8acffc4c9596 \
     --incarnation "477f560f-a47c-4750-966e-8acffc4c9596/0" \
@@ -427,27 +429,51 @@ them; if the operator does, they have to agree with it):
 | `deployment` | the exact deployment identity, as the platform names it. A worker that reported as `<deployment>/<replica>@host:pid` can only be retired against **that** deployment (`deployment_does_not_match_the_worker_s_own`). "some replica" retires nothing. |
 | `stop_verified_by` | how the stop or the fencing was established — the command run, the console state read — in a form an on-call engineer can re-check. |
 | `observed_at` | when the platform was asked, ISO-8601; it must be the record's own `observed_at`. |
-| `stop_record` (`--stop-record <file>`) | the **structured** record `commerce_runtime_worker_stop_record` writes from the platform's captured answer: `deployment`, `incarnation`, `state`, `active_replicas`, `observed_at`, `source`, plus the captured answer under `raw`. Retained verbatim on the worker row with its SHA-256 and size (≤ 64 KiB). |
+| `stop_record` (`--stop-record <file>`) | the **structured** record `commerce_runtime_worker_stop_record` writes from the platform's captured answer: `deployment`, `incarnation`, `state`, `active_replicas`, `active_replicas_basis`, `observed_at`, `source`, plus the captured answer under `raw`. Retained verbatim on the worker row with its SHA-256 and size (≤ 64 KiB). |
 
 The record is checked for what it says, not only for what it is: `state` has
-to be a word the platform uses for something no longer running (`removed`,
-`crashed`, `failed`, `stopped`, `exited`, `terminated`, `inactive`, `dead`,
-`skipped`), `active_replicas` has to be `0`, the deployment has to be this one,
-the moment has to be the one claimed. A record that says the deployment is
-`running`, `SUCCESS`, `sleeping` or anything else is refused as the
-contradiction it is (`stop_record_state_is_not_inactive:…`,
-`stop_record_reports_active_replicas:…`); free text is refused outright
-(`stop_record_not_structured`). A digest proves which bytes were retained; the
-reading is what makes them evidence.
+to be a word the platform uses for something it will **not run again** —
+`removed`, `terminated`, `dead`, `failed`, `skipped`, `deleted`. Inactive is
+not enough: `stopped`, `exited`, `crashed` and `inactive` name a process that
+can be started again under the same identity (a crashed container is, by the
+service's restart policy), and they are refused as
+`stop_record_state_is_not_a_fence:…`; `running`, `SUCCESS`, `sleeping` and
+every other word are refused as `stop_record_state_is_not_inactive:…`.
+`active_replicas` has to be `0`, the deployment has to be this one, the moment
+has to be the one claimed; free text is refused outright
+(`stop_record_not_structured`). **The retained capture is re-read.** The
+summary is what a tool wrote; `raw` is what the platform said, and it is read
+again against the same rules: a capture that names another deployment
+(`stop_record_raw_names_another_deployment`), a running or restartable status
+(`stop_record_raw_state_is_active:…`, `stop_record_raw_state_is_not_a_fence:…`)
+or a replica or instance still reported active
+(`stop_record_raw_reports_active_replicas:…`) refuses the retirement whatever
+the summary says. A digest proves which bytes were retained; the reading is
+what makes them evidence.
+
+**What zero replicas rests on is written down.** The builder reads the
+capture for a *measured* running count (`active_replicas`, `activeReplicas`,
+`runningReplicas`, instances listed with a running status …) and refuses a
+capture that reports one (`capture_reports_active_replicas:<n>:<key>`) — it
+never summarises a contradiction as zero. When the capture measures nothing,
+zero follows from the fence status alone and the record says so:
+`active_replicas_basis` is `measured:<key>` or
+`inferred_from_status:REMOVED`. A configured count (`numReplicas`) is what the
+deployment asked for, not what runs; it is carried as `configured_replicas`
+and contradicts nothing. Railway's `REMOVED`, `FAILED` and `SKIPPED` are the
+fence statuses; `CRASHED` is refused (`deployment_status_not_a_fence:CRASHED`)
+because the platform restarts a crashed container — remove the deployment,
+capture again.
 
 **The trusted operator boundary, stated plainly.** Steps 2–3 are the
 operator's: this platform does not stop anything and does not query Railway.
 It verifies that the record is about this deployment and incarnation, is
-internally consistent, says *inactive* and *zero replicas*, and was observed
-when claimed; that the capture is the platform's genuine answer about that
-deployment at that moment is the operator's responsibility, and the retained
-`raw` capture is what an auditor re-checks it against. Elapsed silence is
-deliberately not evidence. If the worker has reported **after** `observed_at`
+internally consistent with the capture it retains, says *fenced* and *zero
+replicas* on a stated basis, and was observed when claimed; that the capture
+is the platform's genuine answer about that deployment at that moment is the
+operator's responsibility, and the retained `raw` capture is what an auditor
+re-checks it against. Elapsed silence is deliberately not evidence. If the
+worker has reported **after** `observed_at`
 the retirement is refused with `worker reported at …, after the stop was
 observed at … — it is running`: it is demonstrably alive, whatever was
 believed when the command was typed. The evidence is stored on the worker row
@@ -511,8 +537,8 @@ not merely stored next to it:
 | `replayed` | `replayed_as_provider_message_id` (this entry's own identity) | a runtime turn for **this tenant, this channel connection and this customer** whose terminal records a **completed turn with a reply the provider accepted**, recorded after the inbound arrived |
 | `answered` | `answered_by_provider_message_id` | the same, for the turn that answered it |
 | `superseded` | `superseded_by_provider_message_id` | a later inbound for the same recipient on the same connection that this platform actually holds |
-| `not_required` | `authorized_by` **and** `why` | nothing — it claims no delivery was owed, and it is an operator's recorded judgement |
-| `unanswered` | `authorized_by` **and** `why` | the runtime's own turn for this entry, if any: refused (`the_runtime_answered_this_inbound`) when that turn did answer; otherwise the terminal it did record (failed, not attempted, abandoned) is stored with the row. It says the customer was **not** answered, and it never says anything else |
+| `not_required` | `authorized_by` **and** `why` | the runtime's own records for this entry, **read**: they hold no turn for it, or its terminal records a reply that was not accepted (`not_attempted`, `rejected_definitive`). Refused when the turn did answer (`the_runtime_answered_this_inbound`), when the send outcome is `unknown` (`delivery_outcome_unknown`), when the provider accepted a reply of a turn that did not complete (`the_provider_accepted_a_reply:…`), and when the records **could not be read** (`evidence_could_not_be_verified`) — unavailable evidence is never permission. What was read is stored with the row (`runtime_terminal`) |
+| `unanswered` | `authorized_by` **and** `why` | the same reading, under the name that says the customer was **not** answered; the terminal it found (failed, not attempted, rejected) is stored with the row. It never says anything else |
 
 **A terminal is not an answer.** Every path that closes an obligation on the
 strength of a runtime turn — normal resolution when a turn finishes, `recover`'s
@@ -756,10 +782,15 @@ scheduled). A copy of the body that arrives while the claim is still open
 inside the in-flight lease (60 s) is answered `503 replay_in_flight` — nothing
 is acknowledged on another request's behalf; a copy that finds a claim older
 than the lease belongs to a process that died, takes the claim over and is a
-first attempt, whatever the pilot flag or the barrier say by then; only a
-`completed` nonce is a replay, and a refused request gives back only the claim
-it holds itself (compare-and-delete), never another request's. **And a completed
-nonce is still not a record:** when replay protection says a body was seen
+first attempt, whatever the pilot flag or the barrier say by then; a nonce
+written by the **earlier** code (`1`) — or any value that is neither an open
+claim nor a completed marker — says a request took the nonce and cannot say
+how far it got, so it is an ambiguous acquisition taken over the same way,
+never a replay (the durable records and both dedup boundaries decide, per
+message, what was already done, so a retry of work that *was* recorded writes
+nothing twice); only a `completed` nonce is a replay, and a refused request
+gives back only the claim it holds itself (compare-and-delete), never another
+request's. **And a completed nonce is still not a record:** when replay protection says a body was seen
 before, the route checks that every pilot-scoped message in it is **on
 record**; one that is not is treated as a first attempt.
 

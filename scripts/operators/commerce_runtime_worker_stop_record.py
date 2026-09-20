@@ -40,35 +40,51 @@ and build the record::
         --out /tmp/stop-record.json
 
 The capture may be the CLI listing, the GraphQL ``deployments`` answer or a
-single deployment object; the job finds the deployment by id. A status the
-platform uses for something no longer running (``REMOVED``, ``CRASHED``,
-``FAILED``, ``SKIPPED``) yields a record; ``SUCCESS``, ``DEPLOYING``,
+single deployment object; the job finds the deployment by id. Only a status
+that establishes the fence — the platform will not run this deployment again:
+``REMOVED``, ``FAILED``, ``SKIPPED`` — yields a record. ``CRASHED`` does not:
+the platform restarts a crashed container under the service's restart policy
+with the same deployment and replica identity, so the procedure for one is to
+remove the deployment and capture again. ``SUCCESS``, ``DEPLOYING``,
 ``SLEEPING`` and every transitional status are refused — a sleeping service
 wakes, and nothing that can wake is fenced.
+
+The capture is read for what it says about replicas, and the record says on
+what basis it states zero: ``active_replicas_basis`` is
+``measured:<key>`` when the capture carries a running/active count (which then
+has to be zero — a capture that says ``REMOVED`` and ``active_replicas: 1``
+in the same breath is a contradiction and is refused, never summarised as
+zero), and ``inferred_from_status:<STATUS>`` when the capture measures nothing
+and zero follows from the fence status alone. A configured replica count
+(``numReplicas``) is what the deployment asked for, not what is running; it is
+carried as ``configured_replicas`` and contradicts nothing. The retirement
+validator re-reads the retained capture against the same rules.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
 import json
+import os
 import sys
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
+
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+for _path in (os.path.join(_ROOT, "backend"), _ROOT):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from core.commerce_runtime import stop_evidence as se  # noqa: E402
 
 PLATFORM = "railway"
 
-# The platform's status words for a deployment that no longer runs, and the
-# state word the stop record carries for each (a member of the handover's
-# inactive set). Everything else is refused by name.
-INACTIVE_STATUSES: Dict[str, str] = {
-    "REMOVED": "removed",
-    "CRASHED": "crashed",
-    "FAILED": "failed",
-    "SKIPPED": "skipped",
-}
-ACTIVE_STATUSES = frozenset({
-    "SUCCESS", "DEPLOYING", "BUILDING", "INITIALIZING", "QUEUED", "WAITING",
-    "NEEDS_APPROVAL", "REMOVING", "SLEEPING",
-})
+# The platform's status words that establish the fence, and the state word the
+# stop record carries for each; the words that are inactive but restartable;
+# the words for something running or on its way to running. Read from one
+# place so the retirement validator and this job cannot disagree.
+FENCED_STATUSES: Dict[str, str] = dict(se.FENCED_STATUSES)
+RESTARTABLE_STATUSES: Dict[str, str] = dict(se.RESTARTABLE_STATUSES)
+ACTIVE_STATUSES = se.ACTIVE_STATUSES
 
 RAW_MAX_BYTES = 32 * 1024
 
@@ -88,42 +104,19 @@ def _emit(marker: str, **fields: Any) -> None:
     print(f"{LOG_PREFIX} RESULT={marker} {rendered}".rstrip())
 
 
-def deployments_in(document: Any) -> List[Dict[str, Any]]:
-    """Every deployment object a capture holds, whatever shape the capture is."""
-    if isinstance(document, list):
-        return [item for item in document if isinstance(item, dict)]
-    if not isinstance(document, dict):
-        return []
-    for key in ("deployments", "edges", "nodes", "data"):
-        inner = document.get(key)
-        if isinstance(inner, list):
-            found: List[Dict[str, Any]] = []
-            for item in inner:
-                if isinstance(item, dict) and isinstance(item.get("node"), dict):
-                    found.append(item["node"])
-                elif isinstance(item, dict):
-                    found.append(item)
-            return found
-        if isinstance(inner, dict):
-            nested = deployments_in(inner)
-            if nested:
-                return nested
-    if "id" in document and "status" in document:
-        return [document]
-    return []
-
-
-def find_deployment(document: Any, deployment: str) -> Optional[Dict[str, Any]]:
-    wanted = str(deployment or "").strip()
-    for item in deployments_in(document):
-        if str(item.get("id") or "").strip() == wanted:
-            return item
-    return None
+deployments_in = se.deployments_in
+find_deployment = se.find_deployment
 
 
 def build_record(*, deployment: str, incarnation: str, platform_json: Any, source: str,
                  observed_at: Optional[str] = None) -> Dict[str, Any]:
-    """The structured stop record, or a ``ValueError`` naming why there is none."""
+    """The structured stop record, or a ``ValueError`` naming why there is none.
+
+    The record summarises the capture; it never overrules it. A capture that
+    reports a replica or instance running is refused whatever its status word
+    says, and the basis on which the record states zero replicas — measured
+    in the capture, or inferred from a fence status — is written down.
+    """
     wanted = str(deployment or "").strip()
     if not wanted:
         raise ValueError("deployment_required")
@@ -135,26 +128,39 @@ def build_record(*, deployment: str, incarnation: str, platform_json: Any, sourc
     found = find_deployment(platform_json, wanted)
     if found is None:
         raise ValueError("deployment_not_in_capture")
-    status = str(found.get("status") or "").strip().upper()
-    if status in ACTIVE_STATUSES:
+    status = se.status_word(found)
+    kind, state = se.state_for(status)
+    if kind == "active":
         raise ValueError(f"deployment_active:{status}")
-    if status not in INACTIVE_STATUSES:
+    if kind == "restartable":
+        raise ValueError(f"deployment_status_not_a_fence:{status}")
+    if kind != "fenced":
         raise ValueError(f"deployment_status_unrecognised:{status or '(none)'}")
+    measured, measured_key, configured = se.replica_evidence(found)
+    if measured is not None and measured > 0:
+        raise ValueError(f"capture_reports_active_replicas:{measured}:{measured_key}")
     moment = str(observed_at or "").strip() or _dt.datetime.now(_dt.timezone.utc).isoformat()
     raw = json.dumps(found, ensure_ascii=False, sort_keys=True)
     if len(raw.encode("utf-8")) > RAW_MAX_BYTES:
-        raw = raw.encode("utf-8")[:RAW_MAX_BYTES].decode("utf-8", errors="ignore")
-    return {
+        # A capture too large to retain whole cannot be re-read whole either;
+        # the retained part has to stay a document the validator can read.
+        raise ValueError(f"capture_too_large:{len(raw.encode('utf-8'))}>{RAW_MAX_BYTES}")
+    record: Dict[str, Any] = {
         "deployment": wanted,
         "incarnation": who,
-        "state": INACTIVE_STATUSES[status],
+        "state": state,
         "active_replicas": 0,
+        "active_replicas_basis": (f"measured:{measured_key}" if measured is not None
+                                  else f"inferred_from_status:{status}"),
         "observed_at": moment,
         "source": str(source).strip(),
         "platform": PLATFORM,
         "platform_status": status,
         "raw": raw,
     }
+    if configured is not None:
+        record["configured_replicas"] = configured
+    return record
 
 
 def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
@@ -188,7 +194,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ValueError as exc:
         _emit(RESULT_REFUSED, reason=str(exc), deployment=args.deployment,
               hint="no record is written for a deployment the platform reports as "
-                   "active; stop or remove it, capture again, and re-run")
+                   "active, restartable (CRASHED) or with a replica running; remove "
+                   "the deployment so the platform reports REMOVED, capture again, "
+                   "and re-run")
         return EXIT_REFUSED
     try:
         with open(args.out, "w", encoding="utf-8") as handle:
@@ -199,6 +207,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_USAGE
     _emit(RESULT_RECORDED, deployment=record["deployment"], incarnation=record["incarnation"],
           state=record["state"], platform_status=record["platform_status"],
+          active_replicas_basis=record["active_replicas_basis"],
           observed_at=record["observed_at"], out=args.out)
     return EXIT_OK
 

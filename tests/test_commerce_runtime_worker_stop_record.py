@@ -84,12 +84,12 @@ def test_an_unrecognised_status_is_refused_rather_than_guessed(tmp_path: Path, c
 
 @pytest.mark.parametrize("shape", ["list", "edges", "single"])
 def test_every_capture_shape_the_platform_answers_is_read(shape: str) -> None:
-    node = {"id": DEPLOYMENT, "status": "CRASHED"}
+    node = {"id": DEPLOYMENT, "status": "REMOVED"}
     document = {"list": [node], "edges": {"deployments": {"edges": [{"node": node}]}},
                 "single": node}[shape]
     record = job.build_record(deployment=DEPLOYMENT, incarnation=f"{DEPLOYMENT}/0",
                               platform_json=document, source="api", observed_at="2026-09-20T18:05:00+00:00")
-    assert record["state"] == "crashed"
+    assert record["state"] == "removed"
 
 
 def test_the_record_the_job_writes_is_the_one_retirement_accepts(tmp_path: Path) -> None:
@@ -102,7 +102,8 @@ def test_the_record_the_job_writes_is_the_one_retirement_accepts(tmp_path: Path)
     text = json.dumps(record)
     moment = dt.datetime.fromisoformat(observed)
     verified = handover._validated_stop_record(text, deployment=DEPLOYMENT, observed=moment)  # noqa: SLF001
-    assert verified == {"state": "removed", "incarnation": f"{DEPLOYMENT}/0"}
+    assert verified == {"state": "removed", "incarnation": f"{DEPLOYMENT}/0",
+                        "active_replicas_basis": "inferred_from_status:REMOVED"}
 
     running = dict(record, state="running")
     with pytest.raises(handover.RetirementRefused, match="stop_record_state_is_not_inactive:running"):
@@ -133,3 +134,103 @@ def test_the_worker_identity_names_its_deployment_when_the_platform_does(monkeyp
     named = handover.worker_id()
     assert named == f"{DEPLOYMENT}/2@{bare}"
     assert handover.worker_deployment(named) == DEPLOYMENT
+
+
+# ── R3: contradictory source evidence never becomes a record ────────────────
+
+
+CONTRADICTORY_REPLICA_KEYS = ["active_replicas", "activeReplicas", "runningReplicas",
+                              "running_instances", "activeInstances"]
+
+
+@pytest.mark.parametrize("key", CONTRADICTORY_REPLICA_KEYS)
+def test_a_capture_that_reports_an_active_replica_yields_no_record(tmp_path: Path, key, capsys) -> None:
+    """Reproduction of the residual finding: the capture says REMOVED and, in
+    the same breath, that one replica is active. The builder used to write
+    ``active_replicas: 0`` and keep the contradiction only inside ``raw``. It
+    now refuses by name and writes nothing."""
+    source = tmp_path / "deployments.json"
+    source.write_text(json.dumps({"id": DEPLOYMENT, "status": "REMOVED", key: 1}), encoding="utf-8")
+    out = tmp_path / "stop-record.json"
+    code = job.main(["--deployment", DEPLOYMENT, "--incarnation", f"{DEPLOYMENT}/0",
+                     "--platform-json", str(source), "--source", "api", "--out", str(out)])
+    assert code == job.EXIT_REFUSED and not out.exists()
+    assert f"capture_reports_active_replicas:1:{key}" in capsys.readouterr().out
+
+
+def test_instances_listed_as_running_in_the_capture_yield_no_record() -> None:
+    capture = {"id": DEPLOYMENT, "status": "REMOVED",
+               "instances": [{"id": "i-1", "status": "RUNNING"}, {"id": "i-2", "status": "STOPPED"}]}
+    with pytest.raises(ValueError, match="capture_reports_active_replicas:1:instances"):
+        job.build_record(deployment=DEPLOYMENT, incarnation=f"{DEPLOYMENT}/0",
+                         platform_json=capture, source="api", observed_at="2026-09-20T18:05:00+00:00")
+
+
+def test_a_measured_zero_is_recorded_as_measured_and_an_absent_count_as_inferred() -> None:
+    measured = job.build_record(deployment=DEPLOYMENT, incarnation=f"{DEPLOYMENT}/0",
+                                platform_json={"id": DEPLOYMENT, "status": "REMOVED", "activeReplicas": 0},
+                                source="api", observed_at="2026-09-20T18:05:00+00:00")
+    assert measured["active_replicas"] == 0
+    assert measured["active_replicas_basis"] == "measured:activeReplicas"
+    inferred = job.build_record(deployment=DEPLOYMENT, incarnation=f"{DEPLOYMENT}/0",
+                                platform_json={"id": DEPLOYMENT, "status": "REMOVED",
+                                               "meta": {"serviceManifest": {"deploy": {"numReplicas": 2}}}},
+                                source="api", observed_at="2026-09-20T18:05:00+00:00")
+    # A configured replica count is what the deployment *asked for*, not what
+    # is running; it is carried as configuration and does not contradict.
+    assert inferred["active_replicas"] == 0
+    assert inferred["active_replicas_basis"] == "inferred_from_status:REMOVED"
+    assert inferred["configured_replicas"] == 2
+
+
+@pytest.mark.parametrize("status", ["CRASHED"])
+def test_a_status_the_platform_may_restart_from_is_not_a_fence(tmp_path: Path, status, capsys) -> None:
+    """A crashed container is restarted under the service's restart policy
+    with the same deployment and replica identity: the worker can come back.
+    No record is written for it; the procedure is to remove the deployment."""
+    code, record = run(tmp_path, status)
+    assert code == job.EXIT_REFUSED and record is None
+    out = capsys.readouterr().out
+    assert f"deployment_status_not_a_fence:{status}" in out and "remove" in out
+
+
+def test_contradictory_source_evidence_never_reaches_retirement(tmp_path: Path) -> None:
+    """Builder → retirement, the path the finding travelled: the builder
+    refuses the contradictory capture, and a record assembled by hand around
+    that same capture is refused by the retirement validator, which re-reads
+    the retained capture rather than trusting the top-level summary."""
+    observed = "2026-09-20T18:05:00+00:00"
+    moment = dt.datetime.fromisoformat(observed)
+    capture = {"id": DEPLOYMENT, "status": "REMOVED", "active_replicas": 1}
+    with pytest.raises(ValueError, match="capture_reports_active_replicas:1:active_replicas"):
+        job.build_record(deployment=DEPLOYMENT, incarnation=f"{DEPLOYMENT}/0", platform_json=capture,
+                         source="api", observed_at=observed)
+    by_hand = {"deployment": DEPLOYMENT, "incarnation": f"{DEPLOYMENT}/0", "state": "removed",
+               "active_replicas": 0, "observed_at": observed, "source": "api",
+               "raw": json.dumps(capture)}
+    with pytest.raises(handover.RetirementRefused, match="stop_record_raw_reports_active_replicas:1"):
+        handover._validated_stop_record(json.dumps(by_hand), deployment=DEPLOYMENT, observed=moment)  # noqa: SLF001
+    for raw, needle in (
+        (dict(capture, active_replicas=0, status="SUCCESS"), "stop_record_raw_state_is_active:success"),
+        (dict(capture, active_replicas=0, status="CRASHED"), "stop_record_raw_state_is_not_a_fence:crashed"),
+        (dict(capture, active_replicas=0, id=OTHER), "stop_record_raw_names_another_deployment"),
+    ):
+        contradicted = dict(by_hand, raw=json.dumps(raw))
+        with pytest.raises(handover.RetirementRefused, match=needle):
+            handover._validated_stop_record(json.dumps(contradicted), deployment=DEPLOYMENT, observed=moment)  # noqa: SLF001
+    consistent = dict(by_hand, raw=json.dumps(dict(capture, active_replicas=0)))
+    assert handover._validated_stop_record(json.dumps(consistent), deployment=DEPLOYMENT, observed=moment)[  # noqa: SLF001
+        "state"] == "removed"
+
+
+@pytest.mark.parametrize("state", ["crashed", "stopped", "exited", "inactive"])
+def test_a_restartable_state_word_is_refused_as_not_a_fence(state: str) -> None:
+    """Inactive is not fenced: a stopped, exited or crashed process can be
+    started again under the same identity. Only a state the platform will not
+    run again establishes the fence a retirement rests on."""
+    record = {"deployment": DEPLOYMENT, "incarnation": f"{DEPLOYMENT}/0", "state": state,
+              "active_replicas": 0, "observed_at": "2026-09-20T18:05:00+00:00", "source": "api"}
+    with pytest.raises(handover.RetirementRefused, match=f"stop_record_state_is_not_a_fence:{state}"):
+        handover._validated_stop_record(json.dumps(record), deployment=DEPLOYMENT,  # noqa: SLF001
+                                        observed=dt.datetime.fromisoformat("2026-09-20T18:05:00+00:00"))
+

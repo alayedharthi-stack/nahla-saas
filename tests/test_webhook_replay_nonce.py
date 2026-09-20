@@ -57,12 +57,53 @@ def test_a_completed_nonce_is_a_replay(store: NonceRedis) -> None:
     assert store.keys[KEY] == "completed:other"
 
 
-def test_a_nonce_written_by_an_earlier_deployment_is_a_replay(store: NonceRedis) -> None:
-    """``"1"`` is what the previous code wrote; it cannot say how far that
-    request got, and it is treated as the replay it always was."""
+def test_a_nonce_written_by_an_earlier_deployment_is_taken_over_not_acknowledged(
+        store: NonceRedis) -> None:
+    """``"1"`` is what the previous code wrote when a request *took* the nonce.
+    It cannot say how far that request got — it may have died before anything
+    was durable — so it is an ambiguous acquisition, never a completed one: the
+    retry takes it over as a first attempt, and the durable records and the
+    dedup boundaries decide per message what was already done."""
     store.keys[KEY] = "1"
+    store.ttls[KEY] = 500
     verdict = security.evaluate_replay_claim("meta", BODY)
-    assert (verdict.reject, verdict.claimed, verdict.in_flight) == (True, False, False)
+    assert (verdict.reject, verdict.claimed, verdict.in_flight) == (False, True, False)
+    assert store.keys[KEY] == verdict.claim and verdict.claim.startswith("claimed:")
+    assert store.evals == ["-- nahla:nonce_cas_set"]
+    assert store.ttls[KEY] == 500                            # the key's own expiry is kept
+    # Only the holder completes it, and from then on it is a real replay.
+    assert security.mark_replay_completed(verdict) is True
+    later = security.evaluate_replay_claim("meta", BODY)
+    assert (later.reject, later.claimed, later.in_flight) == (True, False, False)
+
+
+def test_an_unparseable_nonce_is_taken_over_like_a_legacy_one(store: NonceRedis) -> None:
+    """Any value that is neither an open claim nor a completed marker says
+    nothing about the request that wrote it; it is not acknowledged as a
+    replay on that strength."""
+    store.keys[KEY] = "claimed:garbage"
+    verdict = security.evaluate_replay_claim("meta", BODY)
+    assert (verdict.reject, verdict.claimed) == (False, True)
+    assert store.keys[KEY] == verdict.claim
+
+
+def test_a_legacy_nonce_taken_over_by_a_concurrent_copy_is_in_flight_for_the_loser(
+        store: NonceRedis, monkeypatch) -> None:
+    """Two retries find ``"1"`` at once. The compare-and-set lets exactly one
+    take it over; the other sees a fresh claim and is in flight — nothing is
+    acknowledged and nothing is dropped."""
+    store.keys[KEY] = "1"
+    real_eval = store.eval
+
+    def _lose_the_race(script: str, numkeys: int, *args) -> int:
+        # The other copy's compare-and-set lands first.
+        store.keys[KEY] = claim_written(0.0, "winner")
+        return real_eval(script, numkeys, *args)
+
+    monkeypatch.setattr(store, "eval", _lose_the_race)
+    loser = security.evaluate_replay_claim("meta", BODY)
+    assert (loser.reject, loser.claimed, loser.in_flight) == (True, False, True)
+    assert store.keys[KEY] == claim_written(0.0, "winner")
 
 
 def test_an_open_claim_inside_the_lease_is_in_flight(store: NonceRedis) -> None:

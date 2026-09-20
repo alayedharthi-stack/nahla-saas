@@ -312,11 +312,17 @@ and only an operator retires one, naming themselves, their reason, the
 deployment, how the stop was verified, when — and handing over the platform's
 own record of the stop. That record is **read, not merely retained**: it is a
 structured document about the exact deployment and incarnation, carrying a
-state word the platform uses for something no longer running and zero active
-replicas, observed at the moment the retirement claims; a record that says the
-deployment is running is refused as the contradiction it is, and a worker that
-named its own deployment when it reported can only be retired against that
-deployment. Shared admission locking orders this job against the workers that
+state word the platform uses for something it will **not run again** (inactive
+is not a fence — a stopped or crashed process can be started again, and a
+crashed container is), zero active replicas on a stated basis (measured in the
+capture, or inferred from the fence status), observed at the moment the
+retirement claims; and the platform's capture retained under it is re-read, so
+a summary cannot say *removed, zero replicas* over a capture that says
+otherwise. A record that says the deployment is running is refused as the
+contradiction it is, the operator tool that builds records refuses a capture
+that reports a replica running rather than summarising it as zero, and a
+worker that named its own deployment when it reported can only be retired
+against that deployment. Shared admission locking orders this job against the workers that
 take it; it does not prove a fleet was rolled out or shut down. The platform
 verifies the record's identity and consistency; that the capture is the
 platform's genuine answer about that deployment at that moment remains the
@@ -336,7 +342,13 @@ arrived when it is another message's turn, and its terminal must record a
 completed turn whose reply the provider **accepted**. A failed, never-attempted, rejected or abandoned reply is a
 terminal and not an answer: the obligation stays pending, counted by
 settlement, until an operator closes it under the honest name — `unanswered`,
-which is refused when the runtime did answer. Provider acceptance is recorded
+which is refused when the runtime did answer. A no-response disposition
+(`not_required`, `unanswered`) rests only on evidence that was **read**: the
+records hold no turn for the entry, or its terminal records a reply that was
+not accepted. Records that could not be read, a turn not bound to the entry, a
+send whose outcome is unknown, or a reply the provider accepted permit nothing
+— unavailable evidence is never absence, and the lookup a disposition asks is
+the strict one, which raises on a failed read instead of answering "none". Provider acceptance is recorded
 as acceptance; a confirmed delivery is a separate fact carried from the
 terminal's `customer_reach` and never inferred. `superseded` names a later
 entry for the same tenant, connection and recipient, later in arrival order — an
@@ -381,7 +393,10 @@ on another request's behalf, a copy that finds a claim older than the lease
 takes it over as a first attempt — whatever the pilot flag or the barrier say by
 then, so a process that died between claim and record, a release, and a
 disablement in between cannot turn the retry into a `200` for a message nothing
-holds — and only a `completed` nonce is a replay. A refused request gives back
+holds — a nonce the earlier code wrote (`1`), or any value that is neither an
+open claim nor a completed marker, is an ambiguous acquisition taken over the
+same way (it cannot say how far that request got; the durable records and the
+dedup boundaries decide per message), and only a `completed` nonce is a replay. A refused request gives back
 only the claim it holds itself. And before a completed nonce alone answers 200,
 the route checks that every pilot-scoped message in the body is on record; one
 that is not is a first attempt. Concurrent and completed duplicates stay

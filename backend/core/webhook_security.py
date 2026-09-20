@@ -473,8 +473,11 @@ def _decoded(value: Any) -> str:
 def _claim_age(value: str, now: float) -> Optional[float]:
     """Seconds since an open claim was written, or ``None`` for anything else.
 
-    A value written by an earlier deployment (``"1"``) or a completed marker is
-    not an open claim: those are replays. Only ``claimed:<token>:<epoch>`` is.
+    Only ``claimed:<token>:<epoch>`` is an open claim. A completed marker is a
+    replay. Anything else — the ``"1"`` an earlier deployment wrote when a
+    request *took* the nonce, or a value this code cannot read — is an
+    **ambiguous acquisition**: see :func:`_is_completed` and the takeover in
+    :func:`evaluate_replay_claim`.
     """
     parts = value.split(":")
     if len(parts) != 3 or parts[0] != _NONCE_CLAIMED:
@@ -483,6 +486,11 @@ def _claim_age(value: str, now: float) -> Optional[float]:
         return max(0.0, now - float(int(parts[2])))
     except ValueError:
         return None
+
+
+def _is_completed(value: str) -> bool:
+    """Whether the nonce says a request with this body finished deciding."""
+    return value.startswith(f"{_NONCE_COMPLETED}:")
 
 
 def _cas(client: Any, script: str, key: str, *args: Any) -> bool:
@@ -545,15 +553,31 @@ def evaluate_replay_claim(
 
     reject = bool(WEBHOOK_REPLAY_REJECT_ENABLED)
     age = _claim_age(current, _time.time())
-    if age is not None and age > REPLAY_IN_FLIGHT_LEASE_SECONDS:
-        # An open claim older than any request takes to decide: the process
-        # that wrote it never finished. This request takes it over, exactly
-        # once — the compare-and-set fails for a second retry racing it, which
-        # is then a concurrent duplicate of *this* one.
+    orphaned = age is not None and age > REPLAY_IN_FLIGHT_LEASE_SECONDS
+    # A value that is neither an open claim nor a completed marker was written
+    # by the earlier code (``"1"``) — or by nothing this code can read. It says
+    # a request *took* the nonce; it cannot say whether that request lived
+    # long enough to make anything durable. Reading it as "completed" turned a
+    # crash between claim and record into a ``200 replay`` for a message
+    # nothing held, once the pilot's durable check was off. So it is an
+    # ambiguous acquisition and is taken over exactly like an orphaned claim:
+    # the request is a first attempt, and the durable records and the dedup
+    # boundaries decide, per message, what was already done.
+    ambiguous = age is None and not _is_completed(current)
+    if orphaned or ambiguous:
+        # This request takes the nonce over, exactly once — the compare-and-set
+        # fails for a second retry racing it, which is then a concurrent
+        # duplicate of *this* one and is answered in flight.
         if _cas(client, _NONCE_CAS_SET, key, current, claim, ttl):
-            logger.warning("[webhook_security] orphaned replay nonce taken over provider=%s "
-                           "age=%ss — treating the request as a first attempt", provider,
-                           int(age))
+            if orphaned:
+                logger.warning("[webhook_security] orphaned replay nonce taken over provider=%s "
+                               "age=%ss — treating the request as a first attempt", provider,
+                               int(age))
+            else:
+                logger.warning("[webhook_security] replay nonce written by an earlier "
+                               "deployment taken over provider=%s value=%r — it cannot say how "
+                               "far that request got; treating the request as a first attempt",
+                               provider, current[:32])
             return ReplayVerdict(reject=False, claimed=True, key=key, token=token, claim=claim)
         age = 0.0
 

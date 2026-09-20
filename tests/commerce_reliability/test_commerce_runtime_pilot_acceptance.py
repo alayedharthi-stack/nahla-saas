@@ -605,7 +605,7 @@ def test_a_nonce_for_unrelated_traffic_is_still_a_replay(configured, db, bound,
     import json as _json
 
     payload = body(message("wamid.stranger.replay", sender=STRANGER))
-    replay_protected.keys[_security.replay_nonce_key("meta", _json.dumps(payload).encode())] = "1"
+    replay_protected.keys[_security.replay_nonce_key("meta", _json.dumps(payload).encode())] = "completed:earlier"
     spawned: List[Any] = []
     response = call_meta_protected(payload, spawned)
     assert response.status_code == 200 and spawned == []
@@ -617,7 +617,7 @@ def test_an_unreadable_durable_status_retries_rather_than_drops(configured, db, 
     import json as _json
 
     payload = body(message("wamid.unreadable.status"))
-    replay_protected.keys[_security.replay_nonce_key("meta", _json.dumps(payload).encode())] = "1"
+    replay_protected.keys[_security.replay_nonce_key("meta", _json.dumps(payload).encode())] = "completed:earlier"
 
     def _boom(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("status store unavailable")
@@ -779,6 +779,120 @@ def test_the_full_sequence_die_release_disable_retry_still_processes_the_message
     assert spawned == ["webhook_meta"]
     assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
     assert str(_nonce(replay_protected, payload)).startswith("completed:")
+
+
+def test_the_full_sequence_with_a_legacy_nonce_still_processes_the_message(
+        configured, db, bound, replay_protected, monkeypatch):
+    """The residual finding, on the real route: the nonce was written by the
+    **earlier** code (``"1"``), whose request died before anything durable
+    existed. That value cannot say how far the first request got, so it is an
+    ambiguous acquisition, never a replay:
+
+    1. the old-format nonce, no durable obligation;
+    2. drain, settle, release with nothing pending;
+    3. the retry while the pilot is enabled takes the nonce over as a first
+       attempt, is refused ``503 pilot_released`` and gives back the claim it
+       now holds — the old value does not survive to lie later;
+    4. the pilot is disabled;
+    5. the retry is a first attempt: 200, processing scheduled, never a
+       ``200 replay`` for a message nothing holds.
+    """
+    from core.commerce_runtime import handover_models as hm
+
+    payload = body(message("wamid.legacy.die.release.disable"))
+    _set_nonce(replay_protected, payload, "1")
+    assert handover.pending_count(db, tenant_id=db.tenant_id) == 0
+
+    handover.open_drain(db, tenant_id=db.tenant_id)
+    row = db.query(hm.HandoverBarrier).filter_by(tenant_id=db.tenant_id).one()
+    row.state = hm.STATE_RELEASED
+    db.commit()
+
+    spawned: List[Any] = []
+    refused = call_meta_protected(payload, spawned)
+    assert refused.status_code == 503 and b"pilot_released" in bytes(refused.body)
+    assert spawned == [] and handover.pending_count(db, tenant_id=db.tenant_id) == 0
+    assert _nonce(replay_protected, payload) is None            # taken over, then released
+
+    monkeypatch.delenv(pg.ENV_ENABLED)
+
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200
+    assert bytes(response.body) == b'{"status":"ok"}'
+    assert spawned == ["webhook_meta"]
+    assert str(_nonce(replay_protected, payload)).startswith("completed:")
+
+
+def test_a_legacy_nonce_with_the_pilot_off_is_a_first_attempt_not_a_replay(
+        configured, db, bound, replay_protected, monkeypatch):
+    """The flag-off transition alone: an old-format nonce found by the retry
+    of a request that got no 200. With the pilot off there is no durable
+    record to consult, and the retry is processed rather than acknowledged
+    as a replay of work nothing can identify."""
+    payload = body(message("wamid.legacy.flag.off"))
+    _set_nonce(replay_protected, payload, "1")
+    monkeypatch.delenv(pg.ENV_ENABLED)
+    spawned: List[Any] = []
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200 and bytes(response.body) == b'{"status":"ok"}'
+    assert spawned == ["webhook_meta"]
+    assert str(_nonce(replay_protected, payload)).startswith("completed:")
+    # And from here on it is a real replay: nothing is spawned twice.
+    again = call_meta_protected(payload, spawned)
+    assert again.status_code == 200 and b"replay" in bytes(again.body)
+    assert spawned == ["webhook_meta"]
+
+
+def test_a_legacy_nonce_over_recorded_work_is_acknowledged_without_a_second_record(
+        configured, db, bound, replay_protected):
+    """The accepted/lost-acknowledgement control: the earlier code recorded the
+    obligation and its 200 was lost in transit. The retry takes the old nonce
+    over, the recorder finds the row already there and writes no second one,
+    processing is scheduled (the dedup boundaries refuse finished work), and
+    the request is acknowledged — the work is identified by its record, not
+    by the nonce."""
+    payload = body(message("wamid.legacy.recorded"))
+    recorded = acceptance.record_before_acknowledging(payload, session_factory=sessions(db),
+                                                      authenticated=True)
+    assert recorded.ok and recorded.recorded == ("wamid.legacy.recorded",)
+    _set_nonce(replay_protected, payload, "1")
+
+    spawned: List[Any] = []
+    response = call_meta_protected(payload, spawned)
+    assert response.status_code == 200 and bytes(response.body) == b'{"status":"ok"}'
+    assert spawned == ["webhook_meta"]
+    assert [r.provider_message_id for r in handover.pending_inbound(db, tenant_id=db.tenant_id)] \
+        == ["wamid.legacy.recorded"]
+    assert str(_nonce(replay_protected, payload)).startswith("completed:")
+
+
+def test_a_concurrent_copy_behind_a_legacy_nonce_is_delayed_not_acknowledged(
+        configured, db, bound, replay_protected):
+    """Two copies of a body behind an old-format nonce: the first takes it over
+    and is still deciding; the second finds a fresh claim inside the lease and
+    is answered retryable, acknowledging nothing on the first's behalf. Once
+    the first has finished deciding the copy is a replay of recorded work."""
+    import json as _json
+
+    payload = body(message("wamid.legacy.concurrent"))
+    _set_nonce(replay_protected, payload, "1")
+    raw = _json.dumps(payload).encode()
+    first = _security.evaluate_replay_claim("meta", raw)
+    assert (first.reject, first.claimed, first.in_flight) == (False, True, False)
+    assert _nonce(replay_protected, payload) == first.claim
+
+    spawned: List[Any] = []
+    second = call_meta_protected(payload, spawned)
+    assert second.status_code == 503 and b"replay_in_flight" in bytes(second.body)
+    assert spawned == [] and handover.pending_count(db, tenant_id=db.tenant_id) == 0
+    assert _nonce(replay_protected, payload) == first.claim         # untouched
+
+    recorded = acceptance.record_before_acknowledging(payload, session_factory=sessions(db),
+                                                      authenticated=True)
+    assert recorded.ok and _security.mark_replay_completed(first) is True
+    third = call_meta_protected(payload, spawned)
+    assert third.status_code == 200 and b"replay" in bytes(third.body)
+    assert spawned == [] and handover.pending_count(db, tenant_id=db.tenant_id) == 1
 
 
 def test_a_retry_inside_the_lease_after_a_death_is_delayed_not_lost(

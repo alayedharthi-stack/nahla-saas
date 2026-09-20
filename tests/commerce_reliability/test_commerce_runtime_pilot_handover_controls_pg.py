@@ -2158,6 +2158,139 @@ def test_resolution_refuses_an_entry_with_no_turn_at_all(configured, store):
     assert entry_state(store, record.id)[0] == "pending"
 
 
+# ── R1: unavailable evidence is not permission to dispose ───────────────────
+#
+# A no-response disposition (``not_required``, ``unanswered``) rests on a
+# positively verified state: the runtime's records were read and say either
+# that no turn was admitted for this inbound, or that its terminal records a
+# reply that was not accepted. Evidence that could not be read is neither, and
+# closes nothing. The failure is injected at the evidence read — the ledger
+# lookup, or the binding read that follows it — after a real turn was run.
+
+
+class _ConnectFails:
+    """The real engine, except that ``connect()`` — what the binding read
+    opens — fails. ``begin()``, which the ledger lookup uses, still works."""
+
+    def __init__(self, engine: Any) -> None:
+        self._engine = engine
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
+
+    def connect(self) -> Any:
+        raise RuntimeError("binding read unavailable")
+
+
+@contextlib.contextmanager
+def _failing_read(where: str) -> Any:
+    """The evidence read failing — at the ledger lookup, or at the binding
+    read that follows it — for the duration of the block only."""
+    with pytest.MonkeyPatch.context() as broken:
+        if where == "lookup":
+            def _boom(**_kwargs: Any) -> Any:
+                raise RuntimeError("ledger lookup unavailable")
+            broken.setattr(recovery, "admitted_turn_for", _boom)
+        elif where == "binding":
+            real = handover._engine_of
+
+            def _fragile(session: Any) -> Any:
+                engine = real(session)
+                return _ConnectFails(engine) if engine is not None else engine
+            broken.setattr(handover, "_engine_of", _fragile)
+        else:
+            raise AssertionError(where)
+        yield
+
+
+@pytest.mark.parametrize("kind", ["not_required", "unanswered"])
+@pytest.mark.parametrize("where", ["lookup", "binding"])
+def test_a_failed_evidence_read_after_an_unknown_send_disposes_nothing(
+        configured, store, kind, where):
+    """Reproduction of the residual finding: a finished turn whose send
+    outcome is UNKNOWN, and the evidence read fails. Nothing establishes
+    absence, so the no-response disposition is refused and the row is
+    untouched — pending count one, the UNKNOWN terminal unchanged."""
+    identity = "wamid.unknown.unread." + uuid.uuid4().hex[:8]
+    record = pending_entry(store, identity)
+    run_turn_with(store, provider_message_id=identity, transport=Transport([timed_out()]))
+    assert terminal_outcomes(store, identity)[1] == "unknown"
+
+    with _failing_read(where):
+        refused = dispose(store, record.id, kind, {"authorized_by": "owner", "why": "x"})
+        assert refused.disposed == ()
+        assert refused.refused == {record.id: "evidence_could_not_be_verified"}
+        assert entry_state(store, record.id)[:2] == ("pending", None)
+        db = store.session()
+        try:
+            assert handover.pending_count(db, tenant_id=store.tenant_id) == 1
+        finally:
+            db.close()
+    assert terminal_outcomes(store, identity)[1] == "unknown"
+    # With the evidence readable again the truthful refusal is the unknown outcome.
+    assert dispose(store, record.id, kind, {"authorized_by": "owner", "why": "x"}).refused \
+        == {record.id: "delivery_outcome_unknown"}
+
+
+@pytest.mark.parametrize("kind", ["not_required", "unanswered"])
+@pytest.mark.parametrize("where", ["lookup", "binding"])
+def test_a_failed_evidence_read_after_an_accepted_reply_disposes_nothing(
+        configured, store, kind, where):
+    """The same failure over a turn the provider accepted a reply for: the
+    disposition is refused as unverifiable, not accepted as 'not answered'."""
+    identity = "wamid.accepted.unread." + uuid.uuid4().hex[:8]
+    record = pending_entry(store, identity)
+    run_turn_with(store, provider_message_id=identity)
+    assert terminal_outcomes(store, identity)[:2] == ("completed", "accepted")
+
+    with _failing_read(where):
+        refused = dispose(store, record.id, kind, {"authorized_by": "owner", "why": "x"})
+        assert refused.refused == {record.id: "evidence_could_not_be_verified"}
+        assert entry_state(store, record.id)[0] == "pending"
+    assert dispose(store, record.id, kind, {"authorized_by": "owner", "why": "x"}).refused \
+        == {record.id: "the_runtime_answered_this_inbound"}
+
+
+@pytest.mark.parametrize("kind", ["not_required", "unanswered"])
+def test_a_lookup_that_swallows_its_failure_is_not_absence(configured, store, kind):
+    """The ownership lookup the seam uses answers ``None`` for anything it
+    cannot establish, which is right for routing and wrong for a disposition:
+    ``None`` from a failed read is not "no turn". The disposition path asks
+    strictly, and a failure underneath the lookup refuses by name."""
+    from core.commerce_runtime import repositories as repos
+
+    identity = "wamid.swallowed." + uuid.uuid4().hex[:8]
+    record = pending_entry(store, identity)
+    run_turn_with(store, provider_message_id=identity, transport=Transport([timed_out()]))
+
+    def _boom(self: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("turn table unreadable")
+    with pytest.MonkeyPatch.context() as broken:
+        broken.setattr(repos.CommerceRuntimeRepository, "find_admitted_turn", _boom)
+        assert admitted_for(store, identity) is None            # the routing answer
+        refused = dispose(store, record.id, kind, {"authorized_by": "owner", "why": "x"})
+        assert refused.refused == {record.id: "evidence_could_not_be_verified"}
+        assert entry_state(store, record.id)[0] == "pending"
+    # Readable again: the truthful refusal is the unknown outcome, not absence.
+    assert dispose(store, record.id, kind, {"authorized_by": "owner", "why": "x"}).refused \
+        == {record.id: "delivery_outcome_unknown"}
+
+
+def test_a_verified_absence_still_closes_under_the_honest_name(configured, store):
+    """The control the correction must keep: the records were read and hold
+    no turn for this inbound. ``not_required`` closes it, and the stored
+    verification says the absence was read, not assumed."""
+    identity = "wamid.absent." + uuid.uuid4().hex[:8]
+    record = pending_entry(store, identity)
+    assert admitted_for(store, identity) is None
+    closed = dispose(store, record.id, "not_required",
+                     {"authorized_by": "owner", "why": "duplicate the merchant answered by hand"})
+    assert closed.disposed == (record.id,), closed.refused
+    state, disposition, evidence = entry_state(store, record.id)
+    assert (state, disposition) == ("disposed", "not_required")
+    assert evidence["verified"]["runtime_terminal"] == "no_runtime_turn_for_that_identity"
+
+
 # ── F: release and acceptance, both lock orders, forced ─────────────────────
 
 
@@ -2301,6 +2434,61 @@ def test_a_stop_record_that_contradicts_the_stop_is_refused(configured, store, r
     finally:
         db.close()
     assert worker.retired is False
+
+
+@pytest.mark.parametrize("raw, needle", [
+    ({"id": "railway:nahla-backend@deploy-1234", "status": "REMOVED", "active_replicas": 1},
+     "stop_record_raw_reports_active_replicas:1"),
+    ({"id": "railway:nahla-backend@deploy-1234", "status": "SUCCESS"},
+     "stop_record_raw_state_is_active:success"),
+    ({"id": "railway:nahla-backend@deploy-1234", "status": "CRASHED"},
+     "stop_record_raw_state_is_not_a_fence:crashed"),
+    ({"id": "deploy-elsewhere", "status": "REMOVED"},
+     "stop_record_raw_names_another_deployment"),
+])
+def test_a_record_whose_retained_capture_contradicts_it_is_refused(configured, store, raw, needle):
+    """Reproduction of the residual finding through the retirement path: a
+    record whose top-level summary says removed and zero replicas while the
+    platform's capture retained under ``raw`` says otherwise. The capture is
+    re-read; the summary does not get to overwrite it."""
+    _reporting(store, "worker-raw-contradicted")
+    contradictory = dict(STOP_EVIDENCE, stop_record=stop_record_for(
+        STOP_EVIDENCE["deployment"], observed_at=STOP_EVIDENCE["observed_at"],
+        raw=json.dumps(raw)))
+    with pytest.raises(handover.RetirementRefused) as caught:
+        _retire(store, "worker-raw-contradicted", contradictory)
+    assert needle in str(caught.value)
+    db = store.session()
+    try:
+        worker = next(w for w in handover.fleet(db, tenant_id=store.tenant_id)
+                      if w.worker_id == "worker-raw-contradicted")
+    finally:
+        db.close()
+    assert worker.retired is False
+
+
+def test_a_record_the_builder_writes_from_a_consistent_capture_retires(configured, store):
+    """The positive control through the same path: the builder's own record
+    for a removed deployment with no replica reported active is accepted, and
+    the retained evidence names the basis on which zero replicas was stated."""
+    from scripts.operators import commerce_runtime_worker_stop_record as builder
+
+    _reporting(store, "worker-builder-consistent")
+    record = builder.build_record(
+        deployment=STOP_EVIDENCE["deployment"], incarnation=STOP_EVIDENCE["deployment"] + "/0",
+        platform_json={"id": STOP_EVIDENCE["deployment"], "status": "REMOVED", "activeReplicas": 0},
+        source="railway deployment list --json", observed_at=STOP_EVIDENCE["observed_at"])
+    assert _retire(store, "worker-builder-consistent",
+                   dict(STOP_EVIDENCE, stop_record=json.dumps(record))) is True
+    db = store.session()
+    try:
+        worker = next(w for w in handover.fleet(db, tenant_id=store.tenant_id)
+                      if w.worker_id == "worker-builder-consistent")
+    finally:
+        db.close()
+    assert worker.retired is True
+    assert worker.retirement_evidence["stop_record_state"] == "removed"
+    assert worker.retirement_evidence["stop_record_active_replicas_basis"] == "measured:activeReplicas"
 
 
 def test_a_free_text_stop_record_is_refused_whatever_it_says(configured, store):
