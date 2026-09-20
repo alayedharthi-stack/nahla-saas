@@ -18,7 +18,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import pytest
 from sqlalchemy import JSON, create_engine
@@ -3030,3 +3030,382 @@ def test_a_reply_with_no_claim_survives_every_failure():
     assert text == honest
     assert suppressed is False
     assert sink["address_save_claim_guard_action"] == "allowed"
+
+
+# ── E1–E3: the actual webhook send boundary, not the guard in isolation ──
+
+
+def _import_blocker(blocked: str):
+    """Make exactly one module import raise, leaving every other alone."""
+    import builtins  # noqa: PLC0415
+
+    real = builtins.__import__
+
+    def _blocking(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == blocked:
+            raise ImportError(f"isolated import failure: {blocked}")
+        return real(name, globals, locals, fromlist, level)
+
+    return _blocking
+
+
+def _webhook_send_block():
+    """The REAL OrderFlowV2 send block, lifted out of the webhook by AST.
+
+    The guard-unit helpers above cannot prove anything about delivery: a
+    failure that stops ``apply_order_flow_v2_outbound_guards`` returning
+    is invisible to a test that calls it directly. These probes execute
+    the branch that decides whether to send, together with the real
+    senders and the real wire sanitizer.
+    """
+    import ast  # noqa: PLC0415
+    import logging as _logging  # noqa: PLC0415
+
+    source = (BACKEND_DIR / "routers" / "whatsapp_webhook.py").read_text()
+    tree = ast.parse(source)
+    branch = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test)
+        == "_of2_result.handled and _of2_result.reply and _trace.outbound_lock_acquired()"
+    )
+    senders = [
+        node for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name in ("_send_interactive_reply", "_send_list_reply",
+                          "_send_whatsapp_message")
+    ]
+    runner = ast.parse("async def _exercise():\n pass").body[0]
+    runner.body = [branch]
+    module = ast.fix_missing_locations(
+        ast.Module(body=senders + [runner], type_ignores=[])
+    )
+    namespace = {
+        "Optional": Optional, "Dict": Dict, "Any": Any,
+        "logger": _logging.getLogger("address-send-probe"),
+    }
+    exec(compile(module, "actual_webhook_send_block", "exec"), namespace)  # noqa: S102
+    return namespace
+
+
+def _run_send_block(db, tenant, convo, result, *, turn_ref="wamid.in-send",
+                    message="متابعة", patches=()):
+    """Run that block with transport faked and storage captured."""
+    import asyncio  # noqa: PLC0415
+    from contextlib import ExitStack  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+    from unittest.mock import patch as _patch  # noqa: PLC0415
+
+    from core.outbound_sanitizer import sanitize_outbound_payload  # noqa: PLC0415
+    from modules.ai.brain.persona_ownership import (  # noqa: PLC0415
+        PersonaBypassReason,
+        PersonaOwnershipRecord,
+    )
+
+    namespace = _webhook_send_block()
+    sent, saved = [], []
+
+    async def _post(phone_id, payload, **kwargs):
+        payload, _ = sanitize_outbound_payload(payload, tenant_id=tenant.id)
+        sent.append(payload)
+        sink = kwargs.get("_result_sink")
+        if isinstance(sink, dict):
+            sink.update(wamid=f"wamid.out-{len(sent)}", duplicate_suppressed=False,
+                        sent_payload=payload)
+        return True
+
+    namespace.update({
+        "_trace": SimpleNamespace(outbound_lock_acquired=lambda: True),
+        "persist_order_flow_v2_result": lambda *a, **k: None,
+        "db": db, "tenant_id": tenant.id, "to": CUSTOMER_PHONE,
+        "phone_id": "synthetic-phone-id", "wa_msg_id": turn_ref, "convo": convo,
+        "text": message, "_post_wa": _post,
+        "_persona_ownership": PersonaOwnershipRecord(),
+        "_POReason": PersonaBypassReason,
+        "StateManager": SimpleNamespace(
+            save_message=lambda *a, **k: saved.append(
+                {"text": a[2], "metadata": k.get("extra_metadata") or {}}
+            )
+        ),
+        "_sync_persona_observability": lambda: None,
+        "_of2_result": result,
+    })
+    with ExitStack() as stack:
+        for target, kwargs in patches:
+            stack.enter_context(_patch(target, **kwargs))
+        asyncio.run(namespace["_exercise"]())
+    db.commit()
+    return sent, saved
+
+
+def _payload_text(payload):
+    interactive = payload.get("interactive") or {}
+    if interactive:
+        return str((interactive.get("body") or {}).get("text") or "")
+    return str((payload.get("text") or {}).get("body") or payload.get("text") or "")
+
+
+class _StubComposer:
+    """Stands in for the authorized composer — no provider call is made."""
+
+    def __init__(self, text="وش عنوان التوصيل اللي تبي نرسل له؟", fail=False):
+        self.text = text
+        self.fail = fail
+        self.calls = 0
+
+    async def compose(self, decision, result, ctx):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("isolated compose failure")
+        return self.text
+
+
+def _result_with_reply(reply, reason="isolated-address-claim"):
+    from modules.ai.order_flow_v2.owner import OrderFlowV2Result  # noqa: PLC0415
+
+    return OrderFlowV2Result(handled=True, reply=reply, reason=reason)
+
+
+_GUARD_CANNOT_RUN = [
+    ([("modules.ai.order_flow_v2.outbound_guards"
+       ".apply_order_flow_v2_outbound_guards",
+       {"side_effect": RuntimeError("isolated wrapper failure")})], "invocation"),
+    ([("builtins.__import__",
+       {"side_effect": _import_blocker(
+           "modules.ai.order_flow_v2.outbound_guards")})], "import"),
+]
+
+
+@pytest.mark.parametrize("patches,label", _GUARD_CANNOT_RUN)
+def test_an_unchecked_claim_never_reaches_the_wire(patches, label):
+    """E1, stated so it can fail on the pre-fix tree without new symbols.
+
+    An import error or a raise on the way in stopped the guard returning,
+    the belt's ``except`` logged it, and the ORIGINAL unchecked candidate
+    — still sitting in the reply variable — went to the customer. Only
+    the existing composer symbol is patched here, so this same test runs
+    against a tree that has no recovery module at all.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply("تم حفظ عنوانك. نكمل الطلب؟"),
+        patches=list(patches) + [(
+            "modules.ai.brain.compose.responder.DefaultComposer",
+            {"return_value": _StubComposer(fail=True)},
+        )],
+    )
+
+    assert all("حفظ عنوانك" not in _payload_text(p) for p in sent), (label, sent)
+    assert all("حفظ عنوانك" not in m["text"] for m in saved), (label, saved)
+
+
+@pytest.mark.parametrize("patches,label", _GUARD_CANNOT_RUN)
+def test_a_guard_that_cannot_run_never_sends_the_unchecked_reply(patches, label):
+    """E1: the refusal inside the guard cannot protect its own absence.
+
+    An import error or a raise on the way in stopped the guard returning,
+    the belt's ``except`` logged it, and the ORIGINAL unchecked candidate
+    — still sitting in the reply variable — went to the customer with no
+    guard decision recorded at all.
+    """
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    composer = _StubComposer()
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply("تم حفظ عنوانك. نكمل الطلب؟"),
+        patches=list(patches) + [(
+            "modules.ai.order_flow_v2.address_reply_recovery._default_composer",
+            {"return_value": composer},
+        )],
+    )
+
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    bodies = [_payload_text(p) for p in sent]
+    assert all("حفظ عنوانك" not in body for body in bodies), (label, bodies)
+    assert all("حفظ عنوانك" not in m["text"] for m in saved), (label, saved)
+    # Safety is not enough: the customer's turn is still answered. With
+    # the guard itself unavailable nothing can verify fresh wording
+    # either, so the approved minimal line speaks — composition was
+    # attempted first, and the provenance says which step failed.
+    assert bodies, label
+    assert composer.calls == 1, label
+    assert is_compose_failure_fallback(bodies[0]), (label, bodies)
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "fallback_deterministic"
+    assert meta["address_claim_compose_attempted"] is True
+    assert meta["fallback_reason"] == "address_reply_unverifiable_after_compose"
+
+
+def test_a_refused_turn_is_answered_by_the_authorized_composer():
+    """E2: refusing the claim is right; leaving the turn silent is not."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    composer = _StubComposer()
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
+        patches=[(
+            "modules.ai.order_flow_v2.address_reply_recovery._default_composer",
+            {"return_value": composer},
+        )],
+    )
+
+    assert composer.calls == 1
+    assert [_payload_text(p) for p in sent] == [composer.text]
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "llm"
+    assert meta["llm_candidate_present"] is True
+    assert meta["address_reply_recovered"] is True
+    assert "fallback_reason" not in meta
+
+
+def test_a_genuine_compose_failure_earns_the_approved_fallback():
+    """E2: composition attempted FIRST, then the minimal approved line.
+
+    This is the condition EX-FALLBACK-GENERIC-001 actually describes, and
+    the reason the earlier "fallback" on this path was untruthful.
+    """
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    composer = _StubComposer(fail=True)
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
+        patches=[(
+            "modules.ai.order_flow_v2.address_reply_recovery._default_composer",
+            {"return_value": composer},
+        )],
+    )
+
+    assert composer.calls == 1
+    assert len(sent) == 1
+    assert is_compose_failure_fallback(_payload_text(sent[0]))
+    meta = saved[0]["metadata"]
+    assert meta["compose_source"] == "fallback_deterministic"
+    assert meta["response_mode"] == "fallback_deterministic"
+    assert meta["fallback_reason"] == "address_reply_compose_failed"
+    assert meta["fallback_action_type"] == "order_flow_v2_address_reply"
+    assert meta["address_claim_compose_attempted"] is True
+    assert meta["llm_candidate_present"] is False
+
+
+def test_a_recovery_that_restates_the_claim_is_refused_too():
+    """E2: a recovery repeating the unsupported claim is not a recovery."""
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    composer = _StubComposer(text="تم حفظ عنوانك")
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply("تم حفظ عنوانك"),
+        patches=[(
+            "modules.ai.order_flow_v2.address_reply_recovery._default_composer",
+            {"return_value": composer},
+        )],
+    )
+
+    assert composer.calls == 1
+    assert all("حفظ عنوانك" not in _payload_text(p) for p in sent)
+    assert is_compose_failure_fallback(_payload_text(sent[0]))
+    meta = saved[0]["metadata"]
+    assert meta["fallback_reason"] == "address_reply_unsupported_after_compose"
+    # A candidate DID exist this time, and the metadata says so.
+    assert meta["llm_candidate_present"] is True
+
+
+def test_a_claimless_question_is_delivered_untouched_through_the_send_block():
+    """E1/E3: fail-closed must not become fail-silent for honest text."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    honest = "وش العنوان اللي تبي نوصل له؟"
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply(honest),
+        patches=[(
+            "modules.ai.order_flow_v2.checkout_context.read_turn_address_operation",
+            {"side_effect": RuntimeError("isolated failure")},
+        )],
+    )
+
+    assert [_payload_text(p) for p in sent] == [honest]
+    assert saved[0]["text"] == honest
+    assert saved[0]["metadata"].get("address_reply_recovered") is not True
+
+
+def test_a_detector_failure_recovers_rather_than_dropping_the_turn():
+    """E2: "cannot decide" must still answer the customer."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _import(db, tenant, customer, _payload())
+    db.commit()
+    convo = _conversation(db, tenant, customer)
+    composer = _StubComposer()
+
+    sent, saved = _run_send_block(
+        db, tenant, convo, _result_with_reply("وش العنوان اللي تبي نوصل له؟"),
+        patches=[
+            ("modules.ai.brain.postprocess.customer_address_save_claim_guard"
+             ".detect_address_save_claim_kinds",
+             {"side_effect": RuntimeError("isolated detector failure")}),
+            ("modules.ai.order_flow_v2.address_reply_recovery._default_composer",
+             {"return_value": composer}),
+        ],
+    )
+
+    from core.fallback_policy import is_compose_failure_fallback  # noqa: PLC0415
+
+    assert sent, "a turn that cannot be judged still has to be answered"
+    # The detector is broken for the recovery too, so the fresh wording
+    # cannot be verified either — the approved line speaks rather than
+    # unverified text, and the turn is not dropped.
+    assert is_compose_failure_fallback(_payload_text(sent[0]))
+    meta = saved[0]["metadata"]
+    assert meta["address_reply_recovered"] is True
+    assert meta["address_claim_compose_attempted"] is True
+    assert meta["fallback_reason"] == "address_reply_unverifiable_after_compose"
+
+
+def test_a_guarded_address_showing_still_reaches_the_wire_with_its_receipt():
+    """E3: the recovery path must not disturb the ordinary showing."""
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    a, b = _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+
+    result = _owner_turn(db, tenant, convo, live=True, missing=("delivery_address",),
+                         inbound_metadata={"wa_message_id": "wamid.in-show",
+                                           "button_id": "checkout_continue"})
+    sent, saved = _run_send_block(db, tenant, convo, result, turn_ref="wamid.in-show")
+
+    assert len(sent) == 1
+    delivered = delivered_address_action_ids(sent[0])
+    offered, _ = _offered_revisions(tenant_id=tenant.id, conversation=convo,
+                                    offer_id=result.address_presentation.offer_id)
+    assert {structured_consent_action({"button_id": i})[1] for i in delivered} == set(offered)
+    assert set(offered) == {a.address_id, b.address_id}
+    assert saved[0]["metadata"].get("address_reply_recovered") is not True

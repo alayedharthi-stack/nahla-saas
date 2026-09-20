@@ -8031,29 +8031,103 @@ async def _handle_merchant_message(
                         ),
                     )
                 except Exception:  # noqa: BLE001
+                    # The guard could not run AT ALL — its import failed,
+                    # its arguments could not be built, or it raised on
+                    # the way in. The refusal inside that function cannot
+                    # protect a failure that stops the function returning,
+                    # and the reply still sitting in ``_of2_reply`` is the
+                    # unchecked candidate. Fail closed HERE, at the send
+                    # decision, or the whole guard is optional.
                     logger.exception(
                         "[ORDER_FLOW_V2] outbound guard failed tenant=%s to=%s",
                         tenant_id,
                         to,
                     )
+                    _of2_provenance["address_claim_send_suppressed"] = True
+                    _of2_provenance["address_save_claim_suppress_reason"] = (
+                        "guard_boundary_failed"
+                    )
+                    _of2_reply = ""
                 if _of2_provenance.get("address_claim_send_suppressed") or not str(
                     _of2_reply or ""
                 ).strip():
-                    # The guard could not stand behind this reply: it
-                    # asserts a save whose evidence is unreadable, or
-                    # removal left nothing honest to send. Delivering it
-                    # anyway is the one outcome the Claim Rule forbids,
-                    # and there is no composer on this path to ask for
-                    # different wording. Nothing is sent, nothing is
-                    # recorded as shown, and the turn is logged so the
-                    # gap is measurable rather than invisible.
+                    # Nothing here can be stood behind. Refusing to send
+                    # the claim is right; leaving the customer's turn
+                    # unanswered is not — they asked a question. So the
+                    # turn is recovered through the composition route the
+                    # Brain already uses: trusted facts in, wording out,
+                    # revalidated by the same guard, and only a GENUINE
+                    # compose failure reaches the approved minimal line.
                     logger.error(
-                        "[ORDER_FLOW_V2] address claim unverifiable, not sending "
+                        "[ORDER_FLOW_V2] address claim unverifiable, recovering "
                         "tenant=%s to=%s reason=%s",
                         tenant_id,
                         to,
                         _of2_provenance.get("address_save_claim_suppress_reason"),
                     )
+                    _of2_recovery = None
+                    try:
+                        from modules.ai.order_flow_v2.address_reply_recovery import (  # noqa: PLC0415
+                            compose_address_recovery_reply,
+                        )
+
+                        _of2_recovery = await compose_address_recovery_reply(
+                            db,
+                            tenant_id=int(tenant_id),
+                            conversation=convo,
+                            customer_phone=to,
+                            message=str(text or ""),
+                            known_facts=dict(
+                                ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
+                                    "order_prep"
+                                )
+                                or {}
+                            ),
+                            turn_ref=str(wa_msg_id or ""),
+                        )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — handled immediately below, where an unrecovered turn is logged rather than answered with unverified text
+                        logger.exception(
+                            "[ORDER_FLOW_V2] address recovery failed tenant=%s to=%s",
+                            tenant_id,
+                            to,
+                        )
+                    if _of2_recovery is not None and _of2_recovery.spoke:
+                        _recovery_sink: Dict[str, Any] = {}
+                        _recovery_ok = await _send_whatsapp_message(
+                            phone_id=phone_id,
+                            to=to,
+                            text=_of2_recovery.text,
+                            _tenant_id=tenant_id,
+                            _db=db,
+                            _inbound_message_id=wa_msg_id,
+                            _result_sink=_recovery_sink,
+                        )
+                        if _recovery_ok:
+                            _persona_ownership.mark_bypass(
+                                _POReason.PRE_BRAIN_FAST_PATH,
+                                owner="order_flow_v2:address_reply_recovery",
+                            )
+                            StateManager.save_message(
+                                db,
+                                to,
+                                _of2_recovery.text,
+                                "outbound",
+                                conversation_id=convo.id,
+                                tenant_id=tenant_id,
+                                extra_metadata={
+                                    **_persona_ownership.to_metadata(),
+                                    "reply_owner": "order_flow_v2",
+                                    "order_flow_v2_reason": "address_reply_recovery",
+                                    **_of2_provenance,
+                                    **_of2_recovery.as_metadata(),
+                                },
+                            )
+                    else:
+                        logger.error(
+                            "[ORDER_FLOW_V2] address turn unanswered tenant=%s to=%s",
+                            tenant_id,
+                            to,
+                        )
                     try:
                         db.commit()
                     except Exception:  # noqa: BLE001  # noqa: silent-ok — the owner's own state was already persisted above; a commit failure here must not raise into the webhook

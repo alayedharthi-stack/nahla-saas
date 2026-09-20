@@ -143,13 +143,21 @@ _NEGATION_RES: Tuple[re.Pattern, ...] = (
 # mark separates clauses wherever it appears, and a sentence-ender does
 # so when a letter follows it directly — the digit case is excluded on
 # purpose, because ``3.14`` and ``1,000`` are one token, not two clauses.
+# Western, Arabic-Indic and Eastern Arabic-Indic digits: a thousands
+# separator is a thousands separator in every script the replies use.
+_DIGITS = r"0-9\u0660-\u0669\u06F0-\u06F9"
+
 _SENTENCE_SPLIT = re.compile(
     r"(?<=[.!?؟،,؛;:])\s+"
     r"|\n+"
     # A comma-like mark with nothing after it — unless BOTH sides are
-    # digits, which is a thousands separator, not a clause end.
-    r"|(?<=[،,؛;])(?![0-9])(?=\S)"
-    r"|(?<![0-9])(?<=[،,؛;])(?=[0-9])"
+    # digits, which is a thousands separator, not a clause end. The digit
+    # test has to look at the characters on either side of the mark, so
+    # the lookbehind reaches back PAST it: ``(?<![0-9],)`` fails only when
+    # a digit immediately precedes the comma we are standing after.
+    rf"|(?<=[،,؛;])(?![{_DIGITS}])(?=\S)"
+    rf"|(?<![{_DIGITS}]،)(?<![{_DIGITS}],)(?<![{_DIGITS}]؛)(?<![{_DIGITS}];)"
+    rf"(?<=[،,؛;])(?=[{_DIGITS}])"
     # ``!``/``?`` run straight into the next clause often enough.
     r"|(?<=[!?؟])(?=[^\W\d_])"
     # A full stop does too, but only with a real word in front of it:
