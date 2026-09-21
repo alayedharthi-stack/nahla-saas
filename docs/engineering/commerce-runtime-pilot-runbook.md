@@ -186,7 +186,7 @@ misroutes.
 | `COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST` | comma-separated phone numbers | the owner's test handsets only |
 | `COMMERCE_RUNTIME_PILOT_MODEL` | the model this pilot runs on | **required** — the approved model, named explicitly |
 | `COMMERCE_RUNTIME_PILOT_MAX_STEPS` | optional, ≤ 6 | leave unset (4) |
-| `COMMERCE_RUNTIME_PILOT_MAX_TOOL_CALLS` | optional, ≤ 8 | leave unset (6) |
+| `COMMERCE_RUNTIME_PILOT_MAX_TOOL_CALLS` | optional, ≤ 8 | leave unset (6). Also the most tool requests one provider step may carry: the API never tells the model a per-step ceiling, so a bundle the budget can pay for is run whole rather than refused as `provider_invalid` |
 | `COMMERCE_RUNTIME_PILOT_TOOL_TIMEOUT_SECONDS` | optional, ≤ 20 | leave unset (10) |
 | `COMMERCE_RUNTIME_PILOT_PROVIDER_TIMEOUT_SECONDS` | optional, ≤ 60 | leave unset (35) |
 | `COMMERCE_RUNTIME_PILOT_DEADLINE_SECONDS` | optional, ≤ 120 | leave unset (75) |
@@ -253,7 +253,7 @@ One line per routed turn:
 
 ```text
 [COMMERCE_RUNTIME_PILOT] route=commerce_runtime {'turn_id': …, 'loop_status': …,
-  'stop_reason': …, 'steps_used': …, 'tool_calls_used': …, 'tools_called': …,
+  'stop_reason': …, 'stop_detail': …, 'steps_used': …, 'tool_calls_used': …, 'tools_called': …,
   'evidence_refs': …, 'delivery_sequence_id': …, 'reused_delivery': …,
   'dispatch_status': …, 'provider_message_id': …, 'processing_outcome': …,
   'transport_outcome': …, 'customer_reach': …, 'input_tokens': …,
@@ -266,6 +266,7 @@ One line per routed turn:
 | `dispatch_status=unknown` | the send is uncertain; it is **not** retried, and the turn is `failed` |
 | `dispatch_status=rejected` | the provider refused; nothing was sent |
 | `loop_status=stopped` | no reply was accepted; `stop_reason` says why and nothing was sent |
+| `stop_detail=…` | the loop's own account of that stop, as `key=value;…`: the provider's stated reason (`provider_reason=tool_requests_exceed_declared_maximum:4>3`), the validation message, the limit that was exceeded (`limit=max_tool_calls;remaining=…;requested=…`), the tool that was repeated. The same detail is stored under `stop_detail` in the failed turn's terminal. Never the customer's text |
 | `reused_delivery=True` | a re-entry dispatched an intent reserved by an earlier invocation |
 | `reused_dispatch=True` | this call sent nothing: it reported an outcome an earlier attempt established |
 | `requested_model` vs `model` | what the platform asked for vs what the provider reported answering with; they should match |

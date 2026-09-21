@@ -712,6 +712,103 @@ def test_a_model_refusal_sends_nothing_and_says_why(pilot):
     assert report.processing_outcome == c.ProcessingOutcome.FAILED.value
 
 
+# ── A step's tool bundle is bounded by the turn's budget, not by a smaller ceiling ──
+
+
+@contextlib.contextmanager
+def _more_products(pilot: "Pilot", titles: Tuple[str, ...]) -> Any:
+    """Extra catalogue rows for one case, removed afterwards."""
+    ids: List[int] = []
+    with pilot.engine.begin() as conn:
+        for title in titles:
+            ids.append(int(conn.execute(
+                text("INSERT INTO products (tenant_id, external_id, title, description, price, "
+                     "in_stock, stock_quantity) VALUES (:t, :x, :ti, :d, 149, true, 2) RETURNING id"),
+                {"t": pilot.tenant_a, "x": "SKU-" + uuid.uuid4().hex[:8], "ti": title,
+                 "d": title}).scalar_one()))
+    try:
+        yield ids
+    finally:
+        with pilot.engine.begin() as conn:
+            for product_id in ids:
+                conn.execute(text("DELETE FROM products WHERE id = :p"), {"p": product_id})
+
+
+def _pilot_budget(max_tool_calls: int) -> ac.LoopBudget:
+    return ac.LoopBudget(max_steps=4, max_tool_calls=max_tool_calls, tool_timeout_seconds=10.0,
+                         provider_timeout_seconds=15.0, deadline_seconds=45.0)
+
+
+def test_a_bundle_of_detail_requests_the_budget_can_pay_for_runs_whole(pilot):
+    """Tenant 1 pilot, September 2026, turn 6: after one search the model asked
+    for four products' details in one step. The provider's ceiling was three
+    per step, so the whole step was refused as ``provider_invalid`` and the
+    customer got nothing. The ceiling now follows the turn's tool budget."""
+    # A details lookup is authorised only for a product an earlier search of
+    # this turn returned, so one search must surface all four: the fixture's
+    # shoe and three more shoes.
+    with _more_products(pilot, ("حذاء جلد بني", "حذاء أطفال أزرق", "حذاء رياضي أسود")) as extra:
+        products = [pilot.product_id, *extra]
+        refs = tuple(f"catalog:product:{pid}" for pid in products)
+        transport = Transport([accepted("wamid.BUNDLE")])
+        report = pilot.run(
+            answers=[step([tool_use("t1", "search_products", query="حذاء", limit=5)]),
+                     step([tool_use(f"d{i}", "get_product_details", product_id=pid)
+                           for i, pid in enumerate(products)]),
+                     step([reply("عندنا أربعة منتجات متوفرة", refs=refs, commerce=True)])],
+            transport=transport, budget=_pilot_budget(max_tool_calls=6),
+        )
+    assert report.loop_status != ac.LoopStatus.STOPPED.value, (
+        report.stop_reason, report.stop_detail, report.tools_called, report.evidence_refs)
+    assert report.stop_reason is None and report.stop_detail == ()
+    assert report.tools_called == ("search_products",) + ("get_product_details",) * 4
+    assert report.tool_calls_used == 5
+    assert set(refs) <= set(report.evidence_refs)
+    assert report.dispatch_status == dd.SENT_ACCEPTED and len(transport.sent) == 1
+
+
+def test_a_bundle_over_a_smaller_ceiling_is_refused_by_name_not_in_silence(pilot):
+    """The same four-request step against a ceiling of three (a tool budget of
+    three): still ``provider_invalid``, but the report, the log line and the
+    terminal now say exactly why."""
+    transport = Transport([])
+    products = [pilot.product_id + offset for offset in (0, 1000, 1001, 1002)]
+    report = pilot.run(
+        answers=[step([tool_use("t1", "search_products", query="حذاء")]),
+                 step([tool_use(f"d{i}", "get_product_details", product_id=pid)
+                       for i, pid in enumerate(products)])],
+        transport=transport, budget=_pilot_budget(max_tool_calls=3),
+    )
+    assert report.stop_reason == ac.StopReason.PROVIDER_INVALID.value
+    assert dict(report.stop_detail) == {"provider_reason": "tool_requests_exceed_declared_maximum:4>3"}
+    assert report.as_log_fields()["stop_detail"] == (
+        "provider_reason=tool_requests_exceed_declared_maximum:4>3")
+    assert transport.sent == [] and report.processing_outcome == c.ProcessingOutcome.FAILED.value
+    terminal = pilot.terminal(report.turn_id)
+    assert terminal.details["stop_reason"] == ac.StopReason.PROVIDER_INVALID.value
+    assert terminal.details["stop_detail"] == {
+        "provider_reason": "tool_requests_exceed_declared_maximum:4>3"}
+
+
+def test_a_bundle_beyond_the_remaining_tool_budget_is_stopped_with_its_numbers(pilot):
+    """Within the ceiling but over what is left: refused whole, by the budget,
+    and the stop says what was asked and what remained."""
+    transport = Transport([])
+    products = [pilot.product_id + offset for offset in (0, 1000, 1001, 1002)]
+    report = pilot.run(
+        answers=[step([tool_use("t1", "search_products", query="حذاء")]),
+                 step([tool_use(f"d{i}", "get_product_details", product_id=pid)
+                       for i, pid in enumerate(products)])],
+        transport=transport, budget=_pilot_budget(max_tool_calls=4),
+    )
+    assert report.stop_reason == ac.StopReason.BUDGET_EXHAUSTED.value
+    assert dict(report.stop_detail) == {"limit": "max_tool_calls", "remaining": "3", "requested": "4"}
+    assert report.tool_calls_used == 1        # the refused bundle debited nothing
+    assert transport.sent == []
+    assert pilot.terminal(report.turn_id).details["stop_detail"] == {
+        "limit": "max_tool_calls", "remaining": "3", "requested": "4"}
+
+
 # ── The history belongs to this conversation (F7) ────────────────────────────
 
 

@@ -23,6 +23,7 @@ No commerce write happens anywhere on this path.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import threading
 import time
@@ -111,6 +112,7 @@ class TurnReport:
     duplicate_inbound: bool = False
     loop_status: Optional[str] = None
     stop_reason: Optional[str] = None
+    stop_detail: Tuple[Tuple[str, str], ...] = ()   # the loop's own account of the stop, bounded
     delivery_sequence_id: Optional[int] = None
     reused_delivery: bool = False      # the loop reused an existing reservation
     reused_dispatch: bool = False      # the outcome came from an earlier attempt, not this send
@@ -140,6 +142,7 @@ class TurnReport:
         fields = dataclasses.asdict(self)
         fields["tools_called"] = ",".join(self.tools_called)
         fields["evidence_refs"] = ",".join(self.evidence_refs)
+        fields["stop_detail"] = ";".join(f"{key}={value}" for key, value in self.stop_detail)
         fields["replied"] = self.replied
         fields["reply_chars"] = len(self.reply_text)
         fields.pop("reply_text", None)      # the log line records length, never the customer's text
@@ -498,6 +501,7 @@ def run_commerce_runtime_turn(
         reasoner = ap.AnthropicReasoningProvider(
             instructions=instructions,
             tools_provider=anthropic_provider or AnthropicProvider(),
+            max_tool_requests_per_step=_tool_requests_per_step(budget),
             audit_context={"tenant_id": int(tenant_id), "conversation_id": int(conversation_id),
                            "turn_id": int(turn_id), "channel": "whatsapp",
                            "reason": "commerce_runtime_pilot",
@@ -548,10 +552,12 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
                          if event.kind == "tool_observation")
     evidence = tuple(str(ref) for ref in (outcome.detail.get("evidence_refs") or ()))
     usage_model = next((u.model for u in reversed(reasoner.usage) if u.model), None)
+    stop_detail = _stop_detail(outcome)
     common = dict(
         report_base,
         loop_status=outcome.status,
         stop_reason=outcome.stop_reason,
+        stop_detail=stop_detail,
         delivery_sequence_id=outcome.delivery_sequence_id,
         reused_delivery=outcome.reused_delivery,
         steps_used=outcome.steps_used,
@@ -569,7 +575,8 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         terminal = dd.complete_turn(
             ledgers=ledgers, tenant_id=tenant_id, namespace=NAMESPACE, turn_id=turn_id, token=token,
             processing_outcome=c.ProcessingOutcome.FAILED.value,
-            details={"stop_reason": outcome.stop_reason or "unknown", "source": "commerce_runtime_pilot"},
+            details={"stop_reason": outcome.stop_reason or "unknown", "source": "commerce_runtime_pilot",
+                     **({"stop_detail": dict(stop_detail)} if stop_detail else {})},
         )
         return TurnReport(reason=HANDLED, dispatch_status=None,
                           processing_outcome=getattr(terminal, "processing_outcome", None),
@@ -597,6 +604,52 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
                       processing_outcome=getattr(terminal, "processing_outcome", None),
                       transport_outcome=getattr(terminal, "transport_outcome", None),
                       customer_reach=getattr(terminal, "customer_reach", None), **common)
+
+
+STOP_DETAIL_MAX_ITEMS = 12
+STOP_DETAIL_MAX_CHARS = 160
+
+
+def _tool_requests_per_step(budget: Optional[ac.LoopBudget]) -> int:
+    """How many tool requests one provider step may carry.
+
+    The API never tells the model a per-step ceiling, so a well-formed bundle
+    the turn's tool budget can pay for must not be refused as invalid for its
+    size alone: four product-detail requests in one step against a ceiling of
+    three ended a real turn with no reply at all. The ceiling is therefore the
+    turn's whole tool budget, within the contract's own maximum. A bundle
+    beyond the budget is still stopped whole, by name, as ``budget_exhausted``.
+    """
+    if budget is None:
+        return ac.MAX_TOOL_REQUESTS_PER_STEP
+    return max(1, min(int(ac.MAX_TOOL_REQUESTS_PER_STEP), int(budget.max_tool_calls)))
+
+
+def _stop_detail(outcome: ac.LoopOutcome) -> Tuple[Tuple[str, str], ...]:
+    """The loop's own account of why it stopped, bounded for a log line and a terminal.
+
+    Only what the loop recorded as its stop detail is carried — the provider's
+    stated reason, the validation message, the capability or limit that was
+    exceeded, the tool that was repeated — so the next ``provider_invalid``
+    names its cause instead of only its class. Evidence references have their
+    own field. No stop detail carries the customer's text or the reply.
+    """
+    if outcome.status != ac.LoopStatus.STOPPED.value:
+        return ()
+    items = []
+    for key, value in sorted(outcome.detail.items(), key=lambda item: str(item[0])):
+        if key == "evidence_refs":
+            continue
+        if isinstance(value, (Mapping, list, tuple)):
+            rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        else:
+            rendered = str(value)
+        if len(rendered) > STOP_DETAIL_MAX_CHARS:
+            rendered = rendered[:STOP_DETAIL_MAX_CHARS - 1] + "…"
+        items.append((str(key), rendered))
+        if len(items) >= STOP_DETAIL_MAX_ITEMS:
+            break
+    return tuple(items)
 
 
 def _fail_turn(ledgers: LedgerRepository, tenant_id: int, turn_id: int, token: c.OwnershipToken,

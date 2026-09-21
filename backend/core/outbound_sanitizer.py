@@ -66,6 +66,16 @@ The sanitiser is intentionally CONSERVATIVE for the search case:
   * The DuckDuckGo bridge (``html.duckduckgo.com/l/?uddg=…``) is the
     canonical leak source we observed in production; that alone is
     enough to drop the reply.
+  * Links the platform recognises never count towards the "too many
+    links" rule: the merchant's own store domain, the storefront
+    platforms Nahla integrates, and payment / tracking / map links
+    (the CTA taxonomy in ``core.wa_link_buttons``). A product
+    listing, a branch list or a payment-plus-tracking answer is a
+    normal reply, not a citation dump. September 2026, Tenant 1
+    pilot: a four-product listing was replaced by the apology for
+    its four store links — that was the rule being wrong, not the
+    reply. Replies carrying many links are audited
+    (``[OUTBOUND_URL_AUDIT]``) so the rule stays measurable.
 
 For the planner case the strategy is RECOVERY-FIRST: we try to keep
 the natural Arabic message the customer was meant to see and only
@@ -75,7 +85,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 logger = logging.getLogger("nahla.security.outbound_sanitizer")
 
@@ -104,13 +115,16 @@ _LEAK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("sources_header",      re.compile(r"المصادر\s*:\s*\n?\s*[-•]?\s*(?:https?://|//)", )),
 ]
 
-# How many independent URLs in a single message constitute a "dump"?
-# A normal merchant reply rarely sends more than ONE clickable link
-# (payment link OR product page OR tracking page). Two is suspicious;
-# three or more is almost certainly a search citation block.
+# How many links the platform does NOT recognise may a single message
+# carry before it is treated as a citation dump? Links it recognises —
+# the merchant's own store, a storefront platform, payment, tracking or
+# map links — never count: a reply listing several products or branches
+# is a normal merchant reply. Three or more unrecognised links, with no
+# fingerprint above, is the residual shape of a search citation block.
 _MAX_URLS_PER_MESSAGE = 2
 
 _URL_RE = re.compile(r"https?://\S+|(?<![A-Za-z0-9])//\S+", re.IGNORECASE)
+_URL_HOST_RE = re.compile(r"^(?:https?:)?//([^/?#\s]+)", re.IGNORECASE)
 
 # ── Internal planner / debug-field fingerprints ──────────────────────────────
 #
@@ -304,11 +318,14 @@ def extract_natural_segment(text: str) -> Optional[str]:
 SAFE_FALLBACK_TEXT = "أعتذر، حصل خلل بسيط في الرد. لو تكرر معك، أعد السؤال وأنا معك 🌷"
 
 
-def contains_leakage_markers(text: str) -> Optional[str]:
+def contains_leakage_markers(text: str, *, store_domain: Optional[str] = None) -> Optional[str]:
     """Return the NAME of the first matching leakage fingerprint, or
     ``None`` when the text is clean. Useful for unit tests + log
     annotations. The returned name is one of the keys in
-    ``_LEAK_PATTERNS`` plus the synthetic ``too_many_urls`` bucket.
+    ``_LEAK_PATTERNS`` plus the synthetic ``too_many_urls`` bucket,
+    which counts only links the platform does not recognise (see
+    ``unrecognised_urls``). ``store_domain`` is the merchant's own
+    store host when the caller knows it; links on it never count.
     """
     if not text or not isinstance(text, str):
         return None
@@ -317,8 +334,73 @@ def contains_leakage_markers(text: str) -> Optional[str]:
             return name
     urls = _URL_RE.findall(text)
     if len(urls) > _MAX_URLS_PER_MESSAGE:
-        return "too_many_urls"
+        if len(unrecognised_urls(urls, store_domain=store_domain)) > _MAX_URLS_PER_MESSAGE:
+            return "too_many_urls"
     return None
+
+
+def unrecognised_urls(urls: Sequence[str], *, store_domain: Optional[str] = None) -> List[str]:
+    """The links in ``urls`` the platform cannot place: not on the
+    merchant's own store or a storefront platform, and not a payment,
+    tracking, product or map link by the CTA taxonomy. Pure."""
+    from core.wa_link_buttons import classify_url, is_storefront_host  # noqa: PLC0415
+
+    unrecognised: List[str] = []
+    for url in urls:
+        try:
+            classified = classify_url(url, store_domain=store_domain)
+        except Exception:  # noqa: BLE001 — an unparsable link is an unrecognised one
+            unrecognised.append(url)
+            continue
+        if classified.kind != "general":
+            continue
+        if is_storefront_host(classified.domain, store_domain=store_domain):
+            continue
+        unrecognised.append(url)
+    return unrecognised
+
+
+def url_hosts(text: str) -> List[str]:
+    """The distinct hosts linked from ``text``, lower-cased and sorted.
+    Pure; used by the link audit line and by tests."""
+    if not text or not isinstance(text, str):
+        return []
+    hosts = set()
+    for url in _URL_RE.findall(text):
+        m = _URL_HOST_RE.match(url)
+        if m:
+            hosts.add(m.group(1).lower().rstrip(".,;:!?)»"))
+    return sorted(hosts)
+
+
+def _store_domain_for(db: Any, tenant_id: Optional[int]) -> Optional[str]:
+    """The merchant's own store host, read from tenant state; ``None`` when
+    unknown. Read only when a reply carries more links than the rule allows,
+    so an ordinary send pays nothing for it. Never raises."""
+    if db is None or not tenant_id:
+        return None
+    try:
+        from modules.ai.brain.commerce.store_url_resolver import (  # noqa: PLC0415
+            lookup_tenant_store_url,
+        )
+
+        url = str(lookup_tenant_store_url(db, int(tenant_id)) or "").strip()
+        host = (urlparse(url).hostname or "").lower() if url else ""
+        return host or None
+    except Exception as exc:  # noqa: BLE001 — an unreadable store domain must not block a send
+        logger.debug("[OUTBOUND_URL_AUDIT] store domain unavailable tenant=%s err=%s", tenant_id, exc)
+        return None
+
+
+def _audit_link_count(body: str, *, tenant_id: Optional[int], recipient: Optional[str]) -> None:
+    """Log a clean reply that carries many links. Never changes the reply."""
+    urls = _URL_RE.findall(body)
+    if len(urls) > _MAX_URLS_PER_MESSAGE:
+        logger.info(
+            "[OUTBOUND_URL_AUDIT] tenant=%s to=%s url_count=%d hosts=%s — recognised links; "
+            "the reply is sent as composed",
+            tenant_id, recipient, len(urls), ",".join(url_hosts(body)),
+        )
 
 
 def _replace_body_in_payload(
@@ -521,6 +603,12 @@ def sanitize_outbound_payload(
 
         # ── External-research leak (May 2026) ───────────────────
         match = contains_leakage_markers(body)
+        if match == "too_many_urls":
+            # Only now, and only for this reply, is the merchant's own store
+            # domain read: links on it are the merchant's, never a dump.
+            match = contains_leakage_markers(body, store_domain=_store_domain_for(db, tenant_id))
+        if not match:
+            _audit_link_count(body, tenant_id=tenant_id, recipient=recipient)
         if match:
             logger.warning(
                 "[EXTERNAL_RESEARCH_BLOCKED] tenant=%s to=%s marker=%s original_len=%d "
@@ -1136,6 +1224,8 @@ __all__ = [
     "ASSET_LOCATION",
     "contains_leakage_markers",
     "contains_planner_markers",
+    "unrecognised_urls",
+    "url_hosts",
     "contains_policy_leak_markers",
     "contains_internal_instruction_leak",
     "contains_handoff_promise",
