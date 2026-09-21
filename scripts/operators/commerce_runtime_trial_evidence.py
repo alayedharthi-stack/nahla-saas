@@ -9,9 +9,9 @@ reached, whether exactly one reply intent was reserved for it, whether exactly
 one send was accepted, and whether anything claimed a customer was reached
 without a receipt saying so.
 
-This job reads those rows for the **allowlisted tenants only**, inside a stated
-window, and renders them with identifiers masked. It writes nothing: the
-transaction is opened read-only and every statement is a ``SELECT``.
+This job reads live-namespace rows for the **allowlisted tenants only**, inside
+a stated admission window, and renders them with identifiers masked. It writes
+nothing: one repeatable-read, read-only transaction supplies the report.
 
 What it will not do
 -------------------
@@ -84,6 +84,12 @@ NOT_OBSERVED = "not_observed"
 # customer, and the pilot records the first and not the second.
 ACCEPTING_RECEIPTS = frozenset({"accepted"})
 REACH_RECEIPTS = frozenset({"delivered", "read"})
+
+# Normal runtime handling resolves a row without an operator disposition.
+# These are the distinct, supported operator dispositions, not reply outcomes.
+DEFERRED_DISPOSITIONS = frozenset({
+    "replayed", "answered", "superseded", "not_required", "unanswered",
+})
 
 # The closed set of claims this report is willing to make about a trial.
 CLAIMS: Tuple[str, ...] = (
@@ -227,11 +233,19 @@ def verdicts(turns: Sequence[Mapping[str, Any]], *,
     if not judged:
         found[CLAIMS[2]] = _claim(NOT_OBSERVED, "no reply intent was reserved in this window")
     else:
-        doubled = [r["turn_id"] for r in judged if r["accepted_sends"] > r["reply_intents"]]
+        # Compare each intent independently. An unsent intent must not offset
+        # two acceptances belonging to a different intent on the same turn.
+        doubled = [t["turn_id"] for t in turns if any(
+            sum(1 for a in s.get("attempts") or ()
+                for r in a.get("receipts") or ()
+                if r.get("kind") in ACCEPTING_RECEIPTS) > 1
+            for s in t.get("sequences") or ()
+        )]
+        intent_count = sum(r["reply_intents"] for r in judged)
         found[CLAIMS[2]] = _claim(
             REFUSED if doubled else PROVEN,
-            "more accepted sends than reply intents means one intent was sent twice"
-            if doubled else f"{len(judged)} reply intents, none sent more than once",
+            "one reply intent has more than one recorded accepted send"
+            if doubled else f"{intent_count} reply intents, none with more than one recorded acceptance",
             doubled)
 
     # 4. An unknown send outcome was never reported as a completed turn.
@@ -279,12 +293,16 @@ def verdicts(turns: Sequence[Mapping[str, Any]], *,
     elif not rows:
         found[CLAIMS[6]] = _claim(NOT_OBSERVED, "no inbound was deferred in this window")
     else:
-        unresolved = [r.get("id") for r in rows
-                      if not str(r.get("disposition") or "").strip()]
+        unresolved = [r.get("id") for r in rows if not (
+            (r.get("state") == "resolved" and r.get("disposition") is None)
+            or (r.get("state") == "disposed"
+                and r.get("disposition") in DEFERRED_DISPOSITIONS)
+        )]
         found[CLAIMS[6]] = _claim(
             REFUSED if unresolved else PROVEN,
-            "a deferred inbound with no disposition was answered by nobody and closed by nobody"
-            if unresolved else f"{len(rows)} deferred, each with a disposition on the record",
+            "an inbound is pending or has inconsistent resolution/disposition state"
+            if unresolved else f"{len(rows)} inbounds, each recorded as runtime-resolved or operator-disposed; "
+                               "accounting alone is not a claim of customer delivery",
             unresolved)
 
     return found
@@ -357,19 +375,24 @@ def read_window(db: Any, *, tenant_id: int, since: _dt.datetime,
                 until: _dt.datetime) -> Tuple[List[Dict[str, Any]], int, List[Dict[str, Any]]]:
     """Every admitted turn for one tenant in one window, with its own rows.
 
-    Returns ``(turns, effects_reserved, deferred)``. The turn list is capped at
+    Returns ``(turns, effects_reserved, deferred)`` for the live namespace only.
+    The caller establishes the read-only snapshot before invoking this reader.
+    Outcomes are their current state in that snapshot, not a reconstruction of
+    their historical state at ``until``. The turn list is capped at
     :data:`MAX_TURNS_INSPECTED`; reaching the cap raises rather than returning a
     partial window that would read as a whole one.
     """
+    scope = {"tenant": tenant_id, "namespace": "live"}
     turns = _rows(db, """
         SELECT t.id AS turn_id, t.provider_message_id, t.admitted_at,
                c.conversation_ref
           FROM commerce_runtime_turns t
           JOIN commerce_runtime_conversations c ON c.id = t.conversation_id
-         WHERE t.tenant_id = :tenant AND t.admitted_at >= :since AND t.admitted_at < :until
+         WHERE t.tenant_id = :tenant AND t.namespace = :namespace
+           AND t.admitted_at >= :since AND t.admitted_at < :until
          ORDER BY t.admitted_at, t.id
          LIMIT :limit
-    """, tenant=tenant_id, since=since, until=until, limit=MAX_TURNS_INSPECTED + 1)
+    """, **scope, since=since, until=until, limit=MAX_TURNS_INSPECTED + 1)
     if len(turns) > MAX_TURNS_INSPECTED:
         raise ValueError("window_exceeds_trial_size")
 
@@ -380,8 +403,8 @@ def read_window(db: Any, *, tenant_id: int, since: _dt.datetime,
         for row in _rows(db, """
             SELECT turn_id, processing_outcome, transport_outcome, customer_reach
               FROM commerce_runtime_turn_terminals
-             WHERE tenant_id = :tenant AND turn_id = ANY(:ids)
-        """, tenant=tenant_id, ids=ids):
+             WHERE tenant_id = :tenant AND namespace = :namespace AND turn_id = ANY(:ids)
+        """, **scope, ids=ids):
             terminals[row["turn_id"]] = row
 
         receipts: Dict[Any, List[Dict[str, Any]]] = {}
@@ -390,9 +413,9 @@ def read_window(db: Any, *, tenant_id: int, since: _dt.datetime,
               FROM commerce_runtime_delivery_receipts r
               JOIN commerce_runtime_delivery_attempts a ON a.id = r.attempt_id
               JOIN commerce_runtime_delivery_sequences s ON s.id = a.sequence_id
-             WHERE s.tenant_id = :tenant AND s.turn_id = ANY(:ids)
+             WHERE s.tenant_id = :tenant AND s.namespace = :namespace AND s.turn_id = ANY(:ids)
              ORDER BY r.receipt_no
-        """, tenant=tenant_id, ids=ids):
+        """, **scope, ids=ids):
             receipts.setdefault(row["attempt_id"], []).append(row)
 
         attempts: Dict[Any, List[Dict[str, Any]]] = {}
@@ -400,18 +423,18 @@ def read_window(db: Any, *, tenant_id: int, since: _dt.datetime,
             SELECT a.id AS attempt_id, a.sequence_id
               FROM commerce_runtime_delivery_attempts a
               JOIN commerce_runtime_delivery_sequences s ON s.id = a.sequence_id
-             WHERE s.tenant_id = :tenant AND s.turn_id = ANY(:ids)
+             WHERE s.tenant_id = :tenant AND s.namespace = :namespace AND s.turn_id = ANY(:ids)
              ORDER BY a.attempt_no
-        """, tenant=tenant_id, ids=ids):
+        """, **scope, ids=ids):
             row["receipts"] = receipts.get(row["attempt_id"], [])
             attempts.setdefault(row["sequence_id"], []).append(row)
 
         for row in _rows(db, """
             SELECT id AS sequence_id, turn_id, outcome
               FROM commerce_runtime_delivery_sequences
-             WHERE tenant_id = :tenant AND turn_id = ANY(:ids)
+             WHERE tenant_id = :tenant AND namespace = :namespace AND turn_id = ANY(:ids)
              ORDER BY id
-        """, tenant=tenant_id, ids=ids):
+        """, **scope, ids=ids):
             row["attempts"] = attempts.get(row["sequence_id"], [])
             sequences.setdefault(row["turn_id"], []).append(row)
 
@@ -421,23 +444,25 @@ def read_window(db: Any, *, tenant_id: int, since: _dt.datetime,
 
     effects = _rows(db, """
         SELECT count(*) AS reserved FROM commerce_runtime_effects
-         WHERE tenant_id = :tenant AND created_at >= :since AND created_at < :until
-    """, tenant=tenant_id, since=since, until=until)
+         WHERE tenant_id = :tenant AND namespace = :namespace
+           AND created_at >= :since AND created_at < :until
+    """, **scope, since=since, until=until)
     deferred = _rows(db, """
         SELECT id, state, disposition, reason
           FROM commerce_runtime_deferred_inbound
-         WHERE tenant_id = :tenant AND created_at >= :since AND created_at < :until
+         WHERE tenant_id = :tenant AND namespace = :namespace
+           AND created_at >= :since AND created_at < :until
          ORDER BY id
-    """, tenant=tenant_id, since=since, until=until)
+    """, **scope, since=since, until=until)
     return turns, int(effects[0]["reserved"]) if effects else 0, deferred
 
 
 def _read_only(db: Any) -> bool:
-    """Make the transaction read-only, and say whether that was established."""
+    """Establish one read-only snapshot for every query in the report."""
     import sqlalchemy as sa  # noqa: PLC0415
 
     try:
-        db.execute(sa.text("SET TRANSACTION READ ONLY"))
+        db.execute(sa.text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
         return True
     except Exception:  # noqa: BLE001 - a backend that cannot promise it says so
         return False
@@ -482,13 +507,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_USAGE
 
     emit(f"window={since.isoformat()}..{until.isoformat()} "
-         f"tenants={','.join(str(t) for t in tenants)}")
+         f"namespace=live tenants={','.join(str(t) for t in tenants)}")
 
     db = None
     refused: List[str] = []
     try:
         db = session()
-        emit(f"read_only_transaction={_read_only(db)}")
+        read_only = _read_only(db)
+        emit(f"read_only_transaction={read_only}")
+        if not read_only:
+            raise RuntimeError("read_only_transaction_not_established")
         for tenant_id in tenants:
             turns, effects, deferred = read_window(db, tenant_id=tenant_id,
                                                    since=since, until=until)

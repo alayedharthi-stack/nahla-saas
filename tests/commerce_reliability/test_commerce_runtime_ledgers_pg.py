@@ -52,7 +52,6 @@ from tests.commerce_reliability.test_commerce_runtime_foundation_pg import (
 
 FOUNDATION_REVISION = "0108"
 THIS_REVISION = "0109"
-CHAIN_HEAD = "0110"      # later revisions extend the same chain linearly
 TABLES = tuple(t.name for t in lm.LEDGER_TABLES)
 WORKER_A, WORKER_B = "worker-a", "worker-b"
 

@@ -326,8 +326,11 @@ COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST=<the pilot's tenant id> \
     --since 2026-09-21T06:00:00Z
 ```
 
-It reads only the allowlisted tenants, only inside the stated window, in a
-read-only transaction, and it masks recipients and message ids so the report
+It reads only the allowlisted tenants' live namespace, using one repeatable-read,
+read-only transaction. The window selects admitted turns and effect/deferred-row
+creation times; related outcomes are their current state in that snapshot,
+not their historical state at the end of the window. Shadow work is excluded.
+It masks recipients and message ids so the report
 can leave the machine. Per turn it prints the terminal, how many reply intents
 were reserved, how many sends were accepted and which receipt kinds exist.
 Then it judges a closed set of claims, each as `proven`, `refused` — with the
@@ -341,7 +344,15 @@ offending turns named — or `not_observed`:
 | `no_unknown_send_was_reported_completed` | an `unknown` send was recorded as a completed turn |
 | `customer_reach_is_never_claimed_without_a_receipt` | `customer_reach=reached` with no `delivered`/`read` receipt behind it |
 | `no_commerce_write_was_reserved` | an effect was reserved; the pilot has no commerce-write tool |
-| `every_deferred_inbound_is_accounted_for` | a deferred inbound carries no disposition |
+| `every_deferred_inbound_is_accounted_for` | an inbound is still pending or its resolution/disposition state is inconsistent |
+
+Normal runtime handling writes `state=resolved` with a null `disposition`;
+only operator handling writes `state=disposed` with a supported disposition.
+The report accepts both forms and does not equate accounting (including an
+`unanswered` disposition) with customer delivery. It checks each reply intent's
+recorded acceptances separately; an unsent intent cannot offset a duplicate
+acceptance on another intent. Failure to establish the read-only transaction
+stops the job before any trial query runs.
 
 `not_observed` is a real answer, not a pass: a window with no turns proves
 nothing, and the report says so rather than reading clean. The exception is a

@@ -65,6 +65,9 @@
         "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[narrowed_column-ALTER TABLE commerce_runtime_turns ALTER COLUMN provider_message_id TYPE varchar(64)-commerce_runtime_turns.provider_message_id]",
         "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_check-ALTER TABLE commerce_runtime_turn_terminals DROP CONSTRAINT ck_commerce_runtime_turn_terminals_transport-constraint ck_commerce_runtime_turn_terminals_transport absent]",
         "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[extra_column-ALTER TABLE commerce_runtime_conversations ADD COLUMN legacy_flag boolean-commerce_runtime_conversations.legacy_flag: unexpected column]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_not_null-ALTER TABLE commerce_runtime_conversations ALTER COLUMN state_revision DROP NOT NULL-commerce_runtime_conversations.state_revision]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[extra_not_null-ALTER TABLE commerce_runtime_conversations ALTER COLUMN lease_owner SET NOT NULL-commerce_runtime_conversations.lease_owner]",
+        "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[check_named_like_not_null-ALTER TABLE commerce_runtime_conversations ADD CONSTRAINT synthetic_not_null CHECK (next_sequence < 100)-unexpected constraint synthetic_not_null]",
         "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_same_named_trigger_on_an_unrelated_table_does_not_satisfy_the_verifier",
         "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_same_named_function_with_a_different_body_is_refused",
         "tests/commerce_reliability/test_commerce_runtime_migration_pg.py::test_missing_terminal_index_is_reconciled"
@@ -147,6 +150,9 @@
         "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_check-ALTER TABLE commerce_runtime_delivery_receipts DROP CONSTRAINT ck_commerce_runtime_delivery_receipts_accepted_id-constraint ck_commerce_runtime_delivery_receipts_accepted_id absent]",
         "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_confirmed_pair-ALTER TABLE commerce_runtime_effects DROP CONSTRAINT ck_commerce_runtime_effects_confirmed_pair-constraint ck_commerce_runtime_effects_confirmed_pair absent]",
         "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[extra_column-ALTER TABLE commerce_runtime_delivery_sequences ADD COLUMN legacy_flag boolean-commerce_runtime_delivery_sequences.legacy_flag: unexpected column]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[missing_not_null-ALTER TABLE commerce_runtime_effects ALTER COLUMN status DROP NOT NULL-commerce_runtime_effects.status]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[extra_not_null-ALTER TABLE commerce_runtime_delivery_receipts ALTER COLUMN provider_message_id SET NOT NULL-commerce_runtime_delivery_receipts.provider_message_id]",
+        "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_incompatible_precreated_schema_is_refused_and_not_stamped[check_named_like_not_null-ALTER TABLE commerce_runtime_effects ADD CONSTRAINT synthetic_not_null CHECK (status <> 'unknown')-unexpected constraint synthetic_not_null]",
         "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_same_named_trigger_on_an_unrelated_table_does_not_satisfy_the_verifier",
         "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_same_named_function_with_a_different_body_is_refused",
         "tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py::test_missing_ledger_index_is_reconciled",
@@ -409,6 +415,31 @@
       ]
     },
     {
+      "id": "commerce_runtime_trial_evidence",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py",
+      "origin": "Trial evidence collector: repository-written turns, exact tenant/live scope, resolved accounting, read-only consistent snapshot and independent concurrent completion",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_reader_finds_the_turn_the_runtime_admitted_and_answered",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_report_over_those_rows_refuses_nothing_and_masks_the_identifiers",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_turn_left_open_is_read_as_open_and_refuses_the_claim",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_an_unknown_send_is_read_as_unknown_and_never_as_an_answer",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_another_merchants_turn_is_never_in_this_merchants_report",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_turn_outside_the_stated_window_is_not_in_the_report",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_window_larger_than_a_trial_is_refused_rather_than_truncated",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_deferred_inbound_is_read_with_its_disposition",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_reserved_commerce_effect_is_counted_and_refuses_the_claim",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_runtime_resolved_inbound_needs_no_operator_disposition",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_shadow_work_cannot_contaminate_the_live_trial",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_report_snapshot_survives_completion_on_an_independent_connection",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_report_leaves_the_database_exactly_as_it_found_it"
+      ]
+    },
+    {
       "id": "runner_connection_regressions",
       "kind": "runner_regression",
       "module": "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py",
@@ -462,28 +493,6 @@
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_survive_taking_authority",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_let_a_stale_refresh_win",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_from_a_retained_session"
-      ]
-    },
-    {
-      "id": "commerce_runtime_trial_evidence",
-      "kind": "proof",
-      "module": "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py",
-      "origin": "Trial evidence reader — the report's SQL read back against turns written through the runtime's own repositories: the admitted turn, its ledger-derived terminal, reply intents, attempts and receipts; an open turn read as open; an unknown send never read as an answer; tenant scoping; window bounds; the trial-size refusal; the deferred inbound and reserved effect reads; and the report leaving every row count untouched",
-      "required_env": {
-        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
-        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
-      },
-      "nodeids": [
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_reader_finds_the_turn_the_runtime_admitted_and_answered",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_report_over_those_rows_refuses_nothing_and_masks_the_identifiers",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_turn_left_open_is_read_as_open_and_refuses_the_claim",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_an_unknown_send_is_read_as_unknown_and_never_as_an_answer",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_another_merchants_turn_is_never_in_this_merchants_report",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_turn_outside_the_stated_window_is_not_in_the_report",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_window_larger_than_a_trial_is_refused_rather_than_truncated",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_deferred_inbound_is_read_with_its_disposition",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_reserved_commerce_effect_is_counted_and_refuses_the_claim",
-        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_report_leaves_the_database_exactly_as_it_found_it"
       ]
     }
   ]

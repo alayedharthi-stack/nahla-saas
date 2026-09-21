@@ -137,7 +137,54 @@ def generate_ai_reply(
         tenant_id, _channel, customer_phone,
     )
 
-    return _pipeline.run(request)
+    # Measurement only, and inert outside an internal-E2E acceptance
+    # context. This is the boundary where the call is actually made, so
+    # it is the only place that can testify to what the model was given
+    # — the reply and the final state cannot. Both calls below are
+    # fail-open by construction; a measurement failure never changes the
+    # customer's reply.
+    from core.acceptance_compose_observer import (  # noqa: PLC0415
+        observe_model_bound_call,
+        record_model_bound_outcome,
+    )
+
+    _observed = observe_model_bound_call(context_metadata=context_metadata)
+    try:
+        # Inert in production. Under an internal-E2E context that armed
+        # one, this is where the injected provider fault actually fires —
+        # at the provider boundary, after the call is recorded as
+        # attempted, so the mechanism is exercised rather than labelled.
+        from core.acceptance_failure_injection import (  # noqa: PLC0415
+            maybe_inject_provider_failure,
+        )
+
+        maybe_inject_provider_failure()
+        payload = _pipeline.run(request)
+    except BaseException:
+        record_model_bound_outcome(
+            _observed,
+            candidate_present=False,
+            fallback_reason="provider_call_raised",
+        )
+        raise
+    _meta = getattr(payload, "metadata", None) or {}
+    _candidate = bool(str(getattr(payload, "reply_text", "") or "").strip())
+    _declared_reason = (
+        str(_meta.get("fallback_reason") or "") if isinstance(_meta, dict) else ""
+    )
+    # A call that returned nothing has to say so. Leaving the reason empty
+    # made "the model produced no text" indistinguishable from "nobody
+    # recorded why", which is exactly the silence the evidence layer
+    # refuses. When the boundary itself names a reason that one wins.
+    if not _candidate and not _declared_reason:
+        _declared_reason = "empty_model_candidate"
+    record_model_bound_outcome(
+        _observed,
+        candidate_present=_candidate,
+        compose_source=str(getattr(payload, "provider_used", "") or ""),
+        fallback_reason=_declared_reason,
+    )
+    return payload
 
 
 async def generate_orchestrate_response(

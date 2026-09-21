@@ -249,6 +249,112 @@ async def _invoke(tool: Any, context: CommerceAgentContext, arguments: dict[str,
 
 # ── 1. Retrieval is part of the orchestration, not a model choice ────────────
 
+@pytest.mark.parametrize("kind", [
+    "shipping_policy", "return_policy", "refund_policy", "exchange_policy",
+    "terms_policy", "privacy_policy", "warranty", "store_story", "faq",
+    "working_hours", "branches", "payment_method", "bank_transfer", "cod",
+    "shipping_carrier", "shipping_zones", "cold_shipping", "summer_note",
+])
+def test_merchant_tool_retrieves_visible_policy_evidence(seeded: Seed, kind: str) -> None:
+    """A real policy row must not disappear behind the product-only kind filter."""
+    from modules.ai.commerce_agent_v2.tools.knowledge import search_merchant_knowledge_impl
+
+    row = MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind=kind, title="سياسة المتجر العامة",
+        body="سياسة المتجر العامة: الشحن من ثلاثة إلى خمسة أيام عمل.",
+        is_active=True, ai_status="approved",
+    )
+    seeded.db.add(row)
+    seeded.db.commit()
+    context = _context(seeded, user_input="سياسة المتجر العامة")
+    result = asyncio.run(search_merchant_knowledge_impl(context, "سياسة المتجر العامة", 4))
+    assert result.status == "ok"
+    section = next(item for item in result.sections if item.section_id == row.id)
+    assert section.kind == kind and section.body == row.body
+    evidence = next(item for item in result.evidence if item.ref == section.evidence_ref)
+    assert evidence.source == "merchant_knowledge"
+    assert evidence.provenance["record"] == "merchant_knowledge_sections"
+    assert evidence.fields["section_id"] == row.id
+
+
+@pytest.mark.parametrize("excluded", ["tenant", "inactive", "deleted", "draft", "product_link"])
+def test_merchant_policy_retrieval_preserves_visibility_and_scope(seeded: Seed, excluded: str) -> None:
+    from datetime import datetime, timezone
+    from modules.ai.commerce_agent_v2.tools.knowledge import search_merchant_knowledge_impl
+
+    row = MerchantKnowledgeSection(
+        tenant_id=seeded.other_tenant.id if excluded == "tenant" else seeded.tenant.id,
+        kind="shipping_policy", title="الشحن والتوصيل", body="الشحن والتوصيل خلال خمسة أيام.",
+        is_active=excluded != "inactive", ai_status="draft" if excluded == "draft" else "approved",
+        deleted_at=datetime.now(timezone.utc) if excluded == "deleted" else None,
+    )
+    seeded.db.add(row)
+    seeded.db.flush()
+    if excluded == "product_link":
+        seeded.db.add(MerchantKnowledgeSectionProduct(section_id=row.id, product_id=seeded.jacket.id))
+    seeded.db.commit()
+    context = _context(seeded, user_input="الشحن والتوصيل")
+    result = asyncio.run(search_merchant_knowledge_impl(context, "الشحن والتوصيل", 4))
+    assert all(item.section_id != row.id for item in result.sections)
+    assert all(item.ref != f"kb:section:{row.id}" for item in result.evidence)
+
+
+def test_catalog_default_keeps_policy_out_of_product_facts(seeded: Seed) -> None:
+    from modules.ai.brain.commerce.product_knowledge_or_comparison import retrieve_catalog_candidate_kb_sections
+
+    row = MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind="shipping_policy", title="الشحن والتوصيل",
+        body="الشحن والتوصيل خلال خمسة أيام.", is_active=True, ai_status="approved",
+    )
+    seeded.db.add(row)
+    seeded.db.commit()
+    result = retrieve_catalog_candidate_kb_sections(
+        seeded.db, seeded.tenant.id, subject="الشحن والتوصيل", message="الشحن والتوصيل",
+    )
+    assert all(item["section_id"] != row.id for item in result["kb_sections"])
+
+
+def test_shipping_policy_real_tool_keeps_limits_and_relevance(seeded: Seed) -> None:
+    from modules.ai.commerce_agent_v2.tools.knowledge import search_merchant_knowledge_impl
+
+    rows = [MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind="shipping_policy", title="الشحن والتوصيل",
+        body="مدة الشحن والتوصيل ثلاثة إلى خمسة أيام عمل. " * 100,
+        is_active=True, ai_status="approved",
+    ) for _ in range(6)]
+    unrelated = MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind="store_story", title="الحرف اليدوية",
+        body="تأسس المتجر لتطوير الحرف اليدوية المحلية.", is_active=True, ai_status="approved",
+    )
+    seeded.db.add_all(rows + [unrelated])
+    seeded.db.commit()
+    context = _context(seeded, user_input="عندكم حذاء رياضي؟ ومتى يوصل؟")
+    result = asyncio.run(search_merchant_knowledge_impl(context, "الشحن والتوصيل", 4))
+    assert result.status == "ok" and 1 <= len(result.sections) <= 4
+    assert all(section.section_id != unrelated.id for section in result.sections)
+    assert all(len(section.body) <= 800 for section in result.sections)
+    assert all(section.body == rows[0].body[:800] for section in result.sections)
+
+
+@pytest.mark.parametrize("kind", [
+    "reply_style", "dialect", "forbidden_phrases", "allowed_style", "escalation_rules",
+    "compliance_rules", "response_tone", "emoji_policy", "owner_identity", "assistant_identity",
+])
+def test_store_knowledge_does_not_promote_behavioral_rules_to_facts(seeded: Seed, kind: str) -> None:
+    from modules.ai.commerce_agent_v2.tools.knowledge import search_merchant_knowledge_impl
+
+    row = MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind=kind, title="الشحن والتوصيل",
+        body="الشحن والتوصيل: تعليمات داخلية وليست حقائق للعميل.",
+        is_active=True, ai_status="approved",
+    )
+    seeded.db.add(row)
+    seeded.db.commit()
+    context = _context(seeded, user_input="الشحن والتوصيل")
+    result = asyncio.run(search_merchant_knowledge_impl(context, "الشحن والتوصيل", 4))
+    assert all(item.section_id != row.id for item in result.sections)
+    assert all(item.ref != f"kb:section:{row.id}" for item in result.evidence)
+
 @pytest.mark.parametrize(
     "turn_id, user_input, query",
     [

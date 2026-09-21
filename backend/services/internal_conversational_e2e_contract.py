@@ -8,11 +8,11 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 
 CONTRACT_VERSION = "internal_conversational_e2e_v1"
-EVIDENCE_SCHEMA_VERSION = "internal_conversational_e2e_evidence_v2"
+EVIDENCE_SCHEMA_VERSION = "internal_conversational_e2e_evidence_v3"
 EVIDENCE_SIGNATURE_SCHEMA_VERSION = "internal_conversational_e2e_signature_v1"
 EVIDENCE_CHANNEL = "direct_code_probe"
 
@@ -429,3 +429,509 @@ def evaluate_preflight(
         "runtime_revision": attested_revision,
         "attestation_id": attestation.attestation_id if attestation else None,
     }
+
+
+# ── OrderFlowV2 address-turn evidence (schema v3) ─────────────────────────
+#
+# Kept HARNESS-SPECIFIC on purpose. The platform's shared reply provenance
+# (``TextProvenance`` / ``PROVENANCE_FIELDS``) is consumed by every
+# non-address caller and by the completeness check over stored artifacts;
+# widening it to carry an address concern would turn a validation need into
+# a platform contract change, with re-verification of every historical
+# record behind it. Nothing here touches it. The signature already covers
+# the whole canonical payload, so these fields are signed by construction
+# and tampering with any of them fails ``verify_session_evidence``; and
+# because that verifier never reads ``evidence_schema_version``, v2
+# artifacts keep verifying unchanged.
+
+EVIDENCE_SCHEMA_VERSIONS_SUPPORTED: tuple[str, ...] = (
+    "internal_conversational_e2e_evidence_v2",
+    "internal_conversational_e2e_evidence_v3",
+)
+
+SCENARIO_SCHEMA_VERSION_V1 = "internal_conversational_e2e_scenarios_v1"
+SCENARIO_SCHEMA_VERSION_V2 = "internal_conversational_e2e_scenarios_v2"
+SCENARIO_SCHEMA_VERSIONS_SUPPORTED: tuple[str, ...] = (
+    SCENARIO_SCHEMA_VERSION_V1,
+    SCENARIO_SCHEMA_VERSION_V2,
+)
+
+TURN_MODE_BRAIN = "brain"
+TURN_MODE_OF2 = "of2"
+TURN_MODES = frozenset({TURN_MODE_BRAIN, TURN_MODE_OF2})
+
+# What a scenario says it did to this turn on purpose. ``none`` is the only
+# value that may contribute to a NATURAL outcome rate; the others exist to
+# confirm a mechanism and carry their own denominator.
+FAILURE_INJECTION_NONE = "none"
+FAILURE_INJECTIONS = frozenset(
+    {
+        FAILURE_INJECTION_NONE,
+        "provider_error",
+        "provider_timeout",
+        "guard_boundary",
+    }
+)
+
+# How the reply was executed. Derived from execution and provenance, never
+# from whether the payload happened to carry choices.
+PATH_ORDINARY = "ordinary"
+PATH_RECOVERY = "recovery"
+PATH_UNRESOLVED = "unresolved"
+EXECUTION_PATHS = frozenset({PATH_ORDINARY, PATH_RECOVERY, PATH_UNRESOLVED})
+
+# What the customer was actually offered. A SEPARATE dimension: an
+# ordinary turn for a customer with no saved addresses legitimately
+# carries no choices, and must not be read as a recovery because of it.
+SURFACE_BUTTONS = "buttons"
+SURFACE_LIST = "list"
+SURFACE_TEXT = "text"
+SURFACE_NONE = "none"
+DELIVERED_SURFACES = frozenset(
+    {SURFACE_BUTTONS, SURFACE_LIST, SURFACE_TEXT, SURFACE_NONE}
+)
+
+CODE_ADDRESS_EVIDENCE_MISSING = "address_turn_evidence_missing"
+CODE_ADDRESS_EVIDENCE_INCOMPLETE = "address_turn_evidence_incomplete"
+CODE_ADDRESS_EVIDENCE_UNBOUND = "address_turn_evidence_unbound"
+CODE_MODEL_CALL_EVIDENCE_INCOMPLETE = "model_bound_call_evidence_incomplete"
+
+ADDRESS_TURN_REQUIRED_FIELDS: tuple[str, ...] = (
+    "captured_payload_digest",
+    "collection_field",
+    "compose_entered",
+    "delivered_surface",
+    "execution_path",
+    "failure_injection",
+    "model_bound_calls",
+    "captured_payload_digest_verified",
+    "captured_persisted_content_match",
+    "captured_persisted_representation",
+    "captured_text_digest",
+    "persisted_body_digest",
+    "outbound_message_id",
+    "outbound_message_row_verified",
+    "outbound_metadata_turn_ref",
+    "outbound_provenance",
+    "receipt_action_ids",
+    "receipt_address_ids",
+    "recorded_action_ids",
+    "transport",
+    "turn_ref",
+)
+
+MODEL_BOUND_CALL_REQUIRED_FIELDS: tuple[str, ...] = (
+    "address_bound",
+    "call_index",
+    "collection_field",
+    "delivery_address_status",
+    "has_accepted_maps_reference",
+    "missing_field",
+    "observed_at",
+    "response_goal",
+    "stage",
+    "turn_ref",
+)
+
+
+CODE_ADDRESS_EXPECTATION_UNMET = "address_turn_expectation_unmet"
+CODE_ADDRESS_RECEIPT_MISMATCH = "address_turn_receipt_mismatch"
+CODE_ADDRESS_INJECTION_NOT_EXECUTED = "address_turn_injection_not_executed"
+CODE_ADDRESS_EXPECTATIONS_MISSING = "address_turn_expectations_missing"
+CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED = "address_turn_final_source_unestablished"
+CODE_ADDRESS_TIMING_UNCORRELATED = "address_turn_timing_uncorrelated"
+CODE_ADDRESS_CONTENT_UNBOUND = "address_turn_content_unbound"
+
+# The representations a reply may legitimately take between the wire and
+# the persisted row. Anything else is recorded, not accepted.
+REPRESENTATION_TEXT = "text_body"
+REPRESENTATION_INTERACTIVE = "interactive_body"
+CONTENT_REPRESENTATIONS = frozenset({REPRESENTATION_TEXT, REPRESENTATION_INTERACTIVE})
+
+CONSENT_ACTION_PREFIX = "nahla_addr_select"
+_SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+_CAPTURED_DELIVERY_ID = re.compile(r"^captured\.[0-9a-f]{32}$")
+
+# The closed set the doctrine allows for a customer-facing reply.
+COMPOSE_SOURCES = frozenset(
+    {
+        "llm",
+        "persona_llm",
+        "merchant_template",
+        "meta_template",
+        "legal_exact_text",
+        "security_exact_text",
+        "fallback_deterministic",
+    }
+)
+
+# What a scenario must state about an address turn before its evidence
+# means anything. Signing protects the bytes after they are written; it
+# says nothing about whether they describe the turn the scenario asked
+# for, which is why these are checked and not merely present.
+ADDRESS_EXPECTATION_FIELDS: tuple[str, ...] = (
+    "collection_field",
+    "response_goal",
+    "missing_field",
+)
+
+
+def _expected(expectations: Mapping[str, Any], key: str) -> str:
+    return str(expectations.get(key) or "").strip()
+
+
+def _model_call_blockers(
+    record: Mapping[str, Any],
+    expectations: Mapping[str, Any],
+) -> list[str]:
+    """Every model-bound call must match what the scenario asked for."""
+    blockers: list[str] = []
+    calls = record.get("model_bound_calls")
+    calls = list(calls) if isinstance(calls, Sequence) and not isinstance(calls, (str, bytes)) else []
+
+    provenance = dict(record.get("outbound_provenance") or {})
+    compose_entered = bool(record.get("compose_entered"))
+    # A turn where compose could not be ENTERED legitimately has no model
+    # call. That is a truthful outcome, not thin evidence — but it must
+    # then carry the fallback provenance that says so, rather than simply
+    # omitting everything.
+    if not calls:
+        if compose_entered:
+            return [CODE_MODEL_CALL_EVIDENCE_INCOMPLETE]
+        if not str(provenance.get("fallback_reason") or "").strip():
+            return [CODE_MODEL_CALL_EVIDENCE_INCOMPLETE]
+        return []
+
+    for call in calls:
+        if not isinstance(call, Mapping) or any(
+            field not in call for field in MODEL_BOUND_CALL_REQUIRED_FIELDS
+        ):
+            blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+            break
+        if str(call.get("observed_at") or "") != "orchestrator_adapter":
+            # Reconstructed from somewhere else is not observation.
+            blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+            break
+        if str(call.get("stage") or "") not in ("ordinary", "recovery"):
+            # ``unspecified`` means no branch declared itself, so the
+            # path this call belongs to was never established.
+            blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+            break
+        # An outcome, or a truthful "this call never returned". Silence
+        # is neither.
+        if not call.get("outcome_recorded") and not call.get("outcome_pending"):
+            blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+            break
+        if call.get("outcome_recorded"):
+            if not isinstance(call.get("candidate_present"), bool):
+                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+                break
+            # Where the text came from, or why there is none. One of the
+            # two must be stated; "it returned something" is not a source.
+            if not call.get("candidate_present") and not str(
+                call.get("fallback_reason") or ""
+            ).strip():
+                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+                break
+            if call.get("candidate_present") and not str(
+                call.get("compose_source") or ""
+            ).strip():
+                blockers.append(CODE_MODEL_CALL_EVIDENCE_INCOMPLETE)
+                break
+
+    # A turn may make more than one model-bound call, and only those
+    # carrying the address context can be judged against an address
+    # expectation. Every call still has to be COMPLETE (above); this
+    # narrows only what the expectation is applied to, and it refuses a
+    # turn where no call carried the context at all rather than passing
+    # one vacuously.
+    address_calls = [
+        call
+        for call in calls
+        if isinstance(call, Mapping) and bool(call.get("address_bound"))
+    ]
+    if calls and not address_calls:
+        blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+    for call in address_calls:
+        if not isinstance(call, Mapping):
+            continue
+        for field in ADDRESS_EXPECTATION_FIELDS:
+            want = _expected(expectations, field)
+            if want and str(call.get(field) or "") != want:
+                blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+        want_status = _expected(expectations, "delivery_address_status")
+        if want_status and str(call.get("delivery_address_status") or "") != want_status:
+            blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+        if "requires_accepted_maps_reference" in expectations:
+            if bool(call.get("has_accepted_maps_reference")) != bool(
+                expectations["requires_accepted_maps_reference"]
+            ):
+                blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+    return blockers
+
+
+def _binding_blockers(record: Mapping[str, Any]) -> list[str]:
+    """One turn, three artifacts, tied by VERIFIED identity.
+
+    Checking that a digest starts with ``sha256:`` and that two ids are
+    non-empty is a shape test, not a binding: a foreign row id, a foreign
+    delivery id and a digest of nothing all passed it. Each one is now
+    checked against the thing it is supposed to identify, and the
+    producer states whether it could verify them at all.
+    """
+    blockers: list[str] = []
+    turn_ref = str(record.get("turn_ref") or "")
+    if not turn_ref or str(record.get("outbound_metadata_turn_ref") or "") != turn_ref:
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+    else:
+        for call in record.get("model_bound_calls") or []:
+            if isinstance(call, Mapping) and str(call.get("turn_ref") or "") != turn_ref:
+                blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+                break
+
+    if str(record.get("transport") or "") != "captured":
+        return sorted(set(blockers))
+
+    digest = str(record.get("captured_payload_digest") or "")
+    if not _SHA256_DIGEST.fullmatch(digest):
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+
+    # Two artifacts of ONE reply, produced by two different code paths:
+    # the text the capture observed leaving, and the body the outbound
+    # writer persisted. Hashing the captured payload twice and comparing
+    # the results established only that hashing is deterministic, so a
+    # persisted body replaced with unrelated text passed while both
+    # verification flags stayed true. The comparison is between the two
+    # sources, under a named supported representation, and only
+    # whitespace is normalised — no wording is preferred or matched.
+    if str(record.get("captured_persisted_representation") or "") not in (
+        CONTENT_REPRESENTATIONS
+    ):
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    captured_text_digest = str(record.get("captured_text_digest") or "")
+    persisted_body_digest = str(record.get("persisted_body_digest") or "")
+    if not _SHA256_DIGEST.fullmatch(captured_text_digest):
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    if not _SHA256_DIGEST.fullmatch(persisted_body_digest):
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    if captured_text_digest != persisted_body_digest:
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    if record.get("captured_persisted_content_match") is not True:
+        blockers.append(CODE_ADDRESS_CONTENT_UNBOUND)
+    if record.get("captured_payload_digest_verified") is not True:
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+
+    delivery_ids = record.get("delivery_ids")
+    delivery_ids = (
+        list(delivery_ids)
+        if isinstance(delivery_ids, Sequence) and not isinstance(delivery_ids, (str, bytes))
+        else []
+    )
+    if not delivery_ids or not all(
+        _CAPTURED_DELIVERY_ID.fullmatch(str(v)) for v in delivery_ids
+    ):
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+
+    # The persisted row was fetched and is this turn's row, not an
+    # arbitrary non-empty string.
+    if record.get("outbound_message_row_verified") is not True:
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+    if not str(record.get("outbound_message_id") or "").strip():
+        blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+
+    # The recorded showing names the delivery it was recorded against.
+    # When a showing exists at all, that reference must be one of the
+    # delivery ids this turn actually captured.
+    if record.get("recorded_action_ids"):
+        offer_ref = str(record.get("recorded_offer_delivery_ref") or "")
+        if not offer_ref or offer_ref not in {str(v) for v in delivery_ids}:
+            blockers.append(CODE_ADDRESS_EVIDENCE_UNBOUND)
+
+    # Latency is only acceptable when it is correlated to THIS turn.
+    # "Carries some turn id" was not correlation: a measurement whose
+    # turn and message ids named a different turn entirely satisfied it.
+    timing = record.get("turn_timing")
+    timing = dict(timing) if isinstance(timing, Mapping) else {}
+    expected = record.get("turn_timing_expected")
+    expected = dict(expected) if isinstance(expected, Mapping) else {}
+    if not timing:
+        if record.get("turn_timing_unavailable") is not True:
+            # Either correlated timing, or an explicit statement that the
+            # measurement is unavailable. Silently absent is neither.
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+    else:
+        observed_turn = str(timing.get("turn_id") or "").strip()
+        if not observed_turn:
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+        # The runner states what its own accumulator was bound to. When
+        # it can, the persisted measurement must be that one.
+        if str(expected.get("turn_id") or "").strip() and observed_turn != str(
+            expected.get("turn_id")
+        ).strip():
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+        if str(timing.get("message_id") or "") != turn_ref:
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+        if int(expected.get("conversation_id") or 0) and int(
+            timing.get("conversation_id") or 0
+        ) != int(expected.get("conversation_id") or 0):
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+        if int(expected.get("tenant_id") or 0) and int(
+            timing.get("tenant_id") or 0
+        ) != int(expected.get("tenant_id") or 0):
+            blockers.append(CODE_ADDRESS_TIMING_UNCORRELATED)
+    return sorted(set(blockers))
+
+
+def _receipt_blockers(record: Mapping[str, Any]) -> list[str]:
+    """What was offered on the wire is what was recorded as offered.
+
+    Three lists have to agree, not two. ``receipt_action_ids`` are the ids
+    that actually left; ``receipt_address_ids`` are what they resolve to;
+    ``recorded_action_ids`` are the addresses the platform recorded as
+    shown. Comparing only the last two let an action id naming a
+    different offer and a different address pass, because nobody checked
+    that the ids on the wire were the ones those addresses came from.
+    """
+    delivered_actions = record.get("receipt_action_ids")
+    delivered = record.get("receipt_address_ids")
+    recorded = record.get("recorded_action_ids")
+    for value in (delivered_actions, delivered, recorded):
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return [CODE_ADDRESS_RECEIPT_MISMATCH]
+
+    resolved: set[str] = set()
+    offers: set[str] = set()
+    for action_id in delivered_actions:
+        parts = str(action_id or "").split(":")
+        if len(parts) != 3 or parts[0] != CONSENT_ACTION_PREFIX:
+            return [CODE_ADDRESS_RECEIPT_MISMATCH]
+        offers.add(parts[1])
+        resolved.add(parts[2])
+
+    if resolved != {str(v) for v in delivered}:
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    if {str(v) for v in delivered} != {str(v) for v in recorded}:
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    # One showing answers one question: ids from two different offers on
+    # one payload mean the receipt does not describe a single showing.
+    if delivered_actions and len(offers) != 1:
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    recorded_offer = str(record.get("recorded_offer_id") or "")
+    if offers and recorded_offer and recorded_offer not in offers:
+        return [CODE_ADDRESS_RECEIPT_MISMATCH]
+    return []
+
+
+def address_turn_evidence_blockers(
+    record: Any,
+    *,
+    expects_address_turn: bool,
+    expectations: Optional[Mapping[str, Any]] = None,
+) -> list[str]:
+    """Why this turn's address evidence cannot be accepted.
+
+    ``address_turn`` is optional in the SCHEMA so that a v3 artifact for
+    a brain turn stays valid — but optional must not mean "absent is
+    fine". A scenario turn that declares ``expects_address_turn`` and
+    produces no record, an incomplete one, one that contradicts what the
+    scenario asked for, or one whose artifacts cannot be tied together,
+    is a failure of the run rather than a thinner artifact.
+    """
+    blockers: list[str] = []
+    if not expects_address_turn:
+        return blockers
+    if not isinstance(record, Mapping) or not record:
+        return [CODE_ADDRESS_EVIDENCE_MISSING]
+
+    wants = dict(expectations or {})
+    # An OrderFlowV2 scenario has to say what it expects. Without that,
+    # every check below degrades to "some string is present", which is
+    # how a city turn asserting a missing DELIVERY ADDRESS passed.
+    # Every one of them, not any of them. A manifest stating only the
+    # collection field leaves the goal and the missing field unasserted,
+    # so a turn could contradict either and still be accepted.
+    if not all(_expected(wants, field) for field in ADDRESS_EXPECTATION_FIELDS):
+        blockers.append(CODE_ADDRESS_EXPECTATIONS_MISSING)
+
+    missing = [f for f in ADDRESS_TURN_REQUIRED_FIELDS if f not in record]
+    if missing:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("execution_path") or "") not in EXECUTION_PATHS:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("execution_path") or "") == PATH_UNRESOLVED:
+        # Nothing established which path ran, so no outcome can be filed.
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("delivered_surface") or "") not in DELIVERED_SURFACES:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("failure_injection") or "") not in FAILURE_INJECTIONS:
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+    if str(record.get("transport") or "") != "captured":
+        blockers.append(CODE_ADDRESS_EVIDENCE_INCOMPLETE)
+
+    # Final-text provenance: what the customer received and why.
+    provenance = record.get("outbound_provenance")
+    provenance = dict(provenance) if isinstance(provenance, Mapping) else {}
+    # "Non-empty mapping" established nothing about the final text. The
+    # source has to be named, and it has to be one of the closed values.
+    source = str(provenance.get("compose_source") or "").strip()
+    if source not in COMPOSE_SOURCES:
+        blockers.append(CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED)
+    elif source == "fallback_deterministic" and not str(
+        provenance.get("fallback_reason") or ""
+    ).strip():
+        blockers.append(CODE_ADDRESS_FINAL_SOURCE_UNESTABLISHED)
+
+    # An injection that was declared but never fired proves nothing about
+    # the mechanism it named, and must not be filed as a passing check.
+    injection = str(record.get("failure_injection") or FAILURE_INJECTION_NONE)
+    if injection != FAILURE_INJECTION_NONE:
+        state = record.get("injection_state")
+        state = dict(state) if isinstance(state, Mapping) else {}
+        if int(state.get("fired") or 0) < 1 or str(state.get("kind") or "") != injection:
+            blockers.append(CODE_ADDRESS_INJECTION_NOT_EXECUTED)
+
+    for want_key, record_key in (
+        ("expected_execution_path", "execution_path"),
+        ("expected_surface", "delivered_surface"),
+    ):
+        want = _expected(wants, want_key)
+        if want and str(record.get(record_key) or "") != want:
+            blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+
+    want_field = _expected(wants, "collection_field")
+    if want_field and str(record.get("collection_field") or "") != want_field:
+        blockers.append(CODE_ADDRESS_EXPECTATION_UNMET)
+
+    blockers.extend(_model_call_blockers(record, wants))
+    blockers.extend(_binding_blockers(record))
+    blockers.extend(_receipt_blockers(record))
+    return sorted(set(blockers))
+
+
+def classify_execution_path(provenance: Any) -> str:
+    """Ordinary or recovery, from what the run recorded about itself.
+
+    Never from the delivered surface: an ordinary turn for a customer with
+    no saved addresses has no choices to offer and is still ordinary.
+    """
+    meta = dict(provenance or {}) if isinstance(provenance, Mapping) else {}
+    if meta.get("address_reply_recovered") or meta.get("address_claim_send_suppressed"):
+        return PATH_RECOVERY
+    if "address_reply_composed" in meta or meta.get("address_claim_compose_attempted") is not None:
+        return PATH_ORDINARY
+    return PATH_UNRESOLVED
+
+
+def delivered_surface(payload: Any) -> str:
+    """What the captured payload actually offered the customer."""
+    body = dict(payload or {}) if isinstance(payload, Mapping) else {}
+    interactive = body.get("interactive")
+    interactive = dict(interactive) if isinstance(interactive, Mapping) else {}
+    kind = str(interactive.get("type") or "").strip().lower()
+    if kind == "button":
+        return SURFACE_BUTTONS
+    if kind == "list":
+        return SURFACE_LIST
+    if body.get("text"):
+        return SURFACE_TEXT
+    return SURFACE_NONE

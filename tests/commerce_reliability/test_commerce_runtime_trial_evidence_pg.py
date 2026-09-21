@@ -275,7 +275,82 @@ def test_a_reserved_commerce_effect_is_counted_and_refuses_the_claim(trial: Tria
     assert entry["verdict"] == job.REFUSED
 
 
+def test_runtime_resolved_inbound_needs_no_operator_disposition(trial: Trial) -> None:
+    # Database-shaped reader control, not proof of the upstream handling
+    # validator. resolve_inbound uses this state with disposition left NULL.
+    with trial.engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO commerce_runtime_deferred_inbound
+                (tenant_id, namespace, channel_connection_ref, phone_number_id, recipient,
+                 provider_message_id, payload, reason, state, resolved_at)
+            VALUES (:t, 'live', :ch, 'phone-trial', '966500000001',
+                    :pmid, '{}'::jsonb, 'accepted', 'resolved', clock_timestamp())
+        """), {"t": trial.tenant_id, "ch": CHANNEL,
+                "pmid": f"wamid.{uuid.uuid4().hex[:18]}"})
+
+    _turns, _effects, deferred = trial.read()
+    assert len(deferred) == 1
+    assert deferred[0]["state"] == "resolved"
+    assert deferred[0]["disposition"] is None
+    entry = job.verdicts([], deferred=deferred)["every_deferred_inbound_is_accounted_for"]
+    assert entry["verdict"] == job.PROVEN
+
+
 # ── The report writes nothing ────────────────────────────────────────────────
+
+def test_shadow_work_cannot_contaminate_the_live_trial(trial: Trial) -> None:
+    live = trial.answered()
+    shadow = trial.repo.foundation.admit_turn(
+        tenant_id=trial.tenant_id, namespace=c.Namespace.SHADOW,
+        conversation_ref=f"shadow-trial-{uuid.uuid4().hex}",
+        channel_connection_ref=CHANNEL, provider_message_id=f"wamid.{uuid.uuid4().hex}")
+    owner = trial.repo.foundation.claim(
+        tenant_id=trial.tenant_id, namespace=c.Namespace.SHADOW,
+        conversation_id=shadow.conversation_id, owner_id=WORKER, lease_seconds=120)
+    trial.repo.reserve_effect(
+        tenant_id=trial.tenant_id, namespace=c.Namespace.SHADOW,
+        conversation_id=shadow.conversation_id, token=owner.token, turn_id=shadow.turn_id,
+        intent=lc.EffectIntent(action_type="order_cancel", idempotency_key=uuid.uuid4().hex,
+                               payload={"order": "synthetic-shadow-order"}))
+    with trial.engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO commerce_runtime_deferred_inbound
+                (tenant_id, namespace, channel_connection_ref, phone_number_id, recipient,
+                 provider_message_id, payload, reason, state)
+            VALUES (:t, 'shadow', :ch, 'phone-trial', '966500000001',
+                    :pmid, '{}'::jsonb, 'accepted', 'pending')
+        """), {"t": trial.tenant_id, "ch": CHANNEL,
+                "pmid": f"wamid.{uuid.uuid4().hex[:18]}"})
+    turns, effects, deferred = trial.read()
+    assert [row["turn_id"] for row in turns] == [live.turn_id]
+    assert effects == 0
+    assert deferred == []
+
+
+def test_report_snapshot_survives_completion_on_an_independent_connection(trial: Trial) -> None:
+    turn, lease = trial.admit()
+    now = dt.datetime.now(dt.timezone.utc)
+    bounds = {"tenant_id": trial.tenant_id, "since": now - dt.timedelta(hours=1),
+              "until": now + dt.timedelta(hours=1)}
+    with trial.session() as db:
+        assert job._read_only(db) is True
+        assert db.execute(text("SHOW transaction_isolation")).scalar_one() == "repeatable read"
+        before, _, _ = job.read_window(db, **bounds)
+        assert before[0]["turn_id"] == turn.turn_id
+        assert before[0]["terminal"] is None
+
+        # The repository uses its own engine transaction while the reporting
+        # session retains its independent, already-established snapshot.
+        trial.answer(turn, lease)
+        trial.finish(turn, lease)
+        during, _, _ = job.read_window(db, **bounds)
+        assert during == before
+        db.rollback()
+
+    after, _, _ = trial.read()
+    assert after[0]["terminal"]["transport_outcome"] == "accepted"
+    assert len(after[0]["sequences"]) == 1
+
 
 def test_the_report_leaves_the_database_exactly_as_it_found_it(trial: Trial) -> None:
     turn = trial.answered()
@@ -291,6 +366,7 @@ def test_the_report_leaves_the_database_exactly_as_it_found_it(trial: Trial) -> 
     before = counts()
     with trial.session() as db:
         assert job._read_only(db) is True
+        assert db.execute(text("SHOW transaction_read_only")).scalar_one() == "on"
         now = dt.datetime.now(dt.timezone.utc)
         job.read_window(db, tenant_id=trial.tenant_id, since=now - dt.timedelta(hours=1),
                         until=now + dt.timedelta(hours=1))
