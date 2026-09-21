@@ -255,9 +255,29 @@ def test_resumable_upload_contract_uses_sample_handle_not_media_id(monkeypatch):
     assert first.args[0].endswith('/test-app/uploads')
     assert first.kwargs['params']['file_type'] == 'image/png'
     assert first.kwargs['params']['file_name'] == 'template-header.png'
+    assert 'access_token' not in first.kwargs['params']
+    assert first.kwargs['headers'] == {'Authorization': 'Bearer test-token'}
     assert first.kwargs['params']['file_length'] == str(len(image_bytes()))
     assert second.kwargs['headers']['file_offset'] == '0'
     assert second.kwargs['content'] == image_bytes()
+
+
+def test_meta_upload_http_error_is_safe_for_router_exception_logs(monkeypatch):
+    import traceback
+    request = headers.httpx.Request('POST', 'https://graph.facebook.com/upload:private-session')
+    response = headers.httpx.Response(403, request=request)
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=headers.httpx.HTTPStatusError('private-session', request=request, response=response))
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=client)
+    context.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(headers.httpx, 'AsyncClient', lambda **_: context)
+    monkeypatch.setattr(headers, 'META_APP_ID', 'test-app')
+    with pytest.raises(ValueError, match='meta_header_upload_failed:403') as error:
+        asyncio.run(headers.MerchantHeaderUploader().upload_template_header(
+            access_token='test-only', image_bytes=image_bytes(), mime_type='image/png'))
+    assert 'private-session' not in ''.join(traceback.format_exception(error.value))
+    assert client.post.await_count == 1
 
 
 def test_create_image_template_is_a_local_draft_only(db, monkeypatch):

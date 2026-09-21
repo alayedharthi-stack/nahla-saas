@@ -24,6 +24,15 @@ class MerchantHeaderUploader:
     """
 
     async def upload_template_header(self, *, access_token, image_bytes, mime_type):
+        try:
+            return await self._upload(access_token=access_token, image_bytes=image_bytes, mime_type=mime_type)
+        except httpx.HTTPError as exc:
+            # HTTP exception strings contain request URLs. Never let access
+            # credentials or resumable-session signatures reach router logs.
+            status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else 'network'
+            raise ValueError(f'meta_header_upload_failed:{status}') from None
+
+    async def _upload(self, *, access_token, image_bytes, mime_type):
         if not META_APP_ID or not str(access_token or '').strip():
             raise ValueError('missing_meta_upload_configuration')
         graph = f'https://graph.facebook.com/{META_GRAPH_API_VERSION}'
@@ -31,8 +40,7 @@ class MerchantHeaderUploader:
             response = await client.post(f'{graph}/{META_APP_ID}/uploads', params={
                 'file_name': 'template-header.png' if mime_type == 'image/png' else 'template-header.jpg',
                 'file_length': str(len(image_bytes)), 'file_type': mime_type,
-                'access_token': access_token,
-            })
+            }, headers={'Authorization': f'Bearer {access_token}'})
             response.raise_for_status()
             session_id = str(response.json().get('id') or '').strip()
             if not session_id:
