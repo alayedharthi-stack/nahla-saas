@@ -460,6 +460,28 @@
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_let_a_stale_refresh_win",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_from_a_retained_session"
       ]
+    },
+    {
+      "id": "commerce_runtime_trial_evidence",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py",
+      "origin": "Trial evidence reader — the report's SQL read back against turns written through the runtime's own repositories: the admitted turn, its ledger-derived terminal, reply intents, attempts and receipts; an open turn read as open; an unknown send never read as an answer; tenant scoping; window bounds; the trial-size refusal; the deferred inbound and reserved effect reads; and the report leaving every row count untouched",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_reader_finds_the_turn_the_runtime_admitted_and_answered",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_report_over_those_rows_refuses_nothing_and_masks_the_identifiers",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_turn_left_open_is_read_as_open_and_refuses_the_claim",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_an_unknown_send_is_read_as_unknown_and_never_as_an_answer",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_another_merchants_turn_is_never_in_this_merchants_report",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_turn_outside_the_stated_window_is_not_in_the_report",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_window_larger_than_a_trial_is_refused_rather_than_truncated",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_deferred_inbound_is_read_with_its_disposition",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_a_reserved_commerce_effect_is_counted_and_refuses_the_claim",
+        "tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py::test_the_report_leaves_the_database_exactly_as_it_found_it"
+      ]
     }
   ]
 }

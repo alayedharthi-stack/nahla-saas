@@ -197,7 +197,11 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    "commerce_runtime_pilot", "commerce_runtime_handover_migration",
                    "commerce_runtime_pilot_handover_controls",
                    "runner_connection_regressions",
-                   "salla_customer_address_candidates"]
+                   "salla_customer_address_candidates",
+                   # The trial evidence reader's own proofs: its SQL is what a
+                   # trial is judged from, and a query that silently returns
+                   # nothing reads as "nothing to judge" rather than as broken.
+                   "commerce_runtime_trial_evidence"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -212,6 +216,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "commerce_runtime_pilot_handover_controls": ("proof", harness_env),
         "runner_connection_regressions": ("runner_regression", harness_env),
         "salla_customer_address_candidates": ("proof", {"LEGACY_MIG_PG_TEST_DATABASE_URL": None}),
+        "commerce_runtime_trial_evidence": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]
