@@ -266,7 +266,15 @@ def ledgers(pg_admin_dsn: str):
 
 
 def test_migration_0109_applies_on_0108_and_is_reversible(pg_admin_dsn: str) -> None:
-    assert _script_heads() == {OTHER_HEAD, THIS_REVISION}, "0109 must extend 0108 and leave 0092 untouched"
+    # 0109 is no longer a head — 0111 extends it, and the address sibling 0110
+    # will too — but it must still sit on the integration branch and leave the
+    # A1-Validate head alone: {0092, 0111} now, {0092, 0110, 0111} once the
+    # address branch merges.
+    from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: PLC0415
+
+    heads = _script_heads()
+    assert OTHER_HEAD in heads and repository_heads_expected(heads), \
+        f"0109 must stay on the integration branch and leave 0092 untouched, got {sorted(heads)}"
     name, dsn = _create_database(pg_admin_dsn)
     try:
         _alembic(dsn, FOUNDATION_REVISION)

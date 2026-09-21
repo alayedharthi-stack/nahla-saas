@@ -1,7 +1,7 @@
 """Ephemeral PostgreSQL rehearsal: integration path to 0101 without touching Production.
 
 Proves:
-- Repository heads stay {0092, 0109}; 0092 is not lost and is not selected.
+- Repository heads stay {0092, 0111}; 0092 is not lost and is not selected.
 - 0102 remains a linear step under the application head 0106.
 - Fresh bootstrap 0093 then upgrade 0101 applies 0094..0101 and creates the index.
 - A production-like DB at 0100 then upgrade 0101 applies only 0101.
@@ -56,7 +56,7 @@ _PROD_CURRENT = "0099"
 _PROD_LIKE = "0100"
 _TARGET = "0101"
 _HEAD = "0102"
-_REPO_HEAD = "0109"
+_REPO_HEAD = "0111"
 _VALIDATE_HEAD = "0092"
 _EXPECTED_FROM_BOOTSTRAP = ("0094", "0095", "0096", "0097", "0098", "0099", "0100", "0101")
 _EXPECTED_FROM_PROD = ("0100", "0101")
@@ -138,12 +138,14 @@ def admin_engine() -> Engine:
     return engine
 
 
+from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
+
 def test_repository_heads_stay_parallel_not_merged() -> None:
     with _database_cwd():
         script = _script()
         heads = set(script.get_heads())
         print("alembic_heads=" + ",".join(sorted(heads)))
-        assert heads == REPOSITORY_ALEMBIC_HEADS == {_VALIDATE_HEAD, _REPO_HEAD}
+        assert repository_heads_expected(heads) and {_VALIDATE_HEAD, _REPO_HEAD} <= set(heads)
         assert _HEAD not in heads
         assert "head" in FORBIDDEN_BOOTSTRAP_LITERALS
         assert _BOOTSTRAP == "0093"

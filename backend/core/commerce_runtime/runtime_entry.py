@@ -33,6 +33,7 @@ from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_live_tools as alt
 from core.commerce_runtime import agent_provider as ap
 from core.commerce_runtime import contracts as c
+from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
 from core.commerce_runtime.agent_loop import AgentLoop
@@ -41,8 +42,15 @@ from core.commerce_runtime.ledgers import LedgerRepository
 logger = logging.getLogger("nahla.commerce_runtime.runtime_entry")
 
 NAMESPACE = c.Namespace.LIVE.value
+CHANNEL = "wa"
 LEASE_SECONDS = 180
 OWNER_PREFIX = "commerce-runtime-pilot"
+
+# How long the reaper waits for an abandoned tool call to finish with the
+# session before giving up on closing it. Longer than any tool timeout the
+# guard can configure, so an ordinary slow read is waited out rather than
+# leaked, and finite, so a wedged call cannot hold a thread for ever.
+ABANDONED_SESSION_REAP_SECONDS = 300.0
 
 # Closed outcomes of one entry call.
 HANDLED = "handled"
@@ -50,8 +58,43 @@ SCHEMA_UNAVAILABLE = "runtime_schema_unavailable"
 ALREADY_TERMINAL = "turn_already_terminal"
 OWNERSHIP_UNAVAILABLE = "ownership_unavailable"
 CONTEXT_UNAVAILABLE = "trusted_context_unavailable"
+LINK_UNVERIFIED = "conversation_link_unverified"
+MODEL_UNCONFIGURED = "model_not_configured"
+HANDOVER_BARRIER = "handover_barrier_closed"
 ADMISSION_CONFLICT = "admission_conflict"
 INTERNAL_ERROR = "internal_error"
+
+# Every relation the runtime needs: foundation, ledgers and handover together.
+#
+# All twelve, not nine. The handover three are not optional extras — the
+# barrier decides whether a turn may be admitted at all, and the deferred table
+# is where an accepted inbound lives between the acknowledgement and the answer.
+# A database holding the first nine can admit turns it cannot record acceptance
+# for, which is the shape that acknowledges a customer and keeps nothing.
+FOUNDATION_RELATIONS: Tuple[str, ...] = (
+    "commerce_runtime_conversations",
+    "commerce_runtime_turns",
+    "commerce_runtime_turn_terminals",
+)
+
+LEDGER_RELATIONS: Tuple[str, ...] = (
+    "commerce_runtime_effects",
+    "commerce_runtime_effect_attempts",
+    "commerce_runtime_effect_results",
+    "commerce_runtime_delivery_sequences",
+    "commerce_runtime_delivery_attempts",
+    "commerce_runtime_delivery_receipts",
+)
+
+HANDOVER_RELATIONS: Tuple[str, ...] = (
+    "commerce_runtime_handover_barrier",
+    "commerce_runtime_handover_workers",
+    "commerce_runtime_deferred_inbound",
+)
+
+REQUIRED_RELATIONS: Tuple[str, ...] = (
+    FOUNDATION_RELATIONS + LEDGER_RELATIONS + HANDOVER_RELATIONS
+)
 
 _schema_state: Dict[str, str] = {}
 _schema_lock = threading.Lock()
@@ -69,7 +112,8 @@ class TurnReport:
     loop_status: Optional[str] = None
     stop_reason: Optional[str] = None
     delivery_sequence_id: Optional[int] = None
-    reused_delivery: bool = False
+    reused_delivery: bool = False      # the loop reused an existing reservation
+    reused_dispatch: bool = False      # the outcome came from an earlier attempt, not this send
     dispatch_status: Optional[str] = None
     provider_message_id: Optional[str] = None
     processing_outcome: Optional[str] = None
@@ -81,7 +125,8 @@ class TurnReport:
     evidence_refs: Tuple[str, ...] = ()
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
-    model: Optional[str] = None
+    requested_model: Optional[str] = None   # what the platform asked for
+    model: Optional[str] = None             # what the provider reported answering with
     reply_text: str = ""
     latency_ms: Optional[int] = None
     owner_id: Optional[str] = None
@@ -104,11 +149,18 @@ class TurnReport:
 def runtime_schema_available(engine: Any) -> bool:
     """Whether this database actually holds the commerce runtime's tables.
 
+    All **twelve** are required together: the three foundation relations the
+    runtime admits, claims and completes turns in, the six ledger relations it
+    reserves and records delivery in, and the three handover relations that
+    decide whether a turn may be admitted and hold an inbound between the
+    acknowledgement and the answer. A database holding some of them is
+    ``partial`` and stays unavailable — the runtime never runs half-present, and
+    a foundation-only database is exactly the shape that would otherwise pass a
+    turns-plus-ledgers check while having no terminals table.
+
     The migrations that create them are merged but are not part of the normal
     bootstrap target, so a database may legitimately not have them. Probing once
-    per engine keeps a disabled pilot from paying for the check on every turn,
-    and an incomplete schema counts as unavailable — the runtime never runs
-    half-present.
+    per database keeps a disabled pilot from paying for the check on every turn.
     """
     # Keyed by the engine's own target, not by object identity: a garbage
     # collected engine can hand its id() to the next one, and a probe result
@@ -118,22 +170,30 @@ def runtime_schema_available(engine: Any) -> bool:
         cached = _schema_state.get(key)
     if cached is not None:
         return cached == "complete"
-    from core.commerce_runtime.repositories import CommerceRuntimeRepository  # noqa: PLC0415
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
 
     state = "absent"
+    missing: Tuple[str, ...] = REQUIRED_RELATIONS
     try:
         with engine.connect() as conn:
-            core_present = conn.exec_driver_sql(
-                "SELECT to_regclass('public.commerce_runtime_turns') IS NOT NULL"
-            ).scalar()
-            ledger_state, _present, _missing = CommerceRuntimeRepository._ledger_schema_state(conn)
-        state = "complete" if (core_present and ledger_state == "complete") else ledger_state
+            present = tuple(
+                name for name in REQUIRED_RELATIONS
+                if conn.execute(sa_text("SELECT to_regclass(:t)"),
+                                {"t": f"public.{name}"}).scalar()
+            )
+        missing = tuple(name for name in REQUIRED_RELATIONS if name not in present)
+        if not present:
+            state = "absent"
+        elif not missing:
+            state = "complete"
+        else:
+            state = "partial"
     except Exception as exc:  # noqa: BLE001 - an unprobeable schema is not an available one
         logger.warning("[COMMERCE_RUNTIME] schema probe failed error=%s", type(exc).__name__)
         state = "absent"
     with _schema_lock:
         _schema_state[key] = state
-    logger.info("[COMMERCE_RUNTIME] schema probe state=%s", state)
+    logger.info("[COMMERCE_RUNTIME] schema probe state=%s missing=%s", state, ",".join(missing))
     return state == "complete"
 
 
@@ -153,14 +213,17 @@ def reset_schema_probe() -> None:
 def build_trusted_binding(
     *,
     session_factory: Any,
-    tenant_id: int,
-    conversation_id: int,
+    link: cl.TrustedConversationLink,
     customer_id: Optional[int],
     normalized_customer_phone: str,
     connection_id: str,
     inbound_trace_id: str,
 ) -> Tuple[Optional[alt.LiveToolBinding], Optional[Any]]:
     """One trusted read context on its own session, or nothing at all.
+
+    The context is built for the **application** conversation the link names;
+    the binding checks the loop's scope against the **runtime** conversation the
+    same link names. Neither identifier is ever compared with the other.
 
     The session belongs to the tool binding and to no request: a tool call the
     loop abandons must never be left sharing a session with the webhook.
@@ -171,8 +234,8 @@ def build_trusted_binding(
     try:
         context = CommerceAgentContext.from_trusted_scope(
             db=session,
-            tenant_id=int(tenant_id),
-            conversation_id=int(conversation_id),
+            tenant_id=int(link.tenant_id),
+            conversation_id=int(link.app_conversation_id),
             customer_id=int(customer_id) if customer_id else None,
             normalized_customer_phone=normalized_customer_phone,
             connection_id=connection_id,
@@ -180,12 +243,10 @@ def build_trusted_binding(
         )
     except Exception as exc:  # noqa: BLE001 - without a trusted scope there are no tools
         logger.warning("[COMMERCE_RUNTIME] trusted context unavailable tenant=%s error=%s",
-                       tenant_id, type(exc).__name__)
+                       link.tenant_id, type(exc).__name__)
         _close_quietly(session)
         return None, None
-    binding = alt.LiveToolBinding(context=context, tenant_id=int(tenant_id),
-                                  conversation_id=int(conversation_id))
-    return binding, session
+    return alt.LiveToolBinding(context=context, link=link), session
 
 
 def _close_quietly(session: Any) -> None:
@@ -195,13 +256,109 @@ def _close_quietly(session: Any) -> None:
         logger.warning("[COMMERCE_RUNTIME] tool session could not be closed cleanly")
 
 
+class ExclusiveCloser:
+    """One session, one close, whoever gets there first.
+
+    Two owners race for an abandoned session: the thread that finishes the
+    abandoned call, and the reaper. Deciding with a check-then-set on a flag —
+    read it, see it unset, set it — is not arbitration: both threads can read it
+    unset before either writes, and both then close. A session closed twice is a
+    connection returned to the pool twice.
+
+    The claim is therefore taken under a mutex and is the only thing the mutex
+    guards: closing itself happens outside it, so a slow or hanging ``close``
+    never blocks the loser, which has nothing left to do anyway.
+
+    ``lock`` exists so a test can drive a chosen interleaving through the very
+    code production runs, rather than a copy of it. Production supplies none.
+    """
+
+    def __init__(self, session: Any, *, turn_id: Optional[int] = None,
+                 lock: Optional[Any] = None) -> None:
+        self._session = session
+        self._turn_id = turn_id
+        self._lock = lock if lock is not None else threading.Lock()
+        self._claimed = False
+
+    def claim(self) -> bool:
+        """``True`` for exactly one caller, ever."""
+        with self._lock:
+            if self._claimed:
+                return False
+            self._claimed = True
+            return True
+
+    @property
+    def claimed(self) -> bool:
+        return self._claimed
+
+    def close(self, source: str) -> bool:
+        """Close the session if this caller won the claim. Never raises."""
+        if not self.claim():
+            return False
+        _close_quietly(self._session)
+        logger.info("[COMMERCE_RUNTIME] tool session closed by %s turn=%s",
+                    source, self._turn_id)
+        return True
+
+
+def _retire_tool_session(binding: alt.LiveToolBinding, session: Any, *,
+                         turn_id: Optional[int] = None,
+                         reap_seconds: float = ABANDONED_SESSION_REAP_SECONDS) -> Optional[Any]:
+    """Close the tool session, or give it an owner that will — with no deadline.
+
+    The common case is that every tool call returned and the session closes
+    here, on the turn's own thread. When a call was abandoned and has not come
+    back, the session is still in use by a thread nobody is waiting for, and
+    closing it now would pull a connection out from under a live statement.
+
+    Two things then own it, and they are not the same thing:
+
+    * an **idle callback** on the binding, which the thread finishing the
+      abandoned call runs. This is the owner, and it does not expire: however
+      long that call takes, the session is closed when it ends.
+    * a bounded **reaper** thread, so the ordinary case — a call that finishes
+      seconds later — is closed promptly and observably rather than only when
+      something else happens to look.
+
+    Whichever gets there first closes it; closing is idempotent. When the
+    reaper's wait runs out it says so and stops waiting, but it does not hand
+    the responsibility back to nobody: the callback is still registered.
+
+    Returns the reaper thread so a caller can observe it; ``None`` when the
+    session was closed here.
+    """
+    closer = ExclusiveCloser(session, turn_id=turn_id)
+
+    def close_once(source: str) -> None:
+        closer.close(source)
+
+    if binding.on_idle(lambda: close_once("the abandoned call's own thread")):
+        # Nothing held it: closed synchronously, on this turn's thread.
+        return None
+
+    def reap() -> None:
+        if binding.wait_until_idle(reap_seconds):
+            close_once("the reaper")
+            return
+        logger.warning("[COMMERCE_RUNTIME] abandoned tool call has not returned within %ss "
+                       "turn=%s; its session stays open and is closed by the call itself "
+                       "when it ends", reap_seconds, turn_id)
+
+    thread = threading.Thread(target=reap, name=f"commerce-runtime-session-reaper-{turn_id}",
+                              daemon=True)
+    thread.start()
+    logger.warning("[COMMERCE_RUNTIME] tool session handed to the reaper turn=%s abandoned=%s",
+                   turn_id, binding.abandoned_calls)
+    return thread
+
+
 def run_commerce_runtime_turn(
     *,
     engine: Any,
     session_factory: Any,
     tenant_id: int,
     conversation_id: int,
-    conversation_ref: str,
     connection_ref: str,
     connection_id: str,
     customer_id: Optional[int],
@@ -211,14 +368,39 @@ def run_commerce_runtime_turn(
     inbound_metadata: Optional[Mapping[str, Any]],
     transport: dd.Transport,
     instructions: str,
+    model: str,
+    admission_barrier: Optional[Any] = None,
     budget: Optional[ac.LoopBudget] = None,
     context_preamble: Optional[Mapping[str, Any]] = None,
     history: Optional[Any] = None,
+    channel: str = CHANNEL,
     anthropic_provider: Optional[Any] = None,
 ) -> TurnReport:
-    """Run one admitted inbound turn to a recorded transport outcome."""
+    """Run one admitted inbound turn to a recorded transport outcome.
+
+    ``conversation_id`` is the **application** conversation. The runtime's own
+    conversation is admitted under a reference derived from it here, so a caller
+    cannot supply a reference that names a different conversation, and the
+    association is verified by reading the row back before anything is bound.
+
+    ``model`` is the caller's explicit choice and has no default: this entry
+    refuses rather than let an unconfigured pilot inherit whatever the legacy
+    path happens to resolve.
+
+    ``admission_barrier`` is an optional veto on taking **new** work, called
+    with the admission transaction's own connection. It is the handover's
+    mechanism: see the ``AdmissionRefused`` branch below for why it is asked
+    there and nowhere else.
+    """
     started = time.monotonic()
     base = {"tenant_id": int(tenant_id), "conversation_id": int(conversation_id)}
+    requested_model = str(model or "").strip()
+    if not requested_model:
+        # The loop is model-neutral and selects nothing. Without an explicitly
+        # configured model there is no approved choice to run on, and inheriting
+        # the legacy path's resolution would be selecting one silently.
+        logger.warning("[COMMERCE_RUNTIME] no model configured for this turn tenant=%s", tenant_id)
+        return TurnReport(reason=MODEL_UNCONFIGURED, **base)
     if not runtime_schema_available(engine):
         return TurnReport(reason=SCHEMA_UNAVAILABLE, **base)
 
@@ -227,20 +409,49 @@ def run_commerce_runtime_turn(
     owner_id = f"{OWNER_PREFIX}:{uuid.uuid4().hex[:16]}"
 
     try:
+        conversation_ref = cl.conversation_ref_for(
+            channel=channel, app_conversation_id=int(conversation_id))
         admitted = foundation.admit_turn(
             tenant_id=tenant_id, namespace=NAMESPACE, conversation_ref=conversation_ref,
             channel_connection_ref=connection_ref, provider_message_id=provider_message_id,
             payload={"text": inbound_text, "metadata": dict(inbound_metadata or {})},
+            admission_guard=admission_barrier,
         )
+    except c.AdmissionRefused:
+        # The window between selecting this route and writing the turn is where
+        # a handover loses work: a drain can land inside it, and a turn admitted
+        # after that is one the settlement check already counted as absent. The
+        # barrier is read on this transaction's own connection, so the database
+        # orders the two: either the turn is visible to the drain, or the drain
+        # is visible here and nothing is written. A re-entry for a turn already
+        # admitted never reaches the barrier, which is what lets a draining
+        # runtime still finish its own work.
+        logger.warning("[COMMERCE_RUNTIME] admission refused by the handover barrier "
+                       "tenant=%s", tenant_id)
+        return TurnReport(reason=HANDOVER_BARRIER, **base)
     except c.CommerceRuntimeError as exc:
         logger.warning("[COMMERCE_RUNTIME] admission refused tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
         return TurnReport(reason=ADMISSION_CONFLICT, **base)
 
     turn_id = admitted.turn_id
-    runtime_conversation_id = admitted.conversation_id
     report_base = dict(base, turn_id=turn_id, duplicate_inbound=bool(admitted.duplicate),
-                       owner_id=owner_id)
+                       owner_id=owner_id, requested_model=requested_model)
+
+    # The two conversation identifiers come from independent sequences. Establish
+    # the association by reading the runtime row back, before anything is scoped
+    # by either of them.
+    try:
+        link = cl.verify_conversation_link(
+            foundation, tenant_id=tenant_id, namespace=NAMESPACE, channel=channel,
+            app_conversation_id=int(conversation_id),
+            runtime_conversation_id=int(admitted.conversation_id),
+        )
+    except (cl.ConversationLinkUnverified, c.CommerceRuntimeError) as exc:
+        logger.warning("[COMMERCE_RUNTIME] conversation link unverified turn=%s reason=%s",
+                       turn_id, getattr(exc, "reason", None) or type(exc).__name__)
+        return TurnReport(reason=LINK_UNVERIFIED, **report_base)
+    runtime_conversation_id = link.runtime_conversation_id
 
     existing = foundation.get_terminal(tenant_id=tenant_id, namespace=NAMESPACE, turn_id=turn_id)
     if existing is not None:
@@ -264,8 +475,7 @@ def run_commerce_runtime_turn(
                              tenant_id=int(tenant_id), namespace=NAMESPACE,
                              conversation_id=int(runtime_conversation_id))
     binding, session = build_trusted_binding(
-        session_factory=session_factory, tenant_id=tenant_id,
-        conversation_id=conversation_id, customer_id=customer_id,
+        session_factory=session_factory, link=link, customer_id=customer_id,
         normalized_customer_phone=normalized_customer_phone,
         connection_id=connection_id, inbound_trace_id=provider_message_id,
     )
@@ -290,7 +500,10 @@ def run_commerce_runtime_turn(
             tools_provider=anthropic_provider or AnthropicProvider(),
             audit_context={"tenant_id": int(tenant_id), "conversation_id": int(conversation_id),
                            "turn_id": int(turn_id), "channel": "whatsapp",
-                           "reason": "commerce_runtime_pilot"},
+                           "reason": "commerce_runtime_pilot",
+                           # The provider resolves the call's model from this key.
+                           # It is the configured pilot value, never a fallback.
+                           "model": requested_model},
             context_preamble=context_preamble,
             history=history,
         )
@@ -314,11 +527,12 @@ def run_commerce_runtime_turn(
                    error=type(exc).__name__)
         report = TurnReport(reason=INTERNAL_ERROR, **report_base)
     finally:
-        if binding.poisoned is None:
-            _close_quietly(session)
-        else:
-            # A tool call was abandoned and may still be using this session.
-            logger.warning("[COMMERCE_RUNTIME] leaving an abandoned tool session to the pool")
+        # The session belongs to the tool binding. It is closed here only when
+        # no call still holds it; otherwise it is handed to the reaper, which
+        # is this runtime's named owner for exactly that case. Closing it under
+        # a live call would break a statement in flight, and leaving it with no
+        # owner would leak it.
+        _retire_tool_session(binding, session, turn_id=turn_id)
         _release(foundation, tenant_id, runtime_conversation_id, token)
 
     return dataclasses.replace(report, latency_ms=int((time.monotonic() - started) * 1000))
@@ -379,6 +593,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
     )
     return TurnReport(reason=HANDLED, dispatch_status=dispatch.status,
                       provider_message_id=dispatch.provider_message_id,
+                      reused_dispatch=dispatch.reused_outcome,
                       processing_outcome=getattr(terminal, "processing_outcome", None),
                       transport_outcome=getattr(terminal, "transport_outcome", None),
                       customer_reach=getattr(terminal, "customer_reach", None), **common)
@@ -428,7 +643,11 @@ def whatsapp_text_transport(send: Any, *, recipient: str) -> dd.Transport:
 
 
 __all__ = [
-    "ADMISSION_CONFLICT", "ALREADY_TERMINAL", "CONTEXT_UNAVAILABLE", "HANDLED", "INTERNAL_ERROR",
+    "ADMISSION_CONFLICT", "ALREADY_TERMINAL", "CHANNEL", "CONTEXT_UNAVAILABLE", "HANDLED",
+    "HANDOVER_BARRIER",
+    "FOUNDATION_RELATIONS", "HANDOVER_RELATIONS", "LEDGER_RELATIONS",
+    "INTERNAL_ERROR", "LINK_UNVERIFIED", "MODEL_UNCONFIGURED", "REQUIRED_RELATIONS",
+    "ABANDONED_SESSION_REAP_SECONDS", "ExclusiveCloser",
     "LEASE_SECONDS", "NAMESPACE", "OWNERSHIP_UNAVAILABLE", "SCHEMA_UNAVAILABLE", "TurnReport",
     "build_trusted_binding", "reset_schema_probe", "run_commerce_runtime_turn",
     "runtime_schema_available", "whatsapp_text_transport",

@@ -30,7 +30,7 @@ from scripts.operators.staging_migration_0087_to_0088 import (  # noqa: E402
 )
 
 MIGRATION_TENANT_ID = 880_002
-_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0109"})
+_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", "0111"})
 
 _ORDER_INDEXES = (
     "ix_orders_tenant_customer_id",
@@ -162,6 +162,8 @@ def ephemeral_validate_engine() -> Iterator[Engine]:
         _drop_ephemeral_database(admin_engine, db_name)
         admin_engine.dispose()
 
+
+from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
 
 def test_repository_has_parallel_heads_0092_and_0098() -> None:
     prev_cwd = os.getcwd()
@@ -326,9 +328,8 @@ def test_migration_0088_never_selected_by_head_literal() -> None:
         script = ScriptDirectory(str(_DATABASE / "migrations"))
     finally:
         os.chdir(prev_cwd)
-    for head in script.get_heads():
-        assert head in _REPOSITORY_ALEMBIC_HEADS
-    assert "head" not in {"0092", "0109"}
+    assert repository_heads_expected(script.get_heads())
+    assert "head" not in {"0092", "0111"}
 
 
 def test_new_writes_still_enforced_after_0088(ephemeral_validate_engine: Engine) -> None:

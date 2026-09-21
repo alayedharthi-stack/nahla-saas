@@ -44,6 +44,7 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
     APPLICATION_ALEMBIC_HEAD,
     INTEGRATION_BOOTSTRAP_TARGET,
     REPOSITORY_ALEMBIC_HEADS,
+    repository_heads_expected,
 )
 from tests.legacy_migration_drift_postgres_fixtures import (  # noqa: E402
     connect_engine,
@@ -91,8 +92,8 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert 'down_revision = "0102"' in source
     assert "down_revision = (\"0092\"" not in source
     assert "down_revision = ('0092'" not in source
-    assert APPLICATION_ALEMBIC_HEAD == "0109"
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0109"})
+    assert APPLICATION_ALEMBIC_HEAD == "0111"
+    assert repository_heads_expected(REPOSITORY_ALEMBIC_HEADS)
     assert INTEGRATION_BOOTSTRAP_TARGET == "0093"
     prev = os.getcwd()
     try:
@@ -106,9 +107,10 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         rev_0107 = script.get_revision("0107")
         rev_0108 = script.get_revision("0108")
         rev_0109 = script.get_revision("0109")
+        rev_0110 = script.get_revision("0111")
     finally:
         os.chdir(prev)
-    assert heads == frozenset({"0092", "0109"})
+    assert repository_heads_expected(heads)
     assert rev.down_revision == _PARENT
     assert not isinstance(rev.down_revision, tuple)
     assert rev_0104 is not None
@@ -127,11 +129,15 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert rev_0108 is not None
     assert rev_0108.down_revision == "0107"
     assert not isinstance(rev_0108.down_revision, tuple)
-    # 0109 (commerce runtime ledgers, dormant) extends 0108 linearly —
+    # 0109 (commerce runtime ledgers) and 0111 (the handover), both dormant,
+    # extend 0108 linearly —
     # it must not merge the abandoned 0092 branch or open a new head.
     assert rev_0109 is not None
     assert rev_0109.down_revision == "0108"
     assert not isinstance(rev_0109.down_revision, tuple)
+    assert rev_0110 is not None
+    assert rev_0110.down_revision == "0109"
+    assert not isinstance(rev_0110.down_revision, tuple)
 
 
 def _pg_required() -> bool:

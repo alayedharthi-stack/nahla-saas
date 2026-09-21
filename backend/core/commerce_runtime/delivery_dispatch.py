@@ -56,6 +56,9 @@ class DispatchOutcome:
     provider_message_id: Optional[str]
     blocked_reason: Optional[str] = None
     detail: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    # True when this call sent nothing because an earlier attempt on the same
+    # reservation had already established the outcome being reported.
+    reused_outcome: bool = False
 
     @property
     def delivered(self) -> bool:
@@ -94,8 +97,10 @@ def dispatch_reserved_delivery(
     except lc.DeliveryDispatchBlocked as blocked:
         logger.info("[COMMERCE_RUNTIME_DISPATCH] blocked sequence=%s reason=%s",
                     sequence_id, blocked.reason.value)
-        return DispatchOutcome(status=NOT_ATTEMPTED, sequence_id=sequence_id, attempt_id=None,
-                               provider_message_id=None, blocked_reason=blocked.reason.value)
+        return _established_outcome(
+            ledgers=ledgers, tenant_id=tenant_id, namespace=namespace,
+            conversation_id=conversation_id, sequence_id=sequence_id,
+            blocked_reason=blocked.reason.value)
     except c.OwnershipRejected as rejected:
         # Ownership was lost, or the turn is no longer the eligible one — for
         # instance because it already has its terminal. Either way this caller
@@ -132,6 +137,80 @@ def dispatch_reserved_delivery(
                 sequence_id, attempt.attempt_id, status, bool(provider_message_id))
     return DispatchOutcome(status=status, sequence_id=sequence_id, attempt_id=attempt.attempt_id,
                            provider_message_id=provider_message_id, detail=evidence)
+
+
+_STATUS_FOR_RECEIPT = {
+    lc.ReceiptKind.ACCEPTED.value: SENT_ACCEPTED,
+    lc.ReceiptKind.REJECTED.value: SENT_REJECTED,
+    lc.ReceiptKind.UNKNOWN.value: SENT_UNKNOWN,
+}
+
+
+def _established_outcome(
+    *,
+    ledgers: LedgerRepository,
+    tenant_id: int,
+    namespace: Any,
+    conversation_id: int,
+    sequence_id: int,
+    blocked_reason: str,
+) -> DispatchOutcome:
+    """What this reservation already established, when a redispatch is refused.
+
+    A refused reservation means *this call* sent nothing. It does not mean
+    nothing was ever sent: the usual reason the ledger refuses is that an
+    earlier attempt on the same reservation already reached the provider. A
+    re-entry that reports ``not_attempted`` in that case completes the turn as
+    failed while the customer holds the message — the same class of untruth as
+    claiming a send that did not happen, in the other direction.
+
+    So the receipts are read and the established outcome is reported as it
+    stands, with ``reused_outcome`` saying plainly that this call did not send
+    it. Only a reservation with no established outcome at all is
+    ``not_attempted``. Acceptance still requires the provider's own message id;
+    an accepted receipt without one is reported as unknown.
+    """
+    try:
+        receipts = ledgers.list_delivery_receipts(
+            tenant_id=tenant_id, namespace=namespace, conversation_id=conversation_id,
+            sequence_id=sequence_id)
+    except Exception as exc:  # noqa: BLE001 - unreadable receipts establish nothing
+        logger.warning("[COMMERCE_RUNTIME_DISPATCH] receipts unreadable sequence=%s error=%s",
+                       sequence_id, type(exc).__name__)
+        return DispatchOutcome(status=NOT_ATTEMPTED, sequence_id=sequence_id, attempt_id=None,
+                               provider_message_id=None, blocked_reason=blocked_reason)
+
+    # An acceptance is the strongest evidence and outranks a later failure
+    # receipt, which is reach evidence about a message that *was* sent.
+    accepted = next((r for r in receipts
+                     if r.kind == lc.ReceiptKind.ACCEPTED.value and r.provider_message_id), None)
+    if accepted is not None:
+        logger.info("[COMMERCE_RUNTIME_DISPATCH] reusing the accepted send sequence=%s attempt=%s",
+                    sequence_id, accepted.attempt_id)
+        return DispatchOutcome(status=SENT_ACCEPTED, sequence_id=sequence_id,
+                               attempt_id=accepted.attempt_id,
+                               provider_message_id=accepted.provider_message_id,
+                               blocked_reason=blocked_reason, reused_outcome=True,
+                               detail={"reused_receipt_id": accepted.receipt_id})
+
+    outcomes = [r for r in receipts if r.kind in _STATUS_FOR_RECEIPT]
+    if not outcomes:
+        # Nothing is established: an attempt is open, or the block is about
+        # something other than an outcome. The turn is not finished here.
+        return DispatchOutcome(status=NOT_ATTEMPTED, sequence_id=sequence_id, attempt_id=None,
+                               provider_message_id=None, blocked_reason=blocked_reason)
+
+    # An unknown outcome anywhere on this reservation keeps the whole thing
+    # unknown: it is exactly the case a later call must not resolve either way.
+    established = next((r for r in outcomes if r.kind == lc.ReceiptKind.UNKNOWN.value),
+                       outcomes[-1])
+    status = _STATUS_FOR_RECEIPT[established.kind]
+    logger.info("[COMMERCE_RUNTIME_DISPATCH] reusing the established outcome sequence=%s "
+                "attempt=%s outcome=%s", sequence_id, established.attempt_id, status)
+    return DispatchOutcome(status=status, sequence_id=sequence_id,
+                           attempt_id=established.attempt_id, provider_message_id=None,
+                           blocked_reason=blocked_reason, reused_outcome=True,
+                           detail={"reused_receipt_id": established.receipt_id})
 
 
 def complete_turn(

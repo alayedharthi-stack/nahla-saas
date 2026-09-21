@@ -99,6 +99,18 @@ class AdmissionConflict(CommerceRuntimeError):
     """The inbound identity is already bound to a different conversation."""
 
 
+class AdmissionRefused(CommerceRuntimeError):
+    """A caller's guard vetoed admitting this inbound, inside the admission
+    transaction, before anything was written.
+
+    Distinct from :class:`AdmissionConflict`: nothing is wrong with the inbound
+    and nothing conflicts. The caller simply refuses to take *new* work right
+    now — during a handover, for instance — and says so where the refusal and
+    the write are decided together, so no turn can be admitted that a check made
+    after the refusal became true would not see.
+    """
+
+
 @dataclasses.dataclass(frozen=True)
 class ConversationSnapshot:
     conversation_id: int
@@ -428,7 +440,7 @@ def classify_rejection(
 
 
 __all__ = [
-    "AdmissionConflict", "AdmittedTurn", "CommerceRuntimeError", "CompletionBlocked", "ConversationNotFound",
+    "AdmissionConflict", "AdmissionRefused", "AdmittedTurn", "CommerceRuntimeError", "CompletionBlocked", "ConversationNotFound",
     "LedgerSchemaIncomplete",
     "ConversationSnapshot", "CustomerReach", "Lease", "MAX_DETAILS_BYTES", "MAX_LEASE_SECONDS",
     "MAX_OWNER_ID_LENGTH", "MAX_PAYLOAD_BYTES", "MAX_PROVIDER_MESSAGE_ID_LENGTH", "MAX_REF_LENGTH",

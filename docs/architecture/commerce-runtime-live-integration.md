@@ -206,14 +206,26 @@ The tools share one session, because the V2 read contract is stateful within a
 turn: `product_lookup` and `order_details` are authorised only for ids an
 earlier lookup in the same context returned. A session is not thread-safe, and
 the loop abandons a tool call that overruns its wait without being able to stop
-it. The binding therefore closes permanently the moment a second call finds the
-first still running: every later read is refused rather than sharing a session
-with a thread nobody is waiting for.
+it.
+
+Abandonment is therefore recorded **when it happens**, not when something later
+notices. The registry calls the resource owner's `on_abandoned` at the instant it
+stops waiting, and the binding closes permanently from that moment: every later
+read in the turn is refused rather than sharing a session with a thread nobody
+is waiting for. Waiting for a *second* call to discover the first would leave a
+single timed-out call — the common case, and the one where the turn then ends —
+unmarked.
 
 This is a **bounded refusal, not a guarantee that the abandoned work stopped**.
-The abandoned call may still complete against that session; the binding stays
-closed afterwards regardless, and the runtime closes the session only after the
-turn.
+The abandoned call may still be mid-statement on that session, so closing the
+binding is not the same as freeing the session, and the two are separated:
+
+* the turn closes the session itself when no call still holds it;
+* otherwise the session is handed to a named owner — a reaper that waits for the
+  binding to go idle and then closes it, and, if the call never returns, says so
+  and leaves the connection to the pool rather than breaking a live statement.
+
+Closing a session under a running call is the one outcome neither path allows.
 
 ---
 

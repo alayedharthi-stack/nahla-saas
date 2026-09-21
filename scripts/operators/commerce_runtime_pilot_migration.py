@@ -5,16 +5,23 @@ applies a production migration: a service built from a pinned branch, with
 ``restartPolicyType: NEVER``, whose only variable is the pilot database's
 ``DATABASE_URL``.
 
-    NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0109 \
+    NAHLA_COMMERCE_RUNTIME_MIGRATION_CONFIRM=RUN_COMMERCE_RUNTIME_0111 \
+    NAHLA_COMMERCE_RUNTIME_MIGRATION_TARGET=<host>/<database> \
         python -m scripts.operators.commerce_runtime_pilot_migration
 
-Fail-closed at both ends. Before Alembic runs it asserts that the database is
-not a local one, that the confirmation token is present, that the current
-revision is one this contract accepts, and that the nine runtime relations are
-either all absent or all present. After Alembic runs it asserts the target
-revision and all nine relations, and only then prints ``RESULT=SUCCESS``. A
-partial schema is refused rather than repaired: the runtime itself fails closed
-on a half-present schema, and so does this.
+Fail-closed at both ends. Before Alembic runs it asserts that the confirmation
+token is present, that ``DATABASE_URL`` parses as a remote PostgreSQL database,
+that it is **the database the operator authorised** — ``DATABASE_URL`` says
+which database is configured, never which one was authorised — that the current
+revision is one this contract accepts, and that the relations present are
+exactly the ones that revision creates. After Alembic runs it asserts the target
+revision and all nine relations, and only then prints ``RESULT=SUCCESS``.
+
+A schema that does not match its own revision is refused rather than repaired:
+the runtime itself fails closed on a half-present schema, and so does this. The
+one intermediate state that *is* startable is revision ``0108``, which creates
+the three foundation relations and none of the ledger six — that is the shape
+that revision produces, not a half-applied one.
 
 It adds nine tables and touches nothing else — no existing table is altered, no
 data is read, written or backfilled. Every observation and the outcome are
@@ -44,16 +51,240 @@ def result(marker: str, **observations: Any) -> None:
     emit(f"RESULT={marker} {body}".rstrip())
 
 
+def _is_loopback(host: str) -> bool:
+    """Whether a hostname names this machine, by name or by address.
+
+    Addresses are compared as addresses, so the whole ``127.0.0.0/8`` range,
+    ``::1`` in any spelling and the IPv4-mapped loopback are all covered, and a
+    remote host whose *name* merely contains "localhost" is not.
+    """
+    import ipaddress  # noqa: PLC0415
+
+    name = host.strip().strip("[]").lower()
+    if not name:
+        return False
+    if name in k.LOOPBACK_HOSTNAMES:
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    if address.is_loopback or address.is_unspecified:
+        return True
+    mapped = getattr(address, "ipv4_mapped", None)
+    return bool(mapped is not None and (mapped.is_loopback or mapped.is_unspecified))
+
+
+def libpq_environment_overrides(environ: Optional[Dict[str, str]] = None) -> Tuple[str, ...]:
+    """Inherited libpq variables that would move the connection's target.
+
+    These are read by the driver, not by the URL parser, so they are invisible
+    to any amount of URL checking — and they are inherited identically by this
+    process and by the Alembic subprocess.
+    """
+    env = environ if environ is not None else os.environ
+    return tuple(name for name in k.LIBPQ_TARGET_ENV_VARS
+                 if str(env.get(name, "") or "").strip())
+
+
+def sanitized_environment(url: str, environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The environment the Alembic subprocess runs in.
+
+    Every target-affecting libpq variable is removed and ``DATABASE_URL`` is
+    replaced with the fully explicit validated URL, so the subprocess connects
+    to the target this job validated and cannot be redirected by something it
+    inherited. Nothing else about the environment is changed, and no credential
+    is logged.
+    """
+    env = dict(environ if environ is not None else os.environ)
+    for name in k.LIBPQ_TARGET_ENV_VARS:
+        env.pop(name, None)
+    env["DATABASE_URL"] = url
+    return env
+
+
+def parse_database_url(url: str, environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """``(target, refusal_reason)`` for one database URL, as the driver reads it.
+
+    The URL's authority is not the connection's target. A PostgreSQL URL may
+    carry ``host``, ``dbname`` and friends as query parameters, and the driver
+    honours those over the authority — so
+    ``postgresql://u:p@approved.internal/pilot?host=other.internal`` connects to
+    ``other.internal``. A check that reads the authority authorises one database
+    while the migration runs against another.
+
+    So the parameters checked here are the ones the driver is actually handed:
+    SQLAlchemy's own ``create_connect_args`` for this URL, the same call the
+    engine makes. Any target-changing query parameter is refused before that,
+    because a URL that needs reconciling is a URL nobody should be running a
+    migration from.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return None, "DATABASE_URL_unresolved"
+    inherited = libpq_environment_overrides(environ)
+    if inherited:
+        # Not reconciled: an inherited PGPORT and an explicit URL port disagree
+        # silently, and the operator's intent is unknowable from here. The URL
+        # must say what it means.
+        emit(f"inherited_libpq_target_variables={list(inherited)!r}")
+        return None, "DATABASE_URL_environment_override"
+    try:
+        from sqlalchemy.engine import make_url  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - without the driver's own parser, nothing is established
+        return None, "DATABASE_URL_unparsable"
+    try:
+        parsed = make_url(raw)
+    except Exception:  # noqa: BLE001
+        return None, "DATABASE_URL_unparsable"
+
+    dialect = str(parsed.get_backend_name() or "").lower()
+    if not dialect:
+        return None, "DATABASE_URL_unparsable"
+    if dialect not in k.SUPPORTED_DIALECTS:
+        return None, "DATABASE_URL_unsupported_dialect"
+
+    overrides = sorted(key for key in (parsed.query or {})
+                       if key.lower() in k.TARGET_OVERRIDE_QUERY_KEYS)
+    if overrides:
+        emit(f"target_changing_query_parameters={overrides!r}")
+        return None, "DATABASE_URL_carries_a_target_override"
+
+    try:
+        import sqlalchemy as sa  # noqa: PLC0415
+
+        # Lazy: constructing an engine opens no connection. This asks the very
+        # dialect the migration would use what it would connect with.
+        engine = sa.create_engine(parsed)
+        try:
+            _args, connect = engine.dialect.create_connect_args(parsed)
+        finally:
+            engine.dispose()
+    except Exception:  # noqa: BLE001 - a URL the driver cannot turn into a connection
+        return None, "DATABASE_URL_unparsable"
+
+    # Neither part is stripped. Whitespace in a host is a broken configuration
+    # and must fail the comparison rather than be tidied into a match, and a
+    # PostgreSQL database may genuinely be named with leading or trailing
+    # whitespace — trimming `` pilot`` to ``pilot`` authorises a different one.
+    host = str(connect.get("host") or "")
+    if not host:
+        return None, "DATABASE_URL_host_missing"
+    if _is_loopback(host):
+        return None, "DATABASE_URL_is_local"
+    database = str(connect.get("dbname") or "")
+    if not database:
+        return None, "DATABASE_URL_database_missing"
+    try:
+        port = int(connect.get("port") or k.DEFAULT_PORT)
+    except (TypeError, ValueError):
+        return None, "DATABASE_URL_unparsable"
+    # The host is an address or a name, so case carries no meaning; a database
+    # name is case-sensitive in PostgreSQL and is kept exactly as given.
+    return {"dialect": dialect, "host": host.lower(), "port": port, "database": database}, None
+
+
+def authorized_target(environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """The one database this run may touch, as ``host[:port]/database``.
+
+    The operator states it explicitly. ``DATABASE_URL`` says which database is
+    *configured* in this service; it can never say which one was *authorised*,
+    and this job exists precisely because those two must be checked against each
+    other before any schema changes.
+    """
+    env = environ if environ is not None else os.environ
+    declared = str(env.get(k.TARGET_ENV, "") or "").strip()
+    if not declared:
+        return None, "authorized_target_not_declared"
+    if declared.count("/") != 1:
+        return None, "authorized_target_malformed"
+    authority, database = declared.split("/", 1)
+    # The database name is NOT stripped: PostgreSQL allows a name with leading
+    # or trailing whitespace, and quietly authorising ``pilot`` for a declared
+    # `` pilot`` would authorise a different database.
+    if not authority or not database:
+        return None, "authorized_target_malformed"
+    port = k.DEFAULT_PORT
+    host = authority
+    # ``host:port``, and an IPv6 literal in brackets so its colons are not read
+    # as a port separator.
+    if authority.startswith("["):
+        closing = authority.find("]")
+        if closing < 0:
+            return None, "authorized_target_malformed"
+        host, rest = authority[1:closing], authority[closing + 1:]
+        if rest.startswith(":"):
+            rest = rest[1:]
+        elif rest:
+            return None, "authorized_target_malformed"
+        if rest:
+            try:
+                port = int(rest)
+            except ValueError:
+                return None, "authorized_target_malformed"
+    elif ":" in authority:
+        host, _, raw_port = authority.rpartition(":")
+        try:
+            port = int(raw_port)
+        except ValueError:
+            return None, "authorized_target_malformed"
+    if not host:
+        return None, "authorized_target_malformed"
+    return {"host": host.lower(), "port": port, "database": database}, None
+
+
+def explicit_url(url: str, target: Dict[str, Any]) -> Optional[str]:
+    """``url`` with host, port and database bound explicitly, credentials intact.
+
+    Nothing downstream may be left to infer a part of the target from its own
+    environment, so every part of it is written into the URL that both the
+    inspection engine and the Alembic subprocess are given.
+    """
+    try:
+        from sqlalchemy.engine import make_url  # noqa: PLC0415
+
+        parsed = make_url(url)
+        bound = parsed.set(host=target["host"], port=int(target["port"]),
+                           database=target["database"])
+        return bound.render_as_string(hide_password=False)
+    except Exception as exc:  # noqa: BLE001 - a URL that cannot be rebound is not usable
+        # The type only. The URL carries credentials and is never printed.
+        emit(f"explicit_url_failed={type(exc).__name__!r}")
+        return None
+
+
+def _target_label(target: Dict[str, Any]) -> str:
+    return f"{target['host']}:{target['port']}/{target['database']}"
+
+
 def database_url(environ: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[str]]:
-    """``(url, refusal_reason)``. A local database is never the pilot database."""
+    """``(explicit_url, refusal_reason)``.
+
+    The effective target must be the authorised one, and what comes back is the
+    **fully explicit** URL — host, port and database all written in — so the
+    inspection engine and the Alembic subprocess are given the same target and
+    neither can infer a part of it from anywhere else.
+    """
     env = environ if environ is not None else os.environ
     url = str(env.get("DATABASE_URL", "") or "").strip()
-    if not url:
-        return None, "DATABASE_URL_unresolved"
-    for marker in k.FORBIDDEN_HOST_MARKERS:
-        if marker in url:
-            return None, "DATABASE_URL_is_local"
-    return url, None
+    target, refusal = parse_database_url(url, env)
+    if target is None:
+        return None, refusal
+    declared, refusal = authorized_target(env)
+    if declared is None:
+        return None, refusal
+    # Host and port identify the server; the database name is compared exactly,
+    # because PostgreSQL treats ``Pilot`` and ``pilot`` as different databases.
+    if (target["host"] != declared["host"] or target["port"] != declared["port"]
+            or target["database"] != declared["database"]):
+        emit(f"authorized_target={_target_label(declared)!r} "
+             f"effective_target={_target_label(target)!r}")
+        return None, "DATABASE_URL_is_not_the_authorized_target"
+    bound = explicit_url(url, target)
+    if bound is None:
+        return None, "DATABASE_URL_unparsable"
+    emit(f"effective_target={_target_label(target)!r}")
+    return bound, None
 
 
 def confirmed(environ: Optional[Dict[str, str]] = None) -> bool:
@@ -92,19 +323,36 @@ def observe(url: str) -> Dict[str, Any]:
 
 
 def classify(observation: Dict[str, Any]) -> str:
-    """``fresh``, ``complete`` or ``partial`` for the nine runtime relations."""
-    if not observation["present"]:
-        return "fresh"
+    """``fresh``, ``foundation``, ``complete`` or ``partial``.
+
+    ``foundation`` is the shape of a database at revision ``0108``: the three
+    foundation relations and none of the ledger six. It is a known revision on
+    the way to the target, not a half-applied schema, and the observed relations
+    are checked against what that revision actually creates rather than against
+    "some are missing".
+    """
+    present = tuple(observation["present"])
     if not observation["missing"]:
         return "complete"
+    if not present:
+        return "fresh"
+    if present == k.FOUNDATION_RELATIONS:
+        return "foundation"
     return "partial"
 
 
-def run_alembic(*, timeout_seconds: int, cwd: str) -> int:
+def run_alembic(*, timeout_seconds: int, cwd: str, env: Dict[str, str]) -> int:
+    """Run the one pinned upgrade, against the validated target and nothing else.
+
+    ``env`` is the sanitized environment: the validated explicit ``DATABASE_URL``
+    and no inherited libpq target variable. Alembic resolves its own connection,
+    so handing it the same explicit URL this job inspected is what makes the two
+    paths the same target rather than two guesses that usually agree.
+    """
     command = k.build_upgrade_argv(python_executable=sys.executable)
     emit(f"running: {' '.join(command)} (cwd={cwd}, timeout={timeout_seconds}s)")
     try:
-        completed = subprocess.run(command, cwd=cwd, check=False, env=os.environ.copy(),
+        completed = subprocess.run(command, cwd=cwd, check=False, env=env,
                                    timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         emit(f"alembic upgrade {k.TARGET_REVISION} TIMED OUT after {timeout_seconds}s")
@@ -151,17 +399,22 @@ def main(argv: Optional[list] = None) -> int:
     if shape == "complete" and k.already_applied(revisions):
         result(k.RESULT_ALREADY_APPLIED, alembic_version=before["alembic_version"])
         return k.EXIT_SUCCESS
-    if shape == "partial":
-        result(k.RESULT_FAILED_PRECONDITION, reason="partial_runtime_schema",
-               present=before["present"], missing=before["missing"])
-        return k.EXIT_PRECONDITION
     if not k.start_state_accepted(revisions):
         result(k.RESULT_FAILED_PRECONDITION, reason="unexpected_start_revision",
                observed=before["alembic_version"],
                accepted=[tuple(sorted(s)) for s in k.ACCEPTED_START_REVISIONS])
         return k.EXIT_PRECONDITION
+    # The relations a database at this revision must already have, which is what
+    # makes ``0108`` a startable state instead of a permanently refused one.
+    expected = k.expected_relations_at(revisions)
+    if tuple(before["present"]) != expected:
+        result(k.RESULT_FAILED_PRECONDITION, reason="unexpected_runtime_schema_for_revision",
+               alembic_version=before["alembic_version"], shape=shape,
+               present=before["present"], expected=list(expected))
+        return k.EXIT_PRECONDITION
 
-    rc = run_alembic(timeout_seconds=timeout_seconds, cwd=directory)
+    rc = run_alembic(timeout_seconds=timeout_seconds, cwd=directory,
+                     env=sanitized_environment(url))
 
     after = observe(url)
     emit(f"AFTER alembic_version={after['alembic_version']} shape={classify(after)} "

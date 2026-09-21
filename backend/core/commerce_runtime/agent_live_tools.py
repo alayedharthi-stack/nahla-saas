@@ -26,10 +26,12 @@ import asyncio
 import dataclasses
 import logging
 import threading
+import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_tools as at
+from core.commerce_runtime import conversation_link as cl
 
 logger = logging.getLogger("nahla.commerce_runtime.agent_live_tools")
 
@@ -47,69 +49,165 @@ class LiveToolsUnavailable(RuntimeError):
     """The trusted context for these tools could not be established."""
 
 
+ABANDONED_CALL_REASON = "an earlier tool call was abandoned and may still be running"
+
+
 @dataclasses.dataclass
 class LiveToolBinding:
     """The one trusted context these tools may read, and the scope it is for.
 
     The database session inside ``context`` belongs to this binding alone and
-    is used only by tool calls. A call that the loop abandoned on a timeout may
-    still be running on that session, so the binding is *poisoned* from that
-    moment: every later call is refused rather than sharing a session with a
-    thread nobody is waiting for. Abandonment is local; it is not proof the
-    abandoned work stopped.
+    is used only by tool calls. When the loop stops waiting for a call, the
+    thread running it does not stop with it, so the registry tells this binding
+    at that exact moment (:meth:`abandon`) and the binding closes permanently:
+    every later call in the turn is refused rather than issuing statements on a
+    session another thread may be mid-statement on.
+
+    Closing the binding is not the same as freeing the session. Abandonment is
+    local knowledge — it is never proof the abandoned work stopped — so the
+    session stays open until :meth:`wait_until_idle` says no call holds it. The
+    owner of that wait is the runtime entry, which hands the session to a reaper
+    rather than closing it under a live thread.
     """
 
     context: Any
-    tenant_id: int
-    conversation_id: int
-    _lock: threading.Lock = dataclasses.field(default_factory=threading.Lock, repr=False)
+    link: cl.TrustedConversationLink
+    _gate: threading.Condition = dataclasses.field(
+        default_factory=threading.Condition, repr=False)
     _poisoned: Optional[str] = None
     _in_flight: int = 0
+    _abandoned: int = 0
+    _on_idle: List[Callable[[], None]] = dataclasses.field(default_factory=list, repr=False)
+
+    @property
+    def tenant_id(self) -> int:
+        return self.link.tenant_id
 
     @property
     def poisoned(self) -> Optional[str]:
         return self._poisoned
 
     @property
-    def abandoned_calls(self) -> int:
+    def in_flight(self) -> int:
+        """Calls this binding has not seen return. Not the same as abandoned."""
         return self._in_flight
 
+    @property
+    def abandoned_calls(self) -> int:
+        """Calls the loop stopped waiting for, counted when it stopped."""
+        return self._abandoned
+
+    @property
+    def session_may_be_in_use(self) -> bool:
+        """Whether closing the session now could pull it from under a live call."""
+        return self._in_flight > 0
+
     def check(self, scope: at.ToolScope) -> None:
-        if scope.tenant_id != self.tenant_id or scope.conversation_id != self.conversation_id:
+        """Accept only the scope this binding was verified for.
+
+        The loop's scope carries the **runtime** conversation id, and the read
+        context was built for the **application** one. Both come from the same
+        verified link, so this compares each against its own side and never one
+        identifier space against the other.
+        """
+        if (scope.tenant_id != self.link.tenant_id
+                or scope.namespace != self.link.namespace
+                or scope.conversation_id != self.link.runtime_conversation_id):
             raise ac.ToolError(
                 ac.ToolErrorCode.SCOPE_OVERRIDE_REFUSED.value,
-                "this tool is bound to another tenant/conversation scope",
+                "this tool is bound to another tenant/namespace/conversation scope",
             )
         if self._poisoned is not None:
             raise ac.ToolError(ac.ToolErrorCode.TOOL_FAILURE.value, self._poisoned)
 
     def poison(self, reason: str) -> None:
         """Close the binding for good. Idempotent; the first reason is kept."""
-        with self._lock:
+        with self._gate:
             if self._poisoned is None:
                 self._poisoned = reason
 
+    def abandon(self, reason: str = "") -> None:
+        """Record, as it happens, that the loop stopped waiting for a call.
+
+        This is what the registry calls on a tool timeout. It runs on the loop's
+        thread, takes no lock the abandoned call holds and never raises, because
+        the loop is owed its observation either way.
+        """
+        detail = str(reason or "").strip()
+        message = f"{ABANDONED_CALL_REASON} ({detail})" if detail else ABANDONED_CALL_REASON
+        with self._gate:
+            self._abandoned += 1
+            if self._poisoned is None:
+                self._poisoned = message
+        logger.warning("[COMMERCE_RUNTIME] tool call abandoned tenant=%s conversation=%s",
+                       self.link.tenant_id, self.link.runtime_conversation_id)
+
     def enter(self) -> None:
-        """Take the binding for one call, or refuse because a call is still running.
+        """Take the binding for one call, or refuse because it is already closed.
 
         The registry runs one tool at a time and waits for it, so finding a call
-        already in flight can only mean the loop abandoned an earlier one on its
-        timeout while the work kept going. Two threads must not share this
-        session, and the state the abandoned call may still write is not state a
-        later call may read, so the binding closes permanently at that point.
+        already in flight can only mean an earlier one was abandoned while the
+        work kept going. That is refused here as well as by :meth:`check`, since
+        the abandonment may land between the two.
         """
-        with self._lock:
+        with self._gate:
+            if self._poisoned is not None:
+                raise ac.ToolError(ac.ToolErrorCode.TOOL_FAILURE.value, self._poisoned)
             if self._in_flight > 0:
-                if self._poisoned is None:
-                    self._poisoned = "an earlier tool call was abandoned and is still running"
+                self._poisoned = ABANDONED_CALL_REASON
                 raise ac.ToolError(ac.ToolErrorCode.TOOL_FAILURE.value, self._poisoned)
             self._in_flight += 1
+
+    def on_idle(self, callback: Callable[[], None]) -> bool:
+        """Run ``callback`` once no call holds this binding.
+
+        If nothing holds it now, the callback runs immediately on the calling
+        thread and this returns ``True``. Otherwise it is kept and runs on
+        whichever thread releases the last call — which is what gives an
+        abandoned call's resources an owner that does not expire. Returns
+        ``False`` when the callback was deferred.
+        """
+        with self._gate:
+            if self._in_flight > 0:
+                self._on_idle.append(callback)
+                return False
+        callback()
+        return True
 
     def leave(self) -> None:
         """Release the binding. A refusal releases it exactly like a result does:
         this thread is finished either way."""
-        with self._lock:
+        due: List[Callable[[], None]] = []
+        with self._gate:
             self._in_flight = max(0, self._in_flight - 1)
+            if self._in_flight == 0:
+                due = list(self._on_idle)
+                self._on_idle.clear()
+                self._gate.notify_all()
+        for callback in due:
+            # The turn is long gone; a broken callback must not take down the
+            # thread that happened to finish the abandoned call.
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                logger.warning("[COMMERCE_RUNTIME] idle callback failed after an "
+                               "abandoned tool call returned")
+
+    def wait_until_idle(self, timeout: float) -> bool:
+        """Block until no call holds the session, or the bound elapses.
+
+        ``True`` means the session is free and may be closed. ``False`` means a
+        call is still running and closing the session would break it — the
+        caller must leave it alone.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._gate:
+            while self._in_flight > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._gate.wait(remaining)
+            return True
 
 
 def _run(coro: Any) -> Any:
@@ -336,9 +434,12 @@ _QUERY = {"type": "string", "maxLength": MAX_QUERY_LENGTH}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT}
 _ID = {"type": "integer", "minimum": 1, "maximum": 2_147_483_647}
 
+# The names below are the ones the merchant instructions already use. They are
+# the contract between the instructions and this registry: renaming one without
+# the other leaves the model calling a tool that does not exist.
 _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBinding], at.ToolFunction]], ...] = (
     (
-        "catalog_search",
+        "search_products",
         "Search this merchant's synced catalog. An empty query browses the merchant's "
         "top available products. Returns products with their evidence references.",
         {"type": "object", "properties": {"query": _QUERY, "limit": _LIMIT}, "required": []},
@@ -346,14 +447,14 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         _catalog_search,
     ),
     (
-        "product_lookup",
-        "Exact details for one product already returned by catalog_search in this turn.",
+        "get_product_details",
+        "Exact details for one product already returned by search_products in this turn.",
         {"type": "object", "properties": {"product_id": _ID}, "required": ["product_id"]},
         "product",
         _product_lookup,
     ),
     (
-        "merchant_knowledge_lookup",
+        "search_merchant_knowledge",
         "Search this merchant's own published knowledge, such as delivery, returns, "
         "branches or policies.",
         {"type": "object", "properties": {"query": _QUERY, "limit": _LIMIT}, "required": []},
@@ -361,7 +462,7 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         _merchant_knowledge,
     ),
     (
-        "order_lookup",
+        "resolve_customer_order",
         "Resolve one order belonging to this customer. order_number is only an optional "
         "lookup key; the customer is taken from trusted context. Use purpose 'shipment' "
         "for a shipping or tracking question and 'status' otherwise.",
@@ -373,15 +474,16 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         _order_lookup,
     ),
     (
-        "order_details",
-        "Total and line items for an order returned by order_lookup in this turn.",
+        "get_order_details",
+        "Total and line items for an order returned by resolve_customer_order in this turn.",
         {"type": "object", "properties": {"order_id": _ID}, "required": ["order_id"]},
-        "order_details",
+        "get_order_details",
         _order_details,
     ),
     (
-        "shipment_lookup",
-        "Shipment, carrier and tracking facts for an order returned by order_lookup in this turn.",
+        "get_order_shipment",
+        "Shipment, carrier and tracking facts for an order returned by resolve_customer_order "
+        "in this turn.",
         {"type": "object", "properties": {"order_id": _ID}, "required": ["order_id"]},
         "shipment",
         _shipment_lookup,
@@ -398,6 +500,9 @@ def build_live_tools(binding: LiveToolBinding) -> Tuple[at.RegisteredTool, ...]:
             definition=ac.ToolDefinition(name=name, description=description, input_schema=schema,
                                          result_kind=kind, read_only=True),
             function=factory(binding),
+            # The binding owns the session these tools read on, so it is the one
+            # told the instant the loop stops waiting for a call.
+            on_abandoned=binding.abandon,
         )
         for name, description, schema, kind, factory in _DECLARATIONS
     )
@@ -408,6 +513,6 @@ def build_live_registry(binding: LiveToolBinding) -> at.ToolRegistry:
 
 
 __all__ = [
-    "LIVE_TOOL_NAMES", "LiveToolBinding", "LiveToolsUnavailable", "MAX_SEARCH_LIMIT",
-    "build_live_registry", "build_live_tools",
+    "ABANDONED_CALL_REASON", "LIVE_TOOL_NAMES", "LiveToolBinding", "LiveToolsUnavailable",
+    "MAX_SEARCH_LIMIT", "build_live_registry", "build_live_tools",
 ]
