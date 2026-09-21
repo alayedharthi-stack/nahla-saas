@@ -15,7 +15,18 @@ leaked secrets`, `lint-and-test`, `constitution-compliance` and
 `merge-freeze-gate`, with "require branches to be up to date" and "do not
 allow bypassing" enabled; `a1-postgres-integration` is **not** required. The
 suites therefore run inside `lint-and-test` with a disposable `postgres:16`
-service (Variant B).
+service (Variant B). The additional `postgres-18-compatibility` job runs the same
+complete strict inventory on an isolated PostgreSQL 18 service, including a
+server-major assertion. It supplements the existing required PostgreSQL 16
+execution; no existing check or inventory identifier is removed. Both jobs must
+pass before deploying this compatibility correction.
+
+PostgreSQL 18 exposes validated NOT NULL constraints as `contype=n` in
+`pg_constraint`. Revisions 0108/0109 verify nullability through the complete
+column definition comparison, and exclude only validated NOT NULL catalog rows
+from table-constraint name comparisons. Missing or extra nullability and an
+extra CHECK whose name ends in `_not_null` still fail. Unvalidated constraints
+remain visible and fail compatibility.
 
 The inventory distinguishes two kinds of suite:
 
@@ -32,10 +43,10 @@ The inventory distinguishes two kinds of suite:
 | Suite id | Kind | Module | Origin | Tests |
 | --- | --- | --- | --- | --- |
 | `commerce_runtime_foundation` | proof | `tests/commerce_reliability/test_commerce_runtime_foundation_pg.py` | PR #1089, dormant commerce runtime foundation, including the lock-wait, scope-binding and ordered-processing regressions | 27 |
-| `commerce_runtime_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_migration_pg.py` | PR #1089, revision 0108 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation) | 10 |
+| `commerce_runtime_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_migration_pg.py` | PR #1089, revision 0108 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, trigger on the correct relation; nullability drift and constraint-kind controls) | 13 |
 | `global_customer_identity` | proof | `backend/tests/test_global_customer_display_identity_pg.py` | PR #1087 (merged), 0107 persistence cases | 5 |
 | `commerce_runtime_ledgers` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py` | ledger PR, dormant effect and delivery ledgers (business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit, ledger-derived terminals, completion boundary on both terminal entry points, distinct business identities, schema-state completion guard with the standalone-0108 control, reservation/completion race in both lock orders) | 30 |
-| `commerce_runtime_ledgers_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py` | ledger PR, revision 0109 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required) | 12 |
+| `commerce_runtime_ledgers_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py` | ledger PR, revision 0109 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required; nullability drift and constraint-kind controls) | 15 |
 | `commerce_runtime_agent_loop` | proof | `tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py` | agent loop PR, dormant agent loop core and its durable guarantees (reasoning with read-only fixture tools and observations feeding the next decision; revision-bound attempt debits, concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; bundle-duplicate refusal and the durable crash-safe recovery allowance) | 39 |
 | `commerce_runtime_pilot` | proof | `tests/commerce_reliability/test_commerce_runtime_pilot_pg.py` | pilot integration and corrected admission, ownership, delivery and recovery boundaries with scripted provider/transport | 57 |
 | `commerce_runtime_handover_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py` | revision 0111 compatibility and sibling migration controls | 25 |
@@ -44,9 +55,11 @@ The inventory distinguishes two kinds of suite:
 | `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
 | `salla_customer_address_candidates` | proof | `backend/tests/test_salla_customer_address_candidates_pg.py` | Salla address-candidate PR, revision 0110 (fresh, `create_all` reconciliation, reversible), candidate durability across commit/session/conversation, one provenance row per address, tenant isolation, selected-address reuse after reset, and the independent review's closure cases: evidence absent before commit / present after / gone after rollback, two concurrent first imports committing one address, an absent provenance table still committing the confirmed address, and a concurrent refresh between offer and selection refused | 31 |
 
-The integrated branch inventories 334 cases (332 proofs + 2 runner regressions):
+The integrated branch inventories 340 cases (338 proofs + 2 runner regressions):
 all 321 identifiers from address integration `8f2bd079`, plus the collector's
-13. All 290 earlier runtime identifiers and all 31 address identifiers are
+13, followed by six nullability/constraint-kind controls for PostgreSQL 18
+compatibility. All 334 pre-correction identifiers remain. All 290 earlier
+runtime identifiers and all 31 address identifiers are
 retained. This is an inventory statement, not a claim that PostgreSQL execution
 on the integrated head has passed.
 

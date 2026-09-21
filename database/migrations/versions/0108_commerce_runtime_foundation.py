@@ -246,9 +246,14 @@ def _actual_columns(bind, table: str):
 
 
 def _actual_constraints(bind, table: str):
+    # PostgreSQL 18 also records NOT NULL in pg_constraint (contype='n').
+    # Nullability is compared for every column by _actual_columns, including
+    # unexpected tightening. Do not compare generated NOT NULL names with the
+    # declared table constraints. An unvalidated constraint is still refused.
     rows = bind.execute(sa.text(
         "SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint "
-        "WHERE conrelid = CAST(:t AS regclass)"), {"t": _table_regclass(table)}).all()
+        "WHERE conrelid = CAST(:t AS regclass) "
+        "AND (contype <> 'n' OR NOT convalidated)"), {"t": _table_regclass(table)}).all()
     return {r[0]: (str(r[1]), _norm(r[2])) for r in rows}
 
 

@@ -102,6 +102,15 @@ def test_fresh_and_compatible_precreation_pass_the_verifier(database_at_0107) ->
     ("extra_column",
      f"ALTER TABLE {m.CONVERSATIONS_TABLE} ADD COLUMN legacy_flag boolean",
      f"{m.CONVERSATIONS_TABLE}.legacy_flag: unexpected column"),
+    ("missing_not_null",
+     f"ALTER TABLE {m.CONVERSATIONS_TABLE} ALTER COLUMN state_revision DROP NOT NULL",
+     f"{m.CONVERSATIONS_TABLE}.state_revision"),
+    ("extra_not_null",
+     f"ALTER TABLE {m.CONVERSATIONS_TABLE} ALTER COLUMN lease_owner SET NOT NULL",
+     f"{m.CONVERSATIONS_TABLE}.lease_owner"),
+    ("check_named_like_not_null",
+     f"ALTER TABLE {m.CONVERSATIONS_TABLE} ADD CONSTRAINT synthetic_not_null CHECK (next_sequence < 100)",
+     "unexpected constraint synthetic_not_null"),
 ])
 def test_incompatible_precreated_schema_is_refused_and_not_stamped(database_at_0107, label, drift_sql,
                                                                    expected_fragment) -> None:
