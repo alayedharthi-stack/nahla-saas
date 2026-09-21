@@ -248,6 +248,55 @@ def _canonical_money(value: Any) -> int | float | None:
     return float(amount)
 
 
+MAX_VARIANT_OPTION_NAMES = 6
+MAX_VARIANT_OPTION_VALUES = 12
+
+
+def _variant_options(variants: Any) -> tuple[dict[str, list[str]], int | None, int | None]:
+    """Option values (colour, size, …) of the variants that can be bought now.
+
+    Read from the catalog row's own structured variants: the default
+    placeholder row and out-of-stock variants are left out, names and values
+    are bounded. Returns ``(options, variants_in_stock, variants_total)``, or
+    ``({}, None, None)`` for a product without variants. Tenant 1, September
+    2026: the model called a white/fuchsia dress "black" because the view
+    carried no variant at all; a colour in the reply should come from here.
+    """
+    if not isinstance(variants, list) or not variants:
+        return {}, None, None
+    real = [v for v in variants if isinstance(v, dict) and not bool(v.get("is_default"))]
+    if not real:
+        return {}, None, None
+
+    def sellable(variant: dict[str, Any]) -> bool:
+        if not bool(variant.get("in_stock")):
+            return False
+        quantity = variant.get("stock_quantity")
+        try:
+            return quantity is None or int(quantity) > 0
+        except (TypeError, ValueError):
+            return True
+
+    in_stock = [v for v in real if sellable(v)]
+    options: dict[str, list[str]] = {}
+    for variant in in_stock:
+        raw_options = variant.get("options")
+        if not isinstance(raw_options, dict):
+            continue
+        for name, value in raw_options.items():
+            label = str(name or "").strip()[:40]
+            text = str(value or "").strip()[:40]
+            if not label or not text:
+                continue
+            if label not in options:
+                if len(options) >= MAX_VARIANT_OPTION_NAMES:
+                    continue
+                options[label] = []
+            if text not in options[label] and len(options[label]) < MAX_VARIANT_OPTION_VALUES:
+                options[label].append(text)
+    return options, len(in_stock), len(real)
+
+
 def _product_evidence(row: dict[str, Any]) -> tuple[ProductSnapshot, EvidenceRecord]:
     product_id = int(row["id"])
     evidence_ref = f"catalog:product:{product_id}"
@@ -267,6 +316,10 @@ def _product_evidence(row: dict[str, Any]) -> tuple[ProductSnapshot, EvidenceRec
         "product_url": str(row.get("product_url") or ""),
         "orderable": bool(row.get("orderable")),
     }
+    variant_options, variants_in_stock, variants_total = _variant_options(row.get("variants"))
+    fields["variant_options"] = variant_options
+    fields["variants_in_stock"] = variants_in_stock
+    fields["variants_total"] = variants_total
     facts: list[CanonicalEvidenceFact] = []
 
     def add_fact(kind: str, value: Any) -> None:
@@ -325,6 +378,9 @@ def _product_evidence(row: dict[str, Any]) -> tuple[ProductSnapshot, EvidenceRec
         image_url=fields["image_url"],
         product_url=fields["product_url"],
         orderable=fields["orderable"],
+        variant_options=variant_options,
+        variants_in_stock=variants_in_stock,
+        variants_total=variants_total,
         evidence_ref=evidence_ref,
     )
     return snapshot, evidence

@@ -514,3 +514,41 @@ def test_no_execution_time_left_refuses_before_touching_the_merchant_s_data(bind
     observation = run(binding, "search_products", {"query": "x"}, timeout=0.0)
     assert observation.error_code == ac.ToolErrorCode.TIMEOUT.value
     assert seen == []
+
+
+# ── What the model is handed: the one discount reading, the variant options ──
+
+
+def test_the_promotion_view_carries_the_one_discount_reading(binding, monkeypatch):
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("ok", promotions=[promotion(5, discount="10%")],
+                                      evidence=[Record("promotion:coupon:5")], query_outcome="ok")))
+    first = run(binding, "list_shareable_promotions", {}).result["promotions"][0]
+    assert first["discount"] == "10%"
+    assert first["discount_type"] == "percentage" and first["discount_value"] == "10"
+
+
+def test_the_product_view_carries_the_options_the_customer_can_buy_now(binding, monkeypatch):
+    """Tenant 1, September 2026: the view carried no variant, and the model
+    called a white/fuchsia dress black. Colours and sizes in stock now travel
+    with the product, bounded; a product without variants carries none."""
+    options = {"اللون": ["أبيض", "فوشي"], "المقاس": ["38 - S"]}
+    patch_impl(monkeypatch, "catalog", "search_products_impl",
+               async_returning(result("ok", products=[
+                   product(1, variant_options=options, variants_in_stock=2, variants_total=10),
+                   product(2),
+               ], evidence=[Record("catalog:product:1"), Record("catalog:product:2")],
+                   knowledge_sections=[])))
+    products = run(binding, "search_products", {"query": "فستان"}).result["products"]
+    assert products[0]["variant_options"] == options
+    assert products[0]["variants_in_stock"] == 2 and products[0]["variants_total"] == 10
+    assert products[1]["variant_options"] == {} and products[1]["variants_in_stock"] is None
+
+
+def test_the_product_view_bounds_the_variant_options_it_forwards(binding, monkeypatch):
+    many = {f"خيار{i}": [f"قيمة{j}" for j in range(20)] for i in range(10)}
+    patch_impl(monkeypatch, "catalog", "search_products_impl",
+               async_returning(result("ok", products=[product(1, variant_options=many)],
+                                      evidence=[Record("catalog:product:1")], knowledge_sections=[])))
+    forwarded = run(binding, "search_products", {"query": "فستان"}).result["products"][0]["variant_options"]
+    assert len(forwarded) == 6 and all(len(values) == 12 for values in forwarded.values())

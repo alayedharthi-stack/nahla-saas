@@ -113,6 +113,11 @@ class ProductSnapshot(BaseModel):
     image_url: str = ""
     product_url: str = ""
     orderable: bool = False
+    # Option values (colour, size, …) of the variants that can be bought now,
+    # from the catalog's own variant rows; empty when the product has none.
+    variant_options: dict[str, list[str]] = Field(default_factory=dict)
+    variants_in_stock: int | None = None
+    variants_total: int | None = None
     evidence_ref: str
 
 
@@ -146,6 +151,7 @@ class PromotionSnapshot(BaseModel):
     description: str = ""
     discount_type: str = ""
     discount_value: str = ""
+    discount: str = ""                        # the one reading the record supports: "5%" or "20 SAR"; "" when unreadable
     expires_at: str = ""
     coupon_level: str = ""
     conditions: dict[str, Any] = Field(default_factory=dict)

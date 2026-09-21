@@ -288,7 +288,8 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_re_entry_that_recovers_an_accepted_send_records_the_message_once",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_turn_admitted_for_one_tenant_is_invisible_to_another",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_conversation_outside_the_tenant_yields_no_trusted_context_and_no_send",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_runtime_refuses_when_its_schema_is_not_present"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_runtime_refuses_when_its_schema_is_not_present",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_percentage_coupon_reconciled_as_a_money_object_is_read_as_a_percentage"
       ]
     },
     {

@@ -895,11 +895,30 @@ as well as through the ledger.
   expired, disabled and exhausted codes are never returned, a personal code issued to
   one customer is returned only in that customer's conversation, no code is ever
   invented, and whether the customer qualifies is reported as not determined), under
-  the merchant's dashboard AI coupon policy (`ai_policy.enabled` and `allowed_levels`;
-  a disabled policy is a `denied` read). Before a reply is reserved, verification
-  refuses a draft that carries a coupon code without citing the coupon it came from,
-  or any code-shaped token this turn's tools did not return. It creates, assigns or
-  redeems none.
+  the merchant's dashboard AI coupon policy (`ai_policy.enabled`, `allowed_levels`
+  and `min_remaining_hours` — a code with less life left than the merchant's minimum
+  is not handed out; a disabled policy is a `denied` read). Before a reply is
+  reserved, verification refuses a draft that carries a coupon code without citing
+  the coupon it came from, or any code-shaped token this turn's tools did not
+  return. It creates, assigns or redeems none.
+* Each promotion carries **one** reading of its discount (`discount`: `5%`, `20 SAR`,
+  or empty when the record supports none) beside the raw `discount_type` and
+  `discount_value`. September 2026: a coupon issued as 5% and reconciled from Salla
+  stored its value as that provider's money object, so the record said "percentage"
+  and "5 SAR" at once and the model quoted the amount. The sync now stores the
+  number and the resolver states the reading; nothing is inferred when neither is
+  readable.
+* Each product carries the **option values of the variants in stock**
+  (`variant_options`, with `variants_in_stock` and `variants_total`), so a colour or
+  size in a reply comes from the merchant's variant rows. September 2026: the view
+  carried no variant at all and a white/fuchsia dress was called black.
+* A product's availability is the **synced** one: the catalog row prefers
+  `metadata.in_stock` / `metadata.stock_qty` and uses the `products` columns only
+  when the metadata is silent. Tenant 1 has rows whose column says available while
+  their synced metadata says otherwise (last written by an ingest that leaves
+  `sync_status='blocked'` and no `product_url`); the customer-facing fact is the
+  synced one, and `tests/test_catalog_availability_precedence.py` locks that. The
+  column drift itself is a catalog-sync item, tracked outside this runtime.
 * It records no delivery or read receipt, so `customer_reach` stays `unknown`
   even for an accepted send.
 * It has no reconciliation worker: an uncertain send is left uncertain rather

@@ -8,9 +8,11 @@ source (native / Salla / imported); the semantic contract does not.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from decimal import Decimal, InvalidOperation
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.brain.promotion_truth")
 
@@ -231,16 +233,90 @@ def _row_customer_binding(row: Any, meta: Optional[Dict[str, Any]] = None) -> Op
     return None
 
 
+_PERCENT_TYPES = frozenset({"percentage", "percent", "pct"})
+_FIXED_TYPES = frozenset({"fixed", "amount", "fixed_amount", "money"})
+_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+_MONEY_AMOUNT_RE = re.compile(r"""amount['"]?\s*[:=]\s*['"]?(-?\d+(?:\.\d+)?)""")
+_MONEY_CURRENCY_RE = re.compile(r"""currency['"]?\s*[:=]\s*['"]?([A-Za-z]{3})""")
+
+
+def _plain_number(raw: Any) -> str:
+    """``"5"`` for 5, 5.0 or "5.00"; ``"12.5"`` for 12.5; ``""`` when not a number."""
+    text = str(raw if raw is not None else "").strip().replace(",", "")
+    if not text or not _NUMBER_RE.match(text):
+        return ""
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return ""
+    if number == number.to_integral_value():
+        return str(int(number))
+    return format(number.normalize(), "f")
+
+
+def _discount_number(value: Any) -> Tuple[str, str]:
+    """``(number, currency)`` read out of a stored discount value.
+
+    The value may be a number, a numeric string, Salla's money object
+    ``{"amount": 5, "currency": "SAR"}``, or the string form a reconcile once
+    wrote of that object. Anything else reads as ``("", "")``.
+    """
+    if isinstance(value, bool):
+        return "", ""
+    if isinstance(value, (int, float, Decimal)):
+        return _plain_number(value), ""
+    if isinstance(value, dict):
+        number, _ = _discount_number(value.get("amount", value.get("value")))
+        return number, str(value.get("currency") or "").strip().upper()
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return "", ""
+    number = _plain_number(text)
+    if number:
+        return number, ""
+    match = _MONEY_AMOUNT_RE.search(text)
+    if match is None:
+        return "", ""
+    currency = _MONEY_CURRENCY_RE.search(text)
+    return _plain_number(match.group(1)), (currency.group(1).upper() if currency else "")
+
+
+def _normalised_discount(discount_type: Any, value: Any, meta: Dict[str, Any]) -> Tuple[str, str]:
+    """``(discount_value, discount)``: the number the record supports and the one
+    reading of it — ``"5%"`` for a percentage, ``"20 SAR"`` for a fixed amount.
+
+    Tenant 1, September 2026: a coupon issued as 5% and reconciled from Salla
+    carried ``discount_type="percentage"`` beside ``discount_value="{'amount':
+    5, 'currency': 'SAR'}"``; handed both, the model told the customer "5 SAR".
+    Here the type decides the reading, a percentage whose value is unreadable
+    falls back to the generator's ``discount_pct``, and nothing readable
+    yields ``("", "")`` rather than a guess.
+    """
+    kind = str(discount_type or "").strip().lower()
+    number, currency = _discount_number(value)
+    if kind in _PERCENT_TYPES:
+        if not number:
+            number, _ = _discount_number(meta.get("discount_pct"))
+        return number, (f"{number}%" if number else "")
+    if kind in _FIXED_TYPES:
+        return number, (f"{number} {currency}".strip() if number else "")
+    return number, number
+
+
 def _row_to_coupon_fact(row: Any) -> Dict[str, Any]:
     expires = getattr(row, "expires_at", None)
     conditions = _conditions_from_row(row)
     source_type = str(getattr(row, "source_type", "") or "manual")
     binding = _row_customer_binding(row)
+    discount_type = str(getattr(row, "discount_type", "") or "")
+    discount_value, discount = _normalised_discount(
+        discount_type, getattr(row, "discount_value", None), _meta_dict(row))
     return {
         "id": getattr(row, "id", None),
         "code": str(getattr(row, "code", "") or ""),
-        "discount_type": str(getattr(row, "discount_type", "") or ""),
-        "discount_value": str(getattr(row, "discount_value", "") or ""),
+        "discount_type": discount_type,
+        "discount_value": discount_value,
+        "discount": discount,
         "description": str(getattr(row, "description", "") or ""),
         "expires_at": expires.isoformat() if hasattr(expires, "isoformat") else (str(expires) if expires else ""),
         "source_type": source_type,
@@ -260,12 +336,16 @@ def _offer_to_fact(row: Any) -> Dict[str, Any]:
     conditions = getattr(row, "conditions", None)
     if not isinstance(conditions, dict):
         conditions = {}
+    promotion_type = str(getattr(row, "promotion_type", "") or "")
+    discount_value, discount = _normalised_discount(
+        promotion_type, getattr(row, "discount_value", None), _meta_dict(row))
     return {
         "id": getattr(row, "id", None),
         "name": str(getattr(row, "name", "") or ""),
         "description": str(getattr(row, "description", "") or ""),
-        "promotion_type": str(getattr(row, "promotion_type", "") or ""),
-        "discount_value": str(getattr(row, "discount_value", "") or ""),
+        "promotion_type": promotion_type,
+        "discount_value": discount_value,
+        "discount": discount,
         "ends_at": ends.isoformat() if hasattr(ends, "isoformat") else (str(ends) if ends else ""),
         "conditions": conditions,
         "code": "",

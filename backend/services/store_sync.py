@@ -1454,10 +1454,27 @@ def _normalise_special_offer(raw: Any) -> Dict[str, Any]:
         "discount_supported": discount_supported,
     }
 
+def _scalar_discount(value: Any) -> Any:
+    """The number inside a coupon's discount as Salla returns it.
+
+    Salla may send the amount as a money object, ``{"amount": 5, "currency":
+    "SAR"}``; the platform stores the number, and a reconcile that wrote the
+    object's string form over a Nahla-issued percentage left the record saying
+    both "5%" and "5 SAR" at once (Tenant 1, September 2026). A nested object
+    is unwrapped; anything else is returned as it came.
+    """
+    if isinstance(value, dict):
+        inner = value.get("amount", value.get("value"))
+        if isinstance(inner, dict):
+            inner = inner.get("amount", inner.get("value", ""))
+        return "" if inner is None else inner
+    return value
+
+
 def _normalise_coupon(raw: Any) -> Dict:
     if hasattr(raw, "dict"):
         raw = raw.dict()
-    discount_val = raw.get("amount", raw.get("percent", raw.get("value", "")))
+    discount_val = _scalar_discount(raw.get("amount", raw.get("percent", raw.get("value", ""))))
     raw_type = str(raw.get("type", raw.get("discount_type", "percentage")) or "").lower()
     if raw_type in ("fixed", "amount"):
         discount_type = "fixed"

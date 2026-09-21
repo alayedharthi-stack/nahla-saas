@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -266,3 +267,64 @@ def test_a_malformed_fact_is_skipped_rather_than_crashing_the_read(monkeypatch) 
     ]))
     assert [p.evidence_ref for p in result.promotions] == ["promotion:coupon:4"]
     assert result.promotions[0].conditions == {}
+
+
+# ── The discount reading and the merchant's minimum remaining life ──────────
+
+
+def test_the_one_discount_reading_travels_with_the_raw_fields(monkeypatch) -> None:
+    """Tenant 1, September 2026: a record saying "percentage" beside a money
+    object made the model quote "5 SAR" for a 5% code. The resolver now hands
+    one reading; the projection carries it next to the raw fields."""
+    context = Context()
+    outcome, _ = run(context, monkeypatch, truth(shareable=[coupon_fact(discount="10%")]))
+    assert outcome.status == "ok"
+    assert outcome.promotions[0].discount == "10%" and outcome.promotions[0].discount_value == "10"
+    assert outcome.evidence[0].fields["discount"] == "10%"
+
+
+def _fixed_now(monkeypatch) -> datetime:
+    now = datetime(2026, 9, 21, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(tool, "_now", lambda: now)
+    return now
+
+
+def test_a_code_with_less_life_left_than_the_merchant_s_minimum_is_left_out(monkeypatch) -> None:
+    """The dashboard's ``min_remaining_hours`` is the merchant's word that the
+    AI does not hand out a code about to expire; the read honours it. An
+    expiry the tool cannot read does not exclude: the resolver already judged
+    the code valid, and this rule only shortens that window."""
+    now = _fixed_now(monkeypatch)
+    soon = coupon_fact(1, "SOON1", expires_at=(now + timedelta(hours=2)).isoformat())
+    later = coupon_fact(2, "LATER2", expires_at=(now + timedelta(hours=4)).isoformat())
+    unreadable = coupon_fact(3, "ODD3", expires_at="tomorrow")
+    outcome, _ = run(Context(), monkeypatch, truth(shareable=[soon, later, unreadable]),
+                     policy={**DEFAULT_POLICY, "min_remaining_hours": 3})
+    assert [p.code for p in outcome.promotions] == ["LATER2", "ODD3"]
+    assert [record.ref for record in outcome.evidence] == ["promotion:coupon:2", "promotion:coupon:3"]
+
+
+def test_with_no_minimum_every_currently_valid_code_is_kept(monkeypatch) -> None:
+    now = _fixed_now(monkeypatch)
+    soon = coupon_fact(1, "SOON1", expires_at=(now + timedelta(minutes=30)).isoformat())
+    for policy in ({**DEFAULT_POLICY, "min_remaining_hours": 0},
+                   {**DEFAULT_POLICY, "min_remaining_hours": "x"},
+                   {k: v for k, v in DEFAULT_POLICY.items() if k != "min_remaining_hours"}):
+        outcome, _ = run(Context(), monkeypatch, truth(shareable=[soon]), policy=policy)
+        assert [p.code for p in outcome.promotions] == ["SOON1"]
+
+
+def test_when_the_minimum_leaves_nothing_the_answer_is_an_honest_not_found(monkeypatch) -> None:
+    now = _fixed_now(monkeypatch)
+    soon = coupon_fact(1, "SOON1", expires_at=(now + timedelta(hours=1)).isoformat())
+    outcome, _ = run(Context(), monkeypatch, truth(shareable=[soon]),
+                     policy={**DEFAULT_POLICY, "min_remaining_hours": 3})
+    assert outcome.status == "not_found" and outcome.failure_reason == "no_valid_shareable_promotions"
+
+
+def test_an_offer_is_not_subject_to_the_coupon_minimum(monkeypatch) -> None:
+    now = _fixed_now(monkeypatch)
+    offer = offer_fact(9, ends_at=(now + timedelta(hours=1)).isoformat())
+    outcome, _ = run(Context(), monkeypatch, truth(offers=[offer]),
+                     policy={**DEFAULT_POLICY, "min_remaining_hours": 3})
+    assert [p.record_kind for p in outcome.promotions] == ["offer"]
