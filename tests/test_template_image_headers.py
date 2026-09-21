@@ -170,7 +170,6 @@ def test_bad_image_never_reaches_storage(monkeypatch, raw, reason):
 
 def test_meta_submit_uses_resumable_sample_not_public_url_and_preserves_draft(monkeypatch):
     from core.commerce_lifecycle import order_confirmation_header_image_fetch as fetcher
-    from core.commerce_lifecycle import order_confirmation_meta_header as meta_header
     from services.whatsapp_platform import token_manager
     original = components()
     fetch = AsyncMock(return_value=(image_bytes(), 'image/png'))
@@ -179,7 +178,7 @@ def test_meta_submit_uses_resumable_sample_not_public_url_and_preserves_draft(mo
     submit = AsyncMock(return_value=({'id': 'approved-later'}, None))
     monkeypatch.setattr(fetcher, 'fetch_header_image_bytes_secure', fetch)
     monkeypatch.setattr(token_manager, 'get_token_for_operation', token)
-    monkeypatch.setattr(meta_header.MetaResumableHeaderUploader, 'upload_template_header', upload)
+    monkeypatch.setattr(headers.MerchantHeaderUploader, 'upload_template_header', upload)
     monkeypatch.setattr(router, 'provider_submit_template', submit)
     asyncio.run(router._submit_template_to_meta(db=MagicMock(), conn=MagicMock(), tenant_id=7,
         waba_id='test-waba', name='generic_shoe_offer', language='ar', category='UTILITY', components=original))
@@ -241,7 +240,7 @@ def test_text_header_does_not_inherit_old_image_sample(db):
 
 
 def test_resumable_upload_contract_uses_sample_handle_not_media_id(monkeypatch):
-    from core.commerce_lifecycle import order_confirmation_meta_header as module
+    module = headers
     client = MagicMock()
     client.post = AsyncMock(side_effect=[MagicMock(json=lambda:{'id':'upload:session'}), MagicMock(json=lambda:{'h':'4::sample'})])
     context = MagicMock()
@@ -249,12 +248,13 @@ def test_resumable_upload_contract_uses_sample_handle_not_media_id(monkeypatch):
     context.__aexit__ = AsyncMock(return_value=None)
     monkeypatch.setattr(module.httpx, 'AsyncClient', lambda **_: context)
     monkeypatch.setattr(module, 'META_APP_ID', 'test-app')
-    handle = asyncio.run(module.MetaResumableHeaderUploader().upload_template_header(
+    handle = asyncio.run(module.MerchantHeaderUploader().upload_template_header(
         access_token='test-token', image_bytes=image_bytes(), mime_type='image/png'))
     assert handle == '4::sample'
     first, second = client.post.call_args_list
     assert first.args[0].endswith('/test-app/uploads')
     assert first.kwargs['params']['file_type'] == 'image/png'
+    assert first.kwargs['params']['file_name'] == 'template-header.png'
     assert first.kwargs['params']['file_length'] == str(len(image_bytes()))
     assert second.kwargs['headers']['file_offset'] == '0'
     assert second.kwargs['content'] == image_bytes()

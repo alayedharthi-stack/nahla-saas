@@ -8,9 +8,44 @@ from __future__ import annotations
 import copy
 from urllib.parse import urlsplit
 
+import httpx
+
+from core.config import META_APP_ID, META_GRAPH_API_VERSION
 from services.template_media_storage import image_url_owned_by_tenant
 
 MISSING_IMAGE = "صورة رأس القالب مفقودة. ارفع صورة JPG أو PNG واحفظ المسودة أولاً."
+
+
+class MerchantHeaderUploader:
+    """Merchant template samples, with all documented resumable-upload fields.
+
+    https://developers.facebook.com/docs/graph-api/guides/upload/
+    The existing lifecycle uploader retains its separate ownership/behavior.
+    """
+
+    async def upload_template_header(self, *, access_token, image_bytes, mime_type):
+        if not META_APP_ID or not str(access_token or '').strip():
+            raise ValueError('missing_meta_upload_configuration')
+        graph = f'https://graph.facebook.com/{META_GRAPH_API_VERSION}'
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(f'{graph}/{META_APP_ID}/uploads', params={
+                'file_name': 'template-header.png' if mime_type == 'image/png' else 'template-header.jpg',
+                'file_length': str(len(image_bytes)), 'file_type': mime_type,
+                'access_token': access_token,
+            })
+            response.raise_for_status()
+            session_id = str(response.json().get('id') or '').strip()
+            if not session_id:
+                raise ValueError('meta_upload_session_missing')
+            response = await client.post(f'{graph}/{session_id}', headers={
+                'Authorization': f'OAuth {access_token}', 'file_offset': '0',
+                'Content-Type': 'application/octet-stream',
+            }, content=image_bytes)
+            response.raise_for_status()
+            handle = str(response.json().get('h') or '').strip()
+            if not handle:
+                raise ValueError('meta_upload_handle_missing')
+            return handle
 
 
 def image_header(components):
@@ -62,7 +97,7 @@ async def prepare_merchant_image_for_meta(db, conn, *, tenant_id, components, up
     if image_header(components) is None:
         return copy.deepcopy(components)
     from core.commerce_lifecycle.order_confirmation_meta_header import (
-        MetaResumableHeaderUploader, prepare_order_confirmation_meta_submit_components,
+        prepare_order_confirmation_meta_submit_components,
     )
     from core.commerce_lifecycle.order_confirmation_header_image_fetch import fetch_header_image_bytes_secure
     from services.whatsapp_platform.token_manager import get_token_for_operation
@@ -75,7 +110,7 @@ async def prepare_merchant_image_for_meta(db, conn, *, tenant_id, components, up
     content, _mime = await fetch_header_image_bytes_secure(url)
     content, mime = prepare_template_image(content)
     ctx = await get_token_for_operation(db, conn, tenant_id=tenant_id, operation="template_submit")
-    handle = await (uploader or MetaResumableHeaderUploader()).upload_template_header(
+    handle = await (uploader or MerchantHeaderUploader()).upload_template_header(
         access_token=ctx.token, image_bytes=content, mime_type=mime,
     )
     return prepare_order_confirmation_meta_submit_components(components, header_handle=handle)

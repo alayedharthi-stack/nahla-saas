@@ -214,7 +214,6 @@ class MetaResumableHeaderUploader:
             session_resp = await client.post(
                 f"{GRAPH}/{META_APP_ID}/uploads",
                 params={
-                    "file_name": "template-header.png" if file_type == "image/png" else "template-header.jpg",
                     "file_length": str(file_len),
                     "file_type": file_type,
                     "access_token": token,
