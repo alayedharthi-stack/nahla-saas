@@ -37,6 +37,17 @@ def test_the_job_targets_a_pinned_revision_and_never_head():
     assert "head" not in argv
 
 
+def test_the_target_matches_the_repository_s_application_head():
+    from scripts.operators.bootstrap_migration_contract import (
+        APPLICATION_ALEMBIC_HEAD,
+        INTEGRATION_BOOTSTRAP_TARGET,
+    )
+
+    assert k.TARGET_REVISION == APPLICATION_ALEMBIC_HEAD
+    # And it is deliberately beyond what normal bootstrap applies.
+    assert INTEGRATION_BOOTSTRAP_TARGET != k.TARGET_REVISION
+
+
 def test_the_confirmation_token_names_the_revision_the_job_applies():
     """The token is the operator's statement of *which* revision they authorise."""
     assert k.CONFIRMATION_TOKEN == f"RUN_COMMERCE_RUNTIME_{k.TARGET_REVISION}"
@@ -87,12 +98,12 @@ def test_the_declared_relations_are_the_ones_the_runtime_itself_requires():
 def test_the_target_is_beyond_normal_bootstrap_and_on_the_application_chain():
     """What this job's target must satisfy, stated as its own properties.
 
-    It used to be asserted as equality with ``APPLICATION_ALEMBIC_HEAD``.
-    That coupled a deliberately BOUNDED component migration to every later
-    application migration: the moment an unrelated revision extended the
-    chain, this job "failed" although nothing about it had changed and its
-    nine-relation scope was still exactly right. Equality was never the
-    property worth holding — these are.
+    The test above asserts equality with ``APPLICATION_ALEMBIC_HEAD``, which
+    holds today. Equality alone is brittle, though: it couples a deliberately
+    BOUNDED component migration to every later application migration, so an
+    unrelated revision extending the chain would "fail" this job although
+    nothing about it had changed and its relation scope was still exactly
+    right. These are the properties that survive that, so both are kept.
     """
     import os
     from pathlib import Path
@@ -153,9 +164,10 @@ def test_revisions_after_the_target_are_outside_this_job():
     """Later application revisions exist, and this job does not apply them.
 
     A revision beyond the target is someone else's change. The contract
-    stays the nine commerce-runtime relations; the job's command stops at
-    its own target and an already-applied pilot database is recognised at
-    that target, not at whatever the application head has become.
+    stays the commerce-runtime relations the module declares; the job's
+    command stops at its own target and an already-applied pilot database is
+    recognised at that target, not at whatever the application head has
+    become.
     """
     import os
     from pathlib import Path
@@ -190,7 +202,9 @@ def test_revisions_after_the_target_are_outside_this_job():
     # And the reason the target may stop where it does: the revisions
     # beyond it touch none of the relations this job is contracted to
     # create, so not applying them leaves nothing of this job's undone.
-    # The count itself is asserted once, above, against the module.
+    # The relation count itself is asserted once, against the module, in
+    # the contract test above — repeating the number here only made it a
+    # second place to go stale, which is what it did.
     versions = repo / "database" / "migrations" / "versions"
     for revision in beyond:
         sources = [
@@ -202,11 +216,11 @@ def test_revisions_after_the_target_are_outside_this_job():
             for relation in k.RUNTIME_RELATIONS:
                 assert relation not in source, (revision, relation)
 
-    # The ledger relations arrive somewhere in the range this job
-    # applies — not necessarily at the target, which has since advanced
-    # past them to the handover revision. What matters is that upgrading
-    # to the target creates them, so the walk covers the target and every
-    # revision below it down to the earliest accepted start.
+    # The ledger relations arrive somewhere in the range this job applies,
+    # not necessarily at the target: the target has advanced past them to
+    # the handover revision. What the job promises is that upgrading TO the
+    # target creates them, so the walk covers the target and every revision
+    # below it down to the earliest accepted start.
     earliest_start = min(
         revision for accepted in k.ACCEPTED_START_REVISIONS for revision in accepted
     )

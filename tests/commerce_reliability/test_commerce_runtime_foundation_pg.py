@@ -35,7 +35,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PREVIOUS_HEAD = "0107"      # integration-bootstrap chain head before this slice
 THIS_REVISION = "0108"
 OTHER_HEAD = "0092"         # pre-existing A1-Validate branch head, untouched
-APPLICATION_HEAD = "0111"   # the ledgers (0109) and the handover (0111) extend this linearly
+# The application head. 0109 (ledgers) carries two siblings: 0111 (handover),
+# which is the application head, and 0110 (address provenance). Neither is an
+# ancestor of the other.
+APPLICATION_HEAD = "0111"
 TABLES = (m.CONVERSATIONS_TABLE, m.TURNS_TABLE, m.TERMINALS_TABLE)
 CHANNEL = "wa:connection-1"
 LIVE = c.Namespace.LIVE

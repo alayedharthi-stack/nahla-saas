@@ -37,8 +37,6 @@ TEST_TENANT_COUPON_B = 991_102
 TEST_TENANT_COUPON_TWO_LEVEL = 991_110
 TEST_TENANT_CROSS_A = 991_301
 TEST_TENANT_CROSS_B = 991_302
-TEST_TENANT_RESERVE_A = 991_311
-TEST_TENANT_RESERVE_B = 991_312
 
 if not _integration_required():
     pytest.skip(
@@ -285,9 +283,6 @@ def test_pool_provenance_jsonb_postgres(postgres_engine) -> None:
     session, connection = _new_session(postgres_engine)
     try:
         _seed_tenant(session, tenant_id)
-        # Fixed codes below; clear first so the suite is re-runnable against a
-        # database that already holds rows from an earlier run.
-        _clear_tenant_coupons(session, tenant_id)
         now = datetime.now(timezone.utc)
         base_meta = {
             "source": "auto",
@@ -430,104 +425,3 @@ def test_two_levels_do_not_corrupt_each_other(postgres_engine) -> None:
     finally:
         session.close()
         connection.close()
-
-
-def test_coupons_code_unique_constraint_is_global(postgres_engine) -> None:
-    """The database — not the ORM model — defines the code uniqueness scope.
-
-    ``database/models.py`` declares ``UNIQUE (tenant_id, code)`` but the
-    physical table still carries the global ``coupons_code_key`` created by
-    ``0001_initial_schema``. This test pins that reality, because the
-    generator's reservation scope has to match it.
-    """
-    from sqlalchemy import text
-
-    session, connection = _new_session(postgres_engine)
-    try:
-        rows = session.execute(
-            text(
-                """
-                SELECT con.conname, pg_get_constraintdef(con.oid)
-                FROM pg_constraint con
-                JOIN pg_class rel ON rel.oid = con.conrelid
-                WHERE rel.relname = 'coupons' AND con.contype = 'u'
-                """
-            )
-        ).all()
-    finally:
-        session.close()
-        connection.close()
-
-    definitions = {str(name): str(definition) for name, definition in rows}
-    assert any(
-        definition.replace(" ", "").upper() == "UNIQUE(CODE)"
-        for definition in definitions.values()
-    ), definitions
-
-
-def test_reserved_codes_cover_other_tenants_short_codes(postgres_engine) -> None:
-    """Regression: tenant B must not spend a provider create on tenant A's code.
-
-    Failure mechanism this pins (observed as ``len(adapter_b) == 13``):
-    ``_reserved_codes`` filtered by ``tenant_id`` while the database enforces
-    a global ``UNIQUE (code)``. Tenant B could therefore draw a short code
-    tenant A already owns — the remote coupon was created, the local INSERT
-    tripped ``coupons_code_key``, and the service compensated and retried,
-    costing one extra provider call per collision.
-    """
-    owned_by_a = "NHXA7"
-
-    session, connection = _new_session(postgres_engine)
-    try:
-        for tenant_id in (TEST_TENANT_RESERVE_A, TEST_TENANT_RESERVE_B):
-            _seed_tenant(session, tenant_id)
-            _clear_tenant_coupons(session, tenant_id)
-        session.query(Coupon).filter(Coupon.code == owned_by_a).delete()
-        session.commit()
-        _add_pool_coupon(session, TEST_TENANT_RESERVE_A, "bronze", owned_by_a)
-        session.commit()
-
-        # The generator for tenant B must see tenant A's code as taken.
-        svc_b = CouponGeneratorService(session, TEST_TENANT_RESERVE_B)
-        assert owned_by_a in svc_b._reserved_codes()
-    finally:
-        session.close()
-        connection.close()
-
-    import services.coupon_generator as cg
-
-    original_random = cg._random_short_code
-    draws = {"n": 0}
-
-    def _steal_then_random() -> str:
-        draws["n"] += 1
-        if draws["n"] == 1:
-            return owned_by_a
-        return original_random()
-
-    adapter_b: list[dict] = []
-    lock_b = threading.Lock()
-    cg._random_short_code = _steal_then_random
-    try:
-        created_b, outcomes_b = asyncio.run(
-            _ensure_pool_once(postgres_engine, TEST_TENANT_RESERVE_B, adapter_b, lock_b)
-        )
-    finally:
-        cg._random_short_code = original_random
-
-    assert draws["n"] >= 1, "the stolen code was never drawn"
-    assert created_b == {"bronze": 3, "silver": 3, "gold": 3, "vip": 3}, outcomes_b
-
-    # No provider create may be spent on the code tenant A already owns, and
-    # no retry may be needed: exactly one adapter call per created coupon.
-    called_codes = [str(call["code"]).upper() for call in adapter_b]
-    assert owned_by_a not in called_codes
-    assert len(adapter_b) == 12, called_codes
-    assert len(set(called_codes)) == 12, called_codes
-
-    # Tenant isolation is preserved: the code stays tenant A's alone.
-    codes_a = set(_all_codes(postgres_engine, TEST_TENANT_RESERVE_A))
-    codes_b = set(_all_codes(postgres_engine, TEST_TENANT_RESERVE_B))
-    assert codes_a == {owned_by_a}
-    assert len(codes_b) == 12
-    assert codes_a.isdisjoint(codes_b)

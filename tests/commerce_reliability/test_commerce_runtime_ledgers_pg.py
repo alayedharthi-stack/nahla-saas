@@ -266,10 +266,11 @@ def ledgers(pg_admin_dsn: str):
 
 
 def test_migration_0109_applies_on_0108_and_is_reversible(pg_admin_dsn: str) -> None:
-    # 0109 is no longer a head — 0111 extends it, and the address sibling 0110
-    # will too — but it must still sit on the integration branch and leave the
-    # A1-Validate head alone: {0092, 0111} now, {0092, 0110, 0111} once the
-    # address branch merges.
+    # 0109 is no longer a head: two siblings extend it — 0111 (handover) and
+    # 0110 (address provenance), whose branch has now merged. It must still
+    # sit on the integration branch and leave the A1-Validate head alone, so
+    # the heads are {0092, 0110, 0111} here and {0092, 0111} in a checkout
+    # from before the address branch merged.
     from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: PLC0415
 
     heads = _script_heads()
