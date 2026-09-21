@@ -98,12 +98,12 @@ def test_the_declared_relations_are_the_ones_the_runtime_itself_requires():
 def test_the_target_is_beyond_normal_bootstrap_and_on_the_application_chain():
     """What this job's target must satisfy, stated as its own properties.
 
-    It used to be asserted as equality with ``APPLICATION_ALEMBIC_HEAD``.
-    That coupled a deliberately BOUNDED component migration to every later
-    application migration: the moment an unrelated revision extended the
-    chain, this job "failed" although nothing about it had changed and its
-    nine-relation scope was still exactly right. Equality was never the
-    property worth holding — these are.
+    The test above asserts equality with ``APPLICATION_ALEMBIC_HEAD``, which
+    holds today. Equality alone is brittle, though: it couples a deliberately
+    BOUNDED component migration to every later application migration, so an
+    unrelated revision extending the chain would "fail" this job although
+    nothing about it had changed and its relation scope was still exactly
+    right. These are the properties that survive that, so both are kept.
     """
     import os
     from pathlib import Path
@@ -164,9 +164,10 @@ def test_revisions_after_the_target_are_outside_this_job():
     """Later application revisions exist, and this job does not apply them.
 
     A revision beyond the target is someone else's change. The contract
-    stays the nine commerce-runtime relations; the job's command stops at
-    its own target and an already-applied pilot database is recognised at
-    that target, not at whatever the application head has become.
+    stays the commerce-runtime relations the module declares; the job's
+    command stops at its own target and an already-applied pilot database is
+    recognised at that target, not at whatever the application head has
+    become.
     """
     import os
     from pathlib import Path
