@@ -7,8 +7,9 @@ source (native / Salla / imported); the semantic contract does not.
 """
 from __future__ import annotations
 
+import ast
+import json
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -235,31 +236,51 @@ def _row_customer_binding(row: Any, meta: Optional[Dict[str, Any]] = None) -> Op
 
 _PERCENT_TYPES = frozenset({"percentage", "percent", "pct"})
 _FIXED_TYPES = frozenset({"fixed", "amount", "fixed_amount", "money"})
-_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
-_MONEY_AMOUNT_RE = re.compile(r"""amount['"]?\s*[:=]\s*['"]?(-?\d+(?:\.\d+)?)""")
-_MONEY_CURRENCY_RE = re.compile(r"""currency['"]?\s*[:=]\s*['"]?([A-Za-z]{3})""")
 
 
 def _plain_number(raw: Any) -> str:
     """``"5"`` for 5, 5.0 or "5.00"; ``"12.5"`` for 12.5; ``""`` when not a number."""
     text = str(raw if raw is not None else "").strip().replace(",", "")
-    if not text or not _NUMBER_RE.match(text):
+    if not text:
         return ""
     try:
         number = Decimal(text)
-    except InvalidOperation:
+    except (InvalidOperation, ValueError):
+        return ""
+    if not number.is_finite():
         return ""
     if number == number.to_integral_value():
         return str(int(number))
     return format(number.normalize(), "f")
 
 
+def _money_mapping(text: str) -> Optional[Dict[str, Any]]:
+    """The mapping a stored money value was written as, or ``None``.
+
+    A reconcile once wrote Salla's money object into a text column, so the
+    value arrives as that object's Python or JSON rendering. Both are parsed
+    as literals — never evaluated — and anything that is not a mapping reads
+    as nothing.
+    """
+    candidate = text.strip()
+    if not candidate.startswith("{"):
+        return None
+    for parse in (ast.literal_eval, json.loads):
+        try:
+            parsed = parse(candidate)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 def _discount_number(value: Any) -> Tuple[str, str]:
     """``(number, currency)`` read out of a stored discount value.
 
     The value may be a number, a numeric string, Salla's money object
-    ``{"amount": 5, "currency": "SAR"}``, or the string form a reconcile once
-    wrote of that object. Anything else reads as ``("", "")``.
+    ``{"amount": 5, "currency": "SAR"}``, or the string that object was
+    written as. Anything else reads as ``("", "")``.
     """
     if isinstance(value, bool):
         return "", ""
@@ -274,11 +295,10 @@ def _discount_number(value: Any) -> Tuple[str, str]:
     number = _plain_number(text)
     if number:
         return number, ""
-    match = _MONEY_AMOUNT_RE.search(text)
-    if match is None:
+    mapping = _money_mapping(text)
+    if mapping is None:
         return "", ""
-    currency = _MONEY_CURRENCY_RE.search(text)
-    return _plain_number(match.group(1)), (currency.group(1).upper() if currency else "")
+    return _discount_number(mapping)
 
 
 def _normalised_discount(discount_type: Any, value: Any, meta: Dict[str, Any]) -> Tuple[str, str]:
