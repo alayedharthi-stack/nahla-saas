@@ -886,6 +886,76 @@ def test_another_tenant_s_coupon_is_never_read_here(pilot):
     assert transport.sent == []
 
 
+# ── The reserved reply survives the platform's own wire sanitiser ────────────
+
+
+@dataclasses.dataclass
+class SanitisingTransport:
+    """A scripted transport that runs the platform's wire sanitiser on the
+    text it is handed — the same guard ``_post_wa`` runs — and records what
+    would have reached the customer."""
+
+    responses: List[Any]
+    tenant_id: int
+    wire: List[str] = dataclasses.field(default_factory=list)
+    sanitised: List[bool] = dataclasses.field(default_factory=list)
+
+    def __call__(self, payload: Any) -> lc.SendResponse:
+        from core.outbound_sanitizer import sanitize_outbound_payload
+
+        wire_payload = {"messaging_product": "whatsapp", "to": PHONE, "type": "text",
+                        "text": {"body": str(payload.get("text") or "")}}
+        out, was_sanitised = sanitize_outbound_payload(wire_payload, tenant_id=self.tenant_id,
+                                                       skip_handoff_scrub=True)
+        self.wire.append(str(out["text"]["body"]))
+        self.sanitised.append(bool(was_sanitised))
+        if not self.responses:
+            raise AssertionError("the runtime dispatched more sends than the test scripted")
+        return self.responses.pop(0)
+
+
+def test_a_listing_with_a_link_and_an_image_per_product_reaches_the_wire_unchanged(pilot, caplog):
+    """Tenant 1, turn 5 of the first real conversation, end to end on the
+    integrated tree: four products, each with its store link and its image
+    link, composed as one reply. The reserved intent and the wire text are
+    the same bytes; the sanitiser only logs the link count."""
+    import logging
+
+    with _more_products(pilot, ("حذاء جلد بني", "حذاء أطفال أزرق", "حذاء رياضي أسود")) as extra:
+        products = [pilot.product_id, *extra]
+        refs = tuple(f"catalog:product:{pid}" for pid in products)
+        listing = "عندنا أربعة أحذية متوفرة:\n" + "\n".join(
+            f"{i + 1}) https://demostore.salla.sa/ar/p{pid} — الصورة: https://cdn.salla.sa/img/p{pid}.jpg"
+            for i, pid in enumerate(products))
+        transport = SanitisingTransport([accepted("wamid.LISTING")], tenant_id=pilot.tenant_a)
+        with caplog.at_level(logging.INFO, logger="nahla.security.outbound_sanitizer"):
+            report = pilot.run(
+                answers=[step([tool_use("t1", "search_products", query="حذاء", limit=5)]),
+                         step([reply(listing, refs=refs, commerce=True)])],
+                transport=transport, question="ابي اشوف الأحذية المتوفرة مع الصور",
+            )
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert transport.wire == [listing] and transport.sanitised == [False]
+    audit = [r.getMessage() for r in caplog.records if "[OUTBOUND_URL_AUDIT]" in r.getMessage()]
+    assert len(audit) == 1 and "url_count=8" in audit[0]
+    assert not [r for r in caplog.records if "[EXTERNAL_RESEARCH_BLOCKED]" in r.getMessage()]
+
+
+def test_a_search_dump_in_the_reserved_reply_is_still_replaced_on_the_wire(pilot):
+    """The retired link-count rule took nothing from the leak guard: a reply
+    carrying an external-research fingerprint is still replaced before it
+    reaches the customer, however few links it has."""
+    from core.outbound_sanitizer import SAFE_FALLBACK_TEXT
+
+    dump = ("حسب البحث:\nالمصادر:\n"
+            "- https://html.duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com&rut=x")
+    transport = SanitisingTransport([accepted("wamid.DUMP")], tenant_id=pilot.tenant_a)
+    report = pilot.run(answers=[step([reply(dump, refs=(), commerce=False)])], transport=transport,
+                       question="كم فاتورة الكهرباء؟")
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert transport.wire == [SAFE_FALLBACK_TEXT] and transport.sanitised == [True]
+
+
 _PROMOTION_TABLES = ("coupons", "coupon_rules", "promotions")
 _WRITE_VERBS = ("insert", "update", "delete", "truncate", "alter", "drop")
 
