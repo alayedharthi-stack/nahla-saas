@@ -15,7 +15,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 for _entry in (str(APP_ROOT), str(APP_ROOT / "backend"), str(APP_ROOT / "database")):
@@ -29,6 +29,16 @@ from models import Conversation  # noqa: E402
 from modules.ai.brain.pipeline import get_brain  # noqa: E402
 from scripts.operators.deployment_revision_attestation_contract import (  # noqa: E402
     evaluate_runtime_revision_attestation,
+)
+from services.internal_conversational_e2e_contract import (  # noqa: E402
+    ADDRESS_EXPECTATION_FIELDS,
+    FAILURE_INJECTIONS,
+    SCENARIO_SCHEMA_VERSION_V1,
+    SCENARIO_SCHEMA_VERSION_V2,
+    SCENARIO_SCHEMA_VERSIONS_SUPPORTED,
+    TURN_MODE_BRAIN,
+    TURN_MODE_OF2,
+    TURN_MODES,
 )
 from services.internal_conversational_e2e_contract import (  # noqa: E402
     DATABASE_URL_ENV,
@@ -51,8 +61,16 @@ from services.internal_conversational_e2e_contract import (  # noqa: E402
     preliminary_environment_blockers,
     sign_session_evidence,
 )
+from services.internal_conversational_e2e_of2_fixtures import (  # noqa: E402
+    FIXTURE_STATES,
+    of2_fixture_preflight,
+    prepare_of2_scenario_fixture,
+)
 from services.internal_conversational_e2e_harness import (  # noqa: E402
+    OPERATIONAL_RESULTS,
+    SandboxOf2TurnRequest,
     SandboxTurnRequest,
+    run_sandbox_of2_turn,
     run_sandbox_turn,
 )
 from services.internal_conversational_e2e_sql_error_audit import (  # noqa: E402
@@ -65,7 +83,40 @@ from services.internal_conversational_e2e_sql_error_audit import (  # noqa: E402
 )
 
 
-SCENARIO_SCHEMA_VERSION = "internal_conversational_e2e_scenarios_v1"
+SCENARIO_SCHEMA_VERSION = SCENARIO_SCHEMA_VERSION_V1
+CAPTURED_ACTION_PLACEHOLDER = "__captured_action_id__"
+
+# The outbound path carries a real burst throttle — six sends per ten
+# seconds for one (tenant, recipient) — and a scenario manifest drives
+# every turn at ONE attested number. Left unpaced, a session's later
+# scenarios are silently throttled: the owner runs, nothing reaches the
+# send boundary, nothing is captured, and the turn reports as an
+# uneventful failure rather than as "the platform declined to send this
+# fast". The throttle is production protection and is not weakened; the
+# operator waits instead. Both values are overridable for a deployment
+# whose throttle differs.
+PACING_BURST_ENV = "NAHLA_INTERNAL_E2E_PACING_BURST"
+PACING_WINDOW_ENV = "NAHLA_INTERNAL_E2E_PACING_WINDOW_SECONDS"
+# Counted in TURNS, but the throttle counts SENDS, and one turn can make
+# several: a compose that fails attempts the reply, then the recovery.
+# Pacing five turns to a window therefore still lost the later scenarios.
+# Two turns per window keeps the worst case inside six sends.
+DEFAULT_PACING_BURST = 2
+DEFAULT_PACING_WINDOW_SECONDS = 11.0
+
+
+def _pacing(env: Mapping[str, str]) -> tuple[int, float]:
+    try:
+        burst = int(str(env.get(PACING_BURST_ENV) or DEFAULT_PACING_BURST))
+    except (TypeError, ValueError):
+        burst = DEFAULT_PACING_BURST
+    try:
+        window = float(
+            str(env.get(PACING_WINDOW_ENV) or DEFAULT_PACING_WINDOW_SECONDS)
+        )
+    except (TypeError, ValueError):
+        window = DEFAULT_PACING_WINDOW_SECONDS
+    return max(1, burst), max(0.0, window)
 SESSION_SCHEMA_VERSION = "internal_conversational_e2e_session_v1"
 MAX_SCENARIOS = 30
 MAX_TURNS_PER_SCENARIO = 12
@@ -191,8 +242,10 @@ def execute_preflight(
 
 def _load_scenarios(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("scenario_schema_version") != SCENARIO_SCHEMA_VERSION:
+    manifest_version = str(payload.get("scenario_schema_version") or "")
+    if manifest_version not in SCENARIO_SCHEMA_VERSIONS_SUPPORTED:
         raise ValueError("scenario_manifest_invalid")
+    of2_allowed = manifest_version == SCENARIO_SCHEMA_VERSION_V2
     scenarios = payload.get("scenarios")
     if not isinstance(scenarios, list) or not 0 < len(scenarios) <= MAX_SCENARIOS:
         raise ValueError("scenario_manifest_invalid")
@@ -239,6 +292,53 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                 )
             if len(set(normalized_denials)) != len(normalized_denials):
                 raise ValueError("expected_denials_invalid")
+            # OrderFlowV2 turns are a v2-manifest capability. A v1
+            # manifest that names one is rejected rather than silently
+            # demoted to a Brain turn, which would quietly measure a
+            # different path than the scenario asked for.
+            mode = str(turn.get("mode") or TURN_MODE_BRAIN)
+            if mode not in TURN_MODES or (mode == TURN_MODE_OF2 and not of2_allowed):
+                raise ValueError("turn_mode_invalid")
+            failure_injection = str(turn.get("failure_injection") or "none")
+            if failure_injection not in FAILURE_INJECTIONS:
+                raise ValueError("failure_injection_invalid")
+            # Never defaulted for an OrderFlowV2 turn. A default of false
+            # let a no-op handler with no capture and no model call
+            # report a PASS, which is exactly the claim the flag exists
+            # to prevent.
+            if mode == TURN_MODE_OF2 and "expects_address_turn" not in turn:
+                raise ValueError("expects_address_turn_required")
+            expects_address_turn = bool(turn.get("expects_address_turn") or False)
+            if expects_address_turn and mode != TURN_MODE_OF2:
+                # Only the OrderFlowV2 path can produce address evidence,
+                # so a Brain turn claiming it would declare a requirement
+                # nothing in the run could ever satisfy.
+                raise ValueError("expects_address_turn_invalid")
+            operational_result = str(turn.get("expected_operational_result") or "")
+            if mode == TURN_MODE_OF2 and operational_result not in OPERATIONAL_RESULTS:
+                # Every OrderFlowV2 turn says what it must DO. Address
+                # evidence is legitimately optional on a continuation
+                # turn; proving the turn happened is not.
+                raise ValueError("expected_operational_result_invalid")
+            expectations = turn.get("expectations") or {}
+            if not isinstance(expectations, Mapping):
+                raise ValueError("expectations_invalid")
+            if expects_address_turn and not all(
+                str(expectations.get(field) or "").strip()
+                for field in ADDRESS_EXPECTATION_FIELDS
+            ):
+                # "Some string is present" is not an assertion. A turn
+                # that expects address evidence must say which field and
+                # which goal it expects, or the evidence cannot contradict
+                # anything.
+                #
+                # EVERY field, not any of them — matching the validator,
+                # which refuses a record whose expectations are partial.
+                # With ``any`` the loader accepted a manifest naming only
+                # the collection field while the validator then rejected
+                # the run for incomplete expectations, so a manifest the
+                # operator called valid could never pass.
+                raise ValueError("expectations_required")
             checked_turns.append(
                 {
                     "text": str(turn["text"]),
@@ -247,11 +347,172 @@ def _load_scenarios(path: Path) -> list[dict[str, Any]]:
                         str(v) for v in (turn.get("expected_state_delta_keys") or [])
                     ),
                     "expected_denials": tuple(sorted(normalized_denials)),
+                    "mode": mode,
+                    "failure_injection": failure_injection,
+                    "expects_address_turn": expects_address_turn,
+                    "expectations": dict(expectations),
+                    "expected_operational_result": operational_result,
+                    "inbound_metadata": dict(turn.get("inbound_metadata") or {}),
+                    "captured_action_index": (
+                        int(turn["captured_action_index"])
+                        if isinstance(turn.get("captured_action_index"), int)
+                        else None
+                    ),
                 }
             )
+        # Which customer state this scenario needs. The manifest's states
+        # are mutually exclusive, so a scenario that does not say which
+        # one it assumes cannot be prepared — and an unprepared OF2
+        # scenario does not fail loudly, it quietly proves nothing.
+        fixture_state = str(scenario.get("fixture_state") or "")
+        if any(t["mode"] == TURN_MODE_OF2 for t in checked_turns):
+            if fixture_state not in FIXTURE_STATES:
+                raise ValueError("fixture_state_required")
         seen.add(scenario_id)
-        normalized.append({"scenario_id": scenario_id, "turns": checked_turns})
+        normalized.append(
+            {
+                "scenario_id": scenario_id,
+                "fixture_state": fixture_state,
+                "turns": checked_turns,
+            }
+        )
     return normalized
+
+
+def _of2_path_report(turn_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Natural outcomes and injected mechanism checks, never mixed.
+
+    Two corrections live here. An injected failure confirms a MECHANISM;
+    counting it beside naturally observed outcomes would invent a failure
+    rate the run never measured, so the two carry separate denominators.
+    And the denominator counts turns the OWNER established as address
+    collection turns — the previous count of "every record the runner
+    created" filed a customer-name turn as an address attempt.
+
+    Outcomes are distinguished rather than bucketed: healthy ordinary
+    composition and an ordinary provider-failure fallback are different
+    results and must not share a number.
+    """
+    natural: dict[tuple[str, str], list[int]] = {}
+    injected: dict[tuple[str, str], list[int]] = {}
+    surfaces: dict[str, int] = {}
+    attempted = 0
+    not_address = 0
+    for row in turn_results:
+        address_turn = row.get("address_turn")
+        if not isinstance(address_turn, Mapping) or not address_turn:
+            continue
+        # The owner's own state patch decides this, not the existence of
+        # a record the runner writes for every OF2 invocation.
+        if str(address_turn.get("collection_field") or "") not in (
+            "delivery_address",
+            "city",
+        ):
+            not_address += 1
+            continue
+        attempted += 1
+        path = str(address_turn.get("execution_path") or "unresolved")
+        outcome = _of2_outcome(address_turn)
+        surface = str(address_turn.get("delivered_surface") or "none")
+        surfaces[surface] = surfaces.get(surface, 0) + 1
+        timing = address_turn.get("turn_timing")
+        latency = int(row.get("latency_ms") or 0)
+        if isinstance(timing, Mapping) and timing.get("total_turn_ms"):
+            latency = int(timing.get("total_turn_ms") or latency)
+        bucket = (
+            natural
+            if str(address_turn.get("failure_injection") or "none") == "none"
+            else injected
+        )
+        bucket.setdefault((path, outcome), []).append(latency)
+
+    def _summary(bucket: dict[tuple[str, str], list[int]]) -> dict[str, Any]:
+        total = sum(len(v) for v in bucket.values())
+        return {
+            "denominator": total,
+            "by_path_and_outcome": {
+                f"{path}:{outcome}": {
+                    "samples": len(samples),
+                    "latency_ms_p50": _percentile(samples, 50),
+                    "latency_ms_p95": _percentile(samples, 95),
+                }
+                for (path, outcome), samples in sorted(bucket.items())
+            },
+        }
+
+    return {
+        "address_turns_attempted": attempted,
+        "non_address_turns_excluded": not_address,
+        "natural": _summary(natural),
+        "injected_mechanism_checks": _summary(injected),
+        # A separate dimension on purpose: an ordinary turn for a customer
+        # with no saved addresses carries no choices and is still ordinary.
+        "delivered_surface_counts": dict(sorted(surfaces.items())),
+        "representative_of_production": False,
+    }
+
+
+def _of2_outcome(address_turn: Mapping[str, Any]) -> str:
+    """Success, fallback, refusal or unresolved — from the provenance."""
+    provenance = address_turn.get("outbound_provenance")
+    provenance = dict(provenance) if isinstance(provenance, Mapping) else {}
+    reason = str(provenance.get("fallback_reason") or "").strip()
+    if str(provenance.get("compose_source") or "") == "llm" and not reason:
+        return "composed"
+    if reason in (
+        "address_reply_unsupported_after_compose",
+        "address_reply_unverifiable_after_compose",
+    ):
+        return "refused_claim"
+    if reason:
+        return "fallback"
+    if address_turn.get("compose_entered"):
+        return "composed"
+    return "unresolved"
+
+
+def _percentile(samples: list[int], pct: int) -> Optional[int]:
+    if not samples:
+        return None
+    ordered = sorted(samples)
+    index = max(0, min(len(ordered) - 1, (pct * len(ordered)) // 100))
+    return int(ordered[index])
+
+
+def _continuation_metadata(
+    turn: Mapping[str, Any], captured_action_ids: list[str],
+) -> dict[str, Any]:
+    """Replay a structured action taken from the previous captured payload.
+
+    Substituting a real delivered id — rather than one the manifest
+    invented — is the only way a continuation turn tests the offer the
+    customer was actually shown. An index with no captured id leaves the
+    placeholder in place, so the turn fails rather than silently
+    answering a showing that never happened.
+    """
+    metadata = dict(turn.get("inbound_metadata") or {})
+    placeholder_present = any(
+        value == CAPTURED_ACTION_PLACEHOLDER for value in metadata.values()
+    )
+    index = turn.get("captured_action_index")
+    if not placeholder_present:
+        if index is not None:
+            raise ValueError("captured_action_reference_unused")
+        return metadata
+    # A placeholder that cannot be resolved must REFUSE, not travel into
+    # the turn unresolved: an unresolved marker answers no showing, and a
+    # turn that silently replays it proves nothing about continuation.
+    if index is None:
+        raise ValueError("captured_action_reference_unresolved")
+    if not captured_action_ids:
+        raise ValueError("captured_action_reference_unresolved")
+    if not 0 <= int(index) < len(captured_action_ids):
+        raise ValueError("captured_action_reference_out_of_range")
+    action_id = str(captured_action_ids[int(index)])
+    return {
+        key: (action_id if value == CAPTURED_ACTION_PLACEHOLDER else value)
+        for key, value in metadata.items()
+    }
 
 
 def _conversation(db: Any, *, tenant_id: int, phone: str, session_id: str) -> tuple[Any, bool]:
@@ -393,9 +654,154 @@ async def run_session(
         )
         if created:
             runner_mutations.append("sandbox_conversation_created")
+        last_captured_action_ids: list[str] = []
+        fixture_reports: list[dict[str, Any]] = []
+        pacing_burst, pacing_window = _pacing(env_map)
+        dispatched_since_pause = 0
+        pauses = 0
         for scenario in scenarios:
+            scenario_convo = convo
+            # Each OrderFlowV2 scenario is PREPARED before it runs. The
+            # manifest's customer states are mutually exclusive, so one
+            # conversation carried through every scenario would leave most
+            # of them describing a state that does not exist — and an
+            # unprepared OrderFlowV2 turn does not fail, it quietly
+            # returns having done nothing.
+            if str(scenario.get("fixture_state") or "") in FIXTURE_STATES:
+                fixture = prepare_of2_scenario_fixture(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=phone,
+                    scenario_id=scenario["scenario_id"],
+                    session_id=session_id,
+                    state=str(scenario["fixture_state"]),
+                )
+                scenario_convo = fixture.conversation
+                report = {
+                    "scenario_id": scenario["scenario_id"],
+                    "fixture": fixture.to_dict(),
+                    "divergences": [],
+                }
+                runner_mutations.extend(fixture.mutations)
+                first_of2 = next(
+                    (t for t in scenario["turns"] if t["mode"] == TURN_MODE_OF2),
+                    None,
+                )
+                if first_of2 is not None:
+                    inbound = dict(first_of2.get("inbound_metadata") or {})
+                    divergences = of2_fixture_preflight(
+                        db,
+                        tenant_id=tenant_id,
+                        customer_phone=phone,
+                        conversation=scenario_convo,
+                        message=str(first_of2["text"]),
+                        inbound_metadata=inbound,
+                        inbound_normalized_type=str(
+                            inbound.get("inbound_normalized_type")
+                            or inbound.get("type")
+                            or "text"
+                        ),
+                        require_address_turn=bool(
+                            first_of2.get("expects_address_turn")
+                        ),
+                    )
+                    report["divergences"] = [d.to_dict() for d in divergences]
+                fixture_reports.append(report)
+                if report["divergences"]:
+                    # Stop at the first failing layer and SAY which one.
+                    # Running the turn anyway would produce a quiet,
+                    # healthy-looking record of nothing having happened.
+                    results.append(
+                        {
+                            "evidence_channel": EVIDENCE_CHANNEL,
+                            "mode": "of2",
+                            "session_id": session_id,
+                            "scenario_id": scenario["scenario_id"],
+                            "turn_index": 0,
+                            "tenant_id": tenant_id,
+                            "status": "fixture_divergence",
+                            "verdict": "fail",
+                            "blockers": ["scenario_fixture_divergence"],
+                            "fixture_divergences": report["divergences"],
+                        }
+                    )
+                    continue
             for turn_index, turn in enumerate(scenario["turns"]):
                 clear_last_turn_sql_error_audit()
+                if dispatched_since_pause >= pacing_burst and pacing_window > 0:
+                    # Let the burst window clear before the next turn, so
+                    # a throttled send is never mistaken for a turn that
+                    # had nothing to say.
+                    await asyncio.sleep(pacing_window)
+                    dispatched_since_pause = 0
+                    pauses += 1
+                dispatched_since_pause += 1
+                if turn["mode"] == TURN_MODE_OF2:
+                    outcome = await run_sandbox_of2_turn(
+                        db=db,
+                        request=SandboxOf2TurnRequest(
+                            session_id=session_id,
+                            scenario_id=scenario["scenario_id"],
+                            turn_index=turn_index,
+                            tenant_id=tenant_id,
+                            customer_phone=phone,
+                            phone_id="internal-direct-code-probe",
+                            text=turn["text"],
+                            conversation=scenario_convo,
+                            allowed_tenants=allowed_tenants,
+                            evidence_hmac_key=evidence_key,
+                            runtime_revision=str(preflight["runtime_revision"]),
+                            database_identity_fingerprint=str(
+                                preflight["database_identity_fingerprint"]
+                            ),
+                            network_attestation_id=str(preflight["attestation_id"]),
+                            llm_allowed_hosts=tuple(preflight["llm_allowed_hosts"]),
+                            turn_ref=(
+                                f"probe.{scenario['scenario_id']}.{turn_index}"
+                            ),
+                            expected_denials=turn["expected_denials"],
+                            allow_llm_inference=llm_allowed,
+                            failure_injection=turn["failure_injection"],
+                            expects_address_turn=turn["expects_address_turn"],
+                            expectations=turn["expectations"],
+                            expected_state_delta_keys=tuple(
+                                turn["expected_state_delta_keys"]
+                            ),
+                            expected_operational_result=turn[
+                                "expected_operational_result"
+                            ],
+                            inbound_metadata=_continuation_metadata(
+                                turn, last_captured_action_ids,
+                            ),
+                            state_probe=_state_probe,
+                        ),
+                    )
+                    clear_last_turn_sql_error_audit()
+                    of2_evidence = dict(outcome.evidence)
+                    # The same assertions the Brain path applies. Appending
+                    # and continuing skipped them entirely, so a turn that
+                    # returned early at a gate still reported the status it
+                    # was initialised with.
+                    of2_blockers: list[str] = []
+                    if of2_evidence["status"] != turn["expected_status"]:
+                        of2_blockers.append("unexpected_turn_status")
+                    if of2_blockers:
+                        of2_evidence["blockers"] = sorted(
+                            set(of2_evidence.get("blockers") or []) | set(of2_blockers)
+                        )
+                        of2_evidence["verdict"] = "fail"
+                    # A structured action the customer can only have taken
+                    # from what was actually delivered: the next turn
+                    # replays an id read back off THIS turn's captured
+                    # payload, never one invented by the scenario.
+                    last_captured_action_ids = list(
+                        (of2_evidence.get("address_turn") or {}).get(
+                            "receipt_action_ids"
+                        )
+                        or []
+                    )
+                    results.append(of2_evidence)
+                    continue
                 outcome = await run_sandbox_turn(
                     db=db,
                     request=SandboxTurnRequest(
@@ -489,7 +895,23 @@ async def run_session(
         "started_at_utc": started_at_utc,
         "completed_at_utc": completed_at_utc,
         "runner_mutations": runner_mutations,
+        # What each scenario was prepared with, and the first layer that
+        # did not hold when one did not. A scenario whose fixture
+        # diverged is recorded as such rather than reported as a quiet
+        # pass.
+        "scenario_fixtures": fixture_reports,
+        # How the run was paced against the outbound burst throttle.
+        "outbound_pacing": {
+            "burst": pacing_burst,
+            "window_seconds": pacing_window,
+            "pauses": pauses,
+        },
         "turn_results": results,
+        "of2_path_report": _of2_path_report(results),
+        "observation_window_utc": {
+            "started_at_utc": started_at_utc,
+            "completed_at_utc": completed_at_utc,
+        },
         "runtime_error_audit": summarize_session_sql_error_audit(
             recorded_session_sql_error_audits()
         ),

@@ -1,0 +1,272 @@
+{
+  "scenario_schema_version": "internal_conversational_e2e_scenarios_v2",
+  "_readme": [
+    "Executable manifest for the OrderFlowV2 address validation harness.",
+    "",
+    "Every OF2 scenario declares fixture_state, because the customer",
+    "states below are mutually exclusive and an unprepared OrderFlowV2",
+    "turn does not fail — it quietly returns having done nothing.",
+    "",
+    "Every OF2 turn carries a STRUCTURAL inbound. OrderFlowV2 may own a",
+    "turn before Brain only for an interactive reply, a location pin, a",
+    "catalog order or a bare national short code; ordinary prose is",
+    "Brain's to interpret by design. A free-text turn can therefore never",
+    "reach this path however well its fixture is prepared, and the",
+    "preflight refuses it at the inbound layer instead of letting the run",
+    "look quiet and healthy.",
+    "",
+    "Each turn also states expects_address_turn and, when true, the field",
+    "and goal it expects — all three expectation fields, matching the",
+    "validator. failure_injection installs a real fault at the named",
+    "seam. No turn asserts reply wording."
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "ordinary_no_saved_choices",
+      "fixture_state": "no_saved_addresses",
+      "_note": [
+        "Nothing saved, so the collection field the owner reaches first is",
+        "the city, and there are no choices to show: a text surface."
+      ],
+      "turns": [
+        {
+          "text": "أكمل الطلب",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": true,
+          "inbound_metadata": {
+            "source_type": "interactive",
+            "inbound_normalized_type": "interactive",
+            "type": "interactive",
+            "button_id": "of2_continue_checkout"
+          },
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "expected_execution_path": "ordinary",
+            "expected_surface": "text"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
+        }
+      ]
+    },
+    {
+      "scenario_id": "ordinary_several_saved_choices",
+      "fixture_state": "several_saved_addresses",
+      "_note": [
+        "Several saved addresses, so the same collection turn carries",
+        "tappable choices. The receipt must reconcile the ids that left",
+        "with the showing the platform recorded."
+      ],
+      "turns": [
+        {
+          "text": "متابعة الشراء",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": true,
+          "inbound_metadata": {
+            "source_type": "interactive",
+            "inbound_normalized_type": "interactive",
+            "type": "interactive",
+            "button_id": "of2_resume_checkout"
+          },
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
+        }
+      ]
+    },
+    {
+      "scenario_id": "city_with_accepted_address",
+      "fixture_state": "accepted_address_pending_city",
+      "_note": [
+        "An address the customer already accepted, whose city is still",
+        "open. The accepted address's map reference must reach the model",
+        "as presence, never as a value."
+      ],
+      "turns": [
+        {
+          "text": "تأكيد العنوان",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": true,
+          "inbound_metadata": {
+            "source_type": "interactive",
+            "inbound_normalized_type": "interactive",
+            "type": "interactive",
+            "button_id": "of2_confirm_address"
+          },
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
+        }
+      ]
+    },
+    {
+      "scenario_id": "provider_failure_retains_choices",
+      "fixture_state": "several_saved_addresses",
+      "_note": [
+        "The ordinary provider-failure path. It retains the saved-address",
+        "choices, and is reported separately from the outer-guard recovery",
+        "below, which does not."
+      ],
+      "turns": [
+        {
+          "text": "اختر عنوان التوصيل",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "provider_error",
+          "expects_address_turn": true,
+          "inbound_metadata": {
+            "source_type": "interactive",
+            "inbound_normalized_type": "interactive",
+            "type": "interactive",
+            "button_id": "of2_pick_address"
+          },
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
+        }
+      ]
+    },
+    {
+      "scenario_id": "provider_timeout_retains_choices",
+      "fixture_state": "several_saved_addresses",
+      "turns": [
+        {
+          "text": "تحديث العنوان",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "provider_timeout",
+          "expects_address_turn": true,
+          "inbound_metadata": {
+            "source_type": "interactive",
+            "inbound_normalized_type": "interactive",
+            "type": "interactive",
+            "button_id": "of2_update_address"
+          },
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
+        }
+      ]
+    },
+    {
+      "scenario_id": "guard_boundary_recovery_text_only",
+      "fixture_state": "accepted_address_pending_city",
+      "_note": [
+        "The outer-guard recovery path. Distinct from the ordinary",
+        "provider-failure path above: this one currently sends a text",
+        "fallback and does not retain the saved-address choices."
+      ],
+      "turns": [
+        {
+          "text": "أكمل بيانات التوصيل",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "guard_boundary",
+          "expects_address_turn": true,
+          "inbound_metadata": {
+            "source_type": "interactive",
+            "inbound_normalized_type": "interactive",
+            "type": "interactive",
+            "button_id": "of2_complete_delivery"
+          },
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "expected_execution_path": "recovery",
+            "expected_surface": "text"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
+        }
+      ]
+    },
+    {
+      "scenario_id": "continuation_after_captured_choice",
+      "fixture_state": "several_saved_addresses",
+      "_note": [
+        "Two turns. The first is offered saved addresses; the second",
+        "replays an action id taken from the first turn's CAPTURED",
+        "payload, never one the scenario invented. The placeholder is",
+        "substituted with the captured id at captured_action_index, and",
+        "an unresolved, out-of-range or unused reference refuses before",
+        "the turn runs.",
+        "",
+        "The second turn must prove CONSUMPTION: the address that action",
+        "names, durably recorded as selected in this tenant's and",
+        "customer's scope. A changed conversation fingerprint is not",
+        "selection evidence."
+      ],
+      "turns": [
+        {
+          "text": "عرض العناوين المحفوظة",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": true,
+          "inbound_metadata": {
+            "source_type": "interactive",
+            "inbound_normalized_type": "interactive",
+            "type": "interactive",
+            "button_id": "of2_show_addresses"
+          },
+          "expectations": {
+            "collection_field": "city",
+            "response_goal": "collect_delivery_city",
+            "missing_field": "city",
+            "expected_execution_path": "ordinary"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "address_reply"
+        },
+        {
+          "text": "اختيار العنوان",
+          "mode": "of2",
+          "expected_status": "evaluated",
+          "failure_injection": "none",
+          "expects_address_turn": false,
+          "captured_action_index": 0,
+          "inbound_metadata": {
+            "source_type": "interactive",
+            "inbound_normalized_type": "interactive",
+            "type": "interactive",
+            "button_id": "__captured_action_id__"
+          },
+          "expected_denials": [],
+          "expected_operational_result": "structured_selection",
+          "expected_state_delta_keys": [
+            "conversation_metadata_fingerprint"
+          ]
+        }
+      ]
+    }
+  ]
+}

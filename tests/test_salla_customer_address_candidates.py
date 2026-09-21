@@ -3075,14 +3075,37 @@ def _webhook_send_block():
         and node.name in ("_send_interactive_reply", "_send_list_reply",
                           "_send_whatsapp_message")
     ]
+    # The lifted branch calls module-level helpers too. Lifting the branch
+    # without them would fail on a NameError rather than on behaviour, so
+    # this list follows the block: a helper the block starts calling must
+    # be added here.
+    senders += [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in ("_of2_save_metadata",)
+    ]
     runner = ast.parse("async def _exercise():\n pass").body[0]
     runner.body = [branch]
     module = ast.fix_missing_locations(
         ast.Module(body=senders + [runner], type_ignores=[])
     )
+    from core.acceptance_compose_observer import (  # noqa: PLC0415
+        compose_stage as _acceptance_compose_stage,
+    )
+    from core.acceptance_failure_injection import (  # noqa: PLC0415
+        maybe_inject_guard_failure as _acceptance_inject_guard_failure,
+    )
+
     namespace = {
         "Optional": Optional, "Dict": Dict, "Any": Any,
         "logger": _logging.getLogger("address-send-probe"),
+        # The real marker, not a stand-in: it is inert without an
+        # acceptance context, which is exactly the state these probes run
+        # in, so the block behaves here as it does in production.
+        "_acceptance_compose_stage": _acceptance_compose_stage,
+        # Both are the REAL helpers, not stand-ins: each is inert without
+        # an acceptance context, which is the state these probes run in,
+        # so the block behaves here exactly as it does in production.
+        "_acceptance_inject_guard_failure": _acceptance_inject_guard_failure,
     }
     exec(compile(module, "actual_webhook_send_block", "exec"), namespace)  # noqa: S102
     return namespace
@@ -3862,3 +3885,85 @@ def test_the_webhooks_inline_field_read_matches_the_owners_own_set():
         and isinstance(node.comparators[0], ast.Tuple)
     }
     assert literals == {frozenset(ADDRESS_REPLY_FIELDS)}, literals
+
+
+def test_an_address_turn_persists_its_turn_ref_and_its_timing():
+    """Measurement and binding at the two OrderFlowV2 save sites.
+
+    ``merge_turn_latency_into_metadata`` runs inside
+    ``_otp_merge_save_metadata``, which neither of these two saves ever
+    called — so an address turn persisted its provenance with no
+    measurable latency beside it and no reference to the inbound turn it
+    answered. Frequency and latency for this path had no queryable
+    source, and the captured payload, the stored metadata and the receipt
+    could not be shown to describe one turn.
+    """
+    from core.turn_latency import (  # noqa: PLC0415
+        bind_turn_latency,
+        new_turn_latency,
+        reset_turn_latency,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    result = _address_turn(db, tenant, convo, field="city")
+
+    timing = new_turn_latency(
+        tenant_id=tenant.id, conversation_id=convo.id, message_id="wamid.in-timed",
+    )
+    token = bind_turn_latency(timing)
+    try:
+        _sent, saved = _run_send_block(
+            db, tenant, convo, result,
+            turn_ref="wamid.in-timed",
+            patches=_fake_provider(),
+        )
+    finally:
+        reset_turn_latency(token)
+
+    meta = saved[0]["metadata"]
+    assert meta["address_turn_ref"] == "wamid.in-timed"
+    assert isinstance(meta.get("turn_timing"), dict), meta.get("turn_timing")
+    assert meta["turn_timing"].get("turn_id")
+
+
+def test_the_recovery_save_carries_the_same_turn_ref_and_timing():
+    """The recovery leg is the one whose frequency matters most."""
+    from core.turn_latency import (  # noqa: PLC0415
+        bind_turn_latency,
+        new_turn_latency,
+        reset_turn_latency,
+    )
+
+    db, _ = _make_db()
+    tenant, customer = _seed(db)
+    _two_candidates(db, tenant, customer)
+    convo = _conversation(db, tenant, customer)
+    result = _address_turn(db, tenant, convo, field="city")
+
+    guard_fails = [
+        ("modules.ai.order_flow_v2.outbound_guards"
+         ".apply_order_flow_v2_outbound_guards",
+         {"side_effect": RuntimeError("isolated wrapper failure")}),
+    ]
+    timing = new_turn_latency(
+        tenant_id=tenant.id, conversation_id=convo.id, message_id="wamid.in-recovered",
+    )
+    token = bind_turn_latency(timing)
+    try:
+        _sent, saved = _run_send_block(
+            db, tenant, convo, result,
+            turn_ref="wamid.in-recovered",
+            patches=_fake_provider(
+                reply_text="تم حفظ عنوانك الجديد. نكمل الطلب؟",
+            ) + guard_fails,
+        )
+    finally:
+        reset_turn_latency(token)
+
+    meta = saved[0]["metadata"]
+    assert meta["order_flow_v2_reason"] == "address_reply_recovery"
+    assert meta["address_turn_ref"] == "wamid.in-recovered"
+    assert isinstance(meta.get("turn_timing"), dict)
