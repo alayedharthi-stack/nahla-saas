@@ -184,7 +184,7 @@ def _retrieve(
         limit=limit,
         # Store-wide questions need policies as well as product knowledge.
         # Product-anchored retrieval keeps its existing, narrower kind set.
-        include_merchant_documents=not product_ids,
+        include_merchant_facts=not product_ids,
     )
 
 

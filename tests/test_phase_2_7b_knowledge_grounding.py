@@ -252,6 +252,8 @@ async def _invoke(tool: Any, context: CommerceAgentContext, arguments: dict[str,
 @pytest.mark.parametrize("kind", [
     "shipping_policy", "return_policy", "refund_policy", "exchange_policy",
     "terms_policy", "privacy_policy", "warranty", "store_story", "faq",
+    "working_hours", "branches", "payment_method", "bank_transfer", "cod",
+    "shipping_carrier", "shipping_zones", "cold_shipping", "summer_note",
 ])
 def test_merchant_tool_retrieves_visible_policy_evidence(seeded: Seed, kind: str) -> None:
     """A real policy row must not disappear behind the product-only kind filter."""
@@ -332,6 +334,26 @@ def test_shipping_policy_real_tool_keeps_limits_and_relevance(seeded: Seed) -> N
     assert all(section.section_id != unrelated.id for section in result.sections)
     assert all(len(section.body) <= 800 for section in result.sections)
     assert all(section.body == rows[0].body[:800] for section in result.sections)
+
+
+@pytest.mark.parametrize("kind", [
+    "reply_style", "dialect", "forbidden_phrases", "allowed_style", "escalation_rules",
+    "compliance_rules", "response_tone", "emoji_policy", "owner_identity", "assistant_identity",
+])
+def test_store_knowledge_does_not_promote_behavioral_rules_to_facts(seeded: Seed, kind: str) -> None:
+    from modules.ai.commerce_agent_v2.tools.knowledge import search_merchant_knowledge_impl
+
+    row = MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind=kind, title="الشحن والتوصيل",
+        body="الشحن والتوصيل: تعليمات داخلية وليست حقائق للعميل.",
+        is_active=True, ai_status="approved",
+    )
+    seeded.db.add(row)
+    seeded.db.commit()
+    context = _context(seeded, user_input="الشحن والتوصيل")
+    result = asyncio.run(search_merchant_knowledge_impl(context, "الشحن والتوصيل", 4))
+    assert all(item.section_id != row.id for item in result.sections)
+    assert all(item.ref != f"kb:section:{row.id}" for item in result.evidence)
 
 @pytest.mark.parametrize(
     "turn_id, user_input, query",
