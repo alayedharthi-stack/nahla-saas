@@ -620,9 +620,8 @@ def _tool_requests_per_step(budget: Optional[ac.LoopBudget]) -> int:
     turn's whole tool budget, within the contract's own maximum. A bundle
     beyond the budget is still stopped whole, by name, as ``budget_exhausted``.
     """
-    if budget is None:
-        return ac.MAX_TOOL_REQUESTS_PER_STEP
-    return max(1, min(int(ac.MAX_TOOL_REQUESTS_PER_STEP), int(budget.max_tool_calls)))
+    effective = budget if budget is not None else ac.LoopBudget()   # the loop's own default
+    return max(1, min(int(ac.MAX_TOOL_REQUESTS_PER_STEP), int(effective.max_tool_calls)))
 
 
 def _stop_detail(outcome: ac.LoopOutcome) -> Tuple[Tuple[str, str], ...]:

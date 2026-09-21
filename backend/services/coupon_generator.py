@@ -363,6 +363,12 @@ def _get_ai_policy(db: Session, tenant_id: int) -> Dict[str, Any]:
     }
 
 
+def ai_coupon_policy(db: Session, tenant_id: int) -> Dict[str, Any]:
+    """The merchant's AI coupon policy as configured in the dashboard, with safe
+    defaults: whether the AI may share coupons at all and which levels."""
+    return _get_ai_policy(db, int(tenant_id))
+
+
 def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(value, high))
 

@@ -162,8 +162,10 @@ observation, including its error code when the tool refused or failed.
 
 ## 5. Real read tools
 
-`core.commerce_runtime.agent_live_tools` registers six tools, each backed by
-the same implementation the Commerce Agent V2 read tools call:
+`core.commerce_runtime.agent_live_tools` registers seven tools, each backed by
+the same implementation the Commerce Agent V2 read tools call (the seventh,
+`list_shareable_promotions`, is backed by the platform's promotion-truth resolver
+and was added by owner decision after the first Tenant 1 conversation):
 
 | Tool | Implementation | Result kind |
 | --- | --- | --- |
@@ -240,7 +242,7 @@ what this change adds.
 | Principle | Implementation | Test evidence | Remaining limitation |
 | --- | --- | --- | --- |
 | The model does the reasoning; the harness keeps control | `agent_provider.AnthropicReasoningProvider.step` returns one result and decides nothing | `test_one_step_asks_for_one_attempt_with_the_loop_s_own_wait_and_prompt` | The loop's budget is fixed per turn; there is no adaptive effort |
-| Tools are the model's only way to reach data | six read-only tools over the existing V2 reads | `test_the_registry_exposes_exactly_the_six_read_tools`, `test_no_declared_schema_offers_a_write_a_price_or_a_quantity_the_model_could_set` | Read-only by construction; no action tool exists to evaluate yet |
+| Tools are the model's only way to reach data | seven read-only tools over the existing V2 reads and the promotion-truth resolver | `test_the_registry_exposes_exactly_the_seven_read_tools`, `test_no_declared_schema_offers_a_write_a_price_or_a_quantity_the_model_could_set` | Read-only by construction; no action tool exists to evaluate yet |
 | Give the model its own results back | native `tool_use`/`tool_result` replay | `test_this_invocation_s_observations_are_replayed_as_native_tool_result_pairs` | Restored observations lose the native pairing and are shown as data |
 | Fail loudly rather than plausibly | closed translation table, refusal on truncation and on mixed results | `test_a_truncated_step_is_invalid_even_when_it_carries_a_complete_looking_reply`, `test_plain_text_without_the_reply_channel_is_never_delivered` | A well-formed but wrong answer is still only structurally checked |
 | Tool results are context, not authority | JSON observation documents, error codes preserved | `test_a_failed_observation_is_replayed_as_an_error_result_not_hidden` | Result bodies are projected and bounded, so the model sees less than the source row |

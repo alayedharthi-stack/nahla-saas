@@ -64,7 +64,7 @@ def _interactive_payload(body: str) -> dict:
 # the merchant's own Salla store. The wording is the model's; the shape is
 # what matters.
 OBSERVED_FOUR_PRODUCT_LISTING = (
-    "يا تركي، عندنا فساتين حلوة متوفرة! 👗✨\n\n"
+    "يا أحمد، عندنا فساتين حلوة متوفرة! 👗✨\n\n"
     "1️⃣ **فستان** - 289 ريال سعودي\n📦 متوفر (6 قطع)\n🔗 https://demostore.salla.sa/ar/p1\n\n"
     "2️⃣ **فستان صيفي** - 199 ريال سعودي\n📦 متوفر (3 قطع)\n🔗 https://demostore.salla.sa/ar/p2\n\n"
     "3️⃣ **فستان سهرة** - 450 ريال سعودي\n📦 متوفر (2 قطع)\n🔗 https://demostore.salla.sa/ar/p3\n\n"
@@ -113,6 +113,10 @@ class TestFingerprintsStillReplace:
         ("wikipedia_citation", "حسب https://ar.wikipedia.org/wiki/كهرباء"),
         ("double_encoded_url", "https://x.com/?u=https%3A%2F%2Fy.com%2F%25D8%25A7"),
         ("sources_header", "الجواب هنا.\nالمصادر:\n- https://example.com/a"),
+        ("sources_header", "الجواب هنا.\nمصادر:\nhttps://example.com/a"),
+        ("sources_header", "الجواب هنا.\nالمراجع:\n• https://example.com/a"),
+        ("sources_header", "Here is the answer.\nSources:\n- https://example.com/a"),
+        ("sources_header", "Here is the answer.\nReference: https://example.com/a"),
     ])
     def test_each_fingerprint_is_named(self, marker: str, body: str) -> None:
         from core.outbound_sanitizer import contains_leakage_markers
@@ -184,6 +188,15 @@ class TestLinkCountNeverRewrites:
         out, sanitised = sanitize_outbound_payload(payload, tenant_id=2)
         assert sanitised is False
         assert out["interactive"]["action"]["name"] == "cta_url"
+
+    def test_the_audit_line_masks_the_recipient(self, caplog) -> None:
+        from core.outbound_sanitizer import sanitize_outbound_payload
+        with caplog.at_level(logging.INFO, logger=SANITIZER_LOGGER):
+            sanitize_outbound_payload(_text_payload(GENERIC_CUSTOM_DOMAIN_LISTING), tenant_id=2,
+                                      recipient="+966512345678", skip_handoff_scrub=True)
+        audit = [r.getMessage() for r in caplog.records if "[OUTBOUND_URL_AUDIT]" in r.getMessage()]
+        assert len(audit) == 1 and "+966512345678" not in audit[0]
+        assert "to=+" + "*" * 10 + "78" in audit[0]
 
     def test_two_links_never_reach_the_audit(self, caplog) -> None:
         from core.outbound_sanitizer import sanitize_outbound_payload

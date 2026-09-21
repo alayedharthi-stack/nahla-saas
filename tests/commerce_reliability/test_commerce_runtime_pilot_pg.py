@@ -813,16 +813,19 @@ def test_a_bundle_beyond_the_remaining_tool_budget_is_stopped_with_its_numbers(p
 
 
 @contextlib.contextmanager
-def _coupons(pilot: "Pilot", rows: Tuple[Tuple[int, str, Optional[str]], ...]) -> Any:
-    """Coupon rows ``(tenant_id, code, allocation_channel)`` for one case, removed afterwards."""
+def _coupons(pilot: "Pilot", rows: Tuple[Tuple[int, str, Optional[str]], ...],
+             metadata: Optional[Mapping[str, Any]] = None) -> Any:
+    """Coupon rows ``(tenant_id, code, allocation_channel)`` for one case, removed afterwards.
+    ``metadata`` is written to every row, as the promotion engine writes a personal code's."""
     ids: List[int] = []
     with pilot.engine.begin() as conn:
         for tenant_id, code, channel in rows:
             ids.append(int(conn.execute(
                 text("INSERT INTO coupons (tenant_id, code, description, discount_type, "
-                     "discount_value, source_type, allocation_channel) "
-                     "VALUES (:t, :c, :d, 'percentage', '10', 'manual', :ch) RETURNING id"),
-                {"t": tenant_id, "c": code, "d": "خصم ترحيبي", "ch": channel}).scalar_one()))
+                     "discount_value, source_type, allocation_channel, metadata) "
+                     "VALUES (:t, :c, :d, 'percentage', '10', 'manual', :ch, CAST(:m AS jsonb)) RETURNING id"),
+                {"t": tenant_id, "c": code, "d": "خصم ترحيبي", "ch": channel,
+                 "m": json.dumps(dict(metadata)) if metadata else None}).scalar_one()))
     try:
         yield ids
     finally:
@@ -870,6 +873,59 @@ def test_a_campaign_only_coupon_is_never_evidence_the_model_can_cite(pilot):
     assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
     assert "unknown_evidence" in dict(report.stop_detail)["problems"]
     assert transport.sent == [] and report.processing_outcome == c.ProcessingOutcome.FAILED.value
+
+
+def test_a_personal_code_issued_to_another_customer_is_never_evidence_here(pilot):
+    """The promotion engine's personal codes live in the same table, stamped
+    with their customer's id and a single-use limit. This conversation's
+    customer is not that customer: the tool does not return the code, and a
+    reply citing it is refused before any send."""
+    other_customer = pilot.customer_id + 100_000
+    with _coupons(pilot, ((pilot.tenant_a, "PERSONAL42", None),),
+                  metadata={"customer_id": other_customer, "usage_limit": 1, "usage_count": 0,
+                            "active": True}) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("خذ هذا الكود", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.tools_called == ("list_shareable_promotions",)
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unknown_evidence" in dict(report.stop_detail)["problems"]
+    assert transport.sent == []
+
+
+def test_this_customer_s_own_personal_code_is_read_and_cited(pilot):
+    with _coupons(pilot, ((pilot.tenant_a, "PERSONALME", None),),
+                  metadata={"customer_id": pilot.customer_id, "usage_limit": 1, "usage_count": 0,
+                            "active": True}) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([accepted("wamid.PERSONAL")])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("كودك الخاص PERSONALME جاهز", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندي كود خاص؟",
+        )
+    assert ref in report.evidence_refs
+    assert report.dispatch_status == dd.SENT_ACCEPTED and len(transport.sent) == 1
+
+
+def test_a_code_the_merchant_s_records_did_not_produce_never_reaches_the_customer(pilot):
+    """The model cites the real coupon but writes a different code: the draft
+    is refused, fed back once, and with no better second draft nothing is sent."""
+    with _coupons(pilot, ((pilot.tenant_a, "WELCOME10", None),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("استخدم كود WELCOME20", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unobserved_code" in dict(report.stop_detail)["problems"]
+    assert transport.sent == []
 
 
 def test_another_tenant_s_coupon_is_never_read_here(pilot):
@@ -1000,8 +1056,11 @@ def test_the_coupon_read_writes_nothing_and_asks_only_for_this_tenant(pilot):
     assert coupon_reads, "the tool never read the coupons table"
     for sql, params in coupon_reads:
         assert "coupons.tenant_id = " in sql, sql
-        bound = list(params.values()) if isinstance(params, dict) else list(params or ())
-        assert pilot.tenant_a in bound and pilot.tenant_b not in bound, (sql, params)
+        # The tenant bind is the one named ``tenant_id_…``; a limit or offset
+        # bind is never mistaken for it.
+        tenant_binds = ([value for key, value in params.items() if str(key).startswith("tenant_id")]
+                        if isinstance(params, dict) else [])
+        assert tenant_binds == [pilot.tenant_a], (sql, params)
 
 
 # ── The history belongs to this conversation (F7) ────────────────────────────

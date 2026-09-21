@@ -210,10 +210,32 @@ def _session_is_poisoned(exc: BaseException) -> bool:
     return False
 
 
+# Metadata keys under which a code is issued to ONE customer (the promotion
+# engine's personal codes and the generator's customer assignments). Such a
+# code is that customer's, never a store-wide offer: it is shareable only in a
+# conversation with that customer.
+_CUSTOMER_BINDING_KEYS = ("customer_id", "assigned_customer_id", "owner_customer_id")
+
+
+def _row_customer_binding(row: Any, meta: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """The customer id a coupon row is bound to, or ``None`` for a store-wide code."""
+    meta = meta if meta is not None else _meta_dict(row)
+    for key in _CUSTOMER_BINDING_KEYS:
+        value = meta.get(key)
+        if value in (None, "", 0, "0"):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return -1          # bound to someone, unreadably: never shareable
+    return None
+
+
 def _row_to_coupon_fact(row: Any) -> Dict[str, Any]:
     expires = getattr(row, "expires_at", None)
     conditions = _conditions_from_row(row)
     source_type = str(getattr(row, "source_type", "") or "manual")
+    binding = _row_customer_binding(row)
     return {
         "id": getattr(row, "id", None),
         "code": str(getattr(row, "code", "") or ""),
@@ -223,7 +245,10 @@ def _row_to_coupon_fact(row: Any) -> Dict[str, Any]:
         "expires_at": expires.isoformat() if hasattr(expires, "isoformat") else (str(expires) if expires else ""),
         "source_type": source_type,
         "allocation_channel": str(getattr(row, "allocation_channel", "") or ""),
+        "coupon_level": str(getattr(row, "coupon_level", "") or "").lower(),
         "conditions": conditions,
+        "customer_bound": binding is not None,
+        "bound_customer_id": binding,
         "eligibility_determined": False,
         "eligibility_note": "conditions_not_fully_evaluated",
         "record_kind": "coupon",
@@ -296,9 +321,16 @@ def resolve_shareable_promotions(
     *,
     now: Optional[datetime] = None,
     limit: int = _MAX_SHAREABLE,
+    customer_id: Optional[int] = None,
 ) -> PromotionTruthResult:
-    """Load currently valid shareable coupons/offers for one tenant at query time."""
+    """Load currently valid shareable coupons/offers for one tenant at query time.
+
+    A coupon issued to one customer (a personal code) is shareable only when
+    ``customer_id`` names that customer; without a customer, or for any other
+    customer, it is left out. Store-wide codes are unaffected.
+    """
     tid = int(tenant_id or 0)
+    audience = int(customer_id) if customer_id not in (None, "", 0) else None
     if db is None or tid <= 0:
         return PromotionTruthResult(
             tenant_id=tid,
@@ -349,6 +381,9 @@ def resolve_shareable_promotions(
         try:
             if not _row_is_currently_valid(row, now=now_):
                 continue
+            binding = _row_customer_binding(row)
+            if binding is not None and (audience is None or binding != audience):
+                continue          # someone else's personal code: never shareable here
             fact = _row_to_coupon_fact(row)
             if not fact["code"]:
                 continue

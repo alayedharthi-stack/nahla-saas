@@ -347,3 +347,61 @@ def test_the_scripted_provider_is_deterministic_and_fails_explicitly_when_exhaus
     assert isinstance(first, ac.ProviderReply) and first.draft.text == "مرحبًا"
     assert isinstance(provider.step(request), ac.ProviderFailure)
     assert len(provider.requests) == 2
+
+
+# ── Coupon codes in the reply are claims against this turn's evidence ────────
+
+
+def _promotions_observation(*codes_and_refs, ok: bool = True, body: bool = True,
+                            truncated: bool = False) -> ac.ToolObservation:
+    result = {"status": "ok", "found": True, "promotions": [
+        {"code": code, "evidence_ref": ref, "record_kind": "coupon"} for code, ref in codes_and_refs]}
+    return ac.ToolObservation(call_id="p1", tool_name=ac.PROMOTIONS_TOOL_NAME, ok=ok,
+                              result=result if body else None, error_code=None, error=None,
+                              evidence_refs=tuple(ref for _, ref in codes_and_refs),
+                              body_truncated=truncated)
+
+
+def test_a_coupon_code_in_the_text_must_cite_the_coupon_it_came_from():
+    obs = [_promotions_observation(("WELCOME10", "promotion:coupon:5"))]
+    uncited = ac.ReplyDraft(text="استخدم كود WELCOME10 على أول طلب", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(uncited, obs)] == ["coupon_code_without_evidence"]
+    cited = ac.ReplyDraft(text="استخدم كود WELCOME10 على أول طلب", evidence_refs=("promotion:coupon:5",),
+                          claims_commerce_facts=True)
+    assert ac.verify_reply_draft(cited, obs) == ()
+
+
+def test_a_code_the_merchant_s_records_did_not_produce_is_refused_in_a_coupon_turn():
+    obs = [_promotions_observation(("WELCOME10", "promotion:coupon:5"))]
+    invented = ac.ReplyDraft(text="خذ كود WELCOME20 وكود SAVE50", evidence_refs=("promotion:coupon:5",),
+                             claims_commerce_facts=True)
+    problems = ac.verify_reply_draft(invented, obs)
+    assert [p.code for p in problems] == ["unobserved_code", "unobserved_code"]
+    assert [p.detail.split(" ")[0] for p in problems] == ["SAVE50", "WELCOME20"]
+
+
+def test_a_code_shaped_token_this_turn_s_tools_returned_is_not_an_invented_code():
+    """A product title or reference the tools themselves carried is evidence,
+    not an invention — only tokens nobody observed are refused."""
+    catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
+                                 result={"products": [{"title": "NIKE AIR MAX", "evidence_ref": "catalog:product:1"}]},
+                                 error_code=None, error=None, evidence_refs=("catalog:product:1",))
+    obs = [catalog, _promotions_observation(("WELCOME10", "promotion:coupon:5"))]
+    draft = ac.ReplyDraft(text="حذاء NIKE متوفر، وكود WELCOME10 لأول طلب",
+                          evidence_refs=("catalog:product:1", "promotion:coupon:5"), claims_commerce_facts=True)
+    assert ac.verify_reply_draft(draft, obs) == ()
+
+
+def test_outside_a_coupon_turn_capitalised_tokens_are_not_the_loop_s_business():
+    catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
+                                 result={"products": []}, error_code=None, error=None, evidence_refs=())
+    draft = ac.ReplyDraft(text="رقم طلبك RRRD1234 قيد التجهيز", claims_commerce_facts=False)
+    assert ac.verify_reply_draft(draft, [catalog]) == ()
+
+
+def test_a_promotions_observation_without_its_body_cannot_be_checked_and_is_not_guessed():
+    obs = [_promotions_observation(("WELCOME10", "promotion:coupon:5"), body=False, truncated=True)]
+    draft = ac.ReplyDraft(text="استخدم كود WELCOME10", evidence_refs=("promotion:coupon:5",),
+                          claims_commerce_facts=True)
+    assert ac.observed_promotion_codes(obs) is None
+    assert ac.verify_reply_draft(draft, obs) == ()

@@ -485,8 +485,8 @@ def _looks_like_store_home(url: str, store_domain: Optional[str]) -> bool:
 def is_storefront_host(host: str, *, store_domain: Optional[str] = None) -> bool:
     """True when ``host`` is the merchant's own store domain (or a subdomain
     of it) or a storefront platform Nahla integrates (Salla / Zid /
-    Shopify). Pure; the one definition of "first-party host" that the
-    CTA classifier and the outbound sanitiser share."""
+    Shopify). Pure; the one definition of "first-party host" the CTA
+    classifier uses for store homepages."""
     host = (host or "").strip().lower()
     if not host:
         return False

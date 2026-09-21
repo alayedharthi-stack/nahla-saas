@@ -892,9 +892,14 @@ as well as through the ledger.
 * It performs **no** commerce write: no order, payment, cancellation or coupon.
   It **reads** the merchant's currently valid, shareable coupons and offers through
   `list_shareable_promotions` (the platform's promotion-truth resolver: campaign-only,
-  expired, disabled and exhausted codes are never returned, no code is ever invented,
-  and whether the customer qualifies is reported as not determined); it creates,
-  assigns or redeems none.
+  expired, disabled and exhausted codes are never returned, a personal code issued to
+  one customer is returned only in that customer's conversation, no code is ever
+  invented, and whether the customer qualifies is reported as not determined), under
+  the merchant's dashboard AI coupon policy (`ai_policy.enabled` and `allowed_levels`;
+  a disabled policy is a `denied` read). Before a reply is reserved, verification
+  refuses a draft that carries a coupon code without citing the coupon it came from,
+  or any code-shaped token this turn's tools did not return. It creates, assigns or
+  redeems none.
 * It records no delivery or read receipt, so `customer_reach` stays `unknown`
   even for an accepted send.
 * It has no reconciliation worker: an uncertain send is left uncertain rather

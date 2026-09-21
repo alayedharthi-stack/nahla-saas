@@ -103,5 +103,6 @@ def test_the_default_pilot_budget_admits_a_four_request_bundle() -> None:
     assert entry._tool_requests_per_step(pilot_guard.pilot_budget()) >= 4
 
 
-def test_without_a_budget_the_contract_s_own_maximum_applies() -> None:
-    assert entry._tool_requests_per_step(None) == ac.MAX_TOOL_REQUESTS_PER_STEP
+def test_without_a_budget_the_loop_s_own_default_budget_applies() -> None:
+    """``AgentLoop(budget=None)`` runs on ``LoopBudget()``; the ceiling mirrors it."""
+    assert entry._tool_requests_per_step(None) == ac.LoopBudget().max_tool_calls

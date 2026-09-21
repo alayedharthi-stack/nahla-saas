@@ -108,9 +108,12 @@ _LEAK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # encoded query string (which is exactly the ``html.duckduckgo
     # .com/l/?uddg=https%3A%2F%2F…%25D8%25A7…`` shape).
     ("double_encoded_url",  re.compile(r"%25[0-9A-Fa-f]{2}", )),
-    # "المصادر:" header followed by URL markers is the giveaway of
-    # the old ``web_search_summary`` template output.
-    ("sources_header",      re.compile(r"المصادر\s*:\s*\n?\s*[-•]?\s*(?:https?://|//)", )),
+    # A "sources" / "references" header followed by a URL is the giveaway
+    # of the old ``web_search_summary`` template output — in either
+    # language, with or without the article, with or without a bullet.
+    ("sources_header",      re.compile(
+        r"(?:المصادر|مصادر|المراجع|مراجع|sources?|references?)\s*:\s*\n?\s*[-•*]?\s*(?:https?://|//)",
+        re.IGNORECASE)),
 ]
 
 _URL_RE = re.compile(r"https?://\S+|(?<![A-Za-z0-9])//\S+", re.IGNORECASE)
@@ -343,6 +346,14 @@ def url_hosts(text: str) -> List[str]:
     return sorted(hosts)
 
 
+def _masked_recipient(recipient: Optional[str]) -> str:
+    """The recipient with every digit but the last two hidden, for an INFO line."""
+    value = str(recipient or "")
+    if not value:
+        return ""
+    return re.sub(r"\d(?=[\d\D]*\d{2}$)", "*", value)
+
+
 def _audit_link_count(body: str, *, tenant_id: Optional[int], recipient: Optional[str]) -> None:
     """Log a clean reply that carries many links. Never changes the reply."""
     urls = _URL_RE.findall(body)
@@ -350,7 +361,7 @@ def _audit_link_count(body: str, *, tenant_id: Optional[int], recipient: Optiona
         logger.info(
             "[OUTBOUND_URL_AUDIT] tenant=%s to=%s url_count=%d hosts=%s — a link count is not "
             "leak evidence; the reply is sent as composed",
-            tenant_id, recipient, len(urls), ",".join(url_hosts(body)),
+            tenant_id, _masked_recipient(recipient), len(urls), ",".join(url_hosts(body)),
         )
 
 

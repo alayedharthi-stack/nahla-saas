@@ -147,7 +147,9 @@ class PromotionSnapshot(BaseModel):
     discount_type: str = ""
     discount_value: str = ""
     expires_at: str = ""
+    coupon_level: str = ""
     conditions: dict[str, Any] = Field(default_factory=dict)
+    bound_to_this_customer: bool = False      # a personal code issued to this conversation's customer
     eligibility_determined: bool = False
     eligibility_note: str = ""
     evidence_ref: str
@@ -160,6 +162,7 @@ class PromotionListResult(BaseModel):
     promotions: list[PromotionSnapshot] = Field(default_factory=list)
     evidence: list[EvidenceRecord] = Field(default_factory=list)
     query_outcome: str = ""
+    partial: bool = False                     # a source could not be read; the list may be incomplete
     failure_reason: str | None = None
 
 
