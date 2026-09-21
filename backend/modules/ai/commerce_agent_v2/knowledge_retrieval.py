@@ -182,6 +182,9 @@ def _retrieve(
         product_id=product_ids[0] if len(product_ids) == 1 else None,
         product_ids=list(product_ids) or None,
         limit=limit,
+        # Store-wide questions need policies as well as product knowledge.
+        # Product-anchored retrieval keeps its existing, narrower kind set.
+        include_merchant_documents=not product_ids,
     )
 
 

@@ -777,12 +777,20 @@ def retrieve_catalog_candidate_kb_sections(
     product_ids: Any = None,
     product_id: Any = None,
     limit: int = _KB_SECTION_RESULT_LIMIT,
+    include_merchant_documents: bool = False,
 ) -> Dict[str, Any]:
     """One tenant-safe KB retrieval for catalog-owned compose.
 
     Public wrapper for responder use. Does not classify intent or change scoring.
     Successful empty is ``missing_kb``. Operational failure is not fact-absence.
+    Store-wide tool callers may include the existing public document kinds;
+    catalog callers retain the product-only default. Visibility, relevance,
+    product associations and result/body limits are shared by both modes.
     """
+    kinds_filter = None
+    if include_merchant_documents:
+        from services.merchant_document_retrieval import DOCUMENT_KINDS  # noqa: PLC0415
+        kinds_filter = _PRODUCT_KB_KINDS | DOCUMENT_KINDS
     succeeded, sections = _retrieve_product_kb_sections_status(
         db,
         tenant_id,
@@ -791,6 +799,7 @@ def retrieve_catalog_candidate_kb_sections(
         product_id=product_id,
         product_ids=product_ids,
         limit=limit,
+        kinds_filter=kinds_filter,
     )
     if not succeeded:
         return catalog_kb_retrieval_failure_payload()
