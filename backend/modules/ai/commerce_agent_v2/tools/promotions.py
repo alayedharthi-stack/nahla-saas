@@ -127,11 +127,14 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
 
 def _merchant_policy(context: CommerceAgentContext) -> Dict[str, Any]:
     """The merchant's AI coupon policy from the dashboard, read through the
-    platform's own accessor. Raises when it cannot be read: a capability gate
-    that cannot be read is closed, never assumed open."""
-    from services.coupon_generator import ai_coupon_policy  # noqa: PLC0415
+    platform's own accessor — the one the customer-request coupon service
+    reads, imported as is: the coupon generator is another scope's file and
+    this runtime does not change it (``test_branch_diff_excludes_other_agent_scope_paths``).
+    Raises when it cannot be read: a capability gate that cannot be read is
+    closed, never assumed open."""
+    from services.coupon_generator import _get_ai_policy  # noqa: PLC0415
 
-    return ai_coupon_policy(context.db, int(context.tenant_id))
+    return _get_ai_policy(context.db, int(context.tenant_id))
 
 
 async def list_shareable_promotions_impl(

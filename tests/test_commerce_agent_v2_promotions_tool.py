@@ -100,7 +100,7 @@ def run(context: Context, monkeypatch: pytest.MonkeyPatch, result: pt.PromotionT
         return dict(DEFAULT_POLICY if policy is None else policy)
 
     monkeypatch.setattr(tool, "resolve_shareable_promotions", resolver)
-    monkeypatch.setattr(generator, "ai_coupon_policy", read_policy)
+    monkeypatch.setattr(generator, "_get_ai_policy", read_policy)
     outcome = asyncio.run(tool.list_shareable_promotions_impl(context, limit=limit))
     return outcome, calls
 
