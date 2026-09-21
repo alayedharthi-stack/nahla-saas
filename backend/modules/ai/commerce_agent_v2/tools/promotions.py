@@ -17,6 +17,7 @@ policy. The commerce runtime's loop passes the trusted context directly.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from modules.ai.brain.commerce.promotion_truth import (
@@ -103,6 +104,7 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
         "description": _text(fact.get("description")),
         "discount_type": _text(fact.get("discount_type") or fact.get("promotion_type"), 64),
         "discount_value": _text(fact.get("discount_value"), 64),
+        "discount": _text(fact.get("discount"), 64),
         "expires_at": _text(fact.get("expires_at") or fact.get("ends_at"), 64),
         "coupon_level": level,
         "conditions": _bounded_conditions(fact.get("conditions")),
@@ -123,6 +125,35 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
         },
     )
     return PromotionSnapshot(**fields, evidence_ref=ref), evidence
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _min_remaining_hours(policy: Dict[str, Any]) -> int:
+    """The merchant's ``min_remaining_hours``: a code with less life left than
+    this is not handed out by the AI. Unreadable or negative reads as 0."""
+    try:
+        return max(0, int(policy.get("min_remaining_hours") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _expires_before(fact: Dict[str, Any], cutoff: datetime) -> bool:
+    """Whether the coupon's expiry is readable and earlier than ``cutoff``. An
+    unreadable expiry does not exclude: the resolver has already judged the
+    code currently valid, and this rule only shortens that window."""
+    raw = str(fact.get("expires_at") or "").strip()
+    if not raw:
+        return False
+    try:
+        expires = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires < cutoff
 
 
 def _merchant_policy(context: CommerceAgentContext) -> Dict[str, Any]:
@@ -170,13 +201,18 @@ async def list_shareable_promotions_impl(
     customer_id = int(raw_customer) if raw_customer not in (None, "", 0) else None
     truth = resolve_shareable_promotions(context.db, int(context.tenant_id), limit=bounded,
                                          customer_id=customer_id)
+    min_hours = _min_remaining_hours(policy)
+    cutoff = _now() + timedelta(hours=min_hours) if min_hours > 0 else None
     snapshots: List[PromotionSnapshot] = []
     evidence: List[EvidenceRecord] = []
     for facts in (list(getattr(truth, "shareable", None) or ()), list(getattr(truth, "offers", None) or ())):
         kept = 0
         for fact in facts:
-            projected = _project(fact, customer_id=customer_id, allowed_levels=allowed_levels) \
-                if isinstance(fact, dict) else None
+            if not isinstance(fact, dict):
+                continue
+            if cutoff is not None and fact.get("record_kind") == "coupon" and _expires_before(fact, cutoff):
+                continue
+            projected = _project(fact, customer_id=customer_id, allowed_levels=allowed_levels)
             if projected is None:
                 continue
             snapshot, record = projected

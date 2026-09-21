@@ -271,7 +271,19 @@ def _product_view(snapshot: Any) -> Dict[str, Any]:
         "orderable": bool(getattr(snapshot, "orderable", False)),
         "product_url": _text(getattr(snapshot, "product_url", ""), 300),
         "image_url": _text(getattr(snapshot, "image_url", ""), 300),
+        # Colours, sizes and other options the customer can actually buy now,
+        # so an attribute in the reply comes from the merchant's variants.
+        "variant_options": _variant_options_view(getattr(snapshot, "variant_options", None)),
+        "variants_in_stock": getattr(snapshot, "variants_in_stock", None),
+        "variants_total": getattr(snapshot, "variants_total", None),
     }
+
+
+def _variant_options_view(options: Any) -> Dict[str, List[str]]:
+    if not isinstance(options, Mapping):
+        return {}
+    return {_text(name, 40): [_text(value, 40) for value in list(values or ())[:12]]
+            for name, values in list(options.items())[:6]}
 
 
 def _knowledge_view(sections: Sequence[Any]) -> List[Dict[str, Any]]:
@@ -447,6 +459,9 @@ def _promotion_view(snapshot: Any) -> Dict[str, Any]:
         "description": _text(getattr(snapshot, "description", ""), MAX_DESCRIPTION_CHARS),
         "discount_type": _text(getattr(snapshot, "discount_type", ""), 64),
         "discount_value": _text(getattr(snapshot, "discount_value", ""), 64),
+        # The one reading the merchant's record supports ("5%" or "20 SAR"),
+        # so a percentage is never quoted as an amount.
+        "discount": _text(getattr(snapshot, "discount", ""), 64),
         "expires_at": _text(getattr(snapshot, "expires_at", ""), 64),
         "coupon_level": _text(getattr(snapshot, "coupon_level", ""), 32),
         "conditions": dict(conditions) if isinstance(conditions, Mapping) else {},

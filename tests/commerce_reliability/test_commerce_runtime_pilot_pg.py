@@ -39,6 +39,7 @@ from core.commerce_runtime import ledger_contracts as lc
 from core.commerce_runtime import runtime_entry as entry
 from core.commerce_runtime.agent_loop import AgentLoop
 from core.commerce_runtime.ledgers import LedgerRepository
+from modules.ai.brain.commerce import promotion_truth as pt
 from tests.commerce_reliability.test_commerce_runtime_foundation_pg import (
     _alembic,
     _create_database,
@@ -814,17 +815,18 @@ def test_a_bundle_beyond_the_remaining_tool_budget_is_stopped_with_its_numbers(p
 
 @contextlib.contextmanager
 def _coupons(pilot: "Pilot", rows: Tuple[Tuple[int, str, Optional[str]], ...],
-             metadata: Optional[Mapping[str, Any]] = None) -> Any:
+             metadata: Optional[Mapping[str, Any]] = None, *, discount_value: str = "10") -> Any:
     """Coupon rows ``(tenant_id, code, allocation_channel)`` for one case, removed afterwards.
-    ``metadata`` is written to every row, as the promotion engine writes a personal code's."""
+    ``metadata`` is written to every row, as the promotion engine writes a personal code's;
+    ``discount_value`` is the stored string, exactly as a sync may have left it."""
     ids: List[int] = []
     with pilot.engine.begin() as conn:
         for tenant_id, code, channel in rows:
             ids.append(int(conn.execute(
                 text("INSERT INTO coupons (tenant_id, code, description, discount_type, "
                      "discount_value, source_type, allocation_channel, metadata) "
-                     "VALUES (:t, :c, :d, 'percentage', '10', 'manual', :ch, CAST(:m AS jsonb)) RETURNING id"),
-                {"t": tenant_id, "c": code, "d": "خصم ترحيبي", "ch": channel,
+                     "VALUES (:t, :c, :d, 'percentage', :v, 'manual', :ch, CAST(:m AS jsonb)) RETURNING id"),
+                {"t": tenant_id, "c": code, "d": "خصم ترحيبي", "v": discount_value, "ch": channel,
                  "m": json.dumps(dict(metadata)) if metadata else None}).scalar_one()))
     try:
         yield ids
@@ -1800,3 +1802,21 @@ def test_the_runtime_refuses_when_its_schema_is_not_present(pg_admin_dsn):
         entry.reset_schema_probe()
         engine.dispose()
         _drop_database(pg_admin_dsn, name)
+
+
+def test_a_percentage_coupon_reconciled_as_a_money_object_is_read_as_a_percentage(pilot):
+    """Tenant 1, September 2026: a coupon issued as 5% and reconciled from Salla
+    carried ``discount_type='percentage'`` beside ``discount_value="{'amount': 5,
+    'currency': 'SAR'}"``, and the model told the customer "5 SAR". Read from a
+    real row: the resolver's fact carries the number the record supports and
+    its one reading, so the tool never hands the model two."""
+    with _coupons(pilot, ((pilot.tenant_a, "NHPCT5", None),), metadata={"discount_pct": 5},
+                  discount_value="{'amount': 5, 'currency': 'SAR'}") as ids:
+        session = sessionmaker(bind=pilot.engine)()
+        try:
+            facts = pt.resolve_shareable_promotions(session, pilot.tenant_a).shareable
+        finally:
+            session.close()
+    fact = next(f for f in facts if int(f["id"]) == ids[0])
+    assert fact["discount_type"] == "percentage"
+    assert fact["discount_value"] == "5" and fact["discount"] == "5%"
