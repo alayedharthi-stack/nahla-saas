@@ -958,6 +958,56 @@ async def customers_metrics(request: Request, db: Session = Depends(get_db)):
     }
 
 
+def _serialize_customer_addresses(
+    db: Session, tenant_id: int, customer_id: int,
+) -> Dict[str, Any]:
+    """Address projection shared with the agent and checkout readers.
+
+    Every durable address is listed with its source and selection state.
+    ``selected_address`` is only ever an address the customer explicitly
+    selected — several unselected candidates yield ``None``, because there
+    is no implicit default.
+    """
+    empty: Dict[str, Any] = {
+        "addresses": [],
+        "selected_address": None,
+        "address_resolution": "no_address",
+        "requires_address_selection": False,
+    }
+    try:
+        from core.customer_address_candidates import (  # noqa: PLC0415
+            resolve_customer_address_selection,
+        )
+
+        resolution = resolve_customer_address_selection(
+            db, tenant_id=int(tenant_id), customer_id=int(customer_id),
+        )
+    except Exception:  # noqa: BLE001
+        return empty
+
+    # The COMPLETE inventory. Assembling it from ``candidates + selected``
+    # dropped every address the customer had selected and then superseded,
+    # so this read said those addresses did not exist.
+    rows = list(resolution.addresses)
+    if not rows:
+        rows = list(resolution.candidates)
+        if resolution.selected is not None:
+            rows.insert(0, resolution.selected)
+    else:
+        selected_id = (
+            resolution.selected.address_id if resolution.selected is not None else None
+        )
+        rows.sort(key=lambda r: (0 if r.address_id == selected_id else 1, r.address_id))
+    return {
+        "addresses": [row.as_dict() for row in rows],
+        "selected_address": (
+            resolution.selected.as_dict() if resolution.selected is not None else None
+        ),
+        "address_resolution": resolution.reason,
+        "requires_address_selection": bool(resolution.requires_explicit_selection),
+    }
+
+
 @router.get("/{customer_id}")
 async def get_customer(customer_id: int, request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
@@ -972,7 +1022,9 @@ async def get_customer(customer_id: int, request: Request, db: Session = Depends
     ).first()
     manual = list_manual_segments_for_customer(db, tenant_id, cust.id)
 
-    return _serialize_customer(cust, profile, manual_segments=manual)
+    payload = _serialize_customer(cust, profile, manual_segments=manual)
+    payload.update(_serialize_customer_addresses(db, tenant_id, cust.id))
+    return payload
 
 
 @router.post("")

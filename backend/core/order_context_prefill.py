@@ -376,6 +376,11 @@ def build_order_prep_prefill_patch(
         _shipping_confirm_enabled()
         and edit_facts.previous_address_confirmed
         and ctx.known_previous_address is not None
+        # Only an EXPLICITLY selected address may be promoted into the
+        # order. An imported candidate the customer never chose must stay
+        # unaccepted at every downstream consumer, not just at the
+        # checkout helper.
+        and bool(getattr(ctx.known_previous_address, "explicitly_selected", False))
     ):
         if not bool(getattr(ctx.shipping, "locked_by_merchant", False)):
             if not has_accepted_delivery_address(prep):

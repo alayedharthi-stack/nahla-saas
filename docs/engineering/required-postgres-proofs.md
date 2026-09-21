@@ -42,12 +42,13 @@ The inventory distinguishes two kinds of suite:
 | `commerce_runtime_pilot_handover_controls` | proof | `tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py` | durable acceptance, handover, recovery, scoped disposition and retirement | 83 |
 | `commerce_runtime_trial_evidence` | proof | `tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py` | repository-written turn evidence; live/tenant isolation; normal resolved-state accounting; read-only snapshot against an independent completing connection | 13 |
 | `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
+| `salla_customer_address_candidates` | proof | `backend/tests/test_salla_customer_address_candidates_pg.py` | Salla address-candidate PR, revision 0110 (fresh, `create_all` reconciliation, reversible), candidate durability across commit/session/conversation, one provenance row per address, tenant isolation, selected-address reuse after reset, and the independent review's closure cases: evidence absent before commit / present after / gone after rollback, two concurrent first imports committing one address, an absent provenance table still committing the confirmed address, and a concurrent refresh between offer and selection refused | 31 |
 
-This branch inventories 303 cases (301 proofs + 2 runner regressions): all
-290 identifiers from main at `466758f5`, plus the collector's 13. This is an
-inventory statement, not a claim that the PostgreSQL execution has passed.
-When integrating the address sibling, preserve its separate 31 identifiers as
-well; do not replace that suite while reconciling the manifest.
+The integrated branch inventories 334 cases (332 proofs + 2 runner regressions):
+all 321 identifiers from address integration `8f2bd079`, plus the collector's
+13. All 290 earlier runtime identifiers and all 31 address identifiers are
+retained. This is an inventory statement, not a claim that PostgreSQL execution
+on the integrated head has passed.
 
 The counts above are informational. Nothing in the runner or its self-test
 pins a count: the inventory must equal pytest's own collection of each
@@ -88,7 +89,7 @@ no allowances. `tests/commerce_reliability/test_required_postgres_proofs_runner.
 proves every rule with a negative control on synthetic suites, proves that
 a test added to a module without an inventory update is refused, proves the
 report freshness rule below, and pins the committed inventory to pytest's
-own collection of the six inventoried modules, so an added or removed test
+own collection of every inventoried module, so an added or removed test
 is a reviewed inventory change, never a silent drift.
 
 ### 2.1 Report freshness
@@ -167,6 +168,16 @@ Regressions:
   `LEGACY_MIG_PG_TEST_DATABASE_URL` is the authoritative admin URL
   (section 2.2). Ephemeral databases (`legacy_mig_*`) are created at
   revision `0107` and dropped.
+* Address-candidate suite: gated on `LEGACY_MIG_PG_TEST_DATABASE_URL`
+  alone, which the existing required-proofs step already provides — the
+  suite therefore needs **no workflow change**. An explicit target is
+  authoritative, so the module fails rather than skips when it is
+  unreachable, and the runner counts a skip as a failure regardless.
+  `CUSTOMER_ADDRESS_CANDIDATES_PG_REQUIRED=1` and
+  `LEGACY_MIG_PG_INTEGRATION_REQUIRED=1` also force it, for operators and
+  for any later `ci.yml`-only pull request that wants an explicit flag.
+  Ephemeral databases (`legacy_mig_*`) are created at revision `0109` or
+  `0110` and dropped.
 
 ## 3. Proposed CI invocation (separate `ci.yml`-only pull request)
 

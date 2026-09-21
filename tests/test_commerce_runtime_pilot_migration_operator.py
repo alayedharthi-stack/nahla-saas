@@ -37,6 +37,17 @@ def test_the_job_targets_a_pinned_revision_and_never_head():
     assert "head" not in argv
 
 
+def test_the_target_matches_the_repository_s_application_head():
+    from scripts.operators.bootstrap_migration_contract import (
+        APPLICATION_ALEMBIC_HEAD,
+        INTEGRATION_BOOTSTRAP_TARGET,
+    )
+
+    assert k.TARGET_REVISION == APPLICATION_ALEMBIC_HEAD
+    # And it is deliberately beyond what normal bootstrap applies.
+    assert INTEGRATION_BOOTSTRAP_TARGET != k.TARGET_REVISION
+
+
 def test_the_confirmation_token_names_the_revision_the_job_applies():
     """The token is the operator's statement of *which* revision they authorise."""
     assert k.CONFIRMATION_TOKEN == f"RUN_COMMERCE_RUNTIME_{k.TARGET_REVISION}"
@@ -84,15 +95,151 @@ def test_the_declared_relations_are_the_ones_the_runtime_itself_requires():
     assert set(k.FOUNDATION_RELATIONS) == {m.CONVERSATIONS_TABLE, m.TURNS_TABLE, m.TERMINALS_TABLE}
 
 
-def test_the_target_matches_the_repository_s_application_head():
+def test_the_target_is_beyond_normal_bootstrap_and_on_the_application_chain():
+    """What this job's target must satisfy, stated as its own properties.
+
+    The test above asserts equality with ``APPLICATION_ALEMBIC_HEAD``, which
+    holds today. Equality alone is brittle, though: it couples a deliberately
+    BOUNDED component migration to every later application migration, so an
+    unrelated revision extending the chain would "fail" this job although
+    nothing about it had changed and its relation scope was still exactly
+    right. These are the properties that survive that, so both are kept.
+    """
+    import os
+    from pathlib import Path
+
+    from alembic.script import ScriptDirectory
+
     from scripts.operators.bootstrap_migration_contract import (
         APPLICATION_ALEMBIC_HEAD,
         INTEGRATION_BOOTSTRAP_TARGET,
+        REPOSITORY_ALEMBIC_HEADS,
     )
 
-    assert k.TARGET_REVISION == APPLICATION_ALEMBIC_HEAD
-    # And it is deliberately beyond what normal bootstrap applies.
+    repo = Path(__file__).resolve().parents[1]
+    prev = os.getcwd()
+    try:
+        os.chdir(repo / "database")
+        script = ScriptDirectory(str(repo / "database" / "migrations"))
+    finally:
+        os.chdir(prev)
+
+    # 1. The target is a real revision, and the job names it literally.
+    target = script.get_revision(k.TARGET_REVISION)
+    assert target is not None
+    assert k.build_upgrade_argv(python_executable="python")[-1] == k.TARGET_REVISION
+
+    # 2. It is deliberately beyond what normal bootstrap applies, which is
+    #    why an operator has to run this job at all.
     assert INTEGRATION_BOOTSTRAP_TARGET != k.TARGET_REVISION
+    bootstrap_chain = set()
+    node = script.get_revision(INTEGRATION_BOOTSTRAP_TARGET)
+    while node is not None:
+        bootstrap_chain.add(node.revision)
+        down = node.down_revision
+        node = script.get_revision(down) if isinstance(down, str) else None
+    assert k.TARGET_REVISION not in bootstrap_chain
+
+    # 3. It is ON the application chain: the application head reaches it by
+    #    ancestry, so this job never leaves a pilot database on a branch
+    #    the application does not know.
+    ancestry = set()
+    node = script.get_revision(APPLICATION_ALEMBIC_HEAD)
+    while node is not None:
+        ancestry.add(node.revision)
+        down = node.down_revision
+        node = script.get_revision(down) if isinstance(down, str) else None
+    assert k.TARGET_REVISION in ancestry
+    assert k.FOUNDATION_REVISION in ancestry
+
+    # 4. It does not traverse the parallel A1 head. That branch is not this
+    #    job's business and must not be dragged in.
+    parallel = sorted(REPOSITORY_ALEMBIC_HEADS - {APPLICATION_ALEMBIC_HEAD})
+    assert parallel, "the repository is expected to keep a parallel head"
+    for other_head in parallel:
+        assert other_head not in ancestry
+
+
+def test_revisions_after_the_target_are_outside_this_job():
+    """Later application revisions exist, and this job does not apply them.
+
+    A revision beyond the target is someone else's change. The contract
+    stays the commerce-runtime relations the module declares; the job's
+    command stops at its own target and an already-applied pilot database is
+    recognised at that target, not at whatever the application head has
+    become.
+    """
+    import os
+    from pathlib import Path
+
+    from alembic.script import ScriptDirectory
+
+    from scripts.operators.bootstrap_migration_contract import APPLICATION_ALEMBIC_HEAD
+
+    repo = Path(__file__).resolve().parents[1]
+    prev = os.getcwd()
+    try:
+        os.chdir(repo / "database")
+        script = ScriptDirectory(str(repo / "database" / "migrations"))
+    finally:
+        os.chdir(prev)
+
+    beyond = []
+    node = script.get_revision(APPLICATION_ALEMBIC_HEAD)
+    while node is not None and node.revision != k.TARGET_REVISION:
+        beyond.append(node.revision)
+        down = node.down_revision
+        node = script.get_revision(down) if isinstance(down, str) else None
+    assert node is not None, "the target must be an ancestor of the application head"
+
+    for revision in beyond:
+        assert revision not in k.build_upgrade_argv(python_executable="python")
+        assert not any(revision in frozen for frozen in k.ACCEPTED_START_REVISIONS)
+        assert k.already_applied(frozenset({revision})) is False
+    # The pilot database is "done" at the target, whatever came after it.
+    assert k.already_applied(frozenset({k.TARGET_REVISION})) is True
+
+    # And the reason the target may stop where it does: the revisions
+    # beyond it touch none of the relations this job is contracted to
+    # create, so not applying them leaves nothing of this job's undone.
+    # The relation count itself is asserted once, against the module, in
+    # the contract test above — repeating the number here only made it a
+    # second place to go stale, which is what it did.
+    versions = repo / "database" / "migrations" / "versions"
+    for revision in beyond:
+        sources = [
+            path.read_text(encoding="utf-8")
+            for path in versions.glob(f"{revision}_*.py")
+        ]
+        assert sources, f"revision {revision} has no migration file"
+        for source in sources:
+            for relation in k.RUNTIME_RELATIONS:
+                assert relation not in source, (revision, relation)
+
+    # The ledger relations arrive somewhere in the range this job applies,
+    # not necessarily at the target: the target has advanced past them to
+    # the handover revision. What the job promises is that upgrading TO the
+    # target creates them, so the walk covers the target and every revision
+    # below it down to the earliest accepted start.
+    earliest_start = min(
+        revision for accepted in k.ACCEPTED_START_REVISIONS for revision in accepted
+    )
+    applied: list[str] = []
+    node = script.get_revision(k.TARGET_REVISION)
+    while node is not None:
+        applied.append(node.revision)
+        if node.revision <= earliest_start:
+            break
+        down = node.down_revision
+        node = script.get_revision(down) if isinstance(down, str) else None
+    applied_sources = "".join(
+        path.read_text(encoding="utf-8")
+        for revision in applied
+        for path in versions.glob(f"{revision}_*.py")
+    )
+    assert applied_sources
+    for relation in k.LEDGER_RELATIONS:
+        assert relation in applied_sources, relation
 
 
 @pytest.mark.parametrize("revisions, accepted", [

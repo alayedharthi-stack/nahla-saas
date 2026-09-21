@@ -173,7 +173,13 @@ def test_repository_has_parallel_heads_0092_and_0098() -> None:
     finally:
         os.chdir(prev_cwd)
     heads = set(script.get_heads())
-    assert heads == _REPOSITORY_ALEMBIC_HEADS
+    # 0092 and the application head must both be present and unselected.
+    # Strict equality was correct while those were the only two heads; the
+    # customer-address revision 0110 is a third, a sibling of 0111 off 0109,
+    # so equality would now reject the repository's real topology. The shared
+    # contract is what decides which head sets are legitimate.
+    assert repository_heads_expected(heads)
+    assert _REPOSITORY_ALEMBIC_HEADS <= heads
 
 
 def test_migration_0088_creates_concurrent_indexes(ephemeral_validate_engine: Engine) -> None:

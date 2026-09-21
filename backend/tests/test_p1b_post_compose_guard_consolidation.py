@@ -104,6 +104,7 @@ class TestPrimaryPipelineOrderAndEvents:
             "payment_context_rewrite",
             "payment_reply_guard",
             "shipment_truth_guard",
+            "customer_address_save_claim_guard",
             "staff_escalation_truth_guard",
         ]
         mock_payment_guard.assert_called_once()

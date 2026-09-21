@@ -166,6 +166,11 @@ def persist_customer_shipping_address_if_confirmed(
         if order_id:
             existing.order_id = int(order_id)
         db.add(existing)
+        # No provenance write here: this branch matched an existing row by
+        # full-content fingerprint, so the address revision is unchanged
+        # and the customer's recorded selection still describes it. Keeping
+        # the idempotent path free of extra I/O is a contract of its own
+        # (``test_upsert_is_idempotent_on_same_external_id``).
         logger.info(
             "[CUSTOMER_SHIPPING_ADDRESS] updated tenant=%s customer=%s order=%s reason=%s",
             tenant_id,
@@ -182,6 +187,12 @@ def persist_customer_shipping_address_if_confirmed(
         **fields,
     )
     db.add(row)
+    _record_confirmed_shipping_selection(
+        db,
+        tenant_id=int(tenant_id),
+        customer_id=int(customer_id),
+        row=row,
+    )
     logger.info(
         "[CUSTOMER_SHIPPING_ADDRESS] created tenant=%s customer=%s order=%s reason=%s",
         tenant_id,
@@ -190,6 +201,60 @@ def persist_customer_shipping_address_if_confirmed(
         reason,
     )
     return True, row
+
+
+def _record_confirmed_shipping_selection(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    row: Any,
+) -> None:
+    """Label a NEWLY created confirmed-shipping address as a selection.
+
+    This path only ever writes when shipping evidence is confirmed, so the
+    row is a selection, not a candidate. Recording it keeps every address
+    under one model: a Salla profile import can never outrank an address
+    the customer actually confirmed, and the resolution below never has to
+    guess from row ids.
+
+    Rows that predate this and rows whose content matched an existing
+    revision keep no provenance and are read as legacy selections — the
+    behaviour that already exists on ``main``.
+
+    Best-effort: the address write is not rolled back when provenance
+    cannot be recorded — a row without provenance is read as a legacy
+    selection, which is the behaviour that already exists on ``main``.
+    The containment is real, not merely intended: the provenance insert is
+    EXECUTED inside a savepoint here rather than queued for the caller's
+    commit, so a rejected insert rolls back that row alone and the
+    confirmed-shipping address still commits.
+    """
+    try:
+        from core.customer_address_candidates import (  # noqa: PLC0415
+            SELECTION_SOURCE_ORDER_CONFIRMED_SHIPPING,
+            SOURCE_ORDER_CONFIRMED_SHIPPING,
+            attach_selection_provenance_contained,
+        )
+
+        attach_selection_provenance_contained(
+            db,
+            tenant_id=int(tenant_id),
+            customer_id=int(customer_id),
+            address_row=row,
+            selection_source=SELECTION_SOURCE_ORDER_CONFIRMED_SHIPPING,
+            source=SOURCE_ORDER_CONFIRMED_SHIPPING,
+        )
+    # noqa: silent-ok — provenance only LABELS an address the confirmed-shipping
+    # write already made; failing to label it must not roll that address back,
+    # and a row without provenance reads as a legacy selection.
+    except Exception:  # noqa: BLE001  # noqa: silent-ok
+        logger.debug(
+            "[CUSTOMER_SHIPPING_ADDRESS] provenance unavailable tenant=%s customer=%s",
+            tenant_id,
+            customer_id,
+            exc_info=True,
+        )
 
 
 def sync_order_shipping_layers(

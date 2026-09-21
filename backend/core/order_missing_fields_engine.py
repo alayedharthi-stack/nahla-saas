@@ -276,13 +276,22 @@ def _resolve_city_state(ctx: Any) -> MissingFieldState:
             evidence={"city": shipping.city, "locked": shipping.locked_by_merchant},
         )
     if previous and getattr(previous, "city", ""):
+        # Reaching here means ``order_prep`` does not carry a city yet —
+        # the ``shipping.city`` branch above returns first. The mode stays
+        # CONFIRM so the value is never reported as present on an order
+        # that does not hold it; the selection distinction rides in the
+        # evidence, and the value reaches ``order_prep`` through the
+        # address-confirmation / prefill paths.
+        selected = bool(getattr(previous, "explicitly_selected", False))
         return MissingFieldState(
             field="city",
             mode=MODE_CONFIRM,
-            reason="known_previous_city",
+            reason=(
+                "selected_customer_address_city" if selected else "known_previous_city"
+            ),
             source=getattr(previous, "source", "") or "customer_addresses",
             confidence=getattr(previous, "confidence", 0.5),
-            evidence={"city": previous.city},
+            evidence={"city": previous.city, "explicitly_selected": selected},
         )
     if shipping.locked_by_merchant and prefill.requires_merchant_review:
         return MissingFieldState(
@@ -353,15 +362,28 @@ def _resolve_delivery_state(ctx: Any) -> MissingFieldState:
         )
 
     if previous and _shipping_has_acceptable(previous):
+        # Same boundary as the city branch: ``order_prep`` has no accepted
+        # delivery address here, so the mode stays CONFIRM. A selected and
+        # sufficient address is what the confirmation / prefill paths
+        # promote into ``order_prep``, and the SKIP then comes from the
+        # ``shipping.accepted_delivery_address`` branch above.
+        selected = bool(getattr(previous, "explicitly_selected", False))
+        sufficient = bool(getattr(previous, "sufficient", False))
         return MissingFieldState(
             field="delivery_address",
             mode=MODE_CONFIRM,
-            reason="known_previous_delivery_address",
+            reason=(
+                "selected_customer_delivery_address"
+                if selected and sufficient
+                else "known_previous_delivery_address"
+            ),
             source=getattr(previous, "source", "") or "customer_addresses",
             confidence=getattr(previous, "confidence", 0.5),
             evidence={
                 "maps_url": bool(getattr(previous, "maps_url", "")),
                 "short_address": bool(getattr(previous, "short_address", "")),
+                "explicitly_selected": selected,
+                "sufficient": sufficient,
             },
         )
 

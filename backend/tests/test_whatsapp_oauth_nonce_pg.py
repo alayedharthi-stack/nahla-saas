@@ -41,6 +41,7 @@ from core.whatsapp_oauth_nonce import (  # noqa: E402
     persist_oauth_nonce,
 )
 from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
+    ADDRESS_ALEMBIC_HEAD,
     APPLICATION_ALEMBIC_HEAD,
     INTEGRATION_BOOTSTRAP_TARGET,
     REPOSITORY_ALEMBIC_HEADS,
@@ -93,6 +94,7 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert "down_revision = (\"0092\"" not in source
     assert "down_revision = ('0092'" not in source
     assert APPLICATION_ALEMBIC_HEAD == "0111"
+    assert ADDRESS_ALEMBIC_HEAD == "0110"
     assert repository_heads_expected(REPOSITORY_ALEMBIC_HEADS)
     assert INTEGRATION_BOOTSTRAP_TARGET == "0093"
     prev = os.getcwd()
@@ -107,7 +109,10 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         rev_0107 = script.get_revision("0107")
         rev_0108 = script.get_revision("0108")
         rev_0109 = script.get_revision("0109")
-        rev_0110 = script.get_revision("0111")
+        # Two siblings off 0109, neither an ancestor of the other: the
+        # address revision and the commerce-runtime handover revision.
+        rev_0110 = script.get_revision("0110")
+        rev_0111 = script.get_revision("0111")
     finally:
         os.chdir(prev)
     assert repository_heads_expected(heads)
@@ -135,9 +140,19 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert rev_0109 is not None
     assert rev_0109.down_revision == "0108"
     assert not isinstance(rev_0109.down_revision, tuple)
+    # 0110 (customer address provenance) and 0111 (commerce runtime
+    # handover) each extend 0109 linearly. They are siblings: neither may
+    # merge the abandoned 0092 branch, open a further head, or depend on
+    # the other. Asserting only one of them would leave the pair's
+    # independence unstated, which is the property this integration rests
+    # on.
     assert rev_0110 is not None
     assert rev_0110.down_revision == "0109"
     assert not isinstance(rev_0110.down_revision, tuple)
+    assert rev_0111 is not None
+    assert rev_0111.down_revision == "0109"
+    assert not isinstance(rev_0111.down_revision, tuple)
+    assert rev_0110.revision != rev_0111.revision
 
 
 def _pg_required() -> bool:
