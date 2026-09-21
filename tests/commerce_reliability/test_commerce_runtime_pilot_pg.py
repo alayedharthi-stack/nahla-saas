@@ -809,6 +809,83 @@ def test_a_bundle_beyond_the_remaining_tool_budget_is_stopped_with_its_numbers(p
         "limit": "max_tool_calls", "remaining": "3", "requested": "4"}
 
 
+# ── The merchant's shareable coupons are read, never invented ─────────────────
+
+
+@contextlib.contextmanager
+def _coupons(pilot: "Pilot", rows: Tuple[Tuple[int, str, Optional[str]], ...]) -> Any:
+    """Coupon rows ``(tenant_id, code, allocation_channel)`` for one case, removed afterwards."""
+    ids: List[int] = []
+    with pilot.engine.begin() as conn:
+        for tenant_id, code, channel in rows:
+            ids.append(int(conn.execute(
+                text("INSERT INTO coupons (tenant_id, code, description, discount_type, "
+                     "discount_value, source_type, allocation_channel) "
+                     "VALUES (:t, :c, :d, 'percentage', '10', 'manual', :ch) RETURNING id"),
+                {"t": tenant_id, "c": code, "d": "خصم ترحيبي", "ch": channel}).scalar_one()))
+    try:
+        yield ids
+    finally:
+        with pilot.engine.begin() as conn:
+            for coupon_id in ids:
+                conn.execute(text("DELETE FROM coupons WHERE id = :c"), {"c": coupon_id})
+
+
+def _two_step_budget() -> ac.LoopBudget:
+    """One tool step and one reply step: a refused reply ends the turn instead
+    of being fed back for another attempt this case does not script."""
+    return ac.LoopBudget(max_steps=2, max_tool_calls=4, tool_timeout_seconds=10.0,
+                         provider_timeout_seconds=15.0, deadline_seconds=45.0)
+
+
+def test_a_shareable_coupon_is_read_from_the_merchant_s_own_records_and_cited(pilot):
+    """The owner's decision after the first Tenant 1 conversation: the model can
+    read the merchant's currently valid coupons and hand one to the customer.
+    Read only — the row is the merchant's, the code is never invented."""
+    with _coupons(pilot, ((pilot.tenant_a, "WELCOME10", None),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([accepted("wamid.COUPON")])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("عندنا كود خصم لأول طلب", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟",
+        )
+    assert report.tools_called == ("list_shareable_promotions",)
+    assert ref in report.evidence_refs
+    assert report.dispatch_status == dd.SENT_ACCEPTED and len(transport.sent) == 1
+
+
+def test_a_campaign_only_coupon_is_never_evidence_the_model_can_cite(pilot):
+    """A code pinned to a campaign channel is not shareable here: the tool does
+    not return it, so a reply citing it is refused before any send."""
+    with _coupons(pilot, ((pilot.tenant_a, "EMAILONLY", "campaign"),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("خذ هذا الكود", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.tools_called == ("list_shareable_promotions",)
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unknown_evidence" in dict(report.stop_detail)["problems"]
+    assert transport.sent == [] and report.processing_outcome == c.ProcessingOutcome.FAILED.value
+
+
+def test_another_tenant_s_coupon_is_never_read_here(pilot):
+    with _coupons(pilot, ((pilot.tenant_b, "OTHERSTORE", None),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("خذ هذا الكود", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unknown_evidence" in dict(report.stop_detail)["problems"]
+    assert transport.sent == []
+
+
 # ── The history belongs to this conversation (F7) ────────────────────────────
 
 

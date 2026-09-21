@@ -22,6 +22,8 @@ EvidenceSource = Literal[
     "order_summary",
     "order_details",
     "order_shipment",
+    "promotion_coupon",
+    "promotion_offer",
 ]
 FactKind = Literal[
     "product_name",
@@ -123,6 +125,42 @@ class KnowledgeSectionSnapshot(BaseModel):
     body: str
     linked_product_ids: list[int] = Field(default_factory=list)
     evidence_ref: str
+
+
+class PromotionSnapshot(BaseModel):
+    """Customer-safe projection of one currently valid, shareable promotion.
+
+    Sourced from ``promotion_truth.resolve_shareable_promotions``: a coupon
+    the merchant may hand out on this channel, or an offer's terms. An offer
+    never carries a code, and no code is ever invented. Whether the customer
+    in the conversation qualifies is not determined here, and the projection
+    says so.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    promotion_id: int = Field(gt=0)
+    record_kind: Literal["coupon", "offer"]
+    code: str = ""
+    name: str = ""
+    description: str = ""
+    discount_type: str = ""
+    discount_value: str = ""
+    expires_at: str = ""
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    eligibility_determined: bool = False
+    eligibility_note: str = ""
+    evidence_ref: str
+
+
+class PromotionListResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: ToolStatus
+    promotions: list[PromotionSnapshot] = Field(default_factory=list)
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    query_outcome: str = ""
+    failure_reason: str | None = None
 
 
 class CatalogSearchResult(BaseModel):

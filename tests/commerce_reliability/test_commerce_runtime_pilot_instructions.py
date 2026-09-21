@@ -67,8 +67,19 @@ def test_every_tool_the_instructions_tell_the_model_to_call_is_declared():
     assert missing == [], missing
 
 
-def test_the_declared_read_tools_are_exactly_the_names_the_instructions_use():
-    assert set(alt.LIVE_TOOL_NAMES) == set(pi.INSTRUCTION_TOOL_NAMES)
+# The one read tool the registry declares beyond the names the instructions
+# use: the owner-approved read of the merchant's shareable promotions. The
+# model discovers it from its declaration; the instructions are not edited.
+PILOT_ONLY_READ_TOOLS = frozenset({"list_shareable_promotions"})
+
+
+def test_every_tool_the_instructions_name_is_declared_and_nothing_else_is_unaccounted_for():
+    """The contract in both directions: a tool the instructions name must exist
+    in the registry (a rename on one side leaves the model calling nothing),
+    and a tool the registry declares beyond those names must be one this
+    module lists on purpose, never an accidental exposure."""
+    assert set(pi.INSTRUCTION_TOOL_NAMES) <= set(alt.LIVE_TOOL_NAMES)
+    assert set(alt.LIVE_TOOL_NAMES) - set(pi.INSTRUCTION_TOOL_NAMES) == PILOT_ONLY_READ_TOOLS
 
 
 def test_the_reply_channel_is_both_declared_and_described():

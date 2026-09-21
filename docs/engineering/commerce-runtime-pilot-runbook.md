@@ -890,6 +890,11 @@ as well as through the ledger.
 
 * It sends one text reply per turn — no rich, interactive or template message.
 * It performs **no** commerce write: no order, payment, cancellation or coupon.
+  It **reads** the merchant's currently valid, shareable coupons and offers through
+  `list_shareable_promotions` (the platform's promotion-truth resolver: campaign-only,
+  expired, disabled and exhausted codes are never returned, no code is ever invented,
+  and whether the customer qualifies is reported as not determined); it creates,
+  assigns or redeems none.
 * It records no delivery or read receipt, so `customer_reach` stays `unknown`
   even for an accepted send.
 * It has no reconciliation worker: an uncertain send is left uncertain rather
