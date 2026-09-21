@@ -313,6 +313,52 @@ SELECT r.* FROM commerce_runtime_delivery_receipts r
   WHERE a.sequence_id = :sequence_id ORDER BY r.receipt_no;
 ```
 
+### 4.1 Reading a whole trial
+
+Those three queries answer for one turn. After a trial — a set of scenarios
+across several handsets — the same rows have to be read for every turn at once
+and judged, which is what this job does:
+
+```bash
+COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST=<the pilot's tenant id> \
+  python -m scripts.operators.commerce_runtime_trial_evidence \
+    --since 2026-09-21T06:00:00Z
+```
+
+It reads only the allowlisted tenants' live namespace, using one repeatable-read,
+read-only transaction. The window selects admitted turns and effect/deferred-row
+creation times; related outcomes are their current state in that snapshot,
+not their historical state at the end of the window. Shadow work is excluded.
+It masks recipients and message ids so the report
+can leave the machine. Per turn it prints the terminal, how many reply intents
+were reserved, how many sends were accepted and which receipt kinds exist.
+Then it judges a closed set of claims, each as `proven`, `refused` — with the
+offending turns named — or `not_observed`:
+
+| Claim | Refused when |
+| --- | --- |
+| `every_admitted_turn_reached_a_terminal` | a turn has no terminal: a customer owed an answer or an honest record |
+| `at_most_one_reply_intent_per_turn` | one inbound reserved a second reply |
+| `at_most_one_accepted_send_per_reply_intent` | one intent was accepted twice |
+| `no_unknown_send_was_reported_completed` | an `unknown` send was recorded as a completed turn |
+| `customer_reach_is_never_claimed_without_a_receipt` | `customer_reach=reached` with no `delivered`/`read` receipt behind it |
+| `no_commerce_write_was_reserved` | an effect was reserved; the pilot has no commerce-write tool |
+| `every_deferred_inbound_is_accounted_for` | an inbound is still pending or its resolution/disposition state is inconsistent |
+
+Normal runtime handling writes `state=resolved` with a null `disposition`;
+only operator handling writes `state=disposed` with a supported disposition.
+The report accepts both forms and does not equate accounting (including an
+`unanswered` disposition) with customer delivery. It checks each reply intent's
+recorded acceptances separately; an unsent intent cannot offset a duplicate
+acceptance on another intent. Failure to establish the read-only transaction
+stops the job before any trial query runs.
+
+`not_observed` is a real answer, not a pass: a window with no turns proves
+nothing, and the report says so rather than reading clean. The exception is a
+claim *about absence* — no commerce write was reserved — which a read that
+found no row does establish. `RESULT=REFUSED` (exit 1) means at least one claim
+was contradicted by the rows.
+
 ---
 
 ## 5. Handover and rollback

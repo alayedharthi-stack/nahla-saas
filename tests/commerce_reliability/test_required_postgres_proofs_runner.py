@@ -196,6 +196,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    # either list would silently stop requiring one of them.
                    "commerce_runtime_pilot", "commerce_runtime_handover_migration",
                    "commerce_runtime_pilot_handover_controls",
+                   "commerce_runtime_trial_evidence",
                    "runner_connection_regressions",
                    "salla_customer_address_candidates"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
@@ -210,6 +211,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "commerce_runtime_pilot": ("proof", harness_env),
         "commerce_runtime_handover_migration": ("proof", harness_env),
         "commerce_runtime_pilot_handover_controls": ("proof", harness_env),
+        "commerce_runtime_trial_evidence": ("proof", harness_env),
         "runner_connection_regressions": ("runner_regression", harness_env),
         "salla_customer_address_candidates": ("proof", {"LEGACY_MIG_PG_TEST_DATABASE_URL": None}),
     }
