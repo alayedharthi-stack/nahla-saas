@@ -51,14 +51,14 @@ def test_upload_template_header_is_tenant_scoped_and_attached(mock_client_factor
     assert result["image_url"].startswith(
         "https://media.example/template-headers/7/"
     )
-    assert result["image_url"].endswith(".webp")
-    assert result["content_type"] == "image/webp"
+    assert result["image_url"].endswith(".png")
+    assert result["content_type"] == "image/png"
     assert result["size_bytes"] > 0
 
     kwargs = client.put_object.call_args.kwargs
     assert kwargs["Bucket"] == "nahlah-media"
     assert kwargs["Key"].startswith("template-headers/7/")
-    assert kwargs["ContentType"] == "image/webp"
+    assert kwargs["ContentType"] == "image/png"
     assert kwargs["Metadata"] == {
         "tenant-id": "7",
         "status": "attached",

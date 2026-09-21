@@ -1528,6 +1528,14 @@ export interface Translations {
       saving: string
       changeImage: string
       imageUploading: string
+      headerTypeLabel: string
+      headerNone: string
+      headerText: string
+      headerImage: string
+      uploadImage: string
+      imageRequired: string
+      imageValidationError: string
+      managedHeaderHint: string
       imageUploadHint: string
       imageUploadFailed: string
       headerPlaceholder: string
