@@ -138,7 +138,7 @@ EVIDENCE_QUERIES = {
         "SELECT cp.id, cp.metadata->>'discount_pct' AS meta_discount_pct, cp.metadata->>'used' AS meta_used, "
         "cp.metadata->>'salla_synced' AS meta_salla_synced, cp.metadata->>'sync_direction' AS meta_sync_direction, "
         "cp.metadata->>'sync_status' AS meta_sync_status, cp.metadata->>'target_segment' AS meta_target_segment, "
-        "cp.metadata->>'source' AS meta_source, cp.metadata->>'category' AS meta_category, cp.starts_at "
+        "cp.metadata->>'source' AS meta_source, cp.metadata->>'category' AS meta_category "
         "FROM coupons cp WHERE cp.tenant_id = 1 AND cp.id = ANY(:coupon_ids) ORDER BY cp.id"),
     "products_cited_raw_fields": (
         "SELECT p.id, p.metadata->>'in_stock' AS meta_in_stock, p.metadata->>'stock_qty' AS meta_stock_qty, "
@@ -150,7 +150,7 @@ EVIDENCE_QUERIES = {
         "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
     "personal_codes_of_this_conversations_customer": (
         "SELECT cp.id, left(cp.code, 2) || repeat('*', greatest(length(cp.code) - 2, 0)) AS code_masked, "
-        "cp.expires_at, cp.starts_at, cp.source_type, cp.coupon_level, cp.allocation_channel, cp.discount_type, "
+        "cp.expires_at, cp.source_type, cp.coupon_level, cp.allocation_channel, cp.discount_type, "
         "cp.metadata->>'active' AS meta_active, cp.metadata->>'used' AS meta_used, "
         "cp.metadata->>'usage_limit' AS meta_usage_limit, cp.metadata->>'usage_count' AS meta_usage_count, "
         "cp.metadata->>'status' AS meta_status, cp.metadata->>'issued_channel' AS meta_issued_channel, "
