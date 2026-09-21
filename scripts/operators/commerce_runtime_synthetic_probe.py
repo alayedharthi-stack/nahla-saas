@@ -48,6 +48,7 @@ expectation; 2 usage or environment; 3 the probe itself failed.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import json
 import logging
@@ -56,7 +57,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 for _entry in (str(APP_ROOT), str(APP_ROOT / "backend"), str(APP_ROOT / "database")):
@@ -224,14 +225,26 @@ def drop_database(admin_dsn: str, name: str) -> None:
         admin.dispose()
 
 
+def alembic_config(dsn: str) -> Any:
+    """The migration configuration, built in code rather than read from
+    ``alembic.ini``. The ini carries a logging section that ``env.py`` installs
+    with ``fileConfig`` whenever a config file is named, and that call disables
+    every logger created before it — the sanitiser's among them when the probe
+    runs in a process that has already imported it. The probe measures that
+    logger, so its migration leaves the process's logging alone."""
+    from alembic.config import Config
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(APP_ROOT / "database" / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", dsn)
+    return cfg
+
+
 def migrate(dsn: str, revision: str = REVISION) -> None:
     """Run the repository's own migration chain against the disposable database."""
     from alembic import command
-    from alembic.config import Config
 
-    cfg = Config(str(APP_ROOT / "database" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(APP_ROOT / "database" / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", dsn)
+    cfg = alembic_config(dsn)
     previous_cwd, previous_url = os.getcwd(), os.environ.get("DATABASE_URL")
     os.chdir(APP_ROOT / "database")
     os.environ["DATABASE_URL"] = dsn
@@ -276,6 +289,9 @@ class SimulatedTransport:
                                body={"messages": [{"id": f"synthetic-{self.case}-{self.calls}"}]})
 
 
+SANITIZER_LOGGER = "nahla.security.outbound_sanitizer"
+
+
 class SanitizerLogCapture(logging.Handler):
     """Collects the sanitiser's audit and block lines for one case."""
 
@@ -290,6 +306,28 @@ class SanitizerLogCapture(logging.Handler):
             self.audit.append(message)
         if "[EXTERNAL_RESEARCH_BLOCKED]" in message:
             self.blocked.append(message)
+
+
+@contextlib.contextmanager
+def capturing_sanitizer_log() -> Iterator[SanitizerLogCapture]:
+    """The sanitiser's audit and block lines for one case, whatever the
+    process's logging configuration did to that logger before the case: the
+    audit line is INFO and the logger may sit at WARNING, or a ``fileConfig``
+    elsewhere in the process may have disabled it, and either would make the
+    probe report a silent sanitiser that did speak. Level, enablement and the
+    handler are restored afterwards."""
+    capture = SanitizerLogCapture()
+    logger = logging.getLogger(SANITIZER_LOGGER)
+    previous_level, previously_disabled = logger.level, logger.disabled
+    logger.setLevel(logging.INFO)
+    logger.disabled = False
+    logger.addHandler(capture)
+    try:
+        yield capture
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(previous_level)
+        logger.disabled = previously_disabled
 
 
 # ── Scripted provider (model-free self-test) ─────────────────────────────────
@@ -363,13 +401,6 @@ def run_case(*, engine: Any, session_factory: Any, seed: Seed, case: Case, provi
     from core.outbound_sanitizer import url_hosts
 
     provider_message_id = f"wamid.synthetic.{case.name}.{uuid.uuid4().hex}"
-    capture = SanitizerLogCapture()
-    sanitizer_logger = logging.getLogger("nahla.security.outbound_sanitizer")
-    # The audit line is INFO; the process may run at WARNING, so the level is
-    # lowered for the case and restored afterwards.
-    previous_level = sanitizer_logger.level
-    sanitizer_logger.setLevel(logging.INFO)
-    sanitizer_logger.addHandler(capture)
     transport = SimulatedTransport(tenant_id=seed.tenant_id, case=case.name)
     anthropic_provider = ScriptedAnthropic(scripted_answers(case, seed)) if provider == PROVIDER_SCRIPTED else None
 
@@ -386,14 +417,11 @@ def run_case(*, engine: Any, session_factory: Any, seed: Seed, case: Case, provi
             anthropic_provider=anthropic_provider,
         )
 
-    try:
+    with capturing_sanitizer_log() as capture:
         report = turn(transport)
         # The same inbound again, exactly as a provider retry would deliver it.
         replay_transport = SimulatedTransport(tenant_id=seed.tenant_id, case=case.name + "-replay")
         replay = turn(replay_transport)
-    finally:
-        sanitizer_logger.removeHandler(capture)
-        sanitizer_logger.setLevel(previous_level)
 
     fields = report.as_log_fields()
     fields["reply_text"] = report.reply_text

@@ -5,6 +5,7 @@ scripted answers and the usage contract. The end-to-end run on PostgreSQL is
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -130,3 +131,37 @@ def test_an_unknown_case_name_is_a_usage_error(monkeypatch, capsys) -> None:
     monkeypatch.setenv(probe.ADMIN_DSN_ENV, "postgresql://u:p@localhost:1/postgres")
     assert probe.main(["--provider", "scripted", "--cases", "nope"]) == probe.EXIT_USAGE
     assert "nope" in capsys.readouterr().err
+
+
+# ── Measuring the sanitiser ──────────────────────────────────────────────────
+
+
+def test_the_capture_hears_a_disabled_sanitiser_logger_and_restores_it() -> None:
+    """September 2026: alembic's ``fileConfig``, run earlier in the same process
+    by another suite's migration, had disabled the sanitiser's logger, and the
+    probe reported zero audit lines for a listing the sanitiser had audited."""
+    logger = logging.getLogger(probe.SANITIZER_LOGGER)
+    previous_level, previously_disabled = logger.level, logger.disabled
+    logger.setLevel(logging.WARNING)
+    logger.disabled = True
+    try:
+        with probe.capturing_sanitizer_log() as capture:
+            logger.info("[OUTBOUND_URL_AUDIT] tenant=7 to=+********01 url_count=4 hosts=demo-probe.example-store.sa")
+            logger.warning("[EXTERNAL_RESEARCH_BLOCKED] tenant=7 marker=sources_header")
+            logger.info("an unrelated line")
+        assert len(capture.audit) == 1 and len(capture.blocked) == 1
+        assert logger.disabled is True and logger.level == logging.WARNING
+        assert capture not in logger.handlers
+    finally:
+        logger.setLevel(previous_level)
+        logger.disabled = previously_disabled
+
+
+def test_the_probe_s_migration_names_no_config_file_so_env_py_installs_no_logging() -> None:
+    """``env.py`` runs ``fileConfig`` only when a config file is named; that call
+    disables every logger created before it, the sanitiser's included."""
+    dsn = "postgresql://user:secret@127.0.0.1:5433/nahla_probe"
+    cfg = probe.alembic_config(dsn)
+    assert cfg.config_file_name is None
+    assert cfg.get_main_option("script_location") == str(probe.APP_ROOT / "database" / "migrations")
+    assert cfg.get_main_option("sqlalchemy.url") == dsn
