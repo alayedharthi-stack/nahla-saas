@@ -15,11 +15,8 @@ Code format (source of truth)
     regex    : ^NH[A-Z0-9]{3}$
     examples : NH4K7, NH3A9, NH7K2
 
-This gives 36^3 = 46,656 codes. The database enforces a **global**
-``UNIQUE (code)`` on ``coupons`` (``coupons_code_key``), so that space is
-shared across every tenant, not per tenant - reservation is global too
-(see ``CouponGeneratorService._reserved_codes``). At realistic platform
-volumes there is still enough headroom that collision retries are rare.
+This gives 36^3 = 46,656 codes per tenant - enough headroom that collision
+retries are effectively free.
 
 Legacy ``NHL\\d{3}`` codes from before this fix are grandfathered:
   - They are recognised by ``_is_short_coupon_code`` so existing reporting
@@ -213,9 +210,9 @@ def _next_short_code(reserved_codes: set[str], *, max_attempts: int = 200) -> st
     ``reserved_codes`` is mutated in-place — the caller's set stays up-to-date
     across multiple calls in the same batch.
 
-    Raises :class:`CouponPoolExhausted` after ``max_attempts`` failures. The
-    46,656 codes are shared platform-wide (global ``UNIQUE (code)``), so this
-    is a guard against runaway loops once the shared space gets crowded.
+    Raises :class:`CouponPoolExhausted` after ``max_attempts`` failures. With
+    46,656 total codes and typical pool sizes << 1000 this should never fire
+    in practice — it's a guard against runaway loops in pathological cases.
     """
     for _ in range(max_attempts):
         code = _random_short_code()
@@ -377,36 +374,10 @@ class CouponGeneratorService:
         self._last_pool_outcomes: Dict[str, str] = {}
 
     def _reserved_codes(self) -> set[str]:
-        """Codes that a newly generated short code must not collide with.
-
-        The uniqueness scope here is dictated by the database, not by the
-        ORM model. ``coupons`` carries a **global** ``UNIQUE (code)``
-        constraint (``coupons_code_key``, created by
-        ``0001_initial_schema`` and never dropped), even though
-        ``database/models.py`` only declares the narrower
-        ``UNIQUE (tenant_id, code)``. Reserving per tenant therefore lets
-        tenant B draw a short code tenant A already owns: the remote
-        provider coupon is created, the local INSERT trips
-        ``coupons_code_key``, and the service has to compensate and retry —
-        one wasted provider create per collision, and an orphaned remote
-        coupon whenever compensation fails.
-
-        So the reserved set is every ``NH``-prefixed code platform-wide.
-        The prefix bound is not a shortcut that drops real collisions: both
-        issued formats (``NH***`` and legacy ``NHL###``) start with ``NH``,
-        so a merchant code without that prefix can never equal a value this
-        generator produces. It also keeps the read cheap — the prefix range
-        is served by the ``coupons_code_key`` index, whereas the previous
-        ``tenant_id`` filter had no index and always sequentially scanned
-        ``coupons``.
-
-        The returned set is an exclusion set only. Codes belonging to other
-        tenants are never surfaced to this tenant — they are compared
-        against and discarded inside ``_next_short_code``.
-        """
+        """All existing coupon codes for this tenant (both new and legacy)."""
         rows = (
             self.db.query(Coupon.code)
-            .filter(Coupon.code.like(f"{SHORT_CODE_PREFIX}%"))
+            .filter(Coupon.tenant_id == self.tenant_id)
             .all()
         )
         return {str(code or "").strip().upper() for (code,) in rows if code}
