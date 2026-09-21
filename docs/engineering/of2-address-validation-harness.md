@@ -505,12 +505,21 @@ provider error, an injected provider timeout, the outer-guard recovery,
 and a two-turn continuation whose second turn replays an action id read
 back off the first turn's captured payload.
 
-**Two things are substituted, and neither is on the path under test:**
-the sandbox attestation preflight, which asserts facts about an
-operator's environment rather than about the address path, and the model
-provider, which must not be called from an offline test. The provider is
-replaced *below* the adapter — patching `generate_ai_reply` would replace
-the very function that records the model-bound call.
+**Three things are substituted in the offline suite, and none is on the
+path under test:** the sandbox attestation preflight, which asserts facts
+about an operator's environment rather than about the address path; the
+model provider, which must not be called from an offline test (replaced
+*below* the adapter — patching `generate_ai_reply` would replace the very
+function that records the model-bound call); and the **WhatsApp
+conversation quota**, which `tests/conftest.py` stubs allow for the whole
+suite with an autouse patch of `core.wa_usage.check_limit`.
+
+That quota stub is repository-wide and predates this work, but it means
+the narrower claim — every permission and quota gate is real — is **not**
+true of the offline suite. Billing access, store mode, the OrderFlowV2
+operational gate, commerce permissions and the pre-Brain ownership rule
+are genuinely exercised; the conversation quota is not. A live run does
+not carry the stub, so the quota applies there.
 
 **What offline execution still does not establish:** that Meta renders
 these payloads, that a handset receives them, that list and button

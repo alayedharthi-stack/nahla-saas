@@ -2253,6 +2253,39 @@ def test_the_preflight_stops_at_the_first_failing_layer(order_flow_v2_live):
 # ── C1: selection is consumption, refusal has an author ───────────────────
 
 
+def _selection(**over):
+    """A complete, genuinely consumed selection.
+
+    Every link the producer now establishes: the showing existed, the
+    writer published an operation for THIS turn naming this address at
+    the shown revision, and the durable row carries that operation's own
+    reference.
+    """
+    base = {
+        "consumed_action_id": "nahla_addr_select:offer:7",
+        "action_offer_id": "offer",
+        "action_address_id": "7",
+        "showing_exists": True,
+        "offer_identity": "offer",
+        "shown_fingerprint": "fp-7",
+        "operation": "adopt_selection",
+        "operation_ref": "offer:",
+        "operation_address_id": "7",
+        "operation_fingerprint": "fp-7",
+        "operation_recorded": True,
+        "operation_observed_in_turn": True,
+        "selected_address_id": "7",
+        "selection_state": "selected",
+        "selected_fingerprint": "fp-7",
+        "selection_source": "customer_confirmed",
+        "selection_operation_ref": "offer:",
+        "selection_matches_action": True,
+        "selection_scope_verified": True,
+    }
+    base.update(over)
+    return base
+
+
 def _result_blockers(**kw):
     from services.internal_conversational_e2e_harness import (  # noqa: PLC0415
         _operational_result_blockers,
@@ -2264,17 +2297,7 @@ def _result_blockers(**kw):
         captured=False,
         address_turn={},
         state_delta={"conversation_metadata_fingerprint": {"before": "a", "after": "b"}},
-        selection={
-            "consumed_action_id": "nahla_addr_select:offer:7",
-            "action_offer_id": "offer",
-            "action_address_id": "7",
-            "selected_address_id": "7",
-            "selection_state": "selected",
-            "selected_fingerprint": "fp-7",
-            "selection_source": "customer_confirmed",
-            "selection_matches_action": True,
-            "selection_scope_verified": True,
-        },
+        selection=_selection(),
         refusal={"gate": "", "reason": "", "observed": False},
     )
     base.update(kw)
@@ -2294,17 +2317,17 @@ def test_an_unrelated_metadata_change_is_not_a_selection():
     """
     blockers = _result_blockers(
         state_delta={"diagnostic_unrelated_counter": {"before": 0, "after": 1}},
-        selection={
-            "consumed_action_id": "",
-            "action_offer_id": "",
-            "action_address_id": "",
-            "selected_address_id": "",
-            "selection_state": "",
-            "selected_fingerprint": "",
-            "selection_source": "",
-            "selection_matches_action": False,
-            "selection_scope_verified": False,
-        },
+        selection=_selection(
+            consumed_action_id="",
+            showing_exists=False,
+            shown_fingerprint="",
+            operation_recorded=False,
+            operation_observed_in_turn=False,
+            selection_state="",
+            selected_fingerprint="",
+            selection_matches_action=False,
+            selection_scope_verified=False,
+        ),
     )
     assert "structured_selection_action_not_consumed" in blockers
     assert "structured_selection_not_durably_recorded" in blockers
@@ -2314,69 +2337,41 @@ def test_an_unrelated_metadata_change_is_not_a_selection():
 def test_an_unconsumed_action_is_refused():
     """The action was supplied but the runtime never resolved it."""
     blockers = _result_blockers(
-        selection={
-            "consumed_action_id": "",
-            "action_offer_id": "",
-            "action_address_id": "",
-            "selected_address_id": "",
-            "selection_state": "",
-            "selected_fingerprint": "",
-            "selection_source": "",
-            "selection_matches_action": False,
-            "selection_scope_verified": False,
-        }
+        selection=_selection(consumed_action_id="", selection_matches_action=False)
     )
     assert "structured_selection_action_not_consumed" in blockers
 
 
 def test_selecting_a_different_address_than_the_action_named_is_refused():
     blockers = _result_blockers(
-        selection={
-            "consumed_action_id": "nahla_addr_select:offer:7",
-            "action_offer_id": "offer",
-            "action_address_id": "7",
+        selection=_selection(
             # A different address was recorded as selected.
-            "selected_address_id": "9",
-            "selection_state": "selected",
-            "selected_fingerprint": "fp-9",
-            "selection_source": "customer_confirmed",
-            "selection_matches_action": False,
-            "selection_scope_verified": True,
-        }
+            selected_address_id="9",
+            selected_fingerprint="fp-9",
+            selection_matches_action=False,
+        )
     )
-    assert blockers == ["structured_selection_address_mismatch"]
+    assert "structured_selection_address_mismatch" in blockers
+    assert "structured_selection_revision_mismatch" in blockers
 
 
 def test_a_selection_outside_this_customers_scope_is_refused():
     blockers = _result_blockers(
-        selection={
-            "consumed_action_id": "nahla_addr_select:offer:7",
-            "action_offer_id": "offer",
-            "action_address_id": "7",
-            "selected_address_id": "7",
-            "selection_state": "selected",
-            "selected_fingerprint": "fp-7",
-            "selection_source": "customer_confirmed",
-            "selection_matches_action": False,
-            "selection_scope_verified": False,
-        }
+        selection=_selection(
+            selection_matches_action=False, selection_scope_verified=False
+        )
     )
     assert "structured_selection_scope_unverified" in blockers
 
 
 def test_a_candidate_that_was_never_selected_is_refused():
     blockers = _result_blockers(
-        selection={
-            "consumed_action_id": "nahla_addr_select:offer:7",
-            "action_offer_id": "offer",
-            "action_address_id": "7",
-            "selected_address_id": "7",
-            "selection_state": "candidate",
-            "selected_fingerprint": "",
-            "selection_source": "",
-            "selection_matches_action": False,
-            "selection_scope_verified": True,
-        }
+        selection=_selection(
+            selection_state="candidate",
+            selected_fingerprint="",
+            selection_source="",
+            selection_matches_action=False,
+        )
     )
     assert "structured_selection_not_durably_recorded" in blockers
 
@@ -2887,3 +2882,257 @@ def test_run_session_reports_a_fixture_divergence_instead_of_a_quiet_pass(
         for d in report["divergences"]
     }
     assert layers == {"channel"}
+
+
+# ── C1: the PRODUCER must refuse, not just the validator ──────────────────
+#
+# The negative tests above hand the validator their own flags, so they
+# cannot detect a producer that sets those flags optimistically — which is
+# exactly the defect the last review found. Everything below drives the
+# REAL producer, ``_selection_evidence``, through ``run_sandbox_of2_turn``
+# against real persisted state, and reads the verdict it generates.
+
+
+def _selection_probe(
+    *,
+    db,
+    tenant,
+    phone,
+    fixture,
+    button_id,
+    handler,
+    label,
+):
+    """One structured-selection turn, judged by the real producer."""
+    import hashlib  # noqa: PLC0415
+
+    from services.internal_conversational_e2e_harness import (  # noqa: PLC0415
+        run_sandbox_of2_turn,
+    )
+
+    def _probe(dbx, tenant_id, convo):
+        dbx.expire_all()
+        dbx.refresh(convo)
+        metadata = dict(getattr(convo, "extra_metadata", None) or {})
+        return {
+            "conversation_metadata_fingerprint": "sha256:"
+            + hashlib.sha256(
+                json.dumps(metadata, sort_keys=True, default=str).encode()
+            ).hexdigest()
+        }
+
+    return asyncio.run(
+        run_sandbox_of2_turn(
+            db=db,
+            request=_entrypoint_request(
+                tenant=tenant,
+                convo=fixture.conversation,
+                phone=phone,
+                text="اختيار العنوان",
+                meta=_interactive(button_id),
+                label=label,
+                expects_address_turn=False,
+                expected_operational_result="structured_selection",
+                expected_state_delta_keys=("conversation_metadata_fingerprint",),
+                state_probe=_probe,
+            ),
+            handler=handler,
+        )
+    ).evidence
+
+
+def _counter_bump_handler(db, fixture):
+    """Runs no owner, consumes no showing, selects nothing, sends nothing."""
+
+    async def _handler(*args, **kwargs):
+        convo = fixture.conversation
+        metadata = dict(convo.extra_metadata or {})
+        metadata["diagnostic_unrelated_counter"] = (
+            int(metadata.get("diagnostic_unrelated_counter") or 0) + 1
+        )
+        convo.extra_metadata = metadata
+        db.add(convo)
+        db.commit()
+
+    return _handler
+
+
+def test_an_action_naming_no_showing_is_refused_by_the_producer(order_flow_v2_live):
+    """A previously selected address does not answer an invented showing.
+
+    The reviewed producer parsed the identifier, then accepted any row
+    already marked ``selected`` for that address. A customer whose
+    address had been selected on an earlier turn therefore produced a
+    clean PASS from a handler that ran no owner and sent nothing.
+    """
+    from services.internal_conversational_e2e_of2_fixtures import (  # noqa: PLC0415
+        STATE_ACCEPTED_PENDING_CITY,
+        prepare_of2_scenario_fixture,
+    )
+
+    db, tenant, phone = _live_sandbox()
+    fixture = prepare_of2_scenario_fixture(
+        db,
+        tenant_id=tenant.id,
+        customer_phone=phone,
+        scenario_id="stale",
+        session_id=str(uuid.uuid4()),
+        state=STATE_ACCEPTED_PENDING_CITY,
+    )
+    # The fixture really did leave an address selected before the turn.
+    assert fixture.accepted_address_id
+
+    evidence = _selection_probe(
+        db=db,
+        tenant=tenant,
+        phone=phone,
+        fixture=fixture,
+        button_id=f"nahla_addr_select:NEVER_OFFERED:{fixture.accepted_address_id}",
+        handler=_counter_bump_handler(db, fixture),
+        label="stale",
+    )
+
+    assert evidence["verdict"] == "fail"
+    assert "structured_selection_showing_unknown" in evidence["blockers"]
+    assert "structured_selection_operation_not_recorded" in evidence["blockers"]
+    assert "structured_selection_address_mismatch" in evidence["blockers"]
+
+    chosen = evidence["selection_evidence"]
+    # The producer itself reports the absence — these are not flags the
+    # test supplied.
+    assert chosen["showing_exists"] is False
+    assert chosen["operation_recorded"] is False
+    assert chosen["selection_matches_action"] is False
+    # And it still reports the pre-existing state honestly, rather than
+    # hiding it: the row IS selected. It just does not answer this action.
+    assert chosen["selection_state"] == "selected"
+
+
+def test_a_superseded_showing_does_not_answer_a_later_action(order_flow_v2_live):
+    """An offer id that was live once, but is not the live showing now."""
+    from services.internal_conversational_e2e_of2_fixtures import (  # noqa: PLC0415
+        STATE_SEVERAL_SAVED,
+        prepare_of2_scenario_fixture,
+    )
+
+    db, tenant, phone = _live_sandbox()
+    fixture = prepare_of2_scenario_fixture(
+        db,
+        tenant_id=tenant.id,
+        customer_phone=phone,
+        scenario_id="superseded",
+        session_id=str(uuid.uuid4()),
+        state=STATE_SEVERAL_SAVED,
+    )
+    address_id = fixture.address_ids[0]
+
+    evidence = _selection_probe(
+        db=db,
+        tenant=tenant,
+        phone=phone,
+        fixture=fixture,
+        button_id=f"nahla_addr_select:SUPERSEDED_OFFER:{address_id}",
+        handler=_counter_bump_handler(db, fixture),
+        label="superseded",
+    )
+    assert evidence["verdict"] == "fail"
+    assert "structured_selection_showing_unknown" in evidence["blockers"]
+    assert evidence["selection_evidence"]["operation_recorded"] is False
+
+
+def test_the_real_continuation_produces_a_complete_consumption_chain(
+    tmp_path, monkeypatch, order_flow_v2_live
+):
+    """The positive case, with every link the producer establishes.
+
+    Drives the shipped manifest through ``run_session`` and reads the
+    continuation's evidence — the showing that existed when the action
+    was taken, the writer's own published operation for that turn, and
+    the durable row carrying that operation's reference.
+    """
+    module, _ = _load_scenarios(
+        REPO_ROOT / "docs" / "engineering" / "of2-address-scenarios.json"
+    )
+    engine, tenant_id, url = _live_engine_sandbox(tmp_path)
+    env = _session_env(url=url, tenant_id=tenant_id, tmp_path=tmp_path)
+    monkeypatch.setattr(
+        module,
+        "execute_preflight",
+        lambda **kw: {
+            "ok": True,
+            "runtime_revision": "sandbox",
+            "database_identity_fingerprint": "sha256:" + "0" * 64,
+            "attestation_id": "att-sandbox",
+            "llm_allowed_hosts": ["api.anthropic.com"],
+        },
+    )
+    result = asyncio.run(
+        module.run_session(
+            tenant_id=tenant_id,
+            scenario_path=REPO_ROOT
+            / "docs"
+            / "engineering"
+            / "of2-address-scenarios.json",
+            env=env,
+            engine=engine,
+        )
+    )
+    session = json.loads(Path(result["session_path"]).read_text(encoding="utf-8"))
+    by_scenario = {
+        (r["scenario_id"], r["turn_index"]): r for r in session["turn_results"]
+    }
+    chosen = by_scenario[("continuation_after_captured_choice", 1)][
+        "selection_evidence"
+    ]
+
+    # The showing the action answered existed, and the writer published
+    # an operation for this turn naming this address at the SHOWN
+    # revision.
+    assert chosen["showing_exists"] is True
+    assert chosen["shown_fingerprint"]
+    assert chosen["operation_recorded"] is True
+    assert chosen["operation_observed_in_turn"] is True
+    assert chosen["operation_address_id"] == chosen["action_address_id"]
+    assert chosen["operation_fingerprint"] == chosen["shown_fingerprint"]
+    # The writer composes its reference from the showing it consumed and
+    # the turn it answered, and the durable row carries that reference.
+    assert chosen["operation_ref"].startswith(f"{chosen['offer_identity']}:")
+    assert chosen["selection_operation_ref"] == chosen["operation_ref"]
+    assert chosen["selected_fingerprint"] == chosen["shown_fingerprint"]
+    assert chosen["selection_matches_action"] is True
+    assert by_scenario[("continuation_after_captured_choice", 1)]["blockers"] == []
+
+
+def test_a_revision_that_changed_since_it_was_shown_is_refused():
+    """The recorded revision must be the one that was SHOWN.
+
+    Checking only that the selected fingerprint is non-empty let an
+    address whose content had changed since the customer saw it pass as
+    though they had approved the new content.
+    """
+    blockers = _result_blockers(
+        selection=_selection(
+            shown_fingerprint="fp-as-shown",
+            operation_fingerprint="fp-as-shown",
+            selected_fingerprint="fp-changed-since",
+            selection_matches_action=False,
+        )
+    )
+    assert "structured_selection_revision_mismatch" in blockers
+    assert "structured_selection_address_mismatch" in blockers
+
+
+def test_an_operation_left_by_an_earlier_turn_is_not_this_turns():
+    """Production stamps no turn id into a button turn's inbound metadata.
+
+    The platform's reader therefore scopes an operation by conversation
+    and TTL, so without the publication time an operation performed on a
+    previous turn would answer for a turn that ran no owner at all.
+    """
+    blockers = _result_blockers(
+        selection=_selection(
+            operation_observed_in_turn=False, selection_matches_action=False
+        )
+    )
+    assert "structured_selection_operation_not_from_this_turn" in blockers
+    assert "structured_selection_operation_not_recorded" not in blockers

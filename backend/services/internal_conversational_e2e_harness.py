@@ -183,6 +183,9 @@ async def run_sandbox_turn(
     from services.turn_trace import new_trace
 
     started = time.perf_counter()
+    # Wall-clock start, so an address operation published by an EARLIER
+    # turn cannot be mistaken for one this turn performed.
+    turn_started_at = _utc_now()
     blockers: list[str] = []
     mutations: list[str] = []
     result = None
@@ -534,8 +537,23 @@ def _operational_result_blockers(
         found.append("structured_selection_action_not_consumed")
     if not chosen.get("selection_scope_verified"):
         found.append("structured_selection_scope_unverified")
+    # The showing the action names has to exist. An invented or
+    # superseded offer resolves to nothing, and answers nothing.
+    if not chosen.get("showing_exists"):
+        found.append("structured_selection_showing_unknown")
+    # The writer has to have published an operation for THIS turn.
+    # Parsing an identifier is not consumption, and an operation left
+    # behind by an earlier turn is not this turn's.
+    if not chosen.get("operation_recorded"):
+        found.append("structured_selection_operation_not_recorded")
+    elif not chosen.get("operation_observed_in_turn"):
+        found.append("structured_selection_operation_not_from_this_turn")
     if str(chosen.get("selection_state") or "") != "selected":
         found.append("structured_selection_not_durably_recorded")
+    # The revision recorded has to be the revision that was SHOWN.
+    shown = str(chosen.get("shown_fingerprint") or "")
+    if shown and str(chosen.get("selected_fingerprint") or "") != shown:
+        found.append("structured_selection_revision_mismatch")
     if not chosen.get("selection_matches_action"):
         found.append("structured_selection_address_mismatch")
     return found
@@ -827,6 +845,35 @@ def _delivered_address_ids(delivered_ids: Sequence[str]) -> list[str]:
         return []
 
 
+def _showing_for_action(
+    *,
+    tenant_id: int,
+    conversation: Any,
+    inbound_metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The live showing this turn's action names, before the turn runs."""
+    try:
+        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+            _offered_revisions,
+            structured_consent_action,
+        )
+
+        resolved = structured_consent_action(dict(inbound_metadata or {}))
+        if not resolved:
+            return {}
+        offer_id, address_id = resolved
+        offered, offer_identity = _offered_revisions(
+            tenant_id=int(tenant_id), conversation=conversation, offer_id=str(offer_id),
+        )
+        return {
+            "offer_identity": str(offer_identity or ""),
+            "shown_fingerprint": str(offered.get(int(address_id)) or ""),
+            "address_id": str(address_id),
+        }
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — no readable showing proves none
+        return {}
+
+
 def _selection_evidence(
     db: Any,
     *,
@@ -834,33 +881,70 @@ def _selection_evidence(
     customer_id: int,
     inbound_metadata: Mapping[str, Any],
     conversation: Any,
+    turn_started_at: Any = None,
+    showing_before: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Which action was replayed, and what the platform DURABLY recorded for it.
+    """What the WRITER did with the action, not what the action looks like.
 
-    "The conversation state changed" is not a selection. Any metadata
-    write changes the conversation fingerprint, so a handler that did
-    nothing but touch an unrelated counter satisfied it. What proves a
-    selection is the durable row: the address the tapped action names,
-    recorded as selected, for this tenant and this customer, against the
-    revision the customer was shown.
+    Parsing an identifier is not consumption. The previous version
+    resolved the action id, then accepted any provenance row already
+    marked ``selected`` for that address — so an action naming a showing
+    that never existed, replayed at a customer whose address had been
+    selected on an earlier turn, produced a clean PASS from a handler
+    that ran no owner, consumed no showing and sent nothing.
 
-    Read-only, and read back through the platform's own resolver so the
-    action id is interpreted exactly as the runtime interprets it.
+    The selection owner already produces exactly the evidence this needs
+    and publishes it for one turn (``record_turn_address_operation``:
+    "the guard boundary cannot be trusted to assemble this; it would then
+    be the claimant vouching for itself"). So this reads that, through
+    the platform's own reader, and checks it against the showing and the
+    durable row:
+
+    * the SHOWING the action names must exist now, in this conversation,
+      at this tenant and customer — a superseded or invented offer
+      resolves to nothing;
+    * the revision recorded as selected must be the revision that was
+      SHOWN, not merely some non-empty fingerprint;
+    * the writer must have published an operation FOR THIS TURN, naming
+      this address, and the durable row must carry that operation's own
+      reference;
+    * and the publication must have happened during this turn, so an
+      operation left by an earlier turn cannot stand in for one that
+      never ran. A legitimate idempotent replay republishes, so it still
+      passes — no second durable write is demanded.
+
+    Read-only, and every judgement is delegated to the platform helper
+    that owns it.
     """
     out: dict[str, Any] = {
         "consumed_action_id": "",
         "action_offer_id": "",
         "action_address_id": "",
+        "showing_exists": False,
+        "offer_identity": "",
+        "shown_fingerprint": "",
+        "operation": "",
+        "operation_ref": "",
+        "operation_address_id": "",
+        "operation_fingerprint": "",
+        "operation_recorded": False,
+        "operation_observed_in_turn": False,
         "selected_address_id": "",
         "selection_state": "",
         "selected_fingerprint": "",
         "selection_source": "",
+        "selection_operation_ref": "",
         "selection_matches_action": False,
         "selection_scope_verified": False,
     }
     try:
         from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+            _TURN_OPERATION_KEY,
+            _conversation_metadata,
+            _offered_revisions,
+            read_turn_address_operation,
             structured_consent_action,
+            turn_reference,
         )
 
         meta = dict(inbound_metadata or {})
@@ -876,6 +960,59 @@ def _selection_evidence(
         out["action_offer_id"] = str(offer_id)
         out["action_address_id"] = str(address_id)
 
+        # 1. The showing, as it stood when the action was taken. Resolved
+        #    through the platform's own reader, which scopes an offer to
+        #    tenant, customer, conversation and its own identity, and
+        #    expires it. Resolved BEFORE the turn: consuming a showing
+        #    supersedes it, so reading afterwards finds nothing even for
+        #    a selection that genuinely happened.
+        before = dict(showing_before or {})
+        if before:
+            out["offer_identity"] = str(before.get("offer_identity") or "")
+            shown_fingerprint = str(before.get("shown_fingerprint") or "")
+        else:
+            offered, offer_identity = _offered_revisions(
+                tenant_id=int(tenant_id),
+                conversation=conversation,
+                offer_id=str(offer_id),
+            )
+            out["offer_identity"] = str(offer_identity or "")
+            shown_fingerprint = str(offered.get(int(address_id)) or "")
+        offer_identity = out["offer_identity"]
+        out["showing_exists"] = bool(shown_fingerprint)
+        out["shown_fingerprint"] = shown_fingerprint
+
+        # 2. The writer's own operation, for this turn.
+        writer_turn_ref = turn_reference(meta)
+        attempt = read_turn_address_operation(conversation, turn_ref=writer_turn_ref)
+        out["operation_recorded"] = bool(getattr(attempt, "is_actionable", False))
+        operation = getattr(attempt, "operation", None)
+        out["operation"] = str(getattr(operation, "value", "") or "")
+        out["operation_ref"] = str(getattr(attempt, "operation_ref", "") or "")
+        out["operation_address_id"] = str(getattr(attempt, "address_id", "") or "")
+        out["operation_fingerprint"] = str(getattr(attempt, "fingerprint", "") or "")
+
+        # When the writer published it. Production stamps no turn id into
+        # a button turn's inbound metadata, so the platform's reader
+        # scopes by conversation and TTL; without this an operation from
+        # an earlier turn would answer for a turn that ran no owner.
+        published_at = _parse_utc(
+            (_conversation_metadata(conversation) or {}).get(_TURN_OPERATION_KEY, {}).get(
+                "recorded_at"
+            )
+            if isinstance(
+                (_conversation_metadata(conversation) or {}).get(_TURN_OPERATION_KEY),
+                Mapping,
+            )
+            else None
+        )
+        started = _parse_utc(turn_started_at)
+        out["operation_observed_in_turn"] = bool(
+            published_at is not None
+            and (started is None or published_at >= started)
+        )
+
+        # 3. The durable row.
         from models import CustomerAddressProvenance  # noqa: PLC0415
 
         row = (
@@ -889,29 +1026,59 @@ def _selection_evidence(
         )
         if row is None:
             return out
-        # Scope is part of the proof: a row read without checking whose it
-        # is could belong to another customer entirely.
         out["selection_scope_verified"] = bool(
             int(getattr(row, "tenant_id", 0) or 0) == int(tenant_id)
             and int(getattr(row, "customer_id", 0) or 0) == int(customer_id)
         )
-        out["selected_address_id"] = str(
-            getattr(row, "customer_address_id", "") or ""
-        )
+        out["selected_address_id"] = str(getattr(row, "customer_address_id", "") or "")
         out["selection_state"] = str(getattr(row, "selection_state", "") or "")
-        out["selected_fingerprint"] = str(
-            getattr(row, "selected_fingerprint", "") or ""
-        )
+        out["selected_fingerprint"] = str(getattr(row, "selected_fingerprint", "") or "")
         out["selection_source"] = str(getattr(row, "selection_source", "") or "")
+        out["selection_operation_ref"] = str(
+            getattr(row, "selection_operation_ref", "") or ""
+        )
+
+        # 4. The conjunction. Every link, or none.
         out["selection_matches_action"] = bool(
             out["selection_scope_verified"]
+            and out["showing_exists"]
+            and out["operation_recorded"]
+            and out["operation_observed_in_turn"]
+            and out["operation_address_id"] == str(address_id)
+            and out["operation_fingerprint"] == shown_fingerprint
+            # The writer composes its reference from the showing it
+            # consumed and the turn it answered.
+            and out["operation_ref"] == f"{offer_identity}:{writer_turn_ref}"
             and out["selection_state"] == "selected"
             and out["selected_address_id"] == str(address_id)
-            and out["selected_fingerprint"]
+            and out["selected_fingerprint"] == shown_fingerprint
+            and out["selection_operation_ref"] == out["operation_ref"]
         )
         return out
     except Exception:  # noqa: BLE001  # noqa: silent-ok — absence is reported as unproven selection
         return out
+
+
+def _utc_now() -> Any:
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    return datetime.now(timezone.utc)
+
+
+def _parse_utc(raw: Any) -> Any:
+    """A UTC datetime, or None. Never raises."""
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    if isinstance(raw, datetime):
+        value = raw
+    else:
+        try:
+            value = datetime.fromisoformat(str(raw or ""))
+        except (TypeError, ValueError):
+            return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(
+        timezone.utc
+    )
 
 
 def _refusal_evidence(
@@ -993,6 +1160,9 @@ async def run_sandbox_of2_turn(
         handler = _handle_merchant_message
 
     started = time.perf_counter()
+    # Wall-clock start, so an address operation published by an EARLIER
+    # turn cannot be mistaken for one this turn performed.
+    turn_started_at = _utc_now()
     blockers: list[str] = []
     mutations: list[str] = []
     captured: list[Any] = []
@@ -1033,6 +1203,16 @@ async def run_sandbox_of2_turn(
             return {}
 
     before_state = _probe()
+    # The showing the customer's action ANSWERS is the one that existed
+    # when they tapped it. Reading it afterwards found nothing, because
+    # consuming a showing supersedes it — the selection turn records the
+    # next offer over the one it just answered. So it is resolved here,
+    # before the handler runs.
+    showing_before = _showing_for_action(
+        tenant_id=int(request.tenant_id),
+        conversation=request.conversation,
+        inbound_metadata=request.inbound_metadata,
+    )
 
     with internal_conversational_e2e_context(
         session_id=request.session_id,
@@ -1218,6 +1398,8 @@ async def run_sandbox_of2_turn(
         customer_id=int(getattr(request.conversation, "customer_id", 0) or 0),
         inbound_metadata=request.inbound_metadata,
         conversation=request.conversation,
+        turn_started_at=turn_started_at,
+        showing_before=showing_before,
     )
     address_turn["selection"] = selection
     blockers.extend(
