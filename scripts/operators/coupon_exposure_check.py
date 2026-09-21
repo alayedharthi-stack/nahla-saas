@@ -157,6 +157,16 @@ EVIDENCE_QUERIES = {
         "(coalesce(p.title, '') ILIKE '%36%') AS title_mentions_36, "
         "(coalesce(p.title, '') ILIKE '%أسود%' OR coalesce(p.description, '') ILIKE '%أسود%') AS mentions_black "
         "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
+    # Whether a colour the reply named could come from the product record the
+    # tool projects (image url, tags) or only from variant data it does not.
+    "products_cited_colour_hints": (
+        "SELECT p.id, (coalesce(p.metadata->>'image_url', '') ILIKE '%black%') AS image_url_black, "
+        "(coalesce(p.metadata->'variants', '[]'::jsonb)::text ILIKE '%أسود%') AS variants_black, "
+        "(coalesce(p.metadata->'options', '[]'::jsonb)::text ILIKE '%أسود%') AS options_black, "
+        "(coalesce(p.metadata->'tags', '[]'::jsonb)::text ILIKE '%أسود%') AS tags_black, "
+        "(SELECT string_agg(DISTINCT v->'options'->>'اللون', ',') "
+        " FROM jsonb_array_elements(coalesce(p.metadata->'variants', '[]'::jsonb)) v) AS variant_colours "
+        "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
     "personal_codes_of_this_conversations_customer": (
         "SELECT cp.id, left(cp.code, 2) || repeat('*', greatest(length(cp.code) - 2, 0)) AS code_masked, "
         "cp.expires_at, cp.source_type, cp.coupon_level, cp.allocation_channel, cp.discount_type, "
