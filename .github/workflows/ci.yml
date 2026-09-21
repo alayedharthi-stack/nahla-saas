@@ -347,8 +347,17 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # Full history, and origin/main present. The agent-scope guard in
+      # this job compares the branch against origin/main; with the
+      # default shallow checkout that ref does not resolve, and the guard
+      # now fails closed rather than passing over an empty diff.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the scope-guard base ref
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Setup Python
         uses: actions/setup-python@v5
