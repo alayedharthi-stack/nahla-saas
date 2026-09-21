@@ -97,6 +97,15 @@ def test_fresh_and_compatible_precreation_pass_the_verifier(database_at_0108) ->
     ("extra_column",
      f"ALTER TABLE {lm.DELIVERY_SEQUENCES_TABLE} ADD COLUMN legacy_flag boolean",
      f"{lm.DELIVERY_SEQUENCES_TABLE}.legacy_flag: unexpected column"),
+    ("missing_not_null",
+     f"ALTER TABLE {lm.EFFECTS_TABLE} ALTER COLUMN status DROP NOT NULL",
+     f"{lm.EFFECTS_TABLE}.status"),
+    ("extra_not_null",
+     f"ALTER TABLE {lm.DELIVERY_RECEIPTS_TABLE} ALTER COLUMN provider_message_id SET NOT NULL",
+     f"{lm.DELIVERY_RECEIPTS_TABLE}.provider_message_id"),
+    ("check_named_like_not_null",
+     f"ALTER TABLE {lm.EFFECTS_TABLE} ADD CONSTRAINT synthetic_not_null CHECK (status <> 'unknown')",
+     "unexpected constraint synthetic_not_null"),
 ])
 def test_incompatible_precreated_schema_is_refused_and_not_stamped(database_at_0108, label, drift_sql,
                                                                     expected_fragment) -> None:
