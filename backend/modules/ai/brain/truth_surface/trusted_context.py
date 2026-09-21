@@ -287,6 +287,49 @@ def _load_customer_order_facts(
         path="order_context.shipping.accepted_delivery_address",
     ))
 
+    # Durable customer-level address truth. ``known_address_selection_state``
+    # separates an address the customer explicitly selected from one merely
+    # imported from the store profile, so the reply can never present a
+    # candidate as an adopted delivery address.
+    known_previous = getattr(order_ctx, "known_previous_address", None)
+    known_candidates = tuple(getattr(order_ctx, "known_address_candidates", ()) or ())
+    _append(facts, _fact(
+        domain=TrustedDomain.CUSTOMER,
+        key="known_address_selection_state",
+        value=(
+            (
+                "selected"
+                if bool(getattr(known_previous, "explicitly_selected", False))
+                else "candidate"
+            )
+            if known_previous is not None
+            else "none"
+        ),
+        source=TruthSource.STORE_SNAPSHOT,
+        path="order_context.known_previous_address.explicitly_selected",
+    ))
+    _append(facts, _fact(
+        domain=TrustedDomain.CUSTOMER,
+        key="known_address_city",
+        value=str(getattr(known_previous, "city", "") or ""),
+        source=TruthSource.STORE_SNAPSHOT,
+        path="order_context.known_previous_address.city",
+    ))
+    _append(facts, _fact(
+        domain=TrustedDomain.CUSTOMER,
+        key="known_address_sufficient",
+        value=bool(getattr(known_previous, "sufficient", False)),
+        source=TruthSource.STORE_SNAPSHOT,
+        path="order_context.known_previous_address.sufficient",
+    ))
+    _append(facts, _fact(
+        domain=TrustedDomain.CUSTOMER,
+        key="known_address_candidate_count",
+        value=len(known_candidates),
+        source=TruthSource.STORE_SNAPSHOT,
+        path="order_context.known_address_candidates",
+    ))
+
     if draft is not None:
         _append(facts, _fact(
             domain=TrustedDomain.ORDER,

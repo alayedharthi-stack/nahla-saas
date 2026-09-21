@@ -41,6 +41,7 @@ from models import (  # noqa: E402
     Conversation,
     Customer,
     CustomerAddress,
+    CustomerAddressProvenance,
     Order,
     Tenant,
 )
@@ -243,9 +244,59 @@ def test_previous_address_mode_confirm_not_auto_apply() -> None:
     assert not has_accepted_delivery_address(ctx.brain_order_prep)
 
 
-def test_customer_confirmed_previous_address_promotes_to_shipping_snapshot(
+def _select_address(db: Any, *, tenant_id: int, customer_id: int, address_id: int) -> str:
+    """Record a real explicit selection, the way the platform records one.
+
+    The provenance row IS the selection: a durable row naming the revision
+    the customer approved. Writing it here keeps the test on the same
+    evidence the runtime reads, rather than asserting a promotion no
+    recorded decision supports.
+    """
+    from core.customer_address_candidates import (  # noqa: PLC0415
+        resolve_customer_address_selection,
+    )
+
+    resolution = resolve_customer_address_selection(
+        db, tenant_id=tenant_id, customer_id=customer_id
+    )
+    fingerprint = next(
+        a.fingerprint for a in resolution.addresses if a.address_id == address_id
+    )
+    now = datetime.now(timezone.utc)
+    db.add(
+        CustomerAddressProvenance(
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            customer_address_id=address_id,
+            source="customer_confirmed",
+            content_fingerprint=fingerprint,
+            source_observed_at=now,
+            selection_state="selected",
+            selected_fingerprint=fingerprint,
+            selected_at=now,
+            selection_source="customer_confirmed",
+            selection_operation_ref="offer-under-test:",
+        )
+    )
+    db.commit()
+    return fingerprint
+
+
+def test_a_previous_address_never_explicitly_selected_is_not_promoted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Saying "the same address as before" does not make it chosen.
+
+    A stored address with no recorded selection is a CANDIDATE: it may
+    have been imported, or created alongside an order, and the customer
+    may never have seen it. Promoting it into the shipping snapshot would
+    put an address into the order on the strength of a phrase, with no
+    evidence of a decision behind it.
+
+    This test previously asserted the opposite, from a bare row with no
+    provenance at all. That was the contract before explicit selection
+    existed.
+    """
     monkeypatch.setenv("ORDER_CONTEXT_SHIPPING_CONFIRM_ENABLED", "true")
     monkeypatch.setenv("ORDER_CONTEXT_OPERATIONAL_PREFILL_ENABLED", "true")
     db, _ = _make_db()
@@ -270,11 +321,64 @@ def test_customer_confirmed_previous_address_promotes_to_shipping_snapshot(
         brain_state={"order_prep": prep},
         message="نفس العنوان السابق",
     )
+    # The address is known and offerable — it is simply not selected.
+    assert ctx.known_previous_address is not None
+    assert ctx.known_previous_address.explicitly_selected is False
+
+    patch = build_order_prep_prefill_patch(ctx, prep=prep)
+    merged = apply_order_prep_prefill_patch(prep, patch)
+    assert "city" not in merged
+    assert "short_address_code" not in merged
+    assert merged.get("shipping_source") != "customer_confirmed_previous_address"
+    assert not has_accepted_delivery_address(merged)
+
+
+def test_an_explicitly_selected_previous_address_promotes_to_shipping_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the contract: a real selection DOES carry over.
+
+    Requiring explicit selection is only correct if a genuine one is
+    honoured. With the selection recorded in the customer's and tenant's
+    own scope, the confirmed address reaches the shipping snapshot with
+    the city and the rest of its fields.
+    """
+    monkeypatch.setenv("ORDER_CONTEXT_SHIPPING_CONFIRM_ENABLED", "true")
+    monkeypatch.setenv("ORDER_CONTEXT_OPERATIONAL_PREFILL_ENABLED", "true")
+    db, _ = _make_db()
+    tenant = _seed_tenant(db)
+    customer = _verified_customer(db, tenant.id)
+    address = CustomerAddress(
+        tenant_id=tenant.id,
+        customer_id=customer.id,
+        city="الرياض",
+        saudi_national_address="RRRD2929",
+    )
+    db.add(address)
+    db.commit()
+    db.refresh(address)
+    _select_address(
+        db, tenant_id=tenant.id, customer_id=customer.id, address_id=address.id
+    )
+
+    prep = {"customer_confirmed_previous_address": True}
+    ctx = build_order_context(
+        db,
+        tenant_id=tenant.id,
+        customer=customer,
+        phone="+966500000001",
+        brain_state={"order_prep": prep},
+        message="نفس العنوان السابق",
+    )
+    assert ctx.known_previous_address is not None
+    assert ctx.known_previous_address.explicitly_selected is True
+
     patch = build_order_prep_prefill_patch(ctx, prep=prep)
     merged = apply_order_prep_prefill_patch(prep, patch)
     assert merged["city"] == "الرياض"
     assert merged["short_address_code"] == "RRRD2929"
     assert merged["shipping_source"] == "customer_confirmed_previous_address"
+    assert merged["customer_confirmed_previous_address"] is True
 
 
 def test_customer_requested_shipping_edit_sets_edit_mode() -> None:

@@ -5606,6 +5606,103 @@ class MerchantBrain:
                 tenant_id, _pcgg_exc,
             )
 
+        # ── customer address save/adoption claims ────────────────────────
+        # Run here, while the composer is still reachable. The post-compose
+        # boundary can only remove an unsupported claim; removing the whole
+        # reply there would leave silence, and a guard may correct the AI
+        # but never mute it. Here the turn can ask for one more natural
+        # composition first, exactly as the product-claim contract does.
+        try:
+            from modules.ai.brain.postprocess.customer_address_save_claim_guard import (  # noqa: PLC0415
+                apply_address_claim_failed_compose_fallback,
+                apply_customer_address_save_claim_guard,
+                detect_address_save_claim_kinds,
+                finalize_address_claim_after_authorized_recompose,
+                invoke_authorized_address_claim_recompose,
+                stamp_address_claim_guard_provenance,
+            )
+
+            if str(reply or "").strip() and detect_address_save_claim_kinds(reply or ""):
+                from core.customer_address_persistence_evidence import (  # noqa: PLC0415
+                    resolve_customer_address_persistence_evidence,
+                )
+                from modules.ai.brain.postprocess.product_claim_grounding_guard import (  # noqa: PLC0415
+                    should_skip_quality_recompose_after_product_claim,
+                )
+                from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+                    read_turn_address_operation_for_conversation,
+                    turn_reference,
+                )
+
+                _casg_meta = dict((profile or {}).get("inbound_metadata") or {})
+                # The WRITER published what this turn did; nothing here
+                # asserts it on the claim's behalf.
+                _casg_attempt = read_turn_address_operation_for_conversation(
+                    db,
+                    conversation_id=conversation_id,
+                    turn_ref=turn_reference(_casg_meta),
+                )
+                _casg_evidence = resolve_customer_address_persistence_evidence(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_id=customer_id,
+                    attempt=_casg_attempt,
+                )
+                _casg = apply_customer_address_save_claim_guard(
+                    reply=reply or "",
+                    evidence=_casg_evidence,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                )
+                if _casg.replaced:
+                    reply = _casg.reply
+                    _guard_replaced["customer_address_save_claim_guard"] = True
+                stamp_address_claim_guard_provenance(result.data, _casg)
+
+                if _casg.requires_grounded_recompose:
+                    result.data["address_save_claim_recompose_requested"] = True
+                    if should_skip_quality_recompose_after_product_claim(result.data):
+                        # This turn already spent its one recompose.
+                        reply = apply_address_claim_failed_compose_fallback(result.data)
+                    else:
+                        (
+                            _casg_text,
+                            _casg_failed,
+                            _casg_calls,
+                        ) = await invoke_authorized_address_claim_recompose(
+                            self._composer, decision, result, ctx,
+                        )
+                        result.data["address_save_claim_recompose_count"] = int(_casg_calls)
+                        _casg_second = apply_customer_address_save_claim_guard(
+                            reply=_casg_text or "",
+                            evidence=_casg_evidence,
+                            tenant_id=tenant_id,
+                            conversation_id=conversation_id,
+                            allow_recompose=False,
+                        )
+                        stamp_address_claim_guard_provenance(
+                            result.data,
+                            _casg_second,
+                            recompose_requested=True,
+                            recompose_performed=True,
+                        )
+                        reply = finalize_address_claim_after_authorized_recompose(
+                            second_pass=_casg_second,
+                            recomposed_reply=_casg_text or "",
+                            result_data=result.data,
+                            compose_failed=_casg_failed,
+                        )
+                    _guard_replaced["customer_address_save_claim_guard"] = True
+                    if result.data.get("address_save_claim_constitutional_fallback"):
+                        _chosen_path = str(
+                            result.data.get("chosen_path") or _chosen_path
+                        ).strip() or _chosen_path
+        except Exception as _casg_exc:  # noqa: BLE001
+            logger.warning(
+                "[CUSTOMER_ADDRESS_SAVE_CLAIM_GUARD] pipeline hook failed tenant=%s err=%s",
+                tenant_id, _casg_exc,
+            )
+
         try:
             from modules.ai.brain.commerce.assistant_presented_provenance import (  # noqa: PLC0415
                 apply_turn_catalog_referent_binding,

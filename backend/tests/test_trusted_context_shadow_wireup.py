@@ -527,17 +527,89 @@ def test_constitution_compliance_green() -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+_SCOPE_DIFF_BASE = "origin/main"
+
+
+class ScopeDiffUnavailable(RuntimeError):
+    """The branch diff could not be computed, so scope cannot be judged."""
+
+
+def _branch_diff_paths(base: str = _SCOPE_DIFF_BASE) -> set:
+    """Paths this branch changes against ``base``, or a hard failure.
+
+    ``git diff`` writes its errors to stderr and leaves stdout EMPTY, so a
+    base ref that does not resolve — a shallow clone, a missing remote —
+    used to produce an empty set that satisfied every scope assertion.
+    The guard then reported PASS precisely when it could see nothing,
+    which is the one situation in which it has proved nothing at all.
+
+    The exit code is therefore checked, and an empty result from a
+    successful diff is distinguished from a diff that never ran.
+    """
+    import subprocess  # noqa: PLC0415
+
+    repo = os.path.abspath(os.path.join(_HERE, "../.."))
+
+    def _diff():
+        return subprocess.run(
+            ["git", "diff", "--name-only", f"{base}...HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+
+    proc = _diff()
+    if proc.returncode != 0:
+        # CI checks out a pull request shallow, so the base ref is simply
+        # absent rather than wrong. The guard fetches it itself instead of
+        # depending on how each job configures its checkout — a workflow
+        # is governance-core, and a scope guard that only works when
+        # somebody remembers to deepen a checkout is the inert guard this
+        # replaces.
+        branch = base.split("/", 1)[-1] if "/" in base else base
+        refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
+        shallow = (
+            subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            == "true"
+        )
+        # A shallow clone rejects a plain fetch of a new root ("shallow
+        # roots are not allowed to be updated"), and a merge base needs
+        # real history on BOTH sides — deepening only the base ref leaves
+        # this branch grafted at one commit and git still reports no
+        # merge base. So the clone is unshallowed first, then the base
+        # ref fetched.
+        attempts = (
+            [["git", "fetch", "--no-tags", "--quiet", "--unshallow", "origin"]]
+            if shallow
+            else []
+        ) + [["git", "fetch", "--no-tags", "--quiet", "origin", refspec]]
+        for argv in attempts:
+            subprocess.run(argv, cwd=repo, capture_output=True, text=True)
+            proc = _diff()
+            if proc.returncode == 0:
+                break
+    if proc.returncode != 0:
+        raise ScopeDiffUnavailable(
+            f"git diff {base}...HEAD failed with exit {proc.returncode}: "
+            f"{(proc.stderr or '').strip()}"
+        )
+    return {
+        line.strip().replace("\\", "/")
+        for line in proc.stdout.splitlines()
+        if line.strip()
+    }
+
+
 def test_branch_diff_excludes_other_agent_scope_paths() -> None:
     """Branch diff must not touch lifecycle/templates/coupon-order agent-owned paths."""
     import subprocess
 
-    proc = subprocess.run(
-        ["git", "diff", "--name-only", "origin/main...HEAD"],
-        cwd=os.path.abspath(os.path.join(_HERE, "../..")),
-        capture_output=True,
-        text=True,
-    )
-    files = {line.strip().replace("\\", "/") for line in proc.stdout.splitlines() if line.strip()}
+    files = _branch_diff_paths()
 
     forbidden_exact = {
         "backend/routers/coupons.py",
@@ -894,3 +966,27 @@ def test_layer2_default_flag_disabled_without_patch(monkeypatch) -> None:
     from modules.ai.brain.truth_surface.flags import is_layer2_shadow_enabled  # noqa: PLC0415
 
     assert is_layer2_shadow_enabled() is False
+
+
+
+def test_the_scope_guard_fails_closed_when_it_cannot_see_the_diff() -> None:
+    """An unreadable diff is a failure, never a silent pass.
+
+    This is the defect that let the scope guard run green in CI while the
+    branch really did touch an agent-owned path: the job checked out at
+    the default depth, ``origin/main`` did not resolve, stdout came back
+    empty and every assertion over the empty set held.
+    """
+    with pytest.raises(ScopeDiffUnavailable):
+        _branch_diff_paths("refs/nahla/definitely-not-a-ref")
+
+
+def test_the_scope_guard_can_actually_see_this_branch_s_diff() -> None:
+    """And it must be able to see the diff where it runs.
+
+    Without this, the guard above would still be satisfied by an
+    environment that can never compute the diff at all — it would simply
+    fail instead of passing, which is safer but still uninformative.
+    """
+    paths = _branch_diff_paths()
+    assert isinstance(paths, set)

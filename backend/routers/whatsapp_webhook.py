@@ -2869,6 +2869,14 @@ async def _dispatch_message(
                         tenant_id=resolved_tenant_id, db=db,
                         wa_message_ts=_wa_msg_ts,
                         wa_msg_id=msg_id or None,
+                        # The reply id is the structured half of a list tap.
+                        # Forwarding only the title would leave the turn with
+                        # words alone, which cannot carry an unambiguous
+                        # choice of a specific row.
+                        inbound_metadata={
+                            "list_reply_id": lr_id,
+                            "list_reply_title": lr_title,
+                        },
                         commerce_runtime_claim=_runtime_claim,
                     )
             return
@@ -6767,6 +6775,124 @@ async def _handle_merchant_message(
                     result=_of2_result,
                 )
                 _of2_reply = _of2_result.reply
+                # Provenance for THIS reply, recorded on the stored
+                # message. The address guard fills it in when it removes a
+                # claim or hands the turn to the emergency fallback.
+                _of2_provenance: Dict[str, Any] = {}
+                # The ordinary address turn is composed, not written here.
+                # Asking the customer where to deliver is a clarification,
+                # and AGENTS.md assigns that wording to the composer; a
+                # fixed sentence for it is exactly the deterministic
+                # customer-facing prose the doctrine prohibits. Everything
+                # structural about this turn — the action ids, the choice
+                # labels, the paging, the receipt — stays platform-owned
+                # and is untouched.
+                # WHICH field this turn is collecting is decided by the
+                # owner's own state patch — never by the customer's
+                # wording — and it is resolved ONCE, here, so that the
+                # ordinary composition below and the recovery that
+                # follows a refused candidate pursue the SAME goal with
+                # the SAME facts. Reading it inline keeps the decision
+                # alive even when the recovery module is the thing that
+                # failed to import, which is exactly when the branch
+                # below must still refuse to revive the old prose.
+                _of2_address_field = str(
+                    (getattr(_of2_result, "state_patch", None) or {}).get(
+                        "order_flow_v2_last_field"
+                    )
+                    or ""
+                )
+                if _of2_address_field not in ("delivery_address", "city"):
+                    _of2_address_field = ""
+                _of2_is_address_turn = bool(_of2_address_field)
+                if _of2_is_address_turn:
+                    _of2_composed = None
+                    try:
+                        from modules.ai.order_flow_v2.address_reply_recovery import (  # noqa: PLC0415
+                            address_collection_field,
+                            address_turn_facts,
+                            compose_address_turn_reply,
+                            response_goal_for_field,
+                        )
+
+                        # The owner's own reader is authoritative when it
+                        # is available; the inline read above is only the
+                        # resilient copy of the same state.
+                        _of2_address_field = (
+                            address_collection_field(_of2_result) or _of2_address_field
+                        )
+                        _of2_composed = await compose_address_turn_reply(
+                            db,
+                            tenant_id=int(tenant_id),
+                            conversation=convo,
+                            customer_phone=to,
+                            message=str(text or ""),
+                            known_facts=address_turn_facts(
+                                order_prep=(
+                                    ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
+                                        "order_prep"
+                                    )
+                                    or {}
+                                ),
+                                presentation=getattr(
+                                    _of2_result, "address_presentation", None
+                                ),
+                                field_name=_of2_address_field,
+                            ),
+                            turn_ref=str(wa_msg_id or ""),
+                            response_goal=response_goal_for_field(_of2_address_field),
+                        )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — handled immediately below, where the turn falls to the approved line rather than to the prose this path no longer owns
+                        logger.exception(
+                            "[ORDER_FLOW_V2] address reply compose unavailable "
+                            "tenant=%s to=%s",
+                            tenant_id,
+                            to,
+                        )
+                    if _of2_composed is not None and _of2_composed.spoke:
+                        _of2_reply = _of2_composed.text
+                        _of2_provenance.update(_of2_composed.as_metadata())
+                        _of2_provenance.pop("address_reply_recovered", None)
+                        _of2_provenance["address_reply_composed"] = True
+                    else:
+                        # Compose could not even be entered — its import
+                        # failed, its inputs could not be built, or it
+                        # raised on the way in. Falling back to the
+                        # deterministic reply would quietly restore the
+                        # prose ownership this path just gave up, so the
+                        # approved minimal line speaks instead. It is
+                        # recorded as what it is: NO generation was
+                        # attempted, which is a different fact from a
+                        # provider that tried and failed.
+                        try:
+                            from core.fallback_policy import (  # noqa: PLC0415
+                                empty_reply_fallback,
+                                operational_compose_error_fallback,
+                            )
+
+                            _of2_reply = str(
+                                operational_compose_error_fallback() or ""
+                            ).strip() or str(empty_reply_fallback() or "").strip()
+                        except Exception:  # noqa: BLE001  # noqa: silent-ok — with no approved line available the suppression flag below refuses the turn instead of sending unowned prose
+                            _of2_reply = ""
+                        _of2_provenance.update({
+                            "compose_source": "fallback_deterministic",
+                            "response_mode": "fallback_deterministic",
+                            "chosen_path": "order_flow_v2_address_reply",
+                            "llm_candidate_present": False,
+                            "address_claim_compose_attempted": False,
+                            "address_reply_composed": False,
+                            "fallback_reason": "address_reply_compose_unavailable",
+                            "fallback_action_type": "order_flow_v2_address_reply",
+                            "final_customer_text_source": "fallback_deterministic",
+                            "final_text_transformed": True,
+                            "final_transform_reasons": ["address_reply_compose_unavailable"],
+                        })
+                        if not _of2_reply:
+                            _of2_provenance["address_claim_send_suppressed"] = True
+                            _of2_provenance["address_save_claim_suppress_reason"] = (
+                                "address_reply_compose_unavailable"
+                            )
                 try:
                     from modules.ai.order_flow_v2.outbound_guards import (  # noqa: PLC0415
                         apply_order_flow_v2_outbound_guards,
@@ -6777,6 +6903,9 @@ async def _handle_merchant_message(
                         db=db,
                         tenant_id=int(tenant_id),
                         conversation_id=getattr(convo, "id", None),
+                        conversation=convo,
+                        turn_ref=str(wa_msg_id or ""),
+                        provenance_sink=_of2_provenance,
                         order_prep=dict(
                             ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
                                 "order_prep"
@@ -6785,24 +6914,211 @@ async def _handle_merchant_message(
                         ),
                     )
                 except Exception:  # noqa: BLE001
+                    # The guard could not run AT ALL — its import failed,
+                    # its arguments could not be built, or it raised on
+                    # the way in. The refusal inside that function cannot
+                    # protect a failure that stops the function returning,
+                    # and the reply still sitting in ``_of2_reply`` is the
+                    # unchecked candidate. Fail closed HERE, at the send
+                    # decision, or the whole guard is optional.
                     logger.exception(
                         "[ORDER_FLOW_V2] outbound guard failed tenant=%s to=%s",
                         tenant_id,
                         to,
                     )
+                    _of2_provenance["address_claim_send_suppressed"] = True
+                    _of2_provenance["address_save_claim_suppress_reason"] = (
+                        "guard_boundary_failed"
+                    )
+                    _of2_reply = ""
+                if _of2_provenance.get("address_claim_send_suppressed") or not str(
+                    _of2_reply or ""
+                ).strip():
+                    # Nothing here can be stood behind. Refusing to send
+                    # the claim is right; leaving the customer's turn
+                    # unanswered is not — they asked a question. So the
+                    # turn is recovered through the composition route the
+                    # Brain already uses: trusted facts in, wording out,
+                    # revalidated by the same guard, and only a GENUINE
+                    # compose failure reaches the approved minimal line.
+                    logger.error(
+                        "[ORDER_FLOW_V2] address claim unverifiable, recovering "
+                        "tenant=%s to=%s reason=%s",
+                        tenant_id,
+                        to,
+                        _of2_provenance.get("address_save_claim_suppress_reason"),
+                    )
+                    _of2_recovery = None
+                    try:
+                        from modules.ai.order_flow_v2.address_reply_recovery import (  # noqa: PLC0415
+                            address_turn_facts,
+                            compose_address_recovery_reply,
+                            response_goal_for_field,
+                        )
+
+                        # The refused candidate does not change WHAT the
+                        # turn is collecting. Recovery therefore reuses
+                        # the same supported fact projection and the same
+                        # collection goal as the ordinary composition
+                        # above — accepted address facts included —
+                        # instead of falling back to the helper's
+                        # delivery-address default, which would answer a
+                        # city turn with the wrong question.
+                        _of2_recovery = await compose_address_recovery_reply(
+                            db,
+                            tenant_id=int(tenant_id),
+                            conversation=convo,
+                            customer_phone=to,
+                            message=str(text or ""),
+                            known_facts=address_turn_facts(
+                                order_prep=(
+                                    ((getattr(convo, "extra_metadata", None) or {}).get("brain_state") or {}).get(
+                                        "order_prep"
+                                    )
+                                    or {}
+                                ),
+                                presentation=getattr(
+                                    _of2_result, "address_presentation", None
+                                ),
+                                field_name=_of2_address_field,
+                            ),
+                            turn_ref=str(wa_msg_id or ""),
+                            response_goal=response_goal_for_field(_of2_address_field),
+                        )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — handled immediately below, where an unrecovered turn is logged rather than answered with unverified text
+                        logger.exception(
+                            "[ORDER_FLOW_V2] address recovery failed tenant=%s to=%s",
+                            tenant_id,
+                            to,
+                        )
+                    if _of2_recovery is not None and _of2_recovery.spoke:
+                        _recovery_sink: Dict[str, Any] = {}
+                        _recovery_ok = await _send_whatsapp_message(
+                            phone_id=phone_id,
+                            to=to,
+                            text=_of2_recovery.text,
+                            _tenant_id=tenant_id,
+                            _db=db,
+                            _inbound_message_id=wa_msg_id,
+                            _result_sink=_recovery_sink,
+                        )
+                        if _recovery_ok:
+                            _persona_ownership.mark_bypass(
+                                _POReason.PRE_BRAIN_FAST_PATH,
+                                owner="order_flow_v2:address_reply_recovery",
+                            )
+                            StateManager.save_message(
+                                db,
+                                to,
+                                _of2_recovery.text,
+                                "outbound",
+                                conversation_id=convo.id,
+                                tenant_id=tenant_id,
+                                extra_metadata={
+                                    **_persona_ownership.to_metadata(),
+                                    "reply_owner": "order_flow_v2",
+                                    "order_flow_v2_reason": "address_reply_recovery",
+                                    **_of2_provenance,
+                                    **_of2_recovery.as_metadata(),
+                                },
+                            )
+                    else:
+                        logger.error(
+                            "[ORDER_FLOW_V2] address turn unanswered tenant=%s to=%s",
+                            tenant_id,
+                            to,
+                        )
+                    try:
+                        db.commit()
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — the owner's own state was already persisted above; a commit failure here must not raise into the webhook
+                        try:
+                            db.rollback()
+                        except Exception:  # noqa: silent-ok — rollback best-effort after commit failure
+                            pass
+                    _sync_persona_observability()
+                    return
                 _persona_ownership.mark_bypass(
                     _POReason.PRE_BRAIN_FAST_PATH,
                     owner=f"order_flow_v2:{_of2_result.reason}",
                 )
-                _of2_ok = await _send_whatsapp_message(
-                    phone_id=phone_id,
-                    to=to,
-                    text=_of2_reply,
-                    _tenant_id=tenant_id,
-                    _db=db,
-                    _inbound_message_id=wa_msg_id,
-                )
+                # Structured address choices ride the supported interactive
+                # surface. A text payload cannot carry an action the
+                # customer can tap, so without this the selection path had
+                # no producer and the ids existed only in tests.
+                _of2_actions = list(getattr(_of2_result, "address_choice_actions", None) or [])
+                _of2_rows = list(getattr(_of2_result, "address_choice_rows", None) or [])
+                _of2_surface = str(getattr(_of2_result, "address_choice_surface", "") or "")
+                _of2_sink: Dict[str, Any] = {}
+                if _of2_surface == "list" and _of2_rows:
+                    # More choices than three buttons can carry, or a page
+                    # beyond the first. Truncating to buttons here is what
+                    # made the fourth saved address unreachable.
+                    _of2_ok = await _send_list_reply(
+                        phone_id=phone_id,
+                        to=to,
+                        body_text=_of2_reply,
+                        rows=_of2_rows,
+                        button_label="العناوين المحفوظة",
+                        _tenant_id=tenant_id,
+                        _db=db,
+                        _result_sink=_of2_sink,
+                    )
+                elif _of2_actions:
+                    _of2_ok = await _send_interactive_reply(
+                        phone_id=phone_id,
+                        to=to,
+                        body_text=_of2_reply,
+                        buttons=_of2_actions,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                        _result_sink=_of2_sink,
+                    )
+                else:
+                    _of2_ok = await _send_whatsapp_message(
+                        phone_id=phone_id,
+                        to=to,
+                        text=_of2_reply,
+                        _tenant_id=tenant_id,
+                        _db=db,
+                        _inbound_message_id=wa_msg_id,
+                        _result_sink=_of2_sink,
+                    )
                 if _of2_ok:
+                    # The message reached the provider, so what it carried
+                    # was genuinely presented. Record it with the OUTBOUND
+                    # identity; a send the dedup answered with an earlier
+                    # message's id may only reaffirm an identical offer.
+                    try:
+                        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+                            delivered_address_action_ids,
+                            record_presented_address_offer,
+                        )
+
+                        _of2_presentation = getattr(_of2_result, "address_presentation", None)
+                        if _of2_presentation is not None:
+                            # Read the payload BACK. Between the reply and
+                            # the provider the wire layer drops rows whose
+                            # titles or ids collide, so only the payload
+                            # that actually left says what was presented.
+                            record_presented_address_offer(
+                                db,
+                                tenant_id=int(tenant_id),
+                                conversation=convo,
+                                presentation=_of2_presentation,
+                                delivery_ref=str(_of2_sink.get("wamid") or ""),
+                                duplicate_suppressed=bool(
+                                    _of2_sink.get("duplicate_suppressed")
+                                ),
+                                delivered_action_ids=delivered_address_action_ids(
+                                    _of2_sink.get("sent_payload")
+                                ),
+                            )
+                    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unrecorded presentation makes a later tap refuse, which is the safe direction, and must not fail a delivered message
+                        logger.debug(
+                            "[ORDER_FLOW_V2] address presentation not recorded tenant=%s",
+                            tenant_id,
+                            exc_info=True,
+                        )
                     StateManager.save_message(
                         db,
                         to,
@@ -6814,6 +7130,11 @@ async def _handle_merchant_message(
                             **_persona_ownership.to_metadata(),
                             "reply_owner": "order_flow_v2",
                             "order_flow_v2_reason": _of2_result.reason,
+                            # What the customer actually received, and why.
+                            # A guard that removed a claim, or an emergency
+                            # fallback that replaced the reply outright, is
+                            # recorded here rather than left implicit.
+                            **_of2_provenance,
                         },
                     )
                     try:
@@ -14795,6 +15116,11 @@ async def _post_wa(
                             "duplicate_suppressed": False,
                             "http_status": (resp_data or {}).get("_nahla_http_status"),
                             "response_body": resp_data,
+                            # What left, after every sanitizer. A caller
+                            # that must record "this is what the customer
+                            # saw" has to read the sent payload back; the
+                            # one it handed in is only what it asked for.
+                            "sent_payload": payload,
                         }
                     )
                 _stamped_id = stamp_outbound_send_status(
@@ -16063,6 +16389,61 @@ async def _send_interactive_reply(
             "type": "button",
             "body": {"text": body_text},
             "action": {"buttons": wire_buttons[:3]},
+        },
+    }, _tenant_id=_tenant_id, _db=_db, _result_sink=_result_sink)
+
+
+async def _send_list_reply(
+    phone_id: str, to: str, body_text: str, rows: list, button_label: str,
+    _tenant_id: Optional[int] = None, _db=None,
+    _result_sink: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Interactive list: the surface for more choices than buttons hold.
+
+    Reply buttons stop at three. A list carries up to ten rows, each with
+    a description, which is what lets several addresses in the same city
+    be told apart. Rows are de-duplicated by id and title for the same
+    reason buttons are — the provider rejects the whole payload otherwise.
+    """
+    wire_rows: list = []
+    seen_ids: set = set()
+    seen_titles: set = set()
+    try:
+        from core.product_button_label import normalize_button_title_key  # noqa: PLC0415
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — fall back to exact titles
+        def normalize_button_title_key(value):  # type: ignore[misc]
+            return str(value or "").strip().lower()
+    for row in list(rows or []):
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get("id") or "").strip()
+        title = str(row.get("title") or "").strip()
+        title_key = normalize_button_title_key(title)
+        if not row_id or not title:
+            continue
+        if row_id in seen_ids or (title_key and title_key in seen_titles):
+            continue
+        seen_ids.add(row_id)
+        if title_key:
+            seen_titles.add(title_key)
+        wire_row: Dict[str, Any] = {"id": row_id[:200], "title": title[:24]}
+        description = str(row.get("description") or "").strip()
+        if description:
+            wire_row["description"] = description[:72]
+        wire_rows.append(wire_row)
+        if len(wire_rows) >= 10:
+            break
+    if not wire_rows:
+        return False
+    return await _post_wa(phone_id, {
+        "messaging_product": "whatsapp", "to": to, "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "body": {"text": body_text},
+            "action": {
+                "button": (str(button_label or "").strip() or "اختر")[:20],
+                "sections": [{"rows": wire_rows}],
+            },
         },
     }, _tenant_id=_tenant_id, _db=_db, _result_sink=_result_sink)
 
