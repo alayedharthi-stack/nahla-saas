@@ -84,6 +84,23 @@ def test_same_draft_save_reopen_replace_and_remove_preserves_approved_copy(db):
     assert db.get(WhatsAppTemplate, original_id).components == components()[1:]
 
 
+@pytest.mark.parametrize('tenant_id', [1, 33])
+def test_image_draft_support_is_platform_wide_and_still_tenant_scoped(db, monkeypatch, tenant_id):
+    monkeypatch.setattr(router, 'resolve_tenant_id', lambda request: tenant_id)
+    tpl = draft(db)
+    tpl.tenant_id = tenant_id
+    db.commit()
+    scoped_url = URL.replace('/7/', f'/{tenant_id}/')
+    asyncio.run(router.update_template(tpl.id, router.UpdateTemplateIn(components=components(scoped_url)), MagicMock(), db))
+    db.expire_all()
+    assert db.get(WhatsAppTemplate, tpl.id).components == components(scoped_url)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(router.update_template(tpl.id, router.UpdateTemplateIn(components=components()), MagicMock(), db))
+    assert error.value.status_code == 400
+    db.expire_all()
+    assert headers.header_url(db.get(WhatsAppTemplate, tpl.id).components) == scoped_url
+
+
 @pytest.mark.parametrize('url', [URL.replace('/7/', '/8/'), URL + '/../x.png', 'http://127.0.0.1/image.png', ''])
 def test_foreign_or_invalid_header_refused_without_draft_mutation(db, url):
     tpl = draft(db)

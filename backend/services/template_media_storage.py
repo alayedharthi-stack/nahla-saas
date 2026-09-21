@@ -74,7 +74,7 @@ def _s3_client():
 
 
 def upload_template_header_image(*, tenant_id: int, content: bytes) -> dict:
-    """Validate, normalize and persist a template header image in R2."""
+    """Validate and persist the original JPEG/PNG template header in R2."""
     image_bytes, content_type = prepare_template_image(content)
     media_id = uuid.uuid4().hex
     extension = "jpg" if content_type == "image/jpeg" else "png"

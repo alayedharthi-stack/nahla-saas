@@ -232,8 +232,18 @@ assert(
     && whatsappTemplatesSource.includes('out.push({\n        ...imageHeaderComp')
     && whatsappTemplatesSource.includes('data-testid="edit-template-image-header"')
     && whatsappTemplatesSource.includes('data-testid="edit-template-image-upload"')
-    && whatsappTemplatesSource.includes('templatesApi.uploadHeaderImage')
+    && whatsappTemplatesSource.includes('templatesApi.uploadHeaderAsset')
+    && whatsappTemplatesSource.includes('onImage(asset.image_url)')
+    && whatsappTemplatesSource.includes("onImage={url => setImageHeaderComp({ type: 'HEADER', format: 'IMAGE', example: { header_url: url } })}")
+    && whatsappTemplatesSource.includes('templatesApi.update(tpl.id, { components: buildComponents() })')
     && whatsappTemplatesSource.includes('headerImageUrl={headerImageUrl}'),
+)
+assert(
+  'create and edit share explicit header choice with upload-before-save validation',
+  (whatsappTemplatesSource.match(/<HeaderEditor /g) ?? []).length === 2
+    && ['NONE', 'TEXT', 'IMAGE'].every(type => whatsappTemplatesSource.includes(`<option value="${type}">`))
+    && whatsappTemplatesSource.includes("if (uploadingImage || (headerType === 'IMAGE' && !headerImageUrl))")
+    && whatsappTemplatesSource.includes("&& (wiz.headerType !== 'IMAGE' || !!wiz.headerImageUrl)"),
 )
 assert(
   'Settings tab follows order_updates deep-link changes',
