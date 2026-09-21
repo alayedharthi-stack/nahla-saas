@@ -71,6 +71,13 @@ QUERIES = {
     "coupons_all_tenants":
         f"SELECT count(*) AS total, count(*) FILTER (WHERE {PERSONAL}) AS personal, "
         f"count(DISTINCT tenant_id) FILTER (WHERE {PERSONAL}) AS tenants_with_personal FROM coupons cp",
+    # How many of tenant 1's personal codes belong to a customer the runtime has
+    # already talked to (the pilot's allowlisted test identities): says whether a
+    # privacy trial between two test accounts can exercise a real personal code.
+    "tenant1_personal_codes_bound_to_a_customer_the_runtime_has_served":
+        f"SELECT count(*) AS n FROM coupons cp WHERE cp.tenant_id = 1 AND {PERSONAL} "
+        f"AND {BOUND} IN (SELECT c.customer_id FROM commerce_runtime_conversations rc "
+        f"JOIN conversations c ON c.id = {APP_CONVERSATION} WHERE rc.tenant_id = 1)",
     "message_events_since_deploy_tenant1":
         "SELECT count(*) FILTER (WHERE direction = 'outbound') AS outbound, "
         "count(*) FILTER (WHERE direction = 'inbound') AS inbound "
