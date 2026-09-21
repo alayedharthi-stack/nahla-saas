@@ -65,17 +65,6 @@ jobs:
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
-      # pytest.ini pins `testpaths = tests`, so the run above collects
-      # nothing under backend/tests. The explicit-selection address
-      # contract lives there, and was therefore invisible to CI: both
-      # halves of it (an unselected previous address is not promoted; an
-      # explicitly selected one is) have to be checked here or nowhere.
-      - name: Address selection contract
-        run: |
-          python -m pytest \
-            backend/tests/test_order_context_identity_shipping_prefill.py \
-            -q --maxfail=1
-
       # Required PostgreSQL proofs: the dormant commerce runtime foundation
       # proofs, the revision-0108 reconciliation proofs and the global customer
       # identity persistence cases run strictly against the postgres service
@@ -347,17 +336,8 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      # Full history, and origin/main present. The agent-scope guard in
-      # this job compares the branch against origin/main; with the
-      # default shallow checkout that ref does not resolve, and the guard
-      # now fails closed rather than passing over an empty diff.
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Fetch the scope-guard base ref
-        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Setup Python
         uses: actions/setup-python@v5

@@ -549,12 +549,50 @@ def _branch_diff_paths(base: str = _SCOPE_DIFF_BASE) -> set:
     import subprocess  # noqa: PLC0415
 
     repo = os.path.abspath(os.path.join(_HERE, "../.."))
-    proc = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...HEAD"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-    )
+
+    def _diff():
+        return subprocess.run(
+            ["git", "diff", "--name-only", f"{base}...HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+
+    proc = _diff()
+    if proc.returncode != 0:
+        # CI checks out a pull request shallow, so the base ref is simply
+        # absent rather than wrong. The guard fetches it itself instead of
+        # depending on how each job configures its checkout — a workflow
+        # is governance-core, and a scope guard that only works when
+        # somebody remembers to deepen a checkout is the inert guard this
+        # replaces.
+        branch = base.split("/", 1)[-1] if "/" in base else base
+        refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
+        shallow = (
+            subprocess.run(
+                ["git", "rev-parse", "--is-shallow-repository"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            == "true"
+        )
+        # A shallow clone rejects a plain fetch of a new root ("shallow
+        # roots are not allowed to be updated"), and a merge base needs
+        # real history on BOTH sides — deepening only the base ref leaves
+        # this branch grafted at one commit and git still reports no
+        # merge base. So the clone is unshallowed first, then the base
+        # ref fetched.
+        attempts = (
+            [["git", "fetch", "--no-tags", "--quiet", "--unshallow", "origin"]]
+            if shallow
+            else []
+        ) + [["git", "fetch", "--no-tags", "--quiet", "origin", refspec]]
+        for argv in attempts:
+            subprocess.run(argv, cwd=repo, capture_output=True, text=True)
+            proc = _diff()
+            if proc.returncode == 0:
+                break
     if proc.returncode != 0:
         raise ScopeDiffUnavailable(
             f"git diff {base}...HEAD failed with exit {proc.returncode}: "
