@@ -107,6 +107,118 @@ QUERIES = {
 }
 
 
+def _int_list(name: str) -> list[int]:
+    raw = str(os.environ.get(name, "") or "").strip()
+    return [int(part) for part in re.split(r"[,\s]+", raw) if part]
+
+
+# Optional, non-secret evidence parameters for one trial turn: the coupon and
+# product ids the pilot log line cites, and the application conversation id.
+EVIDENCE_QUERIES = {
+    "coupons_cited": (
+        "SELECT cp.id, left(cp.code, 2) || repeat('*', greatest(length(cp.code) - 2, 0)) AS code_masked, "
+        "length(cp.code) AS code_len, cp.description, cp.discount_type, cp.discount_value, cp.expires_at, "
+        "cp.source_type, cp.coupon_level, cp.allocation_channel, "
+        f"{PERSONAL} AS customer_bound, "
+        f"({BOUND} = (SELECT c.customer_id FROM conversations c WHERE c.id = :conversation_id)) "
+        "AS bound_to_this_conversations_customer, "
+        "cp.metadata->>'active' AS meta_active, cp.metadata->>'is_active' AS meta_is_active, "
+        "cp.metadata->>'enabled' AS meta_enabled, cp.metadata->>'usage_limit' AS meta_usage_limit, "
+        "cp.metadata->>'usage_count' AS meta_usage_count, cp.metadata->>'min_order_amount' AS meta_min_order, "
+        "(SELECT string_agg(k, ',') FROM jsonb_object_keys(coalesce(cp.metadata, '{}'::jsonb)) k) AS metadata_keys, "
+        "(SELECT json_agg(json_build_object('type', r.rule_type, 'config', r.rule_config)) "
+        " FROM coupon_rules r WHERE r.coupon_id = cp.id) AS rules "
+        "FROM coupons cp WHERE cp.tenant_id = 1 AND cp.id = ANY(:coupon_ids) ORDER BY cp.id"),
+    "products_cited": (
+        "SELECT p.id, p.title AS name, p.price, p.stock_quantity, p.in_stock, p.has_variants, p.catalog_status, p.sync_status, (p.archived_at IS NOT NULL) AS archived, (p.merchant_hidden_at IS NOT NULL) AS hidden, "
+        "(SELECT string_agg(k, ',') FROM jsonb_object_keys(coalesce(p.metadata, '{}'::jsonb)) k) AS metadata_keys, "
+        "left(coalesce(p.metadata->>'variants', p.metadata->>'options', ''), 300) AS variants_excerpt "
+        "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
+    "turns_window": (
+        "SELECT t.id, t.admitted_at, t.sequence, tt.processing_outcome, tt.transport_outcome, tt.customer_reach, "
+        "tt.recorded_at FROM commerce_runtime_turns t "
+        "LEFT JOIN commerce_runtime_turn_terminals tt ON tt.turn_id = t.id AND tt.tenant_id = t.tenant_id "
+        "WHERE t.admitted_at >= :since ORDER BY t.id"),
+    "delivery_window": (
+        "SELECT s.id AS sequence_id, s.turn_id, s.intent_kind, s.outcome, s.attempt_count, "
+        "(SELECT json_agg(json_build_object('attempt', a.attempt_no, 'kind', a.kind, 'reserved_at', a.reserved_at)) "
+        " FROM commerce_runtime_delivery_attempts a WHERE a.sequence_id = s.id) AS attempts, "
+        "(SELECT json_agg(json_build_object('kind', r.kind, 'no', r.receipt_no, 'recorded_at', r.recorded_at)) "
+        " FROM commerce_runtime_delivery_receipts r WHERE r.sequence_id = s.id) AS receipts "
+        "FROM commerce_runtime_delivery_sequences s "
+        "JOIN commerce_runtime_turns t ON t.id = s.turn_id AND t.tenant_id = s.tenant_id "
+        "WHERE t.admitted_at >= :since ORDER BY s.id"),
+}
+
+
+def _longest_string(value: object) -> str:
+    """The longest string inside a JSON value: the reply text of a delivery payload."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return max((_longest_string(v) for v in value.values()), key=len, default="")
+    if isinstance(value, list):
+        return max((_longest_string(v) for v in value), key=len, default="")
+    return ""
+
+
+def _diff_summary(intent: str, wire: str) -> dict:
+    """How the transmitted text differs from the reserved intent, without either text."""
+    first = next((i for i, (a, b) in enumerate(zip(intent, wire)) if a != b), min(len(intent), len(wire)))
+    only_intent = intent[first:][: max(0, len(intent) - len(wire))] if len(intent) > len(wire) else ""
+    only_wire = wire[first:][: max(0, len(wire) - len(intent))] if len(wire) > len(intent) else ""
+    return {"intent_len": len(intent), "wire_len": len(wire), "equal": intent == wire,
+            "first_difference_at": first,
+            "chars_only_in_intent": [f"U+{ord(ch):04X}" for ch in only_intent[:8]],
+            "chars_only_in_wire": [f"U+{ord(ch):04X}" for ch in only_wire[:8]],
+            "intent_ends_with_whitespace": intent[-1:].isspace() if intent else False}
+
+
+def _intent_versus_wire(conn, since: str, since_naive: str, conversation_id: int) -> list[dict]:
+    """For each reply the runtime dispatched in the window, compare the reserved
+    payload text with the outbound message row the platform persisted."""
+    from sqlalchemy import text as _text  # noqa: PLC0415
+
+    rows = conn.execute(_text(
+        "SELECT a.id AS attempt_id, a.sequence_id, a.payload, a.reserved_at "
+        "FROM commerce_runtime_delivery_attempts a WHERE a.reserved_at >= :since ORDER BY a.id"),
+        {"since": since}).mappings().all()
+    out = []
+    for row in rows:
+        intent = _longest_string(row["payload"])
+        wire = conn.execute(_text(
+            "SELECT body FROM message_events WHERE tenant_id = 1 AND conversation_id = :conversation_id "
+            "AND direction = 'outbound' AND created_at >= :since_naive "
+            "AND created_at BETWEEN (:reserved_at AT TIME ZONE 'UTC') - interval '1 minute' "
+            "AND (:reserved_at AT TIME ZONE 'UTC') + interval '3 minutes' ORDER BY created_at LIMIT 1"),
+            {"conversation_id": conversation_id, "since_naive": since_naive,
+             "reserved_at": row["reserved_at"]}).scalar()
+        summary = _diff_summary(intent, wire or "") if wire is not None else {"wire_row": "not_found"}
+        out.append({"attempt_id": row["attempt_id"], "sequence_id": row["sequence_id"],
+                    "reserved_at": str(row["reserved_at"]), **summary})
+    return out
+
+
+def _merchant_ai_coupon_policy(engine) -> dict:
+    """The merchant's AI coupon policy as the runtime's coupon read applies it."""
+    try:
+        import sys  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        root = Path(__file__).resolve().parents[2]
+        for p in [str(root), str(root / "backend"), str(root / "database")]:
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        from sqlalchemy.orm import Session  # noqa: PLC0415
+
+        from services.coupon_generator import _get_ai_policy  # noqa: PLC0415
+
+        with Session(engine) as session:
+            return dict(_get_ai_policy(session, 1))
+    except Exception as exc:  # noqa: BLE001 - reported, never hidden
+        return {"unreadable": type(exc).__name__}
+
+
 def _since() -> tuple[str, str]:
     since = str(os.environ.get("NAHLA_EXPOSURE_SINCE", "") or DEFAULT_SINCE).strip()
     naive = re.sub(r"(Z|[+-]\d\d(:?\d\d)?)$", "", since).replace("T", " ").strip()
@@ -127,6 +239,17 @@ def main() -> int:
         for name, sql in QUERIES.items():
             rows = conn.execute(text(sql), {"since": since, "since_naive": since_naive}).mappings().all()
             out[name] = [dict(r) for r in rows]
+        coupon_ids = _int_list("NAHLA_EVIDENCE_COUPON_IDS")
+        product_ids = _int_list("NAHLA_EVIDENCE_PRODUCT_IDS")
+        conversation_id = int(os.environ.get("NAHLA_EVIDENCE_CONVERSATION_ID", "0") or 0)
+        if coupon_ids or product_ids or conversation_id:
+            params = {"since": since, "since_naive": since_naive, "coupon_ids": coupon_ids,
+                      "product_ids": product_ids, "conversation_id": conversation_id}
+            for name, sql in EVIDENCE_QUERIES.items():
+                rows = conn.execute(text(sql), params).mappings().all()
+                out[name] = [dict(r) for r in rows]
+            out["intent_versus_wire"] = _intent_versus_wire(conn, since, since_naive, conversation_id)
+            out["merchant_ai_coupon_policy"] = _merchant_ai_coupon_policy(engine)
     print("DB_CHECK=" + json.dumps(out, default=str, ensure_ascii=False), flush=True)
     return 0
 
