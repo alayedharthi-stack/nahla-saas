@@ -247,6 +247,7 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_shareable_coupon_is_read_from_the_merchant_s_own_records_and_cited",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_campaign_only_coupon_is_never_evidence_the_model_can_cite",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_tenant_s_coupon_is_never_read_here",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_coupon_read_writes_nothing_and_asks_only_for_this_tenant",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_second_conversation_on_the_same_number_does_not_leak_into_the_history",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_history_is_this_conversation_s_even_when_the_number_resolves_to_another",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_unlinked_legacy_rows_are_left_out_while_the_number_names_two_conversations",

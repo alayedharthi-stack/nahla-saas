@@ -886,6 +886,54 @@ def test_another_tenant_s_coupon_is_never_read_here(pilot):
     assert transport.sent == []
 
 
+_PROMOTION_TABLES = ("coupons", "coupon_rules", "promotions")
+_WRITE_VERBS = ("insert", "update", "delete", "truncate", "alter", "drop")
+
+
+def test_the_coupon_read_writes_nothing_and_asks_only_for_this_tenant(pilot):
+    """Every SQL statement the turn issues is captured at the cursor: none of
+    them writes to a promotion table, and every read of the coupons table is
+    bound to this tenant's id — the merchant's records are read, in scope,
+    and never touched."""
+    from sqlalchemy import event
+
+    statements: List[Tuple[str, Any]] = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        statements.append((str(statement), parameters))
+
+    event.listen(pilot.engine, "before_cursor_execute", capture)
+    try:
+        with _coupons(pilot, ((pilot.tenant_a, "SPRING15", None),)) as ids:
+            ref = f"promotion:coupon:{ids[0]}"
+            statements.clear()                      # the fixture's own insert is not the turn's
+            transport = Transport([accepted("wamid.COUPON2")])
+            report = pilot.run(
+                answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                         step([reply("كود الخصم جاهز", refs=(ref,), commerce=True)])],
+                transport=transport, question="فيه خصم؟",
+            )
+            assert report.dispatch_status == dd.SENT_ACCEPTED and ref in report.evidence_refs
+            turn_statements = list(statements)
+    finally:
+        event.remove(pilot.engine, "before_cursor_execute", capture)
+
+    assert turn_statements, "the turn issued no SQL at all, so nothing was proved"
+    promotion_writes = [
+        sql for sql, _ in turn_statements
+        if sql.lstrip().lower().startswith(_WRITE_VERBS)
+        and any(table in sql.lower() for table in _PROMOTION_TABLES)
+    ]
+    assert promotion_writes == [], promotion_writes
+    coupon_reads = [(sql, params) for sql, params in turn_statements
+                    if sql.lstrip().lower().startswith("select") and "coupons" in sql.lower()]
+    assert coupon_reads, "the tool never read the coupons table"
+    for sql, params in coupon_reads:
+        assert "coupons.tenant_id = " in sql, sql
+        bound = list(params.values()) if isinstance(params, dict) else list(params or ())
+        assert pilot.tenant_a in bound and pilot.tenant_b not in bound, (sql, params)
+
+
 # ── The history belongs to this conversation (F7) ────────────────────────────
 
 
