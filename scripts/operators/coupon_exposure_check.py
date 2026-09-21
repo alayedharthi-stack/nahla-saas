@@ -78,6 +78,13 @@ QUERIES = {
         f"SELECT count(*) AS n FROM coupons cp WHERE cp.tenant_id = 1 AND {PERSONAL} "
         f"AND {BOUND} IN (SELECT c.customer_id FROM commerce_runtime_conversations rc "
         f"JOIN conversations c ON c.id = {APP_CONVERSATION} WHERE rc.tenant_id = 1)",
+    # Inbounds the runtime recorded durably but no turn ever answered: what the
+    # handover 'status' command lists as deferred. Recipient masked, ids kept.
+    "deferred_inbound_tenant1":
+        "SELECT id, state, reason, barrier_generation, created_at, disposed_at, "
+        "left(recipient, 5) || repeat('*', greatest(length(recipient) - 7, 0)) || right(recipient, 2) AS recipient_masked, "
+        "left(provider_message_id, 12) || '…' AS provider_message_id_prefix "
+        "FROM commerce_runtime_deferred_inbound WHERE tenant_id = 1 ORDER BY id",
     "message_events_since_deploy_tenant1":
         "SELECT count(*) FILTER (WHERE direction = 'outbound') AS outbound, "
         "count(*) FILTER (WHERE direction = 'inbound') AS inbound "
