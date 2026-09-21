@@ -134,6 +134,36 @@ EVIDENCE_QUERIES = {
         "(SELECT string_agg(k, ',') FROM jsonb_object_keys(coalesce(p.metadata, '{}'::jsonb)) k) AS metadata_keys, "
         "left(coalesce(p.metadata->>'variants', p.metadata->>'options', ''), 300) AS variants_excerpt "
         "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
+    "coupons_cited_raw_fields": (
+        "SELECT cp.id, cp.metadata->>'discount_pct' AS meta_discount_pct, cp.metadata->>'used' AS meta_used, "
+        "cp.metadata->>'salla_synced' AS meta_salla_synced, cp.metadata->>'sync_direction' AS meta_sync_direction, "
+        "cp.metadata->>'sync_status' AS meta_sync_status, cp.metadata->>'target_segment' AS meta_target_segment, "
+        "cp.metadata->>'source' AS meta_source, cp.metadata->>'category' AS meta_category, cp.starts_at "
+        "FROM coupons cp WHERE cp.tenant_id = 1 AND cp.id = ANY(:coupon_ids) ORDER BY cp.id"),
+    "products_cited_raw_fields": (
+        "SELECT p.id, p.metadata->>'in_stock' AS meta_in_stock, p.metadata->>'stock_qty' AS meta_stock_qty, "
+        "p.metadata->>'status' AS meta_status, p.metadata->>'price' AS meta_price, p.metadata->>'sale_price' AS meta_sale_price, "
+        "p.metadata->>'regular_price' AS meta_regular_price, (p.metadata ? 'product_url') AS has_product_url, "
+        "(p.metadata ? 'image_url') AS has_image_url, jsonb_array_length(coalesce(p.metadata->'variants', '[]'::jsonb)) AS variant_count, "
+        "(SELECT count(*) FROM jsonb_array_elements(coalesce(p.metadata->'variants', '[]'::jsonb)) v "
+        " WHERE (v->>'in_stock')::boolean) AS variants_in_stock "
+        "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
+    "personal_codes_of_this_conversations_customer": (
+        "SELECT cp.id, left(cp.code, 2) || repeat('*', greatest(length(cp.code) - 2, 0)) AS code_masked, "
+        "cp.expires_at, cp.starts_at, cp.source_type, cp.coupon_level, cp.allocation_channel, cp.discount_type, "
+        "cp.metadata->>'active' AS meta_active, cp.metadata->>'used' AS meta_used, "
+        "cp.metadata->>'usage_limit' AS meta_usage_limit, cp.metadata->>'usage_count' AS meta_usage_count, "
+        "cp.metadata->>'status' AS meta_status, cp.metadata->>'issued_channel' AS meta_issued_channel, "
+        "(SELECT count(*) FROM coupon_rules r WHERE r.coupon_id = cp.id) AS rule_count "
+        f"FROM coupons cp WHERE cp.tenant_id = 1 AND {PERSONAL} "
+        f"AND {BOUND} = (SELECT c.customer_id FROM conversations c WHERE c.id = :conversation_id) ORDER BY cp.id"),
+    "outbound_rows_window_status": (
+        "SELECT me.id, me.created_at, me.event_type, length(me.body) AS body_len, "
+        "(SELECT string_agg(k, ',') FROM jsonb_object_keys(coalesce(me.metadata, '{}'::jsonb)) k) AS metadata_keys, "
+        "me.metadata->'provider_send' AS provider_send, me.metadata->>'status' AS status, "
+        "me.metadata->>'delivery_status' AS delivery_status, me.metadata->'wire_attempts' IS NOT NULL AS has_wire_attempts "
+        "FROM message_events me WHERE me.tenant_id = 1 AND me.conversation_id = :conversation_id "
+        "AND me.direction = 'outbound' AND me.created_at >= :since_naive ORDER BY me.id"),
     "turns_window": (
         "SELECT t.id, t.admitted_at, t.sequence, tt.processing_outcome, tt.transport_outcome, tt.customer_reach, "
         "tt.recorded_at FROM commerce_runtime_turns t "
