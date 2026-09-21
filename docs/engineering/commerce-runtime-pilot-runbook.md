@@ -340,7 +340,15 @@ offending turns named — or `not_observed`:
 | `no_unknown_send_was_reported_completed` | an `unknown` send was recorded as a completed turn |
 | `customer_reach_is_never_claimed_without_a_receipt` | `customer_reach=reached` with no `delivered`/`read` receipt behind it |
 | `no_commerce_write_was_reserved` | an effect was reserved; the pilot has no commerce-write tool |
-| `every_deferred_inbound_is_accounted_for` | a deferred inbound carries no disposition |
+| `every_deferred_inbound_is_accounted_for` | an inbound is still pending or its resolution/disposition state is inconsistent |
+
+Normal runtime handling writes `state=resolved` with a null `disposition`;
+only operator handling writes `state=disposed` with a supported disposition.
+The report accepts both forms and does not equate accounting (including an
+`unanswered` disposition) with customer delivery. It checks each reply intent's
+recorded acceptances separately; an unsent intent cannot offset a duplicate
+acceptance on another intent. Failure to establish the read-only transaction
+stops the job before any trial query runs.
 
 `not_observed` is a real answer, not a pass: a window with no turns proves
 nothing, and the report says so rather than reading clean. The exception is a

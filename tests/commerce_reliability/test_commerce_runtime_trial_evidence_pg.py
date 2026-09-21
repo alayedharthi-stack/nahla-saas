@@ -275,6 +275,27 @@ def test_a_reserved_commerce_effect_is_counted_and_refuses_the_claim(trial: Tria
     assert entry["verdict"] == job.REFUSED
 
 
+def test_runtime_resolved_inbound_needs_no_operator_disposition(trial: Trial) -> None:
+    # Database-shaped reader control, not proof of the upstream handling
+    # validator. resolve_inbound uses this state with disposition left NULL.
+    with trial.engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO commerce_runtime_deferred_inbound
+                (tenant_id, namespace, channel_connection_ref, phone_number_id, recipient,
+                 provider_message_id, payload, reason, state, resolved_at)
+            VALUES (:t, 'live', :ch, 'phone-trial', '966500000001',
+                    :pmid, '{}'::jsonb, 'accepted', 'resolved', clock_timestamp())
+        """), {"t": trial.tenant_id, "ch": CHANNEL,
+                "pmid": f"wamid.{uuid.uuid4().hex[:18]}"})
+
+    _turns, _effects, deferred = trial.read()
+    assert len(deferred) == 1
+    assert deferred[0]["state"] == "resolved"
+    assert deferred[0]["disposition"] is None
+    entry = job.verdicts([], deferred=deferred)["every_deferred_inbound_is_accounted_for"]
+    assert entry["verdict"] == job.PROVEN
+
+
 # ── The report writes nothing ────────────────────────────────────────────────
 
 def test_the_report_leaves_the_database_exactly_as_it_found_it(trial: Trial) -> None:
@@ -291,6 +312,7 @@ def test_the_report_leaves_the_database_exactly_as_it_found_it(trial: Trial) -> 
     before = counts()
     with trial.session() as db:
         assert job._read_only(db) is True
+        assert db.execute(text("SHOW transaction_read_only")).scalar_one() == "on"
         now = dt.datetime.now(dt.timezone.utc)
         job.read_window(db, tenant_id=trial.tenant_id, since=now - dt.timedelta(hours=1),
                         until=now + dt.timedelta(hours=1))

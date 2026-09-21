@@ -187,15 +187,60 @@ def test_a_reserved_commerce_effect_is_refused_because_the_pilot_has_no_write_to
 def test_a_deferred_inbound_with_no_disposition_is_refused_and_named():
     found = job.verdicts([], effects_reserved=0,
                          deferred=[{"id": 41, "state": "pending", "disposition": None},
-                                   {"id": 42, "state": "resolved", "disposition": "replayed"}])
+                                   {"id": 42, "state": "disposed", "disposition": "replayed"}])
     entry = found["every_deferred_inbound_is_accounted_for"]
     assert entry["verdict"] == job.REFUSED and entry["turns"] == [41]
 
 
 def test_deferred_inbounds_all_disposed_are_proven():
     found = job.verdicts([], effects_reserved=0,
-                         deferred=[{"id": 42, "state": "resolved", "disposition": "replayed"}])
+                         deferred=[{"id": 42, "state": "disposed", "disposition": "replayed"}])
     assert found["every_deferred_inbound_is_accounted_for"]["verdict"] == job.PROVEN
+
+
+def test_normal_runtime_resolution_does_not_require_an_operator_disposition():
+    # resolve_inbound writes state=resolved and deliberately leaves disposition
+    # NULL. The schema actually forbids a disposition on a resolved row.
+    found = job.verdicts([], deferred=[
+        {"id": 43, "state": "resolved", "disposition": None},
+        {"id": 44, "state": "disposed", "disposition": "unanswered"},
+    ])
+    assert found["every_deferred_inbound_is_accounted_for"]["verdict"] == job.PROVEN
+
+
+def test_a_label_cannot_make_a_pending_or_invalid_row_accounted_for():
+    found = job.verdicts([], deferred=[
+        {"id": 45, "state": "pending", "disposition": "replayed"},
+        {"id": 46, "state": "disposed", "disposition": "arbitrary note"},
+    ])
+    entry = found["every_deferred_inbound_is_accounted_for"]
+    assert entry["verdict"] == job.REFUSED
+    assert entry["turns"] == [45, 46]
+
+
+def test_an_unsent_intent_cannot_hide_two_acceptances_on_another_intent():
+    data = turn(47, terminal=terminal(), sequences=[
+        sequence(sequence_id=1, receipts=("accepted", "accepted")),
+        sequence(sequence_id=2, outcome="reserved", receipts=()),
+    ])
+    entry = job.verdicts([data])["at_most_one_accepted_send_per_reply_intent"]
+    assert entry["verdict"] == job.REFUSED
+    assert entry["turns"] == [47]
+
+
+def test_failed_read_only_setup_refuses_before_reading_any_window(monkeypatch):
+    from unittest.mock import Mock
+
+    db = Mock()
+    read = Mock(side_effect=AssertionError("must not read without read-only setup"))
+    monkeypatch.setattr(job, "configured_tenants", lambda: [1])
+    monkeypatch.setattr(job, "session", lambda: db)
+    monkeypatch.setattr(job, "_read_only", lambda _db: False)
+    monkeypatch.setattr(job, "read_window", read)
+    assert job.main([]) == job.EXIT_FAILED
+    read.assert_not_called()
+    db.rollback.assert_called_once()
+    db.close.assert_called_once()
 
 
 def test_a_clean_trial_refuses_nothing_and_claims_only_what_it_saw():

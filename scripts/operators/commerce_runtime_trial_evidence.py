@@ -85,6 +85,12 @@ NOT_OBSERVED = "not_observed"
 ACCEPTING_RECEIPTS = frozenset({"accepted"})
 REACH_RECEIPTS = frozenset({"delivered", "read"})
 
+# Normal runtime handling resolves a row without an operator disposition.
+# These are the distinct, supported operator dispositions, not reply outcomes.
+DEFERRED_DISPOSITIONS = frozenset({
+    "replayed", "answered", "superseded", "not_required", "unanswered",
+})
+
 # The closed set of claims this report is willing to make about a trial.
 CLAIMS: Tuple[str, ...] = (
     "every_admitted_turn_reached_a_terminal",
@@ -227,11 +233,19 @@ def verdicts(turns: Sequence[Mapping[str, Any]], *,
     if not judged:
         found[CLAIMS[2]] = _claim(NOT_OBSERVED, "no reply intent was reserved in this window")
     else:
-        doubled = [r["turn_id"] for r in judged if r["accepted_sends"] > r["reply_intents"]]
+        # Compare each intent independently. An unsent intent must not offset
+        # two acceptances belonging to a different intent on the same turn.
+        doubled = [t["turn_id"] for t in turns if any(
+            sum(1 for a in s.get("attempts") or ()
+                for r in a.get("receipts") or ()
+                if r.get("kind") in ACCEPTING_RECEIPTS) > 1
+            for s in t.get("sequences") or ()
+        )]
+        intent_count = sum(r["reply_intents"] for r in judged)
         found[CLAIMS[2]] = _claim(
             REFUSED if doubled else PROVEN,
-            "more accepted sends than reply intents means one intent was sent twice"
-            if doubled else f"{len(judged)} reply intents, none sent more than once",
+            "one reply intent has more than one recorded accepted send"
+            if doubled else f"{intent_count} reply intents, none with more than one recorded acceptance",
             doubled)
 
     # 4. An unknown send outcome was never reported as a completed turn.
@@ -279,12 +293,16 @@ def verdicts(turns: Sequence[Mapping[str, Any]], *,
     elif not rows:
         found[CLAIMS[6]] = _claim(NOT_OBSERVED, "no inbound was deferred in this window")
     else:
-        unresolved = [r.get("id") for r in rows
-                      if not str(r.get("disposition") or "").strip()]
+        unresolved = [r.get("id") for r in rows if not (
+            (r.get("state") == "resolved" and r.get("disposition") is None)
+            or (r.get("state") == "disposed"
+                and r.get("disposition") in DEFERRED_DISPOSITIONS)
+        )]
         found[CLAIMS[6]] = _claim(
             REFUSED if unresolved else PROVEN,
-            "a deferred inbound with no disposition was answered by nobody and closed by nobody"
-            if unresolved else f"{len(rows)} deferred, each with a disposition on the record",
+            "an inbound is pending or has inconsistent resolution/disposition state"
+            if unresolved else f"{len(rows)} inbounds, each recorded as runtime-resolved or operator-disposed; "
+                               "accounting alone is not a claim of customer delivery",
             unresolved)
 
     return found
@@ -488,7 +506,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     refused: List[str] = []
     try:
         db = session()
-        emit(f"read_only_transaction={_read_only(db)}")
+        read_only = _read_only(db)
+        emit(f"read_only_transaction={read_only}")
+        if not read_only:
+            raise RuntimeError("read_only_transaction_not_established")
         for tenant_id in tenants:
             turns, effects, deferred = read_window(db, tenant_id=tenant_id,
                                                    since=since, until=until)
