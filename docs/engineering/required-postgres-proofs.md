@@ -19,7 +19,7 @@ service (Variant B).
 
 The inventory distinguishes two kinds of suite:
 
-* `proof` — the **80 PostgreSQL proofs** of the dormant commerce runtime
+* `proof` — the PostgreSQL proofs of the dormant commerce runtime
   foundation, its migration, global customer identity, and the effect and
   delivery ledgers with their migration. These are the proofs the owner asked
   to make required.
@@ -37,8 +37,17 @@ The inventory distinguishes two kinds of suite:
 | `commerce_runtime_ledgers` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_pg.py` | ledger PR, dormant effect and delivery ledgers (business-action identity, dispatch reservation, honest outcomes, bounded recovery, atomic decision commit, ledger-derived terminals, completion boundary on both terminal entry points, distinct business identities, schema-state completion guard with the standalone-0108 control, reservation/completion race in both lock orders) | 30 |
 | `commerce_runtime_ledgers_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_ledgers_migration_pg.py` | ledger PR, revision 0109 reconciliation (fresh, compatible pre-creation, refused incompatible shapes, append-only triggers on the correct relations, foundation tables required) | 12 |
 | `commerce_runtime_agent_loop` | proof | `tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py` | agent loop PR, dormant agent loop core and its durable guarantees (reasoning with read-only fixture tools and observations feeding the next decision; revision-bound attempt debits, concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; bundle-duplicate refusal and the durable crash-safe recovery allowance) | 39 |
-| `commerce_runtime_pilot` | proof | `tests/commerce_reliability/test_commerce_runtime_pilot_pg.py` | pilot integration PR, the owner pilot end to end with the real admission, ownership, agent loop, Anthropic adapter, trusted read context and delivery ledger and only the model's HTTP call and the WhatsApp transport scripted (one inbound message answered at most once across redelivery, re-entry and concurrency; never a success the send does not support; no blind retry of an uncertain send; a follow-up answered from the conversation the platform already recorded; tenant and conversation scope; refusal when the runtime schema is absent) | 17 |
+| `commerce_runtime_pilot` | proof | `tests/commerce_reliability/test_commerce_runtime_pilot_pg.py` | pilot integration and corrected admission, ownership, delivery and recovery boundaries with scripted provider/transport | 57 |
+| `commerce_runtime_handover_migration` | proof | `tests/commerce_reliability/test_commerce_runtime_handover_migration_pg.py` | revision 0111 compatibility and sibling migration controls | 25 |
+| `commerce_runtime_pilot_handover_controls` | proof | `tests/commerce_reliability/test_commerce_runtime_pilot_handover_controls_pg.py` | durable acceptance, handover, recovery, scoped disposition and retirement | 83 |
+| `commerce_runtime_trial_evidence` | proof | `tests/commerce_reliability/test_commerce_runtime_trial_evidence_pg.py` | repository-written turn evidence; live/tenant isolation; normal resolved-state accounting; read-only snapshot against an independent completing connection | 13 |
 | `runner_connection_regressions` | runner_regression | `tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py` | runner PR, explicit target authority at the connection boundary (section 2.2) | 2 |
+
+This branch inventories 303 cases (301 proofs + 2 runner regressions): all
+290 identifiers from main at `466758f5`, plus the collector's 13. This is an
+inventory statement, not a claim that the PostgreSQL execution has passed.
+When integrating the address sibling, preserve its separate 31 identifiers as
+well; do not replace that suite while reconciling the manifest.
 
 The counts above are informational. Nothing in the runner or its self-test
 pins a count: the inventory must equal pytest's own collection of each
@@ -72,7 +81,7 @@ process with `--junitxml` and judges the JUnit output:
 | Any skip, failure or error | exit **1**, the node id and reason are listed; a skip is never a pass |
 | Leaf `testsuite` counts differ from the inventory or show skips, failures or errors | exit **1** |
 | Non-zero pytest exit | exit **1** |
-| Everything above satisfied for every suite | exit **0**, `PROVEN (142/142 required tests passed: 140/140 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)` at the current inventory |
+| Everything above satisfied for every suite | exit **0**, `PROVEN`, with actual inventory totals, per-kind counts and zero skips |
 
 The runner is pure standard library, imports no application code and carries
 no allowances. `tests/commerce_reliability/test_required_postgres_proofs_runner.py`

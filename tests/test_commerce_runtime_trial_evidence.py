@@ -243,6 +243,36 @@ def test_failed_read_only_setup_refuses_before_reading_any_window(monkeypatch):
     db.close.assert_called_once()
 
 
+def test_read_only_setup_also_requires_a_consistent_snapshot():
+    from unittest.mock import Mock
+
+    db = Mock()
+    assert job._read_only(db) is True
+    sql = str(db.execute.call_args.args[0]).upper()
+    assert "REPEATABLE READ" in sql
+    assert "READ ONLY" in sql
+
+
+def test_every_reader_query_is_explicitly_bound_to_the_live_namespace(monkeypatch):
+    seen = []
+
+    def rows(_db, statement, **params):
+        seen.append((statement, params))
+        if "FROM commerce_runtime_turns t" in statement:
+            return [turn()]
+        if "count(*) AS reserved" in statement:
+            return [{"reserved": 0}]
+        return []
+
+    monkeypatch.setattr(job, "_rows", rows)
+    job.read_window(object(), tenant_id=1, since=ADMITTED,
+                    until=ADMITTED + dt.timedelta(hours=1))
+    assert len(seen) == 7
+    for sql, params in seen:
+        assert "namespace = :namespace" in sql
+        assert params["namespace"] == "live"
+
+
 def test_a_clean_trial_refuses_nothing_and_claims_only_what_it_saw():
     turns = [answered_turn(1), answered_turn(2), answered_turn(3)]
     found = job.verdicts(turns, effects_reserved=0, deferred=[])

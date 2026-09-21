@@ -325,8 +325,11 @@ COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST=<the pilot's tenant id> \
     --since 2026-09-21T06:00:00Z
 ```
 
-It reads only the allowlisted tenants, only inside the stated window, in a
-read-only transaction, and it masks recipients and message ids so the report
+It reads only the allowlisted tenants' live namespace, using one repeatable-read,
+read-only transaction. The window selects admitted turns and effect/deferred-row
+creation times; related outcomes are their current state in that snapshot,
+not their historical state at the end of the window. Shadow work is excluded.
+It masks recipients and message ids so the report
 can leave the machine. Per turn it prints the terminal, how many reply intents
 were reserved, how many sends were accepted and which receipt kinds exist.
 Then it judges a closed set of claims, each as `proven`, `refused` — with the
