@@ -479,11 +479,20 @@ def _looks_like_store_home(url: str, store_domain: Optional[str]) -> bool:
     path = (parsed.path or "").strip().rstrip("/")
     if path and path not in ("", "/"):
         return False
+    return is_storefront_host(host, store_domain=store_domain)
+
+
+def is_storefront_host(host: str, *, store_domain: Optional[str] = None) -> bool:
+    """True when ``host`` is the merchant's own store domain (or a subdomain
+    of it) or a storefront platform Nahla integrates (Salla / Zid /
+    Shopify). Pure; the one definition of "first-party host" the CTA
+    classifier uses for store homepages."""
+    host = (host or "").strip().lower()
     if not host:
         return False
     if store_domain:
-        sd = store_domain.lower().lstrip(".")
-        if host == sd or host.endswith("." + sd):
+        sd = store_domain.strip().lower().lstrip(".")
+        if sd and (host == sd or host.endswith("." + sd)):
             return True
     return any(h in host for h in _STOREFRONT_HOST_HINTS)
 

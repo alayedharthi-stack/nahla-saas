@@ -712,6 +712,357 @@ def test_a_model_refusal_sends_nothing_and_says_why(pilot):
     assert report.processing_outcome == c.ProcessingOutcome.FAILED.value
 
 
+# ── A step's tool bundle is bounded by the turn's budget, not by a smaller ceiling ──
+
+
+@contextlib.contextmanager
+def _more_products(pilot: "Pilot", titles: Tuple[str, ...]) -> Any:
+    """Extra catalogue rows for one case, removed afterwards."""
+    ids: List[int] = []
+    with pilot.engine.begin() as conn:
+        for title in titles:
+            ids.append(int(conn.execute(
+                text("INSERT INTO products (tenant_id, external_id, title, description, price, "
+                     "in_stock, stock_quantity) VALUES (:t, :x, :ti, :d, 149, true, 2) RETURNING id"),
+                {"t": pilot.tenant_a, "x": "SKU-" + uuid.uuid4().hex[:8], "ti": title,
+                 "d": title}).scalar_one()))
+    try:
+        yield ids
+    finally:
+        with pilot.engine.begin() as conn:
+            for product_id in ids:
+                conn.execute(text("DELETE FROM products WHERE id = :p"), {"p": product_id})
+
+
+def _pilot_budget(max_tool_calls: int) -> ac.LoopBudget:
+    return ac.LoopBudget(max_steps=4, max_tool_calls=max_tool_calls, tool_timeout_seconds=10.0,
+                         provider_timeout_seconds=15.0, deadline_seconds=45.0)
+
+
+def test_a_bundle_of_detail_requests_the_budget_can_pay_for_runs_whole(pilot):
+    """Tenant 1 pilot, September 2026, turn 6: after one search the model asked
+    for four products' details in one step. The provider's ceiling was three
+    per step, so the whole step was refused as ``provider_invalid`` and the
+    customer got nothing. The ceiling now follows the turn's tool budget."""
+    # A details lookup is authorised only for a product an earlier search of
+    # this turn returned, so one search must surface all four: the fixture's
+    # shoe and three more shoes.
+    with _more_products(pilot, ("حذاء جلد بني", "حذاء أطفال أزرق", "حذاء رياضي أسود")) as extra:
+        products = [pilot.product_id, *extra]
+        refs = tuple(f"catalog:product:{pid}" for pid in products)
+        transport = Transport([accepted("wamid.BUNDLE")])
+        report = pilot.run(
+            answers=[step([tool_use("t1", "search_products", query="حذاء", limit=5)]),
+                     step([tool_use(f"d{i}", "get_product_details", product_id=pid)
+                           for i, pid in enumerate(products)]),
+                     step([reply("عندنا أربعة منتجات متوفرة", refs=refs, commerce=True)])],
+            transport=transport, budget=_pilot_budget(max_tool_calls=6),
+        )
+    assert report.loop_status != ac.LoopStatus.STOPPED.value, (
+        report.stop_reason, report.stop_detail, report.tools_called, report.evidence_refs)
+    assert report.stop_reason is None and report.stop_detail == ()
+    assert report.tools_called == ("search_products",) + ("get_product_details",) * 4
+    assert report.tool_calls_used == 5
+    assert set(refs) <= set(report.evidence_refs)
+    assert report.dispatch_status == dd.SENT_ACCEPTED and len(transport.sent) == 1
+
+
+def test_a_bundle_over_a_smaller_ceiling_is_refused_by_name_not_in_silence(pilot):
+    """The same four-request step against a ceiling of three (a tool budget of
+    three): still ``provider_invalid``, but the report, the log line and the
+    terminal now say exactly why."""
+    transport = Transport([])
+    products = [pilot.product_id + offset for offset in (0, 1000, 1001, 1002)]
+    report = pilot.run(
+        answers=[step([tool_use("t1", "search_products", query="حذاء")]),
+                 step([tool_use(f"d{i}", "get_product_details", product_id=pid)
+                       for i, pid in enumerate(products)])],
+        transport=transport, budget=_pilot_budget(max_tool_calls=3),
+    )
+    assert report.stop_reason == ac.StopReason.PROVIDER_INVALID.value
+    assert dict(report.stop_detail) == {"provider_reason": "tool_requests_exceed_declared_maximum:4>3"}
+    assert report.as_log_fields()["stop_detail"] == (
+        "provider_reason=tool_requests_exceed_declared_maximum:4>3")
+    assert transport.sent == [] and report.processing_outcome == c.ProcessingOutcome.FAILED.value
+    terminal = pilot.terminal(report.turn_id)
+    assert terminal.details["stop_reason"] == ac.StopReason.PROVIDER_INVALID.value
+    assert terminal.details["stop_detail"] == {
+        "provider_reason": "tool_requests_exceed_declared_maximum:4>3"}
+
+
+def test_a_bundle_beyond_the_remaining_tool_budget_is_stopped_with_its_numbers(pilot):
+    """Within the ceiling but over what is left: refused whole, by the budget,
+    and the stop says what was asked and what remained."""
+    transport = Transport([])
+    products = [pilot.product_id + offset for offset in (0, 1000, 1001, 1002)]
+    report = pilot.run(
+        answers=[step([tool_use("t1", "search_products", query="حذاء")]),
+                 step([tool_use(f"d{i}", "get_product_details", product_id=pid)
+                       for i, pid in enumerate(products)])],
+        transport=transport, budget=_pilot_budget(max_tool_calls=4),
+    )
+    assert report.stop_reason == ac.StopReason.BUDGET_EXHAUSTED.value
+    assert dict(report.stop_detail) == {"limit": "max_tool_calls", "remaining": "3", "requested": "4"}
+    assert report.tool_calls_used == 1        # the refused bundle debited nothing
+    assert transport.sent == []
+    assert pilot.terminal(report.turn_id).details["stop_detail"] == {
+        "limit": "max_tool_calls", "remaining": "3", "requested": "4"}
+
+
+# ── The merchant's shareable coupons are read, never invented ─────────────────
+
+
+@contextlib.contextmanager
+def _coupons(pilot: "Pilot", rows: Tuple[Tuple[int, str, Optional[str]], ...],
+             metadata: Optional[Mapping[str, Any]] = None) -> Any:
+    """Coupon rows ``(tenant_id, code, allocation_channel)`` for one case, removed afterwards.
+    ``metadata`` is written to every row, as the promotion engine writes a personal code's."""
+    ids: List[int] = []
+    with pilot.engine.begin() as conn:
+        for tenant_id, code, channel in rows:
+            ids.append(int(conn.execute(
+                text("INSERT INTO coupons (tenant_id, code, description, discount_type, "
+                     "discount_value, source_type, allocation_channel, metadata) "
+                     "VALUES (:t, :c, :d, 'percentage', '10', 'manual', :ch, CAST(:m AS jsonb)) RETURNING id"),
+                {"t": tenant_id, "c": code, "d": "خصم ترحيبي", "ch": channel,
+                 "m": json.dumps(dict(metadata)) if metadata else None}).scalar_one()))
+    try:
+        yield ids
+    finally:
+        with pilot.engine.begin() as conn:
+            for coupon_id in ids:
+                conn.execute(text("DELETE FROM coupons WHERE id = :c"), {"c": coupon_id})
+
+
+def _two_step_budget() -> ac.LoopBudget:
+    """One tool step and one reply step: a refused reply ends the turn instead
+    of being fed back for another attempt this case does not script."""
+    return ac.LoopBudget(max_steps=2, max_tool_calls=4, tool_timeout_seconds=10.0,
+                         provider_timeout_seconds=15.0, deadline_seconds=45.0)
+
+
+def test_a_shareable_coupon_is_read_from_the_merchant_s_own_records_and_cited(pilot):
+    """The owner's decision after the first Tenant 1 conversation: the model can
+    read the merchant's currently valid coupons and hand one to the customer.
+    Read only — the row is the merchant's, the code is never invented."""
+    with _coupons(pilot, ((pilot.tenant_a, "WELCOME10", None),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([accepted("wamid.COUPON")])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("عندنا كود خصم لأول طلب", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟",
+        )
+    assert report.tools_called == ("list_shareable_promotions",)
+    assert ref in report.evidence_refs
+    assert report.dispatch_status == dd.SENT_ACCEPTED and len(transport.sent) == 1
+
+
+def test_a_campaign_only_coupon_is_never_evidence_the_model_can_cite(pilot):
+    """A code pinned to a campaign channel is not shareable here: the tool does
+    not return it, so a reply citing it is refused before any send."""
+    with _coupons(pilot, ((pilot.tenant_a, "EMAILONLY", "campaign"),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("خذ هذا الكود", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.tools_called == ("list_shareable_promotions",)
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unknown_evidence" in dict(report.stop_detail)["problems"]
+    assert transport.sent == [] and report.processing_outcome == c.ProcessingOutcome.FAILED.value
+
+
+def test_a_personal_code_issued_to_another_customer_is_never_evidence_here(pilot):
+    """The promotion engine's personal codes live in the same table, stamped
+    with their customer's id and a single-use limit. This conversation's
+    customer is not that customer: the tool does not return the code, and a
+    reply citing it is refused before any send."""
+    other_customer = pilot.customer_id + 100_000
+    with _coupons(pilot, ((pilot.tenant_a, "PERSONAL42", None),),
+                  metadata={"customer_id": other_customer, "usage_limit": 1, "usage_count": 0,
+                            "active": True}) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("خذ هذا الكود", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.tools_called == ("list_shareable_promotions",)
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unknown_evidence" in dict(report.stop_detail)["problems"]
+    assert transport.sent == []
+
+
+def test_this_customer_s_own_personal_code_is_read_and_cited(pilot):
+    with _coupons(pilot, ((pilot.tenant_a, "PERSONALME", None),),
+                  metadata={"customer_id": pilot.customer_id, "usage_limit": 1, "usage_count": 0,
+                            "active": True}) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([accepted("wamid.PERSONAL")])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("كودك الخاص PERSONALME جاهز", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندي كود خاص؟",
+        )
+    assert ref in report.evidence_refs
+    assert report.dispatch_status == dd.SENT_ACCEPTED and len(transport.sent) == 1
+
+
+def test_a_code_the_merchant_s_records_did_not_produce_never_reaches_the_customer(pilot):
+    """The model cites the real coupon but writes a different code: the draft
+    is refused, fed back once, and with no better second draft nothing is sent."""
+    with _coupons(pilot, ((pilot.tenant_a, "WELCOME10", None),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("استخدم كود WELCOME20", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unobserved_code" in dict(report.stop_detail)["problems"]
+    assert transport.sent == []
+
+
+def test_another_tenant_s_coupon_is_never_read_here(pilot):
+    with _coupons(pilot, ((pilot.tenant_b, "OTHERSTORE", None),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("خذ هذا الكود", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unknown_evidence" in dict(report.stop_detail)["problems"]
+    assert transport.sent == []
+
+
+# ── The reserved reply survives the platform's own wire sanitiser ────────────
+
+
+@dataclasses.dataclass
+class SanitisingTransport:
+    """A scripted transport that runs the platform's wire sanitiser on the
+    text it is handed — the same guard ``_post_wa`` runs — and records what
+    would have reached the customer."""
+
+    responses: List[Any]
+    tenant_id: int
+    wire: List[str] = dataclasses.field(default_factory=list)
+    sanitised: List[bool] = dataclasses.field(default_factory=list)
+
+    def __call__(self, payload: Any) -> lc.SendResponse:
+        from core.outbound_sanitizer import sanitize_outbound_payload
+
+        wire_payload = {"messaging_product": "whatsapp", "to": PHONE, "type": "text",
+                        "text": {"body": str(payload.get("text") or "")}}
+        out, was_sanitised = sanitize_outbound_payload(wire_payload, tenant_id=self.tenant_id,
+                                                       skip_handoff_scrub=True)
+        self.wire.append(str(out["text"]["body"]))
+        self.sanitised.append(bool(was_sanitised))
+        if not self.responses:
+            raise AssertionError("the runtime dispatched more sends than the test scripted")
+        return self.responses.pop(0)
+
+
+def test_a_listing_with_a_link_and_an_image_per_product_reaches_the_wire_unchanged(pilot, caplog):
+    """Tenant 1, turn 5 of the first real conversation, end to end on the
+    integrated tree: four products, each with its store link and its image
+    link, composed as one reply. The reserved intent and the wire text are
+    the same bytes; the sanitiser only logs the link count."""
+    import logging
+
+    with _more_products(pilot, ("حذاء جلد بني", "حذاء أطفال أزرق", "حذاء رياضي أسود")) as extra:
+        products = [pilot.product_id, *extra]
+        refs = tuple(f"catalog:product:{pid}" for pid in products)
+        listing = "عندنا أربعة أحذية متوفرة:\n" + "\n".join(
+            f"{i + 1}) https://demostore.salla.sa/ar/p{pid} — الصورة: https://cdn.salla.sa/img/p{pid}.jpg"
+            for i, pid in enumerate(products))
+        transport = SanitisingTransport([accepted("wamid.LISTING")], tenant_id=pilot.tenant_a)
+        with caplog.at_level(logging.INFO, logger="nahla.security.outbound_sanitizer"):
+            report = pilot.run(
+                answers=[step([tool_use("t1", "search_products", query="حذاء", limit=5)]),
+                         step([reply(listing, refs=refs, commerce=True)])],
+                transport=transport, question="ابي اشوف الأحذية المتوفرة مع الصور",
+            )
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert transport.wire == [listing] and transport.sanitised == [False]
+    audit = [r.getMessage() for r in caplog.records if "[OUTBOUND_URL_AUDIT]" in r.getMessage()]
+    assert len(audit) == 1 and "url_count=8" in audit[0]
+    assert not [r for r in caplog.records if "[EXTERNAL_RESEARCH_BLOCKED]" in r.getMessage()]
+
+
+def test_a_search_dump_in_the_reserved_reply_is_still_replaced_on_the_wire(pilot):
+    """The retired link-count rule took nothing from the leak guard: a reply
+    carrying an external-research fingerprint is still replaced before it
+    reaches the customer, however few links it has."""
+    from core.outbound_sanitizer import SAFE_FALLBACK_TEXT
+
+    dump = ("حسب البحث:\nالمصادر:\n"
+            "- https://html.duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com&rut=x")
+    transport = SanitisingTransport([accepted("wamid.DUMP")], tenant_id=pilot.tenant_a)
+    report = pilot.run(answers=[step([reply(dump, refs=(), commerce=False)])], transport=transport,
+                       question="كم فاتورة الكهرباء؟")
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert transport.wire == [SAFE_FALLBACK_TEXT] and transport.sanitised == [True]
+
+
+_PROMOTION_TABLES = ("coupons", "coupon_rules", "promotions")
+_WRITE_VERBS = ("insert", "update", "delete", "truncate", "alter", "drop")
+
+
+def test_the_coupon_read_writes_nothing_and_asks_only_for_this_tenant(pilot):
+    """Every SQL statement the turn issues is captured at the cursor: none of
+    them writes to a promotion table, and every read of the coupons table is
+    bound to this tenant's id — the merchant's records are read, in scope,
+    and never touched."""
+    from sqlalchemy import event
+
+    statements: List[Tuple[str, Any]] = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        statements.append((str(statement), parameters))
+
+    event.listen(pilot.engine, "before_cursor_execute", capture)
+    try:
+        with _coupons(pilot, ((pilot.tenant_a, "SPRING15", None),)) as ids:
+            ref = f"promotion:coupon:{ids[0]}"
+            statements.clear()                      # the fixture's own insert is not the turn's
+            transport = Transport([accepted("wamid.COUPON2")])
+            report = pilot.run(
+                answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                         step([reply("كود الخصم جاهز", refs=(ref,), commerce=True)])],
+                transport=transport, question="فيه خصم؟",
+            )
+            assert report.dispatch_status == dd.SENT_ACCEPTED and ref in report.evidence_refs
+            turn_statements = list(statements)
+    finally:
+        event.remove(pilot.engine, "before_cursor_execute", capture)
+
+    assert turn_statements, "the turn issued no SQL at all, so nothing was proved"
+    promotion_writes = [
+        sql for sql, _ in turn_statements
+        if sql.lstrip().lower().startswith(_WRITE_VERBS)
+        and any(table in sql.lower() for table in _PROMOTION_TABLES)
+    ]
+    assert promotion_writes == [], promotion_writes
+    coupon_reads = [(sql, params) for sql, params in turn_statements
+                    if sql.lstrip().lower().startswith("select") and "coupons" in sql.lower()]
+    assert coupon_reads, "the tool never read the coupons table"
+    for sql, params in coupon_reads:
+        assert "coupons.tenant_id = " in sql, sql
+        # The tenant bind is the one named ``tenant_id_…``; a limit or offset
+        # bind is never mistaken for it.
+        tenant_binds = ([value for key, value in params.items() if str(key).startswith("tenant_id")]
+                        if isinstance(params, dict) else [])
+        assert tenant_binds == [pilot.tenant_a], (sql, params)
+
+
 # ── The history belongs to this conversation (F7) ────────────────────────────
 
 

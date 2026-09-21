@@ -91,11 +91,23 @@ def run(binding: alt.LiveToolBinding, tool: str, arguments: Dict[str, Any], *,
 # ── The allowlist ────────────────────────────────────────────────────────────
 
 
-def test_the_registry_exposes_exactly_the_six_read_tools(binding):
+def test_the_registry_exposes_exactly_the_seven_read_tools(binding):
     registry = alt.build_live_registry(binding)
     assert tuple(d.name for d in registry.definitions) == alt.LIVE_TOOL_NAMES
     assert alt.LIVE_TOOL_NAMES == ("search_products", "get_product_details", "search_merchant_knowledge",
-                                   "resolve_customer_order", "get_order_details", "get_order_shipment")
+                                   "resolve_customer_order", "get_order_details", "get_order_shipment",
+                                   "list_shareable_promotions")
+
+
+def test_every_tool_the_instructions_name_is_declared_by_the_registry(binding):
+    """The instructions refer to six tools by name; the registry declares those
+    six plus the owner-approved read of shareable promotions, which the
+    instructions never mention and the model discovers from its declaration."""
+    from modules.ai.commerce_agent_v2.pilot_instructions import INSTRUCTION_TOOL_NAMES
+
+    declared = tuple(d.name for d in alt.build_live_registry(binding).definitions)
+    assert declared[:len(INSTRUCTION_TOOL_NAMES)] == INSTRUCTION_TOOL_NAMES
+    assert set(declared) - set(INSTRUCTION_TOOL_NAMES) == set(alt.PILOT_ONLY_TOOL_NAMES)
 
 
 def test_every_exposed_tool_is_declared_read_only(binding):
@@ -195,6 +207,85 @@ def test_merchant_knowledge_keeps_the_section_body_and_its_reference(binding, mo
     observation = run(binding, "search_merchant_knowledge", {"query": "التوصيل"})
     assert observation.evidence_refs == ("knowledge:section:3",)
     assert observation.result["sections"][0]["body"] == "التوصيل خلال ٣ أيام"
+
+
+def promotion(promotion_id: int = 5, **overrides: Any) -> Snapshot:
+    fields: Dict[str, Any] = {
+        "promotion_id": promotion_id, "record_kind": "coupon", "code": "WELCOME10", "name": "",
+        "description": "خصم ترحيبي على أول طلب", "discount_type": "percentage", "discount_value": "10",
+        "expires_at": "2027-01-01T00:00:00+00:00", "conditions": {"min_order_total": "100"},
+        "eligibility_determined": False, "eligibility_note": "conditions_not_fully_evaluated",
+        "evidence_ref": f"promotion:coupon:{promotion_id}",
+    }
+    fields.update(overrides)
+    return Snapshot(**fields)
+
+
+def test_a_shareable_coupon_keeps_its_code_its_conditions_and_its_reference(binding, monkeypatch):
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("ok", promotions=[promotion(5)],
+                                      evidence=[Record("promotion:coupon:5")], query_outcome="ok")))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.ok is True
+    assert observation.evidence_refs == ("promotion:coupon:5",)
+    assert observation.result["found"] is True and observation.result["eligibility_determined"] is False
+    assert observation.result["partial"] is False and observation.result["query_outcome"] == "ok"
+    first = observation.result["promotions"][0]
+    assert first["code"] == "WELCOME10" and first["evidence_ref"] == "promotion:coupon:5"
+    assert first["discount_type"] == "percentage" and first["discount_value"] == "10"
+    assert first["conditions"] == {"min_order_total": "100"}
+    assert first["eligibility_determined"] is False
+
+
+def test_no_shareable_promotion_is_an_honest_empty_answer_with_no_evidence(binding, monkeypatch):
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("not_found", failure_reason="no_valid_shareable_promotions",
+                                      query_outcome="NO_VALID_PROMOTIONS")))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.ok is True
+    assert observation.result == {"status": "not_found", "found": False,
+                                  "reason": "no_valid_shareable_promotions",
+                                  "query_outcome": "NO_VALID_PROMOTIONS"}
+    assert observation.evidence_refs == ()
+
+
+def test_an_unreadable_promotion_source_says_so_rather_than_reporting_none(binding, monkeypatch):
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("error", failure_reason="promotion_query_failed",
+                                      query_outcome="PROMOTION_QUERY_FAILED")))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["status"] == "error" and observation.result["found"] is False
+    assert observation.result["reason"] == "promotion_query_failed"
+    assert observation.evidence_refs == ()
+
+
+def test_a_partial_promotion_read_says_so_to_the_model(binding, monkeypatch):
+    """A source that could not be read is not silently 'no coupons': the model
+    is told the list may be incomplete."""
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("ok", promotions=[promotion(5)], evidence=[Record("promotion:coupon:5")],
+                                      query_outcome="PROMOTION_PARTIAL_FAILURE", partial=True)))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.ok is True and observation.result["found"] is True
+    assert observation.result["partial"] is True
+    assert observation.result["query_outcome"] == "PROMOTION_PARTIAL_FAILURE"
+
+
+def test_a_merchant_denial_reaches_the_model_as_a_denial_not_as_no_coupons(binding, monkeypatch):
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("denied", failure_reason="merchant_ai_coupon_policy_disabled",
+                                      query_outcome="NO_VALID_PROMOTIONS")))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["status"] == "denied" and observation.result["found"] is False
+    assert observation.result["reason"] == "merchant_ai_coupon_policy_disabled"
+    assert observation.evidence_refs == ()
+
+
+def test_the_promotion_read_takes_no_argument_the_model_could_set(binding):
+    definition = next(d for d in alt.build_live_registry(binding).definitions
+                      if d.name == "list_shareable_promotions")
+    assert definition.read_only is True
+    assert definition.input_schema == {"type": "object", "properties": {}, "required": []}
 
 
 def test_an_order_lookup_keeps_the_status_label_and_the_selection_reason(binding, monkeypatch):

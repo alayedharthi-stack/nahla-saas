@@ -66,6 +66,15 @@ The sanitiser is intentionally CONSERVATIVE for the search case:
   * The DuckDuckGo bridge (``html.duckduckgo.com/l/?uddg=…``) is the
     canonical leak source we observed in production; that alone is
     enough to drop the reply.
+  * The NUMBER of links in a reply is not evidence of a leak, and is
+    never a reason to rewrite it. A product listing, a branch list, a
+    "follow us" answer or a payment-plus-tracking reply legitimately
+    carries several links. September 2026, Tenant 1 pilot: a correct
+    four-product listing was replaced by the apology for its four
+    store links — that was the rule being wrong, not the reply. The
+    owner retired the count rule; the fingerprints above are the
+    evidence. Replies carrying many links are still logged
+    (``[OUTBOUND_URL_AUDIT]``) so the shape stays measurable.
 
 For the planner case the strategy is RECOVERY-FIRST: we try to keep
 the natural Arabic message the customer was meant to see and only
@@ -75,7 +84,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("nahla.security.outbound_sanitizer")
 
@@ -99,18 +108,24 @@ _LEAK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # encoded query string (which is exactly the ``html.duckduckgo
     # .com/l/?uddg=https%3A%2F%2F…%25D8%25A7…`` shape).
     ("double_encoded_url",  re.compile(r"%25[0-9A-Fa-f]{2}", )),
-    # "المصادر:" header followed by URL markers is the giveaway of
-    # the old ``web_search_summary`` template output.
-    ("sources_header",      re.compile(r"المصادر\s*:\s*\n?\s*[-•]?\s*(?:https?://|//)", )),
+    # A "sources" / "references" header followed by a URL is the giveaway
+    # of the old ``web_search_summary`` template output — in either
+    # language, with or without the article, with or without a bullet.
+    ("sources_header",      re.compile(
+        r"(?:المصادر|مصادر|المراجع|مراجع|sources?|references?)\s*:\s*\n?\s*[-•*]?\s*(?:https?://|//)",
+        re.IGNORECASE)),
 ]
 
-# How many independent URLs in a single message constitute a "dump"?
-# A normal merchant reply rarely sends more than ONE clickable link
-# (payment link OR product page OR tracking page). Two is suspicious;
-# three or more is almost certainly a search citation block.
-_MAX_URLS_PER_MESSAGE = 2
-
 _URL_RE = re.compile(r"https?://\S+|(?<![A-Za-z0-9])//\S+", re.IGNORECASE)
+_URL_HOST_RE = re.compile(r"^(?:https?:)?//([^/?#\s]+)", re.IGNORECASE)
+
+# Above this many links a reply is LOGGED with its hosts — never rewritten.
+# The retired rule replaced any reply carrying more than two links with the
+# apology; it was written for a legacy flow that sent product cards as
+# separate messages, and it silenced every composed reply that listed
+# several products, branches or social pages. A link count is not evidence
+# of a leak; the fingerprints are.
+_URL_AUDIT_THRESHOLD = 2
 
 # ── Internal planner / debug-field fingerprints ──────────────────────────────
 #
@@ -308,17 +323,46 @@ def contains_leakage_markers(text: str) -> Optional[str]:
     """Return the NAME of the first matching leakage fingerprint, or
     ``None`` when the text is clean. Useful for unit tests + log
     annotations. The returned name is one of the keys in
-    ``_LEAK_PATTERNS`` plus the synthetic ``too_many_urls`` bucket.
+    ``_LEAK_PATTERNS``. How many links the text carries plays no part.
     """
     if not text or not isinstance(text, str):
         return None
     for name, pattern in _LEAK_PATTERNS:
         if pattern.search(text):
             return name
-    urls = _URL_RE.findall(text)
-    if len(urls) > _MAX_URLS_PER_MESSAGE:
-        return "too_many_urls"
     return None
+
+
+def url_hosts(text: str) -> List[str]:
+    """The distinct hosts linked from ``text``, lower-cased and sorted.
+    Pure; used by the link audit line and by tests."""
+    if not text or not isinstance(text, str):
+        return []
+    hosts = set()
+    for url in _URL_RE.findall(text):
+        m = _URL_HOST_RE.match(url)
+        if m:
+            hosts.add(m.group(1).lower().rstrip(".,;:!?)»"))
+    return sorted(hosts)
+
+
+def _masked_recipient(recipient: Optional[str]) -> str:
+    """The recipient with every digit but the last two hidden, for an INFO line."""
+    value = str(recipient or "")
+    if not value:
+        return ""
+    return re.sub(r"\d(?=[\d\D]*\d{2}$)", "*", value)
+
+
+def _audit_link_count(body: str, *, tenant_id: Optional[int], recipient: Optional[str]) -> None:
+    """Log a clean reply that carries many links. Never changes the reply."""
+    urls = _URL_RE.findall(body)
+    if len(urls) > _URL_AUDIT_THRESHOLD:
+        logger.info(
+            "[OUTBOUND_URL_AUDIT] tenant=%s to=%s url_count=%d hosts=%s — a link count is not "
+            "leak evidence; the reply is sent as composed",
+            tenant_id, _masked_recipient(recipient), len(urls), ",".join(url_hosts(body)),
+        )
 
 
 def _replace_body_in_payload(
@@ -521,6 +565,8 @@ def sanitize_outbound_payload(
 
         # ── External-research leak (May 2026) ───────────────────
         match = contains_leakage_markers(body)
+        if not match:
+            _audit_link_count(body, tenant_id=tenant_id, recipient=recipient)
         if match:
             logger.warning(
                 "[EXTERNAL_RESEARCH_BLOCKED] tenant=%s to=%s marker=%s original_len=%d "
@@ -1136,6 +1182,7 @@ __all__ = [
     "ASSET_LOCATION",
     "contains_leakage_markers",
     "contains_planner_markers",
+    "url_hosts",
     "contains_policy_leak_markers",
     "contains_internal_instruction_leak",
     "contains_handoff_promise",

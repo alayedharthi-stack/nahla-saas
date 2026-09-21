@@ -67,8 +67,15 @@ def test_every_tool_the_instructions_tell_the_model_to_call_is_declared():
     assert missing == [], missing
 
 
-def test_the_declared_read_tools_are_exactly_the_names_the_instructions_use():
-    assert set(alt.LIVE_TOOL_NAMES) == set(pi.INSTRUCTION_TOOL_NAMES)
+def test_every_tool_the_instructions_name_is_declared_and_nothing_else_is_unaccounted_for():
+    """The contract in both directions: a tool the instructions name must exist
+    in the registry (a rename on one side leaves the model calling nothing),
+    and a tool the registry declares beyond those names must be one the
+    registry names on purpose (``PILOT_ONLY_TOOL_NAMES``: the owner-approved
+    read of shareable promotions), never an accidental exposure."""
+    assert set(pi.INSTRUCTION_TOOL_NAMES) <= set(alt.LIVE_TOOL_NAMES)
+    assert set(alt.LIVE_TOOL_NAMES) - set(pi.INSTRUCTION_TOOL_NAMES) == set(alt.PILOT_ONLY_TOOL_NAMES)
+    assert alt.PILOT_ONLY_TOOL_NAMES == ("list_shareable_promotions",)
 
 
 def test_the_reply_channel_is_both_declared_and_described():

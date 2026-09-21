@@ -21,7 +21,7 @@ import enum
 import hashlib
 import json
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from core.commerce_runtime import contracts as c
 from core.commerce_runtime import ledger_contracts as lc
@@ -175,7 +175,7 @@ class ToolObservation:
 
 @dataclasses.dataclass(frozen=True)
 class VerificationProblem:
-    code: str                                # closed: "unknown_evidence" | "empty_text" | "text_too_long" | "missing_evidence" | "invalid_kind"
+    code: str                                # closed: "unknown_evidence" | "empty_text" | "text_too_long" | "missing_evidence" | "invalid_kind" | "coupon_code_without_evidence" | "unobserved_code"
     detail: str
 
 
@@ -694,13 +694,59 @@ def evidence_index(observations: Sequence[ToolObservation]) -> Dict[str, str]:
     return index
 
 
+PROMOTIONS_TOOL_NAME = "list_shareable_promotions"
+# A coupon-code-shaped token: Latin capitals and digits, four to twenty-four
+# characters, starting with a letter, standing alone. Only the reply text of a
+# turn in which the promotions tool ran is scanned for these.
+_CODE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{3,23}(?![A-Za-z0-9])")
+
+
+def observed_promotion_codes(observations: Sequence[ToolObservation]) -> Optional[Dict[str, str]]:
+    """``code -> evidence ref`` for every coupon the promotions tool returned this turn.
+
+    ``{}`` when the tool did not run; ``None`` when it ran but a body is not
+    available (an observation restored without its body), in which case the
+    codes cannot be known and nothing about them can be checked.
+    """
+    codes: Dict[str, str] = {}
+    for obs in observations:
+        if obs.tool_name != PROMOTIONS_TOOL_NAME or not obs.ok:
+            continue
+        if obs.result is None or obs.body_truncated:
+            return None
+        for item in list(obs.result.get("promotions") or ()):
+            if not isinstance(item, Mapping):
+                continue
+            code = str(item.get("code") or "").strip().upper()
+            ref = str(item.get("evidence_ref") or "").strip()
+            if code and ref:
+                codes[code] = ref
+    return codes
+
+
+def observed_code_tokens(observations: Sequence[ToolObservation]) -> Set[str]:
+    """Every code-shaped token that appears anywhere in this turn's observation bodies."""
+    tokens: Set[str] = set()
+    for obs in observations:
+        if not obs.ok or obs.result is None:
+            continue
+        rendered = json.dumps(obs.result, ensure_ascii=False, default=str)
+        tokens.update(match.upper() for match in _CODE_TOKEN_RE.findall(rendered))
+    return tokens
+
+
 def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation]) -> Tuple[VerificationProblem, ...]:
     """Deterministic checks a draft must pass before it may be handed to delivery.
 
     They prove that every cited evidence reference exists among the
     observations this loop gathered for this tenant/conversation/turn, that a
     draft which claims commerce facts cites at least one, and that the text
-    is present and bounded. They do **not** prove that the text's sentences
+    is present and bounded. In a turn where the promotions tool ran they also
+    prove that every coupon code the text carries is one that tool returned
+    and that its evidence is cited, and that no other code-shaped token in the
+    text is unknown to this turn's observations: a coupon code is an
+    operational claim, and a code the merchant's records did not produce must
+    never reach a customer. They do **not** prove that the text's sentences
     are consistent with the evidence: semantic grounding is not established
     by this slice.
     """
@@ -716,6 +762,19 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
             problems.append(VerificationProblem("unknown_evidence", f"{ref} was not observed in this turn"))
     if draft.claims_commerce_facts and not draft.evidence_refs:
         problems.append(VerificationProblem("missing_evidence", "a commerce reply must cite observed evidence"))
+    promotions_ran = any(o.tool_name == PROMOTIONS_TOOL_NAME and o.ok for o in observations)
+    codes = observed_promotion_codes(observations) if promotions_ran else {}
+    if promotions_ran and codes is not None:
+        text_tokens = {token.upper() for token in _CODE_TOKEN_RE.findall(text)}
+        cited = set(draft.evidence_refs)
+        for code in sorted(text_tokens & set(codes)):
+            if codes[code] not in cited:
+                problems.append(VerificationProblem(
+                    "coupon_code_without_evidence", f"{code} appears in the text but {codes[code]} is not cited"))
+        seen = observed_code_tokens(observations)
+        for token in sorted(text_tokens - set(codes) - seen):
+            problems.append(VerificationProblem(
+                "unobserved_code", f"{token} is not a code this turn's tools returned"))
     return tuple(problems)
 
 

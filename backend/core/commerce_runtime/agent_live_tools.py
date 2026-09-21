@@ -1,8 +1,10 @@
 """The merchant's real read-only data, exposed to the loop as allowlisted tools.
 
-Six tools — catalog search, product lookup, merchant knowledge, order
-resolution, order details and shipment facts — each backed by the *same*
-implementation the Commerce Agent V2 read tools call. Nothing here queries the
+Seven tools — catalog search, product lookup, merchant knowledge, order
+resolution, order details, shipment facts and the merchant's shareable
+promotions — each backed by the *same* implementation the Commerce Agent V2
+read tools call (the promotions read has no SDK wrapper; its implementation is
+the platform's promotion-truth resolver). Nothing here queries the
 database itself and nothing here writes: no order is created or changed, no
 payment is taken, no cancellation is made, no message is sent. A tool whose
 implementation is not one of those reads cannot be registered, because the
@@ -41,6 +43,12 @@ MAX_DESCRIPTION_CHARS = 400
 MAX_KNOWLEDGE_CHARS = 700
 MAX_KNOWLEDGE_SECTIONS = 4
 MAX_LINE_ITEMS = 12
+MAX_PROMOTIONS = 8
+
+# Read tools the registry declares beyond the names the merchant instructions
+# use. The model discovers them from their declarations; the instructions are
+# not edited. Each one is an owner decision recorded in the pilot runbook.
+PILOT_ONLY_TOOL_NAMES: Tuple[str, ...] = ("list_shareable_promotions",)
 
 _ORDER_PURPOSES = ("status", "shipment")
 
@@ -428,6 +436,50 @@ def _shipment_lookup(binding: LiveToolBinding) -> at.ToolFunction:
     return _guarded(binding, body)
 
 
+def _promotion_view(snapshot: Any) -> Dict[str, Any]:
+    conditions = getattr(snapshot, "conditions", None)
+    return {
+        "promotion_id": getattr(snapshot, "promotion_id", None),
+        "evidence_ref": getattr(snapshot, "evidence_ref", None),
+        "record_kind": getattr(snapshot, "record_kind", None),
+        "code": _text(getattr(snapshot, "code", ""), 64),
+        "name": _text(getattr(snapshot, "name", ""), 160),
+        "description": _text(getattr(snapshot, "description", ""), MAX_DESCRIPTION_CHARS),
+        "discount_type": _text(getattr(snapshot, "discount_type", ""), 64),
+        "discount_value": _text(getattr(snapshot, "discount_value", ""), 64),
+        "expires_at": _text(getattr(snapshot, "expires_at", ""), 64),
+        "coupon_level": _text(getattr(snapshot, "coupon_level", ""), 32),
+        "conditions": dict(conditions) if isinstance(conditions, Mapping) else {},
+        "bound_to_this_customer": bool(getattr(snapshot, "bound_to_this_customer", False)),
+        # Never decided here: the merchant's records say a code exists and is
+        # shareable, not that this customer qualifies for it.
+        "eligibility_determined": False,
+        "eligibility_note": _text(getattr(snapshot, "eligibility_note", ""), 120),
+    }
+
+
+def _shareable_promotions(binding: LiveToolBinding) -> at.ToolFunction:
+    from modules.ai.commerce_agent_v2.tools.promotions import list_shareable_promotions_impl
+
+    def body(arguments: Mapping[str, Any]) -> at.ToolResult:
+        result = _run(list_shareable_promotions_impl(binding.context, limit=MAX_PROMOTIONS))
+        if getattr(result, "status", "") != "ok":
+            return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None),
+                               query_outcome=str(getattr(result, "query_outcome", "") or ""))
+        promotions = [_promotion_view(p) for p in (getattr(result, "promotions", None) or ())]
+        return at.ToolResult(
+            # ``partial`` is said out loud: a source that could not be read means
+            # a code missing from this list may still exist.
+            result={"status": "ok", "found": bool(promotions), "promotions": promotions,
+                    "eligibility_determined": False,
+                    "query_outcome": str(getattr(result, "query_outcome", "") or ""),
+                    "partial": bool(getattr(result, "partial", False))},
+            evidence_refs=_refs(getattr(result, "evidence", None) or ()),
+        )
+
+    return _guarded(binding, body)
+
+
 # ── Declarations ─────────────────────────────────────────────────────────────
 
 _QUERY = {"type": "string", "maxLength": MAX_QUERY_LENGTH}
@@ -488,6 +540,15 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         "shipment",
         _shipment_lookup,
     ),
+    (
+        "list_shareable_promotions",
+        "This merchant's currently valid coupons and offers that may be shared with a "
+        "customer, with their conditions and evidence references. Whether this customer "
+        "qualifies is not determined; a code not returned here does not exist.",
+        {"type": "object", "properties": {}, "required": []},
+        "promotion_list",
+        _shareable_promotions,
+    ),
 )
 
 LIVE_TOOL_NAMES: Tuple[str, ...] = tuple(name for name, *_ in _DECLARATIONS)
@@ -514,5 +575,6 @@ def build_live_registry(binding: LiveToolBinding) -> at.ToolRegistry:
 
 __all__ = [
     "ABANDONED_CALL_REASON", "LIVE_TOOL_NAMES", "LiveToolBinding", "LiveToolsUnavailable",
-    "MAX_SEARCH_LIMIT", "build_live_registry", "build_live_tools",
+    "MAX_PROMOTIONS", "MAX_SEARCH_LIMIT", "PILOT_ONLY_TOOL_NAMES", "build_live_registry",
+    "build_live_tools",
 ]
