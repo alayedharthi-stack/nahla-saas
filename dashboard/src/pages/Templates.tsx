@@ -144,7 +144,6 @@ function WaPreview({
 }
 
 function getLifecycleHeaderImageUrl(tpl: WhatsAppTemplateRecord): string | null {
-  if (!['order_confirmation', 'cod_confirmation'].includes(tpl.service_key ?? '')) return null
   const header = tpl.components.find(component => component.type === 'HEADER')
   if (header?.format !== 'IMAGE') return null
   return header.example?.header_url?.trim() || null
@@ -769,6 +768,62 @@ function PreviewModal({ tpl, onClose, onUpdate }: { tpl: WhatsAppTemplateRecord;
   )
 }
 
+type HeaderType = 'NONE' | 'TEXT' | 'IMAGE'
+
+function HeaderEditor({ type, text, imageUrl, busy, locked, onType, onText, onImage, onBusy, onError }: {
+  type: HeaderType; text: string; imageUrl: string | null; busy: boolean; locked?: boolean
+  onType: (value: HeaderType) => void; onText: (value: string) => void
+  onImage: (value: string) => void; onBusy: (value: boolean) => void; onError: (value: string) => void
+}) {
+  const { t } = useLanguage()
+  const labels = t(tr => tr.templatesMgmt.edit)
+  const upload = async (file: File | undefined) => {
+    if (!file) return
+    if (!['image/jpeg', 'image/png'].includes(file.type) || file.size > 5 * 1024 * 1024 || file.size === 0) {
+      onError(labels.imageValidationError)
+      return
+    }
+    onBusy(true); onError('')
+    try {
+      const asset = await templatesApi.uploadHeaderAsset(file)
+      onImage(asset.image_url)
+    } catch (error: unknown) {
+      const code = error instanceof Error ? error.message : ''
+      onError(['empty_file', 'file_too_large', 'unsupported_image_type', 'invalid_image',
+        'image_pixel_count_too_large', 'animated_image_not_supported'].includes(code)
+        ? labels.imageValidationError : labels.imageUploadFailed)
+    } finally { onBusy(false) }
+  }
+  return <div className="space-y-2">
+    <label className="label">
+      {labels.headerTypeLabel}
+      <select className="input text-sm mt-1" value={type} disabled={busy || locked}
+        onChange={event => onType(event.target.value as HeaderType)} data-testid="template-header-type">
+        <option value="NONE">{labels.headerNone}</option>
+        <option value="TEXT">{labels.headerText}</option>
+        <option value="IMAGE">{labels.headerImage}</option>
+      </select>
+    </label>
+    {locked && <p className="text-xs text-slate-500">{labels.managedHeaderHint}</p>}
+    {type === 'TEXT' && <input className="input text-sm" value={text} maxLength={60}
+      onChange={event => onText(event.target.value)} placeholder={labels.headerPlaceholder} />}
+    {type === 'IMAGE' && <>
+      {imageUrl && <img src={imageUrl} alt={labels.headerImage} referrerPolicy="no-referrer"
+        className="w-full max-h-64 object-contain rounded-xl border border-slate-200 bg-slate-50"
+        data-testid="edit-template-image-header" />}
+      <p className="text-xs text-slate-500">{labels.imageUploadHint}</p>
+      <label className={`btn-secondary text-xs cursor-pointer ${busy ? 'opacity-50' : ''}`}>
+        <Upload className="w-4 h-4" />
+        {busy ? labels.imageUploading : imageUrl ? labels.changeImage : labels.uploadImage}
+        <input type="file" accept="image/jpeg,image/png" className="hidden" disabled={busy}
+          data-testid="edit-template-image-upload" onChange={event => {
+            void upload(event.target.files?.[0]); event.target.value = ''
+          }} />
+      </label>
+    </>}
+  </div>
+}
+
 // ── Create template wizard ────────────────────────────────────────────────────
 
 interface WizardState {
@@ -777,6 +832,8 @@ interface WizardState {
   language: string
   category: TemplateCategory
   headerText: string
+  headerType: HeaderType
+  headerImageUrl: string | null
   bodyText: string
   footerText: string
   buttons: TemplateButton[]
@@ -788,6 +845,8 @@ const INIT_WIZARD_BASE: Omit<WizardState, 'footerText'> = {
   language: 'ar',
   category: 'MARKETING',
   headerText: '',
+  headerType: 'NONE',
+  headerImageUrl: null,
   bodyText: '',
   buttons: [],
 }
@@ -801,6 +860,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
     ...INIT_WIZARD_BASE,
     footerText: page.footerDefault,
   }))
+  const [uploadingImage, setUploadingImage] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -826,7 +886,9 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
   const canNext = (): boolean => {
     if (wiz.step === 1) return !!wiz.name.trim() && !!wiz.category
-    if (wiz.step === 2) return !!wiz.bodyText.trim()
+    if (wiz.step === 2) return !!wiz.bodyText.trim() && !uploadingImage
+      && (wiz.headerType !== 'IMAGE' || !!wiz.headerImageUrl)
+      && (wiz.headerType !== 'TEXT' || !!wiz.headerText.trim())
     return true
   }
 
@@ -857,8 +919,10 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
   const buildPayload = (): CreateTemplatePayload => {
     const components: TemplateComponent[] = []
-    if (wiz.headerText.trim()) {
-      components.push({ type: 'HEADER', format: 'TEXT', text: wiz.headerText.trim() })
+    if (wiz.headerType === 'IMAGE' && wiz.headerImageUrl) {
+      components.push({ type: 'HEADER', format: 'IMAGE', example: { header_url: wiz.headerImageUrl } })
+    } else if (wiz.headerType === 'TEXT' && wiz.headerText.trim()) {
+      components.push({ type: 'HEADER', format: 'TEXT', text: wiz.headerText })
     }
     components.push({ type: 'BODY', text: wiz.bodyText.trim() })
     if (wiz.footerText.trim()) {
@@ -979,15 +1043,11 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                 {c.step2.intro} {`{{1}}`} {`{{2}}`} {`{{3}}`} {c.step2.introSuffix}
               </p>
 
-              <div>
-                <label className="label">{c.step2.headerLabel}</label>
-                <input
-                  className="input text-sm"
-                  placeholder={c.step2.headerExamplePlaceholder}
-                  value={wiz.headerText}
-                  onChange={e => setWiz(w => ({ ...w, headerText: e.target.value }))}
-                />
-              </div>
+              <HeaderEditor type={wiz.headerType} text={wiz.headerText} imageUrl={wiz.headerImageUrl}
+                busy={uploadingImage} onBusy={setUploadingImage} onError={setError}
+                onType={headerType => setWiz(w => ({ ...w, headerType }))}
+                onText={headerText => setWiz(w => ({ ...w, headerText }))}
+                onImage={headerImageUrl => setWiz(w => ({ ...w, headerImageUrl }))} />
 
               <div>
                 <div className="flex items-center justify-between mb-1">
@@ -1142,6 +1202,7 @@ function CreateWizard({ onClose, onCreated }: { onClose: () => void; onCreated: 
                   <p className="text-xs text-slate-500 mb-2">{c.step4.previewLabel}</p>
                   <WaPreview
                     header={previewHeader}
+                    headerImageUrl={wiz.headerType === 'IMAGE' ? wiz.headerImageUrl : null}
                     body={previewBody}
                     footer={previewFooter}
                     buttons={previewButtons as TemplateButton[]}
@@ -1200,6 +1261,7 @@ function EditModal({
   const btnsComp   = tpl.components.find(c => c.type === 'BUTTONS')
   const initialImageHeaderComp = headerComp?.format === 'IMAGE' ? headerComp : null
 
+  const [headerType, setHeaderType] = useState<HeaderType>(initialImageHeaderComp ? 'IMAGE' : headerComp?.format === 'TEXT' ? 'TEXT' : 'NONE')
   const [headerText, setHeaderText] = useState(headerComp?.text ?? '')
   const [bodyText,   setBodyText]   = useState(bodyComp?.text ?? '')
   const [footerText, setFooterText] = useState(footerComp?.text ?? '')
@@ -1208,29 +1270,30 @@ function EditModal({
   const [uploadingImage, setUploadingImage] = useState(false)
   const [saving, setSaving]         = useState(false)
   const [error, setError]           = useState('')
-  const headerImageUrl = imageHeaderComp?.example?.header_url?.trim() || null
+  const headerImageUrl = headerType === 'IMAGE' ? imageHeaderComp?.example?.header_url?.trim() || null : null
 
   const updateBtn = (i: number, patch: Partial<TemplateButton>) =>
     setButtons(bs => bs.map((b, idx) => idx === i ? { ...b, ...patch } : b))
 
   const buildComponents = (): TemplateComponent[] => {
     const out: TemplateComponent[] = []
-    if (imageHeaderComp) {
+    if (headerType === 'IMAGE' && imageHeaderComp) {
       out.push({
         ...imageHeaderComp,
         example: imageHeaderComp.example ? { ...imageHeaderComp.example } : undefined,
       })
-    } else if (headerText.trim()) {
-      out.push({ type: 'HEADER', format: 'TEXT', text: headerText.trim() })
+    } else if (headerType === 'TEXT' && headerText.trim()) {
+      out.push({ type: 'HEADER', format: 'TEXT', text: headerText })
     }
-    out.push({ type: 'BODY', text: bodyText.trim() })
-    if (footerText.trim()) out.push({ type: 'FOOTER', text: footerText.trim() })
+    out.push({ type: 'BODY', text: bodyText })
+    if (footerText.trim()) out.push({ type: 'FOOTER', text: footerText })
     if (buttons.length > 0) out.push({ type: 'BUTTONS', buttons })
     return out
   }
 
   const handleSave = async () => {
     if (!bodyText.trim()) { setError(e.errors.bodyRequired); return }
+    if (uploadingImage || (headerType === 'IMAGE' && !headerImageUrl)) { setError(e.imageRequired); return }
     setSaving(true); setError('')
     try {
       const updated = await templatesApi.update(tpl.id, { components: buildComponents() })
@@ -1243,24 +1306,6 @@ function EditModal({
       setError(msg ?? e.errors.saveFailed)
     } finally {
       setSaving(false)
-    }
-  }
-
-  const handleHeaderImageUpload = async (file: File | undefined) => {
-    if (!file) return
-    setUploadingImage(true)
-    setError('')
-    try {
-      const result = await templatesApi.uploadHeaderImage(tpl.id, file)
-      const nextHeader = result.template.components.find(
-        component => component.type === 'HEADER' && component.format === 'IMAGE',
-      ) ?? null
-      setImageHeaderComp(nextHeader)
-      onSaved(result.template)
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : e.imageUploadFailed)
-    } finally {
-      setUploadingImage(false)
     }
   }
 
@@ -1298,45 +1343,11 @@ function EditModal({
             {e.draftNoticeAfter}
           </div>
 
-          {/* Header — IMAGE headers are platform-owned and preserved as-is. */}
-          {imageHeaderComp && headerImageUrl ? (
-            <div>
-              <label className="label text-xs">{create.step2.headerLabel}</label>
-              <img
-                src={headerImageUrl}
-                alt=""
-                className="w-full h-auto rounded-xl border border-slate-200 bg-slate-50"
-                loading="lazy"
-                referrerPolicy="no-referrer"
-                data-testid="edit-template-image-header"
-              />
-              <div className="flex items-center justify-between gap-3 mt-2">
-                <p className="text-[11px] text-slate-500">{e.imageUploadHint}</p>
-                <label className={`btn-secondary text-xs py-1.5 cursor-pointer ${uploadingImage ? 'opacity-50 pointer-events-none' : ''}`}>
-                  <Upload className={`w-3.5 h-3.5 ${uploadingImage ? 'animate-pulse' : ''}`} />
-                  {uploadingImage ? e.imageUploading : e.changeImage}
-                  <input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    className="hidden"
-                    disabled={uploadingImage}
-                    onChange={event => {
-                      void handleHeaderImageUpload(event.target.files?.[0])
-                      event.target.value = ''
-                    }}
-                    data-testid="edit-template-image-upload"
-                  />
-                </label>
-              </div>
-            </div>
-          ) : (
-            <div>
-              <label className="label text-xs">{create.step2.headerLabel}</label>
-              <input className="input text-sm" value={headerText}
-                onChange={ev => setHeaderText(ev.target.value)}
-                placeholder={e.headerPlaceholder} />
-            </div>
-          )}
+          <HeaderEditor type={headerType} text={headerText} imageUrl={headerImageUrl}
+            busy={uploadingImage} onBusy={setUploadingImage} onError={setError}
+            locked={tpl.service_key === 'cod_confirmation' && !!initialImageHeaderComp}
+            onType={setHeaderType} onText={setHeaderText}
+            onImage={url => setImageHeaderComp({ type: 'HEADER', format: 'IMAGE', example: { header_url: url } })} />
 
           {/* Body */}
           <div>
@@ -1448,7 +1459,7 @@ function EditModal({
           <div>
             <p className="text-xs text-slate-500 mb-2">{e.previewLabel}</p>
             <WaPreview
-              header={headerText}
+              header={headerType === 'TEXT' ? headerText : ''}
               headerImageUrl={headerImageUrl}
               body={bodyText}
               footer={footerText}
@@ -1461,7 +1472,7 @@ function EditModal({
         <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100">
           <button onClick={onClose} className="btn-ghost text-sm">{actions.cancel}</button>
           {error && <p className="text-xs text-red-500 flex-1 mx-4 text-center">{error}</p>}
-          <button onClick={handleSave} disabled={saving || !bodyText.trim()}
+          <button onClick={handleSave} disabled={saving || uploadingImage || !bodyText.trim() || (headerType === 'IMAGE' && !headerImageUrl) || (headerType === 'TEXT' && !headerText.trim())}
             className="btn-primary text-sm disabled:opacity-40">
             {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCheck className="w-4 h-4" />}
             {saving ? e.saving : e.save}
