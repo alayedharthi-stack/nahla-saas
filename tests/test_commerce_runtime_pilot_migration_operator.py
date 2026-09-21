@@ -37,6 +37,17 @@ def test_the_job_targets_a_pinned_revision_and_never_head():
     assert "head" not in argv
 
 
+def test_the_target_matches_the_repository_s_application_head():
+    from scripts.operators.bootstrap_migration_contract import (
+        APPLICATION_ALEMBIC_HEAD,
+        INTEGRATION_BOOTSTRAP_TARGET,
+    )
+
+    assert k.TARGET_REVISION == APPLICATION_ALEMBIC_HEAD
+    # And it is deliberately beyond what normal bootstrap applies.
+    assert INTEGRATION_BOOTSTRAP_TARGET != k.TARGET_REVISION
+
+
 def test_the_confirmation_token_names_the_revision_the_job_applies():
     """The token is the operator's statement of *which* revision they authorise."""
     assert k.CONFIRMATION_TOKEN == f"RUN_COMMERCE_RUNTIME_{k.TARGET_REVISION}"
