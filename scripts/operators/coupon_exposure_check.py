@@ -148,6 +148,15 @@ EVIDENCE_QUERIES = {
         "(SELECT count(*) FROM jsonb_array_elements(coalesce(p.metadata->'variants', '[]'::jsonb)) v "
         " WHERE (v->>'in_stock')::boolean) AS variants_in_stock "
         "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
+    # Whether the model could have read a size claim from the product text it was
+    # given (the search view carries title and description, never variants).
+    "products_cited_text_hints": (
+        "SELECT p.id, length(coalesce(p.description, '')) AS description_len, "
+        "(coalesce(p.description, '') ILIKE '%36%') AS description_mentions_36, "
+        "(coalesce(p.description, '') ILIKE '%مقاس%') AS description_mentions_size_word, "
+        "(coalesce(p.title, '') ILIKE '%36%') AS title_mentions_36, "
+        "(coalesce(p.title, '') ILIKE '%أسود%' OR coalesce(p.description, '') ILIKE '%أسود%') AS mentions_black "
+        "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
     "personal_codes_of_this_conversations_customer": (
         "SELECT cp.id, left(cp.code, 2) || repeat('*', greatest(length(cp.code) - 2, 0)) AS code_masked, "
         "cp.expires_at, cp.source_type, cp.coupon_level, cp.allocation_channel, cp.discount_type, "
