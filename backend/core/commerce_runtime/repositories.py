@@ -165,6 +165,32 @@ class CommerceRuntimeRepository:
             ).all()
         return [_turn(r) for r in rows]
 
+    def find_admitted_turn(
+        self, *, tenant_id: int, namespace: Any, channel_connection_ref: str,
+        provider_message_id: str,
+    ) -> Optional[c.AdmittedTurn]:
+        """The turn admitted under one inbound identity, or ``None``.
+
+        The identity is the same four-part one :meth:`admit_turn` enforces, so
+        this answers exactly "did this runtime already admit this inbound
+        message" without admitting anything. Read-only, one statement.
+        """
+        tenant_id = c.validate_tenant_id(tenant_id)
+        ns = c.validate_namespace(namespace).value
+        channel = c.validate_ref(channel_connection_ref, field="channel_connection_ref",
+                                 max_length=c.MAX_REF_LENGTH)
+        pmid = c.validate_ref(provider_message_id, field="provider_message_id",
+                              max_length=c.MAX_PROVIDER_MESSAGE_ID_LENGTH)
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                select(TURN).where(
+                    TURN.c.tenant_id == tenant_id, TURN.c.namespace == ns,
+                    TURN.c.channel_connection_ref == channel,
+                    TURN.c.provider_message_id == pmid,
+                )
+            ).one_or_none()
+        return _turn(row, duplicate=True) if row is not None else None
+
     def get_terminal(self, *, tenant_id: int, namespace: Any, turn_id: int) -> Optional[c.TerminalRecord]:
         tenant_id = c.validate_tenant_id(tenant_id)
         ns = c.validate_namespace(namespace).value
@@ -180,6 +206,7 @@ class CommerceRuntimeRepository:
     def admit_turn(
         self, *, tenant_id: int, namespace: Any, conversation_ref: str, channel_connection_ref: str,
         provider_message_id: str, payload: Optional[Mapping[str, Any]] = None,
+        admission_guard: Optional[Any] = None,
     ) -> c.AdmittedTurn:
         """Admit one inbound message exactly once and give it the next sequence.
 
@@ -189,6 +216,16 @@ class CommerceRuntimeRepository:
         presented for a different conversation is an explicit conflict that
         writes nothing. One write transaction; after an identity race that
         rolled it back, one read transaction reports the committed truth.
+
+        ``admission_guard`` is an optional veto the caller may place on **new**
+        work only. It is called with this transaction's own connection, after
+        the existing-turn lookup and before the insert, and returning false
+        raises :class:`contracts.AdmissionRefused` with nothing written. Running
+        it inside this transaction is the point: a guard that reads a row here
+        and a writer that changes it elsewhere are serialised by the database,
+        so a turn can never be admitted that a check made after that change
+        would fail to see. A repeated admission never reaches it, which is what
+        lets a caller stop taking new work while still finishing its own.
         """
         tenant_id = c.validate_tenant_id(tenant_id)
         ns = c.validate_namespace(namespace).value
@@ -220,6 +257,8 @@ class CommerceRuntimeRepository:
                             "provider message already admitted to a different conversation"
                         )
                     return _turn(existing, duplicate=True)
+                if admission_guard is not None and not admission_guard(conn):
+                    raise c.AdmissionRefused("the caller's guard refused this new admission")
                 sequence = conn.execute(
                     update(CONV).where(CONV.c.id == conv.id)
                     .values(next_sequence=CONV.c.next_sequence + 1, updated_at=func.clock_timestamp())

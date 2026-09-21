@@ -12,8 +12,9 @@ from core.config import META_APP_ID, META_APP_SECRET, META_GRAPH_API_VERSION, WA
 from core.log_redaction import redact_exception
 from .provider_utils import (
     WHATSAPP_CONNECTION_TYPE_DIRECT,
-    WHATSAPP_PROVIDER_360DIALOG,
-    wa_provider,
+    UnsupportedWhatsAppProvider,
+    provider_is_supported,
+    raw_provider,
 )
 from .wa_connection_secrets import read_access_token, store_access_token
 
@@ -30,6 +31,34 @@ class WhatsAppTokenContext:
     expires_at: Optional[datetime]
     oauth_session_status: str
     oauth_session_message: Optional[str]
+
+
+# The status a token context carries for a connection row that names a provider
+# this platform no longer speaks. It is the answer *instead of* a credential:
+# nothing below reads the stored token for such a row, because the only thing
+# that could be done with it is hand another provider's key to Meta.
+TOKEN_STATUS_UNSUPPORTED_PROVIDER = "unsupported_provider"
+
+
+def unsupported_provider_context(conn: Any) -> WhatsAppTokenContext:
+    """The context for a row this platform cannot speak for. Reads no credential."""
+    return WhatsAppTokenContext(
+        token="",
+        source=TOKEN_STATUS_UNSUPPORTED_PROVIDER,
+        token_status=TOKEN_STATUS_UNSUPPORTED_PROVIDER,
+        expires_at=None,
+        oauth_session_status=TOKEN_STATUS_UNSUPPORTED_PROVIDER,
+        oauth_session_message=None,
+    )
+
+
+def _refuse_unsupported(conn: Any, *, where: str) -> None:
+    """Raise before a retired provider's row reaches any credential handling."""
+    if conn is not None and not provider_is_supported(conn):
+        logger.error("[WA token] refused %s for tenant=%s provider=%r — Meta WhatsApp Cloud "
+                     "API is the only supported provider; no credential was read",
+                     where, getattr(conn, "tenant_id", "?"), raw_provider(conn))
+        raise UnsupportedWhatsAppProvider(raw_provider(conn))
 
 
 def _now_utc() -> datetime:
@@ -68,8 +97,8 @@ def _merchant_token_health(conn: Any) -> Tuple[str, Optional[datetime]]:
 def get_oauth_session_state(conn: Any) -> tuple[str, Optional[str]]:
     if not conn:
         return "missing", None
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
-        return "not_applicable", None
+    if not provider_is_supported(conn):
+        return TOKEN_STATUS_UNSUPPORTED_PROVIDER, None
     meta = _read_meta(conn)
     if getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT and not read_access_token(conn):
         return "not_applicable", None
@@ -85,13 +114,13 @@ def get_oauth_session_state(conn: Any) -> tuple[str, Optional[str]]:
 
 
 def build_token_context(conn: Any, *, source: str) -> WhatsAppTokenContext:
+    if conn is not None and not provider_is_supported(conn):
+        # Not a candidate of any source: the stored credential is another
+        # provider's and is never read, let alone offered to Meta.
+        return unsupported_provider_context(conn)
     oauth_status, oauth_message = get_oauth_session_state(conn)
     if source == "platform":
         token = WA_TOKEN or ""
-        token_status = "healthy" if token else "missing"
-        expires_at = None
-    elif source == "dialog360":
-        token = read_access_token(conn)
         token_status = "healthy" if token else "missing"
         expires_at = None
     elif source == "merchant_oauth":
@@ -114,16 +143,16 @@ def build_token_context(conn: Any, *, source: str) -> WhatsAppTokenContext:
 def _default_prefer_platform(conn: Any) -> bool:
     return bool(
         conn
-        and wa_provider(conn) != WHATSAPP_PROVIDER_360DIALOG
         and getattr(conn, "connection_type", None) == WHATSAPP_CONNECTION_TYPE_DIRECT
     )
 
 
 def get_token_candidates(conn: Any, *, prefer_platform: bool = False) -> List[WhatsAppTokenContext]:
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
-        order = ["dialog360"]
-    else:
-        order = ["platform", "merchant_oauth"] if prefer_platform else ["merchant_oauth", "platform"]
+    if conn is not None and not provider_is_supported(conn):
+        # The platform token is not a candidate either: it is Meta's credential,
+        # and this row's number is not known to be Meta's.
+        return [unsupported_provider_context(conn)]
+    order = ["platform", "merchant_oauth"] if prefer_platform else ["merchant_oauth", "platform"]
     contexts: List[WhatsAppTokenContext] = []
     seen: set[str] = set()
     for source in order:
@@ -138,6 +167,8 @@ def get_token_candidates(conn: Any, *, prefer_platform: bool = False) -> List[Wh
 
 
 def get_token_context(conn: Any) -> WhatsAppTokenContext:
+    if conn is not None and not provider_is_supported(conn):
+        return unsupported_provider_context(conn)
     candidates = get_token_candidates(conn, prefer_platform=_default_prefer_platform(conn))
     usable = next(
         (ctx for ctx in candidates if ctx.token and ctx.token_status in {"healthy", "expiring_soon"}),
@@ -158,6 +189,13 @@ def update_token_state(
 ) -> None:
     if not conn:
         return
+    if not provider_is_supported(conn):
+        # Meta token state is never written onto a retired provider's row:
+        # there is no Meta token for it, and stamping one would make the row
+        # look like a Meta connection that merely needs a refresh.
+        logger.warning("[WA token] not writing token state onto tenant=%s provider=%r",
+                       getattr(conn, "tenant_id", "?"), raw_provider(conn))
+        return
     meta = _read_meta(conn)
     now = _now_utc()
     meta["last_token_check_at"] = now.isoformat()
@@ -170,7 +208,7 @@ def update_token_state(
     if token_expires_at is not None:
         meta["operational_token_expires_at"] = token_expires_at.isoformat()
         conn.token_expires_at = token_expires_at
-    elif token_source in {"platform", "dialog360"}:
+    elif token_source == "platform":
         meta["operational_token_expires_at"] = None
     if oauth_session_status is not None:
         meta["oauth_session_status"] = oauth_session_status
@@ -199,6 +237,8 @@ def persist_token_context(
     operation: str,
     ctx: WhatsAppTokenContext,
 ) -> None:
+    if conn is not None and not provider_is_supported(conn):
+        return
     update_token_state(
         conn,
         token_source=ctx.source,
@@ -225,10 +265,15 @@ def persist_token_context(
 
 
 async def _refresh_merchant_long_lived_token(conn: Any) -> Optional[WhatsAppTokenContext]:
+    if conn is not None and not provider_is_supported(conn):
+        # A refresh exchanges the stored credential at Meta's OAuth endpoint.
+        # For a retired provider's row that would send another provider's key
+        # to Meta and, on Meta's 190, rewrite the row's expiry. Neither happens.
+        logger.warning("[WA token] refresh skipped for tenant=%s provider=%r — unsupported",
+                       getattr(conn, "tenant_id", "?"), raw_provider(conn))
+        return None
     plain = read_access_token(conn) if conn else ""
     if not conn or not plain:
-        return None
-    if wa_provider(conn) == WHATSAPP_PROVIDER_360DIALOG:
         return None
     if not META_APP_ID or not META_APP_SECRET:
         return None
@@ -291,6 +336,10 @@ async def get_token_for_operation(
     prefer_platform: bool = False,
     require_token: bool = True,
 ) -> WhatsAppTokenContext:
+    # Before any candidate is built, any refresh attempted or any state
+    # persisted: a row naming a retired provider is refused here, typed, and
+    # nothing about it is read or written.
+    _refuse_unsupported(conn, where=f"token resolution op={operation}")
     candidates = get_token_candidates(conn, prefer_platform=prefer_platform)
     usable = next(
         (ctx for ctx in candidates if ctx.token and ctx.token_status in {"healthy", "expiring_soon"}),

@@ -58,7 +58,7 @@ _BADGE_CATEGORY_MISMATCH   = "فئة لا تناسب الهدف"
 def _body_text(template: WhatsAppTemplate) -> str:
     """Extract BODY text from a template's components.
 
-    Defensive against non-dict component entries (legacy Salla / 360dialog
+    Defensive against non-dict component entries (legacy Salla / provider
     rows occasionally serialise components as raw strings inside
     ``WhatsAppTemplate.components``). Without the ``isinstance`` guard we
     would crash with ``'str' object has no attribute 'get'`` whenever the

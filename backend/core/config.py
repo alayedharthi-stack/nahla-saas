@@ -347,14 +347,12 @@ def meta_embedded_disabled_reason() -> str:
     if not META_EMBEDDED_SIGNUP_CONFIG_ID:
         return (
             "الربط المباشر مع Meta غير مفعّل بعد. "
-            "الرجاء ضبط META_EMBEDDED_SIGNUP_CONFIG_ID على الخادم. "
-            "حتى ذلك الحين، استخدم الربط عبر 360dialog."
+            "الرجاء ضبط META_EMBEDDED_SIGNUP_CONFIG_ID على الخادم."
         )
     forced = (_META_DIRECT_SIGNUP_FORCE_ENV or "").strip().lower()
     if forced in {"0", "false", "no", "off", "disabled"}:
         return (
-            "الربط المباشر مع Meta قيد التفعيل من قِبل فريق نحلة. "
-            "استخدم الربط عبر 360dialog حالياً."
+            "الربط المباشر مع Meta قيد التفعيل من قِبل فريق نحلة."
         )
     return ""
 
@@ -369,25 +367,16 @@ def is_whatsapp_merchant_self_service_manual_enabled() -> bool:
     return raw in {"1", "true", "yes", "on", "enabled"}
 
 
-# ── 360dialog / WhatsApp Coexistence ───────────────────────────────────────────
-# Internal / platform-managed provider configuration. Never expose these values
-# to merchants in the dashboard.
+# ── Platform URLs ─────────────────────────────────────────────────────────────
 BACKEND_URL = os.environ.get(
     "BACKEND_URL",
     "https://nahla-saas-production.up.railway.app",
 )
-D360_API_BASE_URL = os.environ.get("D360_API_BASE_URL", "https://waba-v2.360dialog.io")
-D360_PARTNER_HUB_BASE = os.environ.get("D360_PARTNER_HUB_BASE", "https://hub.360dialog.com")
-# Partner API key — used to generate channel API keys on behalf of merchants.
-D360_PARTNER_API_KEY = os.environ.get("D360_PARTNER_API_KEY", "")
-# Partner ID visible in the hub URL: hub.360dialog.com/dashboard/app/{PARTNER_ID}
-D360_PARTNER_ID = os.environ.get("D360_PARTNER_ID", "")
-# Internal shared secret sent by 360dialog via custom webhook header configured
-# by Nahla during channel activation.
-D360_WEBHOOK_INTERNAL_SECRET = os.environ.get("D360_WEBHOOK_INTERNAL_SECRET", "")
-# Beta rollout flags
-D360_COHOST_ENABLED = os.environ.get("D360_COHOST_ENABLED", "false").lower() == "true"
-D360_COHOST_ALLOW_SELF_REQUEST = os.environ.get("D360_COHOST_ALLOW_SELF_REQUEST", "true").lower() == "true"
+
+# 360dialog was removed as a WhatsApp provider; Meta WhatsApp Cloud API is the
+# only supported one. Its ``D360_*`` settings are gone with it. An environment
+# that still defines them is not read here, and nothing re-derives a provider
+# from a leftover variable.
 
 # ── Phase 1B — webhook signature enforcement flags ─────────────────────────────
 # Default for every new flag is "audit-only" (verify + record telemetry but do

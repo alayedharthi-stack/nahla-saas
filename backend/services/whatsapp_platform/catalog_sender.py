@@ -5,7 +5,7 @@ Provider-agnostic Meta WhatsApp Catalog sender.
 
 Builds and dispatches ``interactive.type = "product"`` (single product
 card) and ``interactive.type = "product_list"`` (multi-product, up to
-30 across 10 sections) payloads. Both 360dialog and Meta Cloud API
+30 across 10 sections) payloads. Meta Cloud API
 accept the same JSON body — the dispatching layer
 (``provider_send_message``) already abstracts the URL/headers, so this
 module only owns:
@@ -144,7 +144,7 @@ def build_single_product_payload(
 ) -> Dict[str, Any]:
     """Construct the JSON body for a single-product catalog message.
 
-    Schema reference (Meta Cloud API + 360dialog parity):
+    Schema reference (Meta Cloud API):
     https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages
 
     ``body`` is required by Meta; we always set a sensible default
@@ -291,7 +291,7 @@ def build_product_list_payload(
 def _extract_message_id(resp: Dict[str, Any]) -> Optional[str]:
     """Pull the wamid out of the provider response.
 
-    Both 360dialog and Meta Cloud return ``{"messages": [{"id": "..."}]}``.
+    Meta Cloud returns ``{"messages": [{"id": "..."}]}``.
     Defensive — log and return None on shape mismatch so the caller can
     flag a failure without crashing the conversation.
     """

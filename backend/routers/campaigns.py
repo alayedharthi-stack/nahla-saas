@@ -1462,7 +1462,7 @@ async def debug_campaign(
                 # المحاولة" button on rows that can't possibly succeed.
                 "retryable":      classified.retryable,
                 # Provider-side billing/account restriction marker.
-                # Trips the "Contact 360dialog" banner — see the
+                # Trips the "contact the provider" banner — see the
                 # aggregated ``provider_block`` section for the full
                 # campaign-level signal.
                 "provider_billing_block": classified.provider_billing_block,
@@ -1791,7 +1791,7 @@ async def debug_campaign(
     # ── Provider-side billing/account block detector ────────────────
     # Any failure tagged ``provider_billing_block=True`` in the
     # catalogue means the campaign cannot proceed without escalating
-    # to 360dialog. The UI uses this block to: render the support
+    # to Meta. The UI uses this block to: render the support
     # banner, hide "إرسال الآن", and surface the "نسخ تقرير الدعم"
     # CTA. We compute timestamps + a small sample so the merchant
     # (and our support team) can correlate quickly.
@@ -1869,10 +1869,10 @@ async def debug_campaign(
             # backend so all clients (mobile/web/email) show the
             # same message.
             "support_message_ar": (
-                "مشكلة من مزود واتساب أو الدفع — تواصل مع 360dialog "
+                "مشكلة من مزود واتساب أو الدفع — تواصل مع دعم Meta "
                 "وأرفق تقرير الدعم أدناه."
             ),
-            "support_provider": "360dialog",
+            "support_provider": "meta",
         }
     provider_block = _safe("provider_block", _provider_block) or {
         "detected": False,
@@ -2383,16 +2383,16 @@ async def debug_campaign(
     # ── Provider-side billing/account block hint ───────────────────
     # If ANY row failed with a provider_billing_block code, surface
     # the support-escalation copy FIRST — none of the other hints
-    # matter until 360dialog is contacted.
+    # matter until the provider is contacted.
     if provider_block.get("detected"):
         keys_summary = "، ".join(
             f"{kk['label_ar']} ({kk['count']})"
             for kk in (provider_block.get("error_keys") or [])
         )
         hints.insert(0, (
-            "🛑 مشكلة من مزود واتساب أو الدفع — تواصل مع 360dialog. "
+            "🛑 مشكلة من مزود واتساب أو الدفع — تواصل مع دعم Meta. "
             f"تفاصيل: {keys_summary or provider_block.get('primary_label_ar') or ''}. "
-            "أرسل تقرير الدعم الجاهز إلى فريق 360dialog من زر "
+            "أرسل تقرير الدعم الجاهز إلى فريق Meta من زر "
             "«نسخ تقرير الدعم»."
         ))
 
@@ -2690,7 +2690,7 @@ def campaign_support_bundle(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Return a JSON snapshot suitable for pasting into a 360dialog
+    """Return a JSON snapshot suitable for pasting into a provider
     support ticket.
 
     Use case: a recipient (or our own WABA) is blocked by the provider
@@ -2702,13 +2702,13 @@ def campaign_support_bundle(
 
     The bundle is intentionally:
 
-    * **Self-contained** — every field a 360dialog support engineer
+    * **Self-contained** — every field a provider support engineer
       would request (template name, language, WABA phone number id,
       Meta error code + subcode + raw payload). No follow-up
       back-and-forth needed.
     * **PII-aware** — recipient phone numbers are masked to the last
       4 digits. The merchant's WABA phone number id is included
-      verbatim because that's exactly what 360dialog asks for.
+      verbatim because that's exactly what provider support asks for.
     * **Stable shape** — versioned so we can extend it without
       breaking automation on the merchant side.
 
@@ -2768,7 +2768,7 @@ def campaign_support_bundle(
                 "occurred_at":        r.updated_at.isoformat() if r.updated_at else None,
             })
 
-    # 2. WhatsApp connection (provider, phone_number_id). 360dialog
+    # 2. WhatsApp connection (provider, phone_number_id). Support
     #    needs the phone_number_id to identify the WABA — keep it
     #    verbatim, it's not PII.
     wa_conn_info = None
@@ -2833,7 +2833,7 @@ def campaign_support_bundle(
     )
 
     # 5. Human-readable Arabic message the merchant can paste straight
-    #    into a 360dialog ticket. Keeps the technical block (JSON)
+    #    into a support ticket. Keeps the technical block (JSON)
     #    underneath for the support engineer.
     support_message_ar_lines = [
         "السلام عليكم،",
@@ -2869,7 +2869,7 @@ def campaign_support_bundle(
         "kind":    "nahla.campaign.support_bundle",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "tenant_id":    tenant_id,
-        "support_provider": "360dialog",
+        "support_provider": "meta",
         "campaign": {
             "id":             campaign.id,
             "name":           campaign.name,

@@ -56,6 +56,37 @@ def bind_wire_audit(db: Any, row_id: Any, tenant_id: int, recipient: str,
     return _current.set(ctx)
 
 
+def bind_wire_observation(tenant_id: Any, recipient: str, body: str) -> Token:
+    """Observe what the send path transmits, without binding a persisted row.
+
+    A caller that persists its outbound row only *after* an accepted send has
+    no row id to bind beforehand, so it cannot use the row-bound audit. It can
+    still observe the two things the provenance contract needs: the body the
+    send path ended up transmitting, and which layer last changed it.
+
+    Nothing is written to any row from here — ``record_wire_attempt`` returns
+    early for an unbound audit — and the observation lives in the calling
+    task's context only.
+    """
+    ctx = WireAudit(None, None, int(tenant_id), _phone(recipient), str(body or ""), {},
+                    _task(), previous_body=str(body or ""))
+    return _current.set(ctx)
+
+
+def observed_wire_text(tenant_id: Any, recipient: str) -> tuple[str, list[str]] | None:
+    """``(transmitted_body, transform_reasons)`` for the observation in scope.
+
+    ``None`` when there is no observation for this tenant and recipient in this
+    task, which a caller must treat as *unknown*, never as *unchanged*.
+    """
+    ctx = current_wire_audit(tenant_id, recipient)
+    if ctx is None:
+        return None
+    reasons = list(dict.fromkeys(
+        [*(ctx.metadata.get("final_transform_reasons") or []), *ctx.pending]))
+    return ctx.previous_body, reasons
+
+
 def refresh_wire_audit(tenant_id: Any, recipient: str, body: str, metadata: dict) -> None:
     ctx = current_wire_audit(tenant_id, recipient)
     if ctx is not None:

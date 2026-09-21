@@ -33,7 +33,6 @@ ACCEPTANCE_TENANT_ALLOWED_PATH_PREFIXES: Tuple[str, ...] = (
     "scripts/operators/real_channel_conversational_acceptance",
     "scripts/operators/real_channel_acceptance_session",
     "scripts/operators/tenant_merchant_clone",
-    "scripts/probe_d360_forwarding.py",
     "scripts/merchant_assistant_constitution_smoke.py",
     "scripts/test_",
     "artifacts/tenant33-clone-manifest.json",

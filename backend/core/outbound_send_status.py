@@ -13,7 +13,7 @@ reply path in ``backend/routers/whatsapp_webhook.py`` AND
 outbound ``MessageEvent`` row to the database **before** the provider
 POST happens. The dashboard reads those rows verbatim and renders
 every outbound bubble with a green double-check icon, no matter what
-Meta / 360dialog actually did with the bytes.
+Meta actually did with the bytes.
 
 When the provider POST fails (HTTP non-2xx, ``error`` envelope, missing
 ``messages[0].id`` — the F18 "silent" failure mode, or a transport
@@ -149,7 +149,7 @@ def _extract_meta_error(
     response_body: Any,
 ) -> Dict[str, Optional[str]]:
     """Pull ``error.code / .error_subcode / .message / .type /
-    .fbtrace_id`` out of a Meta / 360dialog error envelope. Tolerates
+    .fbtrace_id`` out of a Meta error envelope. Tolerates
     any shape: missing keys, non-dict bodies, lists, ``None``. Always
     returns the same key set so callers don't need ``.get`` chains.
     """
@@ -166,7 +166,7 @@ def _extract_meta_error(
     if not isinstance(err, dict):
         return out
     # Meta uses both ``error_subcode`` AND ``error_data.details``;
-    # we capture the first one. 360dialog occasionally uses ``subcode``
+    # we capture the first one. Some envelopes use ``subcode``
     # directly — handle both.
     out["code"]       = err.get("code")
     out["subcode"]    = err.get("error_subcode") or err.get("subcode")
@@ -223,7 +223,7 @@ def _classify_with_meta_errors(
         out["is_recoverable"]   = True
         out["advice_ar"]        = (
             "حاول إرسال الرسالة مجدداً. إذا تكرر الأمر فقد يكون لدى "
-            "مزود واتساب (Cloud API/360dialog) خلل مؤقت."
+            "مزود واتساب (Cloud API) خلل مؤقت."
         )
         out["message"] = out.get("message") or error_text or (
             "provider returned 2xx but no message id"
@@ -270,7 +270,7 @@ def build_provider_send_block(
       * tests
     """
     # ── ``ok`` without a wamid is NOT considered sent ─────────────────
-    # Some providers (and a few 360dialog edge cases) return a 2xx
+    # Some gateways return a 2xx
     # envelope without ``messages[0].id``. We refuse to claim
     # "delivered" without a wamid — the dashboard would render a
     # ✔✔ that the customer never saw. Downgrade to a structured

@@ -21,7 +21,9 @@ work. No auto-merge of fixes during the acceptance window.
 **Target onboarding:** per-merchant Meta Embedded Signup → merchant-owned WABA, Phone
 Number ID, and Access Token. **Meta Business Verification** is the current external blocker.
 
-360dialog is **legacy/transition-only** and must not satisfy acceptance readiness.
+360dialog has been **removed** as a provider. The `D360_*` checks below remain
+so a stale environment that still defines them is *blocked* rather than
+silently accepted; they never satisfy readiness and never will.
 
 ```
 Meta Cloud API direct → POST /webhook/whatsapp

@@ -31,8 +31,10 @@ from typing import Any, FrozenSet, Optional, Tuple
 logger = logging.getLogger("nahla.commerce_runtime.pilot_guard")
 
 ENV_ENABLED = "COMMERCE_RUNTIME_PILOT_ENABLED"
+ENV_DRAINING = "COMMERCE_RUNTIME_PILOT_DRAINING"
 ENV_TENANT_ALLOWLIST = "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST"
 ENV_RECIPIENT_ALLOWLIST = "COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST"
+ENV_MODEL = "COMMERCE_RUNTIME_PILOT_MODEL"
 ENV_MAX_STEPS = "COMMERCE_RUNTIME_PILOT_MAX_STEPS"
 ENV_MAX_TOOL_CALLS = "COMMERCE_RUNTIME_PILOT_MAX_TOOL_CALLS"
 ENV_DEADLINE_SECONDS = "COMMERCE_RUNTIME_PILOT_DEADLINE_SECONDS"
@@ -42,11 +44,13 @@ ENV_TOOL_TIMEOUT_SECONDS = "COMMERCE_RUNTIME_PILOT_TOOL_TIMEOUT_SECONDS"
 # Closed reasons. Exactly one is reported per decision.
 PERMITTED = "permitted"
 PILOT_DISABLED = "pilot_disabled"
+PILOT_DRAINING = "pilot_draining"
 TENANT_NOT_ALLOWLISTED = "tenant_not_allowlisted"
 RECIPIENT_MISSING = "recipient_missing"
 RECIPIENT_UNNORMALIZABLE = "recipient_unnormalizable"
 RECIPIENT_NOT_ALLOWLISTED = "recipient_not_allowlisted"
 CONNECTION_NOT_VERIFIED = "connection_not_verified"
+MODEL_NOT_CONFIGURED = "model_not_configured"
 LEGACY_ALREADY_ANSWERED = "legacy_already_answered"
 AI_GATE_SKIPPED = "ai_gate_skipped"
 EMPTY_INBOUND = "empty_inbound"
@@ -76,6 +80,7 @@ class PilotDecision:
     recipient: Optional[str] = None
     connection_ref: Optional[str] = None   # the runtime's opaque channel reference
     connection_id: Optional[str] = None    # the verified WhatsAppConnection row id
+    model: Optional[str] = None            # the explicitly configured pilot model
 
     @property
     def legacy_owns_turn(self) -> bool:
@@ -87,6 +92,38 @@ def _flag(name: str, default: str = "false") -> bool:
 
 
 def pilot_enabled() -> bool:
+    return _flag(ENV_ENABLED)
+
+
+def pilot_draining() -> bool:
+    """Whether *this process* is handing back: no new turns, its own work finished.
+
+    Draining is the step a rollback goes through instead of switching the pilot
+    off underneath work it has not finished. While it is set this process takes
+    no new turn, and the turns this runtime already admitted stay reachable
+    until they have a terminal.
+
+    It does **not** mean the affected conversations go to the legacy path. A
+    runtime that is handing over may still have a send in flight, and a second
+    answer from a second runtime is the one outcome a handover must not
+    produce; ``commerce_runtime_claims_inbound`` therefore withholds such an
+    inbound from every owner and records it for the operator instead.
+
+    This flag is per process. It cannot say the same word to every replica at
+    the same moment, so it is not the mechanism a handover is performed with —
+    ``core.commerce_runtime.handover``'s shared barrier is. It remains here so a
+    single process can be taken out of rotation without releasing anything.
+    """
+    return _flag(ENV_ENABLED) and _flag(ENV_DRAINING)
+
+
+def pilot_owns_open_work() -> bool:
+    """Whether unfinished runtime work may still be finished by this deployment.
+
+    True while the pilot is on, and while it is draining. It is only false once
+    the pilot is fully off, which is why switching it off is a step the handover
+    procedure takes *after* draining reports nothing left.
+    """
     return _flag(ENV_ENABLED)
 
 
@@ -130,6 +167,21 @@ def _phone_allowlist(name: str) -> FrozenSet[str]:
         if normalized:
             allowed.add(normalized)
     return frozenset(allowed)
+
+
+def normalize_recipient(phone: Any) -> str:
+    """The platform's own normalisation of a recipient, or ``""``."""
+    return _normalize(phone)
+
+
+def pilot_model() -> str:
+    """The model this pilot is configured to use, or ``""``.
+
+    There is deliberately no default. The loop is model-neutral and the
+    repository's own fallback exists for the legacy path; inheriting it here
+    would mean activating a pilot on a model nobody chose for it.
+    """
+    return str(os.environ.get(ENV_MODEL, "") or "").strip()
 
 
 def tenant_allowlist() -> FrozenSet[int]:
@@ -203,6 +255,8 @@ def evaluate_pilot_route(
     inbound_text: Any,
     legacy_already_answered: bool = False,
     ai_gate_skipped: bool = False,
+    finishing_open_work: bool = False,
+    verified: Optional[Tuple[str, str]] = None,
 ) -> PilotDecision:
     """Decide, once, whether the commerce runtime owns this inbound turn.
 
@@ -232,10 +286,34 @@ def evaluate_pilot_route(
         if not recipients or recipient not in recipients:
             return _refused(RECIPIENT_NOT_ALLOWLISTED, tenant, recipient)
 
-        verified = verified_connection(db, tenant_id=tenant, phone_number_id=phone_number_id)
-        if verified is None:
-            return _refused(CONNECTION_NOT_VERIFIED, tenant, recipient)
-        connection_ref, connection_id = verified
+        if pilot_draining() and not finishing_open_work:
+            # Handing back: this process takes no new turn. Asked *after* the
+            # allowlists on purpose — ``PILOT_DRAINING`` then names only traffic
+            # this pilot would otherwise own, so the caller can tell an affected
+            # conversation (which must not be released to another owner) from
+            # traffic that was never the runtime's and keeps the behaviour it
+            # has today. ``finishing_open_work`` is the caller stating it has
+            # already established that this exact inbound message is a turn this
+            # runtime admitted and never finished; draining finishes those,
+            # which is what makes it a handover rather than an abandonment.
+            return _refused(PILOT_DRAINING, tenant, recipient)
+
+        model = pilot_model()
+        if not model:
+            return _refused(MODEL_NOT_CONFIGURED, tenant, recipient)
+
+        if verified is not None:
+            # The caller already holds the verified row — resolved by
+            # ``resolve_pilot_scope`` a moment ago — and passes it in rather
+            # than having it looked up a second time. A second lookup that
+            # fails would answer ``connection_not_verified``, and a verified
+            # association must not turn into "not ours" on a failed read.
+            connection_ref, connection_id = str(verified[0]), str(verified[1])
+        else:
+            found = verified_connection(db, tenant_id=tenant, phone_number_id=phone_number_id)
+            if found is None:
+                return _refused(CONNECTION_NOT_VERIFIED, tenant, recipient)
+            connection_ref, connection_id = found
 
         if legacy_already_answered:
             return _refused(LEGACY_ALREADY_ANSWERED, tenant, recipient)
@@ -246,11 +324,15 @@ def evaluate_pilot_route(
 
         return PilotDecision(permitted=True, reason=PERMITTED, tenant_id=tenant,
                              recipient=recipient, connection_ref=connection_ref,
-                             connection_id=connection_id)
+                             connection_id=connection_id, model=model)
     except Exception as exc:  # noqa: BLE001 - a guard that cannot decide refuses
         logger.warning("[COMMERCE_RUNTIME_PILOT] guard error tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
         return _refused(GUARD_ERROR, tenant_id)
+
+
+class ConnectionLookupUnavailable(RuntimeError):
+    """The connection row could not be read. Not the same as "no such row"."""
 
 
 def verified_connection(db: Any, *, tenant_id: int,
@@ -276,19 +358,121 @@ def verified_connection(db: Any, *, tenant_id: int,
             .first()
         )
     except Exception as exc:  # noqa: BLE001 - an unverifiable connection is not a verified one
+        # ...and it is not an *unverified* one either. "No such connection" is
+        # a fact about the tenant; "the lookup failed" is a fact about us, and
+        # answering the first for the second is how pilot-owned traffic becomes
+        # traffic nobody has to keep. The guard turns this into ``guard_error``.
         logger.warning("[COMMERCE_RUNTIME_PILOT] connection lookup failed tenant=%s error=%s",
                        tenant_id, type(exc).__name__)
-        return None
+        raise ConnectionLookupUnavailable(type(exc).__name__) from exc
     if connection is None:
         return None
     return f"wa:{identifier}", str(connection.id)
 
 
+# What a scope lookup can conclude. The three are not interchangeable, and the
+# difference between the last two is the whole point: "this is not ours" is a
+# fact about the traffic, "I could not find out" is a fact about us.
+SCOPE_RESOLVED = "resolved"        # an allowlisted tenant owns this connection
+SCOPE_NOT_OURS = "not_ours"        # the platform knows: no allowlisted tenant owns it
+SCOPE_AMBIGUOUS = "ambiguous"      # more than one allowlisted tenant claims the number
+SCOPE_UNAVAILABLE = "unavailable"  # the lookup itself failed
+
+
+@dataclasses.dataclass(frozen=True)
+class ScopeLookup:
+    """Who owns a phone number id, or why that could not be established."""
+
+    status: str
+    tenant_id: int = 0
+    connection_ref: str = ""
+    connection_id: str = ""
+    detail: str = ""
+
+    @property
+    def resolved(self) -> bool:
+        return self.status == SCOPE_RESOLVED
+
+    @property
+    def decided(self) -> bool:
+        """Whether this is an answer about the traffic rather than about us."""
+        return self.status in {SCOPE_RESOLVED, SCOPE_NOT_OURS}
+
+
+def resolve_pilot_scope(db: Any, *, phone_number_id: Any) -> ScopeLookup:
+    """Which allowlisted tenant owns this connection — or why we cannot say.
+
+    The reverse of :func:`verified_connection`, and deliberately narrower than a
+    plain lookup: the connection row says which tenant owns the number, and the
+    answer is given only when that tenant is one the pilot is configured for. A
+    phone number id alone never selects a tenant for the runtime.
+
+    A failed lookup is **not** "not ours". Answering that would let an
+    unreachable database turn pilot-owned traffic into traffic nobody has to
+    keep, and the caller that acknowledges an inbound needs to tell the two
+    apart. Two allowlisted tenants claiming one number is likewise refused
+    rather than resolved to whichever row came back first.
+    """
+    identifier = str(phone_number_id or "").strip()
+    tenants = tenant_allowlist()
+    if not identifier:
+        return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_phone_number_id")
+    if not tenants:
+        return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_tenant_allowlist")
+    if db is None:
+        return ScopeLookup(status=SCOPE_UNAVAILABLE, detail="no_session")
+    try:
+        from database.models import WhatsAppConnection  # noqa: PLC0415
+
+        connections = (
+            db.query(WhatsAppConnection)
+            .filter(WhatsAppConnection.phone_number_id == identifier)
+            .filter(WhatsAppConnection.tenant_id.in_(sorted(tenants)))
+            .limit(2)
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed lookup decides nothing
+        logger.error("[COMMERCE_RUNTIME_PILOT] scope lookup failed phone_number_id=%s "
+                     "error=%s detail=%s — scope unavailable, not 'unrelated'",
+                     identifier, type(exc).__name__, str(exc)[:200])
+        return ScopeLookup(status=SCOPE_UNAVAILABLE, detail=type(exc).__name__)
+    if not connections:
+        return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_allowlisted_tenant_owns_it")
+    if len(connections) > 1:
+        logger.error("[COMMERCE_RUNTIME_PILOT] scope ambiguous phone_number_id=%s — more "
+                     "than one allowlisted tenant claims it", identifier)
+        return ScopeLookup(status=SCOPE_AMBIGUOUS, detail="more_than_one_allowlisted_tenant")
+    connection = connections[0]
+    return ScopeLookup(status=SCOPE_RESOLVED, tenant_id=int(connection.tenant_id),
+                       connection_ref=f"wa:{identifier}", connection_id=str(connection.id))
+
+
+def tenant_for_phone_number_id(db: Any, *, phone_number_id: Any
+                               ) -> Optional[Tuple[int, str, str]]:
+    """``(tenant_id, channel_reference, connection_row_id)``, or ``None``.
+
+    The two-valued form, kept for callers that genuinely cannot act on the
+    difference. Anything that acknowledges an inbound must use
+    :func:`resolve_pilot_scope` instead: this one cannot tell "not ours" from
+    "could not find out".
+    """
+    found = resolve_pilot_scope(db, phone_number_id=phone_number_id)
+    if not found.resolved:
+        return None
+    return found.tenant_id, found.connection_ref, found.connection_id
+
+
 __all__ = [
-    "AI_GATE_SKIPPED", "CONNECTION_NOT_VERIFIED", "DEADLINE_CEILING_SECONDS", "EMPTY_INBOUND",
+    "AI_GATE_SKIPPED", "CONNECTION_NOT_VERIFIED", "ConnectionLookupUnavailable",
+    "DEADLINE_CEILING_SECONDS", "EMPTY_INBOUND",
+    "ENV_DRAINING", "PILOT_DRAINING", "pilot_draining", "pilot_owns_open_work",
     "ENV_ENABLED", "ENV_RECIPIENT_ALLOWLIST", "ENV_TENANT_ALLOWLIST", "GUARD_ERROR",
-    "LEGACY_ALREADY_ANSWERED", "MAX_STEPS_CEILING", "MAX_TOOL_CALLS_CEILING", "PERMITTED",
+    "ENV_MODEL", "LEGACY_ALREADY_ANSWERED", "MAX_STEPS_CEILING", "MAX_TOOL_CALLS_CEILING",
+    "MODEL_NOT_CONFIGURED", "PERMITTED", "normalize_recipient",
     "PILOT_DISABLED", "PilotDecision", "RECIPIENT_MISSING", "RECIPIENT_NOT_ALLOWLISTED",
     "RECIPIENT_UNNORMALIZABLE", "TENANT_NOT_ALLOWLISTED", "evaluate_pilot_route", "pilot_budget",
-    "pilot_enabled", "recipient_allowlist", "tenant_allowlist", "verified_connection",
+    "pilot_enabled", "pilot_model", "recipient_allowlist", "tenant_allowlist",
+    "tenant_for_phone_number_id", "verified_connection",
+    "SCOPE_AMBIGUOUS", "SCOPE_NOT_OURS", "SCOPE_RESOLVED", "SCOPE_UNAVAILABLE",
+    "ScopeLookup", "resolve_pilot_scope",
 ]

@@ -68,7 +68,8 @@ change. Specifically:
      since this is observation-only and adds no behavioural risk).
 
 2. Wiring at known drop points (additive, never modifying control flow):
-   - `_handle_whatsapp_body`, `_handle_360dialog_body` — wrap each
+   - `_handle_whatsapp_body` (and, at the time, `_handle_360dialog_body`,
+     retired with the provider) — wrap each
      `_dispatch_message` call with the context manager.
    - `_dispatch_message` — events at `missing_phone_id`, in-memory dedup
      drop, DB session fail, unknown / ambiguous tenant, DB dedup drop,
