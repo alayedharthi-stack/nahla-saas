@@ -1347,6 +1347,16 @@ async def _submit_template_to_meta(
                 "تعذّر تجهيز صورة رأس القالب لـ Meta. حاول مرة أخرى لاحقاً."
             ) from exc
 
+    else:
+        from services.template_image_header import prepare_merchant_image_for_meta
+        try:
+            components = await prepare_merchant_image_for_meta(
+                db, conn, tenant_id=tenant_id, components=components,
+            )
+        except Exception as exc:
+            logger.warning("[template/submit] merchant header preparation failed tenant=%s", tenant_id, exc_info=True)
+            raise ValueError("تعذّر تجهيز صورة رأس القالب لـ Meta. تحقق من الصورة وحاول مجدداً.") from exc
+
     # Ensure all components have the Meta-required `example` fields before
     # submitting. This prevents code-100 "missing example" rejections for
     # templates that were created/edited without explicit example values.
@@ -1475,6 +1485,11 @@ async def create_template(body: CreateTemplateIn, request: Request, db: Session 
         or wa.get("whatsapp_business_account_id", "")
     )
     components = [c.model_dump(exclude_none=True) for c in body.components]
+    from services.template_image_header import validate_draft_image
+    try:
+        validate_draft_image(components, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     normalized_language = _normalize_template_language(body.language)
     normalized_category = _normalize_template_category(body.category)
     compatibility = _compute_template_compatibility(
@@ -1561,7 +1576,8 @@ async def update_template(
             # Find matching component by type in the old list
             for old_comp in old_comps:
                 if str(old_comp.get("type", "")).upper() == new_type:
-                    if "example" not in new_comp and "example" in old_comp:
+                    if ("example" not in new_comp and "example" in old_comp
+                            and new_comp.get("format") == old_comp.get("format")):
                         new_comp["example"] = old_comp["example"]
                     # Also preserve button-level examples
                     if new_type == "BUTTONS":
@@ -1570,6 +1586,12 @@ async def update_template(
                             if j < len(old_btns) and "example" not in btn and "example" in old_btns[j]:
                                 btn["example"] = old_btns[j]["example"]
                     break
+
+    from services.template_image_header import validate_draft_image
+    try:
+        validate_draft_image(new_components, tenant_id=tenant_id, previous=tpl.components or [])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # After preserving old examples, normalise them so the count always matches
     # the current variable count. Avoids a stale 2-value example being stored
@@ -1590,6 +1612,12 @@ async def update_template(
         tpl.language = _normalize_template_language(body.language)
     if body.category is not None:
         tpl.category = _normalize_template_category(body.category)
+    from services.template_image_header import header_url
+    if header_url(tpl.components) != header_url(new_components):
+        metadata = dict(tpl.ai_generation_metadata or {})
+        metadata.pop("meta_header_handle", None)
+        metadata.pop("merchant_header_image_url", None)
+        tpl.ai_generation_metadata = metadata
     tpl.components = new_components
     tpl.status = "DRAFT"
     tpl.rejection_reason = None
@@ -1610,6 +1638,23 @@ async def update_template(
     return _tpl_to_dict(tpl)
 
 
+@router.post("/templates/header-image")
+async def upload_draft_header_asset(
+    request: Request, file: UploadFile = File(...),
+):
+    """Upload for create/edit; only an explicit Save attaches it to a draft."""
+    tenant_id = resolve_tenant_id(request)
+    from services.catalog_media_storage import CatalogMediaStorageError, CatalogMediaValidationError, MAX_UPLOAD_BYTES
+    from services.template_media_storage import upload_template_header_image as store_header_image
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    try:
+        return store_header_image(tenant_id=tenant_id, content=content)
+    except CatalogMediaValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CatalogMediaStorageError as exc:
+        raise HTTPException(status_code=503, detail="تعذّر حفظ الصورة. حاول مجدداً؛ لم تُعدّل المسودة.") from exc
+
+
 @router.post("/templates/{template_id}/header-image")
 async def upload_template_header_image(
     template_id: int,
@@ -1617,7 +1662,7 @@ async def upload_template_header_image(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """Replace a draft lifecycle template's IMAGE header with a merchant upload."""
+    """Replace a draft template IMAGE header with a merchant upload."""
     tenant_id = resolve_tenant_id(request)
     tpl = db.query(WhatsAppTemplate).filter(
         WhatsAppTemplate.id == template_id,
@@ -1630,13 +1675,6 @@ async def upload_template_header_image(
             status_code=409,
             detail="يمكن تغيير الصورة في المسودة فقط قبل إرسالها إلى Meta.",
         )
-    if str(tpl.service_key or "") not in {
-        "cod_confirmation",
-        "order_confirmation",
-        "order_ready",
-    }:
-        raise HTTPException(status_code=400, detail="template_image_header_not_supported")
-
     from services.catalog_media_storage import (  # noqa: PLC0415
         CatalogMediaStorageError,
         CatalogMediaValidationError,
@@ -1660,7 +1698,7 @@ async def upload_template_header_image(
     except CatalogMediaStorageError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    components = _restore_managed_cod_image_header(tpl, list(tpl.components or []))
+    components = _restore_managed_cod_image_header(tpl, [dict(c) for c in (tpl.components or [])])
     image_replaced = False
     for component in components:
         if (
@@ -1674,15 +1712,20 @@ async def upload_template_header_image(
             image_replaced = True
             break
     if not image_replaced:
-        raise HTTPException(status_code=400, detail="template_image_header_not_supported")
+        components = [c for c in components if str(c.get("type", "")).upper() != "HEADER"]
+        components.insert(0, {"type": "HEADER", "format": "IMAGE", "example": {
+            "header_url": uploaded["image_url"], "header_handle": [],
+        }})
 
     tpl.components = components
     tpl.status = "DRAFT"
     tpl.rejection_reason = None
     tpl.meta_template_id = None
     tpl.updated_at = datetime.now(timezone.utc)
+    metadata = dict(tpl.ai_generation_metadata or {})
+    metadata.pop("meta_header_handle", None)
     tpl.ai_generation_metadata = {
-        **(tpl.ai_generation_metadata or {}),
+        **metadata,
         "merchant_header_image_url": uploaded["image_url"],
         "header_image_source": "merchant_upload",
     }
@@ -3030,7 +3073,10 @@ async def _sync_templates_for_tenant_inner(
             existing.language         = normalized_language
             existing.category         = normalized_category
             existing.status           = normalized_status
-            existing.components       = item.get("components", existing.components)
+            from services.template_image_header import preserve_image_on_sync
+            existing.components = preserve_image_on_sync(
+                existing.components, item.get("components", existing.components),
+            )
             existing.rejection_reason = rejection
             existing.ai_generation_metadata = {
                 **(existing.ai_generation_metadata or {}),

@@ -234,6 +234,24 @@ export const templatesApi = {
       body: JSON.stringify(payload),
     }),
 
+  uploadHeaderAsset: async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const token = getToken()
+    const tenantId = getTenantId()
+    const res = await fetch(`${getApiBase()}/templates/header-image`, {
+      method: 'POST',
+      headers: {
+        ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: form,
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(typeof data?.detail === 'string' ? data.detail : 'image_upload_failed')
+    return data as { image_url: string; content_type: string; size_bytes: number }
+  },
+
   uploadHeaderImage: async (id: number, file: File) => {
     const form = new FormData()
     form.append('file', file)

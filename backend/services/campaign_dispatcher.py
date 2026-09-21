@@ -2531,6 +2531,11 @@ def validate_template_payload(
     """Pre-flight check. Returns a list of human-readable Arabic issues.
     Empty list = everything OK."""
     issues: List[str] = []
+    from services.template_image_header import campaign_image_parameter
+    try:
+        campaign_image_parameter(template.components)
+    except ValueError as exc:
+        issues.append(str(exc))
     for comp in (template.components or []):
         ctype = (comp.get("type") or "").upper()
         if ctype == "BUTTONS":
@@ -2583,6 +2588,13 @@ def _build_send_payload(
         return params
 
     components: List[Dict[str, Any]] = []
+    from services.template_image_header import campaign_image_parameter
+    try:
+        image_parameter = campaign_image_parameter(template.components)
+    except ValueError as exc:
+        raise PayloadValidationError(str(exc)) from exc
+    if image_parameter is not None:
+        components.append(image_parameter)
 
     for comp in (template.components or []):
         ctype = (comp.get("type") or "").upper()
