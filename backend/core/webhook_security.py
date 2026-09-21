@@ -45,7 +45,7 @@ import hmac
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("nahla.webhook_security")
 
@@ -393,6 +393,258 @@ def check_replay(
             "[webhook_security] redis SET NX failed for replay check (%s): %s — treating as not-replay",
             provider, exc,
         )
+        return False
+
+
+@dataclass(frozen=True)
+class ReplayVerdict:
+    """Whether to reject, and whether *this* request holds the nonce.
+
+    ``claimed`` is what makes a refusal recoverable. The first request through
+    claims the nonce with ``SET NX``; every later copy of the same body finds
+    it. If the claimant then fails to accept the work and answers a retryable
+    status, the provider's redelivery is the *same* body — and without giving
+    the nonce back it would be dropped as a replay, which looks to the provider
+    exactly like success. Only the request that holds the claim may release it,
+    and it proves it holds it by the exact value it wrote (``claim``).
+
+    A nonce also carries **how far the request that claimed it got**. A claim is
+    an acquisition, not an acceptance: a process can die between the two, and a
+    claim it left behind must never answer the retry as if the work were done.
+    So the value is ``claimed:<token>:<epoch>`` until the route has finished
+    deciding, and ``completed:<token>`` after. A later request that finds a
+    claim still open within the in-flight lease is a concurrent duplicate and
+    is answered retryable (``in_flight``); one that finds a claim older than
+    the lease takes it over as a first attempt; only ``completed`` is a replay.
+    """
+
+    reject: bool
+    claimed: bool = False
+    key: str = ""
+    token: str = ""
+    claim: str = ""
+    in_flight: bool = False
+
+
+# How long a claim may stay open before it is an orphan rather than a request
+# still deciding. The route's own work between claiming and completing is a
+# signature check, a parse and a handful of database writes; a claim older than
+# this belongs to a process that never finished, and the provider's retry may
+# take it over. A concurrent duplicate inside the lease is answered retryable
+# rather than acknowledged, so the outcome is never decided on its behalf.
+REPLAY_IN_FLIGHT_LEASE_SECONDS = 60
+
+_NONCE_CLAIMED = "claimed"
+_NONCE_COMPLETED = "completed"
+
+# Compare-and-set and compare-and-delete, atomic on the server. The first line
+# of each script names it so a test double can recognise which one it is asked
+# to run without interpreting Lua.
+_NONCE_CAS_SET = """-- nahla:nonce_cas_set
+local current = redis.call('GET', KEYS[1])
+if current ~= ARGV[1] then return 0 end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 1 then ttl = tonumber(ARGV[3]) end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ttl)
+return 1"""
+_NONCE_CAS_DEL = """-- nahla:nonce_cas_del
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0"""
+
+
+def _claim_value(token: str, moment: Optional[float] = None) -> str:
+    import time as _time  # noqa: PLC0415
+
+    return f"{_NONCE_CLAIMED}:{token}:{int(moment if moment is not None else _time.time())}"
+
+
+def _completed_value(token: str) -> str:
+    return f"{_NONCE_COMPLETED}:{token}"
+
+
+def _decoded(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _claim_age(value: str, now: float) -> Optional[float]:
+    """Seconds since an open claim was written, or ``None`` for anything else.
+
+    Only ``claimed:<token>:<epoch>`` is an open claim. A completed marker is a
+    replay. Anything else — the ``"1"`` an earlier deployment wrote when a
+    request *took* the nonce, or a value this code cannot read — is an
+    **ambiguous acquisition**: see :func:`_is_completed` and the takeover in
+    :func:`evaluate_replay_claim`.
+    """
+    parts = value.split(":")
+    if len(parts) != 3 or parts[0] != _NONCE_CLAIMED:
+        return None
+    try:
+        return max(0.0, now - float(int(parts[2])))
+    except ValueError:
+        return None
+
+
+def _is_completed(value: str) -> bool:
+    """Whether the nonce says a request with this body finished deciding."""
+    return value.startswith(f"{_NONCE_COMPLETED}:")
+
+
+def _cas(client: Any, script: str, key: str, *args: Any) -> bool:
+    try:
+        return bool(int(client.eval(script, 1, key, *args) or 0))
+    except Exception as exc:  # noqa: BLE001 — the TTL is the backstop
+        logger.warning("[webhook_security] nonce compare-and-set failed: %s", exc)
+        return False
+
+
+def replay_nonce_key(provider: str, raw_body: bytes) -> str:
+    """The exact key ``check_replay`` uses. One definition, two callers."""
+    return f"webhook:nonce:{provider}:{_body_fingerprint(provider, raw_body)}"
+
+
+def evaluate_replay_claim(
+    provider: str,
+    raw_body: bytes,
+    *,
+    tenant_id: Optional[int] = None,
+    request_meta: Optional[dict] = None,
+    ttl_seconds: int = 86400,
+) -> ReplayVerdict:
+    """:func:`evaluate_replay`, plus whether this request claimed the nonce.
+
+    Same protection, same flags, same audit row. The difference is that the
+    caller can hand the nonce back with :func:`release_replay_nonce` when it
+    turns out it could not accept the work.
+    """
+    from core.config import (  # noqa: PLC0415
+        WEBHOOK_REPLAY_PROTECTION_ENABLED,
+        WEBHOOK_REPLAY_REJECT_ENABLED,
+    )
+    if not WEBHOOK_REPLAY_PROTECTION_ENABLED:
+        return ReplayVerdict(reject=False, claimed=False)
+
+    import time as _time  # noqa: PLC0415
+    import uuid as _uuid  # noqa: PLC0415
+
+    from core.redis_client import get_redis  # noqa: PLC0415
+
+    key = replay_nonce_key(provider, raw_body)
+    client = get_redis()
+    if client is None:
+        # No shared state: nothing can be claimed and nothing is rejected, the
+        # same as ``check_replay``. There is nothing to release either.
+        return ReplayVerdict(reject=False, claimed=False, key=key)
+
+    ttl = int(max(60, ttl_seconds))
+    token = _uuid.uuid4().hex
+    claim = _claim_value(token)
+    try:
+        if client.set(key, claim, nx=True, ex=ttl):
+            return ReplayVerdict(reject=False, claimed=True, key=key, token=token, claim=claim)
+        current = _decoded(client.get(key))
+    except Exception as exc:  # noqa: BLE001 — replay protection must never break webhooks
+        logger.warning("[webhook_security] redis nonce claim failed for %s: %s — treating as "
+                       "not-replay", provider, exc)
+        return ReplayVerdict(reject=False, claimed=False, key=key)
+
+    reject = bool(WEBHOOK_REPLAY_REJECT_ENABLED)
+    age = _claim_age(current, _time.time())
+    orphaned = age is not None and age > REPLAY_IN_FLIGHT_LEASE_SECONDS
+    # A value that is neither an open claim nor a completed marker was written
+    # by the earlier code (``"1"``) — or by nothing this code can read. It says
+    # a request *took* the nonce; it cannot say whether that request lived
+    # long enough to make anything durable. Reading it as "completed" turned a
+    # crash between claim and record into a ``200 replay`` for a message
+    # nothing held, once the pilot's durable check was off. So it is an
+    # ambiguous acquisition and is taken over exactly like an orphaned claim:
+    # the request is a first attempt, and the durable records and the dedup
+    # boundaries decide, per message, what was already done.
+    ambiguous = age is None and not _is_completed(current)
+    if orphaned or ambiguous:
+        # This request takes the nonce over, exactly once — the compare-and-set
+        # fails for a second retry racing it, which is then a concurrent
+        # duplicate of *this* one and is answered in flight.
+        if _cas(client, _NONCE_CAS_SET, key, current, claim, ttl):
+            if orphaned:
+                logger.warning("[webhook_security] orphaned replay nonce taken over provider=%s "
+                               "age=%ss — treating the request as a first attempt", provider,
+                               int(age))
+            else:
+                logger.warning("[webhook_security] replay nonce written by an earlier "
+                               "deployment taken over provider=%s value=%r — it cannot say how "
+                               "far that request got; treating the request as a first attempt",
+                               provider, current[:32])
+            return ReplayVerdict(reject=False, claimed=True, key=key, token=token, claim=claim)
+        age = 0.0
+
+    try:
+        from core.webhook_audit import record_replay  # noqa: PLC0415
+        record_replay(provider, tenant_id=tenant_id, request_meta=request_meta or {})
+    except Exception as exc:  # noqa: BLE001 — audit is best-effort
+        logger.warning("[webhook_security] replay audit record failed: %s", exc)
+
+    if age is not None:
+        # A claim still open inside the lease: another request with this body
+        # is deciding right now. Its outcome is not known yet, so nothing is
+        # acknowledged on its behalf — the copy is answered retryable.
+        return ReplayVerdict(reject=reject, claimed=False, key=key, in_flight=True)
+    return ReplayVerdict(reject=reject, claimed=False, key=key)
+
+
+def mark_replay_completed(verdict: ReplayVerdict) -> bool:
+    """Record that the request holding this claim has finished deciding.
+
+    Called once the route has made its acknowledgement durable — the pilot's
+    obligations recorded, processing scheduled — so that from here on a copy of
+    the body is a replay and nothing else. Only the holder of the claim may
+    mark it; a claim that was taken over in the meantime is left to its new
+    holder. Never raises: an unmarked claim ages into an orphan, which delays a
+    retry rather than losing one.
+    """
+    if not verdict.claimed or not verdict.key or not verdict.claim:
+        return False
+    try:
+        from core.redis_client import get_redis  # noqa: PLC0415
+
+        client = get_redis()
+        if client is None:
+            return False
+        return _cas(client, _NONCE_CAS_SET, verdict.key, verdict.claim,
+                    _completed_value(verdict.token), 86400)
+    except Exception as exc:  # noqa: BLE001 — the TTL is the backstop
+        logger.warning("[webhook_security] could not mark replay nonce completed: %s", exc)
+        return False
+
+
+def release_replay_nonce(verdict: ReplayVerdict) -> bool:
+    """Give back a nonce this request claimed but could not accept.
+
+    Called on exactly one path: the request is answered with a retryable status
+    because the work was not made durable. Giving the nonce back is what keeps
+    the provider's identical retry a real retry instead of a silent drop.
+
+    A verdict that did not claim anything releases nothing — a concurrent
+    duplicate must still be a duplicate. Never raises: a nonce that cannot be
+    released expires on its own TTL, which delays a retry rather than losing it.
+    """
+    if not verdict.claimed or not verdict.key or not verdict.claim:
+        return False
+    try:
+        from core.redis_client import get_redis  # noqa: PLC0415
+
+        client = get_redis()
+        if client is None:
+            return False
+        # Compare-and-delete: the key goes only if it still holds *this*
+        # request's claim. A claim another request took over, or a completed
+        # marker, is never deleted from under its owner.
+        return _cas(client, _NONCE_CAS_DEL, verdict.key, verdict.claim)
+    except Exception as exc:  # noqa: BLE001 — the TTL is the backstop
+        logger.warning("[webhook_security] could not release replay nonce: %s", exc)
         return False
 
 

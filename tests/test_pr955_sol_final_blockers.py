@@ -389,18 +389,37 @@ class TestRecognizedCodButtonAlwaysConsumed:
         block = src[interactive:generic]
         assert "is_owned_cod_button_payload(btn_id)" in block
         assert "consume_owned_cod_button_inbound" in block
-        owned_at = block.index("if is_owned_cod_button_payload(btn_id)")
+        # PR #1099: the branch is now reached only when the commerce runtime has
+        # not claimed this inbound. Everything this case asserted still holds —
+        # the branch exists, it is guarded, and it returns — and the claim is
+        # asserted too so the guard cannot be dropped silently either.
+        owned_at = block.index("is_owned_cod_button_payload(btn_id)")
+        guard_at = block.index("if _runtime_claim is None and "
+                               "is_owned_cod_button_payload(btn_id)")
+        assert guard_at <= owned_at
         return_at = block.index("return", owned_at)
         assert "except" in block[owned_at:return_at]
         assert block[return_at:return_at + 6] == "return"
         rescue = src.index('msg_type == "button"')
         merchant = src.index("_handle_merchant_message", rescue)
         rescue_block = src[rescue:merchant]
-        assert "is_owned_cod_button_payload(_btn_payload)" in rescue_block
+        # The template-button branch still classifies and still consumes, and
+        # it still returns. What moved is where the ownership question is asked:
+        # the whole classification — canonical payload AND the context-id
+        # correlation that reads this tenant's recent COD sends — now sits
+        # inside the ``else`` of the claim check, so a runtime-owned inbound
+        # reaches none of it. ``_classify_owned_cod_button`` is that block.
+        assert "_classify_owned_cod_button(" in rescue_block
         assert "consume_owned_cod_button_inbound" in rescue_block
-        owned_tpl = rescue_block.index("if is_owned_cod_button_payload(_btn_payload)")
-        assert rescue_block.find("return", owned_tpl) > 0
+        guard_tpl = rescue_block.index("if _runtime_claim is not None:")
+        classify_tpl = rescue_block.index("_classify_owned_cod_button(")
+        assert guard_tpl < classify_tpl, "ownership is decided before classification"
+        assert rescue_block.find("return", classify_tpl) > 0
         assert "classify_cod_reply(_wa_text)" not in rescue_block
+        helper = src[src.index("def _classify_owned_cod_button("):
+                     src.index("def _commerce_runtime_claims_inbound(")]
+        assert "is_owned_cod_button_payload(button_payload)" in helper
+        assert "resolve_owned_cod_button_payload_from_context(" in helper
 
 
 class TestCodDisabledDoesNotStrand:

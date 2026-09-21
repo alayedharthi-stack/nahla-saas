@@ -18,6 +18,10 @@ OTHER_TENANT = 9999
 PHONE_ID = "1555000111"
 OWNER_PHONE = "+966500000001"
 STRANGER_PHONE = "+966500000999"
+# A placeholder: these cases prove the guard requires *a* configured model and
+# reports the one it was given. Which model the pilot runs on is an owner
+# decision, and nothing in the repository may stand in for it.
+MODEL = "model-configured-for-this-pilot"
 
 
 class _Connection:
@@ -57,6 +61,7 @@ def configured(monkeypatch: pytest.MonkeyPatch) -> Dict[str, str]:
     monkeypatch.setenv(pg.ENV_ENABLED, "true")
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, str(TENANT))
     monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, OWNER_PHONE)
+    monkeypatch.setenv(pg.ENV_MODEL, MODEL)
     return {}
 
 
@@ -76,6 +81,7 @@ def test_the_runtime_is_unreachable_until_it_is_switched_on(monkeypatch):
     monkeypatch.delenv(pg.ENV_ENABLED, raising=False)
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, str(TENANT))
     monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, OWNER_PHONE)
+    monkeypatch.setenv(pg.ENV_MODEL, MODEL)
     db = _Db()
     decision = route(db)
     assert decision.permitted is False and decision.reason == pg.PILOT_DISABLED
@@ -86,6 +92,7 @@ def test_an_empty_tenant_allowlist_permits_nothing(monkeypatch):
     monkeypatch.setenv(pg.ENV_ENABLED, "true")
     monkeypatch.delenv(pg.ENV_TENANT_ALLOWLIST, raising=False)
     monkeypatch.setenv(pg.ENV_RECIPIENT_ALLOWLIST, OWNER_PHONE)
+    monkeypatch.setenv(pg.ENV_MODEL, MODEL)
     assert route(_Db()).reason == pg.TENANT_NOT_ALLOWLISTED
 
 
@@ -94,6 +101,7 @@ def test_an_allowlisted_tenant_is_never_enabled_wholesale(monkeypatch):
     monkeypatch.setenv(pg.ENV_ENABLED, "true")
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, str(TENANT))
     monkeypatch.delenv(pg.ENV_RECIPIENT_ALLOWLIST, raising=False)
+    monkeypatch.setenv(pg.ENV_MODEL, MODEL)
     assert route(_Db()).reason == pg.RECIPIENT_NOT_ALLOWLISTED
 
 
@@ -132,9 +140,24 @@ def test_a_missing_phone_number_id_cannot_be_verified(configured):
     assert route(_Db(), phone_number_id="").reason == pg.CONNECTION_NOT_VERIFIED
 
 
-def test_a_guard_that_cannot_decide_refuses(configured):
+def test_a_connection_lookup_that_fails_is_undecidable_not_unverified(configured):
+    """A failed read is a fact about us, not about the tenant.
+
+    ``connection_not_verified`` is a verified negative — the tenant does not
+    own this number — and acceptance treats it as "not ours". A lookup that
+    raised established nothing of the kind, so the guard says ``guard_error``
+    and the caller that acknowledges inbounds refuses rather than drops.
+    """
     decision = route(_Db(explode=True))
-    assert decision.permitted is False and decision.reason == pg.CONNECTION_NOT_VERIFIED
+    assert decision.permitted is False and decision.reason == pg.GUARD_ERROR
+
+
+def test_a_verified_row_the_caller_already_holds_is_not_looked_up_again(configured):
+    """Acceptance resolved the connection once; a second lookup that fails must
+    not turn that verified association into ``connection_not_verified``."""
+    decision = route(_Db(explode=True), verified=(f"wa:{PHONE_ID}", "17"))
+    assert decision.permitted is True
+    assert decision.connection_ref == f"wa:{PHONE_ID}" and decision.connection_id == "17"
 
 
 def test_an_unexpected_guard_error_refuses_rather_than_raising(configured, monkeypatch):
@@ -166,6 +189,7 @@ def test_a_fully_configured_owner_conversation_is_permitted_once(configured):
     assert decision.recipient and decision.recipient.endswith("500000001")
     assert decision.connection_ref == f"wa:{PHONE_ID}"
     assert decision.connection_id == "17"
+    assert decision.model == MODEL
 
 
 def test_the_decision_is_exclusive_in_both_directions(configured):
@@ -186,6 +210,49 @@ def test_an_unparsable_tenant_entry_is_dropped_rather_than_widening_the_list(con
     monkeypatch.setenv(pg.ENV_TENANT_ALLOWLIST, f"abc, -1, 0, {TENANT}")
     assert pg.tenant_allowlist() == frozenset({TENANT})
     assert route(_Db()).permitted is True
+
+
+# ── The model is chosen, never inherited ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_a_pilot_with_no_configured_model_is_not_permitted(configured, monkeypatch, value):
+    """Activation must name a model. Silence is refused, not resolved."""
+    if value is None:
+        monkeypatch.delenv(pg.ENV_MODEL, raising=False)
+    else:
+        monkeypatch.setenv(pg.ENV_MODEL, value)
+    decision = route(_Db())
+    assert decision.permitted is False and decision.reason == pg.MODEL_NOT_CONFIGURED
+    assert decision.model is None
+
+
+def test_the_model_is_read_only_from_its_own_variable(configured, monkeypatch):
+    """Not from the legacy resolution, and not from the repository fallback."""
+    monkeypatch.delenv(pg.ENV_MODEL, raising=False)
+    monkeypatch.setenv("CLAUDE_MODEL", "some-other-model")
+    assert route(_Db()).reason == pg.MODEL_NOT_CONFIGURED
+    assert pg.pilot_model() == ""
+
+
+def test_the_configured_model_is_carried_on_the_decision_verbatim(configured, monkeypatch):
+    monkeypatch.setenv(pg.ENV_MODEL, "  a-specific-model  ")
+    decision = route(_Db())
+    assert decision.permitted is True and decision.model == "a-specific-model"
+
+
+def test_an_unconfigured_model_is_refused_before_the_connection_is_looked_up(configured,
+                                                                             monkeypatch):
+    """A misconfigured pilot costs nothing and touches no database."""
+    monkeypatch.delenv(pg.ENV_MODEL, raising=False)
+    db = _Db()
+    assert route(db).reason == pg.MODEL_NOT_CONFIGURED
+    assert db.queries == 0
+
+
+def test_an_unconfigured_model_still_leaves_the_turn_with_the_legacy_path(configured, monkeypatch):
+    monkeypatch.delenv(pg.ENV_MODEL, raising=False)
+    assert route(_Db()).legacy_owns_turn is True
 
 
 # ── Finite limits ────────────────────────────────────────────────────────────
