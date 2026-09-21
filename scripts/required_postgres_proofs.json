@@ -449,6 +449,20 @@
       ]
     },
     {
+      "id": "commerce_runtime_synthetic_probe",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_commerce_runtime_synthetic_probe_pg.py",
+      "origin": "pilot follow-up: the re-runnable, secret-free synthetic probe of the runtime pilot",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_commerce_runtime_synthetic_probe_pg.py::test_the_scripted_probe_runs_every_case_and_leaves_nothing_behind",
+        "tests/commerce_reliability/test_commerce_runtime_synthetic_probe_pg.py::test_the_probe_drops_its_database_even_when_a_case_fails"
+      ]
+    },
+    {
       "id": "runner_connection_regressions",
       "kind": "runner_regression",
       "module": "tests/commerce_reliability/test_required_postgres_proofs_connection_pg.py",
