@@ -2281,6 +2281,9 @@ def _selection(**over):
         "selection_operation_ref": "offer:",
         "selection_matches_action": True,
         "selection_scope_verified": True,
+        "selection_operation_ref_before": "",
+        "selection_state_before": "candidate",
+        "action_already_consumed": False,
     }
     base.update(over)
     return base
@@ -3136,3 +3139,235 @@ def test_an_operation_left_by_an_earlier_turn_is_not_this_turns():
     )
     assert "structured_selection_operation_not_from_this_turn" in blockers
     assert "structured_selection_operation_not_recorded" not in blockers
+
+
+def _structured_action(action_id: str):
+    """The (offer, address) the platform itself reads out of an action id."""
+    from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+        structured_consent_action,
+    )
+
+    resolved = structured_consent_action({"button_id": action_id})
+    assert resolved, action_id
+    return resolved
+
+
+def _show_choices_and_get_action(db, tenant, phone, fixture, label):
+    """Run a real showing turn and return one action id it actually sent."""
+    from services.internal_conversational_e2e_harness import (  # noqa: PLC0415
+        run_sandbox_of2_turn,
+    )
+
+    outcome = asyncio.run(
+        run_sandbox_of2_turn(
+            db=db,
+            request=_entrypoint_request(
+                tenant=tenant,
+                convo=fixture.conversation,
+                phone=phone,
+                text="متابعة الشراء",
+                meta=_interactive("of2_resume_checkout"),
+                label=label,
+            ),
+        )
+    )
+    record = outcome.evidence["address_turn"]
+    assert outcome.evidence["blockers"] == [], outcome.evidence["blockers"]
+    assert record["receipt_action_ids"], record
+    return record["receipt_action_ids"][0]
+
+
+def test_replaying_a_consumed_action_is_not_a_new_selection(order_flow_v2_live):
+    """The last C1 gap: a tap already answered does not select again.
+
+    The writer is idempotent, so on a replay it republishes the same
+    operation and leaves the row exactly as a fresh selection would. The
+    showing is still live and the row still says ``selected``, so every
+    post-turn link held and the replay was counted as a second
+    structured selection by a turn that decided nothing.
+
+    Nothing here demands a second durable write. The replay is separated
+    from the original only by what the row carried BEFORE the turn ran.
+    """
+    from services.internal_conversational_e2e_of2_fixtures import (  # noqa: PLC0415
+        STATE_SEVERAL_SAVED,
+        prepare_of2_scenario_fixture,
+    )
+
+    db, tenant, phone = _live_sandbox()
+    fixture = prepare_of2_scenario_fixture(
+        db,
+        tenant_id=tenant.id,
+        customer_phone=phone,
+        scenario_id="replay",
+        session_id=str(uuid.uuid4()),
+        state=STATE_SEVERAL_SAVED,
+    )
+    action_id = _show_choices_and_get_action(db, tenant, phone, fixture, "replay")
+
+    # 1. The genuine selection. The real owner runs; nothing is patched.
+    first = _selection_probe(
+        db=db,
+        tenant=tenant,
+        phone=phone,
+        fixture=fixture,
+        button_id=action_id,
+        handler=None,
+        label="replay",
+    )
+    assert first["blockers"] == [], first["blockers"]
+    chosen = first["selection_evidence"]
+    assert chosen["selection_matches_action"] is True
+    assert chosen["action_already_consumed"] is False
+    # Nothing had consumed this action before that turn.
+    assert chosen["selection_operation_ref_before"] != chosen["operation_ref"]
+    consumed_ref = chosen["operation_ref"]
+
+    # 2. The SAME tap again. Every post-turn link still holds — which is
+    #    exactly why the pre-turn row is what decides.
+    second = _selection_probe(
+        db=db,
+        tenant=tenant,
+        phone=phone,
+        fixture=fixture,
+        button_id=action_id,
+        handler=None,
+        label="replay",
+    )
+    replay = second["selection_evidence"]
+    assert replay["action_already_consumed"] is True
+    assert replay["selection_operation_ref_before"] == consumed_ref
+    assert replay["selection_state_before"] == "selected"
+    assert replay["selection_matches_action"] is False
+    assert second["verdict"] == "fail"
+    assert "structured_selection_action_already_consumed" in second["blockers"]
+
+    # The original selection is not retracted by refusing the replay: the
+    # durable row still holds it, at the same reference.
+    from models import CustomerAddressProvenance  # noqa: PLC0415
+
+    _offer, address_id = _structured_action(action_id)
+    row = (
+        db.query(CustomerAddressProvenance)
+        .filter(
+            CustomerAddressProvenance.tenant_id == tenant.id,
+            CustomerAddressProvenance.customer_address_id == int(address_id),
+        )
+        .first()
+    )
+    assert row is not None
+    assert row.selection_state == "selected"
+    assert row.selection_operation_ref == consumed_ref
+
+
+def test_choosing_the_same_address_again_through_a_new_showing_passes(
+    order_flow_v2_live,
+):
+    """Re-selection is not required to change the address.
+
+    Refusing a replay must not turn into refusing a customer who is
+    shown their addresses again and picks the same one. That answers a
+    NEW showing, whose identity composes a different reference, so it is
+    a selection in its own right even though the address id is
+    unchanged — the replay check keys on the consumed action, never on
+    the address.
+
+    The second showing is recorded through the platform's own offer
+    writer, the same call the delivery boundary makes, so the offer this
+    turn answers is a real one and not a fixture's invention.
+    """
+    from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+        record_offered_address_set,
+    )
+    from services.internal_conversational_e2e_of2_fixtures import (  # noqa: PLC0415
+        STATE_SEVERAL_SAVED,
+        prepare_of2_scenario_fixture,
+    )
+
+    db, tenant, phone = _live_sandbox()
+    fixture = prepare_of2_scenario_fixture(
+        db,
+        tenant_id=tenant.id,
+        customer_phone=phone,
+        scenario_id="reselect",
+        session_id=str(uuid.uuid4()),
+        state=STATE_SEVERAL_SAVED,
+    )
+    first_action = _show_choices_and_get_action(db, tenant, phone, fixture, "reselect")
+    first = _selection_probe(
+        db=db, tenant=tenant, phone=phone, fixture=fixture,
+        button_id=first_action, handler=None, label="reselect",
+    )
+    assert first["blockers"] == [], first["blockers"]
+    first_offer, address_id = _structured_action(first_action)
+    shown_fingerprint = first["selection_evidence"]["shown_fingerprint"]
+    assert shown_fingerprint
+
+    # A genuinely new showing of the SAME address, at the revision it
+    # still has, recorded by the platform's own writer.
+    second_offer = uuid.uuid4().hex[:16]
+    assert second_offer != first_offer
+    db.refresh(fixture.conversation)
+    record_offered_address_set(
+        db,
+        tenant_id=tenant.id,
+        conversation=fixture.conversation,
+        candidates=[
+            {"address_id": int(address_id), "fingerprint": shown_fingerprint}
+        ],
+        delivery_ref="reselect-delivery",
+        offer_id=second_offer,
+    )
+    db.commit()
+
+    second = _selection_probe(
+        db=db, tenant=tenant, phone=phone, fixture=fixture,
+        button_id=f"nahla_addr_select:{second_offer}:{address_id}",
+        handler=None, label="reselect",
+    )
+    again = second["selection_evidence"]
+    # The same address, and that is not held against it.
+    assert again["action_address_id"] == str(address_id)
+    assert again["offer_identity"] == second_offer
+    assert again["action_already_consumed"] is False
+    # The previous consumption is still on the row, and is simply not
+    # this action's reference.
+    assert again["selection_operation_ref_before"].startswith(f"{first_offer}:")
+    assert again["selection_state_before"] == "selected"
+    assert "structured_selection_action_already_consumed" not in second["blockers"]
+    assert again["selection_matches_action"] is True
+    assert second["blockers"] == [], second["blockers"]
+
+
+def test_a_replayed_action_is_named_as_such_not_merely_mismatched():
+    """The blocker says what actually happened.
+
+    Every post-turn link can hold on a replay, so without its own name
+    the refusal would have to borrow one that misdescribes it — the
+    address did match, the scope was right, and the row was durable.
+    """
+    blockers = _result_blockers(
+        selection=_selection(
+            action_already_consumed=True,
+            selection_operation_ref_before="offer:",
+            selection_state_before="selected",
+            selection_matches_action=False,
+        )
+    )
+    assert "structured_selection_action_already_consumed" in blockers
+    # And it is not confused with the cases that mean something else.
+    assert "structured_selection_showing_unknown" not in blockers
+    assert "structured_selection_not_durably_recorded" not in blockers
+    assert "structured_selection_scope_unverified" not in blockers
+
+
+def test_a_first_selection_is_not_treated_as_a_replay():
+    """A row that carries ANOTHER action's reference is not this action's."""
+    blockers = _result_blockers(
+        selection=_selection(
+            selection_operation_ref_before="a-different-offer:",
+            selection_state_before="selected",
+        )
+    )
+    assert "structured_selection_action_already_consumed" not in blockers
+    assert blockers == []

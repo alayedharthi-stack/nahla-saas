@@ -554,6 +554,12 @@ def _operational_result_blockers(
     shown = str(chosen.get("shown_fingerprint") or "")
     if shown and str(chosen.get("selected_fingerprint") or "") != shown:
         found.append("structured_selection_revision_mismatch")
+    # Replaying an action that an earlier turn already consumed is not a
+    # new selection. The approved duplicate-send behaviour is untouched:
+    # this says only that THIS turn selected nothing, not that the
+    # original selection was invalid.
+    if chosen.get("action_already_consumed"):
+        found.append("structured_selection_action_already_consumed")
     if not chosen.get("selection_matches_action"):
         found.append("structured_selection_address_mismatch")
     return found
@@ -874,6 +880,62 @@ def _showing_for_action(
         return {}
 
 
+def _selection_before_turn(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: int,
+    inbound_metadata: Mapping[str, Any],
+    conversation: Any,
+) -> dict[str, Any]:
+    """The durable selection as it stood BEFORE this turn ran.
+
+    Consuming an action is a one-time event. Nothing in the post-turn
+    picture distinguishes a turn that consumed the action from a turn
+    that merely replayed one already consumed: the showing is still
+    live, the row still says ``selected``, and an idempotent writer
+    republishes the same operation. Both therefore looked identical, and
+    a replay was counted as a fresh selection.
+
+    What separates them is only visible beforehand — whether the durable
+    row ALREADY carried the reference this turn's action composes. So it
+    is read here, before the handler, exactly as the showing is.
+
+    This demands no second write. A genuine re-selection of the same
+    address answers a NEW showing, whose identity makes a different
+    reference, so it is not caught by this.
+    """
+    out = {"selection_operation_ref": "", "selection_state": ""}
+    try:
+        from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
+            structured_consent_action,
+        )
+        from models import CustomerAddressProvenance  # noqa: PLC0415
+
+        resolved = structured_consent_action(dict(inbound_metadata or {}))
+        if not resolved:
+            return out
+        _offer_id, address_id = resolved
+        row = (
+            db.query(CustomerAddressProvenance)
+            .filter(
+                CustomerAddressProvenance.tenant_id == int(tenant_id),
+                CustomerAddressProvenance.customer_id == int(customer_id),
+                CustomerAddressProvenance.customer_address_id == int(address_id),
+            )
+            .first()
+        )
+        if row is None:
+            return out
+        out["selection_operation_ref"] = str(
+            getattr(row, "selection_operation_ref", "") or ""
+        )
+        out["selection_state"] = str(getattr(row, "selection_state", "") or "")
+        return out
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unreadable prior state proves no prior consumption
+        return out
+
+
 def _selection_evidence(
     db: Any,
     *,
@@ -883,6 +945,7 @@ def _selection_evidence(
     conversation: Any,
     turn_started_at: Any = None,
     showing_before: Optional[Mapping[str, Any]] = None,
+    selection_before: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """What the WRITER did with the action, not what the action looks like.
 
@@ -908,10 +971,16 @@ def _selection_evidence(
     * the writer must have published an operation FOR THIS TURN, naming
       this address, and the durable row must carry that operation's own
       reference;
-    * and the publication must have happened during this turn, so an
+    * the publication must have happened during this turn, so an
       operation left by an earlier turn cannot stand in for one that
-      never ran. A legitimate idempotent replay republishes, so it still
-      passes — no second durable write is demanded.
+      never ran;
+    * and the action must not have been CONSUMED ALREADY. An idempotent
+      writer republishes on a replay, so the post-turn picture of a
+      replay is identical to that of a fresh selection. Only the durable
+      row as it stood BEFORE the turn separates them, so that is read
+      too. No second write is demanded: a genuine re-selection of the
+      same address answers a new showing, whose identity composes a
+      different reference.
 
     Read-only, and every judgement is delegated to the platform helper
     that owns it.
@@ -936,6 +1005,9 @@ def _selection_evidence(
         "selection_operation_ref": "",
         "selection_matches_action": False,
         "selection_scope_verified": False,
+        "selection_operation_ref_before": "",
+        "selection_state_before": "",
+        "action_already_consumed": False,
     }
     try:
         from modules.ai.order_flow_v2.checkout_context import (  # noqa: PLC0415
@@ -1038,9 +1110,36 @@ def _selection_evidence(
             getattr(row, "selection_operation_ref", "") or ""
         )
 
-        # 4. The conjunction. Every link, or none.
+        # 4. Was this action already consumed before the turn began?
+        #    The reference the writer composes for THIS action is
+        #    deterministic, so a row that already carried it was selected
+        #    by an earlier turn. Replaying the tap does not select again.
+        prior = dict(selection_before or {})
+        # The reference the writer composed when it consumed this action.
+        # Built from the ACTION's own offer id, not from the live
+        # showing: consuming supersedes the showing, so by the time a
+        # replay arrives ``offer_identity`` is empty and a reference
+        # built from it would match nothing — which is precisely how the
+        # replay escaped detection. The action id is stable, and while
+        # the showing IS live the two are the same string.
+        consumed_ref = f"{offer_id}:{writer_turn_ref}"
+        # The reference a selection made on THIS turn must carry: the
+        # showing that is live now. Kept separate on purpose.
+        expected_ref = f"{offer_identity}:{writer_turn_ref}"
+        out["selection_operation_ref_before"] = str(
+            prior.get("selection_operation_ref") or ""
+        )
+        out["selection_state_before"] = str(prior.get("selection_state") or "")
+        out["action_already_consumed"] = bool(
+            out["selection_operation_ref_before"]
+            and out["selection_operation_ref_before"] == consumed_ref
+            and out["selection_state_before"] == "selected"
+        )
+
+        # 5. The conjunction. Every link, or none.
         out["selection_matches_action"] = bool(
-            out["selection_scope_verified"]
+            not out["action_already_consumed"]
+            and out["selection_scope_verified"]
             and out["showing_exists"]
             and out["operation_recorded"]
             and out["operation_observed_in_turn"]
@@ -1048,7 +1147,7 @@ def _selection_evidence(
             and out["operation_fingerprint"] == shown_fingerprint
             # The writer composes its reference from the showing it
             # consumed and the turn it answered.
-            and out["operation_ref"] == f"{offer_identity}:{writer_turn_ref}"
+            and out["operation_ref"] == expected_ref
             and out["selection_state"] == "selected"
             and out["selected_address_id"] == str(address_id)
             and out["selected_fingerprint"] == shown_fingerprint
@@ -1212,6 +1311,16 @@ async def run_sandbox_of2_turn(
         tenant_id=int(request.tenant_id),
         conversation=request.conversation,
         inbound_metadata=request.inbound_metadata,
+    )
+    # Whether this action had ALREADY been consumed is only visible
+    # before the turn: an idempotent writer republishes on a replay, so
+    # afterwards a replay and a fresh selection look the same.
+    selection_before = _selection_before_turn(
+        db,
+        tenant_id=int(request.tenant_id),
+        customer_id=int(getattr(request.conversation, "customer_id", 0) or 0),
+        inbound_metadata=request.inbound_metadata,
+        conversation=request.conversation,
     )
 
     with internal_conversational_e2e_context(
@@ -1400,6 +1509,7 @@ async def run_sandbox_of2_turn(
         conversation=request.conversation,
         turn_started_at=turn_started_at,
         showing_before=showing_before,
+        selection_before=selection_before,
     )
     address_turn["selection"] = selection
     blockers.extend(
