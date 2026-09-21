@@ -29,6 +29,16 @@ def image_bytes(fmt='PNG'):
     return out.getvalue()
 
 
+@pytest.mark.parametrize(('mode', 'fmt'), [('CMYK', 'JPEG'), ('P', 'PNG'), ('I;16', 'PNG')])
+def test_non_rgb_images_are_normalized_to_meta_8bit_rgb(mode, fmt):
+    original = io.BytesIO()
+    Image.new(mode, (80, 40)).save(original, format=fmt)
+    content, mime = storage.prepare_template_image(original.getvalue())
+    assert mime == 'image/png' and content[24] == 8
+    with Image.open(io.BytesIO(content)) as image:
+        assert image.mode in {'RGB', 'RGBA'} and image.size == (80, 40)
+
+
 def components(url=URL):
     return [{'type': 'HEADER', 'format': 'IMAGE', 'example': {'header_url': url}},
             {'type': 'BODY', 'text': BODY}, {'type': 'BUTTONS', 'buttons': copy.deepcopy(BUTTONS)}]

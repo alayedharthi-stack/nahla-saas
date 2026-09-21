@@ -44,10 +44,20 @@ def prepare_template_image(content: bytes) -> tuple[bytes, str]:
             image.verify()
         with Image.open(io.BytesIO(content)) as image:
             image.load()
+            # Meta requires 8-bit RGB/RGBA. Preserve ordinary uploads byte for
+            # byte, but normalize CMYK, palette/grayscale and 16-bit PNG input.
+            png_depth = content[24] if mime == "image/png" else 8
+            if image.mode not in {"RGB", "RGBA"} or png_depth != 8:
+                mode = "RGBA" if "A" in image.mode or "transparency" in image.info else "RGB"
+                output = io.BytesIO()
+                image.convert(mode).save(output, format="PNG")
+                content, mime = output.getvalue(), "image/png"
     except CatalogMediaValidationError:
         raise
     except Exception as exc:
         raise CatalogMediaValidationError("invalid_image") from exc
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise CatalogMediaValidationError("file_too_large")
     return content, mime
 
 
@@ -74,7 +84,7 @@ def _s3_client():
 
 
 def upload_template_header_image(*, tenant_id: int, content: bytes) -> dict:
-    """Validate and persist the original JPEG/PNG template header in R2."""
+    """Validate and persist a Meta-compatible JPEG/PNG template header in R2."""
     image_bytes, content_type = prepare_template_image(content)
     media_id = uuid.uuid4().hex
     extension = "jpg" if content_type == "image/jpeg" else "png"
