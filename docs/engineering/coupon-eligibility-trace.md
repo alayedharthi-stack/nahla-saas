@@ -20,7 +20,7 @@ Each one that closes is now counted under its own reason in the tool's
 | 4 | Enough life left for the merchant's minimum | `ai_policy.min_remaining_hours` | `expiring_before_store_minimum` |
 | 5 | The rung is one the merchant lets the assistant read | `ai_policy.allowed_levels` | `level_not_allowed_by_store_policy` |
 | 6 | The customer stands on that rung | `services.coupon_entitlement_read` | `level_not_earned_by_customer` |
-| 7 | No rung: the merchant published it to an AI surface | `source_type` + `allocation_channel` | `not_published_for_general_use` |
+| 7 | No rung: the merchant published it — an AI channel, or a dashboard-declared general coupon | `source_type` + `allocation_channel` + `merchant_authored` | `not_published_for_general_use` |
 
 Gate 7 is the one that surprises people. A coupon carrying no
 `coupon_level` is not thereby a public offer — the record is simply
@@ -35,13 +35,27 @@ old row is not withheld for want of a source. A `NULL` `allocation_channel`
 reads as the empty string, which is in neither channel, so the channel is the
 one of the two that an old row will fail.
 
-**Known gap.** The dashboard's own «كوبون ترويجي عام» sends neither
-`coupon_level` nor `allocation_channel` (`Coupons.tsx`, `CreateStoreCouponModal`:
-both fields are sent only when the purpose is «متاح لتخصيص الذكاء الاصطناعي»).
-So the most ordinary thing a merchant can do — create a general promotional
-coupon — produces a row gate 7 withholds. The merchant *has* made an explicit
-declaration; the platform does not record it anywhere the gate can read. See
-"What is still missing" below.
+**The declared general coupon.** The dashboard's own «كوبون ترويجي عام» sends
+neither `coupon_level` nor `allocation_channel` (`Coupons.tsx`,
+`CreateStoreCouponModal`: both are sent only for «متاح لتخصيص الذكاء
+الاصطناعي»), so for a while the most ordinary thing a merchant can do produced
+a row this gate withheld. The merchant had made a declaration — the dashboard
+describes the option to them as a code that «يبقى مشتركاً», stays shared, and is
+simply not auto-assigned to one customer — and the platform was not reading it.
+
+It reads it now, and still only as a positive act. `merchant_authored` is
+`is_dashboard_authored_coupon(source_type, metadata)`: `source_type` `manual`
+**and** the `source: "dashboard"` marker the create endpoint stamps, which no
+other writer produces. A coupon whose metadata records nothing is still
+withheld; so is one the merchant placed on `campaign` or `autopilot`, because a
+channel the merchant did choose is a placement somewhere that is not this
+conversation. Those two channels are refused twice over — the resolver drops
+them before projection (`_CAMPAIGN_ONLY_CHANNELS`) and the gate refuses them
+again — because a placement elsewhere is the merchant's decision and neither
+layer should be the only thing standing behind it.
+
+`merchant_authored` decides whether a coupon may be projected at all; it is not
+on the snapshot and never reaches the customer-facing view.
 
 ## Reading the customer's standing
 
@@ -117,27 +131,46 @@ nothing.
 
 ## What is still missing
 
-1. **A merchant act that gate 7 can read.** The dashboard lets a merchant
-   declare a coupon «كوبون ترويجي عام» and then stores that declaration only
-   as `ai_allocatable: false` with no channel. Recording it — so the platform
-   can tell "the merchant published this for everyone" from "the record
-   happens to name no rung" — is what closes the gap without loosening the
-   gate. The alternative, treating an absent level as public, is exactly what
-   gate 7 exists to prevent.
+1. **The welcome's numbers reach the resolution, not yet the coupon.**
+   `resolve_coupon_level_for_order_count` now returns the merchant's own
+   `discount_value`, `validity_days`, `max_uses` and `min_order_amount`
+   instead of bronze's, and says so in `economics_source`. The issuance half
+   applies the welcome's `min_order_amount`, `max_uses` and
+   `per_customer_usage`.
 
-2. **A welcome coupon the merchant can actually shape.** The
-   `first_purchase` rule is a real, persisted, entitlement-gated dashboard
-   setting with its own `discount_type`, `discount_value`, `validity_days`,
-   `min_order_amount` and `max_uses`. None of those five is read anywhere.
-   `resolve_coupon_level_for_order_count` authorizes the **bronze level
-   entry** and returns bronze's economics, so a merchant who configures a 15%
-   one-day welcome gets whatever bronze says. The merchant can switch the
-   welcome on and off and cannot say what it is.
+   What it does **not** yet shape is the coupon itself. Issuance obtains a code
+   through `CouponGeneratorService.pick_coupon_for_level(resolved_level, …)`,
+   and the generator builds and prices pool coupons from the *level* config
+   (`coupon_generator.py:487,493`: `level_cfg["discount_default"]`,
+   `level_cfg["validity_hours"]`). So a welcome still arrives as a bronze pool
+   coupon at bronze's discount and expiry. Closing that means teaching the
+   generator to build from `resolution.economics_source ==
+   "first_purchase_rule"` — a change inside `backend/services/coupon_generator.py`,
+   which is outside the commerce-runtime scope and needs the platform owner.
 
-3. **A way to mark a coupon as the welcome.** There is no such marking. A
+2. **A way to mark a coupon as the welcome.** There is no such marking. A
    first-purchase customer resolves to bronze and sees the bronze rung's
-   codes, indistinguishable from an ordinary bronze reward.
+   codes, indistinguishable from an ordinary bronze reward. Whether the
+   welcome should be its own kind of coupon, or bronze with different
+   economics, is a product decision rather than a defect.
 
-4. **Issuance.** `CUSTOMER_COUPON_LIVE_ISSUANCE` is `False`; nothing is
+3. **Issuance.** `CUSTOMER_COUPON_LIVE_ISSUANCE` is `False`; nothing is
    generated for a first purchase today. A merchant relying on the welcome
    must have a bronze coupon already in the pool.
+
+## Tracing one real customer
+
+`scripts/operators/coupon_eligibility_trace.py` answers the four questions
+above for one tenant and one conversation, by running the platform's own
+authorities — `count_customer_orders`, `resolve_level_entitlement`,
+`list_shareable_promotions_impl` — against the live row in a session
+PostgreSQL holds read-only. It reports which record each route resolved and
+whether the routes agree, the orders read/counted/set aside with the status
+that set each aside, the rung and its reason, the per-gate withheld counts,
+and one masked line per currently-valid coupon carrying the fields those gates
+read. It prints internal ids, counts and reasons; never a code, a phone or a
+name.
+
+This exists so the general `[PROMOTION_PROJECTION]` line does not have to carry
+a customer identifier or order counts. A general log is the wrong home for
+them; a deliberate, scoped trace is the right one.

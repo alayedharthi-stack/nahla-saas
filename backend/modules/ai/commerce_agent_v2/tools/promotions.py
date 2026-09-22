@@ -134,18 +134,32 @@ def _merchant_published_generally(fact: Dict[str, Any]) -> bool:
     """Whether the merchant themselves put this unleveled coupon where the
     assistant can reach it.
 
-    Two acts, both positive, neither inferred from an absence: the coupon was
-    created in the merchant's own dashboard (``source_type`` "manual", the only
-    path that writes the AI fields), and the merchant chose an AI-reachable
-    allocation channel. The warm pool writes "system" and always stamps a rung;
-    a Salla import expresses no Nahla AI intent; and an unset channel stays
-    empty, which is exactly why a defaulted "shared" cannot stand in for a
-    decision nobody made.
+    Always a positive act, never an absence. The coupon must first have been
+    created in the merchant's own dashboard — ``source_type`` "manual", the one
+    path that writes the AI fields; the warm pool writes "system" and always
+    stamps a rung, and a store-platform import expresses no Nahla intent. Then
+    one of two things the merchant did:
+
+    * they chose an AI-reachable allocation channel, or
+    * they created it as a general promotional coupon, which the dashboard
+      describes to them as a code that «يبقى مشتركاً» — it stays shared, and is
+      simply not auto-assigned to one customer. That is the merchant declaring
+      a public code, and it reaches the assistant on the strength of the
+      declaration rather than of the missing rung.
+
+    A channel the merchant did choose is honoured either way: ``campaign`` and
+    ``autopilot`` are placements on surfaces that are not this one, so a coupon
+    sent there stays there. And ``merchant_authored`` is the create endpoint's
+    own marker, which nothing else writes — a row that merely says nothing is
+    still not a merchant act, which is the distinction this gate exists to keep.
     """
     source_type = _text(fact.get("source_type"), 32).lower()
     if source_type not in MERCHANT_AUTHORED_SOURCE_TYPES:
         return False
-    return _text(fact.get("allocation_channel"), 32).lower() in NATIVE_AI_CHANNELS
+    channel = _text(fact.get("allocation_channel"), 32).lower()
+    if channel:
+        return channel in NATIVE_AI_CHANNELS
+    return bool(fact.get("merchant_authored"))
 
 
 def _project(fact: Dict[str, Any], *, customer_id: Optional[int],

@@ -329,7 +329,9 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_selector_the_channel_cannot_show_still_answers_with_its_options",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_resolves_against_the_one_list_it_names_not_any_earlier_one",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_naming_a_message_this_conversation_never_sent_resolves_to_nothing",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_conversations_list_is_never_tappable_in_this_one"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_conversations_list_is_never_tappable_in_this_one",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_general_coupon_the_merchant_declared_reaches_a_real_customer",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_code_recording_no_declaration_is_still_refused_on_postgres"
       ]
     },
     {

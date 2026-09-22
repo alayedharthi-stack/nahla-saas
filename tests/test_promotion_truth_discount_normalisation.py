@@ -117,3 +117,36 @@ def test_numbers_are_rendered_plainly() -> None:
     assert pt._plain_number("abc") == "" and pt._plain_number(None) == ""
     assert pt._discount_number({"amount": "7", "currency": "sar"}) == ("7", "SAR")
     assert pt._discount_number(True) == ("", "")
+
+
+# ── The merchant's creation act travels with the fact ────────────────────────
+
+
+def test_a_coupon_the_merchant_made_in_the_dashboard_says_so() -> None:
+    """The create endpoint stamps ``source: dashboard`` beside
+    ``source_type: manual``. Both halves reach the projection, because the gate
+    that decides whether an unleveled code was published for everyone needs the
+    merchant's act and not the absence of a rung."""
+    fact = fact_of(Row(source_type="manual", extra_metadata={"source": "dashboard"}))
+    assert fact["merchant_authored"] is True
+    assert fact["source_type"] == "manual"
+
+
+def test_a_row_that_records_no_act_claims_none() -> None:
+    """A coupon whose metadata says nothing about where it came from is not a
+    merchant declaration. Silence stays silence all the way to the gate."""
+    for meta in ({}, {"source": ""}, {"category": "standard"}):
+        assert fact_of(Row(source_type="manual", extra_metadata=meta))["merchant_authored"] is False
+
+
+def test_the_pool_and_the_store_platform_are_not_the_merchants_dashboard() -> None:
+    """Both write their own markers, and neither is the merchant creating a
+    promotional code in Nahla. A synced coupon expresses no Nahla intent; a
+    pool coupon always carries its own rung instead."""
+    assert fact_of(Row(source_type="system",
+                       extra_metadata={"source": "auto"}))["merchant_authored"] is False
+    assert fact_of(Row(source_type="imported",
+                       extra_metadata={"source": "salla"}))["merchant_authored"] is False
+    # And a marker on the wrong source type does not promote it.
+    assert fact_of(Row(source_type="system",
+                       extra_metadata={"source": "dashboard"}))["merchant_authored"] is False

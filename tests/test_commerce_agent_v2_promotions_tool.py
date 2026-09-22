@@ -60,6 +60,10 @@ def coupon_fact(promotion_id: int = 5, code: str = "WELCOME10", **overrides: Any
         # A merchant-created coupon the merchant put on a shared surface: the
         # two acts that make an unleveled code a general offer.
         "source_type": "manual", "allocation_channel": "shared", "coupon_level": "",
+        # What the create endpoint stamps when the merchant makes a coupon in
+        # their own dashboard. Default False: a fixture must say the act
+        # happened, exactly as a row must.
+        "merchant_authored": False,
         "conditions": {"min_order_amount": "100"}, "customer_bound": False, "bound_customer_id": None,
         "eligibility_determined": False, "eligibility_note": "conditions_not_fully_evaluated",
         "record_kind": "coupon",
@@ -787,3 +791,92 @@ def test_the_projection_log_says_how_many_were_considered_and_what_took_them(mon
     assert f"{tool.WITHHELD_LEVEL_NOT_EARNED}:3" in line
     assert "standing=entitled_by_order_count" in line and "level=bronze" in line
     assert "OPEN10" not in line and "SILVER0" not in line
+
+
+# ── The merchant's declared general coupon ───────────────────────────────────
+
+
+def test_a_general_promotional_coupon_the_merchant_declared_reaches_the_customer(monkeypatch) -> None:
+    """«الكوبون الترويجي العام يبقى مشتركاً» — the dashboard's own words for the
+    option, and the merchant choosing it is the declaration this gate asks for.
+    The code carries no rung and names no channel because a general coupon has
+    neither; what it does carry is the merchant's creation act."""
+    context = Context()
+    declared = coupon_fact(promotion_id=100, code="EID20", coupon_level="",
+                           source_type="manual", allocation_channel="",
+                           merchant_authored=True, conditions={})
+    result, _ = run(context, monkeypatch, truth(shareable=[declared]),
+                    entitlement=entitled("silver"))
+    assert [p.code for p in result.promotions] == ["EID20"]
+    assert result.promotions[0].level_eligibility == "merchant_authorized_general"
+    assert result.withheld == {}
+
+
+def test_a_code_carrying_no_rung_and_no_act_is_still_withheld(monkeypatch) -> None:
+    """The rule that has not moved: absence proves nothing. Same row, same empty
+    channel, minus the merchant's creation marker — an import, a legacy row, a
+    code that arrived from somewhere nobody recorded — and it stays out."""
+    context = Context()
+    unmarked = coupon_fact(promotion_id=101, code="MYSTERY", coupon_level="",
+                           source_type="manual", allocation_channel="",
+                           merchant_authored=False, conditions={})
+    result, _ = run(context, monkeypatch, truth(shareable=[unmarked]),
+                    entitlement=entitled("silver"))
+    assert result.status == "not_found" and result.promotions == []
+    assert result.withheld == {tool.WITHHELD_NOT_PUBLISHED: 1}
+
+
+def test_a_channel_the_merchant_chose_elsewhere_keeps_the_code_there(monkeypatch) -> None:
+    """A merchant who placed a code on the campaign or autopilot surface put it
+    somewhere that is not this conversation. The creation act does not override
+    a placement the same merchant made."""
+    context = Context()
+    for channel in ("campaign", "autopilot"):
+        placed = coupon_fact(promotion_id=102, code="ELSEWHERE", coupon_level="",
+                             source_type="manual", allocation_channel=channel,
+                             merchant_authored=True, conditions={})
+        result, _ = run(Context(), monkeypatch, truth(shareable=[placed]),
+                        entitlement=entitled("silver"))
+        assert result.status == "not_found", channel
+        assert result.withheld == {tool.WITHHELD_NOT_PUBLISHED: 1}
+
+
+def test_the_creation_act_never_opens_a_pool_or_an_imported_code(monkeypatch) -> None:
+    """``merchant_authored`` is the dashboard's marker and nothing else writes
+    it, but the source gate runs first regardless: a pool coupon and a synced
+    coupon stay out even if their metadata ever claimed otherwise."""
+    context = Context()
+    for source in ("system", "imported", "promotion_rule"):
+        claimed = coupon_fact(promotion_id=103, code="NOTYOURS", coupon_level="",
+                              source_type=source, allocation_channel="",
+                              merchant_authored=True, conditions={})
+        result, _ = run(Context(), monkeypatch, truth(shareable=[claimed]),
+                        entitlement=entitled("silver"))
+        assert result.status == "not_found", source
+        assert result.withheld == {tool.WITHHELD_NOT_PUBLISHED: 1}
+
+
+def test_a_declared_general_coupon_reaches_a_customer_nobody_could_classify(monkeypatch) -> None:
+    """The protection that must survive this change: an unidentified
+    conversation still receives what the merchant published for everyone, and
+    still receives nothing that was conditioned on a rung."""
+    context = Context(customer_id=None)
+    declared = coupon_fact(promotion_id=104, code="EID20", coupon_level="",
+                           source_type="manual", allocation_channel="",
+                           merchant_authored=True, conditions={})
+    levelled = coupon_fact(promotion_id=105, code="GOLD50", coupon_level="gold")
+    result, _ = run(context, monkeypatch, truth(shareable=[levelled, declared]),
+                    policy={**DEFAULT_POLICY, "allowed_levels": None}, entitlement=unknown())
+    assert [p.code for p in result.promotions] == ["EID20"]
+    assert result.entitlement["determined"] is False
+
+
+def test_a_generic_store_declares_its_general_coupon_the_same_way(monkeypatch) -> None:
+    """Platform-wide: the declaration is the platform's, not one category's."""
+    for code in ("QAMEES20", "ATTAR15", "HITHAA30"):
+        declared = coupon_fact(promotion_id=106, code=code, coupon_level="",
+                               source_type="manual", allocation_channel="",
+                               merchant_authored=True, conditions={})
+        result, _ = run(Context(), monkeypatch, truth(shareable=[declared]),
+                        entitlement=entitled("bronze"))
+        assert [p.code for p in result.promotions] == [code]

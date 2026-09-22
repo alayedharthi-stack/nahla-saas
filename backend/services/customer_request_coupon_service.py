@@ -496,6 +496,11 @@ async def issue_customer_coupon(
         min_order_amount = float(defaults.get("min_order_amount") or 0)
     except (TypeError, ValueError):
         min_order_amount = 0.0
+    if resolution.min_order_amount is not None:
+        # A welcome the merchant gave its own minimum keeps it. The store
+        # default applies to every other rung, and is not a reason to overrule
+        # what the merchant configured for this one.
+        min_order_amount = float(resolution.min_order_amount)
     restrictions = {
         "min_order_amount": min_order_amount,
         "max_uses": resolution.max_uses,
