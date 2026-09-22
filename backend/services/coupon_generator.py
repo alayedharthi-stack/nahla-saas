@@ -374,12 +374,17 @@ class CouponGeneratorService:
         self._last_pool_outcomes: Dict[str, str] = {}
 
     def _reserved_codes(self) -> set[str]:
-        """All existing coupon codes for this tenant (both new and legacy)."""
-        rows = (
-            self.db.query(Coupon.code)
-            .filter(Coupon.tenant_id == self.tenant_id)
-            .all()
-        )
+        """All locally known coupon codes, across every tenant.
+
+        Coupon codes are sent to the shared Salla merchant account, and some
+        deployed database foundations still enforce a legacy global uniqueness
+        constraint on ``coupons.code``.  Reserving only this tenant's codes
+        can therefore create a remote coupon that the local insert must roll
+        back solely because another tenant already owns the same short code.
+        Keeping the in-memory reservation global avoids that external side
+        effect and remains safe on tenant-scoped schemas.
+        """
+        rows = self.db.query(Coupon.code).all()
         return {str(code or "").strip().upper() for (code,) in rows if code}
 
     def _mark_coupon_sent(
