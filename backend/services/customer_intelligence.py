@@ -895,6 +895,23 @@ class CustomerIntelligenceService:
                 name_index.setdefault(name, []).append(order)
         return phone_index, name_index
 
+    @staticmethod
+    def order_lookup_key(customer: Customer) -> str:
+        """The phone key this customer's orders are indexed under, or ``""``.
+
+        An empty key means the index was never searched: no order could have
+        been found for this customer whatever their history is. Callers that
+        report a count must be able to tell that apart from a search that ran
+        and found nothing, so the key is asked for here rather than re-derived
+        — one authority, one answer.
+        """
+        normalized_phone = normalize_phone(customer.phone)
+        if not normalized_phone:
+            normalized_phone = normalize_phone(
+                getattr(customer, "normalized_phone", None) or ""
+            )
+        return normalized_phone
+
     def _orders_for_customer(
         self,
         customer: Customer,
@@ -913,11 +930,7 @@ class CustomerIntelligenceService:
                 )
             phone_index, name_index = self._index_orders(base_orders)
 
-        normalized_phone = normalize_phone(customer.phone)
-        if not normalized_phone:
-            normalized_phone = normalize_phone(
-                getattr(customer, "normalized_phone", None) or ""
-            )
+        normalized_phone = self.order_lookup_key(customer)
         if normalized_phone and normalized_phone in phone_index:
             return list(phone_index.get(normalized_phone, []))
 

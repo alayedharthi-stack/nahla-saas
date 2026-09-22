@@ -186,6 +186,9 @@ class PromotionListResult(BaseModel):
     # whether that was a determination or a failure to determine. Empty only
     # where nothing was resolved at all.
     entitlement: dict[str, Any] = Field(default_factory=dict)
+    # ``reason -> count`` for promotions the merchant's records held but this
+    # customer did not receive. An empty list is an answer; this says which one.
+    withheld: dict[str, int] = Field(default_factory=dict)
     failure_reason: str | None = None
 
 

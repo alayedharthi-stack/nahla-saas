@@ -639,3 +639,151 @@ def test_an_imported_code_expresses_no_nahla_intent(monkeypatch) -> None:
     result, _ = run(context, monkeypatch, truth(shareable=[imported]),
                     entitlement=entitled("silver"))
     assert result.status == "not_found" and result.promotions == []
+
+
+# ── Why nothing arrived ──────────────────────────────────────────────────────
+
+
+def test_every_gate_that_closes_names_itself_in_the_withheld_count(monkeypatch) -> None:
+    """Six live promotions, six different reasons none of them reached this
+    customer. The visible outcome is identical in all six cases — no codes —
+    and the counts are the only thing that tells a merchant which rule fired."""
+    context = Context()
+    facts = [
+        coupon_fact(promotion_id=0, code="NOID"),                                # unusable id
+        coupon_fact(promotion_id=31, code=""),                                   # coupon with no code
+        coupon_fact(promotion_id=32, code="HERS", customer_bound=True, bound_customer_id=99),
+        coupon_fact(promotion_id=33, code="VIP50", coupon_level="vip"),          # policy forbids vip
+        coupon_fact(promotion_id=34, code="GOLD50", coupon_level="gold"),        # allowed, not earned
+        coupon_fact(promotion_id=35, code="FROMSALLA", coupon_level="", source_type="imported"),
+    ]
+    result, _ = run(context, monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver", "gold"]},
+                    entitlement=entitled("silver"))
+    assert result.status == "not_found" and result.promotions == []
+    assert result.withheld == {
+        tool.WITHHELD_UNUSABLE_RECORD: 2,
+        tool.WITHHELD_PERSONAL_TO_ANOTHER: 1,
+        tool.WITHHELD_LEVEL_NOT_ALLOWED: 1,
+        tool.WITHHELD_LEVEL_NOT_EARNED: 1,
+        tool.WITHHELD_NOT_PUBLISHED: 1,
+    }
+
+
+def test_a_code_dropped_for_expiring_too_soon_is_counted_under_its_own_reason(monkeypatch) -> None:
+    """The merchant's minimum-life rule is a separate gate from eligibility,
+    and a merchant asking "why did my customer get nothing?" needs to see that
+    it was the clock and not the classification."""
+    now = _fixed_now(monkeypatch)
+    context = Context()
+    expiring = coupon_fact(promotion_id=36, code="TONIGHT",
+                           expires_at=(now + timedelta(hours=2)).isoformat())
+    result, _ = run(context, monkeypatch, truth(shareable=[expiring]),
+                    policy={**DEFAULT_POLICY, "min_remaining_hours": 24},
+                    entitlement=entitled("silver"))
+    assert result.status == "not_found"
+    assert result.withheld == {tool.WITHHELD_EXPIRING_TOO_SOON: 1}
+
+
+def test_a_store_with_nothing_to_share_is_told_apart_from_a_store_that_held_it_back(monkeypatch) -> None:
+    """Both answers are "no codes". One means the merchant published none; the
+    other means the merchant published eight and this customer earned none.
+    Before the counts existed these were the same reply to the model."""
+    nothing_published, _ = run(Context(), monkeypatch, truth(shareable=[]),
+                               entitlement=entitled("bronze", orders=1))
+    held_back, _ = run(Context(), monkeypatch, truth(shareable=[
+        coupon_fact(promotion_id=40 + i, code=f"SILVER{i}", coupon_level="silver") for i in range(8)]),
+        entitlement=entitled("bronze", orders=1))
+    assert nothing_published.status == held_back.status == "not_found"
+    assert nothing_published.withheld == {}
+    assert held_back.withheld == {tool.WITHHELD_LEVEL_NOT_EARNED: 8}
+    # And the standing is on both, so "earned none" can be read against orders.
+    assert nothing_published.entitlement["resolved_level"] == "bronze"
+    assert held_back.entitlement["countable_orders"] == 1
+
+
+def test_the_withheld_counts_carry_reasons_only_never_a_code(monkeypatch) -> None:
+    """A code held back is still a code. The counts explain a refusal; they must
+    never become a second way to read what was refused."""
+    context = Context()
+    result, _ = run(context, monkeypatch, truth(shareable=[
+        coupon_fact(promotion_id=50, code="SECRETVIP", coupon_level="vip"),
+        coupon_fact(promotion_id=51, code="HERS", customer_bound=True, bound_customer_id=99)]),
+        policy={**DEFAULT_POLICY, "allowed_levels": ["bronze"]}, entitlement=entitled("bronze"))
+    blob = repr(result.withheld)
+    assert "SECRETVIP" not in blob and "HERS" not in blob and "99" not in blob
+    assert all(isinstance(count, int) for count in result.withheld.values())
+
+
+def test_a_kept_result_still_reports_what_was_held_back_beside_it(monkeypatch) -> None:
+    """A short list is as much a question as an empty one: the merchant wants to
+    know that six of the seven were withheld, and why."""
+    context = Context()
+    facts = [coupon_fact(promotion_id=60, code="OPEN10", coupon_level="", conditions={})]
+    facts += [coupon_fact(promotion_id=61 + i, code=f"SILVER{i}", coupon_level="silver") for i in range(6)]
+    result, _ = run(context, monkeypatch, truth(shareable=facts), entitlement=entitled("bronze"))
+    assert result.status == "ok" and [p.code for p in result.promotions] == ["OPEN10"]
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_EARNED: 6}
+
+
+def test_an_unreadable_source_still_reports_the_gates_that_ran_before_it_failed(monkeypatch) -> None:
+    """``error`` is about the records. Whatever was settled before the read
+    failed is still true, and throwing it away makes the failure look total."""
+    context = Context()
+    result, _ = run(context, monkeypatch,
+                    truth(shareable=[coupon_fact(promotion_id=70, code="SILVER50", coupon_level="silver")],
+                          query_failed=True, outcome=pt.PROMOTION_QUERY_FAILED),
+                    entitlement=entitled("bronze"))
+    assert result.status == "error"
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_EARNED: 1}
+    assert result.entitlement["resolved_level"] == "bronze"
+
+
+def test_a_generic_store_reports_the_same_reasons_as_any_other(monkeypatch) -> None:
+    """Platform-wide, not one category: a clothing store's withheld counts read
+    exactly like a perfume store's, because the gates are the platform's."""
+    for code, level in (("QAMEES20", "silver"), ("ATTAR15", "silver"), ("HITHAA30", "silver")):
+        result, _ = run(Context(), monkeypatch,
+                        truth(shareable=[coupon_fact(promotion_id=80, code=code, coupon_level=level)]),
+                        entitlement=entitled("bronze"))
+        assert result.status == "not_found"
+        assert result.withheld == {tool.WITHHELD_LEVEL_NOT_EARNED: 1}
+
+
+def test_the_projection_log_says_how_many_were_considered_and_what_took_them(monkeypatch) -> None:
+    """One line a person can read in production without a transcript. It carries
+    counts and reasons — no code, no customer identifier.
+
+    Captured off the module's own logger rather than through propagation, so
+    whatever the rest of the suite has done to the root logger cannot decide
+    whether this passes."""
+    import logging
+
+    records: List[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = Capture(level=logging.INFO)
+    previous_level, previously_disabled = tool.logger.level, tool.logger.disabled
+    tool.logger.addHandler(handler)
+    tool.logger.setLevel(logging.INFO)
+    # Alembic's ``fileConfig``, run by a migration suite earlier in the same
+    # process, disables every logger created before it. The line exists in
+    # production; this makes sure the measurement can hear it.
+    tool.logger.disabled = False
+    context = Context()
+    facts = [coupon_fact(promotion_id=90, code="OPEN10", coupon_level="", conditions={})]
+    facts += [coupon_fact(promotion_id=91 + i, code=f"SILVER{i}", coupon_level="silver") for i in range(3)]
+    try:
+        run(context, monkeypatch, truth(shareable=facts), entitlement=entitled("bronze"))
+    finally:
+        tool.logger.removeHandler(handler)
+        tool.logger.setLevel(previous_level)
+        tool.logger.disabled = previously_disabled
+    line = next(r.getMessage() for r in records if "[PROMOTION_PROJECTION]" in r.getMessage())
+    assert "considered=4" in line and "kept=1" in line
+    assert f"{tool.WITHHELD_LEVEL_NOT_EARNED}:3" in line
+    assert "standing=entitled_by_order_count" in line and "level=bronze" in line
+    assert "OPEN10" not in line and "SILVER0" not in line

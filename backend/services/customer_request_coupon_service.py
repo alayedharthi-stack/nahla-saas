@@ -39,10 +39,19 @@ CUSTOMER_COUPON_LIVE_ROUTING = False
 CUSTOMER_COUPON_LIVE_ISSUANCE = False
 
 COUNT_SOURCE_CI_PHONE_INDEX = "customer_intelligence_phone_index"
+# The record carries no phone the order index can be searched by, so no search
+# ran. The resulting zero is the absence of a lookup, never a verified history
+# of no purchases, and a caller that cannot tell those apart will eventually
+# tell a long-standing customer they are new.
+COUNT_SOURCE_NO_LOOKUP_KEY = "customer_has_no_order_lookup_key"
 
 REASON_ISSUED = "issued"
 REASON_REUSED = "reused_existing_assignment"
 REASON_IDENTITY_UNAVAILABLE = "identity_unavailable"
+# The record exists; its order history does not. Distinct from
+# ``identity_unavailable`` so an operator can tell a missing customer from a
+# customer the order index cannot be searched for.
+REASON_ORDER_HISTORY_NOT_SEARCHABLE = "order_history_not_searchable"
 REASON_NO_LEVEL = "no_level"
 REASON_LEVEL_DISABLED = "level_disabled"
 REASON_LEVEL_NOT_ALLOWED_FOR_AI = "level_not_allowed_for_ai"
@@ -62,6 +71,7 @@ CLOSED_REASON_CODES = frozenset(
         REASON_ISSUED,
         REASON_REUSED,
         REASON_IDENTITY_UNAVAILABLE,
+        REASON_ORDER_HISTORY_NOT_SEARCHABLE,
         REASON_NO_LEVEL,
         REASON_LEVEL_DISABLED,
         REASON_LEVEL_NOT_ALLOWED_FOR_AI,
@@ -95,6 +105,15 @@ class CustomerOrderCount:
     countable_orders: int
     excluded_orders: int
     count_source: str
+
+    @property
+    def history_established(self) -> bool:
+        """Whether the order history was actually searched for this customer.
+
+        ``False`` makes ``countable_orders`` meaningless: the counters are zero
+        because nothing was looked up, not because nothing was found.
+        """
+        return self.count_source == COUNT_SOURCE_CI_PHONE_INDEX
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -160,6 +179,16 @@ def count_customer_orders(
     if customer is None:
         return None
     intel = CustomerIntelligenceService(db, tenant_id)
+    if not intel.order_lookup_key(customer):
+        # Nothing to search the index with. Reporting zero here without saying
+        # so is how a customer with a real history gets read as a new one.
+        return CustomerOrderCount(
+            customer_id=int(customer.id),
+            raw_orders=0,
+            countable_orders=0,
+            excluded_orders=0,
+            count_source=COUNT_SOURCE_NO_LOOKUP_KEY,
+        )
     orders = intel._orders_for_customer(customer)
     countable = [row for row in orders if is_countable_order(row)]
     excluded = len(orders) - len(countable)
@@ -440,6 +469,17 @@ async def issue_customer_coupon(
             countable_orders=0,
             resolved_level=None,
             reason_code=REASON_IDENTITY_UNAVAILABLE,
+        )
+    if not count.history_established:
+        # Its counters are zero because nothing was searched, and resolving a
+        # level from them would issue the merchant's first-purchase welcome to
+        # a customer whose purchases were never read. A count that was not
+        # established resolves nothing.
+        return _empty_result(
+            customer_id=int(count.customer_id),
+            countable_orders=0,
+            resolved_level=None,
+            reason_code=REASON_ORDER_HISTORY_NOT_SEARCHABLE,
         )
 
     block = _get_coupon_dashboard_block(db, tenant_id)
