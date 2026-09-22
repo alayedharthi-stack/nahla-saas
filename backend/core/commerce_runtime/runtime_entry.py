@@ -38,6 +38,7 @@ from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
 from core.commerce_runtime import recent_products as rp
+from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime.agent_loop import AgentLoop
 from core.commerce_runtime.ledgers import LedgerRepository
 
@@ -118,6 +119,13 @@ class TurnReport:
     reused_delivery: bool = False      # the loop reused an existing reservation
     reused_dispatch: bool = False      # the outcome came from an earlier attempt, not this send
     dispatch_status: Optional[str] = None
+    delivery_kind: Optional[str] = None       # text, or rich when a selector was offered
+    choice_rows: int = 0                      # selectable rows the customer was offered
+    # The row ids that actually reached the customer, which is what a later tap
+    # is checked against. Empty when the list was withheld or refused: a row
+    # nobody was sent is a row nobody can have tapped.
+    choice_row_ids: Tuple[str, ...] = ()
+    recovery_status: Optional[str] = None     # the bounded rich-to-text attempt, when one was made
     provider_message_id: Optional[str] = None
     processing_outcome: Optional[str] = None
     transport_outcome: Optional[str] = None
@@ -143,6 +151,7 @@ class TurnReport:
         fields = dataclasses.asdict(self)
         fields["tools_called"] = ",".join(self.tools_called)
         fields["evidence_refs"] = ",".join(self.evidence_refs)
+        fields["choice_row_ids"] = ",".join(self.choice_row_ids)
         fields["stop_detail"] = ";".join(f"{key}={value}" for key, value in self.stop_detail)
         fields["replied"] = self.replied
         fields["reply_chars"] = len(self.reply_text)
@@ -261,6 +270,7 @@ def _with_products_shown_earlier(
     conversation_id: int,
     turn_id: int,
     context_preamble: Optional[Mapping[str, Any]],
+    inbound_metadata: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Carry this conversation's recently shown products into the turn.
 
@@ -282,14 +292,70 @@ def _with_products_shown_earlier(
         if shown.products:
             binding.context.authorize_products(shown.product_ids, titles=shown.titles)
             preamble["products_shown_earlier"] = shown.as_facts()
+        tapped = _tapped_product(inbound_metadata, shown)
+        if tapped is not None:
+            preamble["customer_tapped"] = tapped
     except Exception as exc:  # noqa: BLE001 - the aid is never the turn's precondition
         logger.warning("[COMMERCE_RUNTIME] browsing context unavailable turn=%s error=%s",
                        turn_id, type(exc).__name__)
         return preamble
     logger.info("[COMMERCE_RUNTIME] browsing context turn=%s reason=%s products=%d "
-                "seconds_since_last_product_shown=%s", turn_id, shown.reason,
-                len(shown.products), shown.seconds_since_last_product_shown)
+                "seconds_since_last_product_shown=%s tapped=%s", turn_id, shown.reason,
+                len(shown.products), shown.seconds_since_last_product_shown,
+                (preamble.get("customer_tapped") or {}).get("product_id"))
     return preamble
+
+
+def _tapped_product(inbound_metadata: Optional[Mapping[str, Any]],
+                    shown: Any) -> Optional[Dict[str, Any]]:
+    """The product a tap on a selector row names, once it verifies.
+
+    A row id arrives from the wire, so it is a claim and not a fact, and two
+    separate things have to hold before the platform will say a row was tapped:
+
+    * **this conversation actually sent that row.** The check is against the
+      row ids the send path put on the wire and the platform persisted with
+      that reply, not against products the conversation merely mentioned. A
+      product named in prose was never a row anyone could tap, so a crafted id
+      naming one resolves to nothing. When the tap names the message it was
+      made in — WhatsApp supplies that — the check is to **that one list**, so
+      a row from some other list this conversation still holds is not a tap on
+      this one either;
+    * **the product is still carried**, under the same browsing-context clock
+      as every other reference, and re-read in the merchant's catalogue now.
+
+    A tap on a list old enough to have lapsed, on a row this runtime never
+    sent, or on another tenant's product therefore resolves to nothing at all,
+    and the turn simply proceeds on the row title the tap delivered as ordinary
+    text — the customer is still answered.
+    """
+    metadata = inbound_metadata if isinstance(inbound_metadata, Mapping) else {}
+    product_id = rc.product_id_from_row_id(metadata.get("list_reply_id"))
+    if product_id is None:
+        return None
+    named = str(metadata.get("list_reply_context_id") or "").strip()
+    if named:
+        # The customer's tap names the message it was made in, so the answer is
+        # exact: the row belongs to that one list or to none. A named message
+        # this conversation never sent, or one whose rows do not include this
+        # product, is not a tap on anything.
+        if product_id not in shown.rows_offered_in(named):
+            logger.info("[COMMERCE_RUNTIME] a tapped row does not belong to the list it names "
+                        "product_id=%s", product_id)
+            return None
+    elif product_id not in (getattr(shown, "offered_as_rows", ()) or ()):
+        # No message named — some payloads carry none. The weaker but still
+        # real check stands: some list this conversation sent, still inside the
+        # lapse, offered this row.
+        logger.info("[COMMERCE_RUNTIME] a tapped row was never offered in this conversation "
+                    "product_id=%s", product_id)
+        return None
+    for product in getattr(shown, "products", ()) or ():
+        if int(getattr(product, "product_id", 0)) == product_id:
+            return product.as_fact()
+    logger.info("[COMMERCE_RUNTIME] a tapped row named a product this conversation no longer "
+                "carries product_id=%s", product_id)
+    return None
 
 
 def _close_quietly(session: Any) -> None:
@@ -544,7 +610,8 @@ def run_commerce_runtime_turn(
         # evidence. Inside the try, so the session below is always retired.
         preamble = _with_products_shown_earlier(
             binding, session, tenant_id=int(tenant_id), conversation_id=int(conversation_id),
-            turn_id=turn_id, context_preamble=context_preamble)
+            turn_id=turn_id, context_preamble=context_preamble,
+            inbound_metadata=inbound_metadata)
         registry = alt.build_live_registry(binding)
         reasoner = ap.AnthropicReasoningProvider(
             instructions=instructions,
@@ -632,14 +699,31 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
                           customer_reach=getattr(terminal, "customer_reach", None), **common)
 
     sequence = ledgers.get_delivery_sequence(tenant_id=tenant_id, namespace=NAMESPACE, turn_id=turn_id)
+    intent_payload = dict(getattr(sequence, "intent_payload", None) or {})
     # The text that is dispatched is the ledger's stored intent, read back rather
     # than rebuilt, so what is persisted and logged is what actually went out.
-    common["reply_text"] = str((getattr(sequence, "intent_payload", None) or {}).get("text") or "")
+    common["reply_text"] = str(intent_payload.get("text") or "")
+    common["delivery_kind"] = getattr(sequence, "intent_kind", None)
+    offered_rows, _button = rc.payload_rows(intent_payload)
+    common["choice_rows"] = len(offered_rows)
+    common["choice_row_ids"] = tuple(str(row.get("id") or "") for row in offered_rows
+                                     if row.get("id"))
     dispatch = dd.dispatch_reserved_delivery(
         ledgers=ledgers, tenant_id=tenant_id, namespace=NAMESPACE,
         conversation_id=runtime_conversation_id, token=token,
         sequence_id=outcome.delivery_sequence_id, transport=transport, recorded_by=owner_id,
     )
+    recovery = _recover_without_the_selector(
+        ledgers=ledgers, tenant_id=tenant_id, runtime_conversation_id=runtime_conversation_id,
+        token=token, dispatch=dispatch, sequence=sequence, intent_payload=intent_payload,
+        transport=transport, owner_id=owner_id)
+    if recovery is not None:
+        common["recovery_status"] = recovery.status
+        # The recovery is the send that reached the customer, and it carried no
+        # rows. Reporting the withheld ones would let a later tap verify
+        # against a list nobody received.
+        common["choice_row_ids"] = ()
+        dispatch = recovery
     terminal = dd.complete_turn(
         ledgers=ledgers, tenant_id=tenant_id, namespace=NAMESPACE, turn_id=turn_id, token=token,
         processing_outcome=dispatch.processing_outcome,
@@ -652,6 +736,52 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
                       processing_outcome=getattr(terminal, "processing_outcome", None),
                       transport_outcome=getattr(terminal, "transport_outcome", None),
                       customer_reach=getattr(terminal, "customer_reach", None), **common)
+
+
+def _recover_without_the_selector(
+    *, ledgers: LedgerRepository, tenant_id: int, runtime_conversation_id: int,
+    token: c.OwnershipToken, dispatch: dd.DispatchOutcome, sequence: Any,
+    intent_payload: Mapping[str, Any], transport: dd.Transport, owner_id: str,
+) -> Optional[dd.DispatchOutcome]:
+    """Send the answer without its selector when the rich send was refused.
+
+    Only on a **proven** rejection of a rich message: an unknown send may
+    already have reached the customer, and a second one would be a duplicate,
+    not a recovery. The ledger refuses everything else on its own; this only
+    declines to ask when the case plainly is not one.
+
+    A rejection this call did not itself produce still counts. It is the crash
+    window the bounded recovery exists for — the list was refused, the receipt
+    written, and the process died before the terminal — and refusing to act on
+    it would leave that customer with no answer at all. Nothing is taken on
+    trust: the ledger re-reads the outcome, the attempt kind and the bound, and
+    an accepted, unknown or already-recovered reservation permits nothing.
+
+    The reply itself is unchanged — same text, same evidence, no selector — so
+    a provider that will not render the rows costs the customer the tapping and
+    nothing else. A recovery that is itself refused leaves the first outcome
+    standing rather than inventing a better one.
+    """
+    if dispatch.status != dd.SENT_REJECTED:
+        return None
+    if str(getattr(sequence, "intent_kind", "") or "") != lc.DeliveryKind.RICH.value:
+        return None
+    payload = rc.text_only_payload(intent_payload)
+    if not str(payload.get("text") or "").strip():
+        return None
+    recovery = dd.dispatch_delivery_recovery(
+        ledgers=ledgers, tenant_id=tenant_id, namespace=NAMESPACE,
+        conversation_id=runtime_conversation_id, token=token,
+        sequence_id=dispatch.sequence_id, payload=payload, transport=transport,
+        recorded_by=owner_id,
+    )
+    if recovery.status == dd.NOT_ATTEMPTED:
+        logger.info("[COMMERCE_RUNTIME] selector recovery not made sequence=%s reason=%s",
+                    dispatch.sequence_id, recovery.blocked_reason)
+        return None
+    logger.info("[COMMERCE_RUNTIME] the selector was refused; the same answer was sent as text "
+                "sequence=%s outcome=%s", dispatch.sequence_id, recovery.status)
+    return recovery
 
 
 STOP_DETAIL_MAX_ITEMS = 12
@@ -719,6 +849,39 @@ def _release(foundation: Any, tenant_id: int, conversation_id: int, token: c.Own
         logger.info("[COMMERCE_RUNTIME] lease release skipped reason=%s", type(exc).__name__)
 
 
+def whatsapp_reply_transport(send: Any, send_list: Any, *, recipient: str) -> dd.Transport:
+    """One transport for both shapes of the same reply.
+
+    The stored payload says which it is: a reply that carries verified
+    selectable rows is sent as an interactive list, and everything else — plain
+    replies, and the bounded recovery after a refused list — goes out as text.
+    Reading the shape off the payload rather than off a flag is what lets the
+    recovery attempt reuse this same transport unchanged.
+
+    Both senders report what the provider said as ``(classification, wamid,
+    http_status)``; only ``ok`` with a provider message id is an accepted send.
+    A list sender that is not available is not a reason to drop the answer: the
+    text goes out instead, which is exactly what the recovery would have done.
+    """
+    text_only = whatsapp_text_transport(send, recipient=recipient)
+
+    def transport(payload: Mapping[str, Any]) -> lc.SendResponse:
+        rows, button = rc.payload_rows(payload)
+        if not rows or send_list is None:
+            return text_only(payload)
+        classification, wamid, http_status = send_list(
+            recipient, str(payload.get("text") or ""), rows, button)
+        if classification == "ok" and wamid:
+            return lc.SendResponse(http_status=int(http_status or 200),
+                                   body={"messages": [{"id": str(wamid)}]})
+        if http_status is not None:
+            return lc.SendResponse(http_status=int(http_status),
+                                   body={"error": {"code": str(classification or "unknown")}})
+        return lc.SendResponse(http_status=None, body={}, timed_out=True)
+
+    return transport
+
+
 def whatsapp_text_transport(send: Any, *, recipient: str) -> dd.Transport:
     """Adapt a WhatsApp text sender to the ledger's transport contract.
 
@@ -750,5 +913,5 @@ __all__ = [
     "ABANDONED_SESSION_REAP_SECONDS", "ExclusiveCloser",
     "LEASE_SECONDS", "NAMESPACE", "OWNERSHIP_UNAVAILABLE", "SCHEMA_UNAVAILABLE", "TurnReport",
     "build_trusted_binding", "reset_schema_probe", "run_commerce_runtime_turn",
-    "runtime_schema_available", "whatsapp_text_transport",
+    "runtime_schema_available", "whatsapp_reply_transport", "whatsapp_text_transport",
 ]

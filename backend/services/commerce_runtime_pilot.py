@@ -25,7 +25,7 @@ import dataclasses
 import datetime as _dt
 import hashlib
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from services.turn_trace import SOURCE_COMMERCE_RUNTIME as TRACE_SOURCE
 
@@ -94,12 +94,21 @@ class WireObservation:
     text: str = ""
     reasons: List[str] = dataclasses.field(default_factory=list)
     duplicate_suppressed: bool = False
+    # The selectable rows the send path actually put on the wire, read back the
+    # same way the text is. A later tap is checked against these, so they have
+    # to be what was sent rather than what was asked for: the sender
+    # de-duplicates ids and caps the list, and the bounded text recovery sends
+    # none at all. Each send replaces this, so what remains is the send that
+    # reached the customer.
+    row_ids: List[str] = dataclasses.field(default_factory=list)
 
-    def record(self, text: str, reasons: Sequence[str], *, duplicate_suppressed: bool) -> None:
+    def record(self, text: str, reasons: Sequence[str], *, duplicate_suppressed: bool,
+               row_ids: Optional[Sequence[str]] = None) -> None:
         self.observed = True
         self.text = str(text or "")
         self.reasons = [str(reason) for reason in reasons]
         self.duplicate_suppressed = bool(duplicate_suppressed)
+        self.row_ids = [str(value) for value in (row_ids or ()) if str(value or "").strip()]
 
     def resolve(self, intent: str) -> Tuple[str, bool, List[str]]:
         """``(text_to_store, transformed, reasons)`` for one accepted send."""
@@ -310,32 +319,83 @@ def _send_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
             finally:
                 seen = observed_wire_text(int(tenant_id), recipient)
                 if seen is not None:
-                    observation.record(seen[0], seen[1],
+                    observation.record(seen[0], seen[1], row_ids=(),
                                        duplicate_suppressed=bool(sink.get("duplicate_suppressed")))
                 reset_wire_audit(token)
 
-        future = asyncio.run_coroutine_threadsafe(_observed_send(), loop)
-        try:
-            ok = bool(future.result(timeout=SEND_WAIT_SECONDS))
-        except concurrent.futures.TimeoutError:
-            # The send is still in flight and may well reach the provider. That
-            # is an unknown outcome, never a rejection, and the ledger will
-            # refuse to retry it.
-            logger.warning("[COMMERCE_RUNTIME_PILOT] send did not answer within %ss",
-                           SEND_WAIT_SECONDS)
-            return "timeout", None, None
-        classification = str(sink.get("classification") or ("ok" if ok else "blocked"))
-        wamid = sink.get("wamid")
-        status = sink.get("http_status")
-        if not ok and classification == "ok":
-            # The transport reported success but the send path refused it: a
-            # refusal, not an acceptance, and never an unknown.
-            classification = "blocked"
-            wamid = None
-            status = status if status is not None else 400
-        return classification, (str(wamid) if wamid else None), (int(status) if status is not None else None)
+        return _awaited(_observed_send, loop, sink)
 
     return send
+
+
+def _awaited(observed_send: Any, loop: Any, sink: Dict[str, Any]) -> Tuple[str, Optional[str], Optional[int]]:
+    """Wait on a send scheduled back onto the event loop and read its outcome."""
+    future = asyncio.run_coroutine_threadsafe(observed_send(), loop)
+    try:
+        ok = bool(future.result(timeout=SEND_WAIT_SECONDS))
+    except concurrent.futures.TimeoutError:
+        # The send is still in flight and may well reach the provider. That
+        # is an unknown outcome, never a rejection, and the ledger will
+        # refuse to retry it.
+        logger.warning("[COMMERCE_RUNTIME_PILOT] send did not answer within %ss",
+                       SEND_WAIT_SECONDS)
+        return "timeout", None, None
+    classification = str(sink.get("classification") or ("ok" if ok else "blocked"))
+    wamid = sink.get("wamid")
+    status = sink.get("http_status")
+    if not ok and classification == "ok":
+        # The transport reported success but the send path refused it: a
+        # refusal, not an acceptance, and never an unknown.
+        classification = "blocked"
+        wamid = None
+        status = status if status is not None else 400
+    return classification, (str(wamid) if wamid else None), (int(status) if status is not None else None)
+
+
+def _send_list_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
+                       observation: WireObservation) -> Any:
+    """The same established sender, for a reply that carries selectable rows.
+
+    Identical in every guarantee to the text sender above — the same
+    ``_post_wa``, so the same sanitiser, AI-disabled gate, burst throttle and
+    outbound dedup — and the same wire observation over the body text the model
+    wrote. The rows beside it are the platform's structured payload, composed
+    from this turn's observations and already verified before they reach here.
+
+    A refusal is reported as a refusal. That matters more here than on the text
+    path: a definitively rejected list is what permits the ledger's one bounded
+    recovery, which sends this same answer as plain text.
+    """
+    def send_list(recipient: str, text: str, rows: Sequence[Mapping[str, Any]],
+                  button: str) -> Tuple[str, Optional[str], Optional[int]]:
+        from core.outbound_wire_audit import (  # noqa: PLC0415
+            bind_wire_observation,
+            observed_wire_text,
+            reset_wire_audit,
+        )
+        from routers.whatsapp_webhook import _send_list_reply  # noqa: PLC0415
+
+        sink: Dict[str, Any] = {}
+
+        async def _observed_send() -> bool:
+            token = bind_wire_observation(int(tenant_id), recipient, text)
+            try:
+                return bool(await _send_list_reply(
+                    phone_id=phone_id, to=recipient, body_text=text,
+                    rows=[dict(row) for row in rows], button_label=button,
+                    _tenant_id=int(tenant_id), _db=db, _blocked_path=BLOCKED_PATH,
+                    _result_sink=sink,
+                ))
+            finally:
+                seen = observed_wire_text(int(tenant_id), recipient)
+                if seen is not None:
+                    observation.record(seen[0], seen[1], row_ids=list(sink.get("list_row_ids") or ()),
+                                       duplicate_suppressed=bool(sink.get("duplicate_suppressed")))
+                reset_wire_audit(token)
+
+        return _awaited(_observed_send, loop, sink)
+
+    return send_list
 
 
 @dataclasses.dataclass(frozen=True)
@@ -870,6 +930,7 @@ async def _own_turn(
     loop = asyncio.get_running_loop()
     wire = WireObservation()
     send = _send_factory(phone_id, int(tenant_id), db, loop, wire)
+    send_list = _send_list_factory(phone_id, int(tenant_id), db, loop, wire)
 
     def admission_barrier(conn: Any) -> bool:
         """Read the shared barrier on the admission transaction's own connection.
@@ -909,7 +970,8 @@ async def _own_turn(
             provider_message_id=provider_message_id,
             inbound_text=text,
             inbound_metadata=inbound_metadata,
-            transport=entry.whatsapp_text_transport(send, recipient=str(decision.recipient)),
+            transport=entry.whatsapp_reply_transport(send, send_list,
+                                                     recipient=str(decision.recipient)),
             instructions=_instructions(),
             model=str(decision.model or ""),
             admission_barrier=admission_barrier,
@@ -1018,6 +1080,7 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
         logger.warning("[COMMERCE_RUNTIME_PILOT] transmitted text is not the reserved intent "
                        "turn=%s reasons=%s", report.turn_id, ",".join(reasons))
     try:
+        from core.commerce_runtime import recent_products as rp  # noqa: PLC0415
         from core.conversation_engine import StateManager  # noqa: PLC0415
 
         StateManager.save_message(
@@ -1038,6 +1101,11 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
                 "commerce_runtime_wire_duplicate_suppressed": wire.duplicate_suppressed,
                 "provider_message_id": report.provider_message_id,
                 "evidence_refs": list(report.evidence_refs),
+                # The rows this message actually carried, read back from the
+                # wire rather than from the reserved intent. A later tap is
+                # checked against these, so a reply that offered no list — or
+                # whose list the provider refused — leaves nothing tappable.
+                rp.CHOICE_ROW_IDS_KEY: list(wire.row_ids),
             },
         )
     except Exception:  # noqa: BLE001 - the send already happened; persistence must not undo it

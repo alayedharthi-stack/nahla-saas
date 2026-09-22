@@ -84,12 +84,40 @@ def test_the_reply_channel_is_both_declared_and_described():
     assert ap.REPLY_TOOL_NAME in pi.build_pilot_instructions()
 
 
-def test_the_reply_fields_the_instructions_name_are_the_fields_the_schema_declares():
+def test_the_reply_fields_the_instructions_name_are_fields_the_schema_declares():
+    """The direction that could mislead the model: a field named in the
+    addendum but absent from the schema would have it filling nothing."""
     reply = next(t for t in declared_tools() if t["name"] == ap.REPLY_TOOL_NAME)
     schema_fields = set(reply["input_schema"]["properties"])
-    assert schema_fields == {"text", "evidence_refs", "claims_commerce_facts"}
-    for field in sorted(schema_fields):
+    named = {field for field in schema_fields if field in pi.PILOT_REPLY_ADDENDUM}
+    assert named == {"text", "evidence_refs", "claims_commerce_facts"}
+
+
+def test_every_field_the_model_must_supply_is_named_in_the_addendum():
+    """A **required** field the instructions never mention is a field the
+    model can only discover by accident, and a reply without it is refused."""
+    reply = next(t for t in declared_tools() if t["name"] == ap.REPLY_TOOL_NAME)
+    for field in sorted(reply["input_schema"]["required"]):
         assert field in pi.PILOT_REPLY_ADDENDUM, field
+
+
+def test_the_selector_is_optional_and_described_on_the_tool_itself():
+    """``choices`` is deliberately absent from the addendum.
+
+    Naming it there would be a prompt change, which GOV-001 forbids by
+    default; a capability the model may decline is described where every tool
+    interface is described — on the declaration the model receives. What this
+    asserts is that the description is actually there and actually says the
+    two things that make the capability safe to offer: the products must have
+    been looked up in this turn, and the selector is never required.
+    """
+    reply = next(t for t in declared_tools() if t["name"] == ap.REPLY_TOOL_NAME)
+    schema = reply["input_schema"]
+    assert "choices" not in schema["required"]
+    assert "choices" not in pi.PILOT_REPLY_ADDENDUM
+    description = schema["properties"]["choices"]["description"]
+    assert "this turn" in description and "evidence_refs" in description
+    assert "never required" in description and "typing" in description
 
 
 def test_the_system_prompt_the_model_receives_is_the_assembled_one():
