@@ -1542,6 +1542,7 @@ async def get_order_detail(order_id: str, request: Request, db: Session = Depend
         evaluate_create_shipment,
         get_order_shipment,
         resolve_tenant_cod_enabled,
+        serialise_order_tracking_state,
         serialise_shipment,
     )
     from core.order_shipping_policy import can_generate_label  # noqa: PLC0415
@@ -1576,6 +1577,7 @@ async def get_order_detail(order_id: str, request: Request, db: Session = Depend
         "label_blocked_reason_key": label_gate.reason_key if label_gate else None,
         "label_blocked_reason_ar": label_gate.message_ar if label_gate else None,
         "shipment": serialise_shipment(shipment_row) if shipment_row else None,
+        "tracking": serialise_order_tracking_state(order, shipment_row),
     }
     return {"order": payload}
 
@@ -2076,6 +2078,7 @@ def _detail_order_payload(
         evaluate_create_shipment,
         get_order_shipment,
         resolve_tenant_cod_enabled,
+        serialise_order_tracking_state,
         serialise_shipment,
     )
     from core.order_shipping_policy import can_generate_label  # noqa: PLC0415
@@ -2110,6 +2113,7 @@ def _detail_order_payload(
         "label_blocked_reason_key": label_gate.reason_key if label_gate else None,
         "label_blocked_reason_ar": label_gate.message_ar if label_gate else None,
         "shipment": serialise_shipment(shipment_row) if shipment_row else None,
+        "tracking": serialise_order_tracking_state(order, shipment_row),
     }
     return payload
 

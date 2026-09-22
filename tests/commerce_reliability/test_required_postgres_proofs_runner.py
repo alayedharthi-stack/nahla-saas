@@ -199,7 +199,8 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    "commerce_runtime_trial_evidence",
                    "commerce_runtime_synthetic_probe",
                    "runner_connection_regressions",
-                   "salla_customer_address_candidates"]
+                   "salla_customer_address_candidates",
+                   "salla_shipment_tracking"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -216,6 +217,9 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "commerce_runtime_synthetic_probe": ("proof", harness_env),
         "runner_connection_regressions": ("runner_regression", harness_env),
         "salla_customer_address_candidates": (
+            "proof", {"LEGACY_MIG_PG_TEST_DATABASE_URL": None},
+        ),
+        "salla_shipment_tracking": (
             "proof", {"LEGACY_MIG_PG_TEST_DATABASE_URL": None},
         ),
     }

@@ -18,24 +18,34 @@ from __future__ import annotations
 
 APPLICATION_ALEMBIC_HEAD = "0111"
 # The customer-address provenance revision is a sibling of the application
-# head: both revise ``0109``, and neither is an ancestor of the other. That
-# branch HAS now merged, so this repository's heads are
-# ``{0092, 0110, 0111}``. A checkout from before the merge shows
-# ``{0092, 0111}``; both are expected, and anything else is not.
+# head: both revise ``0109``, and neither is an ancestor of the other.
 ADDRESS_ALEMBIC_HEAD = "0110"
-REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD})
-TOLERATED_REPOSITORY_ALEMBIC_HEADS = REPOSITORY_ALEMBIC_HEADS | {ADDRESS_ALEMBIC_HEAD}
+# Shipment tracking extends the address branch. It replaces 0110 as a head;
+# it does not merge the 0092 validation or 0111 application siblings.
+SHIPMENT_ALEMBIC_HEAD = "0112"
+
+# These are the only script-directory topologies accepted by this contract.
+# They describe source checkouts, not bootstrap targets: normal bootstrap
+# remains pinned to 0093 and must never use bare ``head``.
+BASE_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD})
+ADDRESS_REPOSITORY_ALEMBIC_HEADS = BASE_REPOSITORY_ALEMBIC_HEADS | {ADDRESS_ALEMBIC_HEAD}
+REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD, SHIPMENT_ALEMBIC_HEAD})
+SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
+    BASE_REPOSITORY_ALEMBIC_HEADS,
+    ADDRESS_REPOSITORY_ALEMBIC_HEADS,
+    REPOSITORY_ALEMBIC_HEADS,
+})
 
 
 def repository_heads_expected(heads) -> bool:
     """Whether the script directory's heads are the ones this repository knows.
 
-    ``0092`` and ``0111`` must both be present; ``0110`` may be — it is the
-    address sibling, present once its branch has merged, as it now has — and
-    nothing else may.
+    Accepted source checkouts are exactly ``{0092, 0111}``, the intermediate
+    address checkout ``{0092, 0110, 0111}``, and the current shipment checkout
+    ``{0092, 0111, 0112}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
-    return REPOSITORY_ALEMBIC_HEADS <= found <= TOLERATED_REPOSITORY_ALEMBIC_HEADS
+    return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS
 INTEGRATION_BOOTSTRAP_TARGET = "0093"
 NORMAL_BOOTSTRAP_REVISIONS = frozenset({"0093"})
 VALIDATED_STAGING_BOOTSTRAP_REVISIONS = frozenset({"0088", "0093"})

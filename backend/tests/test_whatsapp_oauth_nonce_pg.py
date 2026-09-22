@@ -113,8 +113,11 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         # address revision and the commerce-runtime handover revision.
         rev_0110 = script.get_revision("0110")
         rev_0111 = script.get_revision("0111")
+        rev_0112 = script.get_revision("0112")
     finally:
         os.chdir(prev)
+    # Shipping 0112 extends the address branch while the 0092 validation and
+    # 0111 runtime siblings remain independent repository heads.
     assert repository_heads_expected(heads)
     assert rev.down_revision == _PARENT
     assert not isinstance(rev.down_revision, tuple)
@@ -153,6 +156,9 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert rev_0111.down_revision == "0109"
     assert not isinstance(rev_0111.down_revision, tuple)
     assert rev_0110.revision != rev_0111.revision
+    assert rev_0112 is not None
+    assert rev_0112.down_revision == "0110"
+    assert not isinstance(rev_0112.down_revision, tuple)
 
 
 def _pg_required() -> bool:

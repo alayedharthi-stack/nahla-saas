@@ -25,6 +25,19 @@ SALLA_ORDER_WEBHOOK_EVENTS: FrozenSet[str] = frozenset({
     "order.customer.updated",
 })
 
+# Salla documents these separately from order events.  They carry a shipment
+# id and let the integration refresh the authenticated tracking history without
+# ever querying by a customer-provided tracking number.
+SALLA_SHIPMENT_WEBHOOK_EVENTS: FrozenSet[str] = frozenset({
+    "shipment.creating",
+    "shipment.created",
+    "shipment.cancelled",
+    "shipment.updated",
+    "order.shipment.creating",
+    "order.shipment.created",
+    "order.shipment.cancelled",
+})
+
 SALLA_CUSTOMER_WEBHOOK_EVENTS: FrozenSet[str] = frozenset({
     "customer.created",
     "customer.updated",
@@ -110,6 +123,7 @@ def is_terminal_abandoned_cart_status(status: str | None) -> bool:
 def is_salla_commerce_event(event_type: str) -> bool:
     return event_type in (
         SALLA_ORDER_WEBHOOK_EVENTS
+        | SALLA_SHIPMENT_WEBHOOK_EVENTS
         | SALLA_CUSTOMER_WEBHOOK_EVENTS
         | SALLA_CUSTOMER_LOGIN_EVENTS
         | SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS
@@ -126,6 +140,7 @@ def is_salla_commerce_event(event_type: str) -> bool:
 
 SALLA_MERCHANT_WEBHOOK_ACTIVATION_CHECKLIST: tuple[str, ...] = tuple(sorted(
     SALLA_ORDER_WEBHOOK_EVENTS
+    | SALLA_SHIPMENT_WEBHOOK_EVENTS
     | SALLA_CUSTOMER_WEBHOOK_EVENTS
     | SALLA_CUSTOMER_LOGIN_EVENTS
     | SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS

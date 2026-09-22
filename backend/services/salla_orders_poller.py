@@ -343,6 +343,9 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
     upserted_total = 0
     api_error: Optional[str] = None
     needs_reauth_raised = False
+    tracking_stats: Dict[str, int] = {
+        "scanned": 0, "available": 0, "no_data": 0, "failed": 0,
+    }
 
     # We want to also know how many rows the Salla API actually returned
     # for this lookback window — so we call adapter.get_orders directly
@@ -398,6 +401,27 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
             else:
                 raise
 
+    # Salla's ordinary order list does not include tracking history.  Poll the
+    # documented shipment source separately; it is tenant-scoped through this
+    # integration and never queries by a customer tracking number.
+    if not needs_reauth_raised and adapter is not None:
+        from services.salla_shipment_tracking import refresh_tenant_tracking  # noqa: PLC0415
+
+        tracking_stats = await refresh_tenant_tracking(
+            db,
+            tenant_id=tenant_id,
+            adapter=adapter,
+            from_date=lookback_iso,
+            observed_via="salla_orders_poller",
+        )
+        logger.info(
+            "[Salla Orders Poller] tracking refresh tenant=%s scanned=%d "
+            "available=%d no_data=%d failed=%d",
+            tenant_id,
+            tracking_stats["scanned"], tracking_stats["available"],
+            tracking_stats["no_data"], tracking_stats["failed"],
+        )
+
     try:
         db.commit()
     except Exception:
@@ -437,6 +461,7 @@ async def _poll_integration(db: Session, intg: Any, lookback_iso: str) -> Dict[s
         "new_orders":         new_orders_count,
         "updated_orders":     updated_orders_count,
         "events_emitted":     events_emitted,
+        "tracking":           tracking_stats,
         "pre_orders_in_db":   len(pre_ids),
         "post_orders_in_db":  len(post_ids),
         "duration_ms":        int((time.monotonic() - started) * 1000),

@@ -3901,6 +3901,49 @@ class SallaAdapter(BaseStoreAdapter):
 
     # ── Shipping ───────────────────────────────────────────────────────────────
 
+    async def get_shipments(
+        self,
+        *,
+        order_id: Optional[str] = None,
+        from_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return forward shipments from Salla's authenticated Merchant API.
+
+        This is deliberately an order-scoped source lookup, not a lookup by a
+        customer-supplied tracking number.  Salla documents ``order_id`` and
+        ``shipment_type`` filters on ``GET /shipments`` and requires the
+        ``shipping.read`` scope.
+        """
+        params: Dict[str, Any] = {"shipment_type": "shipment"}
+        if order_id:
+            params["order_id"] = str(order_id)
+        if from_date:
+            params["from_date"] = str(from_date).split("T", 1)[0]
+        try:
+            return await self._get_all_pages_strict(
+                "/shipments",
+                extra_params=params,
+                label="shipments",
+            )
+        except Exception as exc:
+            self._log_error("get_shipments", exc)
+            raise
+
+    async def get_shipment_tracking(self, shipment_id: str) -> Dict[str, Any]:
+        """Fetch Salla's structured tracking history for one Salla shipment."""
+        shipment_ref = str(shipment_id or "").strip()
+        if not shipment_ref:
+            raise ValueError("shipment_id is required")
+        try:
+            data = await self._get(f"/shipments/{shipment_ref}/tracking")
+            tracking = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(tracking, dict):
+                raise RuntimeError("salla_tracking_payload_missing_data")
+            return tracking
+        except Exception as exc:
+            self._log_error("get_shipment_tracking", exc)
+            raise
+
     async def get_shipping_options(self, city: str = "") -> List[ShippingOption]:
         try:
             params = {"city": city} if city else {}
