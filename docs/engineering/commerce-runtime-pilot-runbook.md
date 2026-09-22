@@ -888,7 +888,10 @@ as well as through the ledger.
 
 ## 6. What the pilot does not do
 
-* It sends one text reply per turn — no rich, interactive or template message.
+* It sends **one** message per turn — the model's text, optionally carrying a
+  tappable product selector (see below). No template message, and never two
+  messages, except the one bounded text recovery after a list the provider
+  definitively refused.
 * It performs **no** commerce write: no order, payment, cancellation or coupon.
   It **reads** the merchant's currently valid, shareable coupons and offers through
   `list_shareable_promotions` (the platform's promotion-truth resolver: campaign-only,
@@ -954,19 +957,88 @@ as well as through the ledger.
   from evidence rather than opinion. The lapse is deliberately **not**
   WhatsApp's 24 h service window: that governs sending, not memory.
 * A multi-product **selector** is an affordance over the answer, never the
-  answer itself. Row labels are composed by the platform from the merchant's
-  own values (`core/commerce_runtime/choice_rows.py`), because a provider that
-  reads two visible titles as one would collapse or reject the payload and
-  Tenant 1's five dresses are all titled «فستان». When the merchant's facts
-  cannot separate a group, the whole group is labelled by **position in this
-  list** («فستان · 1», «فستان · 2») — never an internal id, and never by
-  leaving a product out. A position is not a claim about the product: it is a
-  true statement about the list in front of the customer, in the words they
-  already use for it. The group is numbered together so a number is never read
-  as a price. Only a product with no usable identity or title cannot become a
-  row; the set then reports itself **incomplete** and the caller sends the
-  model's text alone, so a real option never disappears because of a display
-  limit.
+  answer itself, and it is **optional for the model**. The reply channel
+  carries an optional `choices` field (`core/commerce_runtime/reply_choices.py`):
+  the model decides whether this turn is one where a selector helps, names the
+  products **by id only**, and may supply the button word. Everything the
+  customer then reads on a row — title, price, option values — is composed by
+  the platform from **this turn's own tool results**
+  (`core/commerce_runtime/choice_rows.py`), never from the model's words. The
+  text beside the rows stays entirely the model's, and the customer may always
+  answer by typing instead; nothing about this turn requires a tap.
+
+  **Evidence.** A row states the merchant's price, so verification refuses a
+  draft that offers a product this turn did not look up and cite
+  (`choice_without_evidence`). The refusal is correctable: the model is told
+  which product it may not offer and replies again.
+
+  **Labels.** Row labels come from the merchant's own values, because two
+  visible titles a customer reads as one are not a usable selector and Tenant
+  1's five dresses are all titled «فستان». When the merchant's facts cannot
+  separate a group, the whole group is labelled by **position in this list**
+  («فستان · 1», «فستان · 2») — never an internal id, and never by leaving a
+  product out. A position is not a claim about the product: it is a true
+  statement about the list in front of the customer, in the words they already
+  use for it. The group is numbered together so a number is never read as a
+  price.
+
+  **Nothing real is ever dropped to make a list fit, and no reply points at a
+  list that is not there.** Fewer than two products, more than the ten rows the
+  channel shows, or a product with no usable identity or title: the *selector*
+  is withheld, the *options* are not. They follow the model's own sentence as
+  lines of the merchant's values — the same title and description the rows
+  would have carried, joined by the same separator, with no heading, verb or
+  connective, and a description the title already states not repeated. So a
+  reply that says «اختر من القائمة» arrives with the list under it as text. The
+  model's wording is never replaced, only followed; the withheld reason rides
+  on the delivered payload as `choices_withheld`, and the turn logs it.
+
+  This is a judgement call worth naming: the lines are platform-composed
+  merchant facts, the same class as the row labels themselves and as the
+  CTA/vCard payloads the platform already owns — values and separators, never
+  prose. They are *appended to* the model's text, never substituted for it.
+
+  **Delivery.** A verified selector is reserved as a **rich** delivery intent
+  whose stored payload carries the rows, and the transport reads the shape off
+  that payload. If the provider **definitively rejects** the list, the ledger's
+  one bounded rich→text recovery sends the same answer as plain text — same
+  words, same evidence, no rows. An **accepted** or an **unknown** send is never
+  recovered: an unknown message may already be on the customer's phone, and a
+  second one would be a duplicate, not a recovery. A rejection a re-entry
+  reports without having produced it counts too — that is the crash window the
+  recovery exists for — and the ledger, not the caller, re-reads the outcome,
+  the attempt kind and the bound, so a second recovery is refused. The turn
+  report carries `delivery_kind`, `choice_rows`, `choice_row_ids` and
+  `recovery_status`. A refused list keeps its options too: the recovery text
+  carries them as lines, exactly as a compose-time withholding does.
+
+  **A tap is a claim until it verifies, and it verifies against the list the
+  customer chose from.** Row ids are the platform's own token
+  (`nahla:choice:<product_id>`). What is persisted with the reply
+  (`choice_row_ids`) is read back from **the wire** — the rows the send path
+  actually wrote, after its own id de-duplication and ten-row cap — not from
+  the reserved intent, and the bounded text recovery records none at all.
+  Beside them sits that reply's `provider_message_id`.
+
+  A tapped id becomes a fact only when **both** hold: this conversation
+  actually sent that row, within the same per-product browsing-context lapse;
+  and the product is still carried and re-read in the merchant's catalogue now.
+  When the tap names the message it was made in — WhatsApp supplies that as
+  `context.id`, forwarded as `list_reply_context_id` — the first check is to
+  **that one list**, so a row from some other list this conversation still
+  holds is not a tap on this one. A tap that names no message falls back to the
+  conversation-wide check, which is weaker but still real. Nothing crosses a
+  conversation: the rows are read only from this conversation's own replies.
+
+  Being *mentioned* in a reply is deliberately not enough. A product named in
+  prose was never a row anyone could tap, so a crafted `list_reply_id` naming
+  one resolves to nothing — while the product stays a readable identity,
+  because mentioning it is enough for *that*. A refused list records no rows at
+  all: the customer received text, so nothing in it is tappable. A tap on a
+  lapsed list, on a row this runtime never sent, or on another tenant's product
+  therefore yields no fact, and the turn proceeds on the row title the tap
+  delivered as ordinary text — the customer is still answered. A verified tap
+  is named in the preamble as `customer_tapped`.
 * **Settled, 2026-09-22 10:17Z: Meta accepts a list whose two rows share a
   visible title.** The platform dropped such rows on a rule carried over from
   reply buttons, where the rejection is real (HTTP 400 `Duplicate button

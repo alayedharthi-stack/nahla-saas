@@ -53,6 +53,7 @@ from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_tools as at
 from core.commerce_runtime import contracts as c
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime.ledgers import LedgerRepository
 
 Clock = Callable[[], float]
@@ -143,8 +144,16 @@ class AgentLoop:
                 draft = result.draft
                 problems = ac.verify_reply_draft(draft, session.observations)
                 if not problems:
+                    # The model chose whether to offer a selector and which
+                    # products belong in it; what each row *says* is composed
+                    # here from this turn's own observations, so the structured
+                    # payload states the merchant's values and never the
+                    # model's. The text is carried through untouched, and a
+                    # selector that cannot be offered whole simply is not.
+                    draft, choices = rc.finalize(draft, session.observations)
                     session.record("reply_accepted",
-                                   {"evidence_refs": list(draft.evidence_refs), "kind": draft.kind})
+                                   {"evidence_refs": list(draft.evidence_refs), "kind": draft.kind,
+                                    "choices": choices})
                     return draft
                 session.record("verification_failed", {"problems": [p.code for p in problems]})
                 if not session.steps_left():

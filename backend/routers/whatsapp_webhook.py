@@ -2893,6 +2893,10 @@ async def _dispatch_message(
             elif interactive.get("type") == "list_reply":
                 lr       = interactive.get("list_reply", {}) or {}
                 lr_id    = lr.get("id", "")
+                # Which message the customer tapped in. WhatsApp names it, and
+                # it is what binds a tap to the one list it came from rather
+                # than to any list this conversation still holds.
+                lr_ctx   = str((msg.get("context") or {}).get("id") or "")
                 lr_title = (lr.get("title", "") or lr_id).strip()
                 if lr_title and not _is_platform_tenant(db, resolved_tenant_id):
                     logger.info(
@@ -2911,6 +2915,7 @@ async def _dispatch_message(
                         inbound_metadata={
                             "list_reply_id": lr_id,
                             "list_reply_title": lr_title,
+                            "list_reply_context_id": lr_ctx,
                         },
                         commerce_runtime_claim=_runtime_claim,
                     )
@@ -16527,6 +16532,8 @@ async def _send_list_reply(
     phone_id: str, to: str, body_text: str, rows: list, button_label: str,
     _tenant_id: Optional[int] = None, _db=None,
     _result_sink: Optional[Dict[str, Any]] = None,
+    _blocked_path: str = "send_list_reply",
+    _inbound_message_id: Optional[str] = None,
 ) -> bool:
     """Interactive list: the surface for more choices than buttons hold.
 
@@ -16586,7 +16593,7 @@ async def _send_list_reply(
             break
     if not wire_rows:
         return False
-    return await _post_wa(phone_id, {
+    payload: Dict[str, Any] = {
         "messaging_product": "whatsapp", "to": to, "type": "interactive",
         "interactive": {
             "type": "list",
@@ -16596,7 +16603,17 @@ async def _send_list_reply(
                 "sections": [{"rows": wire_rows}],
             },
         },
-    }, _tenant_id=_tenant_id, _db=_db, _result_sink=_result_sink)
+    }
+    inbound_id = str(_inbound_message_id or "").strip()
+    if inbound_id:
+        payload["_nahla_inbound_id"] = inbound_id
+    if _result_sink is not None:
+        # The rows that are actually on the wire, after this sender's own id
+        # de-duplication and the ten-row cap. A caller that records what it
+        # offered must record these, not what it asked for.
+        _result_sink["list_row_ids"] = [str(row["id"]) for row in wire_rows]
+    return await _post_wa(phone_id, payload, _tenant_id=_tenant_id, _db=_db,
+                          _blocked_path=_blocked_path, _result_sink=_result_sink)
 
 
 def _safe_cta_http_url(url: Optional[str]) -> str:
