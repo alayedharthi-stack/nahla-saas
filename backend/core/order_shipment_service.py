@@ -123,18 +123,34 @@ def _address_snapshot(order: Any) -> Dict[str, Any]:
     }
 
 
-def get_order_shipment(db: Any, tenant_id: int, order_id: int) -> Any:
-    from models import OrderShipment  # noqa: PLC0415
+def get_order_shipment(
+    db: Any,
+    tenant_id: int,
+    order_id: int,
+    *,
+    customer_id: Optional[int] = None,
+) -> Any:
+    """Load a shipment only through a tenant-scoped order identity.
 
-    return (
+    ``customer_id`` is optional for merchant operations, but customer-facing
+    consumers can require it to prove the order belongs to the requester. A
+    tracking number is intentionally not accepted as a lookup key.
+    """
+    from models import Order, OrderShipment  # noqa: PLC0415
+
+    query = (
         db.query(OrderShipment)
         .filter(
             OrderShipment.tenant_id == tenant_id,
             OrderShipment.order_id == order_id,
         )
-        .order_by(OrderShipment.id.desc())
-        .first()
     )
+    if customer_id is not None:
+        query = query.join(Order, Order.id == OrderShipment.order_id).filter(
+            Order.tenant_id == tenant_id,
+            Order.customer_id == customer_id,
+        )
+    return query.order_by(OrderShipment.id.desc()).first()
 
 
 def serialise_shipment(shipment: Any) -> Dict[str, Any]:
@@ -150,6 +166,22 @@ def serialise_shipment(shipment: Any) -> Dict[str, Any]:
         "status": shipment.status,
         "status_label_ar": _shipment_status_label_ar(shipment.status),
         "tracking_number": shipment.tracking_number,
+        "tracking": {
+            "data_source": getattr(shipment, "tracking_data_source", None),
+            "external_shipment_id": getattr(shipment, "external_shipment_id", None),
+            "carrier": getattr(shipment, "carrier", None),
+            "tracking_number": shipment.tracking_number,
+            "tracking_link": getattr(shipment, "tracking_url", None),
+            "latest_event": getattr(shipment, "latest_event", None),
+            "source_event_at": (
+                getattr(shipment, "source_event_at", None).isoformat()
+                if getattr(shipment, "source_event_at", None) else None
+            ),
+            "last_successful_verification_at": (
+                getattr(shipment, "last_verified_at", None).isoformat()
+                if getattr(shipment, "last_verified_at", None) else None
+            ),
+        },
         "label_url": shipment.label_url,
         "label_pdf_path": shipment.label_pdf_path,
         "recipient_name": shipment.recipient_name,
@@ -164,6 +196,37 @@ def serialise_shipment(shipment: Any) -> Dict[str, Any]:
         "updated_at": updated.isoformat() if updated else None,
         "label_placeholder": bool(meta.get("label_placeholder")),
         "extra_metadata": meta,
+    }
+
+
+def serialise_order_tracking_state(order: Any, shipment: Any = None) -> Dict[str, Any]:
+    """Expose availability separately from source refresh health.
+
+    This makes a failed source refresh distinguishable from no tracking data
+    and from older stored data.  No network call is made while serving this
+    payload, so a failure can never be reported as fresh.
+    """
+    meta = _order_meta(order)
+    raw = meta.get("salla_tracking")
+    tracking = dict(raw) if isinstance(raw, dict) else {}
+    has_stored = bool(
+        shipment is not None
+        and getattr(shipment, "tracking_data_source", None)
+        and getattr(shipment, "last_verified_at", None)
+    )
+    return {
+        "state": tracking.get("state") or ("available" if has_stored else "no_tracking_data"),
+        "data_source": tracking.get("data_source") or getattr(shipment, "tracking_data_source", None),
+        "last_attempt_at": tracking.get("last_attempt_at"),
+        "last_successful_verification_at": (
+            tracking.get("last_successful_verification_at")
+            or (
+                getattr(shipment, "last_verified_at", None).isoformat()
+                if shipment is not None and getattr(shipment, "last_verified_at", None) else None
+            )
+        ),
+        "last_refresh_failed_at": tracking.get("last_refresh_failed_at"),
+        "last_refresh_error_code": tracking.get("last_refresh_error_code"),
     }
 
 
@@ -316,5 +379,6 @@ __all__ = [
     "generate_shipment_label",
     "get_order_shipment",
     "resolve_tenant_cod_enabled",
+    "serialise_order_tracking_state",
     "serialise_shipment",
 ]
