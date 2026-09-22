@@ -207,7 +207,12 @@
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_concurrent_invocations_cannot_spend_the_same_recovery_allowance_twice",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_existing_pending_and_unknown_ledger_work_neither_resends_nor_completes",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_completed_turn_is_never_reasoned_about_again",
-        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_loop_run_closes_its_transactions_and_holds_none_across_reasoning"
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_loop_run_closes_its_transactions_and_holds_none_across_reasoning",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_is_told_back_and_the_finished_answer_is_accepted",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_with_no_step_left_still_stops_rather_than_sending_half",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_number_the_customer_wrote_survives_verification_and_is_delivered",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_the_same_sentence_on_a_turn_that_never_mentioned_it_is_refused"
       ]
     },
     {
@@ -249,6 +254,10 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_personal_code_issued_to_another_customer_is_never_evidence_here",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_this_customer_s_own_personal_code_is_read_and_cited",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_code_the_merchant_s_records_did_not_produce_never_reaches_the_customer",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_loyalty_rung_this_customer_has_not_reached_is_never_read_here",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_merchant_s_own_first_purchase_rule_opens_the_first_rung",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_unpublished_code_carrying_no_rung_is_not_read_as_a_general_offer",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_coupon_tied_to_no_rung_is_never_withheld_for_want_of_one",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_tenant_s_coupon_is_never_read_here",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_listing_with_a_link_and_an_image_per_product_reaches_the_wire_unchanged",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_search_dump_in_the_reserved_reply_is_still_replaced_on_the_wire",

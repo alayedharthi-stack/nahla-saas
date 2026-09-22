@@ -185,7 +185,11 @@ def seed_merchant(engine: Any) -> Seed:
         coupon_id = int(conn.execute(
             text("INSERT INTO coupons (tenant_id, code, description, discount_type, discount_value, "
                  "source_type, allocation_channel) "
-                 "VALUES (:t, 'WELCOME10', 'خصم ترحيبي على أول طلب', 'percentage', '10', 'manual', NULL) "
+                 # Merchant-created and placed on a shared surface: the two acts
+                 # that make an unleveled code an offer to everyone. A NULL
+                 # channel would be a code the merchant never published, which
+                 # the read tool correctly declines to hand out.
+                 "VALUES (:t, 'WELCOME10', 'خصم ترحيبي على أول طلب', 'percentage', '10', 'manual', 'shared') "
                  "RETURNING id"), {"t": tenant_id}).scalar_one())
         campaign_coupon_id = int(conn.execute(
             text("INSERT INTO coupons (tenant_id, code, description, discount_type, discount_value, "

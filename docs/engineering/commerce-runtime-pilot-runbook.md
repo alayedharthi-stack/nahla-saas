@@ -902,8 +902,74 @@ as well as through the ledger.
   and `min_remaining_hours` — a code with less life left than the merchant's minimum
   is not handed out; a disabled policy is a `denied` read). Before a reply is
   reserved, verification refuses a draft that carries a coupon code without citing
-  the coupon it came from, or any code-shaped token this turn's tools did not
-  return. It creates, assigns or redeems none.
+  the coupon it came from, or any code-shaped token the agent originated — one
+  neither this turn's tools returned nor the customer's own message carried. It
+  creates, assigns or redeems none.
+* **The list is this customer's, not the store's price list.** A valid coupon is
+  not an entitled coupon: the merchant's loyalty ladder exists so that a gold
+  customer's discount is a gold customer's discount. A coupon whose record names
+  a rung is projected only for a customer who reached that rung, read through
+  `services/coupon_entitlement_read.py` from the platform's own authorities —
+  `count_customer_orders` (the Customer Intelligence phone index), the level
+  contract's `resolve_coupon_level_for_order_count`, and the merchant's saved
+  `coupons_dashboard` ladder. It is a **read**: no coupon is created, assigned,
+  generated, reserved or redeemed, and a test asserts that by walking the
+  module's own syntax tree rather than trusting the review.
+
+  **One rung, and it is the contract's.** `resolve_coupon_level_for_order_count`
+  resolves exactly one — the highest enabled rung the customer has reached — and
+  that one is the answer. An earlier draft returned every rung the customer had
+  passed, reasoning that `min_orders` is a minimum; that put a gold customer's
+  bronze, silver and gold codes in front of the model at once and so recreated,
+  smaller, the problem the gate exists to solve. A customer has a standing, not
+  a range, and the issuance half acts on the same single answer — reading and
+  issuing must not disagree about who a customer is. The store's own AI policy
+  (`allowed_levels`) is a separate gate and both must open: a store that allows
+  gold does not make a conversation gold, and a gold customer does not override
+  a store that keeps gold off the assistant.
+
+  **A general offer is a merchant's act, never an absence.** Carrying no rung
+  says only that the record does not name one; it is not evidence the merchant
+  meant the code for everyone, and `shared` on its own proves nothing because
+  `coupon_generator` *defaults* every pool coupon's `allocation_channel` to it.
+  So an unleveled coupon is projected only on two positive acts the merchant
+  performed: `source_type` is `manual` — the merchant's own dashboard, the one
+  path that writes the AI fields, while the warm pool writes `system` and always
+  stamps a rung, and a Salla import expresses no Nahla AI intent — **and** the
+  `allocation_channel` is `ai` or `shared`, a field left empty when the merchant
+  does not choose one. Every **offer** is projected because an active store
+  promotion the merchant created is itself that authorisation, and it carries no
+  code.
+
+  *Operational consequence worth checking per merchant:* a coupon with neither a
+  rung nor an allocation channel is now withheld. If a merchant expects such a
+  code to be offered, the fix is in their dashboard — set the level, or set the
+  channel — not in the runtime.
+
+  Not knowing is never an entitlement: `identity_not_established` (no customer in
+  this conversation), `customer_record_unavailable` (an id this tenant carries
+  no record for) and `order_history_unreadable` are failures to determine, each
+  named, none of them earning a rung — and all three distinct from
+  `no_entitled_level`, which is a customer whose history *was* read and is
+  empty. The merchant's first-purchase rule is read exactly as saved and never
+  enabled here: with it on, such a customer reaches the rung the contract names
+  and only that one; with it off, they reach none.
+
+  What the projection claims is bounded to what it settled.
+  `level_eligibility` (`entitled` for a rung the customer stands on,
+  `merchant_authorized_general` for a code or offer the merchant published) /
+  `customer_level` / `level_reason` carry the level answer;
+  `eligibility_determined` is true only when who this customer is was
+  settled **and** the record leaves no other condition unchecked, so a minimum
+  basket or a usage limit keeps it false with `eligibility_note` naming what is
+  still open. An offer never sets it: an offer is terms, not a grant, and a
+  record with empty conditions cannot be told apart from conditions nobody
+  read. The result also carries the whole reading (`entitlement`), so a short
+  or empty list can be told apart from a classification that could not be made.
+
+  Offering a coupon — whether to, when, and in what words — remains the agent's,
+  unprompted or not. Nothing here forces a suggestion, and the tool's
+  description states what the list contains, not when to reach for it.
 * Each promotion carries **one** reading of its discount (`discount`: `5%`, `20 SAR`,
   or empty when the record supports none) beside the raw `discount_type` and
   `discount_value`. September 2026: a coupon issued as 5% and reconciled from Salla
@@ -1071,6 +1137,68 @@ as well as through the ledger.
   `NAHLA_DUPLICATE_ROW_TITLE_TEST=SEND` and an explicitly named allowlisted
   `NAHLA_PROBE_RECIPIENT`, sends through `provider_send_message` so no
   credential reaches the script, and writes to no table.
+* **A step cut off at the output limit no longer costs the customer the
+  reply.** 2026-09-22 14:26Z, Tenant 1 turn 13: «أبي أشوف الخيارات» produced
+  exactly 1024 output tokens, `stop_reason=max_tokens`, `replied=False` — the
+  customer received nothing. Two independent causes, fixed separately:
+
+  **The cap contradicted the platform's own bound.** `MAX_REPLY_TEXT_LENGTH`
+  declares a reply of up to 4000 characters legal, while `MAX_OUTPUT_TOKENS`
+  let the model emit 1024. Measured on that same conversation — 1027 Arabic
+  characters with markdown, emoji and URLs cost ~840 output tokens including
+  the tool-call envelope, ~0.7 tokens per character of text — 4000 characters
+  is ~2800 tokens plus up to ~260 for ten evidence references and a selector's
+  ids. The cap is now 4096, derived from that bound rather than chosen. It is a
+  ceiling, never an instruction: the model is not told it, billing follows the
+  tokens actually emitted, and how long a reply may be is still decided by
+  `MAX_REPLY_TEXT_LENGTH` in verification. It changes what can be **finished**,
+  not what is **written**.
+
+  **Truncation is correctable.** Being cut off is a fact about one step, not a
+  verdict on the turn, so while a step remains the loop hands the fact back
+  (`output_truncated`) and the model finishes with its whole context intact.
+  With no step left it still stops and reserves nothing — an unfinished answer
+  is never sent. Only truncation is treated this way; every other invalid
+  output ends the turn as before.
+
+* **A coupon code may not rest on memory.** The code checks used to run only
+  when the promotions tool had run in the same turn. 2026-09-22 14:25Z, Tenant
+  1 turn 12: a reply handed the customer six codes while the only tool that ran
+  was `search_products` — the codes came from the conversation's own history
+  and nothing looked at them. History is context, not evidence: validity and
+  eligibility are exactly what goes stale. Every code-shaped token in a reply
+  is now held to **this turn's** observations whatever tools ran. A token with
+  nothing behind it is fed back as `unobserved_code`, so the model calls
+  `list_shareable_promotions` for the current truth or drops the code — either
+  way it still answers, with its context intact and the customer never left
+  waiting.
+
+  This widened an earlier expectation that read a code-shaped token outside a
+  coupon turn as none of the loop's business. An order number the agent states
+  with no order lookup behind it is the same class of unevidenced operational
+  claim; a token a tool really returned still passes, which is the ordinary case.
+
+* **What the customer wrote is not what the agent claimed.** The rule above, as
+  first written, refused *every* unobserved code-shaped token — including one the
+  customer had just typed. A customer who writes «وش حال طلبي RRRD1234؟» has named
+  that number; repeating it back to look it up, to say it was not found, or to ask
+  whether it was typed correctly is quoting, not claiming, and refusing it would
+  leave the agent discussing the customer's order unable to name it — the
+  `track_order_not_found` shape the doctrine exists to prevent. Verification now
+  receives the admitted turn's own payload (`inbound`, trusted data, never
+  instructions) and excludes the tokens the customer's message carries.
+
+  The narrowness is the point, and it is what keeps the Tenant 1 defect fixed:
+  only **this turn's** inbound, only the payload's customer-text slots (`text`,
+  `body`, `message` — never the platform-added metadata beside them), never the
+  conversation's history, and never the agent's own earlier replies. The six
+  codes of turn 12 came from the agent's own wording, so they stay refused.
+  Citation discipline is untouched: a code this turn's promotions tool returned
+  still owes its `evidence_ref`, whoever named it first. What this slice does
+  **not** prove is that the sentence around a quoted token is true — an agent
+  confirming a customer-quoted code's terms without a lookup is caught, if at
+  all, by `missing_evidence`. That is a semantic judgement, not a regex one.
+
 * Recorded, not changed: the catalogue search's clarification guard
   (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the
   `artifact` / `response_bundle` shapes the legacy compose path writes. This

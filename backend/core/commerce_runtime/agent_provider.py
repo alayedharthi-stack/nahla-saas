@@ -138,7 +138,24 @@ def _requested_choices(raw: Any) -> Dict[str, Any]:
     return {rc.REQUESTED_KEY: request}
 
 
-MAX_OUTPUT_TOKENS = 1024
+# What one step may emit. Sized from the reply bound the platform itself
+# declares (``MAX_REPLY_TEXT_LENGTH`` = 4000 characters) rather than chosen: a
+# platform that accepts a 4000-character reply must be able to let the model
+# write one. Measured on Tenant 1's own production turns — 1027 characters of
+# Arabic with markdown, emoji and URLs cost ~840 output tokens including the
+# tool-call envelope, i.e. ~0.7 tokens per character of text — 4000 characters
+# is ~2800 tokens, plus up to ~260 for ten evidence references and a selector's
+# ids. 4096 covers that with margin.
+#
+# This is a ceiling, not an instruction: the model is never told it, billing
+# follows the tokens actually emitted, and how long a reply may be is still
+# decided by ``MAX_REPLY_TEXT_LENGTH`` in verification. Raising it changes what
+# can be *finished*, never what is *written*. At 1024 a reply the platform
+# would have accepted was cut off mid-decision and the customer received
+# nothing (Tenant 1, 2026-09-22 14:26Z, turn 13: exactly 1024 output tokens,
+# ``stop_reason=max_tokens``, ``replied=False``).
+MAX_OUTPUT_TOKENS = 4096
+
 MIN_STEP_SECONDS = 2.0
 
 # Closed mapping from the provider module's status to how this step is reported.
@@ -323,7 +340,7 @@ class AnthropicReasoningProvider:
         if stop_reason == "max_tokens":
             # A truncated step is not a usable answer even when it carries a
             # complete-looking block: the model was cut off mid-decision.
-            return ac.ProviderInvalid("truncated_output")
+            return ac.ProviderInvalid(ac.TRUNCATED_OUTPUT)
         if not tool_blocks:
             return ac.ProviderInvalid("no_tool_use_block")
 

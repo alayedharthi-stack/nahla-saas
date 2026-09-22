@@ -100,7 +100,46 @@ def _ensure_a1_schema(engine: Engine) -> None:
         command.upgrade(cfg, "0093")
     finally:
         os.chdir(prev_cwd)
+    _reconcile_coupon_code_uniqueness(engine)
     _ensure_capability_state_row(engine)
+
+
+def _reconcile_coupon_code_uniqueness(engine: Engine) -> None:
+    """Give the test database the coupon constraint the platform actually runs.
+
+    Migration 0001 created ``coupons.code`` with a column-level ``unique=True``,
+    which PostgreSQL names ``coupons_code_key`` and which is **global**: no two
+    tenants may hold the same code. Neither the ORM model
+    (``UniqueConstraint('tenant_id', 'code')``) nor the running application
+    agrees — ``backend/main.py`` drops ``coupons_code_key`` and installs the
+    composite on every boot. No migration between 0001 and 0093 ever did, so a
+    database built by alembic alone carries a constraint the platform considers
+    wrong, and this fixture pins to 0093.
+
+    The consequence is not theoretical. Coupon codes here are five characters,
+    and different test tenants generate them at random: two tenants drawing the
+    same code is legal under the real constraint and a hard failure under this
+    one, so the suite fails intermittently on whichever test happens to collide.
+    Applying the same reconciliation the application performs makes the test
+    database match production rather than a shape production repairs at startup.
+
+    Idempotent, and it never weakens the invariant under test: a single tenant
+    still cannot hold one code twice.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE coupons DROP CONSTRAINT IF EXISTS coupons_code_key"))
+        conn.execute(text(
+            """
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'uq_coupons_tenant_code'
+                ) THEN
+                    ALTER TABLE coupons
+                    ADD CONSTRAINT uq_coupons_tenant_code UNIQUE (tenant_id, code);
+                END IF;
+            END $$
+            """
+        ))
 
 
 def _ensure_capability_state_row(engine: Engine) -> None:

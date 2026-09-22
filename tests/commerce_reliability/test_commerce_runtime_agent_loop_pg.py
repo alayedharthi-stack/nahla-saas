@@ -1171,3 +1171,108 @@ def test_every_loop_run_closes_its_transactions_and_holds_none_across_reasoning(
     assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
     assert observed_open == [0, 0], "no transaction is held while the provider reasons"
     assert agent.open_transactions() == 0 and agent.engine.pool.checkedout() == 0
+
+
+# ── A step cut off at the output limit is recoverable, not the end of a turn ──
+
+
+def test_a_truncated_step_is_told_back_and_the_finished_answer_is_accepted(agent: Harness) -> None:
+    """Tenant 1, 2026-09-22 14:26Z: «أبي أشوف الخيارات» produced exactly 1024
+    output tokens, ``stop_reason=max_tokens``, and the customer received
+    nothing at all. Being cut off is a fact about that step, not a verdict on
+    the turn: with a step left the loop hands the fact back, the model keeps
+    its whole context and finishes, and the reply is delivered.
+    """
+    turn, lease = agent.start()
+    feedback_seen: List[Tuple[int, List[str]]] = []
+
+    def finished(request: ac.ProviderRequest) -> ac.ProviderResult:
+        feedback_seen.append((request.step_no, [p.code for f in request.feedback for p in f.problems]))
+        ref = sp.observed(request, "c1").result["products"][0]["ref"]
+        return sp.reply("قميص قطني أزرق متوفر.", refs=[ref], commerce=True)
+
+    provider = sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="قميص")),
+        ac.ProviderInvalid(ac.TRUNCATED_OUTPUT),
+        finished,
+    ])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert feedback_seen == [(3, ["output_truncated"])]
+    assert _kinds(outcome).count("output_truncated") == 1
+    assert agent.sequences(turn) == 1, "the truncated step reserved nothing of its own"
+    assert outcome.detail["evidence_refs"] == ["product:blue_cotton_shirt"]
+
+
+def test_a_truncated_step_with_no_step_left_still_stops_rather_than_sending_half(agent: Harness) -> None:
+    """The bound is the budget, not optimism. An unfinished answer is never
+    sent: with nothing left to spend the turn stops and reserves no delivery.
+    """
+    turn, lease = agent.start()
+    provider = sp.ScriptedReasoningProvider([
+        ac.ProviderInvalid(ac.TRUNCATED_OUTPUT),
+        ac.ProviderInvalid(ac.TRUNCATED_OUTPUT),
+    ], capabilities=ac.ProviderCapabilities(provider_name="scripted"))
+    outcome = agent.run(turn, lease, provider,
+                        loop=agent.loop(budget=ac.LoopBudget(max_steps=2, max_tool_calls=1)))
+    assert outcome.status == ac.LoopStatus.STOPPED.value
+    assert outcome.stop_reason == ac.StopReason.PROVIDER_INVALID.value
+    assert agent.sequence(turn) is None and agent.sequences(turn) == 0
+
+
+def test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn(agent: Harness) -> None:
+    """Only truncation is correctable. Malformed output is not a step that ran
+    out of room, so it keeps its existing, stricter outcome."""
+    turn, lease = agent.start()
+    provider = sp.ScriptedReasoningProvider([
+        ac.ProviderInvalid("reply_arguments_not_an_object"),
+        sp.reply("لن يُطلب هذا أبدًا.", commerce=False),
+    ])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.status == ac.LoopStatus.STOPPED.value
+    assert outcome.stop_reason == ac.StopReason.PROVIDER_INVALID.value
+    assert agent.sequences(turn) == 0
+
+
+# ── The customer's own words reach verification, and only theirs ────────────
+
+
+def test_a_number_the_customer_wrote_survives_verification_and_is_delivered(agent: Harness) -> None:
+    """End to end on PostgreSQL: the number is in the admitted turn's payload,
+    the loop hands that payload to verification, and the reply naming it is
+    accepted and reserved for delivery. Nothing about the order is claimed —
+    the agent says it could not find it and asks. That answer is the customer's
+    to receive, and a guard reading it as an invention would take it away.
+    """
+    turn, lease = agent.start(body="وش حال طلبي RRRD1234؟")
+    provider = sp.ScriptedReasoningProvider([
+        sp.reply("ما لقيت طلبًا بالرقم RRRD1234 — تتأكد لي منه؟", commerce=False),
+    ])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert agent.sequences(turn) == 1
+    assert "verification_failed" not in _kinds(outcome)
+
+
+def test_the_same_sentence_on_a_turn_that_never_mentioned_it_is_refused(agent: Harness) -> None:
+    """The contrast that proves the inbound is what changed the outcome, not
+    the wording. One identical draft, two turns: the customer who wrote the
+    number gets it back, and the customer who asked about a shirt does not get
+    an order number the agent produced from nowhere. Refusal is not silence —
+    a step remains, the model is told, and it answers without the token.
+    """
+    turn, lease = agent.start(body="عندكم قميص قطني أزرق؟")
+    told: List[List[str]] = []
+
+    def second(request: ac.ProviderRequest) -> ac.ProviderResult:
+        told.append([p.code for f in request.feedback for p in f.problems])
+        return sp.reply("القميص القطني الأزرق متوفر.", commerce=False)
+
+    provider = sp.ScriptedReasoningProvider([
+        sp.reply("ما لقيت طلبًا بالرقم RRRD1234 — تتأكد لي منه؟", commerce=False),
+        second,
+    ])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert told == [["unobserved_code"]]
+    assert agent.sequences(turn) == 1, "the refused draft reserved nothing of its own"

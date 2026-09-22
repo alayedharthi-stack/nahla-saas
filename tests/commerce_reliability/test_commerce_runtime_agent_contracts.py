@@ -392,11 +392,56 @@ def test_a_code_shaped_token_this_turn_s_tools_returned_is_not_an_invented_code(
     assert ac.verify_reply_draft(draft, obs) == ()
 
 
-def test_outside_a_coupon_turn_capitalised_tokens_are_not_the_loop_s_business():
+def test_a_code_shaped_token_with_nothing_behind_it_is_refused_even_with_no_coupon_turn():
+    """The check no longer waits for the promotions tool to have run.
+
+    Tenant 1, 2026-09-22 14:25Z: a reply handed the customer six coupon codes
+    while the only tool that ran was ``search_products``. The codes came from
+    the conversation's own history, and the gate on ``promotions_ran`` meant
+    nothing looked at them — so a code that had since expired would have gone
+    out unchecked. Validity is exactly what goes stale, so a code-shaped token
+    is now held to this turn's observations whatever tools ran.
+
+    This widened an earlier expectation, which read a token outside a coupon
+    turn as none of the loop's business. An order number the agent states with
+    no order lookup behind it is the same class of unevidenced operational
+    claim. Both drafts below are checked with nothing known about the inbound,
+    which is the strictest reading: the agent originated the token. What the
+    customer wrote is a different question, answered in the cases that follow.
+    """
     catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
                                  result={"products": []}, error_code=None, error=None, evidence_refs=())
-    draft = ac.ReplyDraft(text="رقم طلبك RRRD1234 قيد التجهيز", claims_commerce_facts=False)
-    assert ac.verify_reply_draft(draft, [catalog]) == ()
+    remembered = ac.ReplyDraft(text="استخدم كود NHNER وخصم 10%", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(remembered, [catalog])] == ["unobserved_code"]
+
+    invented_order = ac.ReplyDraft(text="رقم طلبك RRRD1234 قيد التجهيز", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(invented_order, [catalog])] == ["unobserved_code"]
+
+
+def test_an_order_number_this_turn_actually_read_is_not_refused():
+    """The companion: the token is fine when a tool really returned it."""
+    order = ac.ToolObservation(
+        call_id="o1", tool_name="resolve_customer_order", ok=True,
+        result={"status": "ok", "found": True, "order": {"order_number": "RRRD1234", "status": "processing"}},
+        error_code=None, error=None, evidence_refs=("order:summary:4",))
+    draft = ac.ReplyDraft(text="رقم طلبك RRRD1234 قيد التجهيز", evidence_refs=("order:summary:4",),
+                          claims_commerce_facts=True)
+    assert ac.verify_reply_draft(draft, [order]) == ()
+
+
+def test_the_model_can_recover_a_remembered_code_by_reading_the_current_truth():
+    """The correction path the customer never sees: the code is refused while
+    it rests on memory, and accepted once this turn read it from the merchant's
+    records and cited it. The answer is never lost — only re-grounded."""
+    catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
+                                 result={"products": []}, error_code=None, error=None, evidence_refs=())
+    text = "استخدم كود NHNER وخصم 10%"
+    from_memory = ac.ReplyDraft(text=text, claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(from_memory, [catalog])] == ["unobserved_code"]
+
+    checked = [catalog, _promotions_observation(("NHNER", "promotion:coupon:41"))]
+    grounded = ac.ReplyDraft(text=text, evidence_refs=("promotion:coupon:41",), claims_commerce_facts=True)
+    assert ac.verify_reply_draft(grounded, checked) == ()
 
 
 def test_a_promotions_observation_without_its_body_cannot_be_checked_and_is_not_guessed():
@@ -405,3 +450,94 @@ def test_a_promotions_observation_without_its_body_cannot_be_checked_and_is_not_
                           claims_commerce_facts=True)
     assert ac.observed_promotion_codes(obs) is None
     assert ac.verify_reply_draft(draft, obs) == ()
+
+
+# ── A token the customer wrote is not a token the agent asserted ─────────────
+
+
+def _lookup_failed(number: str) -> ac.ToolObservation:
+    """An order lookup that ran and found nothing. It never echoes the number,
+    which is precisely why the reply naming it cannot lean on the observation."""
+    return ac.ToolObservation(call_id="o1", tool_name="resolve_customer_order", ok=False,
+                              result=None, error_code="not_found", error="no such order",
+                              evidence_refs=())
+
+
+def test_a_number_the_customer_wrote_may_be_repeated_back_to_ask_about_it():
+    """The owner's objection, made executable: «رقم طلب أو عنوان يذكره العميل
+    للاستعلام عنه ليس بالضرورة ادعاءً من الوكيل».
+
+    The customer names a short code and asks about it; the lookup finds
+    nothing. Saying so — and naming the number, so the customer knows which
+    one was checked — is quoting, not claiming. A guard that refused it would
+    leave the agent discussing the customer's order unable to name it, which
+    is the ``track_order_not_found`` shape the doctrine exists to prevent.
+    """
+    inbound = {"kind": "text", "text": "وش حال طلبي RRRD1234؟"}
+    asking = ac.ReplyDraft(text="ما لقيت طلبًا بالرقم RRRD1234 — تتأكد لي منه؟",
+                           claims_commerce_facts=False)
+    assert ac.verify_reply_draft(asking, [_lookup_failed("RRRD1234")], inbound=inbound) == ()
+
+
+def test_a_generic_merchant_customer_may_quote_a_code_the_store_never_returned():
+    """The same rule on a neutral catalogue: a clothing order, a generic
+    customer, and a code the merchant's records do not know. The agent may
+    still name it to ask, and the answer is not withheld."""
+    inbound = {"kind": "text", "text": "طلبت قميص قطني أزرق بكود KHMS7788، وصل؟"}
+    catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
+                                 result={"products": []}, error_code=None, error=None, evidence_refs=())
+    asking = ac.ReplyDraft(text="ما ظهر عندي طلب بالرقم KHMS7788. تحب تتأكد من الرقم؟",
+                           claims_commerce_facts=False)
+    assert ac.verify_reply_draft(asking, [catalog], inbound=inbound) == ()
+
+
+def test_the_exclusion_is_the_customer_s_message_and_not_the_conversation():
+    """The narrowness is the point. The inbound below is a real customer turn
+    that says nothing about a code; the agent produces one anyway, from its own
+    earlier wording. That is the Tenant 1 defect, and it stays refused —
+    admitting the transcript would hand it straight back."""
+    inbound = {"kind": "text", "text": "عندك خصومات هالأسبوع؟"}
+    catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
+                                 result={"products": []}, error_code=None, error=None, evidence_refs=())
+    from_memory = ac.ReplyDraft(text="استخدم كود NHNER وخصم 10%", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(from_memory, [catalog], inbound=inbound)] == ["unobserved_code"]
+
+
+def test_a_code_the_customer_quoted_still_owes_its_evidence_once_the_records_returned_it():
+    """Quoting a code buys the right to name it, never the right to state its
+    terms. When this turn's promotions tool did return the code, the citation
+    rule is untouched: the agent must say where the discount came from."""
+    inbound = {"kind": "text", "text": "كودي WELCOME10 ما زال شغال؟"}
+    obs = [_promotions_observation(("WELCOME10", "promotion:coupon:5"))]
+    uncited = ac.ReplyDraft(text="نعم، WELCOME10 يعطيك خصم 10%", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(uncited, obs, inbound=inbound)] == [
+        "coupon_code_without_evidence"]
+    cited = ac.ReplyDraft(text="نعم، WELCOME10 يعطيك خصم 10%", evidence_refs=("promotion:coupon:5",),
+                          claims_commerce_facts=True)
+    assert ac.verify_reply_draft(cited, obs, inbound=inbound) == ()
+
+
+def test_only_the_customer_s_text_is_read_never_the_payload_s_platform_metadata():
+    """An inbound payload also carries identifiers the platform generated —
+    message ids, context ids. Reading those as the customer's words would let a
+    value the platform invented launder into a reply as if it had been said."""
+    inbound = {"kind": "text", "text": "متى يوصل طلبي؟",
+               "metadata": {"provider_message_id": "WAMID9911", "list_reply_context_id": "CTXB4410"}}
+    catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
+                                 result={"products": []}, error_code=None, error=None, evidence_refs=())
+    draft = ac.ReplyDraft(text="طلبك WAMID9911 في الطريق", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(draft, [catalog], inbound=inbound)] == ["unobserved_code"]
+    assert ac.customer_supplied_tokens(inbound) == set()
+
+
+def test_knowing_nothing_about_the_inbound_reads_strictest():
+    """A caller that cannot say what the customer wrote gets the old behaviour,
+    not the benefit of the doubt: the failure direction is a refusal the model
+    can correct, never an unevidenced claim reaching a customer."""
+    assert ac.customer_supplied_tokens(None) == set()
+    assert ac.customer_supplied_tokens({"metadata": {"x": "ABCD1234"}}) == set()
+    assert ac.customer_supplied_tokens({"text": "طلبي RRRD1234 و SAVE20"}) == {"RRRD1234", "SAVE20"}
+    catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
+                                 result={"products": []}, error_code=None, error=None, evidence_refs=())
+    quoted = ac.ReplyDraft(text="ما لقيت RRRD1234", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(quoted, [catalog])] == ["unobserved_code"]
