@@ -912,6 +912,105 @@ as well as through the ledger.
   (`variant_options`, with `variants_in_stock` and `variants_total`), so a colour or
   size in a reply comes from the merchant's variant rows. September 2026: the view
   carried no variant at all and a white/fuchsia dress was called black.
+* Each turn is handed the products **this conversation's recent replies were
+  grounded on**, read back from the persisted `evidence_refs`. They become
+  identities the turn may look up and are named in the trusted-fact preamble as
+  `products_shown_earlier`. 2026-09-22 07:12Z: asked about a dress shown
+  earlier, the model called `get_product_details` — the right tool — and the
+  isolation guard refused it, because identity was otherwise acquired only
+  inside the turn that searched; the fallback search on the referring phrase
+  («الفستان الأول») matched nothing, because the catalogue search requires every
+  token and no product text contains an ordinal. The guard is unchanged: an id
+  the model names on its own is still refused, and every fact still has to be
+  read by a tool in this turn and cited as this turn's evidence.
+
+  No **order** is claimed. The stored references are the order the reply
+  *cited*, which is not provably the order the customer *saw*; the model has its
+  own earlier message in the transcript and resolves "the first" from that. A
+  provable presentation order needs the reply to carry structured choices.
+
+  The set is bounded to this conversation, this tenant and at most
+  `MAX_PRODUCTS` products, each re-read in the merchant's catalogue now — one
+  the merchant has since removed is not carried.
+
+  **The clock belongs to the product, not to the conversation.** A product is
+  carried while the reply that last showed *it* is younger than
+  `BROWSING_CONTEXT_LAPSE_SECONDS` (72 h, adopted as an experimental start). A conversation that has
+  carried on daily about other subjects therefore carries nothing from three
+  weeks ago, and a product still being discussed stays current on its own,
+  because the reply discussing it cites it. Relevance is carried by evidence;
+  nothing here guesses at the subject of a message, and nothing asks the
+  customer to confirm one. `MAX_REPLIES_READ` bounds the read, not the policy.
+
+  Lapsing changes only what the platform volunteers for one turn: the
+  conversation, the customer's profile and their real orders are untouched, and
+  coming back costs one ordinary search — proven by
+  `test_a_customer_can_go_back_to_a_product_whose_context_has_lapsed`, which
+  runs the turn rather than asserting that the rows survived. The reply that
+  turn sends cites the product, so the turn after it carries the product again.
+
+  Each turn logs `[COMMERCE_RUNTIME] browsing context turn=… reason=…
+  products=… seconds_since_last_product_shown=…`, so the duration can be set
+  from evidence rather than opinion. The lapse is deliberately **not**
+  WhatsApp's 24 h service window: that governs sending, not memory.
+* A multi-product **selector** is an affordance over the answer, never the
+  answer itself. Row labels are composed by the platform from the merchant's
+  own values (`core/commerce_runtime/choice_rows.py`), because a provider that
+  reads two visible titles as one would collapse or reject the payload and
+  Tenant 1's five dresses are all titled «فستان». When the merchant's facts
+  cannot separate a group, the whole group is labelled by **position in this
+  list** («فستان · 1», «فستان · 2») — never an internal id, and never by
+  leaving a product out. A position is not a claim about the product: it is a
+  true statement about the list in front of the customer, in the words they
+  already use for it. The group is numbered together so a number is never read
+  as a price. Only a product with no usable identity or title cannot become a
+  row; the set then reports itself **incomplete** and the caller sends the
+  model's text alone, so a real option never disappears because of a display
+  limit.
+* **Settled, 2026-09-22 10:17Z: Meta accepts a list whose two rows share a
+  visible title.** The platform dropped such rows on a rule carried over from
+  reply buttons, where the rejection is real (HTTP 400 `Duplicate button
+  title`, `build_standard_pick_buttons`, `meta_errors.invalid_payload`); for
+  list rows there was never a test or a logged rejection behind it. Asked
+  directly — one list, two rows, one title, two ids — the provider answered
+  `{"accepted": true, "classification": "ok", "http_status": 200}` with no
+  error. So `_send_list_reply` no longer drops a row for its title: ids are
+  de-duplicated (the provider does require those unique) and a repeated title
+  is logged and sent. A self-imposed rule was removing real choices from the
+  customer's answer.
+
+  **What the run proves, and what it does not.** It proves provider
+  *acceptance* of the payload — which is the whole question. It is not evidence
+  of delivery, of anyone reading it, or of the recipient being the intended
+  one: this runtime records no delivery or read receipt, so `customer_reach`
+  stays `unknown` for an accepted send. The run also reached an unintended
+  though allowlisted number, because the script chose the allowlist's first
+  entry; **membership of the allowlist is permission, not intent**. The probe
+  now refuses to choose at all: `NAHLA_PROBE_RECIPIENT` must name the number
+  and that number must also be in the allowlist.
+
+  What does not change: two rows a customer reads as one title are a poor
+  selector whatever the provider accepts, so the labelling above stands — it
+  is now the only thing standing between the customer and an ambiguous row,
+  rather than a second line of defence behind a silent drop.
+
+  `scripts/operators/whatsapp_duplicate_row_title_probe.py` stays runnable to
+  re-establish the answer after any provider change. It requires
+  `NAHLA_DUPLICATE_ROW_TITLE_TEST=SEND` and an explicitly named allowlisted
+  `NAHLA_PROBE_RECIPIENT`, sends through `provider_send_message` so no
+  credential reaches the script, and writes to no table.
+* Recorded, not changed: the catalogue search's clarification guard
+  (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the
+  `artifact` / `response_bundle` shapes the legacy compose path writes. This
+  runtime writes `evidence_refs` instead, so on a pilot turn the guard always
+  sees none and never fires. With the products of earlier replies now carried,
+  forcing a clarification question would be the wrong repair anyway; the finding
+  is kept here so the gap is not rediscovered as a bug.
+* `variant_options` carries only values a customer could say back. A provider may
+  keep its own bookkeeping in the same mapping — Tenant 1 product 37 carries
+  `option_value_ids: ['1064266980', '1837256091']` beside `المقاس` — and a
+  non-scalar value is never an option anyone chooses. The rule is the shape, not
+  a name list.
 * A product's availability is the **synced** one: the catalog row prefers
   `metadata.in_stock` / `metadata.stock_qty` and uses the `products` columns only
   when the metadata is silent. Tenant 1 has rows whose column says available while

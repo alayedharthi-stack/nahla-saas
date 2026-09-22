@@ -37,6 +37,7 @@ from core.commerce_runtime import contracts as c
 from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import recent_products as rp
 from core.commerce_runtime.agent_loop import AgentLoop
 from core.commerce_runtime.ledgers import LedgerRepository
 
@@ -250,6 +251,45 @@ def build_trusted_binding(
         _close_quietly(session)
         return None, None
     return alt.LiveToolBinding(context=context, link=link), session
+
+
+def _with_products_shown_earlier(
+    binding: Any,
+    session: Any,
+    *,
+    tenant_id: int,
+    conversation_id: int,
+    turn_id: int,
+    context_preamble: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Carry this conversation's recently shown products into the turn.
+
+    Two things happen together, and neither is useful alone: the products
+    become identities this turn may look up, and the model is told they exist.
+    Authorizing without telling leaves the model guessing an id — which is what
+    it did on 2026-09-22, and the isolation guard rightly refused it. Telling
+    without authorizing leaves it with a name it cannot resolve.
+
+    The context is data, not instruction: ids and the merchant's own values, in
+    the same trusted-fact block the preamble already uses. No order is claimed;
+    see ``recent_products`` for why. Never raises — a turn that cannot read its
+    own earlier replies runs without the aid.
+    """
+    preamble: Dict[str, Any] = dict(context_preamble or {})
+    try:
+        shown = rp.products_shown_earlier(
+            session, tenant_id=int(tenant_id), conversation_id=int(conversation_id))
+        if shown.products:
+            binding.context.authorize_products(shown.product_ids, titles=shown.titles)
+            preamble["products_shown_earlier"] = shown.as_facts()
+    except Exception as exc:  # noqa: BLE001 - the aid is never the turn's precondition
+        logger.warning("[COMMERCE_RUNTIME] browsing context unavailable turn=%s error=%s",
+                       turn_id, type(exc).__name__)
+        return preamble
+    logger.info("[COMMERCE_RUNTIME] browsing context turn=%s reason=%s products=%d "
+                "seconds_since_last_product_shown=%s", turn_id, shown.reason,
+                len(shown.products), shown.seconds_since_last_product_shown)
+    return preamble
 
 
 def _close_quietly(session: Any) -> None:
@@ -497,6 +537,14 @@ def run_commerce_runtime_turn(
             AnthropicProvider,
         )
 
+        # What earlier replies in this conversation were grounded on, so a
+        # follow-up question about something already shown has an identity to
+        # bind to instead of a phrase to search for. Identity only: every fact
+        # still has to be read by a tool in this turn and cited as this turn's
+        # evidence. Inside the try, so the session below is always retired.
+        preamble = _with_products_shown_earlier(
+            binding, session, tenant_id=int(tenant_id), conversation_id=int(conversation_id),
+            turn_id=turn_id, context_preamble=context_preamble)
         registry = alt.build_live_registry(binding)
         reasoner = ap.AnthropicReasoningProvider(
             instructions=instructions,
@@ -508,7 +556,7 @@ def run_commerce_runtime_turn(
                            # The provider resolves the call's model from this key.
                            # It is the configured pilot value, never a fallback.
                            "model": requested_model},
-            context_preamble=context_preamble,
+            context_preamble=preamble,
             history=history,
         )
         loop = AgentLoop(ledgers, registry, budget=budget)

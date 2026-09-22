@@ -167,6 +167,24 @@ EVIDENCE_QUERIES = {
         "(SELECT string_agg(DISTINCT v->'options'->>'اللون', ',') "
         " FROM jsonb_array_elements(coalesce(p.metadata->'variants', '[]'::jsonb)) v) AS variant_colours "
         "FROM products p WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) ORDER BY p.id"),
+    # Whether the catalog row the read tools project can carry variant options
+    # at all: store_knowledge builds them from ProductVariant ROWS and returns
+    # an empty list on its legacy metadata-JSON path.
+    "product_variant_rows_cited": (
+        "SELECT p.id AS product_id, count(v.id) AS variant_rows, "
+        "count(v.id) FILTER (WHERE v.is_default) AS default_rows, "
+        "count(v.id) FILTER (WHERE v.in_stock AND coalesce(v.stock_quantity, 1) > 0 AND NOT v.is_default) "
+        "  AS sellable_rows, "
+        "(SELECT string_agg(DISTINCT k, ',') FROM product_variants v2, "
+        "   jsonb_object_keys(coalesce(v2.options, '{}'::jsonb)) k "
+        " WHERE v2.product_id = p.id) AS option_names, "
+        "jsonb_array_length(coalesce(p.metadata->'variants', '[]'::jsonb)) AS metadata_variants "
+        "FROM products p LEFT JOIN product_variants v ON v.product_id = p.id AND v.tenant_id = p.tenant_id "
+        "WHERE p.tenant_id = 1 AND p.id = ANY(:product_ids) GROUP BY p.id ORDER BY p.id"),
+    "product_variant_rows_tenant1_total": (
+        "SELECT count(*) AS variant_rows, count(DISTINCT product_id) AS products_with_rows, "
+        "(SELECT count(*) FROM products WHERE tenant_id = 1) AS products_total "
+        "FROM product_variants WHERE tenant_id = 1"),
     "personal_codes_of_this_conversations_customer": (
         "SELECT cp.id, left(cp.code, 2) || repeat('*', greatest(length(cp.code) - 2, 0)) AS code_masked, "
         "cp.expires_at, cp.source_type, cp.coupon_level, cp.allocation_channel, cp.discount_type, "

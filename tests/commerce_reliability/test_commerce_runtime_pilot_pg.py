@@ -36,6 +36,7 @@ from core.commerce_runtime import contracts as c
 from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import recent_products as rp
 from core.commerce_runtime import runtime_entry as entry
 from core.commerce_runtime.agent_loop import AgentLoop
 from core.commerce_runtime.ledgers import LedgerRepository
@@ -1820,3 +1821,220 @@ def test_a_percentage_coupon_reconciled_as_a_money_object_is_read_as_a_percentag
     fact = next(f for f in facts if int(f["id"]) == ids[0])
     assert fact["discount_type"] == "percentage"
     assert fact["discount_value"] == "5" and fact["discount"] == "5%"
+
+
+# ── Products an earlier reply showed (X1) ────────────────────────────────────
+
+
+def _age_row(pilot: "Pilot", row_id: int, *, hours: int) -> None:
+    with pilot.engine.begin() as conn:
+        conn.execute(text("UPDATE message_events SET created_at = now() at time zone 'utc' "
+                          "- make_interval(hours => :h) WHERE id = :i"),
+                     {"h": int(hours), "i": int(row_id)})
+
+
+def _shown(pilot: "Pilot", *, conversation_id: Optional[int] = None) -> Any:
+    session = pilot.session_factory()
+    try:
+        return rp.products_shown_earlier(
+            session, tenant_id=pilot.tenant_a,
+            conversation_id=conversation_id or pilot.conversation_id)
+    finally:
+        session.close()
+
+
+def test_a_product_an_earlier_reply_cited_is_an_identity_the_next_turn_can_read(pilot):
+    """Tenant 1, 2026-09-22 07:12Z: asked about a dress shown earlier, the model
+    called ``get_product_details`` first — the reasonable tool — and the
+    isolation guard refused it, because identity was acquired only inside the
+    turn that searched. The reply then had no fact to give. With the products
+    the earlier reply was grounded on carried into the turn, the same first
+    call resolves, and the evidence it produces is this turn's own."""
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound",
+            body="عندنا هذه الخيارات", metadata={"evidence_refs": [ref],
+                                                 "commerce_runtime_turn_id": 1})
+        transport = Transport([accepted("wamid.CARRIED")])
+        report = pilot.run(
+            answers=[
+                step([tool_use("t1", "get_product_details", product_id=pilot.product_id)]),
+                step([reply("متوفر بمقاسين", refs=(ref,), commerce=True, call_id="r1")]),
+            ],
+            transport=transport,
+            question="وش الألوان والمقاسات المتوفرة للأول؟",
+        )
+    assert report.tools_called == ("get_product_details",)
+    assert ref in report.evidence_refs
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+
+
+def test_without_an_earlier_reply_the_same_lookup_is_still_refused(pilot):
+    """The guard is not weakened: identity comes from evidence this conversation
+    really produced, never from the model naming an id."""
+    ref = f"catalog:product:{pilot.product_id}"
+    transport = Transport([])
+    report = pilot.run(
+        answers=[
+            step([tool_use("t1", "get_product_details", product_id=pilot.product_id)]),
+            step([reply("متوفر", refs=(ref,), commerce=True, call_id="r1")]),
+            step([reply("متوفر", refs=(ref,), commerce=True, call_id="r2")]),
+        ],
+        transport=transport,
+        question="وش الألوان والمقاسات المتوفرة للأول؟",
+    )
+    assert transport.sent == []
+    assert report.processing_outcome == c.ProcessingOutcome.FAILED.value
+
+
+def test_the_carried_products_are_read_back_from_the_merchant_s_own_catalogue(pilot):
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارات",
+            metadata={"evidence_refs": [ref, "order:summary:7", "catalog:product:999999"]})
+        shown = _shown(pilot)
+    assert shown.reason == rp.CARRIED
+    assert shown.product_ids == [pilot.product_id]
+    fact = shown.as_facts()[0]
+    assert fact["product_id"] == pilot.product_id and fact["title"] == PRODUCT_TITLE
+    assert fact["in_stock"] is True
+
+
+def test_a_product_shown_long_enough_ago_carries_no_browsing_context(pilot):
+    """The set lapses; nothing is deleted. The reply row, the conversation and
+    the customer are all still there — only what the platform volunteers for
+    this one turn changes."""
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        row = say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارات",
+                  metadata={"evidence_refs": [ref]})
+        _age_row(pilot, row, hours=1 + rp.BROWSING_CONTEXT_LAPSE_SECONDS // 3600)
+        lapsed = _shown(pilot)
+        _age_row(pilot, row, hours=1)
+        fresh = _shown(pilot)
+        with pilot.engine.begin() as conn:
+            still_there = int(conn.execute(
+                text("SELECT count(*) FROM message_events WHERE id = :i"), {"i": row}).scalar_one())
+    assert lapsed.reason == rp.LAPSED and lapsed.products == ()
+    assert fresh.reason == rp.CARRIED and fresh.product_ids == [pilot.product_id]
+    assert still_there == 1
+
+
+def test_a_busy_conversation_does_not_keep_an_old_product_current(pilot):
+    """The clock belongs to the product, not to the conversation.
+
+    The customer was shown a product a week ago and has been replied to since —
+    about a coupon, about an order. Neither of those replies showed the
+    product, so neither makes it current again. This is the behaviour a lapse
+    measured from "the conversation's last reply" would get wrong, and it needs
+    no guess at what any message was about: a reply that discusses the product
+    cites it, and only that citation refreshes it.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        old_row = say(conversation_id=pilot.conversation_id, direction="outbound",
+                      body="هذه الخيارات", metadata={"evidence_refs": [ref]})
+        _age_row(pilot, old_row, hours=24 * 7)
+        for hours, refs in ((49, ["order:summary:4"]), (25, []), (1, ["promotion:coupon:9"])):
+            chatter = say(conversation_id=pilot.conversation_id, direction="outbound",
+                          body="رد آخر", metadata={"evidence_refs": refs})
+            _age_row(pilot, chatter, hours=hours)
+        stale = _shown(pilot)
+
+        # And the moment a reply shows it again, it is current again — by
+        # evidence, not by any judgement about the subject of the message.
+        again = say(conversation_id=pilot.conversation_id, direction="outbound",
+                    body="عن المنتج نفسه", metadata={"evidence_refs": [ref]})
+        _age_row(pilot, again, hours=1)
+        refreshed = _shown(pilot)
+    assert stale.reason == rp.LAPSED and stale.products == ()
+    assert stale.seconds_since_last_product_shown >= 24 * 7 * 3600
+    assert refreshed.reason == rp.CARRIED and refreshed.product_ids == [pilot.product_id]
+
+
+def test_a_customer_can_go_back_to_a_product_whose_context_has_lapsed(pilot):
+    """Retrieval after a lapse, run rather than assumed.
+
+    That the rows survive proves nothing about whether the customer can get
+    back to the product. So this drives the real turn: with the earlier reply
+    aged past the lapse — nothing carried, the identity gone — the customer
+    asks to go back, the model searches the catalogue by name, the product is
+    found, its details resolve, and the reply is grounded on it and sent.
+
+    The turn after that carries it again, because this reply cited it. Nothing
+    was restored by hand: coming back costs one ordinary search.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        row = say(conversation_id=pilot.conversation_id, direction="outbound",
+                  body="هذه الخيارات", metadata={"evidence_refs": [ref]})
+        _age_row(pilot, row, hours=1 + rp.BROWSING_CONTEXT_LAPSE_SECONDS // 3600)
+        assert _shown(pilot).reason == rp.LAPSED
+
+        transport = Transport([accepted("wamid.BACK")])
+        report = pilot.run(
+            answers=[
+                step([tool_use("t1", "search_products", query=PRODUCT_TITLE)]),
+                step([tool_use("t2", "get_product_details", product_id=pilot.product_id)]),
+                step([reply("متوفر", refs=(ref,), commerce=True, call_id="r1")]),
+            ],
+            transport=transport,
+            question="أبغى أرجع للمنتج اللي كلمتك عنه",
+            budget=ac.LoopBudget(max_steps=4, max_tool_calls=4, tool_timeout_seconds=10.0,
+                                 provider_timeout_seconds=15.0, deadline_seconds=45.0),
+        )
+        # The reply this turn sent cites the product, so the next turn has it
+        # again — the ordinary refresh, not a special case.
+        say(conversation_id=pilot.conversation_id, direction="outbound", body=report.reply_text,
+            metadata={"evidence_refs": list(report.evidence_refs)})
+        after = _shown(pilot)
+    assert report.tools_called == ("search_products", "get_product_details")
+    assert ref in report.evidence_refs
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert after.reason == rp.CARRIED and after.product_ids == [pilot.product_id]
+
+
+def test_another_conversation_s_products_are_never_carried_into_this_one(pilot):
+    ref = f"catalog:product:{pilot.product_id}"
+    with _second_conversation(pilot) as other, _messages(pilot) as say:
+        say(conversation_id=other, direction="outbound", body="خيارات",
+            metadata={"evidence_refs": [ref]})
+        here = _shown(pilot)
+        there = _shown(pilot, conversation_id=other)
+    assert here.reason == rp.NO_EARLIER_REPLY and here.products == ()
+    assert there.product_ids == [pilot.product_id]
+
+
+def test_a_reply_that_cited_no_product_carries_nothing_and_says_so(pilot):
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="كوبون",
+            metadata={"evidence_refs": ["promotion:coupon:10041"]})
+        shown = _shown(pilot)
+    assert shown.reason == rp.NO_PRODUCTS_CITED and shown.products == ()
+
+
+def test_the_model_is_told_which_products_were_shown_not_left_to_guess_an_id(pilot):
+    """Authorizing without telling would leave the model naming an id — which
+    is exactly what it did before the guard refused it. The two halves ship
+    together: the identity is readable *and* the model can see it exists."""
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارات",
+            metadata={"evidence_refs": [ref]})
+        transport = Transport([accepted("wamid.TOLD")])
+        scripted = ScriptedAnthropic([step([reply("تفضلي", call_id="r1")])])
+        report = entry.run_commerce_runtime_turn(
+            engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+            conversation_id=pilot.conversation_id, connection_ref=f"wa:{pilot.connection_id}",
+            connection_id=str(pilot.connection_id), customer_id=pilot.customer_id,
+            normalized_customer_phone=PHONE, provider_message_id="wamid." + uuid.uuid4().hex,
+            inbound_text="والأول؟", inbound_metadata={}, transport=transport,
+            instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+            context_preamble={"channel": "whatsapp"}, anthropic_provider=scripted)
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    context_block = scripted.calls[0]["messages"][0]["content"][0]["text"]
+    assert "products_shown_earlier" in context_block
+    assert f'"product_id": {pilot.product_id}' in context_block
+    assert PRODUCT_TITLE in context_block
+    # The preamble the caller supplied is kept, not replaced.
+    assert "whatsapp" in context_block
