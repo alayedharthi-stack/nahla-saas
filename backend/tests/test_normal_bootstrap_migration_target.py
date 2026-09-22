@@ -25,13 +25,14 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
 
 from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
 
-def test_repository_parallel_heads_0092_and_0111() -> None:
-    # 0110 is the address sibling; it joins this set once its branch merges.
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111"})
-    assert repository_heads_expected(REPOSITORY_ALEMBIC_HEADS)
+def test_repository_accepts_only_known_parallel_head_topologies() -> None:
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0112"})
+    assert repository_heads_expected({"0092", "0111"})
     assert repository_heads_expected({"0092", "0110", "0111"})
+    assert repository_heads_expected(REPOSITORY_ALEMBIC_HEADS)
     assert not repository_heads_expected({"0092", "0110"})
-    assert not repository_heads_expected({"0092", "0111", "0112"})
+    assert not repository_heads_expected({"0092", "0110", "0111", "0112"})
+    assert not repository_heads_expected({"0092", "0111", "0112", "0113"})
 
 
 def test_migration_0094_extends_integration_branch_from_0093() -> None:

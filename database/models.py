@@ -697,10 +697,14 @@ class ConversationA1SubjectBinding(Base):
 
 
 class OrderShipment(Base):
-    """Internal shipment record for merchant fulfillment (foundation — no carrier API)."""
+    """Shipment record, optionally enriched from an approved carrier source."""
     __tablename__ = 'order_shipments'
     __table_args__ = (
         UniqueConstraint('order_id', name='uq_order_shipments_order_id'),
+        UniqueConstraint(
+            'tenant_id', 'tracking_data_source', 'external_shipment_id',
+            name='uq_order_shipments_tenant_tracking_source_ref',
+        ),
         Index('ix_order_shipments_tenant_id', 'tenant_id'),
     )
 
@@ -710,6 +714,17 @@ class OrderShipment(Base):
     provider = Column(String, nullable=False, default='internal')
     status = Column(String, nullable=False, default='shipment_created')
     tracking_number = Column(String, nullable=True)
+    # Salla tracking enrichment. These fields intentionally do not make a
+    # network request from a customer-provided tracking number: the source
+    # record is reached only through the tenant-scoped order and Salla shipment
+    # id returned by Salla's authenticated Merchant API.
+    tracking_data_source = Column(String, nullable=True)
+    external_shipment_id = Column(String, nullable=True)
+    carrier = Column(String, nullable=True)
+    tracking_url = Column(String, nullable=True)
+    latest_event = Column(JSONB, nullable=True)
+    source_event_at = Column(DateTime(timezone=True), nullable=True)
+    last_verified_at = Column(DateTime(timezone=True), nullable=True)
     label_url = Column(String, nullable=True)
     label_pdf_path = Column(String, nullable=True)
     recipient_name = Column(String, nullable=True)

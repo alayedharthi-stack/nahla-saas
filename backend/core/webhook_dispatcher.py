@@ -155,6 +155,7 @@ async def _dispatch_salla(db: Session, event) -> None:
         SALLA_CUSTOMER_WEBHOOK_EVENTS,
         SALLA_MERCHANT_WEBHOOK_DEPRECATED_EVENTS,
         SALLA_ORDER_WEBHOOK_EVENTS,
+        SALLA_SHIPMENT_WEBHOOK_EVENTS,
         SALLA_PRODUCT_DELETE_WEBHOOK_EVENTS,
         SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS,
         SALLA_SPECIAL_OFFER_WEBHOOK_EVENTS,
@@ -174,6 +175,20 @@ async def _dispatch_salla(db: Session, event) -> None:
             record_order_outcome(db, tenant_id, data, event_type=event_type)
         except Exception as _ot_exc:
             logger.debug("[Dispatcher] outcome_tracker raised (non-fatal): %s", _ot_exc)
+        return
+
+    if event_type in SALLA_SHIPMENT_WEBHOOK_EVENTS:
+        adapter = svc._get_adapter()  # noqa: SLF001 - connection is already tenant-resolved
+        shipment_payload = data.get("shipment") if isinstance(data.get("shipment"), dict) else data
+        from services.salla_shipment_tracking import refresh_tracking_from_salla_event  # noqa: PLC0415
+
+        await refresh_tracking_from_salla_event(
+            db,
+            tenant_id=tenant_id,
+            adapter=adapter,
+            payload=shipment_payload,
+            observed_via=f"salla_webhook:{event_type}",
+        )
         return
 
     if event_type in SALLA_PRODUCT_UPSERT_WEBHOOK_EVENTS | SALLA_MERCHANT_WEBHOOK_DEPRECATED_EVENTS:
