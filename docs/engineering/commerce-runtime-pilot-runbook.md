@@ -967,19 +967,28 @@ as well as through the ledger.
   row; the set then reports itself **incomplete** and the caller sends the
   model's text alone, so a real option never disappears because of a display
   limit.
-* Open question, under test: the platform de-duplicates interactive rows by
-  visible title, but every recorded provider rejection behind that rule —
-  HTTP 400 `Duplicate button title`, `build_standard_pick_buttons`,
-  `meta_errors.invalid_payload` — is about reply **buttons**. For list **rows**
-  the rule was carried over by analogy, with no test and no logged rejection.
-  `scripts/operators/whatsapp_duplicate_row_title_probe.py` asks the provider
-  once, owner-approved: one interactive list to the pilot's own allowlisted
-  trial recipient with two rows sharing a title and differing only by id. It
-  requires `NAHLA_DUPLICATE_ROW_TITLE_TEST=SEND`, reads the recipient from the
+* **Settled, 2026-09-22 10:17Z: WhatsApp does not refuse a list for a repeated
+  row title.** The platform dropped such rows on a rule carried over from reply
+  buttons, where the rejection is real (HTTP 400 `Duplicate button title`,
+  `build_standard_pick_buttons`, `meta_errors.invalid_payload`); for list rows
+  there was never a test or a logged rejection behind it. Asked directly —
+  one list, two rows, one title, two ids — the provider answered
+  `{"accepted": true, "classification": "ok", "http_status": 200}` with no
+  error. So `_send_list_reply` no longer drops a row for its title: ids are
+  de-duplicated (the provider does require those unique) and a repeated title
+  is logged and sent. A self-imposed rule was removing real choices from the
+  customer's answer.
+
+  What does not change: two rows a customer reads as one title are a poor
+  selector whatever the provider accepts, so the labelling above stands — it
+  is now the only thing standing between the customer and an ambiguous row,
+  rather than a second line of defence behind a silent drop.
+
+  `scripts/operators/whatsapp_duplicate_row_title_probe.py` stays runnable to
+  re-establish the answer after any provider change. It requires
+  `NAHLA_DUPLICATE_ROW_TITLE_TEST=SEND`, reads the recipient from the pilot
   allowlist rather than an argument, sends through `provider_send_message` so
-  no credential reaches the script, and writes to no table. Whatever the answer,
-  two rows a customer reads as one title are not a usable selector — the
-  labelling above stands either way.
+  no credential reaches the script, and writes to no table.
 * Recorded, not changed: the catalogue search's clarification guard
   (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the
   `artifact` / `response_bundle` shapes the legacy compose path writes. This

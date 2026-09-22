@@ -16532,8 +16532,20 @@ async def _send_list_reply(
 
     Reply buttons stop at three. A list carries up to ten rows, each with
     a description, which is what lets several addresses in the same city
-    be told apart. Rows are de-duplicated by id and title for the same
-    reason buttons are — the provider rejects the whole payload otherwise.
+    be told apart.
+
+    Rows are de-duplicated by **id**, which the provider does require to be
+    unique. They are no longer dropped for sharing a visible title: that rule
+    was carried over from reply buttons, where the rejection is real (HTTP 400
+    ``Duplicate button title``), and it was never true here. Asked directly on
+    2026-09-22 — one list, two rows, one title, two ids — WhatsApp answered
+    HTTP 200 and delivered it
+    (``scripts/operators/whatsapp_duplicate_row_title_probe.py``). Dropping
+    those rows removed real choices from the customer's answer for a provider
+    rule that does not exist. A repeat is logged instead, because two rows a
+    customer reads as one title are still a poor selector — that is the
+    caller's to fix by labelling them (see ``core/commerce_runtime/choice_rows.py``),
+    not this sender's to fix by hiding one.
     """
     wire_rows: list = []
     seen_ids: set = set()
@@ -16551,8 +16563,14 @@ async def _send_list_reply(
         title_key = normalize_button_title_key(title)
         if not row_id or not title:
             continue
-        if row_id in seen_ids or (title_key and title_key in seen_titles):
+        if row_id in seen_ids:
             continue
+        if title_key and title_key in seen_titles:
+            logger.warning(
+                "[WA_LIST_ROWS] two rows share a visible title tenant=%s rows=%d — sent "
+                "as-is; the customer cannot tell them apart",
+                _tenant_id, len(wire_rows) + 1,
+            )
         seen_ids.add(row_id)
         if title_key:
             seen_titles.add(title_key)

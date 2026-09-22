@@ -10,7 +10,15 @@ It matters: a catalogue like Tenant 1's, where five dresses are all titled
 «فستان», is shaped entirely by that rule. If rows only require unique **ids**,
 the constraint is self-imposed.
 
-So this asks the provider, once. It sends a single interactive list to the
+**Answered, 2026-09-22 10:17Z:** one list, two rows, one title, two ids —
+``{"accepted": true, "classification": "ok", "http_status": 200}``, no error of
+any kind. WhatsApp does not refuse a list for a repeated row title. The rule
+was self-imposed, and ``_send_list_reply`` no longer drops those rows; it logs
+the repeat and sends them. Labelling them so the *customer* can tell them apart
+remains the caller's job (``core/commerce_runtime/choice_rows.py``).
+
+This stays runnable so the answer can be re-established after any provider
+change. It asks the provider, once. It sends a single interactive list to the
 tenant's own allowlisted trial recipient with two rows that share a title and
 differ only by id, and prints what came back. Owner-approved, and deliberately
 narrow:
