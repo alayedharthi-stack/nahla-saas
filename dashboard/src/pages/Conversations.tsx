@@ -432,6 +432,9 @@ export default function Conversations() {
         !signal.aborted
       ) {
         const supplemental = await fetchOutlineForPhoneMaybe(requestedPhone, signal).catch(() => null)
+        // The deep search adds an await after the first-page generation check.
+        // Do not let an aborted or superseded deep link write stale inbox state.
+        if (gen !== listReqGen.current || signal.aborted) return
         if (
           supplemental &&
           gen === listReqGen.current &&
@@ -485,16 +488,17 @@ export default function Conversations() {
 
   /** Broader inbox fetch — only when linked phone misses the newest page snapshot. */
   async function fetchOutlineForPhoneMaybe(phoneGuess: string, signal: AbortSignal) {
-    // Intentionally NOT filtered — when a deep-link arrives for a
-    // specific phone and it isn't in the current filter's slice, we
-    // want to surface the row anyway. The router returns the full
-    // (unfiltered) inbox so the search lands across categories.
-    const res = await featureRealityApi.conversations({
-      signal,
-      limit: 200,
-      offset: 0,
-    })
-    return res.conversations.find((c) => phonesMatch(c.phone, phoneGuess)) ?? null
+    // A notification can be opened long after the conversation left the
+    // first page. Search the tenant-scoped, unfiltered pages until found.
+    let offset = 0
+    while (!signal.aborted) {
+      const res = await featureRealityApi.conversations({ signal, limit: 200, offset })
+      const hit = res.conversations.find((c) => phonesMatch(c.phone, phoneGuess))
+      if (hit) return hit
+      if (!res.has_more || res.conversations.length === 0) return null
+      offset += res.conversations.length
+    }
+    return null
   }
 
   const appendNextPage = async () => {
