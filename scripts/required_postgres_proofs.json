@@ -289,7 +289,14 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_turn_admitted_for_one_tenant_is_invisible_to_another",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_conversation_outside_the_tenant_yields_no_trusted_context_and_no_send",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_runtime_refuses_when_its_schema_is_not_present",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_percentage_coupon_reconciled_as_a_money_object_is_read_as_a_percentage"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_percentage_coupon_reconciled_as_a_money_object_is_read_as_a_percentage",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_product_an_earlier_reply_cited_is_an_identity_the_next_turn_can_read",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_without_an_earlier_reply_the_same_lookup_is_still_refused",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_carried_products_are_read_back_from_the_merchant_s_own_catalogue",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_conversation_that_has_gone_quiet_carries_no_browsing_context",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_conversation_s_products_are_never_carried_into_this_one",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_reply_that_cited_no_product_carries_nothing_and_says_so",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_model_is_told_which_products_were_shown_not_left_to_guess_an_id"
       ]
     },
     {

@@ -912,6 +912,48 @@ as well as through the ledger.
   (`variant_options`, with `variants_in_stock` and `variants_total`), so a colour or
   size in a reply comes from the merchant's variant rows. September 2026: the view
   carried no variant at all and a white/fuchsia dress was called black.
+* Each turn is handed the products **this conversation's recent replies were
+  grounded on**, read back from the persisted `evidence_refs`. They become
+  identities the turn may look up and are named in the trusted-fact preamble as
+  `products_shown_earlier`. 2026-09-22 07:12Z: asked about a dress shown
+  earlier, the model called `get_product_details` — the right tool — and the
+  isolation guard refused it, because identity was otherwise acquired only
+  inside the turn that searched; the fallback search on the referring phrase
+  («الفستان الأول») matched nothing, because the catalogue search requires every
+  token and no product text contains an ordinal. The guard is unchanged: an id
+  the model names on its own is still refused, and every fact still has to be
+  read by a tool in this turn and cited as this turn's evidence.
+
+  No **order** is claimed. The stored references are the order the reply
+  *cited*, which is not provably the order the customer *saw*; the model has its
+  own earlier message in the transcript and resolves "the first" from that. A
+  provable presentation order needs the reply to carry structured choices.
+
+  The set is bounded: the last `MAX_REPLIES_READ` replies, at most
+  `MAX_PRODUCTS` products, this conversation only, this tenant only, and each
+  product re-read in the merchant's catalogue now — one the merchant has since
+  removed is not carried. It **lapses** after
+  `BROWSING_CONTEXT_LAPSE_SECONDS` (provisional: 72 h) measured from the last
+  reply, so a customer returning after a long silence on a new subject is not
+  pulled back to it. Lapsing changes only what the platform volunteers for one
+  turn: the conversation, the customer's profile and their real orders are
+  untouched, and a customer who asks to go back to a product simply has it
+  looked up again. Each turn logs `[COMMERCE_RUNTIME] browsing context
+  turn=… reason=… products=… seconds_since_last_reply=…`, so the duration can be
+  set from evidence rather than opinion. The lapse is deliberately **not**
+  WhatsApp's 24 h service window: that governs sending, not memory.
+* Recorded, not changed: the catalogue search's clarification guard
+  (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the
+  `artifact` / `response_bundle` shapes the legacy compose path writes. This
+  runtime writes `evidence_refs` instead, so on a pilot turn the guard always
+  sees none and never fires. With the products of earlier replies now carried,
+  forcing a clarification question would be the wrong repair anyway; the finding
+  is kept here so the gap is not rediscovered as a bug.
+* `variant_options` carries only values a customer could say back. A provider may
+  keep its own bookkeeping in the same mapping — Tenant 1 product 37 carries
+  `option_value_ids: ['1064266980', '1837256091']` beside `المقاس` — and a
+  non-scalar value is never an option anyone chooses. The rule is the shape, not
+  a name list.
 * A product's availability is the **synced** one: the catalog row prefers
   `metadata.in_stock` / `metadata.stock_qty` and uses the `products` columns only
   when the metadata is silent. Tenant 1 has rows whose column says available while

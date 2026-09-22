@@ -252,6 +252,18 @@ MAX_VARIANT_OPTION_NAMES = 6
 MAX_VARIANT_OPTION_VALUES = 12
 
 
+def _option_value_text(value: Any) -> str:
+    """One option value as the customer would say it, or "" when it is not one.
+
+    A chosen value is a single scalar: a colour, a size, a material. Anything
+    a provider nests there (a list of internal option ids, a mapping) is
+    bookkeeping that no customer picks, so it is not an option value here.
+    """
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        return ""
+    return str(value).strip()[:40]
+
+
 def _variant_options(variants: Any) -> tuple[dict[str, list[str]], int | None, int | None]:
     """Option values (colour, size, …) of the variants that can be bought now.
 
@@ -261,6 +273,12 @@ def _variant_options(variants: Any) -> tuple[dict[str, list[str]], int | None, i
     ``({}, None, None)`` for a product without variants. Tenant 1, September
     2026: the model called a white/fuchsia dress "black" because the view
     carried no variant at all; a colour in the reply should come from here.
+
+    Only an option value a customer could say back is carried. A provider may
+    put its own bookkeeping in the same mapping — Tenant 1 product 37 carries
+    ``option_value_ids: ['1064266980', '1837256091']`` beside ``المقاس`` — and
+    such an entry is a list, never a value anyone chooses. The rule is the
+    shape, not a name list, so it holds for every merchant and provider.
     """
     if not isinstance(variants, list) or not variants:
         return {}, None, None
@@ -285,7 +303,7 @@ def _variant_options(variants: Any) -> tuple[dict[str, list[str]], int | None, i
             continue
         for name, value in raw_options.items():
             label = str(name or "").strip()[:40]
-            text = str(value or "").strip()[:40]
+            text = _option_value_text(value)
             if not label or not text:
                 continue
             if label not in options:

@@ -83,3 +83,43 @@ def test_a_row_without_variants_projects_nothing_extra() -> None:
     snapshot, evidence = catalog._product_evidence(row)
     assert snapshot.variant_options == {} and snapshot.variants_in_stock is None
     assert evidence.fields["variants_total"] is None
+
+
+def test_a_providers_internal_option_ids_are_not_an_option_the_customer_picks() -> None:
+    """Tenant 1 product 37 carried Salla's own id array beside the real size.
+
+    The list reached the model as an option named ``option_value_ids`` whose
+    values read ``"['1064266980', '1837256091']"`` — something no customer
+    says and the model could repeat. The shape decides, not the name.
+    """
+    options, in_stock, total = catalog._variant_options([
+        variant(id=1, options={"المقاس": "40 - M",
+                               "option_value_ids": ["1064266980", "1837256091"]}),
+        variant(id=2, options={"المقاس": "42 - L",
+                               "option_value_ids": ["1527950054", "1837256091"]}),
+    ])
+    assert options == {"المقاس": ["40 - M", "42 - L"]}
+    assert in_stock == 2 and total == 2
+
+
+def test_only_a_scalar_value_is_carried_whatever_the_provider_nests() -> None:
+    options, _, _ = catalog._variant_options([
+        variant(options={
+            "Colour": "White",          # a generic merchant, non-Arabic option name
+            "Size": 42,                 # a number is still something a customer says
+            "internal_map": {"id": 7},  # a mapping is bookkeeping
+            "internal_list": [1, 2],    # so is a list
+            "flag": True,               # and a boolean is not a value anyone picks
+            "blank": "   ",
+        }),
+    ])
+    assert options == {"Colour": ["White"], "Size": ["42"]}
+
+
+def test_a_variant_whose_options_are_all_internal_contributes_no_option_name() -> None:
+    options, in_stock, total = catalog._variant_options([
+        variant(id=1, options={"option_value_ids": ["9", "8"]}),
+        variant(id=2, options={"اللون": "أزرق"}),
+    ])
+    assert options == {"اللون": ["أزرق"]}
+    assert in_stock == 2 and total == 2
