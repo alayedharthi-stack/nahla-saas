@@ -858,7 +858,7 @@ def test_a_shareable_coupon_is_read_from_the_merchant_s_own_records_and_cited(pi
     """The owner's decision after the first Tenant 1 conversation: the model can
     read the merchant's currently valid coupons and hand one to the customer.
     Read only — the row is the merchant's, the code is never invented."""
-    with _coupons(pilot, ((pilot.tenant_a, "WELCOME10", None),)) as ids:
+    with _coupons(pilot, ((pilot.tenant_a, "WELCOME10", "shared"),)) as ids:
         ref = f"promotion:coupon:{ids[0]}"
         transport = Transport([accepted("wamid.COUPON")])
         report = pilot.run(
@@ -911,7 +911,7 @@ def test_a_personal_code_issued_to_another_customer_is_never_evidence_here(pilot
 
 
 def test_this_customer_s_own_personal_code_is_read_and_cited(pilot):
-    with _coupons(pilot, ((pilot.tenant_a, "PERSONALME", None),),
+    with _coupons(pilot, ((pilot.tenant_a, "PERSONALME", "shared"),),
                   metadata={"customer_id": pilot.customer_id, "usage_limit": 1, "usage_count": 0,
                             "active": True}) as ids:
         ref = f"promotion:coupon:{ids[0]}"
@@ -1008,11 +1008,34 @@ def test_the_merchant_s_own_first_purchase_rule_opens_the_first_rung(pilot):
     assert report.dispatch_status == dd.SENT_ACCEPTED and len(transport.sent) == 1
 
 
+def test_an_unpublished_code_carrying_no_rung_is_not_read_as_a_general_offer(pilot):
+    """«غياب المستوى عن سجل الكوبون ليس وحده إثباتًا بأنه عرض عام».
+
+    The same row as the case below, minus the one thing that makes it an offer
+    to everyone: the merchant never placed it on a surface the assistant reads.
+    Carrying no rung is the record declining to name one, not the merchant
+    publishing it, so the tool does not return it and a reply citing it is
+    refused before anything is sent.
+    """
+    with _coupons(pilot, ((pilot.tenant_a, "UNPLACED", None),)) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("خذ هذا الكود", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.tools_called == ("list_shareable_promotions",)
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unknown_evidence" in dict(report.stop_detail)["problems"]
+    assert transport.sent == [] and report.processing_outcome == c.ProcessingOutcome.FAILED.value
+
+
 def test_a_coupon_tied_to_no_rung_is_never_withheld_for_want_of_one(pilot):
     """«عند غياب مستوى مستحق، لا تُحجب العروض العامة غير المشروطة بذلك
     المستوى». This customer reaches no rung at all, and a code the merchant
     conditioned on none is read and cited exactly as before."""
-    with _coupons(pilot, ((pilot.tenant_a, "OPEN5", None),)) as ids:
+    with _coupons(pilot, ((pilot.tenant_a, "OPEN5", "shared"),)) as ids:
         ref = f"promotion:coupon:{ids[0]}"
         transport = Transport([accepted("wamid.OPEN")])
         report = pilot.run(
@@ -1126,7 +1149,7 @@ def test_the_coupon_read_writes_nothing_and_asks_only_for_this_tenant(pilot):
 
     event.listen(pilot.engine, "before_cursor_execute", capture)
     try:
-        with _coupons(pilot, ((pilot.tenant_a, "SPRING15", None),)) as ids:
+        with _coupons(pilot, ((pilot.tenant_a, "SPRING15", "shared"),)) as ids:
             ref = f"promotion:coupon:{ids[0]}"
             statements.clear()                      # the fixture's own insert is not the turn's
             transport = Transport([accepted("wamid.COUPON2")])

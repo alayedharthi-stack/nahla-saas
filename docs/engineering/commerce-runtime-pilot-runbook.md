@@ -916,19 +916,37 @@ as well as through the ledger.
   generated, reserved or redeemed, and a test asserts that by walking the
   module's own syntax tree rather than trusting the review.
 
-  `min_orders` is a minimum, so a customer reaches every enabled rung whose
-  minimum they have met, not only the highest; the rungs are returned in the
-  ladder's order and **never ranked by discount** — which one suits a
-  conversation is not a question a threshold can answer, and it stays the
-  agent's. The store's own AI policy (`allowed_levels`) is a separate gate and
-  both must open: a store that allows gold does not make a conversation gold,
-  and a gold customer does not override a store that keeps gold off the
-  assistant.
+  **One rung, and it is the contract's.** `resolve_coupon_level_for_order_count`
+  resolves exactly one — the highest enabled rung the customer has reached — and
+  that one is the answer. An earlier draft returned every rung the customer had
+  passed, reasoning that `min_orders` is a minimum; that put a gold customer's
+  bronze, silver and gold codes in front of the model at once and so recreated,
+  smaller, the problem the gate exists to solve. A customer has a standing, not
+  a range, and the issuance half acts on the same single answer — reading and
+  issuing must not disagree about who a customer is. The store's own AI policy
+  (`allowed_levels`) is a separate gate and both must open: a store that allows
+  gold does not make a conversation gold, and a gold customer does not override
+  a store that keeps gold off the assistant.
 
-  Two rules protect the customer who cannot be placed. A coupon tied to **no**
-  rung — and every offer — is projected whether or not a level resolved: what
-  was never about classification is not withheld for want of one. And not
-  knowing is never an entitlement: `identity_not_established` (no customer in
+  **A general offer is a merchant's act, never an absence.** Carrying no rung
+  says only that the record does not name one; it is not evidence the merchant
+  meant the code for everyone, and `shared` on its own proves nothing because
+  `coupon_generator` *defaults* every pool coupon's `allocation_channel` to it.
+  So an unleveled coupon is projected only on two positive acts the merchant
+  performed: `source_type` is `manual` — the merchant's own dashboard, the one
+  path that writes the AI fields, while the warm pool writes `system` and always
+  stamps a rung, and a Salla import expresses no Nahla AI intent — **and** the
+  `allocation_channel` is `ai` or `shared`, a field left empty when the merchant
+  does not choose one. Every **offer** is projected because an active store
+  promotion the merchant created is itself that authorisation, and it carries no
+  code.
+
+  *Operational consequence worth checking per merchant:* a coupon with neither a
+  rung nor an allocation channel is now withheld. If a merchant expects such a
+  code to be offered, the fix is in their dashboard — set the level, or set the
+  channel — not in the runtime.
+
+  Not knowing is never an entitlement: `identity_not_established` (no customer in
   this conversation), `customer_record_unavailable` (an id this tenant carries
   no record for) and `order_history_unreadable` are failures to determine, each
   named, none of them earning a rung — and all three distinct from
@@ -938,8 +956,10 @@ as well as through the ledger.
   and only that one; with it off, they reach none.
 
   What the projection claims is bounded to what it settled.
-  `level_eligibility` / `customer_level` / `level_reason` carry the level
-  answer; `eligibility_determined` is true only when who this customer is was
+  `level_eligibility` (`entitled` for a rung the customer stands on,
+  `merchant_authorized_general` for a code or offer the merchant published) /
+  `customer_level` / `level_reason` carry the level answer;
+  `eligibility_determined` is true only when who this customer is was
   settled **and** the record leaves no other condition unchecked, so a minimum
   basket or a usage limit keeps it false with `eligibility_note` naming what is
   still open. An offer never sets it: an offer is terms, not a grant, and a

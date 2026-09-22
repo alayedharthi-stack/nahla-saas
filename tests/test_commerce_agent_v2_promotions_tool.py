@@ -57,7 +57,9 @@ def coupon_fact(promotion_id: int = 5, code: str = "WELCOME10", **overrides: Any
     fact = {
         "id": promotion_id, "code": code, "discount_type": "percentage", "discount_value": "10",
         "description": "خصم ترحيبي على أول طلب", "expires_at": "2027-01-01T00:00:00+00:00",
-        "source_type": "manual", "allocation_channel": "", "coupon_level": "",
+        # A merchant-created coupon the merchant put on a shared surface: the
+        # two acts that make an unleveled code a general offer.
+        "source_type": "manual", "allocation_channel": "shared", "coupon_level": "",
         "conditions": {"min_order_amount": "100"}, "customer_bound": False, "bound_customer_id": None,
         "eligibility_determined": False, "eligibility_note": "conditions_not_fully_evaluated",
         "record_kind": "coupon",
@@ -87,13 +89,14 @@ def truth(*, shareable: List[Dict[str, Any]] = (), offers: List[Dict[str, Any]] 
     )
 
 
-def entitled(*levels: str, orders: int = 4, customer_id: Optional[int] = 41,
+def entitled(level: Optional[str] = None, *, orders: int = 4, customer_id: Optional[int] = 41,
              reason: str = cer.REASON_ENTITLED, first_purchase: bool = False) -> cer.LevelEntitlement:
-    """A customer who reached ``levels``. The contract itself is proved in its
-    own module; here the tool is shown obeying whatever it is told."""
+    """A customer standing on exactly one rung — the shape the contract
+    resolves. The contract itself is proved in its own module; here the tool is
+    shown obeying whatever it is told."""
     return cer.LevelEntitlement(
-        customer_id=customer_id, countable_orders=orders,
-        resolved_level=(levels[-1] if levels else None), entitled_levels=tuple(levels),
+        customer_id=customer_id, countable_orders=orders, resolved_level=level,
+        entitled_levels=((level,) if level else ()),
         reason=reason, first_purchase_applied=first_purchase)
 
 
@@ -127,7 +130,7 @@ def run(context: Context, monkeypatch: pytest.MonkeyPatch, result: pt.PromotionT
 
     def read_entitlement(db: Any, tenant_id: int, customer_id: Any) -> cer.LevelEntitlement:
         context.standing_reads.append((db, tenant_id, customer_id))
-        return entitlement if entitlement is not None else entitled(*cer.CANONICAL_COUPON_LEVEL_IDS)
+        return entitlement if entitlement is not None else entitled("vip")
 
     monkeypatch.setattr(tool, "resolve_shareable_promotions", resolver)
     monkeypatch.setattr(tool, "resolve_level_entitlement", read_entitlement)
@@ -233,7 +236,7 @@ def test_a_coupon_level_the_policy_does_not_allow_is_left_out(monkeypatch) -> No
         coupon_fact(promotion_id=2, code="SILVER15", coupon_level="silver"),
         coupon_fact(promotion_id=3, code="WELCOME10", coupon_level=""),
     ]), policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver"]},
-        entitlement=entitled("bronze", "silver", "gold", "vip"))
+        entitlement=entitled("silver"))
     assert [p.code for p in result.promotions] == ["SILVER15", "WELCOME10"]
     assert result.promotions[0].coupon_level == "silver"
 
@@ -247,7 +250,9 @@ def _ladder_facts():
         coupon_fact(promotion_id=1, code="GOLD50", coupon_level="gold", conditions={}),
         coupon_fact(promotion_id=2, code="SILVER15", coupon_level="silver", conditions={}),
         coupon_fact(promotion_id=3, code="BRONZE5", coupon_level="bronze", conditions={}),
-        coupon_fact(promotion_id=4, code="WELCOME10", coupon_level="", conditions={}),
+        # Unleveled, and published to a shared surface by the merchant.
+        coupon_fact(promotion_id=4, code="WELCOME10", coupon_level="", conditions={},
+                    source_type="manual", allocation_channel="shared"),
     ]
 
 
@@ -259,13 +264,17 @@ def test_a_rung_this_customer_has_not_reached_never_leaves_the_records(monkeypat
     context = Context()
     result, _ = run(context, monkeypatch, truth(shareable=_ladder_facts()),
                     policy={**DEFAULT_POLICY, "allowed_levels": None},
-                    entitlement=entitled("bronze", "silver", orders=4))
-    assert [p.code for p in result.promotions] == ["SILVER15", "BRONZE5", "WELCOME10"]
-    assert [e.ref for e in result.evidence] == ["promotion:coupon:2", "promotion:coupon:3",
-                                                "promotion:coupon:4"]
+                    entitlement=entitled("silver", orders=4))
+    assert [p.code for p in result.promotions] == ["SILVER15", "WELCOME10"]
+    assert [e.ref for e in result.evidence] == ["promotion:coupon:2", "promotion:coupon:4"]
     assert result.entitlement["resolved_level"] == "silver"
-    assert result.entitlement["entitled_levels"] == ["bronze", "silver"]
+    assert result.entitlement["entitled_levels"] == ["silver"]
     assert result.entitlement["determined"] is True
+    # Restated from an earlier draft that also returned BRONZE5, on the
+    # reasoning that ``min_orders`` is a minimum and this customer had passed
+    # bronze's. That put three rungs of one ladder in front of the model at
+    # once and so recreated, smaller, the problem this gate exists to solve.
+    # A customer has one standing, and the contract already says which.
 
 
 def test_both_gates_must_open_and_either_one_can_close(monkeypatch) -> None:
@@ -280,8 +289,10 @@ def test_both_gates_must_open_and_either_one_can_close(monkeypatch) -> None:
 
     earned_but_unallowed, _ = run(Context(), monkeypatch, facts,
                                   policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver"]},
-                                  entitlement=entitled("bronze", "silver", "gold"))
-    assert [p.code for p in earned_but_unallowed.promotions] == ["SILVER15", "BRONZE5", "WELCOME10"]
+                                  entitlement=entitled("gold"))
+    assert [p.code for p in earned_but_unallowed.promotions] == ["WELCOME10"]
+    # A gold customer whose store keeps gold from the assistant reaches no
+    # coupon rung at all — not a consolation rung further down the ladder.
 
 
 def test_a_customer_who_could_not_be_classified_still_sees_what_was_never_about_class(monkeypatch) -> None:
@@ -299,7 +310,7 @@ def test_a_customer_who_could_not_be_classified_still_sees_what_was_never_about_
     # Nothing about this customer was settled, and the projection says so
     # rather than presenting an unconditioned code as verified for them.
     unconditioned = result.promotions[0]
-    assert unconditioned.level_eligibility == "not_conditioned_on_level"
+    assert unconditioned.level_eligibility == "merchant_authorized_general"
     assert unconditioned.customer_level == ""
     assert unconditioned.eligibility_determined is False
     assert unconditioned.eligibility_note == (
@@ -311,7 +322,7 @@ def test_a_known_customer_with_no_purchases_is_told_apart_from_one_nobody_could_
     One was read and had not bought yet; the other could not be read at all."""
     facts = truth(shareable=_ladder_facts())
     read_and_empty, _ = run(Context(), monkeypatch, facts, policy={**DEFAULT_POLICY, "allowed_levels": None},
-                            entitlement=entitled(orders=0, reason=cer.REASON_NO_ENTITLED_LEVEL))
+                            entitlement=entitled(None, orders=0, reason=cer.REASON_NO_ENTITLED_LEVEL))
     unreadable, _ = run(Context(), monkeypatch, facts, policy={**DEFAULT_POLICY, "allowed_levels": None},
                         entitlement=unknown(cer.REASON_CUSTOMER_RECORD_UNAVAILABLE, customer_id=41))
 
@@ -374,18 +385,19 @@ def test_a_generic_store_holds_the_same_rule_across_categories(monkeypatch) -> N
                     description="خصم على الأحذية الرياضية", conditions={}),
         coupon_fact(promotion_id=12, code="SCENT10", coupon_level="silver",
                     description="عطر ورد 100ml", conditions={"min_order_amount": "150"}),
-        coupon_fact(promotion_id=13, code="OPEN5", coupon_level="", description="خصم عام", conditions={}),
+        coupon_fact(promotion_id=13, code="OPEN5", coupon_level="", description="خصم عام",
+                    conditions={}, source_type="manual", allocation_channel="shared"),
     ]
     result, _ = run(context, monkeypatch, truth(shareable=facts),
                     policy={**DEFAULT_POLICY, "allowed_levels": None},
-                    entitlement=entitled("bronze", "silver", orders=3, customer_id=502))
+                    entitlement=entitled("silver", orders=3, customer_id=502))
     assert [p.code for p in result.promotions] == ["SCENT10", "OPEN5"]
     scent, open_code = result.promotions
     assert scent.level_eligibility == "entitled" and scent.customer_level == "silver"
     # The rung is settled; the basket minimum is not, and is named.
     assert scent.eligibility_determined is False
     assert scent.eligibility_note == "conditions_not_fully_evaluated:min_order_amount"
-    assert open_code.level_eligibility == "not_conditioned_on_level"
+    assert open_code.level_eligibility == "merchant_authorized_general"
     assert open_code.eligibility_determined is True and open_code.eligibility_note == ""
 
 
@@ -398,7 +410,7 @@ def test_an_offer_never_claims_its_own_eligibility(monkeypatch) -> None:
     offer = result.promotions[0]
     assert offer.eligibility_determined is False
     assert offer.eligibility_note == "offer_terms_only_no_code_invented"
-    assert offer.level_eligibility == "not_conditioned_on_level"
+    assert offer.level_eligibility == "merchant_authorized_general"
 
 
 def test_an_honest_empty_answer_still_says_on_what_reading_it_was_empty(monkeypatch) -> None:
@@ -546,7 +558,7 @@ def test_the_evidence_names_where_the_entitlement_came_from(monkeypatch) -> None
                     truth(shareable=[coupon_fact(promotion_id=2, code="SILVER15",
                                                  coupon_level="silver", conditions={})]),
                     policy={**DEFAULT_POLICY, "allowed_levels": None},
-                    entitlement=entitled("bronze", "silver"))
+                    entitlement=entitled("silver"))
     provenance = result.evidence[0].provenance
     assert provenance["service"].endswith("resolve_shareable_promotions")
     assert provenance["entitlement_service"] == (
@@ -555,3 +567,75 @@ def test_the_evidence_names_where_the_entitlement_came_from(monkeypatch) -> None
     # And the snapshot's own fields agree with it.
     assert result.evidence[0].fields["level_eligibility"] == "entitled"
     assert result.evidence[0].fields["customer_level"] == "silver"
+
+
+# ── A general offer is a merchant's act, never an absence ────────────────────
+
+
+def test_an_unleveled_code_the_merchant_never_published_is_withheld(monkeypatch) -> None:
+    """«كون الكود shared وحده لا يثبت أنه متاح للجميع». Carrying no rung says
+    only that the record does not name one. It is not evidence the merchant
+    meant the code for everyone, so without a positive act it does not reach
+    the assistant at all."""
+    context = Context()
+    unplaced = coupon_fact(promotion_id=21, code="NOCHAN", coupon_level="",
+                           source_type="manual", allocation_channel="")
+    result, _ = run(context, monkeypatch, truth(shareable=[unplaced]),
+                    entitlement=entitled("silver"))
+    assert result.status == "not_found" and result.promotions == []
+
+
+def test_the_warm_pool_s_defaulted_shared_channel_is_not_a_merchant_decision(monkeypatch) -> None:
+    """The exact trap. ``coupon_generator`` writes ``allocation_channel``
+    "shared" by default on every pool coupon it creates, so "shared" alone
+    records a default rather than a choice. A system-sourced code is therefore
+    not a general offer however its channel reads."""
+    context = Context()
+    pooled = coupon_fact(promotion_id=22, code="POOLED", coupon_level="",
+                         source_type="system", allocation_channel="shared")
+    result, _ = run(context, monkeypatch, truth(shareable=[pooled]),
+                    entitlement=entitled("silver"))
+    assert result.status == "not_found" and result.promotions == []
+
+
+def test_a_code_the_merchant_created_and_placed_is_a_general_offer(monkeypatch) -> None:
+    """The two acts together: created in the merchant's own dashboard, and put
+    on an AI-reachable surface. Neither is inferred from an absence."""
+    context = Context()
+    published = coupon_fact(promotion_id=23, code="OPEN10", coupon_level="",
+                            source_type="manual", allocation_channel="shared", conditions={})
+    result, _ = run(context, monkeypatch, truth(shareable=[published]),
+                    entitlement=entitled("silver"))
+    assert [p.code for p in result.promotions] == ["OPEN10"]
+    assert result.promotions[0].level_eligibility == "merchant_authorized_general"
+
+    on_the_ai_channel = coupon_fact(promotion_id=24, code="AIONLY", coupon_level="",
+                                    source_type="manual", allocation_channel="ai", conditions={})
+    also, _ = run(Context(), monkeypatch, truth(shareable=[on_the_ai_channel]),
+                  entitlement=entitled("silver"))
+    assert [p.code for p in also.promotions] == ["AIONLY"]
+
+
+def test_a_general_offer_reaches_a_customer_nobody_could_classify(monkeypatch) -> None:
+    """The rule the owner asked to preserve, now resting on the merchant's act
+    rather than on the absence of a rung: an unidentified conversation still
+    receives what the merchant published for everyone."""
+    context = Context(customer_id=None)
+    published = coupon_fact(promotion_id=25, code="OPEN10", coupon_level="",
+                            source_type="manual", allocation_channel="shared", conditions={})
+    levelled = coupon_fact(promotion_id=26, code="GOLD50", coupon_level="gold")
+    result, _ = run(context, monkeypatch, truth(shareable=[levelled, published]),
+                    policy={**DEFAULT_POLICY, "allowed_levels": None}, entitlement=unknown())
+    assert [p.code for p in result.promotions] == ["OPEN10"]
+    assert result.entitlement["determined"] is False
+
+
+def test_an_imported_code_expresses_no_nahla_intent(monkeypatch) -> None:
+    """A coupon synced in from the store platform was never placed on an AI
+    surface in Nahla's dashboard, so it carries no authorisation to read."""
+    context = Context()
+    imported = coupon_fact(promotion_id=27, code="FROMSALLA", coupon_level="",
+                           source_type="imported", allocation_channel="shared")
+    result, _ = run(context, monkeypatch, truth(shareable=[imported]),
+                    entitlement=entitled("silver"))
+    assert result.status == "not_found" and result.promotions == []

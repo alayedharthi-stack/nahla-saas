@@ -24,15 +24,18 @@ own: every threshold, every ``enabled`` flag and the first-purchase rule come
 from the merchant's saved configuration, and a rule the merchant did not turn
 on is never turned on here.
 
-**The entitled set, and why it is a set.** The contract resolves one level —
+**One level, and it is the contract's.** The contract resolves exactly one —
 the highest enabled rung whose ``min_orders`` the customer has reached — and
-that is reported as ``resolved_level`` because it is the platform's existing
-answer and the one the issuance half would act on. For *reading* a catalogue
-of coupons, though, the merchant's own field decides: ``min_orders`` is a
-**minimum**, so a customer with eight countable orders has met bronze's one,
-silver's three and gold's seven, and has not met vip's fifteen. All three are
-returned, in the ladder's order, and never ranked by discount: which one suits
-this conversation is not a question a threshold can answer.
+that one is the answer here too. An earlier draft returned every rung the
+customer had passed, on the reasoning that ``min_orders`` is a minimum; that
+put a gold customer's bronze, silver and gold codes in front of the model at
+once and so recreated the problem this module exists to solve, only smaller.
+A customer has one standing with this merchant, the contract already says
+which, and the issuance half acts on that same answer. Reading and issuing
+must not disagree about who a customer is.
+
+What stays with the agent is everything the contract does not decide: whether
+to mention a coupon at all, when, and in what words.
 
 **Not knowing is its own answer.** A customer whose identity was never
 established in this conversation, one whose record cannot be found for this
@@ -45,12 +48,11 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from services.coupon_level_contract import (
     CANONICAL_COUPON_LEVEL_IDS,
     REASON_FIRST_PURCHASE_AUTHORIZED,
-    min_orders_for_level,
     resolve_coupon_level_for_order_count,
 )
 
@@ -82,7 +84,7 @@ class LevelEntitlement:
     customer_id: Optional[int]
     countable_orders: Optional[int]          # None when it could not be established
     resolved_level: Optional[str]            # the contract's single answer
-    entitled_levels: Tuple[str, ...]         # every enabled rung the count reached
+    entitled_levels: Tuple[str, ...]         # that answer, as a list; empty when there is none
     reason: str
     first_purchase_applied: bool = False
 
@@ -92,7 +94,8 @@ class LevelEntitlement:
 
     def entitles(self, level: str) -> bool:
         """Whether a coupon requiring ``level`` may be put in front of this
-        customer. An unreadable or unknown level entitles nothing."""
+        customer — true only for the one rung they actually stand on. An
+        unreadable or unknown level entitles nothing."""
         wanted = str(level or "").strip().lower()
         return bool(wanted) and wanted in self.entitled_levels
 
@@ -111,31 +114,6 @@ class LevelEntitlement:
 def _undetermined(customer_id: Optional[int], reason: str) -> LevelEntitlement:
     return LevelEntitlement(customer_id=customer_id, countable_orders=None, resolved_level=None,
                             entitled_levels=(), reason=reason)
-
-
-def _entitled_from_count(levels: Any, count: int) -> Tuple[str, ...]:
-    """Every enabled rung whose ``min_orders`` this count has reached.
-
-    The merchant's saved entry decides; a rung the merchant never saved keeps
-    the contract's canonical threshold and is enabled, which is the same
-    default the resolution itself applies. Order is the ladder's, never the
-    discount's.
-    """
-    from services.coupon_level_contract import _as_level_list  # noqa: PLC0415
-
-    saved: Dict[str, Dict[str, Any]] = {}
-    for entry in _as_level_list(levels):
-        lid = str(entry.get("id") or "").strip().lower()
-        if lid in CANONICAL_COUPON_LEVEL_IDS:
-            saved[lid] = entry
-    reached: List[str] = []
-    for lid in CANONICAL_COUPON_LEVEL_IDS:
-        entry = saved.get(lid) or {"id": lid, "enabled": True}
-        if not bool(entry.get("enabled", True)):
-            continue
-        if min_orders_for_level(lid, entry) <= count:
-            reached.append(lid)
-    return tuple(reached)
 
 
 def resolve_level_entitlement(db: Any, tenant_id: int, customer_id: Optional[int]) -> LevelEntitlement:
@@ -210,12 +188,12 @@ def resolve_level_entitlement(db: Any, tenant_id: int, customer_id: Optional[int
                                 entitled_levels=(resolution.level_id,),
                                 reason=REASON_FIRST_PURCHASE, first_purchase_applied=True)
 
-    # Same predicate the contract itself used to choose — enabled, and
-    # ``min_orders`` reached — applied to every rung instead of only the
-    # highest, so the contract's own answer is always among these.
+    # The contract's one answer, and nothing beside it. A rung the customer has
+    # passed but outgrown is not theirs to be offered: they have a standing,
+    # not a range.
     return LevelEntitlement(customer_id=cid, countable_orders=countable,
                             resolved_level=resolution.level_id,
-                            entitled_levels=_entitled_from_count(levels, countable),
+                            entitled_levels=(resolution.level_id,),
                             reason=REASON_ENTITLED)
 
 

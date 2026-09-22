@@ -81,17 +81,21 @@ def resolve(monkeypatch: pytest.MonkeyPatch, *, count: Any = 0, block: Any = Non
 # ── The ladder the merchant saved ────────────────────────────────────────────
 
 
-def test_a_customer_reaches_every_rung_whose_minimum_they_have_met(monkeypatch) -> None:
-    """``min_orders`` is a minimum, and eight orders have met one, three and
-    seven. Fifteen they have not met. The contract's own single answer — the
-    highest rung — is reported beside the set, and the order is the ladder's,
-    never the discount's."""
+def test_a_customer_stands_on_one_rung_and_it_is_the_contract_s(monkeypatch) -> None:
+    """Eight orders have met bronze's one, silver's three and gold's seven, and
+    not vip's fifteen — so the contract resolves **gold**, and gold is the
+    answer. Restated from a first draft that returned all three passed rungs on
+    the reasoning that ``min_orders`` is a minimum: that handed a gold
+    customer's bronze and silver codes to the model as well, which is the thing
+    this module exists to stop. A customer has a standing, not a range, and the
+    issuance half acts on this same single answer."""
     standing = resolve(monkeypatch, count=8)
-    assert standing.entitled_levels == ("bronze", "silver", "gold")
+    assert standing.entitled_levels == ("gold",)
     assert standing.resolved_level == "gold"
     assert standing.reason == cer.REASON_ENTITLED and standing.determined is True
     assert standing.countable_orders == 8
-    assert standing.entitles("gold") and standing.entitles("bronze")
+    assert standing.entitles("gold")
+    assert not standing.entitles("bronze"), "a rung they have outgrown is not theirs to be offered"
     assert not standing.entitles("vip")
 
 
@@ -99,7 +103,7 @@ def test_a_rung_the_merchant_switched_off_is_not_reached_by_anyone(monkeypatch) 
     """The merchant's ``enabled`` flag is policy, not decoration. Turning
     silver off does not promote a silver customer or demote a gold one."""
     standing = resolve(monkeypatch, count=8, block={"levels": ladder(silver={"enabled": False})})
-    assert standing.entitled_levels == ("bronze", "gold")
+    assert standing.entitled_levels == ("gold",)
     assert standing.resolved_level == "gold"
 
 
@@ -107,7 +111,7 @@ def test_a_merchant_who_raised_a_threshold_is_obeyed(monkeypatch) -> None:
     """Every number comes from the merchant's saved row; this module sets none
     of its own. Raising gold to twelve puts it out of an eight-order reach."""
     standing = resolve(monkeypatch, count=8, block={"levels": ladder(gold={"min_orders": 12})})
-    assert standing.entitled_levels == ("bronze", "silver")
+    assert standing.entitled_levels == ("silver",)
     assert standing.resolved_level == "silver"
 
 
@@ -213,7 +217,7 @@ def test_a_rung_nobody_named_is_never_entitled(monkeypatch) -> None:
     """``entitles`` answers about a level the caller read off a record. An
     empty or unknown one is not a rung, and is never granted by default."""
     standing = resolve(monkeypatch, count=20)
-    assert standing.entitled_levels == ("bronze", "silver", "gold", "vip")
+    assert standing.entitled_levels == ("vip",)
     assert not standing.entitles("") and not standing.entitles(None)
     assert not standing.entitles("platinum")
     assert standing.entitles("VIP"), "the record's casing is not the customer's problem"
@@ -224,7 +228,7 @@ def test_the_view_hands_out_a_plain_readable_answer(monkeypatch) -> None:
     surprises, and ``determined`` said out loud."""
     view = resolve(monkeypatch, count=4).as_dict()
     assert view == {"customer_id": CUSTOMER, "countable_orders": 4, "resolved_level": "silver",
-                    "entitled_levels": ["bronze", "silver"], "reason": cer.REASON_ENTITLED,
+                    "entitled_levels": ["silver"], "reason": cer.REASON_ENTITLED,
                     "determined": True, "first_purchase_applied": False}
 
 

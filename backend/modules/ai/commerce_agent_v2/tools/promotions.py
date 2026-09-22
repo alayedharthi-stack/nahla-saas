@@ -20,13 +20,19 @@ the platform's own authorities — the Customer Intelligence order count, the
 level contract, and the merchant's saved ladder with its first-purchase rule
 exactly as the merchant left it. Nothing is issued, assigned or generated here.
 
-What is *not* conditioned on a level is not withheld for want of one. A coupon
-the record ties to no rung, and every offer, is projected whether or not a
-level could be resolved: a customer the platform could not classify still sees
-what was never about classification. Equally, not knowing is not a level —
-an unidentified conversation, an unreadable history and a known customer with
-no purchases are three different states, the projection names which, and only
-the third is a determination.
+What is not conditioned on a level is not withheld *for want of one* — but it
+still needs the merchant to have said so. The absence of a rung on a record
+says only that the record does not name one; it is not evidence that the
+merchant meant the code for everyone. A coupon carrying no rung is therefore
+projected only when the merchant published it to an AI surface themselves
+(``_merchant_published_generally``), and every offer is projected because an
+active store promotion the merchant created *is* that authorisation and carries
+no code. A customer the platform could not classify still sees what was never
+about classification, and nothing else.
+
+Equally, not knowing is not a level — an unidentified conversation, an
+unreadable history and a known customer with no purchases are three different
+states, the projection names which, and only the third is a determination.
 
 Every remaining condition stays unevaluated and is said so by name: the
 projection claims the level question and no more.
@@ -52,14 +58,23 @@ from modules.ai.commerce_agent_v2.output import (
     PromotionSnapshot,
 )
 from services.coupon_entitlement_read import LevelEntitlement, resolve_level_entitlement
+from services.native_ai_coupon_eligibility import NATIVE_AI_CHANNELS
 
 MAX_PROMOTIONS = 8            # per kind: at most this many coupons and this many offers
 MAX_CONDITION_IDS = 20        # ids kept per product/category condition; the rest become a count
 _MAX_TEXT = 300
 _RECORD_KINDS = ("coupon", "offer")
 # What the projection says it settled about who may use a code.
-LEVEL_ENTITLED = "entitled"                      # the record names a rung this customer reached
-LEVEL_NOT_CONDITIONED = "not_conditioned_on_level"   # the record names no rung at all
+LEVEL_ENTITLED = "entitled"                      # the record names the rung this customer stands on
+GENERAL_AUTHORIZED = "merchant_authorized_general"   # no rung, and the merchant published it anyway
+# A coupon carrying no rung is a general offer only when the merchant performed
+# two acts that say so. ``source_type`` "manual" is the merchant's own dashboard
+# — the single path where the AI fields are set at all; the warm pool writes
+# "system" and always stamps a rung, and a Salla import expresses no Nahla AI
+# intent. ``allocation_channel`` is left empty when the merchant does not choose
+# one, and only the pool generator defaults it to "shared", which is why
+# "shared" on its own proves nothing. Both together are a deliberate placement.
+MERCHANT_AUTHORED_SOURCE_TYPES = frozenset({"manual"})
 # The conditions a projection carries but has not evaluated. Named rather than
 # summarised, so a reader can see exactly what is still open.
 _UNEVALUATED = "conditions_not_fully_evaluated"
@@ -101,6 +116,24 @@ def _unevaluated_conditions(conditions: Dict[str, Any]) -> Tuple[str, ...]:
     return tuple(sorted(str(name) for name in names))
 
 
+def _merchant_published_generally(fact: Dict[str, Any]) -> bool:
+    """Whether the merchant themselves put this unleveled coupon where the
+    assistant can reach it.
+
+    Two acts, both positive, neither inferred from an absence: the coupon was
+    created in the merchant's own dashboard (``source_type`` "manual", the only
+    path that writes the AI fields), and the merchant chose an AI-reachable
+    allocation channel. The warm pool writes "system" and always stamps a rung;
+    a Salla import expresses no Nahla AI intent; and an unset channel stays
+    empty, which is exactly why a defaulted "shared" cannot stand in for a
+    decision nobody made.
+    """
+    source_type = _text(fact.get("source_type"), 32).lower()
+    if source_type not in MERCHANT_AUTHORED_SOURCE_TYPES:
+        return False
+    return _text(fact.get("allocation_channel"), 32).lower() in NATIVE_AI_CHANNELS
+
+
 def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
              allowed_levels: Optional[List[str]],
              entitlement: LevelEntitlement) -> Optional[Tuple[PromotionSnapshot, EvidenceRecord]]:
@@ -131,20 +164,30 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
     else:
         bound_to_this_customer = False
     level = _text(fact.get("coupon_level"), 32).lower()
-    if kind == "coupon" and level:
+    if kind != "coupon":
+        # An offer is a store promotion the merchant created and left running.
+        # Being active *is* the authorisation, and it carries no code.
+        level_eligibility = GENERAL_AUTHORIZED
+    elif level:
         # Two separate gates, and both must open. The merchant's AI policy says
         # which rungs the assistant may ever mention in this store; the
-        # entitlement says whether *this* customer reached this one. A store
-        # that allows gold does not make every conversation gold.
+        # entitlement says whether this is the rung *this* customer stands on.
+        # A store that allows gold does not make every conversation gold.
         if allowed_levels is not None and level not in allowed_levels:
             return None
         if not entitlement.entitles(level):
             return None
         level_eligibility = LEVEL_ENTITLED
+    elif _merchant_published_generally(fact):
+        # No rung, and the merchant published it to an AI surface themselves.
+        # Nothing about a classification is being claimed, so an unresolved
+        # level is no reason to withhold it.
+        level_eligibility = GENERAL_AUTHORIZED
     else:
-        # No rung on the record: nothing about a classification is being
-        # claimed, so an unresolved level is no reason to withhold it.
-        level_eligibility = LEVEL_NOT_CONDITIONED
+        # No rung and no authorisation. The absence of a level says only that
+        # the record does not name one — never that the merchant meant this for
+        # everyone — so it is withheld rather than guessed into a public offer.
+        return None
     ref = f"promotion:{kind}:{promotion_id}"
     conditions = _bounded_conditions(fact.get("conditions"))
     unevaluated = _unevaluated_conditions(conditions)
@@ -336,5 +379,5 @@ async def list_shareable_promotions_impl(
                                query_outcome=outcome, partial=partial, entitlement=entitlement_view)
 
 
-__all__ = ["LEVEL_ENTITLED", "LEVEL_NOT_CONDITIONED", "MAX_CONDITION_IDS", "MAX_PROMOTIONS",
-           "list_shareable_promotions_impl"]
+__all__ = ["GENERAL_AUTHORIZED", "LEVEL_ENTITLED", "MAX_CONDITION_IDS", "MAX_PROMOTIONS",
+           "MERCHANT_AUTHORED_SOURCE_TYPES", "list_shareable_promotions_impl"]
