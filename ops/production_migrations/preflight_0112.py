@@ -81,6 +81,19 @@ def main() -> int:
     if (parsed.host or "").lower() in {"localhost", "127.0.0.1", "::1"}:
         _fail("refusing a local DATABASE_URL")
 
+    # Diagnostic identity only: this deliberately omits the URI and every
+    # credential component.  It lets an operator prove that the isolated
+    # runner targets the same server, database and role as the live service.
+    print(json.dumps({
+        "status": "connecting",
+        "connection_identity": {
+            "host": parsed.host,
+            "port": parsed.port,
+            "database": parsed.database,
+            "username": parsed.username,
+        },
+    }, sort_keys=True), flush=True)
+
     # AUTOCOMMIT lets us explicitly begin a READ ONLY transaction after the
     # connection dialect's own harmless capability probe.  No query below is
     # issued outside that transaction.
