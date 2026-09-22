@@ -142,7 +142,11 @@ class AgentLoop:
 
             if isinstance(result, ac.ProviderReply):
                 draft = result.draft
-                problems = ac.verify_reply_draft(draft, session.observations)
+                # ``inbound`` is the customer's own turn as admitted — trusted data,
+                # never instructions. Verification reads it for one purpose: an
+                # identifier the customer wrote is not one the agent asserted.
+                problems = ac.verify_reply_draft(draft, session.observations,
+                                                 inbound=context.inbound)
                 if not problems:
                     # The model chose whether to offer a selector and which
                     # products belong in it; what each row *says* is composed

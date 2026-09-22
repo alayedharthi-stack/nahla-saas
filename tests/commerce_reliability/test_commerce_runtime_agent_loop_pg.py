@@ -1232,3 +1232,47 @@ def test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn(agent: 
     assert outcome.status == ac.LoopStatus.STOPPED.value
     assert outcome.stop_reason == ac.StopReason.PROVIDER_INVALID.value
     assert agent.sequences(turn) == 0
+
+
+# ── The customer's own words reach verification, and only theirs ────────────
+
+
+def test_a_number_the_customer_wrote_survives_verification_and_is_delivered(agent: Harness) -> None:
+    """End to end on PostgreSQL: the number is in the admitted turn's payload,
+    the loop hands that payload to verification, and the reply naming it is
+    accepted and reserved for delivery. Nothing about the order is claimed —
+    the agent says it could not find it and asks. That answer is the customer's
+    to receive, and a guard reading it as an invention would take it away.
+    """
+    turn, lease = agent.start(body="وش حال طلبي RRRD1234؟")
+    provider = sp.ScriptedReasoningProvider([
+        sp.reply("ما لقيت طلبًا بالرقم RRRD1234 — تتأكد لي منه؟", commerce=False),
+    ])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert agent.sequences(turn) == 1
+    assert "verification_failed" not in _kinds(outcome)
+
+
+def test_the_same_sentence_on_a_turn_that_never_mentioned_it_is_refused(agent: Harness) -> None:
+    """The contrast that proves the inbound is what changed the outcome, not
+    the wording. One identical draft, two turns: the customer who wrote the
+    number gets it back, and the customer who asked about a shirt does not get
+    an order number the agent produced from nowhere. Refusal is not silence —
+    a step remains, the model is told, and it answers without the token.
+    """
+    turn, lease = agent.start(body="عندكم قميص قطني أزرق؟")
+    told: List[List[str]] = []
+
+    def second(request: ac.ProviderRequest) -> ac.ProviderResult:
+        told.append([p.code for f in request.feedback for p in f.problems])
+        return sp.reply("القميص القطني الأزرق متوفر.", commerce=False)
+
+    provider = sp.ScriptedReasoningProvider([
+        sp.reply("ما لقيت طلبًا بالرقم RRRD1234 — تتأكد لي منه؟", commerce=False),
+        second,
+    ])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert told == [["unobserved_code"]]
+    assert agent.sequences(turn) == 1, "the refused draft reserved nothing of its own"

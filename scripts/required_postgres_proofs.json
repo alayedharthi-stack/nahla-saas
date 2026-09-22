@@ -210,7 +210,9 @@
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_loop_run_closes_its_transactions_and_holds_none_across_reasoning",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_is_told_back_and_the_finished_answer_is_accepted",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_with_no_step_left_still_stops_rather_than_sending_half",
-        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn"
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_number_the_customer_wrote_survives_verification_and_is_delivered",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_the_same_sentence_on_a_turn_that_never_mentioned_it_is_refused"
       ]
     },
     {

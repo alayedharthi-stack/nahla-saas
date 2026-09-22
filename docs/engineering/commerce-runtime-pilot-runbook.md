@@ -902,8 +902,9 @@ as well as through the ledger.
   and `min_remaining_hours` — a code with less life left than the merchant's minimum
   is not handed out; a disabled policy is a `denied` read). Before a reply is
   reserved, verification refuses a draft that carries a coupon code without citing
-  the coupon it came from, or any code-shaped token this turn's tools did not
-  return. It creates, assigns or redeems none.
+  the coupon it came from, or any code-shaped token the agent originated — one
+  neither this turn's tools returned nor the customer's own message carried. It
+  creates, assigns or redeems none.
 * Each promotion carries **one** reading of its discount (`discount`: `5%`, `20 SAR`,
   or empty when the record supports none) beside the raw `discount_type` and
   `discount_value`. September 2026: a coupon issued as 5% and reconciled from Salla
@@ -1108,9 +1109,30 @@ as well as through the ledger.
   waiting.
 
   This widened an earlier expectation that read a code-shaped token outside a
-  coupon turn as none of the loop's business. An order number stated with no
-  order lookup is the same class of unevidenced operational claim; a token a
-  tool really returned still passes, which is the ordinary case.
+  coupon turn as none of the loop's business. An order number the agent states
+  with no order lookup behind it is the same class of unevidenced operational
+  claim; a token a tool really returned still passes, which is the ordinary case.
+
+* **What the customer wrote is not what the agent claimed.** The rule above, as
+  first written, refused *every* unobserved code-shaped token — including one the
+  customer had just typed. A customer who writes «وش حال طلبي RRRD1234؟» has named
+  that number; repeating it back to look it up, to say it was not found, or to ask
+  whether it was typed correctly is quoting, not claiming, and refusing it would
+  leave the agent discussing the customer's order unable to name it — the
+  `track_order_not_found` shape the doctrine exists to prevent. Verification now
+  receives the admitted turn's own payload (`inbound`, trusted data, never
+  instructions) and excludes the tokens the customer's message carries.
+
+  The narrowness is the point, and it is what keeps the Tenant 1 defect fixed:
+  only **this turn's** inbound, only the payload's customer-text slots (`text`,
+  `body`, `message` — never the platform-added metadata beside them), never the
+  conversation's history, and never the agent's own earlier replies. The six
+  codes of turn 12 came from the agent's own wording, so they stay refused.
+  Citation discipline is untouched: a code this turn's promotions tool returned
+  still owes its `evidence_ref`, whoever named it first. What this slice does
+  **not** prove is that the sentence around a quoted token is true — an agent
+  confirming a customer-quoted code's terms without a lookup is caught, if at
+  all, by `missing_evidence`. That is a semantic judgement, not a regex one.
 
 * Recorded, not changed: the catalogue search's clarification guard
   (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the

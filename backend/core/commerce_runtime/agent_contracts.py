@@ -746,7 +746,31 @@ def observed_code_tokens(observations: Sequence[ToolObservation]) -> Set[str]:
     return tokens
 
 
-def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation]) -> Tuple[VerificationProblem, ...]:
+# The slots an inbound turn payload carries the customer's own words in. Only
+# these are read: everything else in the payload is platform-added (message and
+# context identifiers, routing metadata), and admitting those would let a value
+# the platform generated pass as something the customer said.
+CUSTOMER_TEXT_KEYS = ("text", "body", "message")
+
+
+def customer_supplied_tokens(inbound: Optional[Mapping[str, Any]]) -> Set[str]:
+    """Every code-shaped token the customer's own message carries this turn.
+
+    ``None`` or a payload with no text is an empty set, so a caller that knows
+    nothing about the inbound gets the strictest reading.
+    """
+    if not isinstance(inbound, Mapping):
+        return set()
+    tokens: Set[str] = set()
+    for key in CUSTOMER_TEXT_KEYS:
+        value = inbound.get(key)
+        if isinstance(value, str) and value.strip():
+            tokens.update(match.upper() for match in _CODE_TOKEN_RE.findall(value))
+    return tokens
+
+
+def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation], *,
+                       inbound: Optional[Mapping[str, Any]] = None) -> Tuple[VerificationProblem, ...]:
     """Deterministic checks a draft must pass before it may be handed to delivery.
 
     They prove that every cited evidence reference exists among the
@@ -754,18 +778,35 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
     draft which claims commerce facts cites at least one, and that the text
     is present and bounded. In a turn where the promotions tool ran they also
     prove that every coupon code the text carries is one that tool returned
-    and that its evidence is cited, and that no other code-shaped token in the
-    text is unknown to this turn's observations: a coupon code is an
-    operational claim, and a code the merchant's records did not produce must
-    never reach a customer. Those code checks are deliberately **not**
-    conditional on the promotions tool having run this turn — a code carried
-    over from the conversation's own history has nothing current behind it,
-    and validity and eligibility are exactly what goes stale. A draft that offers a tappable selector is held to
+    and that its evidence is cited. Beyond that they hold the reply to one
+    rule about code-shaped tokens generally: the agent may not put one in
+    front of a customer unless it did not originate it. There are exactly two
+    ways it did not — this turn's observations returned it, or the customer's
+    own message this turn carried it (``inbound``). Everything else is the
+    agent stating a coupon, order or tracking identifier out of nothing.
+
+    The second source is why ``inbound`` exists. A customer who writes «وش حال
+    طلبي RRRD1234؟» has named that number; repeating it back to look it up, to
+    say it was not found, or to ask whether it was typed correctly is quoting,
+    not claiming, and a guard that refused it would force the agent to discuss
+    the customer's order without being able to name it. The customer's words
+    are authoritative about what the customer said. Note the narrowness: only
+    *this turn's* inbound, never the conversation's history, and never the
+    agent's own earlier replies — a code the agent said yesterday is the
+    defect this check exists for, since validity and eligibility are exactly
+    what goes stale.
+
+    A draft that offers a tappable selector is held to
     the same standard for every product in it: the row the customer reads
     carries the merchant's title and price, so the product must have been
     looked up in this turn and cited here. They do **not** prove that the
     text's sentences are consistent with the evidence: semantic grounding is
-    not established by this slice.
+    not established by this slice. In particular, a token the customer
+    supplied may be *named* freely but nothing here proves the sentence around
+    it is true — an agent that confirms a customer-quoted code's terms without
+    a lookup is caught, if at all, by ``missing_evidence`` on a draft that
+    claims commerce facts. That is a semantic judgement this slice does not
+    make and does not pretend to.
     """
     problems = []
     text = draft.text.strip()
@@ -783,11 +824,17 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
     # say *now*. The conversation's history is context, not evidence: a code
     # that was valid yesterday may since have expired, been disabled or run
     # out, and repeating it from memory states a discount nobody re-checked.
-    # So every code-shaped token is held to this turn's own observations,
-    # whether or not the promotions tool ran. When it did not, the model is
-    # told the token is unsupported here and can call that tool for the
-    # current truth or drop the code; either way it still answers, with its
-    # whole context intact.
+    # So a code-shaped token is held to this turn's own observations whether or
+    # not the promotions tool ran. When it is unsupported the model is told so
+    # and can call that tool for the current truth or drop the code; either way
+    # it still answers, with its whole context intact.
+    #
+    # What the rule must not do is stop the agent repeating the customer. A
+    # number the customer wrote this turn to ask about is not something the
+    # agent asserted, so it is excluded — quoting it, saying it was not found
+    # and asking whether it is right all stay possible. The exclusion is the
+    # customer's message only: the agent's own earlier wording is never a
+    # source of truth about itself.
     text_tokens = {token.upper() for token in _CODE_TOKEN_RE.findall(text)}
     promotions_ran = any(o.tool_name == PROMOTIONS_TOOL_NAME and o.ok for o in observations)
     codes = observed_promotion_codes(observations) if promotions_ran else {}
@@ -797,10 +844,11 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
             if codes[code] not in cited:
                 problems.append(VerificationProblem(
                     "coupon_code_without_evidence", f"{code} appears in the text but {codes[code]} is not cited"))
-        seen = observed_code_tokens(observations)
-        for token in sorted(text_tokens - set(codes) - seen):
+        not_originated = observed_code_tokens(observations) | customer_supplied_tokens(inbound)
+        for token in sorted(text_tokens - set(codes) - not_originated):
             problems.append(VerificationProblem(
-                "unobserved_code", f"{token} is not a code this turn's tools returned"))
+                "unobserved_code",
+                f"{token} was neither returned by this turn's tools nor written by the customer"))
     from core.commerce_runtime import reply_choices as _rc  # noqa: PLC0415
 
     for product_id in _rc.unobserved_choices(draft, observations):
@@ -819,7 +867,9 @@ __all__ = [
     "ProviderResult", "ProviderToolRequests", "READABLE_STATE_VERSIONS", "RESERVED_SCOPE_ARGUMENTS", "ReplyDraft",
     "TRUNCATED_OUTPUT", "StopReason", "ToolDefinition", "ToolError", "ToolErrorCode", "ToolObservation", "ToolRequest",
     "UnsupportedCapability", "VerificationFeedback", "VerificationProblem", "checkpoint_observations",
-    "evidence_index", "observation_digest", "public_copy", "validate_budget", "validate_call_id",
-    "validate_capabilities", "validate_evidence_ref", "validate_provider_result", "validate_reply_draft",
+    "customer_supplied_tokens", "evidence_index", "observation_digest", "public_copy", "validate_budget",
+    "validate_call_id",
+    "CUSTOMER_TEXT_KEYS", "validate_capabilities", "validate_evidence_ref", "validate_provider_result",
+    "validate_reply_draft",
     "validate_tool_name", "validate_tool_request", "verify_reply_draft"
 ]
