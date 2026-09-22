@@ -14,6 +14,8 @@ Behaviour:
     template, fills body parameters from the merchant-provided variable
     map, falling back to safe MOCK_DEFAULTS for any placeholder the
     merchant left empty (so the preview never has a literal "{{1}}").
+    IMAGE headers use the saved sending URL through the same helper as
+    campaign delivery; a missing image is rejected before provider I/O.
   * Sends via the canonical `provider_send_message` — same path used
     by every other transactional template send in the app (COD, cart
     recovery, …) — so any WhatsApp connectivity issue surfaces here
@@ -41,8 +43,13 @@ from services.campaign_wizard.test_send_urls import (
     extract_button_suffix,
     resolve_test_button_url,
 )
+from services.template_image_header import campaign_image_parameter
 
 logger = logging.getLogger(__name__)
+
+
+class InvalidTestImageHeader(ValueError):
+    """The approved image header has no usable saved sending image."""
 
 
 # Demo values used when the merchant didn't fill a variable on Step 4
@@ -232,6 +239,16 @@ def build_test_payload(
         body_params.append({"type": "text", "text": str(val)})
 
     components: List[Dict[str, Any]] = []
+    # Preserve the legacy tolerance for non-dict component entries while
+    # sharing the exact image contract with campaign delivery. The review
+    # upload handle is deliberately never used as a send-time media id.
+    stored_components = [c for c in (template.components or []) if isinstance(c, dict)]
+    try:
+        image_parameter = campaign_image_parameter(stored_components)
+    except ValueError as exc:
+        raise InvalidTestImageHeader(str(exc)) from exc
+    if image_parameter is not None:
+        components.append(image_parameter)
     if body_params:
         components.append({"type": "body", "parameters": body_params})
 
@@ -460,6 +477,16 @@ async def _send_test_message_inner(
             merchant_vars=merchant_vars,
             store_domain_hint=store_domain_hint,
         )
+    except InvalidTestImageHeader as exc:
+        logger.warning(
+            "[CAMPAIGN_TEST_SEND] invalid image header tenant=%s tpl=%s",
+            tenant_id, getattr(template, "name", None),
+        )
+        return {
+            "sent": False, "simulated": False, "wa_message_id": None,
+            "to": to_e164, "error_code": "invalid_template_image",
+            "error_message": str(exc),
+        }
     except Exception as exc:
         logger.warning(
             "[CAMPAIGN_TEST_SEND] build_test_payload failed tenant=%s tpl=%s: %s",
