@@ -407,11 +407,18 @@ jobs:
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
           pip install pytest alembic
 
-      # Parallel heads: 0092 (A1-Validate) and 0093 (bindings). Pin CI to 0093
-      # so capability stays expand; never use bare `head` here.
-      - name: Apply integration migration path (0093 only)
+      # Parallel heads: 0092 (A1-Validate) and 0093 (bindings). Pin CI to 0093,
+      # then apply the checked-out shipment schema when that migration is present.
+      # Never use bare `head`: unrelated branch heads must not enter this test DB.
+      - name: Apply integration migration path (0093, then checked-out 0112)
         working-directory: database
-        run: python -m alembic upgrade 0093
+        run: |
+          python -m alembic upgrade 0093
+          if [ -f migrations/versions/0112_salla_shipment_tracking.py ]; then
+            python -m alembic upgrade 0112
+          else
+            echo "0112 shipment tracking migration is not present in this checkout"
+          fi
 
       - name: Prepare tenant clone source and target databases
         run: |
