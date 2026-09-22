@@ -395,6 +395,38 @@ def test_cross_tenant_pool_isolation(postgres_engine) -> None:
     assert codes_a.isdisjoint(codes_b)
 
 
+def test_pool_reserves_another_tenants_code_before_remote_create(postgres_engine, monkeypatch) -> None:
+    """A legacy global code constraint must not cause a remote retry."""
+    tenant_a = TEST_TENANT_CROSS_A
+    tenant_b = TEST_TENANT_CROSS_B
+    already_reserved = "NHZQ0"
+    session, connection = _new_session(postgres_engine)
+    try:
+        for tenant_id in (tenant_a, tenant_b):
+            _seed_tenant(session, tenant_id)
+            _clear_tenant_coupons(session, tenant_id)
+        _add_pool_coupon(session, tenant_a, "bronze", already_reserved)
+        session.commit()
+    finally:
+        session.close()
+        connection.close()
+
+    generated = iter([already_reserved] + [f"NHZ{value}" for value in (
+        "Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", "QA", "QB", "QC",
+    )])
+    monkeypatch.setattr("services.coupon_generator._random_short_code", lambda: next(generated))
+    adapter_calls: list[dict] = []
+    calls_lock = threading.Lock()
+
+    created, outcomes = asyncio.run(
+        _ensure_pool_once(postgres_engine, tenant_b, adapter_calls, calls_lock)
+    )
+
+    assert created == {"bronze": 3, "silver": 3, "gold": 3, "vip": 3}, outcomes
+    assert len(adapter_calls) == 12
+    assert already_reserved not in {row["code"] for row in adapter_calls}
+
+
 def test_two_levels_do_not_corrupt_each_other(postgres_engine) -> None:
     tenant_id = TEST_TENANT_COUPON_TWO_LEVEL
     session, connection = _new_session(postgres_engine)
