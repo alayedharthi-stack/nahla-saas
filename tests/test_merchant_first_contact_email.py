@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from sqlalchemy import JSON, create_engine
@@ -17,7 +18,7 @@ for _p in (REPO_ROOT, BACKEND_DIR, REPO_ROOT / "database"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from models import Base, Customer, Tenant, User  # noqa: E402
+from models import Base, Customer, Tenant, TenantSettings, User  # noqa: E402
 from services.merchant_first_contact import (  # noqa: E402
     EVENT_FIRST_CUSTOMER_CONTACT,
     STAMP_KEY,
@@ -383,3 +384,62 @@ def test_long_email_does_not_overflow_layout():
     customer_cell = html[html.index("العميل"): html.index("الهاتف")]
     assert "font-weight:600" in customer_cell
     assert "font-size:15px" in customer_cell
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_notification_uses_own_store_identity_and_exact_phone_link(db, configured):
+    # Identical phone across merchants must not mix recipient or store identity.
+    phone = "+966500000099"
+    for index in (1, 2):
+        tenant = _tenant(db, f"متجر عام {index}")
+        email = f"owner{index}@example.com"
+        _merchant(db, tenant, email=email, username=email)
+        name = f"متجر الملابس {index}"
+        if configured:
+            db.add(TenantSettings(tenant_id=tenant.id, store_settings={
+                "store_name_ar": name,
+                "store_name_ar_source": "merchant_override",
+            }))
+        customer = _customer(db, tenant, phone=phone)
+        with patch("services.email_service.enqueue_email") as enqueue:
+            result = maybe_notify_first_customer(
+                db=db, tenant_id=tenant.id, customer=customer, customer_phone=phone,
+            )
+        assert result["send"] is True
+        payload = enqueue.call_args.kwargs
+        assert payload["to"] == email
+        variables = payload["variables"]
+        assert variables["merchant_name"] == (name if configured else tenant.name)
+        link = urlsplit(variables["conversation_url"])
+        assert link.path.endswith("/conversations")
+        assert parse_qs(link.query) == {"phone": [phone]}
+        html = _render("first_whatsapp_message", variables)
+        assert email not in html
+        assert "%2B966500000099" in html
+
+
+def test_notification_missing_store_identity_never_greets_account_email(db):
+    tenant = _tenant(db, "account@example.com")
+    _merchant(db, tenant, email="account@example.com", username="account@example.com")
+    customer = _customer(db, tenant, phone="+966500000098")
+    with patch("services.email_service.enqueue_email") as enqueue:
+        result = maybe_notify_first_customer(db=db, tenant_id=tenant.id, customer=customer)
+    assert result["send"] is True
+    variables = enqueue.call_args.kwargs["variables"]
+    assert variables["merchant_name"]
+    assert "@" not in variables["merchant_name"]
+    assert parse_qs(urlsplit(variables["conversation_url"]).query) == {
+        "phone": [customer.phone],
+    }
+
+
+def test_notification_preserves_explicit_conversation_link(db):
+    tenant = _tenant(db, "متجر الهدايا")
+    _merchant(db, tenant, email="gifts@example.com", username="gifts")
+    customer = _customer(db, tenant, phone="+966500000097")
+    link = "https://dashboard.example.com/conversations?phone=%2B966500000097"
+    with patch("services.email_service.enqueue_email") as enqueue:
+        maybe_notify_first_customer(
+            db=db, tenant_id=tenant.id, customer=customer, conversation_url=link,
+        )
+    assert enqueue.call_args.kwargs["variables"]["conversation_url"] == link

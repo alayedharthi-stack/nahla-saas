@@ -10,6 +10,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlencode
 
 from sqlalchemy import text
 from sqlalchemy.orm.attributes import flag_modified
@@ -216,7 +217,9 @@ def maybe_notify_first_customer(
         return result
 
     try:
-        from models import User  # noqa: PLC0415
+        from models import Tenant, TenantSettings, User  # noqa: PLC0415
+        from core.store_identity import resolve_store_name  # noqa: PLC0415
+        from core.store_display import clean_store_name  # noqa: PLC0415
         from services.email_service import enqueue_email  # noqa: PLC0415
         from core.config import DASHBOARD_URL  # noqa: PLC0415
         from core.customer_identity_resolver import display_name_for_customer  # noqa: PLC0415
@@ -232,13 +235,29 @@ def maybe_notify_first_customer(
                 "reason_ar": "لا يوجد بريد تاجر",
             }
 
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        settings = db.query(TenantSettings).filter(
+            TenantSettings.tenant_id == tenant_id,
+        ).first()
+        store_name = resolve_store_name(
+            settings.store_settings or {} if settings else {},
+            "ar",
+            tenant_name=clean_store_name(tenant.name if tenant else ""),
+        )
+        # The inbox already resolves ?phone= within the authenticated tenant,
+        # including conversations outside the first page. Encode '+' as %2B.
+        phone = customer_phone or getattr(customer, "phone", "") or ""
+        inbox_url = f"{DASHBOARD_URL.rstrip('/')}/conversations"
+        if phone:
+            inbox_url += "?" + urlencode({"phone": phone})
+
         enqueue_email(
             to=merchant.email,
             subject="عميل جديد بدأ محادثة عبر واتساب 🎉",
             template="first_whatsapp_message",
             sender_type="growth",
             variables={
-                "merchant_name": merchant.username or "",
+                "merchant_name": store_name,
                 # Keep the legacy argument for caller compatibility, but never
                 # let an unchecked profile string override resolved identity.
                 "customer_name": display_name_for_customer(
@@ -246,7 +265,7 @@ def maybe_notify_first_customer(
                 ),
                 "customer_phone": customer_phone,
                 "message_preview": message_preview,
-                "conversation_url": conversation_url or f"{DASHBOARD_URL}/conversations",
+                "conversation_url": conversation_url or inbox_url,
             },
         )
         _log(
