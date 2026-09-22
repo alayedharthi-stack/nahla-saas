@@ -12,19 +12,27 @@ the constraint is self-imposed.
 
 **Answered, 2026-09-22 10:17Z:** one list, two rows, one title, two ids —
 ``{"accepted": true, "classification": "ok", "http_status": 200}``, no error of
-any kind. WhatsApp does not refuse a list for a repeated row title. The rule
-was self-imposed, and ``_send_list_reply`` no longer drops those rows; it logs
-the repeat and sends them. Labelling them so the *customer* can tell them apart
-remains the caller's job (``core/commerce_runtime/choice_rows.py``).
+any kind.
+
+What that establishes, exactly: **Meta accepted the payload.** It did not
+reject a list for a repeated row title, which is the whole question. It is
+**not** evidence that the message reached a device, that anyone saw it, or
+that the recipient was the intended one — this runtime records no delivery or
+read receipt, and ``customer_reach`` stays ``unknown`` for an accepted send.
+The rule was self-imposed, so ``_send_list_reply`` no longer drops those rows;
+it logs the repeat and sends them. Labelling them so the *customer* can tell
+them apart remains the caller's job
+(``core/commerce_runtime/choice_rows.py``).
 
 This stays runnable so the answer can be re-established after any provider
-change. It asks the provider, once. It sends a single interactive list to the
-tenant's own allowlisted trial recipient with two rows that share a title and
-differ only by id, and prints what came back. Owner-approved, and deliberately
-narrow:
+change. It asks the provider, once, and prints what came back. Owner-approved,
+and deliberately narrow:
 
-* the recipient is read from the pilot's own allowlist, never typed here, and
-  only ever the first entry;
+* the recipient is **named explicitly** in ``NAHLA_PROBE_RECIPIENT`` and must
+  also appear in the pilot allowlist. Being in the allowlist does not make a
+  number the intended destination: the first run took the first entry and
+  reached an unintended (though allowlisted) number, so choosing is no longer
+  something this script does;
 * the send goes through the platform's ``provider_send_message``, so the
   credential is resolved, refreshed and kept inside the platform's own code
   and never touches this script;
@@ -33,13 +41,14 @@ narrow:
 * exactly one message, and nothing is written to any table.
 
 Output is one ``ROW_TITLE_PROBE=`` JSON line: the HTTP status, the provider's
-classification and error fields, whether a message id came back, and the
+classification and error fields, whether the provider **accepted** it, and the
 recipient masked. No token, no full number, no message body beyond the two row
 titles this test is about.
 
 Usage::
 
     DATABASE_URL=... NAHLA_DUPLICATE_ROW_TITLE_TEST=SEND \\
+      NAHLA_PROBE_RECIPIENT=+966XXXXXXXXX \\
       python scripts/operators/whatsapp_duplicate_row_title_probe.py
 """
 from __future__ import annotations
@@ -49,7 +58,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
 for path in (str(ROOT), str(ROOT / "backend"), str(ROOT / "database")):
@@ -69,13 +78,26 @@ def _mask(phone: str) -> str:
     return text[:5] + "*" * max(0, len(text) - 7) + text[-2:] if len(text) > 7 else "***"
 
 
-def _first_allowlisted_recipient() -> str:
+def _digits(value: str) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _named_recipient() -> Tuple[str, str]:
+    """The recipient this run was told to use, or why it will not send.
+
+    Two conditions, both required. The number is named explicitly, because
+    picking one is a decision this script must never make on the operator's
+    behalf; and it must be in the pilot allowlist, because being named is not
+    the same as being permitted.
+    """
+    asked = str(os.environ.get("NAHLA_PROBE_RECIPIENT", "") or "").strip()
+    if not asked:
+        return "", "NAHLA_PROBE_RECIPIENT is not set — name the trial number explicitly"
     raw = str(os.environ.get("COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST", "") or "")
-    for part in raw.replace(";", ",").split(","):
-        candidate = part.strip()
-        if candidate:
-            return candidate
-    return ""
+    allowed = {_digits(part) for part in raw.replace(";", ",").split(",") if part.strip()}
+    if _digits(asked) not in allowed:
+        return "", "the named recipient is not in the pilot allowlist"
+    return asked, ""
 
 
 def _payload(to: str) -> Dict[str, Any]:
@@ -143,10 +165,10 @@ def main() -> int:
             {"skipped": "NAHLA_DUPLICATE_ROW_TITLE_TEST is not SEND"}, ensure_ascii=False),
             flush=True)
         return 0
-    to = _first_allowlisted_recipient()
-    if not to:
-        print("ROW_TITLE_PROBE=" + json.dumps(
-            {"skipped": "no allowlisted recipient configured"}, ensure_ascii=False), flush=True)
+    to, refusal = _named_recipient()
+    if refusal:
+        print("ROW_TITLE_PROBE=" + json.dumps({"skipped": refusal}, ensure_ascii=False),
+              flush=True)
         return 0
 
     url = os.environ["DATABASE_URL"]

@@ -16537,15 +16537,18 @@ async def _send_list_reply(
     Rows are de-duplicated by **id**, which the provider does require to be
     unique. They are no longer dropped for sharing a visible title: that rule
     was carried over from reply buttons, where the rejection is real (HTTP 400
-    ``Duplicate button title``), and it was never true here. Asked directly on
-    2026-09-22 — one list, two rows, one title, two ids — WhatsApp answered
-    HTTP 200 and delivered it
-    (``scripts/operators/whatsapp_duplicate_row_title_probe.py``). Dropping
-    those rows removed real choices from the customer's answer for a provider
-    rule that does not exist. A repeat is logged instead, because two rows a
-    customer reads as one title are still a poor selector — that is the
-    caller's to fix by labelling them (see ``core/commerce_runtime/choice_rows.py``),
-    not this sender's to fix by hiding one.
+    ``Duplicate button title``), and no test or logged rejection ever
+    established it here. Asked directly on 2026-09-22 — one list, two rows, one
+    title, two ids — the provider **accepted** the payload: HTTP 200, no error
+    (``scripts/operators/whatsapp_duplicate_row_title_probe.py``). Acceptance
+    is all that establishes, and all that is needed: the question was whether
+    Meta refuses such a list, not whether anything was delivered or read, which
+    this runtime does not observe. Dropping those rows removed real choices
+    from the customer's answer for a provider rule that was never shown to
+    exist. A repeat is logged instead, because two rows a customer reads as one
+    title are still a poor selector — that is the caller's to fix by labelling
+    them (see ``core/commerce_runtime/choice_rows.py``), not this sender's to
+    fix by hiding one.
     """
     wire_rows: list = []
     seen_ids: set = set()
