@@ -527,6 +527,18 @@
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_let_a_stale_refresh_win",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_from_a_retained_session"
       ]
+    },
+    {
+      "id": "salla_shipment_tracking",
+      "kind": "proof",
+      "module": "backend/tests/test_salla_shipment_tracking_pg.py",
+      "origin": "Salla shipment-tracking integration — revision 0112, tenant/source/external-shipment identity and PostgreSQL transaction conflict proof",
+      "required_env": {
+        "LEGACY_MIG_PG_TEST_DATABASE_URL": null
+      },
+      "nodeids": [
+        "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_enforces_salla_shipment_identity_per_tenant"
+      ]
     }
   ]
 }
