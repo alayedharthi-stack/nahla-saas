@@ -84,7 +84,12 @@ def main() -> int:
     # AUTOCOMMIT lets us explicitly begin a READ ONLY transaction after the
     # connection dialect's own harmless capability probe.  No query below is
     # issued outside that transaction.
-    engine = create_engine(database_url, pool_pre_ping=True, isolation_level="AUTOCOMMIT")
+    # The ops runner deliberately installs psycopg 3 rather than inheriting
+    # the application's legacy psycopg2 build dependency.  Keep the Railway
+    # reference value intact apart from choosing that explicit SQLAlchemy
+    # driver.
+    driver_url = str(parsed.set(drivername="postgresql+psycopg"))
+    engine = create_engine(driver_url, pool_pre_ping=True, isolation_level="AUTOCOMMIT")
     try:
         with engine.connect() as connection:
             connection.execute(text("SET default_transaction_read_only = on"))
