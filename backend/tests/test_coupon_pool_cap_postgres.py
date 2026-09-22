@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -393,6 +394,69 @@ def test_cross_tenant_pool_isolation(postgres_engine) -> None:
     assert len(codes_a) == 12
     assert len(codes_b) == 12
     assert codes_a.isdisjoint(codes_b)
+
+
+def test_a_code_another_tenant_owns_costs_no_remote_create(postgres_engine, monkeypatch) -> None:
+    """The flake that failed this suite on two unrelated PRs, made deterministic.
+
+    Codes are five characters drawn at random per tenant, so two tenants
+    eventually draw the same one. Under the constraint the platform runs —
+    ``UNIQUE (tenant_id, code)`` — that is legal and costs nothing. Under the
+    global ``coupons_code_key`` migration 0001 left behind (and that
+    ``backend/main.py`` drops at every boot), the local insert is rejected
+    *after* the remote Salla coupon has been created, so the allocator rolls
+    back, compensates, and retries with a new code: one extra adapter call, and
+    the fill no longer makes exactly twelve. PR #1113 hit it on ``NHM05``,
+    PR #1115 on ``NHFI3`` — different tests, same constraint.
+
+    Forcing the draw rather than waiting for chance turns the flake into a
+    guard. It also states the rule the allocator must *not* adopt: reserving
+    every tenant's codes globally would make one merchant's namespace shrink
+    another's, which is the opposite of tenant isolation on a platform built
+    for many merchants.
+    """
+    shared_code = "NHSHR"
+    session, connection = _new_session(postgres_engine)
+    try:
+        for tenant_id in (TEST_TENANT_CROSS_A, TEST_TENANT_CROSS_B):
+            _seed_tenant(session, tenant_id)
+            _clear_tenant_coupons(session, tenant_id)
+        # Tenant A already owns the code tenant B is about to draw first.
+        _add_pool_coupon(session, TEST_TENANT_CROSS_A, "bronze", shared_code)
+        session.commit()
+    finally:
+        session.close()
+        connection.close()
+
+    draws = iter([shared_code] + [f"NH{suffix}" for suffix in (
+        "SH1", "SH2", "SH3", "SH4", "SH5", "SH6", "SH7", "SH8", "SH9", "SHA", "SHB", "SHC",
+    )])
+    monkeypatch.setattr("services.coupon_generator._random_short_code", lambda: next(draws))
+
+    adapter_calls: list[dict] = []
+    created, outcomes = asyncio.run(
+        _ensure_pool_once(postgres_engine, TEST_TENANT_CROSS_B, adapter_calls, threading.Lock())
+    )
+
+    assert created == {"bronze": 3, "silver": 3, "gold": 3, "vip": 3}, outcomes
+    # Twelve coupons, twelve remote creates: another tenant's code was never a
+    # collision, so nothing was created remotely and then compensated away.
+    assert len(adapter_calls) == 12, "a cross-tenant code must not cost a remote create and rollback"
+    assert shared_code in {row["code"] for row in adapter_calls}, "B really did draw A's code"
+    assert len(set(_all_codes(postgres_engine, TEST_TENANT_CROSS_B))) == 12
+    # A's row is untouched.
+    assert list(_all_codes(postgres_engine, TEST_TENANT_CROSS_A)) == [shared_code]
+
+    # And the invariant that matters still bites: one tenant, one code, once.
+    session, connection = _new_session(postgres_engine)
+    try:
+        _add_pool_coupon(session, TEST_TENANT_CROSS_A, "bronze", shared_code)
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+    finally:
+        session.close()
+        connection.close()
 
 
 def test_two_levels_do_not_corrupt_each_other(postgres_engine) -> None:
