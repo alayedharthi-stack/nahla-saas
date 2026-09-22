@@ -45,7 +45,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from datetime import datetime, timedelta
-from typing import Any, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 logger = logging.getLogger("nahla.commerce_runtime.recent_products")
 
@@ -70,6 +70,11 @@ PRODUCT_REF_PREFIX = "catalog:product:"
 # which is what a tap has to be checked against — a product merely named in
 # prose was never a row anyone could tap.
 CHOICE_ROW_IDS_KEY = "choice_row_ids"
+
+# The provider's own id for the reply that carried those rows. A tap names the
+# message it was made in, so this is what binds a tap to the one list it came
+# from rather than to any list this conversation still holds.
+PROVIDER_MESSAGE_ID_KEY = "provider_message_id"
 
 _OUTBOUND_DIRECTIONS = ("out", "outbound", "internal_e2e_outbound")
 
@@ -118,6 +123,15 @@ class ShownProducts:
     # mentioned in a reply is not being offered as a row, and only a row that
     # was sent can honestly be said to have been tapped.
     offered_as_rows: Tuple[int, ...] = ()
+    # The same rows, kept per reply, keyed by the provider message id that
+    # carried them. A tap that names its message is resolved against that one
+    # list; the flat set above is the fallback for a tap that names none.
+    offered_by_message: Mapping[str, Tuple[int, ...]] = dataclasses.field(default_factory=dict)
+
+    def rows_offered_in(self, provider_message_id: Any) -> Tuple[int, ...]:
+        """The rows one named reply carried, or nothing if it carried none."""
+        key = str(provider_message_id or "").strip()
+        return tuple(self.offered_by_message.get(key, ())) if key else ()
 
     def __bool__(self) -> bool:
         return bool(self.products)
@@ -243,6 +257,7 @@ def products_shown_earlier(
     lapse = max(0, int(lapse_seconds))
     current: List[int] = []
     offered: List[int] = []
+    by_message: Dict[str, Tuple[int, ...]] = {}
     newest_citation: Optional[int] = None
     cited_anything = False
     for row in rows:
@@ -262,6 +277,11 @@ def products_shown_earlier(
             continue
         # A row that was offered is tappable whether or not this reply also
         # cited it; the two are collected side by side under the one clock.
+        if offered_here:
+            named = str((metadata or {}).get(PROVIDER_MESSAGE_ID_KEY) or "").strip() \
+                if isinstance(metadata, Mapping) else ""
+            if named and named not in by_message:
+                by_message[named] = tuple(offered_here)
         for product_id in offered_here:
             if product_id not in offered:
                 offered.append(product_id)
@@ -273,17 +293,22 @@ def products_shown_earlier(
     current = current[:MAX_PRODUCTS]
 
     rows_offered = tuple(offered)
+    offered_map: Dict[str, Tuple[int, ...]] = dict(by_message)
     if not cited_anything:
-        return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered)
+        return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered,
+                             offered_by_message=offered_map)
     if not current:
         return ShownProducts(products=(), reason=LAPSED, offered_as_rows=rows_offered,
+                             offered_by_message=offered_map,
                              seconds_since_last_product_shown=newest_citation)
 
     products = _still_in_catalog(db, tenant_id=tenant_id, product_ids=current)
     if not products:
         return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered,
+                             offered_by_message=offered_map,
                              seconds_since_last_product_shown=newest_citation)
     return ShownProducts(products=tuple(products), reason=CARRIED, offered_as_rows=rows_offered,
+                         offered_by_message=offered_map,
                          seconds_since_last_product_shown=newest_citation)
 
 
@@ -327,7 +352,8 @@ def _scalar(value: Any) -> Optional[str]:
 
 
 __all__ = [
-    "BROWSING_CONTEXT_LAPSE_SECONDS", "CHOICE_ROW_IDS_KEY", "CARRIED", "LAPSED", "MAX_PRODUCTS", "MAX_REPLIES_READ",
+    "BROWSING_CONTEXT_LAPSE_SECONDS", "CHOICE_ROW_IDS_KEY", "CARRIED",
+    "PROVIDER_MESSAGE_ID_KEY", "LAPSED", "MAX_PRODUCTS", "MAX_REPLIES_READ",
     "NO_EARLIER_REPLY", "NO_PRODUCTS_CITED", "PRODUCT_REF_PREFIX", "ShownProduct",
     "ShownProducts", "UNAVAILABLE", "products_shown_earlier",
 ]

@@ -261,3 +261,29 @@ def test_a_reply_that_offered_rows_without_citing_anything_is_still_read(monkeyp
     result = shown(monkeypatch, [row])
     assert result.reason == rp.NO_PRODUCTS_CITED
     assert result.offered_as_rows == (11,)
+
+
+def test_the_rows_of_each_reply_are_kept_apart_by_the_message_that_carried_them(monkeypatch) -> None:
+    """A tap names its message, so the rows are grouped by message.
+
+    Two lists, still both inside the lapse. Row 11 belongs to the first and
+    row 13 to the second; neither is a row of the other.
+    """
+    first = OfferedRow(["catalog:product:11"], [11], hours_ago=5)
+    first.extra_metadata = {**first.extra_metadata, rp.PROVIDER_MESSAGE_ID_KEY: "wamid.A"}
+    second = OfferedRow(["catalog:product:13"], [13], hours_ago=1)
+    second.extra_metadata = {**second.extra_metadata, rp.PROVIDER_MESSAGE_ID_KEY: "wamid.B"}
+    result = shown(monkeypatch, [second, first])
+    assert result.rows_offered_in("wamid.A") == (11,)
+    assert result.rows_offered_in("wamid.B") == (13,)
+    # And a message this conversation never sent offers nothing at all.
+    assert result.rows_offered_in("wamid.SOMEONE_ELSE") == ()
+    assert result.rows_offered_in("") == () and result.rows_offered_in(None) == ()
+    # The flat set still holds both, for a tap that names no message.
+    assert sorted(result.offered_as_rows) == [11, 13]
+
+
+def test_a_reply_that_offered_rows_without_a_message_id_joins_only_the_flat_set(monkeypatch) -> None:
+    result = shown(monkeypatch, [OfferedRow(["catalog:product:11"], [11])])
+    assert result.offered_as_rows == (11,)
+    assert result.offered_by_message == {}

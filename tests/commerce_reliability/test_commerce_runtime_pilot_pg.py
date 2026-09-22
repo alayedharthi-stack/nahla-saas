@@ -2503,3 +2503,78 @@ def test_a_selector_the_channel_cannot_show_still_answers_with_its_options(pilot
     assert report.delivery_kind == lc.DeliveryKind.TEXT.value and report.choice_rows == 0
     assert report.reply_text.splitlines()[0] == "اختر من القائمة"
     assert PRODUCT_TITLE in report.reply_text.splitlines()[1]
+
+
+def _tapped_context_with(pilot: "Pilot", row_id_value: str, *, context_id: str = "") -> str:
+    """Run one turn carrying a tap that names the message it was made in."""
+    metadata: Dict[str, Any] = {"list_reply_id": row_id_value}
+    if context_id:
+        metadata["list_reply_context_id"] = context_id
+    transport = Transport([accepted("wamid." + uuid.uuid4().hex[:8])])
+    scripted = ScriptedAnthropic([step([reply("تمام", call_id="r1")])])
+    entry.run_commerce_runtime_turn(
+        engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+        conversation_id=pilot.conversation_id, connection_ref=f"wa:{pilot.connection_id}",
+        connection_id=str(pilot.connection_id), customer_id=pilot.customer_id,
+        normalized_customer_phone=PHONE, provider_message_id="wamid." + uuid.uuid4().hex,
+        inbound_text=PRODUCT_TITLE, inbound_metadata=metadata,
+        transport=transport, instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+        context_preamble={"channel": "whatsapp"}, anthropic_provider=scripted)
+    return scripted.calls[0]["messages"][0]["content"][0]["text"]
+
+
+def test_a_tap_resolves_against_the_one_list_it_names_not_any_earlier_one(pilot):
+    """The owner's requirement, proven.
+
+    Two lists in the same conversation, both still inside the lapse. Tapping
+    the older list's row while naming the newer message is not a tap on the
+    newer list — it resolves to nothing. Naming the list the row really came
+    from resolves.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    with _two_products(pilot) as extra, _messages(pilot) as say:
+        other = extra[0]
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="القائمة الأولى",
+            metadata={"evidence_refs": [ref], rp.CHOICE_ROW_IDS_KEY: [rc.row_id(pilot.product_id)],
+                      rp.PROVIDER_MESSAGE_ID_KEY: "wamid.FIRST"})
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="القائمة الثانية",
+            metadata={"evidence_refs": [f"catalog:product:{other}"],
+                      rp.CHOICE_ROW_IDS_KEY: [rc.row_id(other)],
+                      rp.PROVIDER_MESSAGE_ID_KEY: "wamid.SECOND"})
+
+        # The first list's row, claimed as a tap in the second list's message.
+        mismatched = _tapped_context_with(pilot, rc.row_id(pilot.product_id),
+                                          context_id="wamid.SECOND")
+        # The same row, naming the message it actually came from.
+        matched = _tapped_context_with(pilot, rc.row_id(pilot.product_id),
+                                       context_id="wamid.FIRST")
+    assert "customer_tapped" not in mismatched
+    assert "customer_tapped" in matched
+    assert f'"product_id": {pilot.product_id}' in matched
+
+
+def test_a_tap_naming_a_message_this_conversation_never_sent_resolves_to_nothing(pilot):
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارين",
+            metadata={"evidence_refs": [ref], rp.CHOICE_ROW_IDS_KEY: [rc.row_id(pilot.product_id)],
+                      rp.PROVIDER_MESSAGE_ID_KEY: "wamid.OURS"})
+        context_block = _tapped_context_with(pilot, rc.row_id(pilot.product_id),
+                                             context_id="wamid.NEVER_SENT")
+    assert "customer_tapped" not in context_block
+
+
+def test_another_conversations_list_is_never_tappable_in_this_one(pilot):
+    """Conversation scope, on the tap as well as on the identity."""
+    ref = f"catalog:product:{pilot.product_id}"
+    with _second_conversation(pilot) as other, _messages(pilot) as say:
+        say(conversation_id=other, direction="outbound", body="قائمة محادثة أخرى",
+            metadata={"evidence_refs": [ref], rp.CHOICE_ROW_IDS_KEY: [rc.row_id(pilot.product_id)],
+                      rp.PROVIDER_MESSAGE_ID_KEY: "wamid.OTHER_CONVO"})
+        here = _shown(pilot)
+        there = _shown(pilot, conversation_id=other)
+        context_block = _tapped_context_with(pilot, rc.row_id(pilot.product_id),
+                                             context_id="wamid.OTHER_CONVO")
+    assert here.offered_as_rows == () and here.offered_by_message == {}
+    assert there.offered_as_rows == (pilot.product_id,)
+    assert "customer_tapped" not in context_block

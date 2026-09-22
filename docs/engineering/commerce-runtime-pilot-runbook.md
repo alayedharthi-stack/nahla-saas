@@ -1012,13 +1012,23 @@ as well as through the ledger.
   `recovery_status`. A refused list keeps its options too: the recovery text
   carries them as lines, exactly as a compose-time withholding does.
 
-  **A tap is a claim until it verifies, and it verifies against the list that
-  was sent.** Row ids are the platform's own token (`nahla:choice:<product_id>`),
-  and the ids a reply actually carried are persisted with that reply
-  (`choice_row_ids` on the outbound row). A tapped id becomes a fact only when
-  **both** hold: this conversation actually sent that row, within the same
-  per-product browsing-context lapse; and the product is still carried and
-  re-read in the merchant's catalogue now.
+  **A tap is a claim until it verifies, and it verifies against the list the
+  customer chose from.** Row ids are the platform's own token
+  (`nahla:choice:<product_id>`). What is persisted with the reply
+  (`choice_row_ids`) is read back from **the wire** — the rows the send path
+  actually wrote, after its own id de-duplication and ten-row cap — not from
+  the reserved intent, and the bounded text recovery records none at all.
+  Beside them sits that reply's `provider_message_id`.
+
+  A tapped id becomes a fact only when **both** hold: this conversation
+  actually sent that row, within the same per-product browsing-context lapse;
+  and the product is still carried and re-read in the merchant's catalogue now.
+  When the tap names the message it was made in — WhatsApp supplies that as
+  `context.id`, forwarded as `list_reply_context_id` — the first check is to
+  **that one list**, so a row from some other list this conversation still
+  holds is not a tap on this one. A tap that names no message falls back to the
+  conversation-wide check, which is weaker but still real. Nothing crosses a
+  conversation: the rows are read only from this conversation's own replies.
 
   Being *mentioned* in a reply is deliberately not enough. A product named in
   prose was never a row anyone could tap, so a crafted `list_reply_id` naming

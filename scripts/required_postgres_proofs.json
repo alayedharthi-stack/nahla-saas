@@ -317,7 +317,10 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_turn_that_offered_a_selector_records_the_rows_it_sent",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_turn_whose_list_was_refused_records_no_rows_at_all",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_refused_list_still_puts_every_option_in_front_of_the_customer",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_selector_the_channel_cannot_show_still_answers_with_its_options"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_selector_the_channel_cannot_show_still_answers_with_its_options",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_resolves_against_the_one_list_it_names_not_any_earlier_one",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_naming_a_message_this_conversation_never_sent_resolves_to_nothing",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_conversations_list_is_never_tappable_in_this_one"
       ]
     },
     {

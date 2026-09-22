@@ -314,10 +314,13 @@ def _tapped_product(inbound_metadata: Optional[Mapping[str, Any]],
     separate things have to hold before the platform will say a row was tapped:
 
     * **this conversation actually sent that row.** The check is against the
-      row ids the platform minted and persisted when it sent the list, not
-      against products the conversation merely mentioned. A product named in
-      prose was never a row anyone could tap, so a crafted id naming one
-      resolves to nothing;
+      row ids the send path put on the wire and the platform persisted with
+      that reply, not against products the conversation merely mentioned. A
+      product named in prose was never a row anyone could tap, so a crafted id
+      naming one resolves to nothing. When the tap names the message it was
+      made in — WhatsApp supplies that — the check is to **that one list**, so
+      a row from some other list this conversation still holds is not a tap on
+      this one either;
     * **the product is still carried**, under the same browsing-context clock
       as every other reference, and re-read in the merchant's catalogue now.
 
@@ -330,7 +333,20 @@ def _tapped_product(inbound_metadata: Optional[Mapping[str, Any]],
     product_id = rc.product_id_from_row_id(metadata.get("list_reply_id"))
     if product_id is None:
         return None
-    if product_id not in (getattr(shown, "offered_as_rows", ()) or ()):
+    named = str(metadata.get("list_reply_context_id") or "").strip()
+    if named:
+        # The customer's tap names the message it was made in, so the answer is
+        # exact: the row belongs to that one list or to none. A named message
+        # this conversation never sent, or one whose rows do not include this
+        # product, is not a tap on anything.
+        if product_id not in shown.rows_offered_in(named):
+            logger.info("[COMMERCE_RUNTIME] a tapped row does not belong to the list it names "
+                        "product_id=%s", product_id)
+            return None
+    elif product_id not in (getattr(shown, "offered_as_rows", ()) or ()):
+        # No message named — some payloads carry none. The weaker but still
+        # real check stands: some list this conversation sent, still inside the
+        # lapse, offered this row.
         logger.info("[COMMERCE_RUNTIME] a tapped row was never offered in this conversation "
                     "product_id=%s", product_id)
         return None

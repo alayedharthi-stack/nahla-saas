@@ -94,12 +94,21 @@ class WireObservation:
     text: str = ""
     reasons: List[str] = dataclasses.field(default_factory=list)
     duplicate_suppressed: bool = False
+    # The selectable rows the send path actually put on the wire, read back the
+    # same way the text is. A later tap is checked against these, so they have
+    # to be what was sent rather than what was asked for: the sender
+    # de-duplicates ids and caps the list, and the bounded text recovery sends
+    # none at all. Each send replaces this, so what remains is the send that
+    # reached the customer.
+    row_ids: List[str] = dataclasses.field(default_factory=list)
 
-    def record(self, text: str, reasons: Sequence[str], *, duplicate_suppressed: bool) -> None:
+    def record(self, text: str, reasons: Sequence[str], *, duplicate_suppressed: bool,
+               row_ids: Optional[Sequence[str]] = None) -> None:
         self.observed = True
         self.text = str(text or "")
         self.reasons = [str(reason) for reason in reasons]
         self.duplicate_suppressed = bool(duplicate_suppressed)
+        self.row_ids = [str(value) for value in (row_ids or ()) if str(value or "").strip()]
 
     def resolve(self, intent: str) -> Tuple[str, bool, List[str]]:
         """``(text_to_store, transformed, reasons)`` for one accepted send."""
@@ -310,7 +319,7 @@ def _send_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
             finally:
                 seen = observed_wire_text(int(tenant_id), recipient)
                 if seen is not None:
-                    observation.record(seen[0], seen[1],
+                    observation.record(seen[0], seen[1], row_ids=(),
                                        duplicate_suppressed=bool(sink.get("duplicate_suppressed")))
                 reset_wire_audit(token)
 
@@ -380,7 +389,7 @@ def _send_list_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
             finally:
                 seen = observed_wire_text(int(tenant_id), recipient)
                 if seen is not None:
-                    observation.record(seen[0], seen[1],
+                    observation.record(seen[0], seen[1], row_ids=list(sink.get("list_row_ids") or ()),
                                        duplicate_suppressed=bool(sink.get("duplicate_suppressed")))
                 reset_wire_audit(token)
 
@@ -1092,10 +1101,11 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
                 "commerce_runtime_wire_duplicate_suppressed": wire.duplicate_suppressed,
                 "provider_message_id": report.provider_message_id,
                 "evidence_refs": list(report.evidence_refs),
-                # The rows this message actually carried. A later tap is
+                # The rows this message actually carried, read back from the
+                # wire rather than from the reserved intent. A later tap is
                 # checked against these, so a reply that offered no list — or
                 # whose list the provider refused — leaves nothing tappable.
-                rp.CHOICE_ROW_IDS_KEY: list(getattr(report, "choice_row_ids", ()) or ()),
+                rp.CHOICE_ROW_IDS_KEY: list(wire.row_ids),
             },
         )
     except Exception:  # noqa: BLE001 - the send already happened; persistence must not undo it
