@@ -101,7 +101,8 @@ def main() -> int:
     # the application's legacy psycopg2 build dependency.  Keep the Railway
     # reference value intact apart from choosing that explicit SQLAlchemy
     # driver.
-    driver_url = str(parsed.set(drivername="postgresql+psycopg"))
+    # Pass the URL object: str(URL) masks its password as "***".
+    driver_url = parsed.set(drivername="postgresql+psycopg")
     engine = create_engine(driver_url, pool_pre_ping=True, isolation_level="AUTOCOMMIT")
     try:
         with engine.connect() as connection:
