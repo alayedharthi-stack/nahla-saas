@@ -967,6 +967,19 @@ as well as through the ledger.
   row; the set then reports itself **incomplete** and the caller sends the
   model's text alone, so a real option never disappears because of a display
   limit.
+* Open question, under test: the platform de-duplicates interactive rows by
+  visible title, but every recorded provider rejection behind that rule —
+  HTTP 400 `Duplicate button title`, `build_standard_pick_buttons`,
+  `meta_errors.invalid_payload` — is about reply **buttons**. For list **rows**
+  the rule was carried over by analogy, with no test and no logged rejection.
+  `scripts/operators/whatsapp_duplicate_row_title_probe.py` asks the provider
+  once, owner-approved: one interactive list to the pilot's own allowlisted
+  trial recipient with two rows sharing a title and differing only by id. It
+  requires `NAHLA_DUPLICATE_ROW_TITLE_TEST=SEND`, reads the recipient from the
+  allowlist rather than an argument, sends through `provider_send_message` so
+  no credential reaches the script, and writes to no table. Whatever the answer,
+  two rows a customer reads as one title are not a usable selector — the
+  labelling above stands either way.
 * Recorded, not changed: the catalogue search's clarification guard
   (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the
   `artifact` / `response_bundle` shapes the legacy compose path writes. This
