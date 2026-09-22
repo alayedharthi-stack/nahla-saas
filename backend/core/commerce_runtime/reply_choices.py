@@ -46,6 +46,9 @@ MIN_CHOICES = 2
 # what the platform established are never the same field.
 REQUESTED_KEY = "requested_choices"
 CHOICES_KEY = "choices"
+# Why a requested selector was not offered, carried on the delivered payload so
+# the reason is auditable in production rather than only in a log line.
+WITHHELD_KEY = "choices_withheld"
 
 ROW_ID_PREFIX = "nahla:choice:"
 PRODUCT_REF_PREFIX = "catalog:product:"
@@ -200,11 +203,30 @@ def unobserved_choices(draft: Any, observations: Sequence[Any]) -> Tuple[int, ..
                  or product_ref(product_id) not in cited)
 
 
+def _wire_rows(products: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], bool]:
+    """The rows these products compose to, and whether every one became a row."""
+    composed = cr.choice_rows(products)
+    rows: List[Dict[str, Any]] = []
+    for row in composed.rows:
+        wire: Dict[str, Any] = {"id": row_id(row.product_id), "title": row.title}
+        if row.description:
+            wire["description"] = row.description
+        rows.append(wire)
+    return rows, bool(composed) and composed.complete
+
+
+def _requested_products(draft: Any, observations: Sequence[Any]) -> List[Mapping[str, Any]]:
+    observed = observed_products(observations)
+    return [observed[product_id] for product_id in requested_product_ids(draft)
+            if product_id in observed]
+
+
 def selection(draft: Any, observations: Sequence[Any]) -> Tuple[Optional[ChoiceSelection], str]:
     """The selector this draft may carry, and why there is none when there is not.
 
     Called after verification, so anything refused here is a display limit
-    rather than a truth problem, and the caller sends the model's text alone.
+    rather than a truth problem. The options themselves are not refused with
+    it: see ``finalize``, which carries them into the text instead.
     """
     requested = requested_product_ids(draft)
     if not requested:
@@ -213,58 +235,104 @@ def selection(draft: Any, observations: Sequence[Any]) -> Tuple[Optional[ChoiceS
         return None, TOO_FEW
     if len(requested) > MAX_CHOICES:
         return None, TOO_MANY
-    observed = observed_products(observations)
-    products = [observed[product_id] for product_id in requested if product_id in observed]
+    products = _requested_products(draft, observations)
     if len(products) != len(requested):
         return None, NOT_OBSERVED
-    composed = cr.choice_rows(products)
-    if not composed or not composed.complete:
+    rows, complete = _wire_rows(products)
+    if not rows or not complete:
         return None, INCOMPLETE
-    rows: List[Dict[str, Any]] = []
-    for row in composed.rows:
-        wire: Dict[str, Any] = {"id": row_id(row.product_id), "title": row.title}
-        if row.description:
-            wire["description"] = row.description
-        rows.append(wire)
     return ChoiceSelection(rows=tuple(rows),
-                           product_ids=tuple(row.product_id for row in composed.rows),
+                           product_ids=tuple(int(str(row["id"])[len(ROW_ID_PREFIX):])
+                                             for row in rows),
                            button=requested_button(draft)), OFFERED
 
 
-def finalize(draft: Any, observations: Sequence[Any]) -> Tuple[Any, str]:
-    """The draft as it will be delivered, with its selector or without one.
+def option_line(row: Mapping[str, Any]) -> str:
+    """One option as a line of the merchant's own values, and nothing else.
 
-    The text is returned untouched in every case. What changes is the delivery
-    kind and the structured payload beside it: a verified selector makes the
-    reply ``rich``, and everything else leaves it the plain text the model
-    wrote. The one bounded rich-to-text recovery the ledger permits still
-    applies afterwards, so a list the provider definitively refuses costs the
-    tapping and not the answer.
+    The same title and description the row would have carried, joined by the
+    same separator. No heading, no verb, no connective: this is the platform's
+    structured facts rendered where the channel would not take a row, not a
+    sentence the platform wrote on the model's behalf. A description the title
+    already states is not repeated.
+    """
+    title = " ".join(str(row.get("title") or "").split())
+    description = " ".join(str(row.get("description") or "").split())
+    if not title:
+        return ""
+    if not description or description in title:
+        return title
+    return f"{title}{cr.FIELD_SEPARATOR}{description}"
+
+
+def options_as_text(text: str, rows: Sequence[Mapping[str, Any]]) -> str:
+    """The model's sentence, with the options it meant under it as fact lines.
+
+    A reply that says «اختر من القائمة» must not arrive with no list. The
+    options are the platform's own composed merchant facts; when the channel
+    will not carry them as rows they are carried as lines, so the customer sees
+    every option and the sentence refers to something that is there. The
+    model's own wording is never replaced, only followed.
+    """
+    lines = [line for line in (option_line(row) for row in rows or ()) if line]
+    if not lines:
+        return str(text or "")
+    body = str(text or "").rstrip()
+    return "\n".join([body, *lines]) if body else "\n".join(lines)
+
+
+def finalize(draft: Any, observations: Sequence[Any]) -> Tuple[Any, str]:
+    """The draft as it will be delivered, with its selector or with its options.
+
+    A verified selector makes the reply ``rich`` and leaves the text exactly as
+    the model wrote it. When the channel will not carry the rows, the **options
+    are not withheld with them**: they follow the model's own sentence as lines
+    of the merchant's values, so a reply that says «اختر من القائمة» never
+    arrives with nothing to choose from. Only a reply that asked for no
+    selector is returned untouched.
+
+    The model's wording is never replaced — only followed by facts the platform
+    already owns and had already composed for the rows.
     """
     from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
     from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
 
     chosen, reason = selection(draft, observations)
-    if chosen is None:
-        # A draft that asked for nothing is left exactly as it is; only the
-        # request itself is dropped, because a request the platform declined is
-        # not part of what gets delivered.
-        payload = dict(getattr(draft, "payload", None) or {})
-        if REQUESTED_KEY not in payload:
-            return draft, reason
-        payload.pop(REQUESTED_KEY)
-        return dataclasses.replace(draft, kind=lc.DeliveryKind.TEXT.value,
-                                   payload=ac.public_copy(payload)), reason
-    offered: Dict[str, Any] = {key: value for key, value in dict(getattr(draft, "payload", None) or {}).items()
+    payload: Dict[str, Any] = {key: value
+                               for key, value in dict(getattr(draft, "payload", None) or {}).items()
                                if key != REQUESTED_KEY}
-    offered[CHOICES_KEY] = chosen.as_payload()
-    return dataclasses.replace(draft, kind=lc.DeliveryKind.RICH.value,
-                               payload=ac.public_copy(offered)), reason
+    if chosen is not None:
+        payload[CHOICES_KEY] = chosen.as_payload()
+        return dataclasses.replace(draft, kind=lc.DeliveryKind.RICH.value,
+                                   payload=ac.public_copy(payload)), reason
+    if reason == NOT_REQUESTED:
+        return (draft if REQUESTED_KEY not in (getattr(draft, "payload", None) or {})
+                else dataclasses.replace(draft, kind=lc.DeliveryKind.TEXT.value,
+                                         payload=ac.public_copy(payload))), reason
+
+    # The selector was asked for and cannot be offered. The options themselves
+    # are still the answer, so they are carried as text rather than lost.
+    rows, _complete = _wire_rows(_requested_products(draft, observations))
+    text = options_as_text(getattr(draft, "text", ""), rows)
+    if rows:
+        payload[WITHHELD_KEY] = reason
+    return dataclasses.replace(draft, kind=lc.DeliveryKind.TEXT.value, text=text,
+                               payload=ac.public_copy(payload)), reason
 
 
 def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    """The same reply without its selector, for the bounded recovery attempt."""
+    """The same reply without its selector, for the bounded recovery attempt.
+
+    The rows do not simply disappear: the provider refused to render them, not
+    to carry their content, so they follow the model's sentence as lines. A
+    customer whose list was rejected still reads every option, and the
+    sentence that pointed at the list still points at something.
+    """
     out = {key: value for key, value in dict(payload or {}).items() if key != CHOICES_KEY}
+    rows, _button = payload_rows(payload)
+    if rows:
+        out["text"] = options_as_text(out.get("text", ""), rows)
+        out[WITHHELD_KEY] = "provider_rejected_the_list"
     return out
 
 
@@ -283,7 +351,8 @@ def payload_rows(payload: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], str]
 __all__ = [
     "CHOICES_KEY", "ChoiceSelection", "INCOMPLETE", "MAX_BUTTON_LABEL", "MAX_CHOICES",
     "MIN_CHOICES", "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX",
-    "REQUESTED_KEY", "ROW_ID_PREFIX", "TOO_FEW", "TOO_MANY", "finalize", "observed_products",
+    "REQUESTED_KEY", "ROW_ID_PREFIX", "TOO_FEW", "TOO_MANY", "WITHHELD_KEY", "finalize",
+    "observed_products", "option_line", "options_as_text",
     "payload_rows", "product_id_from_row_id", "product_ref", "requested_button",
     "requested_product_ids", "row_id", "selection", "text_only_payload", "unobserved_choices",
 ]

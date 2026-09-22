@@ -121,6 +121,10 @@ class TurnReport:
     dispatch_status: Optional[str] = None
     delivery_kind: Optional[str] = None       # text, or rich when a selector was offered
     choice_rows: int = 0                      # selectable rows the customer was offered
+    # The row ids that actually reached the customer, which is what a later tap
+    # is checked against. Empty when the list was withheld or refused: a row
+    # nobody was sent is a row nobody can have tapped.
+    choice_row_ids: Tuple[str, ...] = ()
     recovery_status: Optional[str] = None     # the bounded rich-to-text attempt, when one was made
     provider_message_id: Optional[str] = None
     processing_outcome: Optional[str] = None
@@ -147,6 +151,7 @@ class TurnReport:
         fields = dataclasses.asdict(self)
         fields["tools_called"] = ",".join(self.tools_called)
         fields["evidence_refs"] = ",".join(self.evidence_refs)
+        fields["choice_row_ids"] = ",".join(self.choice_row_ids)
         fields["stop_detail"] = ";".join(f"{key}={value}" for key, value in self.stop_detail)
         fields["replied"] = self.replied
         fields["reply_chars"] = len(self.reply_text)
@@ -305,17 +310,29 @@ def _tapped_product(inbound_metadata: Optional[Mapping[str, Any]],
                     shown: Any) -> Optional[Dict[str, Any]]:
     """The product a tap on a selector row names, once it verifies.
 
-    A row id arrives from the wire, so it is a claim and not a fact. It becomes
-    one only by matching a product this conversation's own replies showed and
-    still carry — the same set, under the same browsing-context clock, that
-    every other reference in this turn is resolved against. A tap on a list old
-    enough to have lapsed, or on a row this runtime never sent, therefore
-    resolves to nothing at all, and the turn proceeds on the row title the tap
-    delivered as ordinary text.
+    A row id arrives from the wire, so it is a claim and not a fact, and two
+    separate things have to hold before the platform will say a row was tapped:
+
+    * **this conversation actually sent that row.** The check is against the
+      row ids the platform minted and persisted when it sent the list, not
+      against products the conversation merely mentioned. A product named in
+      prose was never a row anyone could tap, so a crafted id naming one
+      resolves to nothing;
+    * **the product is still carried**, under the same browsing-context clock
+      as every other reference, and re-read in the merchant's catalogue now.
+
+    A tap on a list old enough to have lapsed, on a row this runtime never
+    sent, or on another tenant's product therefore resolves to nothing at all,
+    and the turn simply proceeds on the row title the tap delivered as ordinary
+    text — the customer is still answered.
     """
     metadata = inbound_metadata if isinstance(inbound_metadata, Mapping) else {}
     product_id = rc.product_id_from_row_id(metadata.get("list_reply_id"))
     if product_id is None:
+        return None
+    if product_id not in (getattr(shown, "offered_as_rows", ()) or ()):
+        logger.info("[COMMERCE_RUNTIME] a tapped row was never offered in this conversation "
+                    "product_id=%s", product_id)
         return None
     for product in getattr(shown, "products", ()) or ():
         if int(getattr(product, "product_id", 0)) == product_id:
@@ -673,6 +690,8 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
     common["delivery_kind"] = getattr(sequence, "intent_kind", None)
     offered_rows, _button = rc.payload_rows(intent_payload)
     common["choice_rows"] = len(offered_rows)
+    common["choice_row_ids"] = tuple(str(row.get("id") or "") for row in offered_rows
+                                     if row.get("id"))
     dispatch = dd.dispatch_reserved_delivery(
         ledgers=ledgers, tenant_id=tenant_id, namespace=NAMESPACE,
         conversation_id=runtime_conversation_id, token=token,
@@ -684,6 +703,10 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         transport=transport, owner_id=owner_id)
     if recovery is not None:
         common["recovery_status"] = recovery.status
+        # The recovery is the send that reached the customer, and it carried no
+        # rows. Reporting the withheld ones would let a later tap verify
+        # against a list nobody received.
+        common["choice_row_ids"] = ()
         dispatch = recovery
     terminal = dd.complete_turn(
         ledgers=ledgers, tenant_id=tenant_id, namespace=NAMESPACE, turn_id=turn_id, token=token,

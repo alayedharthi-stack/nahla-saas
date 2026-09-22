@@ -1071,6 +1071,7 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
         logger.warning("[COMMERCE_RUNTIME_PILOT] transmitted text is not the reserved intent "
                        "turn=%s reasons=%s", report.turn_id, ",".join(reasons))
     try:
+        from core.commerce_runtime import recent_products as rp  # noqa: PLC0415
         from core.conversation_engine import StateManager  # noqa: PLC0415
 
         StateManager.save_message(
@@ -1091,6 +1092,10 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
                 "commerce_runtime_wire_duplicate_suppressed": wire.duplicate_suppressed,
                 "provider_message_id": report.provider_message_id,
                 "evidence_refs": list(report.evidence_refs),
+                # The rows this message actually carried. A later tap is
+                # checked against these, so a reply that offered no list — or
+                # whose list the provider refused — leaves nothing tappable.
+                rp.CHOICE_ROW_IDS_KEY: list(getattr(report, "choice_row_ids", ()) or ()),
             },
         )
     except Exception:  # noqa: BLE001 - the send already happened; persistence must not undo it

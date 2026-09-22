@@ -982,12 +982,21 @@ as well as through the ledger.
   use for it. The group is numbered together so a number is never read as a
   price.
 
-  **Nothing real is ever dropped to make a list fit.** Fewer than two products,
-  more than the ten rows the channel shows, or a product with no usable
-  identity or title: in every such case the whole selector is withheld and the
-  model's text goes out with every option still in it. The reason is logged
-  (`reply_accepted … choices=…`), never fed back, because none of it makes the
-  reply wrong.
+  **Nothing real is ever dropped to make a list fit, and no reply points at a
+  list that is not there.** Fewer than two products, more than the ten rows the
+  channel shows, or a product with no usable identity or title: the *selector*
+  is withheld, the *options* are not. They follow the model's own sentence as
+  lines of the merchant's values — the same title and description the rows
+  would have carried, joined by the same separator, with no heading, verb or
+  connective, and a description the title already states not repeated. So a
+  reply that says «اختر من القائمة» arrives with the list under it as text. The
+  model's wording is never replaced, only followed; the withheld reason rides
+  on the delivered payload as `choices_withheld`, and the turn logs it.
+
+  This is a judgement call worth naming: the lines are platform-composed
+  merchant facts, the same class as the row labels themselves and as the
+  CTA/vCard payloads the platform already owns — values and separators, never
+  prose. They are *appended to* the model's text, never substituted for it.
 
   **Delivery.** A verified selector is reserved as a **rich** delivery intent
   whose stored payload carries the rows, and the transport reads the shape off
@@ -999,16 +1008,27 @@ as well as through the ledger.
   reports without having produced it counts too — that is the crash window the
   recovery exists for — and the ledger, not the caller, re-reads the outcome,
   the attempt kind and the bound, so a second recovery is refused. The turn
-  report carries `delivery_kind`, `choice_rows` and `recovery_status`.
+  report carries `delivery_kind`, `choice_rows`, `choice_row_ids` and
+  `recovery_status`. A refused list keeps its options too: the recovery text
+  carries them as lines, exactly as a compose-time withholding does.
 
-  **A tap is a claim until it verifies.** Row ids are the platform's own token
-  (`nahla:choice:<product_id>`). A tapped id is resolved to a product and then
-  re-checked against what this conversation's own replies showed and still
-  carry — the same set, under the same browsing-context clock, as every other
-  reference. A tap on a lapsed list, or on a row this runtime never sent,
-  resolves to nothing at all and the turn simply proceeds on the row title the
-  tap delivered as text. A verified tap is named in the preamble as
-  `customer_tapped`.
+  **A tap is a claim until it verifies, and it verifies against the list that
+  was sent.** Row ids are the platform's own token (`nahla:choice:<product_id>`),
+  and the ids a reply actually carried are persisted with that reply
+  (`choice_row_ids` on the outbound row). A tapped id becomes a fact only when
+  **both** hold: this conversation actually sent that row, within the same
+  per-product browsing-context lapse; and the product is still carried and
+  re-read in the merchant's catalogue now.
+
+  Being *mentioned* in a reply is deliberately not enough. A product named in
+  prose was never a row anyone could tap, so a crafted `list_reply_id` naming
+  one resolves to nothing — while the product stays a readable identity,
+  because mentioning it is enough for *that*. A refused list records no rows at
+  all: the customer received text, so nothing in it is tappable. A tap on a
+  lapsed list, on a row this runtime never sent, or on another tenant's product
+  therefore yields no fact, and the turn proceeds on the row title the tap
+  delivered as ordinary text — the customer is still answered. A verified tap
+  is named in the preamble as `customer_tapped`.
 * **Settled, 2026-09-22 10:17Z: Meta accepts a list whose two rows share a
   visible title.** The platform dropped such rows on a rule carried over from
   reply buttons, where the rejection is real (HTTP 400 `Duplicate button

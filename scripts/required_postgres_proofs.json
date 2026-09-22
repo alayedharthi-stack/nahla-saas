@@ -306,12 +306,18 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_accepted_list_is_never_followed_by_a_second_message",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_unknown_list_send_is_never_recovered",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_reply_without_a_selector_is_still_an_ordinary_text_send",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_on_a_row_resolves_to_the_product_that_reply_showed",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_on_a_row_resolves_to_the_product_that_reply_offered",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_this_conversation_no_longer_carries_resolves_to_nothing",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_tenants_row_id_is_never_an_identity_here",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_rejection_this_call_did_not_make_still_reaches_the_customer",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_second_recovery_is_refused_by_the_ledger_not_by_the_caller",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_accepted_list_permits_no_recovery_at_the_ledger_either"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_accepted_list_permits_no_recovery_at_the_ledger_either",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_naming_a_product_that_was_only_talked_about_is_not_a_tap",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_same_product_is_a_tap_once_a_reply_actually_offered_it_as_a_row",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_turn_that_offered_a_selector_records_the_rows_it_sent",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_turn_whose_list_was_refused_records_no_rows_at_all",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_refused_list_still_puts_every_option_in_front_of_the_customer",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_selector_the_channel_cannot_show_still_answers_with_its_options"
       ]
     },
     {

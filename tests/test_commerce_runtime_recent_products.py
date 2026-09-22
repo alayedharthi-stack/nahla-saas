@@ -191,3 +191,73 @@ def test_an_unreadable_reply_timestamp_does_not_silently_lapse_the_context(monke
     row.created_at = None  # type: ignore[assignment]
     result = shown(monkeypatch, [row])
     assert result.reason == rp.CARRIED and result.seconds_since_last_product_shown is None
+
+
+# ── A tap is checked against the list that was sent, not what was mentioned ──
+
+
+class OfferedRow(Row):
+    """An outbound reply that actually carried selectable rows."""
+
+    def __init__(self, refs: Any, row_product_ids: Any, *, hours_ago: float = 1.0) -> None:
+        super().__init__(refs, hours_ago=hours_ago)
+        meta = dict(self.extra_metadata or {})
+        meta[rp.CHOICE_ROW_IDS_KEY] = [f"nahla:choice:{i}" for i in row_product_ids]
+        self.extra_metadata = meta
+
+
+def test_a_product_merely_named_in_a_reply_was_never_a_row_anyone_could_tap(monkeypatch) -> None:
+    """The gap this closes: prose is not a list.
+
+    The reply cited the shirt, so the next turn may look it up — but it
+    offered no rows, so nothing in this conversation is tappable.
+    """
+    result = shown(monkeypatch, [Row(["catalog:product:11"])])
+    assert result.product_ids == [11]
+    assert result.offered_as_rows == ()
+
+
+def test_only_the_rows_a_reply_actually_carried_are_tappable(monkeypatch) -> None:
+    result = shown(monkeypatch, [OfferedRow(["catalog:product:11", "catalog:product:12"], [11, 12]),
+                                 Row(["catalog:product:13"], hours_ago=2)])
+    assert result.product_ids == [11, 12, 13]      # all three may be looked up
+    assert result.offered_as_rows == (11, 12)      # only two were ever rows
+
+
+def test_a_row_offered_longer_ago_than_the_lapse_is_no_longer_tappable(monkeypatch) -> None:
+    hours = rp.BROWSING_CONTEXT_LAPSE_SECONDS / 3600
+    result = shown(monkeypatch, [OfferedRow(["catalog:product:11"], [11], hours_ago=hours + 1)])
+    assert result.reason == rp.LAPSED and result.offered_as_rows == ()
+
+
+def test_the_same_row_offered_twice_is_carried_once(monkeypatch) -> None:
+    result = shown(monkeypatch, [OfferedRow(["catalog:product:11"], [11]),
+                                 OfferedRow(["catalog:product:11"], [11], hours_ago=3)])
+    assert result.offered_as_rows == (11,)
+
+
+def test_a_row_id_stored_in_another_shape_is_read_the_same_way(monkeypatch) -> None:
+    row = Row(["catalog:product:11"])
+    row.extra_metadata = {"evidence_refs": ["catalog:product:11"],
+                          rp.CHOICE_ROW_IDS_KEY: "nahla:choice:11,nahla:choice:13"}
+    result = shown(monkeypatch, [row])
+    assert result.offered_as_rows == (11, 13)
+
+
+def test_anything_that_is_not_a_platform_row_id_offers_nothing(monkeypatch) -> None:
+    row = Row(["catalog:product:11"])
+    row.extra_metadata = {"evidence_refs": ["catalog:product:11"],
+                          rp.CHOICE_ROW_IDS_KEY: ["11", "catalog:product:11", "", None,
+                                                  "nahla:choice:", "nahla:choice:abc",
+                                                  "other_surface_row"]}
+    result = shown(monkeypatch, [row])
+    assert result.offered_as_rows == ()
+
+
+def test_a_reply_that_offered_rows_without_citing_anything_is_still_read(monkeypatch) -> None:
+    """Defensive: the two keys are read side by side, neither gating the other."""
+    row = Row(None)
+    row.extra_metadata = {rp.CHOICE_ROW_IDS_KEY: ["nahla:choice:11"]}
+    result = shown(monkeypatch, [row])
+    assert result.reason == rp.NO_PRODUCTS_CITED
+    assert result.offered_as_rows == (11,)

@@ -65,6 +65,12 @@ MAX_PRODUCTS = 10
 
 PRODUCT_REF_PREFIX = "catalog:product:"
 
+# The metadata key an outbound row carries when that reply offered selectable
+# rows. It is the evidence that *this* list was sent to *this* conversation,
+# which is what a tap has to be checked against — a product merely named in
+# prose was never a row anyone could tap.
+CHOICE_ROW_IDS_KEY = "choice_row_ids"
+
 _OUTBOUND_DIRECTIONS = ("out", "outbound", "internal_e2e_outbound")
 
 # Closed reasons, for the pilot log and for tests.
@@ -107,6 +113,11 @@ class ShownProducts:
     # number the policy turns on, logged every turn so it can be set from
     # evidence rather than opinion.
     seconds_since_last_product_shown: Optional[int] = None
+    # Products this conversation actually offered as selectable rows, within
+    # the same per-product lapse. Strictly narrower than ``products``: being
+    # mentioned in a reply is not being offered as a row, and only a row that
+    # was sent can honestly be said to have been tapped.
+    offered_as_rows: Tuple[int, ...] = ()
 
     def __bool__(self) -> bool:
         return bool(self.products)
@@ -121,6 +132,30 @@ class ShownProducts:
 
     def as_facts(self) -> List[dict]:
         return [item.as_fact() for item in self.products]
+
+
+def _row_product_ids_offered(metadata: Any) -> List[int]:
+    """The catalog products a stored reply offered as selectable rows.
+
+    Read from the row ids the platform itself minted and persisted when it
+    sent the list, so the answer is "this reply offered this row", never "this
+    product came up somewhere".
+    """
+    if not isinstance(metadata, Mapping):
+        return []
+    raw = metadata.get(CHOICE_ROW_IDS_KEY)
+    if isinstance(raw, str):
+        raw = [part for part in raw.split(",")]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    from core.commerce_runtime.reply_choices import product_id_from_row_id  # noqa: PLC0415
+
+    out: List[int] = []
+    for value in raw:
+        product_id = product_id_from_row_id(value)
+        if product_id is not None and product_id not in out:
+            out.append(product_id)
+    return out
 
 
 def _product_ids_cited(metadata: Any) -> List[int]:
@@ -207,38 +242,48 @@ def products_shown_earlier(
     moment = now if isinstance(now, datetime) else datetime.utcnow()
     lapse = max(0, int(lapse_seconds))
     current: List[int] = []
+    offered: List[int] = []
     newest_citation: Optional[int] = None
     cited_anything = False
     for row in rows:
-        cited = _product_ids_cited(getattr(row, "extra_metadata", None))
-        if not cited:
+        metadata = getattr(row, "extra_metadata", None)
+        cited = _product_ids_cited(metadata)
+        offered_here = _row_product_ids_offered(metadata)
+        if not cited and not offered_here:
             continue
-        cited_anything = True
         # A reply whose timestamp cannot be read is not evidence of staleness;
         # the age is simply unknown and the products it showed are carried.
         age = _age_seconds(moment, getattr(row, "created_at", None))
-        if age is not None and (newest_citation is None or age < newest_citation):
-            newest_citation = age
+        if cited:
+            cited_anything = True
+            if age is not None and (newest_citation is None or age < newest_citation):
+                newest_citation = age
         if age is not None and age > lapse:
+            continue
+        # A row that was offered is tappable whether or not this reply also
+        # cited it; the two are collected side by side under the one clock.
+        for product_id in offered_here:
+            if product_id not in offered:
+                offered.append(product_id)
+        if len(current) >= MAX_PRODUCTS:
             continue
         for product_id in cited:
             if product_id not in current:
                 current.append(product_id)
-        if len(current) >= MAX_PRODUCTS:
-            break
     current = current[:MAX_PRODUCTS]
 
+    rows_offered = tuple(offered)
     if not cited_anything:
-        return ShownProducts(products=(), reason=NO_PRODUCTS_CITED)
+        return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered)
     if not current:
-        return ShownProducts(products=(), reason=LAPSED,
+        return ShownProducts(products=(), reason=LAPSED, offered_as_rows=rows_offered,
                              seconds_since_last_product_shown=newest_citation)
 
     products = _still_in_catalog(db, tenant_id=tenant_id, product_ids=current)
     if not products:
-        return ShownProducts(products=(), reason=NO_PRODUCTS_CITED,
+        return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered,
                              seconds_since_last_product_shown=newest_citation)
-    return ShownProducts(products=tuple(products), reason=CARRIED,
+    return ShownProducts(products=tuple(products), reason=CARRIED, offered_as_rows=rows_offered,
                          seconds_since_last_product_shown=newest_citation)
 
 
@@ -282,7 +327,7 @@ def _scalar(value: Any) -> Optional[str]:
 
 
 __all__ = [
-    "BROWSING_CONTEXT_LAPSE_SECONDS", "CARRIED", "LAPSED", "MAX_PRODUCTS", "MAX_REPLIES_READ",
+    "BROWSING_CONTEXT_LAPSE_SECONDS", "CHOICE_ROW_IDS_KEY", "CARRIED", "LAPSED", "MAX_PRODUCTS", "MAX_REPLIES_READ",
     "NO_EARLIER_REPLY", "NO_PRODUCTS_CITED", "PRODUCT_REF_PREFIX", "ShownProduct",
     "ShownProducts", "UNAVAILABLE", "products_shown_earlier",
 ]

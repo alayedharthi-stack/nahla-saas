@@ -226,10 +226,13 @@ def test_anything_else_on_that_field_resolves_to_no_product() -> None:
 # ── The bounded recovery keeps the answer, loses only the tapping ────────────
 
 def test_the_same_reply_without_its_selector_keeps_text_and_evidence() -> None:
+    """The selector goes; the evidence and the option itself stay."""
     stored = {"text": "هذي الخيارات", "evidence_refs": ["catalog:product:23"],
               rc.CHOICES_KEY: {"rows": [{"id": "nahla:choice:23", "title": "فستان"}]}}
-    assert rc.text_only_payload(stored) == {"text": "هذي الخيارات",
-                                            "evidence_refs": ["catalog:product:23"]}
+    recovered = rc.text_only_payload(stored)
+    assert rc.CHOICES_KEY not in recovered
+    assert recovered["evidence_refs"] == ["catalog:product:23"]
+    assert recovered["text"].splitlines() == ["هذي الخيارات", "فستان"]
 
 
 def test_a_stored_payload_without_a_selector_reads_as_no_rows() -> None:
@@ -258,3 +261,77 @@ def test_the_verified_payload_survives_the_platforms_own_payload_validation() ->
     assert validated.kind == lc.DeliveryKind.RICH.value
     rows, button = rc.payload_rows(validated.payload)
     assert len(rows) == 3 and button == "اختر"
+
+
+# ── The options survive when the selector cannot ─────────────────────────────
+
+def test_a_reply_pointing_at_a_list_never_arrives_without_one() -> None:
+    """«اختر من القائمة» with no list is a reference to nothing.
+
+    Twelve options do not fit the channel's ten rows, so the selector is
+    withheld — but the options are the answer, not the affordance, and they
+    follow the model's own sentence as lines of the merchant's values.
+    """
+    many = [product(100 + i, f"قميص قطني أزرق {i}", price=f"{100 + i}.0") for i in range(12)]
+    ids = [p["product_id"] for p in many]
+    final, reason = rc.finalize(draft(ids, text="اختر من القائمة"), [search(*many)])
+    assert reason == rc.TOO_MANY and final.kind == lc.DeliveryKind.TEXT.value
+    lines = final.text.splitlines()
+    assert lines[0] == "اختر من القائمة"
+    assert len(lines) == 1 + 12          # every option, none trimmed
+    assert lines[1].startswith("قميص قطني أزرق 0")
+    assert final.payload[rc.WITHHELD_KEY] == rc.TOO_MANY
+
+
+def test_one_option_still_reaches_the_customer_as_a_line() -> None:
+    final, reason = rc.finalize(draft([23], text="اختر من القائمة"), [search(*DRESSES)])
+    assert reason == rc.TOO_FEW
+    assert final.text.splitlines() == ["اختر من القائمة", "فستان · 144.0 SAR"]
+
+
+def test_a_line_does_not_repeat_a_fact_its_title_already_states() -> None:
+    assert rc.option_line({"title": "فستان · 144.0 SAR", "description": "144.0 SAR"}) == \
+        "فستان · 144.0 SAR"
+    assert rc.option_line({"title": "قميص قطني أزرق", "description": "129.0"}) == \
+        "قميص قطني أزرق · 129.0"
+    assert rc.option_line({"title": "", "description": "129.0"}) == ""
+
+
+def test_the_lines_are_values_and_separators_and_never_a_sentence() -> None:
+    """No heading, no verb, no connective: the platform adds facts, not prose."""
+    final, _reason = rc.finalize(draft([23], text="تفضلي"), [search(*DRESSES)])
+    added = final.text.splitlines()[1:]
+    assert added == ["فستان · 144.0 SAR"]
+    for line in added:
+        assert not line.endswith(":") and "الخيارات" not in line
+
+
+def test_a_reply_that_asked_for_no_selector_keeps_its_text_exactly() -> None:
+    final, reason = rc.finalize(draft(text="أهلاً وسهلاً"), [search(*DRESSES)])
+    assert reason == rc.NOT_REQUESTED and final.text == "أهلاً وسهلاً"
+    assert rc.WITHHELD_KEY not in final.payload
+
+
+def test_an_offered_selector_leaves_the_models_text_byte_for_byte() -> None:
+    written = "اختاري اللي يعجبك"
+    final, reason = rc.finalize(draft([23, 37], text=written), [search(*DRESSES)])
+    assert reason == rc.OFFERED and final.text == written
+    assert rc.WITHHELD_KEY not in final.payload
+
+
+def test_a_refused_list_carries_its_rows_into_the_recovery_text() -> None:
+    """The provider refused to render the rows, not to carry their content."""
+    stored = {"text": "اختر من القائمة", "evidence_refs": ["catalog:product:23"],
+              rc.CHOICES_KEY: {"rows": [{"id": rc.row_id(23), "title": "فستان · 144.0 SAR"},
+                                        {"id": rc.row_id(37), "title": "فستان · 114.0 SAR"}],
+                               "product_ids": [23, 37]}}
+    recovered = rc.text_only_payload(stored)
+    assert rc.CHOICES_KEY not in recovered
+    assert recovered["text"].splitlines() == ["اختر من القائمة", "فستان · 144.0 SAR",
+                                              "فستان · 114.0 SAR"]
+    assert recovered["evidence_refs"] == ["catalog:product:23"]
+    assert recovered[rc.WITHHELD_KEY] == "provider_rejected_the_list"
+
+
+def test_a_plain_reply_recovers_to_exactly_itself() -> None:
+    assert rc.text_only_payload({"text": "أهلاً"}) == {"text": "أهلاً"}

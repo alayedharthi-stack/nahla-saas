@@ -2157,10 +2157,16 @@ def test_a_refused_list_still_delivers_the_answer_as_text(pilot):
     assert report.dispatch_status == dd.SENT_ACCEPTED
     assert report.provider_message_id == "wamid.TEXT"
     assert report.processing_outcome == c.ProcessingOutcome.COMPLETED.value
-    # The recovery carries the model's text and no rows at all.
+    # The recovery carries no rows — and loses no option: the model's own
+    # sentence comes first, the merchant's values follow as lines.
     assert len(transport.sent) == 2
-    assert transport.sent[1]["text"] == "عندنا خيارين"
     assert rc.payload_rows(transport.sent[1]) == ([], "")
+    lines = transport.sent[1]["text"].splitlines()
+    assert lines[0] == "عندنا خيارين"
+    assert len(lines[1:]) == 2
+    # Each option named, with the merchant's own price beside it.
+    assert any(line.startswith(PRODUCT_TITLE) and "199" in line for line in lines[1:])
+    assert any(line.startswith(SECOND_TITLE) and "149" in line for line in lines[1:])
 
 
 def test_an_accepted_list_is_never_followed_by_a_second_message(pilot):
@@ -2199,17 +2205,19 @@ def test_a_reply_without_a_selector_is_still_an_ordinary_text_send(pilot):
     assert report.dispatch_status == dd.SENT_ACCEPTED
 
 
-def test_a_tap_on_a_row_resolves_to_the_product_that_reply_showed(pilot):
+def test_a_tap_on_a_row_resolves_to_the_product_that_reply_offered(pilot):
     """The structured half of a tap, checked rather than trusted.
 
-    The row id arrives from the wire. It becomes an identity only by matching a
-    product this conversation's own replies showed and still carry, which is
-    also what applies the browsing-context clock.
+    The row id arrives from the wire. It becomes an identity only by matching
+    a row **this conversation actually sent** — the ids the platform minted and
+    persisted with that reply — and a product still carried under the
+    browsing-context clock.
     """
     ref = f"catalog:product:{pilot.product_id}"
     with _messages(pilot) as say:
         say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارين",
-            metadata={"evidence_refs": [ref]})
+            metadata={"evidence_refs": [ref],
+                      rp.CHOICE_ROW_IDS_KEY: [rc.row_id(pilot.product_id)]})
         transport = Transport([accepted("wamid.TAP")])
         scripted = ScriptedAnthropic([step([reply("تمام", call_id="r1")])])
         report = entry.run_commerce_runtime_turn(
@@ -2237,7 +2245,8 @@ def test_a_tap_this_conversation_no_longer_carries_resolves_to_nothing(pilot):
     ref = f"catalog:product:{pilot.product_id}"
     with _messages(pilot) as say:
         row = say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارين",
-                  metadata={"evidence_refs": [ref]})
+                  metadata={"evidence_refs": [ref],
+                            rp.CHOICE_ROW_IDS_KEY: [rc.row_id(pilot.product_id)]})
         _age_row(pilot, row, hours=1 + rp.BROWSING_CONTEXT_LAPSE_SECONDS // 3600)
         transport = Transport([accepted("wamid.STALE")])
         scripted = ScriptedAnthropic([step([reply("تمام", call_id="r1")])])
@@ -2261,7 +2270,8 @@ def test_another_tenants_row_id_is_never_an_identity_here(pilot):
     ref = f"catalog:product:{pilot.product_id}"
     with _messages(pilot) as say:
         say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارين",
-            metadata={"evidence_refs": [ref]})
+            metadata={"evidence_refs": [ref],
+                      rp.CHOICE_ROW_IDS_KEY: [rc.row_id(pilot.product_id)]})
         transport = Transport([accepted("wamid.FOREIGN")])
         scripted = ScriptedAnthropic([step([reply("تمام", call_id="r1")])])
         entry.run_commerce_runtime_turn(
@@ -2335,8 +2345,10 @@ def test_a_rejection_this_call_did_not_make_still_reaches_the_customer(pilot):
         assert recovery is not None and recovery.status == dd.SENT_ACCEPTED
         assert [a.kind for a in pilot.attempts(reservation.turn_id)] == [
             lc.DeliveryKind.RICH.value, lc.DeliveryKind.TEXT.value]
-        assert text_transport.sent[0]["text"] == "هذي الخيارات"
         assert rc.payload_rows(text_transport.sent[0]) == ([], "")
+        # The late send still carries every option it was meant to offer.
+        assert text_transport.sent[0]["text"].splitlines() == [
+            "هذي الخيارات", "قميص قطني أزرق", "حذاء رياضي أبيض"]
 
 
 def test_a_second_recovery_is_refused_by_the_ledger_not_by_the_caller(pilot):
@@ -2386,3 +2398,108 @@ def test_an_accepted_list_permits_no_recovery_at_the_ledger_either(pilot):
                 transport=blocked, recorded_by="pilot")
         assert refused.status == dd.NOT_ATTEMPTED and blocked.sent == []
         assert refused.blocked_reason == lc.RecoveryRefusal.OUTCOME_ACCEPTED.value
+
+
+def _tapped_context(pilot: "Pilot", row_id_value: str) -> str:
+    """Run one turn carrying a tap, and return the trusted-fact block it built."""
+    transport = Transport([accepted("wamid." + uuid.uuid4().hex[:8])])
+    scripted = ScriptedAnthropic([step([reply("تمام", call_id="r1")])])
+    entry.run_commerce_runtime_turn(
+        engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+        conversation_id=pilot.conversation_id, connection_ref=f"wa:{pilot.connection_id}",
+        connection_id=str(pilot.connection_id), customer_id=pilot.customer_id,
+        normalized_customer_phone=PHONE, provider_message_id="wamid." + uuid.uuid4().hex,
+        inbound_text=PRODUCT_TITLE, inbound_metadata={"list_reply_id": row_id_value},
+        transport=transport, instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+        context_preamble={"channel": "whatsapp"}, anthropic_provider=scripted)
+    return scripted.calls[0]["messages"][0]["content"][0]["text"]
+
+
+def test_a_tap_naming_a_product_that_was_only_talked_about_is_not_a_tap(pilot):
+    """The gap the owner found, closed and proven.
+
+    The reply named the product in prose and offered no rows. A crafted
+    ``list_reply_id`` for it must not become «the customer tapped this row»:
+    no row was ever sent, so there was nothing to tap. The product is still a
+    readable identity — being mentioned is enough for that — which is exactly
+    the distinction that was missing.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound",
+            body="عندنا حذاء رياضي أبيض", metadata={"evidence_refs": [ref]})
+        context_block = _tapped_context(pilot, rc.row_id(pilot.product_id))
+    assert "customer_tapped" not in context_block
+    assert "products_shown_earlier" in context_block
+
+
+def test_the_same_product_is_a_tap_once_a_reply_actually_offered_it_as_a_row(pilot):
+    """The control for the case above: the only difference is the sent list."""
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارين",
+            metadata={"evidence_refs": [ref],
+                      rp.CHOICE_ROW_IDS_KEY: [rc.row_id(pilot.product_id)]})
+        context_block = _tapped_context(pilot, rc.row_id(pilot.product_id))
+    assert "customer_tapped" in context_block
+    assert f'"product_id": {pilot.product_id}' in context_block
+
+
+def test_a_turn_that_offered_a_selector_records_the_rows_it_sent(pilot):
+    """The evidence a later tap is checked against is written by the send."""
+    with _two_products(pilot) as extra:
+        ids = [pilot.product_id, extra[0]]
+        report = pilot.run(answers=_offer(pilot, ids), transport=Transport([accepted("wamid.R")]),
+                           budget=_pilot_budget(4))
+    assert report.choice_row_ids == tuple(rc.row_id(pid) for pid in ids)
+
+
+def test_a_turn_whose_list_was_refused_records_no_rows_at_all(pilot):
+    """The customer received the text, not the list, so nothing is tappable.
+
+    Recording the withheld rows would let a later tap verify against a list
+    nobody was ever sent.
+    """
+    with _two_products(pilot) as extra:
+        report = pilot.run(answers=_offer(pilot, [pilot.product_id, extra[0]]),
+                           transport=Transport([rejected(), accepted("wamid.TEXT")]),
+                           budget=_pilot_budget(4))
+    assert report.recovery_status == dd.SENT_ACCEPTED
+    assert report.choice_row_ids == ()
+
+
+def test_a_refused_list_still_puts_every_option_in_front_of_the_customer(pilot):
+    """«اختر من القائمة» must not arrive with no list.
+
+    The provider refused to render the rows; their content still goes out, as
+    lines of the merchant's own values under the model's own sentence.
+    """
+    with _two_products(pilot) as extra:
+        ids = [pilot.product_id, extra[0]]
+        transport = Transport([rejected(), accepted("wamid.TEXT")])
+        pilot.run(answers=[
+            step([tool_use("t1", "search_products", query="حذاء", limit=5)]),
+            step([reply("اختر من القائمة",
+                        refs=tuple(f"catalog:product:{pid}" for pid in ids),
+                        commerce=True, call_id="r1",
+                        choices={"product_ids": list(ids)})]),
+        ], transport=transport, budget=_pilot_budget(4))
+    sent = transport.sent[1]["text"].splitlines()
+    assert sent[0] == "اختر من القائمة"
+    assert PRODUCT_TITLE in "\n".join(sent[1:])
+    assert SECOND_TITLE in "\n".join(sent[1:])
+
+
+def test_a_selector_the_channel_cannot_show_still_answers_with_its_options(pilot):
+    """Withheld at compose time — one option is not a choice — and yet the
+    customer reads it, under the sentence that pointed at it."""
+    ref = f"catalog:product:{pilot.product_id}"
+    transport = Transport([accepted("wamid.ONE")])
+    report = pilot.run(answers=[
+        step([tool_use("t1", "search_products", query="حذاء")]),
+        step([reply("اختر من القائمة", refs=(ref,), commerce=True, call_id="r1",
+                    choices={"product_ids": [pilot.product_id]})]),
+    ], transport=transport, budget=_pilot_budget(4))
+    assert report.delivery_kind == lc.DeliveryKind.TEXT.value and report.choice_rows == 0
+    assert report.reply_text.splitlines()[0] == "اختر من القائمة"
+    assert PRODUCT_TITLE in report.reply_text.splitlines()[1]
