@@ -209,6 +209,15 @@ def test_merchant_knowledge_keeps_the_section_body_and_its_reference(binding, mo
     assert observation.result["sections"][0]["body"] == "التوصيل خلال ٣ أيام"
 
 
+# The reading of the customer a projected list was built against, as the tool
+# hands it over: four countable orders reaching bronze and silver.
+STANDING: Dict[str, Any] = {
+    "customer_id": 41, "countable_orders": 4, "resolved_level": "silver",
+    "entitled_levels": ["bronze", "silver"], "reason": "entitled_by_order_count",
+    "determined": True, "first_purchase_applied": False,
+}
+
+
 def promotion(promotion_id: int = 5, **overrides: Any) -> Snapshot:
     fields: Dict[str, Any] = {
         "promotion_id": promotion_id, "record_kind": "coupon", "code": "WELCOME10", "name": "",
@@ -224,17 +233,67 @@ def promotion(promotion_id: int = 5, **overrides: Any) -> Snapshot:
 def test_a_shareable_coupon_keeps_its_code_its_conditions_and_its_reference(binding, monkeypatch):
     patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
                async_returning(result("ok", promotions=[promotion(5)],
-                                      evidence=[Record("promotion:coupon:5")], query_outcome="ok")))
+                                      evidence=[Record("promotion:coupon:5")], query_outcome="ok",
+                                      entitlement=STANDING)))
     observation = run(binding, "list_shareable_promotions", {})
     assert observation.ok is True
     assert observation.evidence_refs == ("promotion:coupon:5",)
-    assert observation.result["found"] is True and observation.result["eligibility_determined"] is False
+    assert observation.result["found"] is True
     assert observation.result["partial"] is False and observation.result["query_outcome"] == "ok"
     first = observation.result["promotions"][0]
     assert first["code"] == "WELCOME10" and first["evidence_ref"] == "promotion:coupon:5"
     assert first["discount_type"] == "percentage" and first["discount_value"] == "10"
     assert first["conditions"] == {"min_order_total": "100"}
     assert first["eligibility_determined"] is False
+
+
+def test_the_view_carries_the_reading_of_the_customer_the_list_was_built_against(binding, monkeypatch):
+    """A coupon tied to a loyalty rung reaches the list only for a customer who
+    earned it, so the observation says which rung was resolved and how firmly.
+    ``determined`` is the load-bearing one: a standing that could not be read is
+    not a customer with no standing."""
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("ok", promotions=[promotion(
+                   5, coupon_level="silver", level_eligibility="entitled", customer_level="silver",
+                   level_reason="entitled_by_order_count")],
+                   evidence=[Record("promotion:coupon:5")], query_outcome="ok", entitlement=STANDING)))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["entitlement"] == {
+        "resolved_level": "silver", "entitled_levels": ["bronze", "silver"], "countable_orders": 4,
+        "reason": "entitled_by_order_count", "determined": True, "first_purchase_applied": False}
+    first = observation.result["promotions"][0]
+    assert first["coupon_level"] == "silver" and first["customer_level"] == "silver"
+    assert first["level_eligibility"] == "entitled"
+    assert first["level_reason"] == "entitled_by_order_count"
+
+
+def test_a_standing_that_could_not_be_read_reaches_the_observation_as_undetermined(binding, monkeypatch):
+    """Nothing was settled about this customer, and the observation says so
+    rather than presenting an unconditioned code as verified for them."""
+    undetermined = {"customer_id": None, "countable_orders": None, "resolved_level": "",
+                    "entitled_levels": [], "reason": "identity_not_established",
+                    "determined": False, "first_purchase_applied": False}
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("ok", promotions=[promotion(
+                   5, level_eligibility="not_conditioned_on_level",
+                   eligibility_note="customer_standing_not_determined:identity_not_established")],
+                   evidence=[Record("promotion:coupon:5")], query_outcome="ok",
+                   entitlement=undetermined)))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["entitlement"]["determined"] is False
+    assert observation.result["entitlement"]["countable_orders"] is None
+    assert observation.result["entitlement"]["resolved_level"] == ""
+    first = observation.result["promotions"][0]
+    assert first["level_eligibility"] == "not_conditioned_on_level"
+    assert first["eligibility_determined"] is False
+
+
+def test_a_result_that_carries_no_standing_at_all_is_an_empty_reading_not_a_guess(binding, monkeypatch):
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("ok", promotions=[promotion(5)],
+                                      evidence=[Record("promotion:coupon:5")], query_outcome="ok")))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["entitlement"] == {}
 
 
 def test_no_shareable_promotion_is_an_honest_empty_answer_with_no_evidence(binding, monkeypatch):

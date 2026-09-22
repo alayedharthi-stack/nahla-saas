@@ -905,6 +905,51 @@ as well as through the ledger.
   the coupon it came from, or any code-shaped token the agent originated — one
   neither this turn's tools returned nor the customer's own message carried. It
   creates, assigns or redeems none.
+* **The list is this customer's, not the store's price list.** A valid coupon is
+  not an entitled coupon: the merchant's loyalty ladder exists so that a gold
+  customer's discount is a gold customer's discount. A coupon whose record names
+  a rung is projected only for a customer who reached that rung, read through
+  `services/coupon_entitlement_read.py` from the platform's own authorities —
+  `count_customer_orders` (the Customer Intelligence phone index), the level
+  contract's `resolve_coupon_level_for_order_count`, and the merchant's saved
+  `coupons_dashboard` ladder. It is a **read**: no coupon is created, assigned,
+  generated, reserved or redeemed, and a test asserts that by walking the
+  module's own syntax tree rather than trusting the review.
+
+  `min_orders` is a minimum, so a customer reaches every enabled rung whose
+  minimum they have met, not only the highest; the rungs are returned in the
+  ladder's order and **never ranked by discount** — which one suits a
+  conversation is not a question a threshold can answer, and it stays the
+  agent's. The store's own AI policy (`allowed_levels`) is a separate gate and
+  both must open: a store that allows gold does not make a conversation gold,
+  and a gold customer does not override a store that keeps gold off the
+  assistant.
+
+  Two rules protect the customer who cannot be placed. A coupon tied to **no**
+  rung — and every offer — is projected whether or not a level resolved: what
+  was never about classification is not withheld for want of one. And not
+  knowing is never an entitlement: `identity_not_established` (no customer in
+  this conversation), `customer_record_unavailable` (an id this tenant carries
+  no record for) and `order_history_unreadable` are failures to determine, each
+  named, none of them earning a rung — and all three distinct from
+  `no_entitled_level`, which is a customer whose history *was* read and is
+  empty. The merchant's first-purchase rule is read exactly as saved and never
+  enabled here: with it on, such a customer reaches the rung the contract names
+  and only that one; with it off, they reach none.
+
+  What the projection claims is bounded to what it settled.
+  `level_eligibility` / `customer_level` / `level_reason` carry the level
+  answer; `eligibility_determined` is true only when who this customer is was
+  settled **and** the record leaves no other condition unchecked, so a minimum
+  basket or a usage limit keeps it false with `eligibility_note` naming what is
+  still open. An offer never sets it: an offer is terms, not a grant, and a
+  record with empty conditions cannot be told apart from conditions nobody
+  read. The result also carries the whole reading (`entitlement`), so a short
+  or empty list can be told apart from a classification that could not be made.
+
+  Offering a coupon — whether to, when, and in what words — remains the agent's,
+  unprompted or not. Nothing here forces a suggestion, and the tool's
+  description states what the list contains, not when to reach for it.
 * Each promotion carries **one** reading of its discount (`discount`: `5%`, `20 SAR`,
   or empty when the record supports none) beside the raw `discount_type` and
   `discount_value`. September 2026: a coupon issued as 5% and reconciled from Salla

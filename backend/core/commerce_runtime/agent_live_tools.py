@@ -466,10 +466,36 @@ def _promotion_view(snapshot: Any) -> Dict[str, Any]:
         "coupon_level": _text(getattr(snapshot, "coupon_level", ""), 32),
         "conditions": dict(conditions) if isinstance(conditions, Mapping) else {},
         "bound_to_this_customer": bool(getattr(snapshot, "bound_to_this_customer", False)),
-        # Never decided here: the merchant's records say a code exists and is
-        # shareable, not that this customer qualifies for it.
-        "eligibility_determined": False,
+        # One part of "may this customer have it" is settled upstream: a coupon
+        # tied to a loyalty rung reaches this list only for a customer who
+        # reached that rung. These say which reading that was.
+        "level_eligibility": _text(getattr(snapshot, "level_eligibility", ""), 32),
+        "customer_level": _text(getattr(snapshot, "customer_level", ""), 32),
+        "level_reason": _text(getattr(snapshot, "level_reason", ""), 64),
+        # The rest is not settled. True only when the record leaves no condition
+        # unevaluated; otherwise the note names what is still open.
+        "eligibility_determined": bool(getattr(snapshot, "eligibility_determined", False)),
         "eligibility_note": _text(getattr(snapshot, "eligibility_note", ""), 120),
+    }
+
+
+def _entitlement_view(entitlement: Any) -> Mapping[str, Any]:
+    """The customer's resolved coupon standing, bounded for the observation.
+
+    ``determined`` is the load-bearing one: false means the level question
+    could not be answered, which is not the same as answering "no level".
+    """
+    if not isinstance(entitlement, Mapping):
+        return {}
+    levels = entitlement.get("entitled_levels")
+    orders = entitlement.get("countable_orders")
+    return {
+        "resolved_level": _text(entitlement.get("resolved_level"), 32),
+        "entitled_levels": [_text(level, 32) for level in list(levels or ())[:8]],
+        "countable_orders": int(orders) if isinstance(orders, int) else None,
+        "reason": _text(entitlement.get("reason"), 64),
+        "determined": bool(entitlement.get("determined")),
+        "first_purchase_applied": bool(entitlement.get("first_purchase_applied")),
     }
 
 
@@ -486,7 +512,10 @@ def _shareable_promotions(binding: LiveToolBinding) -> at.ToolFunction:
             # ``partial`` is said out loud: a source that could not be read means
             # a code missing from this list may still exist.
             result={"status": "ok", "found": bool(promotions), "promotions": promotions,
-                    "eligibility_determined": False,
+                    # The reading of the customer this whole list was built
+                    # against, so an empty or short list can be told apart from
+                    # a classification that could not be made.
+                    "entitlement": _entitlement_view(getattr(result, "entitlement", None)),
                     "query_outcome": str(getattr(result, "query_outcome", "") or ""),
                     "partial": bool(getattr(result, "partial", False))},
             evidence_refs=_refs(getattr(result, "evidence", None) or ()),
@@ -557,9 +586,11 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
     ),
     (
         "list_shareable_promotions",
-        "This merchant's currently valid coupons and offers that may be shared with a "
-        "customer, with their conditions and evidence references. Whether this customer "
-        "qualifies is not determined; a code not returned here does not exist.",
+        "This merchant's currently valid coupons and offers that may be shared with this "
+        "customer, with their conditions and evidence references. A coupon tied to a "
+        "loyalty level is listed only for a customer who reached that level; one tied to "
+        "no level is listed either way. Remaining conditions are not evaluated, and are "
+        "named in each entry. A code not returned here does not exist.",
         {"type": "object", "properties": {}, "required": []},
         "promotion_list",
         _shareable_promotions,

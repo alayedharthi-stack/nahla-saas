@@ -8,9 +8,28 @@ out campaign-only, expired, disabled and exhausted codes, it hands a personal
 code (one issued to a single customer) only to a conversation with that
 customer, and it reports what it could not read. This module adds the
 merchant's own dashboard policy — whether the AI may share coupons at all, and
-which levels — and projects the facts into evidence the loop verifies a reply
-against. Whether the customer qualifies is not evaluated here, and every
-projection says so.
+which levels — and the one thing the resolver deliberately leaves open: whether
+this customer has earned the level a code is conditioned on.
+
+A valid code is not an entitled code. The merchant's loyalty ladder exists so
+that a gold customer's discount is a gold customer's discount, and a tool that
+hands every rung to every conversation has turned the reward into a public
+price. So a level-conditioned coupon is projected only when
+``coupon_entitlement_read`` says this customer reached that rung, read from
+the platform's own authorities — the Customer Intelligence order count, the
+level contract, and the merchant's saved ladder with its first-purchase rule
+exactly as the merchant left it. Nothing is issued, assigned or generated here.
+
+What is *not* conditioned on a level is not withheld for want of one. A coupon
+the record ties to no rung, and every offer, is projected whether or not a
+level could be resolved: a customer the platform could not classify still sees
+what was never about classification. Equally, not knowing is not a level —
+an unidentified conversation, an unreadable history and a known customer with
+no purchases are three different states, the projection names which, and only
+the third is a determination.
+
+Every remaining condition stays unevaluated and is said so by name: the
+projection claims the level question and no more.
 
 There is no Agents-SDK wrapper: the legacy path keeps its own promotion
 policy. The commerce runtime's loop passes the trusted context directly.
@@ -32,11 +51,18 @@ from modules.ai.commerce_agent_v2.output import (
     PromotionListResult,
     PromotionSnapshot,
 )
+from services.coupon_entitlement_read import LevelEntitlement, resolve_level_entitlement
 
 MAX_PROMOTIONS = 8            # per kind: at most this many coupons and this many offers
 MAX_CONDITION_IDS = 20        # ids kept per product/category condition; the rest become a count
 _MAX_TEXT = 300
 _RECORD_KINDS = ("coupon", "offer")
+# What the projection says it settled about who may use a code.
+LEVEL_ENTITLED = "entitled"                      # the record names a rung this customer reached
+LEVEL_NOT_CONDITIONED = "not_conditioned_on_level"   # the record names no rung at all
+# The conditions a projection carries but has not evaluated. Named rather than
+# summarised, so a reader can see exactly what is still open.
+_UNEVALUATED = "conditions_not_fully_evaluated"
 
 
 def _text(value: Any, limit: int = _MAX_TEXT) -> str:
@@ -65,12 +91,24 @@ def _bounded_conditions(conditions: Any) -> Dict[str, Any]:
     return bounded
 
 
+def _unevaluated_conditions(conditions: Dict[str, Any]) -> Tuple[str, ...]:
+    """The condition names this projection carries but did not check.
+
+    The ``<key>_count`` companions ``_bounded_conditions`` adds are the same
+    condition counted, not another one, so they are not listed twice.
+    """
+    names = [name for name in conditions if not str(name).endswith("_count")]
+    return tuple(sorted(str(name) for name in names))
+
+
 def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
-             allowed_levels: Optional[List[str]]) -> Optional[Tuple[PromotionSnapshot, EvidenceRecord]]:
+             allowed_levels: Optional[List[str]],
+             entitlement: LevelEntitlement) -> Optional[Tuple[PromotionSnapshot, EvidenceRecord]]:
     """One resolver fact as a snapshot plus its evidence record, or ``None``
     when the fact cannot be cited here: no id, an unknown kind, a coupon
-    without a code, a personal code that is someone else's, or a level the
-    merchant's policy keeps from the AI. An offer never carries a code."""
+    without a code, a personal code that is someone else's, a level the
+    merchant's policy keeps from the AI, or a level this customer has not
+    earned. An offer never carries a code, and is never level-conditioned."""
     kind = str(fact.get("record_kind") or "")
     try:
         promotion_id = int(fact.get("id"))
@@ -93,9 +131,41 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
     else:
         bound_to_this_customer = False
     level = _text(fact.get("coupon_level"), 32).lower()
-    if kind == "coupon" and level and allowed_levels is not None and level not in allowed_levels:
-        return None
+    if kind == "coupon" and level:
+        # Two separate gates, and both must open. The merchant's AI policy says
+        # which rungs the assistant may ever mention in this store; the
+        # entitlement says whether *this* customer reached this one. A store
+        # that allows gold does not make every conversation gold.
+        if allowed_levels is not None and level not in allowed_levels:
+            return None
+        if not entitlement.entitles(level):
+            return None
+        level_eligibility = LEVEL_ENTITLED
+    else:
+        # No rung on the record: nothing about a classification is being
+        # claimed, so an unresolved level is no reason to withhold it.
+        level_eligibility = LEVEL_NOT_CONDITIONED
     ref = f"promotion:{kind}:{promotion_id}"
+    conditions = _bounded_conditions(fact.get("conditions"))
+    unevaluated = _unevaluated_conditions(conditions)
+    if kind == "offer":
+        # An offer is terms, not a grant, and its record's empty ``conditions``
+        # cannot be told apart from conditions that were never read. Nothing
+        # about who may use it is settled here, and the note keeps the
+        # resolver's own word for why.
+        determined, note = False, _text(fact.get("eligibility_note"), 120)
+    else:
+        # Either this customer's standing was actually read, or the merchant's
+        # own record names them: both settle *who* this is. Anything the record
+        # still conditions on keeps the whole question open, by name.
+        settled = entitlement.determined or bound_to_this_customer
+        determined = settled and not unevaluated
+        if unevaluated:
+            note = _text(f"{_UNEVALUATED}:{','.join(unevaluated)}", 120)
+        elif settled:
+            note = ""
+        else:
+            note = _text(f"customer_standing_not_determined:{entitlement.reason}", 120)
     fields: Dict[str, Any] = {
         "promotion_id": promotion_id,
         "record_kind": kind,
@@ -107,10 +177,22 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
         "discount": _text(fact.get("discount"), 64),
         "expires_at": _text(fact.get("expires_at") or fact.get("ends_at"), 64),
         "coupon_level": level,
-        "conditions": _bounded_conditions(fact.get("conditions")),
+        "conditions": conditions,
         "bound_to_this_customer": bound_to_this_customer,
-        "eligibility_determined": False,
-        "eligibility_note": _text(fact.get("eligibility_note"), 120),
+        # What was settled about *who* may use this, and on what reading of the
+        # customer. ``customer_level`` is the ladder rung the platform resolved,
+        # empty when it resolved none; ``level_reason`` says whether that was a
+        # determination or a failure to determine.
+        "level_eligibility": level_eligibility,
+        "customer_level": entitlement.resolved_level or "",
+        "level_reason": entitlement.reason,
+        # The whole eligibility question, not a part of it: true only when who
+        # this customer is was settled *and* the record leaves no other
+        # condition unchecked. A minimum basket or a usage limit nobody
+        # evaluated keeps this false, an offer never sets it, and
+        # ``eligibility_note`` names exactly what is still open.
+        "eligibility_determined": determined,
+        "eligibility_note": note,
     }
     evidence = EvidenceRecord(
         ref=ref,
@@ -122,6 +204,10 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
             "service": "modules.ai.brain.commerce.promotion_truth.resolve_shareable_promotions",
             "record": "coupons" if kind == "coupon" else "promotions",
             "freshness": "query_time",
+            # The record says the promotion exists and is live. Who may use it
+            # was settled somewhere else, and the evidence names where.
+            "entitlement_service": "services.coupon_entitlement_read.resolve_level_entitlement",
+            "entitlement_reason": entitlement.reason,
         },
     )
     return PromotionSnapshot(**fields, evidence_ref=ref), evidence
@@ -178,11 +264,18 @@ async def list_shareable_promotions_impl(
     Reads the tenant's currently valid, shareable coupons and offers through
     the platform's promotion-truth resolver — for this conversation's customer,
     so a personal code issued to anyone else is never returned — under the
-    merchant's AI coupon policy, and registers each as evidence. ``denied``
-    says the merchant keeps coupons away from the AI; ``not_found`` is an
-    honest empty answer; ``error`` says the records could not be read, which
-    is never reported as "no promotions"; ``partial`` marks a list a failed
-    source may have left incomplete.
+    merchant's AI coupon policy and this customer's own level entitlement, and
+    registers each as evidence. ``denied`` says the merchant keeps coupons away
+    from the AI; ``not_found`` is an honest empty answer; ``error`` says the
+    records could not be read, which is never reported as "no promotions";
+    ``partial`` marks a list a failed source may have left incomplete.
+
+    The entitlement is resolved once, before any fact is projected, and travels
+    with the result so the caller can see on what reading of the customer the
+    list was built. It decides only which level-conditioned coupons may appear;
+    a customer whose level could not be resolved still receives everything the
+    records did not condition on one, and ``not_found`` after that is a real
+    empty answer rather than a classification failure in disguise.
     """
     context.assert_scope()
     try:
@@ -199,6 +292,11 @@ async def list_shareable_promotions_impl(
     bounded = max(1, min(int(limit or MAX_PROMOTIONS), MAX_PROMOTIONS))
     raw_customer = getattr(context, "customer_id", None)
     customer_id = int(raw_customer) if raw_customer not in (None, "", 0) else None
+    # Read once per call, before anything is projected: every coupon in this
+    # list is judged against the same reading of the customer, and a second
+    # order landing mid-turn cannot make one rung's code appear beside
+    # another's. Never raises — an unreadable history entitles nothing.
+    entitlement = resolve_level_entitlement(context.db, int(context.tenant_id), customer_id)
     truth = resolve_shareable_promotions(context.db, int(context.tenant_id), limit=bounded,
                                          customer_id=customer_id)
     min_hours = _min_remaining_hours(policy)
@@ -212,7 +310,8 @@ async def list_shareable_promotions_impl(
                 continue
             if cutoff is not None and fact.get("record_kind") == "coupon" and _expires_before(fact, cutoff):
                 continue
-            projected = _project(fact, customer_id=customer_id, allowed_levels=allowed_levels)
+            projected = _project(fact, customer_id=customer_id, allowed_levels=allowed_levels,
+                                 entitlement=entitlement)
             if projected is None:
                 continue
             snapshot, record = projected
@@ -223,15 +322,19 @@ async def list_shareable_promotions_impl(
                 break
     outcome = str(getattr(truth, "query_outcome", "") or "")
     partial = outcome == PROMOTION_PARTIAL_FAILURE
+    entitlement_view = entitlement.as_dict()
     if not snapshots:
         if bool(getattr(truth, "query_failed", False)) or outcome == PROMOTION_QUERY_FAILED:
             return PromotionListResult(status="error", query_outcome=outcome or PROMOTION_QUERY_FAILED,
-                                       partial=partial, failure_reason="promotion_query_failed")
+                                       partial=partial, failure_reason="promotion_query_failed",
+                                       entitlement=entitlement_view)
         return PromotionListResult(status="not_found", query_outcome=outcome or NO_VALID_PROMOTIONS,
-                                   partial=partial, failure_reason="no_valid_shareable_promotions")
+                                   partial=partial, failure_reason="no_valid_shareable_promotions",
+                                   entitlement=entitlement_view)
     context.register_evidence(evidence)
     return PromotionListResult(status="ok", promotions=snapshots, evidence=evidence,
-                               query_outcome=outcome, partial=partial)
+                               query_outcome=outcome, partial=partial, entitlement=entitlement_view)
 
 
-__all__ = ["MAX_CONDITION_IDS", "MAX_PROMOTIONS", "list_shareable_promotions_impl"]
+__all__ = ["LEVEL_ENTITLED", "LEVEL_NOT_CONDITIONED", "MAX_CONDITION_IDS", "MAX_PROMOTIONS",
+           "list_shareable_promotions_impl"]

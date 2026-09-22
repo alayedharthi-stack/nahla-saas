@@ -137,9 +137,15 @@ class PromotionSnapshot(BaseModel):
 
     Sourced from ``promotion_truth.resolve_shareable_promotions``: a coupon
     the merchant may hand out on this channel, or an offer's terms. An offer
-    never carries a code, and no code is ever invented. Whether the customer
-    in the conversation qualifies is not determined here, and the projection
-    says so.
+    never carries a code, and no code is ever invented.
+
+    One part of "may this customer have it" is settled before a snapshot is
+    built: a coupon conditioned on a loyalty rung is projected only for a
+    customer who reached that rung, and ``level_eligibility`` /
+    ``customer_level`` / ``level_reason`` say what was read and how firmly.
+    The rest is not. ``eligibility_determined`` is true only when nothing is
+    left open at all; while a minimum basket or a usage limit stands
+    unevaluated it is false and ``eligibility_note`` names what remains.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -156,8 +162,14 @@ class PromotionSnapshot(BaseModel):
     coupon_level: str = ""
     conditions: dict[str, Any] = Field(default_factory=dict)
     bound_to_this_customer: bool = False      # a personal code issued to this conversation's customer
-    eligibility_determined: bool = False
-    eligibility_note: str = ""
+    # "entitled" — the record names a loyalty rung and this customer reached it;
+    # "not_conditioned_on_level" — the record names no rung, so none was needed.
+    # A rung the customer has not reached never becomes a snapshot at all.
+    level_eligibility: str = ""
+    customer_level: str = ""                  # the rung the platform resolved for this customer; "" when none
+    level_reason: str = ""                    # how that was reached, including the ways it could not be
+    eligibility_determined: bool = False      # true only when NO condition is left unevaluated
+    eligibility_note: str = ""                # the unevaluated conditions, by name
     evidence_ref: str
 
 
@@ -169,6 +181,11 @@ class PromotionListResult(BaseModel):
     evidence: list[EvidenceRecord] = Field(default_factory=list)
     query_outcome: str = ""
     partial: bool = False                     # a source could not be read; the list may be incomplete
+    # The reading of the customer this whole list was built against: the
+    # countable orders, the rung they resolve to, every rung reached, and
+    # whether that was a determination or a failure to determine. Empty only
+    # where nothing was resolved at all.
+    entitlement: dict[str, Any] = Field(default_factory=dict)
     failure_reason: str | None = None
 
 
