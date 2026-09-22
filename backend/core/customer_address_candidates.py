@@ -151,6 +151,17 @@ REASON_SELECTED_ADDRESS = "selected_address"
 REASON_SINGLE_CANDIDATE = "single_candidate"
 REASON_MULTIPLE_CANDIDATES = "multiple_candidates_require_selection"
 
+# Read states for consumers that need to distinguish "there is no address" from
+# "the authoritative address projection could not be read".  A reader failure
+# is deliberately not collapsed into REASON_NO_ADDRESS: doing so would let a
+# caller claim the customer has no saved address when the database simply was
+# unavailable for this turn.
+ADDRESS_READ_AVAILABLE = "available"
+ADDRESS_READ_UNAVAILABLE = "unavailable"
+ADDRESS_READ_REASON_OK = "ok"
+ADDRESS_READ_REASON_CUSTOMER_NOT_BOUND = "customer_not_bound"
+ADDRESS_READ_REASON_RESOLVER_UNAVAILABLE = "resolver_unavailable"
+
 # Values a provider may send that mean "absent", never "delete".
 _NULLISH = frozenset({"", "null", "none", "nil", "n/a", "na", "-", "--", "undefined"})
 
@@ -1587,11 +1598,149 @@ def resolve_customer_address_selection(
     return AddressResolution(reason=REASON_NO_ADDRESS)
 
 
+# ── Trusted agent-context projection ───────────────────────────────────
+
+def _trusted_address_fact(row: ResolvedAddress) -> Dict[str, Any]:
+    """The customer-facing address facts a trusted runtime may receive.
+
+    This is intentionally *not* ``ResolvedAddress.as_dict()``.  The latter is
+    an internal/dashboard projection and includes primary keys, content
+    fingerprints and selection-operation references.  A model answering the
+    authenticated customer needs the address components and their provenance,
+    not those internal control values.
+
+    Coordinates are not passed through this projection.  A map URL, when the
+    source supplied one, remains an address component the customer may ask the
+    agent to repeat; the runtime must still keep this mapping out of logs.
+    """
+    components = row.components
+    return {
+        "address": {
+            "city": components.city,
+            "district": components.district,
+            "address_line": components.address_line,
+            "country": components.country,
+            "short_address_code": components.short_address_code,
+            "maps_url": components.maps_url,
+        },
+        "source": row.source,
+        "selection_state": row.selection_state,
+        "selected": bool(row.selected),
+        "sufficient": bool(row.sufficient),
+        "has_delivery_evidence": bool(row.has_delivery_evidence),
+        "has_location_pin": bool(row.location_pin),
+        "provenance_known": bool(row.provenance_known),
+        "missing_requirements": list(row.missing_requirements),
+    }
+
+
+def _resolution_rows_for_trusted_context(resolution: AddressResolution) -> List[ResolvedAddress]:
+    """Return the complete inventory with the current selection first.
+
+    Ordering is for display only.  It never determines a default: callers must
+    use ``selected_delivery_address`` or ``requires_explicit_selection`` to
+    decide whether an address is reusable.
+    """
+    rows = list(resolution.addresses or ())
+    if not rows:
+        rows = list(resolution.candidates)
+        if resolution.selected is not None:
+            rows.insert(0, resolution.selected)
+    selected_id = resolution.selected.address_id if resolution.selected else None
+    rows.sort(key=lambda row: (0 if row.address_id == selected_id else 1, row.address_id))
+    return rows
+
+
+def customer_address_facts_for_trusted_context(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: Optional[int],
+) -> Dict[str, Any]:
+    """Build the address facts that an already-bound runtime may pass to its model.
+
+    The function is read-only and makes no identity fallback: the caller has to
+    supply the customer id from its verified conversation binding.  It exposes
+    the three distinct facts a response may need without silently substituting
+    one for another:
+
+    * ``saved_addresses`` is the complete durable inventory, including
+      unselected profile candidates;
+    * ``selected_delivery_address`` exists only for the resolver's explicit
+      current selection;
+    * ``prior_order_addresses`` is restricted to rows proven to be confirmed
+      shipping from a prior order.
+
+    If the customer binding is absent or the resolver fails, the result says
+    that directly.  It must never claim ``no_address`` from an unreadable
+    projection.
+    """
+    empty: Dict[str, Any] = {
+        "saved_addresses": [],
+        "selected_delivery_address": None,
+        "prior_order_addresses": [],
+        "requires_explicit_selection": False,
+    }
+    if not tenant_id or not customer_id:
+        return {
+            "address_read_status": ADDRESS_READ_UNAVAILABLE,
+            "address_read_reason": ADDRESS_READ_REASON_CUSTOMER_NOT_BOUND,
+            "address_resolution": None,
+            **empty,
+        }
+
+    try:
+        resolution = resolve_customer_address_selection(
+            db,
+            tenant_id=int(tenant_id),
+            customer_id=int(customer_id),
+        )
+    except Exception as exc:  # noqa: BLE001 - an optional fact must not abort a live turn
+        logger.warning(
+            "[CUSTOMER_ADDRESS] trusted-context projection unavailable tenant=%s error=%s",
+            tenant_id,
+            type(exc).__name__,
+        )
+        return {
+            "address_read_status": ADDRESS_READ_UNAVAILABLE,
+            "address_read_reason": ADDRESS_READ_REASON_RESOLVER_UNAVAILABLE,
+            "address_resolution": None,
+            **empty,
+        }
+
+    rows = _resolution_rows_for_trusted_context(resolution)
+    facts = [_trusted_address_fact(row) for row in rows]
+    selected = (
+        _trusted_address_fact(resolution.selected)
+        if resolution.selected is not None
+        else None
+    )
+    prior_order = [
+        _trusted_address_fact(row)
+        for row in rows
+        if row.source == SOURCE_ORDER_CONFIRMED_SHIPPING
+    ]
+    return {
+        "address_read_status": ADDRESS_READ_AVAILABLE,
+        "address_read_reason": ADDRESS_READ_REASON_OK,
+        "address_resolution": resolution.reason,
+        "saved_addresses": facts,
+        "selected_delivery_address": selected,
+        "prior_order_addresses": prior_order,
+        "requires_explicit_selection": bool(resolution.requires_explicit_selection),
+    }
+
+
 __all__ = [
     "ACTION_CREATED",
     "ACTION_SKIPPED",
     "ACTION_UNCHANGED",
     "ACTION_UPDATED",
+    "ADDRESS_READ_AVAILABLE",
+    "ADDRESS_READ_REASON_CUSTOMER_NOT_BOUND",
+    "ADDRESS_READ_REASON_OK",
+    "ADDRESS_READ_REASON_RESOLVER_UNAVAILABLE",
+    "ADDRESS_READ_UNAVAILABLE",
     "ADDRESS_TYPE_IMPORTED_CANDIDATE",
     "AddressComponents",
     "AddressResolution",
@@ -1612,6 +1761,7 @@ __all__ = [
     "address_content_fingerprint",
     "attach_selection_provenance_for_new_address",
     "clean_source_value",
+    "customer_address_facts_for_trusted_context",
     "components_from_address_row",
     "components_from_mapping",
     "components_from_salla_customer_payload",
