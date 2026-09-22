@@ -42,6 +42,33 @@ for _p in (_REPO_ROOT, _BACKEND_DIR, _DATABASE_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+
+def _masked_db_target(url: str = "") -> str:
+    """``host:port/database`` for the configured database, or why it is unknown.
+
+    Written for one purpose: so the boot record says which database a migration
+    ran against. Nothing here reads a password — the credential half of the URL
+    is discarded before anything is formatted, and a URL that cannot be parsed
+    yields a shape, never its contents. Host, port and database name are not
+    secrets; they are what makes a migration record mean something, and without
+    them "which database is production" cannot be answered from the log at all.
+    """
+    raw = url or os.environ.get("DATABASE_URL", "") or ""
+    if not raw:
+        return "unset"
+    try:
+        from urllib.parse import urlsplit  # noqa: PLC0415
+
+        parts = urlsplit(raw)
+        # ``hostname``/``port`` come off the parsed URL, so userinfo is never
+        # in hand to begin with; ``netloc`` is deliberately not used.
+        host = parts.hostname or "unknown-host"
+        port = parts.port
+        database = (parts.path or "").lstrip("/") or "unknown-db"
+        return f"{host}:{port}/{database}" if port else f"{host}/{database}"
+    except Exception:  # noqa: BLE001 - a log line must never break a boot
+        return "unparseable"
+
 from core.log_redaction import install_log_redaction  # noqa: E402
 
 # Credential redaction on every root handler (all app loggers) and on the
@@ -603,7 +630,7 @@ async def on_startup() -> None:
     #    lifespan startup event. Previously this was awaited inline,
     #    which meant uvicorn would not serve a single HTTP request
     #    (not even /alive, /healthz, /auth/ping) until the entire
-    #    cleanup_salla_duplicates + ``alembic upgrade 0089`` chain
+    #    cleanup_salla_duplicates + the contract's pinned ``alembic upgrade`` chain
     #    finished. On Railway this is observed as: TCP connects fine,
     #    request bytes are sent fine, but the client gets ``0 bytes
     #    received`` and times out — because uvicorn refuses to
@@ -686,7 +713,7 @@ async def on_startup() -> None:
 
                 # ── Step B: Stamp Alembic to 0016 if tables exist but alembic_version
                 #    doesn't.  The DB was previously managed by Base.metadata.create_all();
-                #    without this stamp, 'alembic upgrade 0089' tries to run 0001 which
+                #    without this stamp, the bootstrap upgrade tries to run 0001 which
                 #    immediately fails with "relation tenants already exists".
                 _db_url = os.environ.get("DATABASE_URL", "")
                 if _db_url:
@@ -759,9 +786,10 @@ async def on_startup() -> None:
                             _stamp_exc,
                         )
 
-                # ── Step C: Apply normal application migrations through 0089 ─
-                # 0088 is a sibling maintenance-only validation branch from 0087
-                # and must only run via the guarded 0087→0088 operator.
+                # ── Step C: Apply the normal application migration target ────
+                # The target is whatever the bootstrap contract pins; 0088 is a
+                # sibling maintenance-only validation branch from 0087 and must
+                # only run via the guarded 0087→0088 operator.
                 from scripts.operators.bootstrap_migration_contract import (  # noqa: PLC0415
                     build_normal_bootstrap_upgrade_argv,
                 )
@@ -769,10 +797,23 @@ async def on_startup() -> None:
                 _bootstrap_upgrade_cmd = build_normal_bootstrap_upgrade_argv(
                     python_executable=sys.executable,
                 )
-                # capture_output so the real Alembic error surfaces in
-                # Railway logs instead of being silently swallowed.
+                # Log the revision this run actually passes to Alembic, read
+                # back off the command itself rather than written out beside
+                # it. The two had drifted — every line here said "0089" while
+                # the contract had moved the target to 0093 — so a boot log
+                # read to judge the applied revision reported one that had not
+                # been requested for some time. An operator deciding whether a
+                # later migration still needs an explicit run was being told
+                # the wrong thing by the only evidence they had.
+                _bootstrap_target = _bootstrap_upgrade_cmd[-1]
+                # And say which database it ran against. The service resolves
+                # DATABASE_URL from its environment, and nothing in this log
+                # recorded the destination, so "which database is production"
+                # could not be answered from the record at all. Credentials
+                # never appear: host, port and database name only.
                 logger.info(
-                    "[BOOT/db] Step C: alembic upgrade 0089 (timeout=%ds)", _T_UPGRADE,
+                    "[BOOT/db] Step C: alembic upgrade %s on %s (timeout=%ds)",
+                    _bootstrap_target, _masked_db_target(), _T_UPGRADE,
                 )
                 _t0 = _t.monotonic()
                 try:
@@ -795,8 +836,8 @@ async def on_startup() -> None:
                 _elapsed = _t.monotonic() - _t0
                 if _alembic.stdout:
                     logger.info(
-                        "[BOOT/db] Step C: alembic upgrade 0089 stdout (rc=%d, elapsed=%.1fs):\n%s",
-                        _alembic.returncode, _elapsed, _alembic.stdout.strip(),
+                        "[BOOT/db] Step C: alembic upgrade %s stdout (rc=%d, elapsed=%.1fs):\n%s",
+                        _bootstrap_target, _alembic.returncode, _elapsed, _alembic.stdout.strip(),
                     )
                 if _alembic.returncode != 0:
                     logger.error(
@@ -808,8 +849,8 @@ async def on_startup() -> None:
                     )
                     return  # do NOT raise — caller already logs and continues
                 logger.info(
-                    "[BOOT/db] Step C: alembic upgrade 0089 OK rc=0 elapsed=%.1fs",
-                    _elapsed,
+                    "[BOOT/db] Step C: alembic upgrade %s OK rc=0 elapsed=%.1fs on %s",
+                    _bootstrap_target, _elapsed, _masked_db_target(),
                 )
 
             async def _bootstrap_db_schema_bg() -> None:
