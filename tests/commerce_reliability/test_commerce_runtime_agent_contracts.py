@@ -392,11 +392,54 @@ def test_a_code_shaped_token_this_turn_s_tools_returned_is_not_an_invented_code(
     assert ac.verify_reply_draft(draft, obs) == ()
 
 
-def test_outside_a_coupon_turn_capitalised_tokens_are_not_the_loop_s_business():
+def test_a_code_shaped_token_with_nothing_behind_it_is_refused_even_with_no_coupon_turn():
+    """The check no longer waits for the promotions tool to have run.
+
+    Tenant 1, 2026-09-22 14:25Z: a reply handed the customer six coupon codes
+    while the only tool that ran was ``search_products``. The codes came from
+    the conversation's own history, and the gate on ``promotions_ran`` meant
+    nothing looked at them — so a code that had since expired would have gone
+    out unchecked. Validity is exactly what goes stale, so a code-shaped token
+    is now held to this turn's observations whatever tools ran.
+
+    This widened an earlier expectation, which read a token outside a coupon
+    turn as none of the loop's business. An order number stated with no order
+    lookup is the same class of unevidenced operational claim, and the case
+    below shows the real flow still passes.
+    """
     catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
                                  result={"products": []}, error_code=None, error=None, evidence_refs=())
-    draft = ac.ReplyDraft(text="رقم طلبك RRRD1234 قيد التجهيز", claims_commerce_facts=False)
-    assert ac.verify_reply_draft(draft, [catalog]) == ()
+    remembered = ac.ReplyDraft(text="استخدم كود NHNER وخصم 10%", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(remembered, [catalog])] == ["unobserved_code"]
+
+    invented_order = ac.ReplyDraft(text="رقم طلبك RRRD1234 قيد التجهيز", claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(invented_order, [catalog])] == ["unobserved_code"]
+
+
+def test_an_order_number_this_turn_actually_read_is_not_refused():
+    """The companion: the token is fine when a tool really returned it."""
+    order = ac.ToolObservation(
+        call_id="o1", tool_name="resolve_customer_order", ok=True,
+        result={"status": "ok", "found": True, "order": {"order_number": "RRRD1234", "status": "processing"}},
+        error_code=None, error=None, evidence_refs=("order:summary:4",))
+    draft = ac.ReplyDraft(text="رقم طلبك RRRD1234 قيد التجهيز", evidence_refs=("order:summary:4",),
+                          claims_commerce_facts=True)
+    assert ac.verify_reply_draft(draft, [order]) == ()
+
+
+def test_the_model_can_recover_a_remembered_code_by_reading_the_current_truth():
+    """The correction path the customer never sees: the code is refused while
+    it rests on memory, and accepted once this turn read it from the merchant's
+    records and cited it. The answer is never lost — only re-grounded."""
+    catalog = ac.ToolObservation(call_id="c1", tool_name="search_products", ok=True,
+                                 result={"products": []}, error_code=None, error=None, evidence_refs=())
+    text = "استخدم كود NHNER وخصم 10%"
+    from_memory = ac.ReplyDraft(text=text, claims_commerce_facts=False)
+    assert [p.code for p in ac.verify_reply_draft(from_memory, [catalog])] == ["unobserved_code"]
+
+    checked = [catalog, _promotions_observation(("NHNER", "promotion:coupon:41"))]
+    grounded = ac.ReplyDraft(text=text, evidence_refs=("promotion:coupon:41",), claims_commerce_facts=True)
+    assert ac.verify_reply_draft(grounded, checked) == ()
 
 
 def test_a_promotions_observation_without_its_body_cannot_be_checked_and_is_not_guessed():

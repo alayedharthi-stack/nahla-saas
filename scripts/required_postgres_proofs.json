@@ -207,7 +207,10 @@
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_concurrent_invocations_cannot_spend_the_same_recovery_allowance_twice",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_existing_pending_and_unknown_ledger_work_neither_resends_nor_completes",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_completed_turn_is_never_reasoned_about_again",
-        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_loop_run_closes_its_transactions_and_holds_none_across_reasoning"
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_loop_run_closes_its_transactions_and_holds_none_across_reasoning",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_is_told_back_and_the_finished_answer_is_accepted",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_with_no_step_left_still_stops_rather_than_sending_half",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn"
       ]
     },
     {

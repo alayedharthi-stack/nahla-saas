@@ -167,6 +167,20 @@ class AgentLoop:
                 self._run_tools(result, scope, session, fault_after_tool_debit)
                 continue
 
+            if isinstance(result, ac.ProviderInvalid):
+                # Only a truncated step reaches here; everything else stopped
+                # the turn inside ``_provider_step``. Being cut off is a fact
+                # about that step, not a verdict on the turn: the model keeps
+                # its whole context and is told plainly what happened, so it
+                # can finish the answer instead of the customer getting none.
+                session.feedback.append(ac.VerificationFeedback(
+                    step_no=session.progress.steps_used,
+                    problems=(ac.VerificationProblem(
+                        "output_truncated",
+                        "the previous step reached the output limit and was cut off before it "
+                        "finished; nothing from it was used"),)))
+                continue
+
             raise self._provider_stop(result)          # pragma: no cover - validation narrows the union
 
     def _provider_step(self, provider: Any, request: ac.ProviderRequest, session: "_Session") -> ac.ProviderResult:
@@ -188,6 +202,14 @@ class AgentLoop:
         except c.ValidationError as exc:
             raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc)) from exc
         session.record("provider_step", {"result": type(result).__name__})
+        if (isinstance(result, ac.ProviderInvalid) and result.reason == ac.TRUNCATED_OUTPUT
+                and session.steps_left()):
+            # A step that ran out of room is recoverable while the budget still
+            # allows another: the loop hands the fact back rather than ending a
+            # turn the customer is waiting on. With no step left it stops as
+            # before — an unfinished answer is never sent.
+            session.record("output_truncated", {"step_no": request.step_no})
+            return result
         if isinstance(result, (ac.ProviderFailure, ac.ProviderBlocked, ac.ProviderInvalid)):
             raise self._provider_stop(result)
         return result

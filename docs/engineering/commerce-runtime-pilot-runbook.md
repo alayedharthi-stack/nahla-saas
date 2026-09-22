@@ -1071,6 +1071,47 @@ as well as through the ledger.
   `NAHLA_DUPLICATE_ROW_TITLE_TEST=SEND` and an explicitly named allowlisted
   `NAHLA_PROBE_RECIPIENT`, sends through `provider_send_message` so no
   credential reaches the script, and writes to no table.
+* **A step cut off at the output limit no longer costs the customer the
+  reply.** 2026-09-22 14:26Z, Tenant 1 turn 13: «أبي أشوف الخيارات» produced
+  exactly 1024 output tokens, `stop_reason=max_tokens`, `replied=False` — the
+  customer received nothing. Two independent causes, fixed separately:
+
+  **The cap contradicted the platform's own bound.** `MAX_REPLY_TEXT_LENGTH`
+  declares a reply of up to 4000 characters legal, while `MAX_OUTPUT_TOKENS`
+  let the model emit 1024. Measured on that same conversation — 1027 Arabic
+  characters with markdown, emoji and URLs cost ~840 output tokens including
+  the tool-call envelope, ~0.7 tokens per character of text — 4000 characters
+  is ~2800 tokens plus up to ~260 for ten evidence references and a selector's
+  ids. The cap is now 4096, derived from that bound rather than chosen. It is a
+  ceiling, never an instruction: the model is not told it, billing follows the
+  tokens actually emitted, and how long a reply may be is still decided by
+  `MAX_REPLY_TEXT_LENGTH` in verification. It changes what can be **finished**,
+  not what is **written**.
+
+  **Truncation is correctable.** Being cut off is a fact about one step, not a
+  verdict on the turn, so while a step remains the loop hands the fact back
+  (`output_truncated`) and the model finishes with its whole context intact.
+  With no step left it still stops and reserves nothing — an unfinished answer
+  is never sent. Only truncation is treated this way; every other invalid
+  output ends the turn as before.
+
+* **A coupon code may not rest on memory.** The code checks used to run only
+  when the promotions tool had run in the same turn. 2026-09-22 14:25Z, Tenant
+  1 turn 12: a reply handed the customer six codes while the only tool that ran
+  was `search_products` — the codes came from the conversation's own history
+  and nothing looked at them. History is context, not evidence: validity and
+  eligibility are exactly what goes stale. Every code-shaped token in a reply
+  is now held to **this turn's** observations whatever tools ran. A token with
+  nothing behind it is fed back as `unobserved_code`, so the model calls
+  `list_shareable_promotions` for the current truth or drops the code — either
+  way it still answers, with its context intact and the customer never left
+  waiting.
+
+  This widened an earlier expectation that read a code-shaped token outside a
+  coupon turn as none of the loop's business. An order number stated with no
+  order lookup is the same class of unevidenced operational claim; a token a
+  tool really returned still passes, which is the ordinary case.
+
 * Recorded, not changed: the catalogue search's clarification guard
   (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the
   `artifact` / `response_bundle` shapes the legacy compose path writes. This

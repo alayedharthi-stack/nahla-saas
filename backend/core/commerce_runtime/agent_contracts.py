@@ -255,9 +255,20 @@ class ProviderBlocked(ProviderResult):
     reason: str
 
 
+# A step the provider cut off at its output limit. Named in the contract rather
+# than in one provider because the loop treats it as correctable while a step
+# remains: being cut off is a fact about that step, not a verdict on the turn.
+TRUNCATED_OUTPUT = "truncated_output"
+
+
 @dataclasses.dataclass(frozen=True)
 class ProviderInvalid(ProviderResult):
-    """Incomplete or malformed output (truncation, unparsable structure). Not a usable reply."""
+    """Incomplete or malformed output (truncation, unparsable structure).
+
+    Not a usable reply. ``TRUNCATED_OUTPUT`` is the one reason the loop may
+    hand back to the provider instead of stopping the turn, because the model
+    can finish what it was cut off from; every other reason ends the turn.
+    """
 
     reason: str
 
@@ -746,7 +757,10 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
     and that its evidence is cited, and that no other code-shaped token in the
     text is unknown to this turn's observations: a coupon code is an
     operational claim, and a code the merchant's records did not produce must
-    never reach a customer. A draft that offers a tappable selector is held to
+    never reach a customer. Those code checks are deliberately **not**
+    conditional on the promotions tool having run this turn — a code carried
+    over from the conversation's own history has nothing current behind it,
+    and validity and eligibility are exactly what goes stale. A draft that offers a tappable selector is held to
     the same standard for every product in it: the row the customer reads
     carries the merchant's title and price, so the product must have been
     looked up in this turn and cited here. They do **not** prove that the
@@ -765,10 +779,19 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
             problems.append(VerificationProblem("unknown_evidence", f"{ref} was not observed in this turn"))
     if draft.claims_commerce_facts and not draft.evidence_refs:
         problems.append(VerificationProblem("missing_evidence", "a commerce reply must cite observed evidence"))
+    # A coupon code is an operational claim about what the merchant's records
+    # say *now*. The conversation's history is context, not evidence: a code
+    # that was valid yesterday may since have expired, been disabled or run
+    # out, and repeating it from memory states a discount nobody re-checked.
+    # So every code-shaped token is held to this turn's own observations,
+    # whether or not the promotions tool ran. When it did not, the model is
+    # told the token is unsupported here and can call that tool for the
+    # current truth or drop the code; either way it still answers, with its
+    # whole context intact.
+    text_tokens = {token.upper() for token in _CODE_TOKEN_RE.findall(text)}
     promotions_ran = any(o.tool_name == PROMOTIONS_TOOL_NAME and o.ok for o in observations)
     codes = observed_promotion_codes(observations) if promotions_ran else {}
-    if promotions_ran and codes is not None:
-        text_tokens = {token.upper() for token in _CODE_TOKEN_RE.findall(text)}
+    if text_tokens and codes is not None:
         cited = set(draft.evidence_refs)
         for code in sorted(text_tokens & set(codes)):
             if codes[code] not in cited:
@@ -794,7 +817,7 @@ __all__ = [
     "MAX_TOOL_ATTEMPTS_PER_SIGNATURE", "MAX_TOOL_REQUESTS_PER_STEP", "ObservationCheckpoint", "ProviderBlocked",
     "ProviderCapabilities", "ProviderFailure", "ProviderInvalid", "ProviderReply", "ProviderRequest",
     "ProviderResult", "ProviderToolRequests", "READABLE_STATE_VERSIONS", "RESERVED_SCOPE_ARGUMENTS", "ReplyDraft",
-    "StopReason", "ToolDefinition", "ToolError", "ToolErrorCode", "ToolObservation", "ToolRequest",
+    "TRUNCATED_OUTPUT", "StopReason", "ToolDefinition", "ToolError", "ToolErrorCode", "ToolObservation", "ToolRequest",
     "UnsupportedCapability", "VerificationFeedback", "VerificationProblem", "checkpoint_observations",
     "evidence_index", "observation_digest", "public_copy", "validate_budget", "validate_call_id",
     "validate_capabilities", "validate_evidence_ref", "validate_provider_result", "validate_reply_draft",
