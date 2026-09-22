@@ -37,6 +37,7 @@ from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
 from core.commerce_runtime import recent_products as rp
+from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime import runtime_entry as entry
 from core.commerce_runtime.agent_loop import AgentLoop
 from core.commerce_runtime.ledgers import LedgerRepository
@@ -88,10 +89,12 @@ def tool_use(call_id: str, name: str, **arguments: Any) -> Dict[str, Any]:
 
 
 def reply(text_body: str, *, refs: Tuple[str, ...] = (), commerce: bool = False,
-          call_id: str = "r1") -> Dict[str, Any]:
-    return {"type": "tool_use", "id": call_id, "name": ap.REPLY_TOOL_NAME,
-            "input": {"text": text_body, "evidence_refs": list(refs),
-                      "claims_commerce_facts": commerce}}
+          call_id: str = "r1", choices: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    arguments: Dict[str, Any] = {"text": text_body, "evidence_refs": list(refs),
+                                 "claims_commerce_facts": commerce}
+    if choices is not None:
+        arguments["choices"] = choices
+    return {"type": "tool_use", "id": call_id, "name": ap.REPLY_TOOL_NAME, "input": arguments}
 
 
 @dataclasses.dataclass
@@ -147,7 +150,8 @@ class Pilot:
     def run(self, *, answers: List[Dict[str, Any]], transport: Transport,
             provider_message_id: Optional[str] = None, tenant: Optional[int] = None,
             question: str = QUESTION, model: str = MODEL,
-            budget: Optional[ac.LoopBudget] = None) -> entry.TurnReport:
+            budget: Optional[ac.LoopBudget] = None,
+            inbound_metadata: Optional[Dict[str, Any]] = None) -> entry.TurnReport:
         return entry.run_commerce_runtime_turn(
             engine=self.engine,
             session_factory=self.session_factory,
@@ -159,7 +163,7 @@ class Pilot:
             normalized_customer_phone=PHONE,
             provider_message_id=provider_message_id or ("wamid." + uuid.uuid4().hex),
             inbound_text=question,
-            inbound_metadata={"source": "test"},
+            inbound_metadata={"source": "test", **(inbound_metadata or {})},
             transport=transport,
             instructions="EXISTING-INSTRUCTIONS",
             model=model,
@@ -219,7 +223,8 @@ class Pilot:
             except c.CommerceRuntimeError:
                 pass
 
-    def reserve_reply(self, body: str) -> Any:
+    def reserve_reply(self, body: str, *, kind: str = lc.DeliveryKind.TEXT.value,
+                      payload: Optional[Dict[str, Any]] = None) -> Any:
         """Admit a turn and reserve one delivery intent, leaving the turn open."""
         from core.commerce_runtime import agent_scripted as sp
         from tests.commerce_reliability.agent_fixture_catalog import build_registry
@@ -234,7 +239,8 @@ class Pilot:
             outcome = AgentLoop(self.ledgers, build_registry()).run_turn(
                 tenant_id=self.tenant_a, namespace=entry.NAMESPACE,
                 conversation_id=admitted.conversation_id, turn_id=admitted.turn_id, token=token,
-                provider=sp.ScriptedReasoningProvider([sp.reply(body)]))
+                provider=sp.ScriptedReasoningProvider(
+                    [sp.reply(body, kind=kind, payload=payload)]))
         assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
         return Reservation(turn_id=admitted.turn_id, sequence_id=outcome.delivery_sequence_id)
 
@@ -2038,3 +2044,345 @@ def test_the_model_is_told_which_products_were_shown_not_left_to_guess_an_id(pil
     assert PRODUCT_TITLE in context_block
     # The preamble the caller supplied is kept, not replaced.
     assert "whatsapp" in context_block
+
+
+# ── The selector the model may offer (X4) ────────────────────────────────────
+
+
+SECOND_TITLE = "حذاء رياضي أسود"
+
+
+def _two_products(pilot: "Pilot") -> Any:
+    """This tenant's own catalogue rows, and the refs a turn must cite for them."""
+    return _more_products(pilot, (SECOND_TITLE,))
+
+
+def _offer(pilot: "Pilot", ids: List[int], *, button: str = "اختر") -> List[Dict[str, Any]]:
+    refs = tuple(f"catalog:product:{pid}" for pid in ids)
+    return [
+        step([tool_use("t1", "search_products", query="حذاء", limit=5)]),
+        step([reply("عندنا خيارين", refs=refs, commerce=True, call_id="r1",
+                    choices={"product_ids": list(ids), "button": button})]),
+    ]
+
+
+def test_a_verified_selector_is_reserved_as_a_rich_intent_and_sent_as_a_list(pilot):
+    """The whole path, on real rows: search, offer, reserve, send.
+
+    What the customer would read on each row is composed from the merchant's
+    own catalogue as this turn's search returned it — the model supplied two
+    ids and one button word, and nothing else. The stored intent is what the
+    transport is handed, so what is persisted is what went out.
+    """
+    with _two_products(pilot) as extra:
+        ids = [pilot.product_id, extra[0]]
+        transport = Transport([accepted("wamid.LIST")])
+        report = pilot.run(answers=_offer(pilot, ids), transport=transport,
+                           budget=_pilot_budget(4))
+        sequence = pilot.ledgers.get_delivery_sequence(
+            tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE, turn_id=report.turn_id)
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert report.delivery_kind == lc.DeliveryKind.RICH.value and report.choice_rows == 2
+    assert report.recovery_status is None
+    assert sequence.intent_kind == lc.DeliveryKind.RICH.value
+    rows, button = rc.payload_rows(sequence.intent_payload)
+    assert [row["id"] for row in rows] == [f"nahla:choice:{pid}" for pid in ids]
+    assert [row["title"] for row in rows] == [PRODUCT_TITLE, SECOND_TITLE]
+    assert button == "اختر"
+    # One send, carrying the model's own text beside the platform's rows.
+    assert len(transport.sent) == 1
+    assert transport.sent[0]["text"] == "عندنا خيارين"
+    assert rc.payload_rows(transport.sent[0])[0] == rows
+
+
+def test_a_product_the_turn_never_looked_up_is_refused_before_anything_is_sent(pilot):
+    """A row prices a product, so a product with no evidence is not offerable.
+
+    The loop feeds the problem back and the step is spent; with no step left
+    the turn stops at verification rather than sending a list whose second row
+    states a price this turn never read.
+    """
+    transport = Transport([])
+    report = pilot.run(
+        answers=[step([tool_use("t1", "search_products", query="حذاء")]),
+                 step([reply("خيارين", refs=(f"catalog:product:{pilot.product_id}",),
+                             commerce=True, call_id="r1",
+                             choices={"product_ids": [pilot.product_id, 999999]})])],
+        transport=transport,
+        budget=ac.LoopBudget(max_steps=2, max_tool_calls=2, tool_timeout_seconds=10.0,
+                             provider_timeout_seconds=15.0, deadline_seconds=45.0))
+    assert transport.sent == []
+    assert report.loop_status == ac.LoopStatus.STOPPED.value
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "choice_without_evidence" in dict(report.stop_detail).get("problems", "")
+
+
+def test_the_refusal_is_correctable_and_the_turn_still_answers(pilot):
+    """Verification feeds back rather than ending the conversation.
+
+    Told which product it may not offer, the model drops it and replies again.
+    One product left is not a choice, so the selector is withheld and the
+    customer gets the answer in the model's own words — which is the whole
+    point of keeping the selector optional.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    transport = Transport([accepted("wamid.FIXED")])
+    report = pilot.run(
+        answers=[step([tool_use("t1", "search_products", query="حذاء")]),
+                 step([reply("خيارين", refs=(ref,), commerce=True, call_id="r1",
+                             choices={"product_ids": [pilot.product_id, 999999]})]),
+                 step([reply("المتوفر عندنا هو هذا", refs=(ref,), commerce=True, call_id="r2")])],
+        transport=transport, budget=_pilot_budget(2))
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert report.delivery_kind == lc.DeliveryKind.TEXT.value and report.choice_rows == 0
+    assert report.reply_text == "المتوفر عندنا هو هذا"
+
+
+def test_a_refused_list_still_delivers_the_answer_as_text(pilot):
+    """The selector is an affordance; the answer is not.
+
+    The provider definitively refuses the interactive message, and the ledger's
+    one bounded recovery sends the same text — same words, same evidence, no
+    rows. Two attempts on one reservation, the second a text attempt, and the
+    customer is reached.
+    """
+    with _two_products(pilot) as extra:
+        ids = [pilot.product_id, extra[0]]
+        transport = Transport([rejected(), accepted("wamid.TEXT")])
+        report = pilot.run(answers=_offer(pilot, ids), transport=transport,
+                           budget=_pilot_budget(4))
+        attempts = pilot.attempts(report.turn_id)
+    assert [a.kind for a in attempts] == [lc.DeliveryKind.RICH.value, lc.DeliveryKind.TEXT.value]
+    assert report.recovery_status == dd.SENT_ACCEPTED
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert report.provider_message_id == "wamid.TEXT"
+    assert report.processing_outcome == c.ProcessingOutcome.COMPLETED.value
+    # The recovery carries the model's text and no rows at all.
+    assert len(transport.sent) == 2
+    assert transport.sent[1]["text"] == "عندنا خيارين"
+    assert rc.payload_rows(transport.sent[1]) == ([], "")
+
+
+def test_an_accepted_list_is_never_followed_by_a_second_message(pilot):
+    with _two_products(pilot) as extra:
+        transport = Transport([accepted("wamid.ONCE")])
+        report = pilot.run(answers=_offer(pilot, [pilot.product_id, extra[0]]),
+                           transport=transport, budget=_pilot_budget(4))
+        attempts = pilot.attempts(report.turn_id)
+    assert len(transport.sent) == 1 and len(attempts) == 1
+    assert report.recovery_status is None
+
+
+def test_an_unknown_list_send_is_never_recovered(pilot):
+    """An unknown send may already be on the customer's phone.
+
+    Sending the text as well would be a duplicate, not a recovery, so the
+    reservation stays unknown and the turn is finished as a failure.
+    """
+    with _two_products(pilot) as extra:
+        transport = Transport([timed_out()])
+        report = pilot.run(answers=_offer(pilot, [pilot.product_id, extra[0]]),
+                           transport=transport, budget=_pilot_budget(4))
+        attempts = pilot.attempts(report.turn_id)
+    assert len(transport.sent) == 1 and len(attempts) == 1
+    assert report.dispatch_status == dd.SENT_UNKNOWN and report.recovery_status is None
+    assert report.processing_outcome == c.ProcessingOutcome.FAILED.value
+
+
+def test_a_reply_without_a_selector_is_still_an_ordinary_text_send(pilot):
+    transport = Transport([accepted("wamid.PLAIN")])
+    report = pilot.run(
+        answers=[step([reply("أهلاً وسهلاً", call_id="r1")])],
+        transport=transport, budget=_pilot_budget(1))
+    assert report.delivery_kind == lc.DeliveryKind.TEXT.value and report.choice_rows == 0
+    assert rc.payload_rows(transport.sent[0]) == ([], "")
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+
+
+def test_a_tap_on_a_row_resolves_to_the_product_that_reply_showed(pilot):
+    """The structured half of a tap, checked rather than trusted.
+
+    The row id arrives from the wire. It becomes an identity only by matching a
+    product this conversation's own replies showed and still carry, which is
+    also what applies the browsing-context clock.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارين",
+            metadata={"evidence_refs": [ref]})
+        transport = Transport([accepted("wamid.TAP")])
+        scripted = ScriptedAnthropic([step([reply("تمام", call_id="r1")])])
+        report = entry.run_commerce_runtime_turn(
+            engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+            conversation_id=pilot.conversation_id, connection_ref=f"wa:{pilot.connection_id}",
+            connection_id=str(pilot.connection_id), customer_id=pilot.customer_id,
+            normalized_customer_phone=PHONE, provider_message_id="wamid." + uuid.uuid4().hex,
+            inbound_text=PRODUCT_TITLE,
+            inbound_metadata={"list_reply_id": rc.row_id(pilot.product_id),
+                              "list_reply_title": PRODUCT_TITLE},
+            transport=transport, instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+            context_preamble={"channel": "whatsapp"}, anthropic_provider=scripted)
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    context_block = scripted.calls[0]["messages"][0]["content"][0]["text"]
+    assert "customer_tapped" in context_block
+    assert f'"product_id": {pilot.product_id}' in context_block
+
+
+def test_a_tap_this_conversation_no_longer_carries_resolves_to_nothing(pilot):
+    """A tap on a list old enough to have lapsed is not an identity.
+
+    Nothing is claimed from it: the turn runs on the row title the tap sent as
+    text, like any other message, and the customer can still be helped.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        row = say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارين",
+                  metadata={"evidence_refs": [ref]})
+        _age_row(pilot, row, hours=1 + rp.BROWSING_CONTEXT_LAPSE_SECONDS // 3600)
+        transport = Transport([accepted("wamid.STALE")])
+        scripted = ScriptedAnthropic([step([reply("تمام", call_id="r1")])])
+        report = entry.run_commerce_runtime_turn(
+            engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+            conversation_id=pilot.conversation_id, connection_ref=f"wa:{pilot.connection_id}",
+            connection_id=str(pilot.connection_id), customer_id=pilot.customer_id,
+            normalized_customer_phone=PHONE, provider_message_id="wamid." + uuid.uuid4().hex,
+            inbound_text=PRODUCT_TITLE,
+            inbound_metadata={"list_reply_id": rc.row_id(pilot.product_id)},
+            transport=transport, instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+            context_preamble={"channel": "whatsapp"}, anthropic_provider=scripted)
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    context_block = scripted.calls[0]["messages"][0]["content"][0]["text"]
+    assert "customer_tapped" not in context_block
+
+
+def test_another_tenants_row_id_is_never_an_identity_here(pilot):
+    """Tenant isolation holds on the tap too: the id resolves to a product,
+    but the product is not one this conversation showed, so it is no fact."""
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="خيارين",
+            metadata={"evidence_refs": [ref]})
+        transport = Transport([accepted("wamid.FOREIGN")])
+        scripted = ScriptedAnthropic([step([reply("تمام", call_id="r1")])])
+        entry.run_commerce_runtime_turn(
+            engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+            conversation_id=pilot.conversation_id, connection_ref=f"wa:{pilot.connection_id}",
+            connection_id=str(pilot.connection_id), customer_id=pilot.customer_id,
+            normalized_customer_phone=PHONE, provider_message_id="wamid." + uuid.uuid4().hex,
+            inbound_text="خيار", inbound_metadata={"list_reply_id": rc.row_id(pilot.product_id + 5000)},
+            transport=transport, instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+            context_preamble={"channel": "whatsapp"}, anthropic_provider=scripted)
+    context_block = scripted.calls[0]["messages"][0]["content"][0]["text"]
+    assert "customer_tapped" not in context_block
+
+
+@contextlib.contextmanager
+def _rich_reservation(pilot: "Pilot", body: str) -> Any:
+    """A reserved rich intent, as a turn that offered a selector leaves behind.
+
+    The turn is finished on the way out, so the conversation's eligibility is
+    released for the next case exactly as a real turn releases it.
+    """
+    reservation = pilot.reserve_reply(
+        body, kind=lc.DeliveryKind.RICH.value,
+        payload={rc.CHOICES_KEY: {"rows": [{"id": rc.row_id(1), "title": "قميص قطني أزرق"},
+                                           {"id": rc.row_id(2), "title": "حذاء رياضي أبيض"}],
+                                  "product_ids": [1, 2], "button": "اختر"}})
+    try:
+        yield reservation
+    finally:
+        with pilot.owned(turn_id=reservation.turn_id) as token:
+            dd.complete_turn(ledgers=pilot.ledgers, tenant_id=pilot.tenant_a,
+                             namespace=entry.NAMESPACE, turn_id=reservation.turn_id,
+                             token=token, processing_outcome=c.ProcessingOutcome.FAILED.value)
+
+
+def test_a_rejection_this_call_did_not_make_still_reaches_the_customer(pilot):
+    """The crash window the bounded recovery exists for.
+
+    The list was refused and the receipt written, then the process died before
+    the terminal. The re-entry reports a rejection it did not itself produce —
+    and must still send the answer, because otherwise this customer gets
+    nothing at all. The ledger, not the caller, decides: it re-reads the
+    outcome, the attempt kind and the bound.
+    """
+    with _rich_reservation(pilot, "هذي الخيارات") as reservation:
+        with pilot.owned(turn_id=reservation.turn_id) as token:
+            first = dd.dispatch_reserved_delivery(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+                conversation_id=pilot.runtime_conversation_id, token=token,
+                sequence_id=reservation.sequence_id, transport=Transport([rejected()]),
+                recorded_by="pilot")
+        assert first.status == dd.SENT_REJECTED and first.reused_outcome is False
+
+        # The re-entry: a redispatch is refused and reports the established outcome.
+        text_transport = Transport([accepted("wamid.LATE")])
+        with pilot.owned(turn_id=reservation.turn_id) as token:
+            again = dd.dispatch_reserved_delivery(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+                conversation_id=pilot.runtime_conversation_id, token=token,
+                sequence_id=reservation.sequence_id, transport=Transport([]),
+                recorded_by="pilot")
+            assert again.status == dd.SENT_REJECTED and again.reused_outcome is True
+            sequence = pilot.ledgers.get_delivery_sequence(
+                tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE, turn_id=reservation.turn_id)
+            recovery = entry._recover_without_the_selector(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a,
+                runtime_conversation_id=pilot.runtime_conversation_id, token=token,
+                dispatch=again, sequence=sequence,
+                intent_payload=dict(sequence.intent_payload or {}),
+                transport=text_transport, owner_id="pilot")
+        assert recovery is not None and recovery.status == dd.SENT_ACCEPTED
+        assert [a.kind for a in pilot.attempts(reservation.turn_id)] == [
+            lc.DeliveryKind.RICH.value, lc.DeliveryKind.TEXT.value]
+        assert text_transport.sent[0]["text"] == "هذي الخيارات"
+        assert rc.payload_rows(text_transport.sent[0]) == ([], "")
+
+
+def test_a_second_recovery_is_refused_by_the_ledger_not_by_the_caller(pilot):
+    """One recovery, and only one: the answer is not sent twice.
+
+    Two refusals apply to a second attempt — the reservation's attempt bound
+    and "the only bounded recovery is rich to text" — and the bound is the one
+    that fires. Either way nothing is sent.
+    """
+    with _rich_reservation(pilot, "هذي الخيارات") as reservation:
+        blocked = Transport([accepted("wamid.NEVER")])
+        with pilot.owned(turn_id=reservation.turn_id) as token:
+            dd.dispatch_reserved_delivery(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+                conversation_id=pilot.runtime_conversation_id, token=token,
+                sequence_id=reservation.sequence_id, transport=Transport([rejected()]),
+                recorded_by="pilot")
+            payload = {"text": "هذي الخيارات"}
+            one = dd.dispatch_delivery_recovery(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+                conversation_id=pilot.runtime_conversation_id, token=token,
+                sequence_id=reservation.sequence_id, payload=payload,
+                transport=Transport([rejected()]), recorded_by="pilot")
+            two = dd.dispatch_delivery_recovery(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+                conversation_id=pilot.runtime_conversation_id, token=token,
+                sequence_id=reservation.sequence_id, payload=payload,
+                transport=blocked, recorded_by="pilot")
+        assert one.status == dd.SENT_REJECTED
+        assert two.status == dd.NOT_ATTEMPTED and blocked.sent == []
+        assert two.blocked_reason == lc.RecoveryRefusal.ATTEMPTS_EXHAUSTED.value
+
+
+def test_an_accepted_list_permits_no_recovery_at_the_ledger_either(pilot):
+    with _rich_reservation(pilot, "هذي الخيارات") as reservation:
+        blocked = Transport([accepted("wamid.NEVER")])
+        with pilot.owned(turn_id=reservation.turn_id) as token:
+            dd.dispatch_reserved_delivery(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+                conversation_id=pilot.runtime_conversation_id, token=token,
+                sequence_id=reservation.sequence_id, transport=Transport([accepted("wamid.OK")]),
+                recorded_by="pilot")
+            refused = dd.dispatch_delivery_recovery(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+                conversation_id=pilot.runtime_conversation_id, token=token,
+                sequence_id=reservation.sequence_id, payload={"text": "هذي الخيارات"},
+                transport=blocked, recorded_by="pilot")
+        assert refused.status == dd.NOT_ATTEMPTED and blocked.sent == []
+        assert refused.blocked_reason == lc.RecoveryRefusal.OUTCOME_ACCEPTED.value

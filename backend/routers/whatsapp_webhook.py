@@ -16527,6 +16527,8 @@ async def _send_list_reply(
     phone_id: str, to: str, body_text: str, rows: list, button_label: str,
     _tenant_id: Optional[int] = None, _db=None,
     _result_sink: Optional[Dict[str, Any]] = None,
+    _blocked_path: str = "send_list_reply",
+    _inbound_message_id: Optional[str] = None,
 ) -> bool:
     """Interactive list: the surface for more choices than buttons hold.
 
@@ -16586,7 +16588,7 @@ async def _send_list_reply(
             break
     if not wire_rows:
         return False
-    return await _post_wa(phone_id, {
+    payload: Dict[str, Any] = {
         "messaging_product": "whatsapp", "to": to, "type": "interactive",
         "interactive": {
             "type": "list",
@@ -16596,7 +16598,12 @@ async def _send_list_reply(
                 "sections": [{"rows": wire_rows}],
             },
         },
-    }, _tenant_id=_tenant_id, _db=_db, _result_sink=_result_sink)
+    }
+    inbound_id = str(_inbound_message_id or "").strip()
+    if inbound_id:
+        payload["_nahla_inbound_id"] = inbound_id
+    return await _post_wa(phone_id, payload, _tenant_id=_tenant_id, _db=_db,
+                          _blocked_path=_blocked_path, _result_sink=_result_sink)
 
 
 def _safe_cta_http_url(url: Optional[str]) -> str:

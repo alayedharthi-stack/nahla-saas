@@ -15,6 +15,8 @@ import pytest
 
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_provider as ap
+from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import reply_choices as rc
 
 INSTRUCTIONS = "EXISTING-INSTRUCTIONS-OWNED-ELSEWHERE"
 
@@ -234,6 +236,56 @@ def test_reply_arguments_that_are_not_an_object_are_invalid_output():
     provider, _ = build([ok([{"type": "tool_use", "id": "r", "name": ap.REPLY_TOOL_NAME, "input": []}])])
     result = provider.step(request())
     assert isinstance(result, ac.ProviderInvalid) and result.reason == "reply_arguments_not_an_object"
+
+
+def test_a_reply_may_offer_a_selector_and_carries_only_the_ids_it_named():
+    """The model names products; nothing it writes becomes a row's label."""
+    provider, _ = build([ok([reply_block(
+        text="عندنا ثلاثة فساتين", evidence_refs=["catalog:product:23"],
+        claims_commerce_facts=True,
+        choices={"product_ids": [23, 37], "button": "اختاري", "title": "لا يُقرأ"})])])
+    result = provider.step(request())
+    assert isinstance(result, ac.ProviderReply)
+    assert result.draft.payload == {rc.REQUESTED_KEY: {"product_ids": [23, 37],
+                                                       "button": "اختاري"}}
+    # Still a text reply at this point: whether the selector may be offered is
+    # established against the turn's observations, not here.
+    assert result.draft.kind == lc.DeliveryKind.TEXT.value
+
+
+def test_a_reply_that_offers_no_selector_carries_an_empty_payload():
+    provider, _ = build([ok([reply_block(text="أهلاً", claims_commerce_facts=False)])])
+    result = provider.step(request())
+    assert isinstance(result, ac.ProviderReply) and result.draft.payload == {}
+
+
+def test_a_selector_the_model_asked_for_without_products_is_simply_no_selector():
+    provider, _ = build([ok([reply_block(text="أهلاً", claims_commerce_facts=False,
+                                         choices={"button": "اختر"})])])
+    result = provider.step(request())
+    assert isinstance(result, ac.ProviderReply) and result.draft.payload == {}
+
+
+@pytest.mark.parametrize("choices", ["23,37", ["23"], 7])
+def test_a_selector_shaped_wrongly_is_invalid_output_never_a_guess(choices):
+    provider, _ = build([ok([reply_block(text="أهلاً", claims_commerce_facts=False,
+                                         choices=choices)])])
+    result = provider.step(request())
+    assert isinstance(result, ac.ProviderInvalid) and result.reason == "reply_choices_not_an_object"
+
+
+def test_the_product_ids_field_must_be_a_list_to_mean_anything():
+    provider, _ = build([ok([reply_block(text="أهلاً", claims_commerce_facts=False,
+                                         choices={"product_ids": "23"})])])
+    result = provider.step(request())
+    assert isinstance(result, ac.ProviderInvalid) and result.reason == "reply_choices_not_an_object"
+
+
+def test_the_reply_channel_declares_the_selector_as_optional():
+    schema = ap.REPLY_TOOL_SCHEMA
+    assert "choices" in schema["properties"]
+    assert "choices" not in schema["required"]
+    assert schema["properties"]["choices"]["required"] == ["product_ids"]
 
 
 def test_plain_text_without_the_reply_channel_is_never_delivered():

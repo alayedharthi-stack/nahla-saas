@@ -175,7 +175,7 @@ class ToolObservation:
 
 @dataclasses.dataclass(frozen=True)
 class VerificationProblem:
-    code: str                                # closed: "unknown_evidence" | "empty_text" | "text_too_long" | "missing_evidence" | "invalid_kind" | "coupon_code_without_evidence" | "unobserved_code"
+    code: str                                # closed: "unknown_evidence" | "empty_text" | "text_too_long" | "missing_evidence" | "invalid_kind" | "coupon_code_without_evidence" | "unobserved_code" | "choice_without_evidence"
     detail: str
 
 
@@ -746,9 +746,12 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
     and that its evidence is cited, and that no other code-shaped token in the
     text is unknown to this turn's observations: a coupon code is an
     operational claim, and a code the merchant's records did not produce must
-    never reach a customer. They do **not** prove that the text's sentences
-    are consistent with the evidence: semantic grounding is not established
-    by this slice.
+    never reach a customer. A draft that offers a tappable selector is held to
+    the same standard for every product in it: the row the customer reads
+    carries the merchant's title and price, so the product must have been
+    looked up in this turn and cited here. They do **not** prove that the
+    text's sentences are consistent with the evidence: semantic grounding is
+    not established by this slice.
     """
     problems = []
     text = draft.text.strip()
@@ -775,6 +778,12 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
         for token in sorted(text_tokens - set(codes) - seen):
             problems.append(VerificationProblem(
                 "unobserved_code", f"{token} is not a code this turn's tools returned"))
+    from core.commerce_runtime import reply_choices as _rc  # noqa: PLC0415
+
+    for product_id in _rc.unobserved_choices(draft, observations):
+        problems.append(VerificationProblem(
+            "choice_without_evidence",
+            f"product {product_id} is offered as a choice but was not looked up and cited in this turn"))
     return tuple(problems)
 
 

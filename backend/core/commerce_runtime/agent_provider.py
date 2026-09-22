@@ -37,6 +37,7 @@ import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from core.commerce_runtime import agent_contracts as ac
+from core.commerce_runtime import reply_choices as rc
 
 logger = logging.getLogger("nahla.commerce_runtime.agent_provider")
 
@@ -49,7 +50,10 @@ REPLY_TOOL_DESCRIPTION = (
     "Submit the final answer for this customer turn. Call this exactly once, "
     "on its own, when no further lookup is needed. Every commerce fact in the "
     "text must come from a tool result observed in this turn, and every "
-    "evidence reference listed must be one those results returned."
+    "evidence reference listed must be one those results returned. Optionally "
+    "offer the customer a tappable selector over products you looked up this "
+    "turn; the text stands on its own either way, and the customer may always "
+    "answer by typing instead."
 )
 
 REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
@@ -74,9 +78,65 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
                 "merchant fact; false for a purely conversational reply."
             ),
         },
+        "choices": {
+            "type": "object",
+            "description": (
+                "Optional. Offer these products as a tappable selector beside the text. "
+                "Name products only; their titles, prices and options are taken from the "
+                "merchant's own records as this turn read them. Two to ten products, each "
+                "looked up in this turn and cited in evidence_refs. Omit this whenever the "
+                "text answers on its own \u2014 the selector is never required, and the "
+                "customer can always reply by typing."
+            ),
+            "properties": {
+                "product_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "The product ids to offer, in the order the customer should see them."
+                    ),
+                },
+                "button": {
+                    "type": "string",
+                    "description": (
+                        "The word on the button that opens the selector, in the customer's "
+                        "language, at most 20 characters."
+                    ),
+                },
+            },
+            "required": ["product_ids"],
+        },
     },
     "required": ["text", "claims_commerce_facts"],
 }
+
+_INVALID_CHOICES: Dict[str, Any] = {"__invalid__": True}
+
+
+def _requested_choices(raw: Any) -> Dict[str, Any]:
+    """What the model asked to offer, carried as a request and nothing more.
+
+    Only the ids and the button word survive translation: whether the selector
+    may be offered at all is established later against this turn's
+    observations, and every value the customer reads is composed there from the
+    merchant's own records. An absent field is the ordinary case and means a
+    plain text reply.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        return _INVALID_CHOICES
+    ids = raw.get("product_ids")
+    if ids is None:
+        return {}
+    if not isinstance(ids, (list, tuple)):
+        return _INVALID_CHOICES
+    request: Dict[str, Any] = {"product_ids": [item for item in ids]}
+    button = raw.get("button")
+    if isinstance(button, str) and button.strip():
+        request["button"] = button.strip()[:rc.MAX_BUTTON_LABEL]
+    return {rc.REQUESTED_KEY: request}
+
 
 MAX_OUTPUT_TOKENS = 1024
 MIN_STEP_SECONDS = 2.0
@@ -290,10 +350,14 @@ class AnthropicReasoningProvider:
         commerce = raw.get("claims_commerce_facts")
         if not isinstance(commerce, bool):
             return ac.ProviderInvalid("reply_commerce_flag_missing")
+        payload = _requested_choices(raw.get("choices"))
+        if payload is _INVALID_CHOICES:
+            return ac.ProviderInvalid("reply_choices_not_an_object")
         return ac.ProviderReply(ac.ReplyDraft(
             text=text.strip(),
             evidence_refs=tuple(str(r) for r in refs),
             claims_commerce_facts=commerce,
+            payload=payload,
         ))
 
     def _requests(self, request: ac.ProviderRequest, blocks: Sequence[Mapping[str, Any]],

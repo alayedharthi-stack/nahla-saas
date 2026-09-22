@@ -139,6 +139,76 @@ def dispatch_reserved_delivery(
                            provider_message_id=provider_message_id, detail=evidence)
 
 
+def dispatch_delivery_recovery(
+    *,
+    ledgers: LedgerRepository,
+    tenant_id: int,
+    namespace: Any,
+    conversation_id: int,
+    token: c.OwnershipToken,
+    sequence_id: int,
+    payload: Mapping[str, Any],
+    transport: Transport,
+    recorded_by: str,
+) -> DispatchOutcome:
+    """Send the same answer without its selector, once, after a proven refusal.
+
+    A tappable selector is an affordance over an answer the customer is owed
+    either way, so a provider that definitively refuses the rich message must
+    not cost them the reply. The ledger decides whether that is what happened:
+    it permits this attempt only after a rejection it has recorded, and never
+    after an accepted or an unknown send, where a second message would be a
+    duplicate rather than a recovery.
+
+    The text is the model's own, carried unchanged from the reserved intent;
+    only the structured payload beside it is gone.
+    """
+    try:
+        attempt = ledgers.reserve_delivery_recovery(
+            tenant_id=tenant_id, namespace=namespace, conversation_id=conversation_id,
+            token=token, sequence_id=sequence_id, payload=payload,
+        )
+    except lc.RecoveryNotPermitted as refused:
+        logger.info("[COMMERCE_RUNTIME_DISPATCH] recovery refused sequence=%s reason=%s",
+                    sequence_id, refused.reason.value)
+        return DispatchOutcome(status=NOT_ATTEMPTED, sequence_id=sequence_id, attempt_id=None,
+                               provider_message_id=None, blocked_reason=refused.reason.value)
+    except c.OwnershipRejected as rejected:
+        logger.info("[COMMERCE_RUNTIME_DISPATCH] recovery not ours sequence=%s reason=%s",
+                    sequence_id, rejected.reason.value)
+        return DispatchOutcome(status=NOT_ATTEMPTED, sequence_id=sequence_id, attempt_id=None,
+                               provider_message_id=None, blocked_reason=rejected.reason.value)
+
+    try:
+        response = transport(attempt.payload)
+        if not isinstance(response, lc.SendResponse):
+            raise TypeError("transport must report a SendResponse")
+    except Exception as exc:  # noqa: BLE001 - an exception is an unknown send, never a proven failure
+        logger.warning("[COMMERCE_RUNTIME_DISPATCH] recovery transport raised sequence=%s "
+                       "attempt=%s error=%s", sequence_id, attempt.attempt_id, type(exc).__name__)
+        response = lc.SendResponse(http_status=None, body={}, timed_out=True)
+        evidence: dict = {"transport_error": type(exc).__name__, "recovery": True}
+    else:
+        evidence = {"http_status": response.http_status, "timed_out": bool(response.timed_out),
+                    "recovery": True}
+
+    kind, provider_message_id = lc.classify_send_response(response)
+    ledgers.record_delivery_receipt(
+        tenant_id=tenant_id, namespace=namespace, conversation_id=conversation_id,
+        attempt_id=attempt.attempt_id, kind=kind, provider_message_id=provider_message_id,
+        evidence=evidence, recorded_by=recorded_by,
+    )
+    status = {
+        lc.ReceiptKind.ACCEPTED: SENT_ACCEPTED,
+        lc.ReceiptKind.REJECTED: SENT_REJECTED,
+        lc.ReceiptKind.UNKNOWN: SENT_UNKNOWN,
+    }[kind]
+    logger.info("[COMMERCE_RUNTIME_DISPATCH] recovery sequence=%s attempt=%s outcome=%s "
+                "identified=%s", sequence_id, attempt.attempt_id, status, bool(provider_message_id))
+    return DispatchOutcome(status=status, sequence_id=sequence_id, attempt_id=attempt.attempt_id,
+                           provider_message_id=provider_message_id, detail=evidence)
+
+
 _STATUS_FOR_RECEIPT = {
     lc.ReceiptKind.ACCEPTED.value: SENT_ACCEPTED,
     lc.ReceiptKind.REJECTED.value: SENT_REJECTED,
@@ -249,5 +319,5 @@ def complete_turn(
 
 __all__ = [
     "DispatchOutcome", "NOT_ATTEMPTED", "SENT_ACCEPTED", "SENT_REJECTED", "SENT_UNKNOWN",
-    "Transport", "complete_turn", "dispatch_reserved_delivery",
+    "Transport", "complete_turn", "dispatch_delivery_recovery", "dispatch_reserved_delivery",
 ]

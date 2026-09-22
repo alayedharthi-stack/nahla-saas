@@ -298,7 +298,20 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_customer_can_go_back_to_a_product_whose_context_has_lapsed",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_conversation_s_products_are_never_carried_into_this_one",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_reply_that_cited_no_product_carries_nothing_and_says_so",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_model_is_told_which_products_were_shown_not_left_to_guess_an_id"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_model_is_told_which_products_were_shown_not_left_to_guess_an_id",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_verified_selector_is_reserved_as_a_rich_intent_and_sent_as_a_list",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_product_the_turn_never_looked_up_is_refused_before_anything_is_sent",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_refusal_is_correctable_and_the_turn_still_answers",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_refused_list_still_delivers_the_answer_as_text",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_accepted_list_is_never_followed_by_a_second_message",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_unknown_list_send_is_never_recovered",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_reply_without_a_selector_is_still_an_ordinary_text_send",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_on_a_row_resolves_to_the_product_that_reply_showed",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_this_conversation_no_longer_carries_resolves_to_nothing",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_tenants_row_id_is_never_an_identity_here",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_rejection_this_call_did_not_make_still_reaches_the_customer",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_second_recovery_is_refused_by_the_ledger_not_by_the_caller",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_accepted_list_permits_no_recovery_at_the_ledger_either"
       ]
     },
     {
