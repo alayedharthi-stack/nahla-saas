@@ -12,20 +12,24 @@ So a row can only ever say what the turn established. A product the model names
 without having looked it up this turn is refused in verification
 (``choice_without_evidence``): the row would state a price the turn never read.
 
-A selector is an affordance **over** the answer, never the answer itself, so
-everything short of a truth problem degrades quietly to the model's text alone:
-fewer than two products to choose between, more rows than the channel shows, a
-product with no usable identity or title. The customer still hears about every
-option in the model's own words; only the tapping is withheld, and the reason
-is logged rather than fed back, because none of it makes the reply wrong.
-Nothing is ever dropped from a list to make it fit — a list that cannot carry
-every option is not sent at all.
+A selector is an affordance **over** the answer, never the answer itself. So
+when the channel will not take the rows — fewer than two products to choose
+between, more than it shows, a product with no usable title — the *selector*
+is withheld and the *options* are not: they follow the model's own sentence as
+lines of the merchant's values, the same title and description the rows would
+have carried. A reply that says «اختر من القائمة» therefore never arrives with
+nothing to choose from, and no option is ever trimmed to make a list fit. The
+model's wording is never replaced, only followed; the reason rides on the
+delivered payload as ``choices_withheld``.
 
-A tap comes back as the row's id. It is resolved to a product id here and then
-**re-checked** against what this conversation's replies actually showed
-(``recent_products``), which is also what applies the browsing-context lapse.
-An id that does not verify is simply not a fact: the turn proceeds on the row
-title the customer's tap sent as text, like any other message.
+A tap comes back as the row's id, and it is checked against the list that was
+**sent**: the row ids each reply actually carried are persisted with it
+(``recent_products.CHOICE_ROW_IDS_KEY``), and a tap must match one of those,
+within the same per-product browsing-context lapse, *and* name a product still
+carried and re-read in the merchant's catalogue. Being mentioned in a reply is
+deliberately not enough — a product named in prose was never a row anyone could
+tap. An id that does not verify is simply not a fact: the turn proceeds on the
+row title the customer's tap sent as text, like any other message.
 """
 from __future__ import annotations
 
