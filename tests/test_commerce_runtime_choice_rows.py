@@ -145,3 +145,37 @@ def test_an_empty_set_is_empty_rather_than_an_error() -> None:
     result = cr.choice_rows([])
     assert result.rows == () and result.indistinguishable == ()
     assert not result
+
+
+def test_a_set_every_product_could_join_is_complete() -> None:
+    result = cr.choice_rows([
+        product(11, "قميص قطني أزرق", price="129.0"),
+        product(12, "عطر ورد 100ml", price="240.0"),
+    ])
+    assert result.complete and len(result.rows) == 2
+
+
+def test_a_set_that_lost_a_product_is_not_complete() -> None:
+    """The caller's signal to send the model's text without a selector, so the
+    option the list could not render is still part of the customer's answer."""
+    result = cr.choice_rows([
+        product(1, "فستان", price="199.0"),
+        product(2, "فستان", price="199.0"),
+        product(3, "فستان", price="250.0"),
+    ])
+    assert not result.complete
+    assert result.offered == 3 and len(result.rows) == 1
+
+
+def test_a_product_with_no_usable_identity_also_makes_the_set_incomplete() -> None:
+    result = cr.choice_rows([
+        {"title": "بلا معرّف", "price": "10"},
+        product(8, "عطر ورد 100ml", price="10"),
+    ])
+    assert not result.complete
+    assert result.offered == 2 and [row.product_id for row in result.rows] == [8]
+
+
+def test_an_empty_set_loses_nothing() -> None:
+    result = cr.choice_rows([])
+    assert result.complete and not result

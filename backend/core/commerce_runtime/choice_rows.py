@@ -15,6 +15,13 @@ This is a structured action payload, which the platform owns; the sentence the
 customer reads around it stays the model's. Labels here are values and
 separators, never prose: no greeting, no verb, no connective wording.
 
+A selector is an affordance over the answer, never the answer itself. So when
+a set cannot be offered **whole** — ``complete`` is false — the caller sends
+the model's own text and no selector, rather than a list quietly missing a
+product. The customer still hears about every option, in the model's words;
+only the tapping is withheld. That is why this returns what it could not
+render instead of silently shortening the set.
+
 Meta's caps are the contract: 24 characters for a row title, 72 for its
 description, and titles compared the way the provider compares them.
 """
@@ -44,13 +51,26 @@ class ChoiceRow:
 
 @dataclasses.dataclass(frozen=True)
 class ChoiceRows:
-    """Rows a provider will accept, and the products no fact could tell apart."""
+    """Rows a provider will accept, and what could not be rendered as one."""
 
     rows: Tuple[ChoiceRow, ...]
     indistinguishable: Tuple[int, ...]
+    offered: int = 0
 
     def __bool__(self) -> bool:
         return bool(self.rows)
+
+    @property
+    def complete(self) -> bool:
+        """Whether every product asked for became a row.
+
+        False when anything was left out — an indistinguishable pair, or a
+        product with no usable identity or title. A caller offering a selector
+        checks this: an incomplete set is sent as the model's text alone, so a
+        real option never disappears from the customer's answer because of a
+        display limit.
+        """
+        return len(self.rows) == int(self.offered)
 
 
 def _title_key(value: str) -> str:
@@ -134,8 +154,9 @@ def choice_rows(products: Sequence[Mapping[str, Any]]) -> ChoiceRows:
     A product is dropped only when its title clashes with one already accepted
     and no fact in its own record tells the two apart. The caller is told which,
     so "several of these look the same to the customer" stays a fact it can act
-    on rather than something the platform papers over.
+    on rather than something the platform papers over — see ``complete``.
     """
+    offered = len(list(products))
     considered: List[Tuple[int, str, Mapping[str, Any]]] = []
     dropped: List[int] = []
     for product in products:
@@ -171,7 +192,7 @@ def choice_rows(products: Sequence[Mapping[str, Any]]) -> ChoiceRows:
         taken[_title_key(title)] = product_id
         rows.append(ChoiceRow(product_id=product_id, title=title,
                               description=_description(product)))
-    return ChoiceRows(rows=tuple(rows), indistinguishable=tuple(dropped))
+    return ChoiceRows(rows=tuple(rows), indistinguishable=tuple(dropped), offered=offered)
 
 
 def _first_free_title(base: str, distinguishers: Sequence[str], taken: Mapping[str, int]) -> Optional[str]:

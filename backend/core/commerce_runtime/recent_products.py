@@ -26,10 +26,19 @@ are the order the reply *cited*, which is not provably the order the customer
 "the first" from that. A provable presentation order needs the reply itself to
 carry structured choices, which is a later step.
 
+The clock belongs to the **product**, not to the conversation. A customer who
+chats every day about other things must not keep a dress from three weeks ago
+alive: what is asked is "is *this product* still what 'the first one' means",
+and the honest measure of that is how long ago a reply last showed it. A
+product that is still being discussed refreshes itself, because the reply that
+discusses it cites it — relevance is carried by evidence, never by guessing at
+the subject of a message.
+
 Nothing here is deleted or rewritten. Lapsing changes only what the platform
 volunteers as context for one turn: the conversation, the customer's profile
 and their real orders are untouched, and a customer who asks to go back to a
-product simply has it looked up again.
+product simply has it looked up again — which the PostgreSQL proofs exercise
+rather than assume.
 """
 from __future__ import annotations
 
@@ -40,15 +49,15 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 logger = logging.getLogger("nahla.commerce_runtime.recent_products")
 
-# How long a browsing context survives the conversation going quiet, measured
-# from this conversation's last reply. Provisional: the owner's policy decision
-# is pending, and this is the one number it changes. It is deliberately not
-# WhatsApp's 24h service window — that governs sending, not memory.
+# How long a product stays current after the reply that last showed it.
+# Provisional: the owner's policy decision is pending, and this is the one
+# number it changes. It is deliberately not WhatsApp's 24h service window —
+# that governs sending, not memory.
 BROWSING_CONTEXT_LAPSE_SECONDS = 72 * 3600
 
-# How far back to read, and how much to carry. A follow-up refers to something
-# recent; an unbounded set would be noise the model has to wade through.
-MAX_REPLIES_READ = 5
+# Resource guards, not policy. The lapse above decides what is current; these
+# only bound the read and the size of what one turn is handed.
+MAX_REPLIES_READ = 20
 MAX_PRODUCTS = 10
 
 PRODUCT_REF_PREFIX = "catalog:product:"
@@ -91,7 +100,10 @@ class ShownProducts:
 
     products: Tuple[ShownProduct, ...]
     reason: str
-    seconds_since_last_reply: Optional[int] = None
+    # Age of the most recent product citation found, carried or lapsed. The one
+    # number the policy turns on, logged every turn so it can be set from
+    # evidence rather than opinion.
+    seconds_since_last_product_shown: Optional[int] = None
 
     def __bool__(self) -> bool:
         return bool(self.products)
@@ -147,6 +159,18 @@ def _recent_outbound_rows(db: Any, *, tenant_id: int, conversation_id: int) -> S
     )
 
 
+def _age_seconds(moment: datetime, shown_at: Any) -> Optional[int]:
+    """How long ago a stored reply was written, or ``None`` if it cannot say."""
+    if not isinstance(shown_at, datetime):
+        return None
+    when = shown_at
+    if when.tzinfo is not None and moment.tzinfo is None:
+        moment = moment.replace(tzinfo=when.tzinfo)
+    elif when.tzinfo is None and moment.tzinfo is not None:
+        when = when.replace(tzinfo=moment.tzinfo)
+    return max(0, int((moment - when).total_seconds()))
+
+
 def products_shown_earlier(
     db: Any,
     *,
@@ -155,7 +179,13 @@ def products_shown_earlier(
     now: Optional[datetime] = None,
     lapse_seconds: int = BROWSING_CONTEXT_LAPSE_SECONDS,
 ) -> ShownProducts:
-    """Products this conversation's recent replies cited, if still current.
+    """Products this conversation showed recently enough to still mean.
+
+    Each product is judged by the age of the reply that last showed **it**, not
+    by how recently anything at all was said. A conversation that has carried
+    on daily about other subjects therefore carries nothing from three weeks
+    ago, while a product still being discussed stays current on its own, since
+    the reply discussing it cites it.
 
     Never raises: a turn that cannot read its own history still runs, with no
     carried context rather than a failure.
@@ -171,37 +201,42 @@ def products_shown_earlier(
     if not rows:
         return ShownProducts(products=(), reason=NO_EARLIER_REPLY)
 
-    last_reply_at = getattr(rows[0], "created_at", None)
-    elapsed: Optional[int] = None
-    if isinstance(last_reply_at, datetime):
-        moment = now if isinstance(now, datetime) else datetime.utcnow()
-        if last_reply_at.tzinfo is not None and moment.tzinfo is None:
-            moment = moment.replace(tzinfo=last_reply_at.tzinfo)
-        elif last_reply_at.tzinfo is None and moment.tzinfo is not None:
-            last_reply_at = last_reply_at.replace(tzinfo=moment.tzinfo)
-        elapsed = max(0, int((moment - last_reply_at).total_seconds()))
-        if moment - last_reply_at > timedelta(seconds=int(lapse_seconds)):
-            return ShownProducts(products=(), reason=LAPSED,
-                                 seconds_since_last_reply=elapsed)
-
-    cited: List[int] = []
+    moment = now if isinstance(now, datetime) else datetime.utcnow()
+    lapse = max(0, int(lapse_seconds))
+    current: List[int] = []
+    newest_citation: Optional[int] = None
+    cited_anything = False
     for row in rows:
-        for product_id in _product_ids_cited(getattr(row, "extra_metadata", None)):
-            if product_id not in cited:
-                cited.append(product_id)
-        if len(cited) >= MAX_PRODUCTS:
+        cited = _product_ids_cited(getattr(row, "extra_metadata", None))
+        if not cited:
+            continue
+        cited_anything = True
+        # A reply whose timestamp cannot be read is not evidence of staleness;
+        # the age is simply unknown and the products it showed are carried.
+        age = _age_seconds(moment, getattr(row, "created_at", None))
+        if age is not None and (newest_citation is None or age < newest_citation):
+            newest_citation = age
+        if age is not None and age > lapse:
+            continue
+        for product_id in cited:
+            if product_id not in current:
+                current.append(product_id)
+        if len(current) >= MAX_PRODUCTS:
             break
-    cited = cited[:MAX_PRODUCTS]
-    if not cited:
-        return ShownProducts(products=(), reason=NO_PRODUCTS_CITED,
-                             seconds_since_last_reply=elapsed)
+    current = current[:MAX_PRODUCTS]
 
-    products = _still_in_catalog(db, tenant_id=tenant_id, product_ids=cited)
+    if not cited_anything:
+        return ShownProducts(products=(), reason=NO_PRODUCTS_CITED)
+    if not current:
+        return ShownProducts(products=(), reason=LAPSED,
+                             seconds_since_last_product_shown=newest_citation)
+
+    products = _still_in_catalog(db, tenant_id=tenant_id, product_ids=current)
     if not products:
         return ShownProducts(products=(), reason=NO_PRODUCTS_CITED,
-                             seconds_since_last_reply=elapsed)
+                             seconds_since_last_product_shown=newest_citation)
     return ShownProducts(products=tuple(products), reason=CARRIED,
-                         seconds_since_last_reply=elapsed)
+                         seconds_since_last_product_shown=newest_citation)
 
 
 def _still_in_catalog(db: Any, *, tenant_id: int, product_ids: Sequence[int]) -> List[ShownProduct]:

@@ -287,8 +287,8 @@ def _with_products_shown_earlier(
                        turn_id, type(exc).__name__)
         return preamble
     logger.info("[COMMERCE_RUNTIME] browsing context turn=%s reason=%s products=%d "
-                "seconds_since_last_reply=%s", turn_id, shown.reason, len(shown.products),
-                shown.seconds_since_last_reply)
+                "seconds_since_last_product_shown=%s", turn_id, shown.reason,
+                len(shown.products), shown.seconds_since_last_product_shown)
     return preamble
 
 

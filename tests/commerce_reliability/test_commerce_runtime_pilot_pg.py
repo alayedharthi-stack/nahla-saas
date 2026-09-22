@@ -1900,7 +1900,7 @@ def test_the_carried_products_are_read_back_from_the_merchant_s_own_catalogue(pi
     assert fact["in_stock"] is True
 
 
-def test_a_conversation_that_has_gone_quiet_carries_no_browsing_context(pilot):
+def test_a_product_shown_long_enough_ago_carries_no_browsing_context(pilot):
     """The set lapses; nothing is deleted. The reply row, the conversation and
     the customer are all still there — only what the platform volunteers for
     this one turn changes."""
@@ -1918,6 +1918,80 @@ def test_a_conversation_that_has_gone_quiet_carries_no_browsing_context(pilot):
     assert lapsed.reason == rp.LAPSED and lapsed.products == ()
     assert fresh.reason == rp.CARRIED and fresh.product_ids == [pilot.product_id]
     assert still_there == 1
+
+
+def test_a_busy_conversation_does_not_keep_an_old_product_current(pilot):
+    """The clock belongs to the product, not to the conversation.
+
+    The customer was shown a product a week ago and has been replied to since —
+    about a coupon, about an order. Neither of those replies showed the
+    product, so neither makes it current again. This is the behaviour a lapse
+    measured from "the conversation's last reply" would get wrong, and it needs
+    no guess at what any message was about: a reply that discusses the product
+    cites it, and only that citation refreshes it.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        old_row = say(conversation_id=pilot.conversation_id, direction="outbound",
+                      body="هذه الخيارات", metadata={"evidence_refs": [ref]})
+        _age_row(pilot, old_row, hours=24 * 7)
+        for hours, refs in ((49, ["order:summary:4"]), (25, []), (1, ["promotion:coupon:9"])):
+            chatter = say(conversation_id=pilot.conversation_id, direction="outbound",
+                          body="رد آخر", metadata={"evidence_refs": refs})
+            _age_row(pilot, chatter, hours=hours)
+        stale = _shown(pilot)
+
+        # And the moment a reply shows it again, it is current again — by
+        # evidence, not by any judgement about the subject of the message.
+        again = say(conversation_id=pilot.conversation_id, direction="outbound",
+                    body="عن المنتج نفسه", metadata={"evidence_refs": [ref]})
+        _age_row(pilot, again, hours=1)
+        refreshed = _shown(pilot)
+    assert stale.reason == rp.LAPSED and stale.products == ()
+    assert stale.seconds_since_last_product_shown >= 24 * 7 * 3600
+    assert refreshed.reason == rp.CARRIED and refreshed.product_ids == [pilot.product_id]
+
+
+def test_a_customer_can_go_back_to_a_product_whose_context_has_lapsed(pilot):
+    """Retrieval after a lapse, run rather than assumed.
+
+    That the rows survive proves nothing about whether the customer can get
+    back to the product. So this drives the real turn: with the earlier reply
+    aged past the lapse — nothing carried, the identity gone — the customer
+    asks to go back, the model searches the catalogue by name, the product is
+    found, its details resolve, and the reply is grounded on it and sent.
+
+    The turn after that carries it again, because this reply cited it. Nothing
+    was restored by hand: coming back costs one ordinary search.
+    """
+    ref = f"catalog:product:{pilot.product_id}"
+    with _messages(pilot) as say:
+        row = say(conversation_id=pilot.conversation_id, direction="outbound",
+                  body="هذه الخيارات", metadata={"evidence_refs": [ref]})
+        _age_row(pilot, row, hours=1 + rp.BROWSING_CONTEXT_LAPSE_SECONDS // 3600)
+        assert _shown(pilot).reason == rp.LAPSED
+
+        transport = Transport([accepted("wamid.BACK")])
+        report = pilot.run(
+            answers=[
+                step([tool_use("t1", "search_products", query=PRODUCT_TITLE)]),
+                step([tool_use("t2", "get_product_details", product_id=pilot.product_id)]),
+                step([reply("متوفر", refs=(ref,), commerce=True, call_id="r1")]),
+            ],
+            transport=transport,
+            question="أبغى أرجع للمنتج اللي كلمتك عنه",
+            budget=ac.LoopBudget(max_steps=4, max_tool_calls=4, tool_timeout_seconds=10.0,
+                                 provider_timeout_seconds=15.0, deadline_seconds=45.0),
+        )
+        # The reply this turn sent cites the product, so the next turn has it
+        # again — the ordinary refresh, not a special case.
+        say(conversation_id=pilot.conversation_id, direction="outbound", body=report.reply_text,
+            metadata={"evidence_refs": list(report.evidence_refs)})
+        after = _shown(pilot)
+    assert report.tools_called == ("search_products", "get_product_details")
+    assert ref in report.evidence_refs
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert after.reason == rp.CARRIED and after.product_ids == [pilot.product_id]
 
 
 def test_another_conversation_s_products_are_never_carried_into_this_one(pilot):

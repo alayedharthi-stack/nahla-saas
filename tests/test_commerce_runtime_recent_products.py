@@ -3,7 +3,8 @@
 A follow-up question about something already shown needs an identity, not a
 phrase. The platform already persists the evidence each reply rested on; this
 reads it back, re-checks it against the merchant's catalogue, and stops
-carrying it once the conversation has gone quiet.
+carrying a product once the reply that last showed **it** is old enough —
+however busy the conversation has been about other things since.
 
 Offline: the stored rows and the catalogue are supplied directly, so the
 bounds, the lapse and the parsing are under test without a database. The
@@ -110,7 +111,7 @@ def test_the_newest_reply_comes_first_and_a_repeat_is_not_carried_twice(monkeypa
     assert result.product_ids == [13, 11]
 
 
-def test_only_a_bounded_number_of_replies_and_products_is_carried(monkeypatch) -> None:
+def test_only_a_bounded_number_of_products_is_carried(monkeypatch) -> None:
     table = {i: {"id": i, "title": f"منتج {i}", "price": "10", "sale_price": "",
                  "currency": "SAR", "in_stock": True} for i in range(1, 40)}
     rows = [Row([f"catalog:product:{i}" for i in range(n * 4 + 1, n * 4 + 5)], hours_ago=n + 1)
@@ -120,14 +121,48 @@ def test_only_a_bounded_number_of_replies_and_products_is_carried(monkeypatch) -
     assert result.product_ids[0] == 1
 
 
-def test_a_conversation_quiet_for_longer_than_the_lapse_carries_nothing(monkeypatch) -> None:
+def test_a_product_shown_longer_ago_than_the_lapse_is_not_carried(monkeypatch) -> None:
     hours = rp.BROWSING_CONTEXT_LAPSE_SECONDS / 3600
     lapsed = shown(monkeypatch, [Row(["catalog:product:11"], hours_ago=hours + 1)])
     assert lapsed.reason == rp.LAPSED and lapsed.products == ()
-    assert lapsed.seconds_since_last_reply == int((hours + 1) * 3600)
+    assert lapsed.seconds_since_last_product_shown == int((hours + 1) * 3600)
 
     just_inside = shown(monkeypatch, [Row(["catalog:product:11"], hours_ago=hours - 0.5)])
     assert just_inside.reason == rp.CARRIED
+
+
+def test_talking_every_day_about_other_things_does_not_keep_an_old_product_alive(monkeypatch) -> None:
+    """The clock belongs to the product, not to the conversation.
+
+    The customer was shown a shirt a week ago and has chatted daily since —
+    about delivery, about a coupon, about nothing in particular. None of those
+    replies showed the shirt, so none of them makes it current again.
+    """
+    rows = [Row(["promotion:coupon:9"], hours_ago=1),
+            Row([], hours_ago=25),
+            Row(["order:summary:4"], hours_ago=49),
+            Row(["catalog:product:11"], hours_ago=24 * 7)]
+    result = shown(monkeypatch, rows)
+    assert result.reason == rp.LAPSED and result.products == ()
+    assert result.seconds_since_last_product_shown == 24 * 7 * 3600
+
+
+def test_a_product_still_being_discussed_stays_current_on_its_own(monkeypatch) -> None:
+    """No intent detection: the reply that discusses it cites it, and that
+    citation is what refreshes it."""
+    rows = [Row(["catalog:product:11"], hours_ago=2),
+            Row(["catalog:product:11", "catalog:product:12"], hours_ago=24 * 7)]
+    result = shown(monkeypatch, rows)
+    assert result.reason == rp.CARRIED
+    assert result.product_ids == [11]  # 12 was only ever shown a week ago
+
+
+def test_each_product_is_judged_on_its_own_age_not_the_newest_reply(monkeypatch) -> None:
+    rows = [Row(["catalog:product:13"], hours_ago=1),
+            Row(["catalog:product:11"], hours_ago=24 * 7)]
+    result = shown(monkeypatch, rows)
+    assert result.product_ids == [13]
+    assert result.seconds_since_last_product_shown == 3600
 
 
 def test_the_lapse_is_a_parameter_so_the_policy_is_one_number(monkeypatch) -> None:
@@ -155,4 +190,4 @@ def test_an_unreadable_reply_timestamp_does_not_silently_lapse_the_context(monke
     row = Row(["catalog:product:11"])
     row.created_at = None  # type: ignore[assignment]
     result = shown(monkeypatch, [row])
-    assert result.reason == rp.CARRIED and result.seconds_since_last_reply is None
+    assert result.reason == rp.CARRIED and result.seconds_since_last_product_shown is None

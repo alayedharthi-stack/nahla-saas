@@ -929,19 +929,39 @@ as well as through the ledger.
   own earlier message in the transcript and resolves "the first" from that. A
   provable presentation order needs the reply to carry structured choices.
 
-  The set is bounded: the last `MAX_REPLIES_READ` replies, at most
-  `MAX_PRODUCTS` products, this conversation only, this tenant only, and each
-  product re-read in the merchant's catalogue now — one the merchant has since
-  removed is not carried. It **lapses** after
-  `BROWSING_CONTEXT_LAPSE_SECONDS` (provisional: 72 h) measured from the last
-  reply, so a customer returning after a long silence on a new subject is not
-  pulled back to it. Lapsing changes only what the platform volunteers for one
-  turn: the conversation, the customer's profile and their real orders are
-  untouched, and a customer who asks to go back to a product simply has it
-  looked up again. Each turn logs `[COMMERCE_RUNTIME] browsing context
-  turn=… reason=… products=… seconds_since_last_reply=…`, so the duration can be
-  set from evidence rather than opinion. The lapse is deliberately **not**
+  The set is bounded to this conversation, this tenant and at most
+  `MAX_PRODUCTS` products, each re-read in the merchant's catalogue now — one
+  the merchant has since removed is not carried.
+
+  **The clock belongs to the product, not to the conversation.** A product is
+  carried while the reply that last showed *it* is younger than
+  `BROWSING_CONTEXT_LAPSE_SECONDS` (provisional: 72 h). A conversation that has
+  carried on daily about other subjects therefore carries nothing from three
+  weeks ago, and a product still being discussed stays current on its own,
+  because the reply discussing it cites it. Relevance is carried by evidence;
+  nothing here guesses at the subject of a message, and nothing asks the
+  customer to confirm one. `MAX_REPLIES_READ` bounds the read, not the policy.
+
+  Lapsing changes only what the platform volunteers for one turn: the
+  conversation, the customer's profile and their real orders are untouched, and
+  coming back costs one ordinary search — proven by
+  `test_a_customer_can_go_back_to_a_product_whose_context_has_lapsed`, which
+  runs the turn rather than asserting that the rows survived. The reply that
+  turn sends cites the product, so the turn after it carries the product again.
+
+  Each turn logs `[COMMERCE_RUNTIME] browsing context turn=… reason=…
+  products=… seconds_since_last_product_shown=…`, so the duration can be set
+  from evidence rather than opinion. The lapse is deliberately **not**
   WhatsApp's 24 h service window: that governs sending, not memory.
+* A multi-product **selector** is an affordance over the answer, never the
+  answer itself. Row labels are composed by the platform from the merchant's
+  own values (`core/commerce_runtime/choice_rows.py`) because WhatsApp refuses
+  an interactive payload whose visible titles repeat and Tenant 1's five
+  dresses are all titled «فستان». Nothing is invented: when no fact tells two
+  products apart, both are left out and the set reports itself **incomplete**,
+  and a caller offering a selector then sends the model's text alone. A real
+  option therefore never disappears from the customer's answer because of a
+  display limit — only the tapping is withheld.
 * Recorded, not changed: the catalogue search's clarification guard
   (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the
   `artifact` / `response_bundle` shapes the legacy compose path writes. This
