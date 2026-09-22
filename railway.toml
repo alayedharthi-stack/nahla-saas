@@ -6,5 +6,5 @@ dockerfilePath = "Dockerfile"
 # This branch is a read-only production schema inspector.  It never starts
 # the application process, so an unmerged tracking ORM cannot materialise
 # columns before the explicit Alembic operation.
-startCommand = "python /app/ops/production_migrations/preflight_0112.py && sleep infinity"
+startCommand = "python -u /app/ops/production_migrations/preflight_0112.py"
 restartPolicyType = "NEVER"
