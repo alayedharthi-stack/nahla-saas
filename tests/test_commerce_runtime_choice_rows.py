@@ -64,16 +64,61 @@ def test_an_option_value_only_this_product_has_separates_it_when_prices_match() 
     assert titles(result) == ["فستان · أسود", "فستان · بيج"]
 
 
-def test_products_no_fact_tells_apart_are_left_out_and_named() -> None:
-    """Both, not an arbitrary survivor: which of two identical rows the
-    customer meant is not something the platform gets to decide."""
+def test_products_no_fact_tells_apart_are_numbered_rather_than_dropped() -> None:
+    """Nothing real disappears because of a display limit.
+
+    Two of these three are identical in every stored fact. The whole group is
+    numbered instead — a position is not a claim about the product, it is a
+    true statement about the list the customer is looking at, in the words
+    they already use for it.
+    """
     result = cr.choice_rows([
         product(1, "فستان", price="199.0"),
         product(2, "فستان", price="199.0"),
         product(3, "فستان", price="250.0"),
     ])
-    assert titles(result) == ["فستان · 250.0 SAR"]
-    assert result.indistinguishable == (1, 2)
+    assert titles(result) == ["فستان · 1", "فستان · 2", "فستان · 3"]
+    assert result.indistinguishable == () and result.complete
+    assert [row.description for row in result.rows] == ["199.0 SAR", "199.0 SAR", "250.0 SAR"]
+
+
+def test_the_whole_group_is_numbered_so_a_number_is_never_read_as_a_price() -> None:
+    """«فستان · 1» beside «فستان · 250 SAR» invites the 1 to be read as money."""
+    result = cr.choice_rows([
+        product(1, "فستان", price="199.0"),
+        product(2, "فستان", price="199.0"),
+    ])
+    assert titles(result) == ["فستان · 1", "فستان · 2"]
+
+
+def test_a_group_the_merchants_facts_can_separate_is_still_labelled_by_them() -> None:
+    result = cr.choice_rows([
+        product(1, "فستان", price="199.0"),
+        product(2, "فستان", price="250.0"),
+    ])
+    assert titles(result) == ["فستان · 199.0 SAR", "فستان · 250.0 SAR"]
+
+
+def test_the_number_is_the_row_position_the_customer_sees() -> None:
+    result = cr.choice_rows([
+        product(9, "عطر ورد 100ml", price="240.0"),
+        product(1, "فستان", price="199.0"),
+        product(2, "فستان", price="199.0"),
+    ])
+    assert titles(result) == ["عطر ورد 100ml", "فستان · 2", "فستان · 3"]
+
+
+def test_a_long_title_gives_room_to_the_number_too() -> None:
+    long_title = "قميص قطني أزرق بأكمام طويلة"
+    result = cr.choice_rows([
+        product(1, long_title, price="199.0"),
+        product(2, long_title, price="199.0"),
+    ])
+    assert len(result.rows) == 2 and result.complete
+    for row in result.rows:
+        assert len(row.title) <= cr.MAX_ROW_TITLE
+    assert result.rows[0].title.endswith(" · 1")
+    assert result.rows[1].title.endswith(" · 2")
 
 
 def test_a_long_title_gives_room_to_the_fact_rather_than_cutting_it() -> None:
@@ -155,16 +200,13 @@ def test_a_set_every_product_could_join_is_complete() -> None:
     assert result.complete and len(result.rows) == 2
 
 
-def test_a_set_that_lost_a_product_is_not_complete() -> None:
-    """The caller's signal to send the model's text without a selector, so the
-    option the list could not render is still part of the customer's answer."""
+def test_looking_alike_no_longer_makes_a_set_incomplete() -> None:
     result = cr.choice_rows([
         product(1, "فستان", price="199.0"),
         product(2, "فستان", price="199.0"),
         product(3, "فستان", price="250.0"),
     ])
-    assert not result.complete
-    assert result.offered == 3 and len(result.rows) == 1
+    assert result.complete and result.offered == 3 and len(result.rows) == 3
 
 
 def test_a_product_with_no_usable_identity_also_makes_the_set_incomplete() -> None:

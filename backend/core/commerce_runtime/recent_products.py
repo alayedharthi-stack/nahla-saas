@@ -50,9 +50,12 @@ from typing import Any, List, Mapping, Optional, Sequence, Tuple
 logger = logging.getLogger("nahla.commerce_runtime.recent_products")
 
 # How long a product stays current after the reply that last showed it.
-# Provisional: the owner's policy decision is pending, and this is the one
-# number it changes. It is deliberately not WhatsApp's 24h service window —
-# that governs sending, not memory.
+# Adopted by the owner as an experimental starting point: one number, measured
+# per product rather than from the conversation's last activity, and to be set
+# from the ``seconds_since_last_product_shown`` the pilot log records. It is
+# deliberately not WhatsApp's 24h service window — that governs sending, not
+# memory — and it expires nothing else: the conversation, the customer's
+# profile and their real orders are untouched.
 BROWSING_CONTEXT_LAPSE_SECONDS = 72 * 3600
 
 # Resource guards, not policy. The lapse above decides what is current; these

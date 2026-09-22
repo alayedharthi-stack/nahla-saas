@@ -7,20 +7,27 @@ collapse to one row, or be refused outright.
 
 So a row's label is composed by the platform from values the merchant's own
 records carry — the price it sells at, the option values its variants are in
-stock in — and only far enough to tell the rows apart. Nothing is invented: a
-product that no fact distinguishes from one already in the set is **left out**
-and named to the caller, rather than given a made-up label or an internal id.
+stock in — and only far enough to tell the rows apart. When the merchant's own
+facts cannot separate a group, the label falls back to the row's **position in
+this list** («فستان · 1», «فستان · 2»), never to an internal id and never by
+leaving a product out. A position is not a claim about the product: it is a
+true statement about the list the customer is looking at, in the vocabulary
+they already use for it. Every real option therefore stays reachable.
+
+The fallback is taken for the whole group at once. Mixing «فستان · 1» with
+«فستان · 250 SAR» invites the 1 to be read as a price; when the ladder runs
+out for any member, every member is numbered.
 
 This is a structured action payload, which the platform owns; the sentence the
 customer reads around it stays the model's. Labels here are values and
 separators, never prose: no greeting, no verb, no connective wording.
 
 A selector is an affordance over the answer, never the answer itself. So when
-a set cannot be offered **whole** — ``complete`` is false — the caller sends
-the model's own text and no selector, rather than a list quietly missing a
-product. The customer still hears about every option, in the model's words;
-only the tapping is withheld. That is why this returns what it could not
-render instead of silently shortening the set.
+a set still cannot be offered **whole** — ``complete`` is false, which after
+the positional fallback means a product with no usable identity or title — the
+caller sends the model's own text and no selector, rather than a list quietly
+missing a product. The customer still hears about every option, in the model's
+words; only the tapping is withheld.
 
 Meta's caps are the contract: 24 characters for a row title, 72 for its
 description, and titles compared the way the provider compares them.
@@ -148,13 +155,44 @@ def _description(product: Mapping[str, Any]) -> str:
     return text[:MAX_ROW_DESCRIPTION]
 
 
+def _positional_title(base: str, position: int) -> str:
+    """``base`` plus which row this is, trimming the title rather than the number."""
+    suffix = f"{FIELD_SEPARATOR}{int(position)}"
+    head = base[: max(1, MAX_ROW_TITLE - len(suffix))].rstrip()
+    return f"{head}{suffix}"[:MAX_ROW_TITLE]
+
+
+def _labels_from_facts(
+    considered: List[Tuple[int, str, Mapping[str, Any]]],
+    members: Sequence[int],
+) -> Optional[Dict[int, str]]:
+    """A distinct fact-based label for **every** member, or nothing at all.
+
+    All or none: a group where only some members can be told apart by the
+    merchant's facts is numbered instead, so the customer never has to read one
+    row's price against another row's silence.
+    """
+    labels: Dict[int, str] = {}
+    seen: Dict[str, int] = {}
+    for position in members:
+        _pid, base, product = considered[position]
+        siblings = [considered[other][2] for other in members if other != position]
+        title = _first_free_title(base, _distinguishers(product, siblings), seen)
+        if title is None:
+            return None
+        seen[_title_key(title)] = position
+        labels[position] = title
+    return labels
+
+
 def choice_rows(products: Sequence[Mapping[str, Any]]) -> ChoiceRows:
     """Rows for these products, in the order given, with distinct titles.
 
-    A product is dropped only when its title clashes with one already accepted
-    and no fact in its own record tells the two apart. The caller is told which,
-    so "several of these look the same to the customer" stays a fact it can act
-    on rather than something the platform papers over — see ``complete``.
+    Products sharing a visible title are labelled from the merchant's own facts
+    when those tell them apart, and by their position in this list when they do
+    not. Nothing is left out for looking alike; only a product with no usable
+    identity or title cannot become a row, and the caller is told — see
+    ``complete``.
     """
     offered = len(list(products))
     considered: List[Tuple[int, str, Mapping[str, Any]]] = []
@@ -177,15 +215,32 @@ def choice_rows(products: Sequence[Mapping[str, Any]]) -> ChoiceRows:
     for position, (_pid, base, _p) in enumerate(considered):
         groups.setdefault(_title_key(base), []).append(position)
 
+    fact_labels: Dict[int, str] = {}
+    numbered: set = set()
+    for key, members in groups.items():
+        if len(members) == 1:
+            continue
+        labels = _labels_from_facts(considered, members)
+        if labels is None:
+            numbered.add(key)
+        else:
+            fact_labels.update(labels)
+
     rows: List[ChoiceRow] = []
     taken: Dict[str, int] = {}
     for position, (product_id, base, product) in enumerate(considered):
-        group = groups.get(_title_key(base)) or [position]
-        if len(group) == 1:
-            title: Optional[str] = base if _title_key(base) not in taken else None
+        key = _title_key(base)
+        if key in numbered:
+            title: Optional[str] = _positional_title(base, len(rows) + 1)
+        elif len(groups[key]) > 1:
+            title = fact_labels.get(position)
         else:
-            siblings = [considered[i][2] for i in group if i != position]
-            title = _first_free_title(base, _distinguishers(product, siblings), taken)
+            title = base if _title_key(base) not in taken else None
+        if title is None or _title_key(title) in taken:
+            # A label that collided with another group's: the row's own number
+            # is still true and still free in all but a pathological catalogue.
+            fallback = _positional_title(base, len(rows) + 1)
+            title = fallback if _title_key(fallback) not in taken else None
         if title is None:
             dropped.append(product_id)
             continue

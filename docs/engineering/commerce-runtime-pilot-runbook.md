@@ -935,7 +935,7 @@ as well as through the ledger.
 
   **The clock belongs to the product, not to the conversation.** A product is
   carried while the reply that last showed *it* is younger than
-  `BROWSING_CONTEXT_LAPSE_SECONDS` (provisional: 72 h). A conversation that has
+  `BROWSING_CONTEXT_LAPSE_SECONDS` (72 h, adopted as an experimental start). A conversation that has
   carried on daily about other subjects therefore carries nothing from three
   weeks ago, and a product still being discussed stays current on its own,
   because the reply discussing it cites it. Relevance is carried by evidence;
@@ -955,13 +955,18 @@ as well as through the ledger.
   WhatsApp's 24 h service window: that governs sending, not memory.
 * A multi-product **selector** is an affordance over the answer, never the
   answer itself. Row labels are composed by the platform from the merchant's
-  own values (`core/commerce_runtime/choice_rows.py`) because WhatsApp refuses
-  an interactive payload whose visible titles repeat and Tenant 1's five
-  dresses are all titled «فستان». Nothing is invented: when no fact tells two
-  products apart, both are left out and the set reports itself **incomplete**,
-  and a caller offering a selector then sends the model's text alone. A real
-  option therefore never disappears from the customer's answer because of a
-  display limit — only the tapping is withheld.
+  own values (`core/commerce_runtime/choice_rows.py`), because a provider that
+  reads two visible titles as one would collapse or reject the payload and
+  Tenant 1's five dresses are all titled «فستان». When the merchant's facts
+  cannot separate a group, the whole group is labelled by **position in this
+  list** («فستان · 1», «فستان · 2») — never an internal id, and never by
+  leaving a product out. A position is not a claim about the product: it is a
+  true statement about the list in front of the customer, in the words they
+  already use for it. The group is numbered together so a number is never read
+  as a price. Only a product with no usable identity or title cannot become a
+  row; the set then reports itself **incomplete** and the caller sends the
+  model's text alone, so a real option never disappears because of a display
+  limit.
 * Recorded, not changed: the catalogue search's clarification guard
   (`_ambiguous_reference_has_multiple_candidates`) reads product ids from the
   `artifact` / `response_bundle` shapes the legacy compose path writes. This
