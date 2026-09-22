@@ -394,3 +394,84 @@ def test_send_test_message_handles_first_message_not_dict(monkeypatch):
     # Treated as "no message id" — never raises AttributeError.
     assert result["sent"] is False
     assert result["error_code"] == "no_message_id"
+
+
+# The campaign wizard must send the IMAGE header that Meta approved, just
+# like campaign delivery. A resumable-upload review sample is not send media.
+_IMAGE_URL = "https://media.example/template-headers/7/generic-shoe.png"
+
+
+def _image_template(url=_IMAGE_URL):
+    template = _approved_template()
+    template.name = "generic_shoe_offer"
+    template.components.insert(0, {
+        "type": "HEADER", "format": "IMAGE",
+        "example": {"header_url": url, "header_handle": ["review-sample-only"]},
+    })
+    return template
+
+
+def test_image_test_payload_keeps_header_body_and_dynamic_button():
+    template = _image_template()
+    template.components.insert(0, "legacy-component")
+    template.components.append({"type": "BUTTONS", "buttons": [
+        {"type": "URL", "url": "https://store.example/{{1}}"},
+    ]})
+
+    payload = build_test_payload(
+        template, to_phone_e164="+966500000000",
+        merchant_vars={"{{1}}": "Customer", "cart_url": "https://store.example/shoes"},
+    )
+
+    components = payload["template"]["components"]
+    assert [component["type"] for component in components] == ["header", "body", "button"]
+    assert components[0]["parameters"] == [{"type": "image", "image": {"link": _IMAGE_URL}}]
+    assert components[1]["parameters"] == [{"type": "text", "text": "Customer"}]
+    assert components[2]["parameters"] == [{"type": "text", "text": "shoes"}]
+    assert "review-sample-only" not in str(payload)
+    assert template.components[1]["example"]["header_handle"] == ["review-sample-only"]
+
+
+@pytest.mark.parametrize("tenant_id", [7, 71])
+def test_image_test_send_passes_saved_image_to_provider(tenant_id):
+    from unittest.mock import AsyncMock
+
+    template = _image_template()
+    template.tenant_id = tenant_id
+    db = _FakeDB(template=template, wa_conn=_wa_conn())
+    send = AsyncMock(return_value=({"messages": [{"id": "wamid.test-image"}]}, object()))
+    with patch("services.whatsapp_platform.service.provider_send_message", send):
+        with patch("services.customer_intelligence.normalize_phone", lambda value: value):
+            result = _run(send_test_message(
+                db, tenant_id=tenant_id, template_db_id=template.id,
+                to_phone="+966500000000", merchant_vars={"{{1}}": "Customer"},
+            ))
+
+    assert result["sent"] is True
+    assert result["wa_message_id"] == "wamid.test-image"
+    send.assert_awaited_once()
+    assert send.call_args.kwargs["tenant_id"] == tenant_id
+    payload = send.call_args.kwargs["payload"]
+    assert payload["template"]["components"][0] == {
+        "type": "header", "parameters": [{"type": "image", "image": {"link": _IMAGE_URL}}],
+    }
+
+
+@pytest.mark.parametrize("url", ["", "http://media.example/image.png", "https://user:secret@media.example/image.png"])
+def test_image_test_send_rejects_missing_or_invalid_image_before_provider(url):
+    from unittest.mock import AsyncMock
+    from services.template_image_header import MISSING_IMAGE
+
+    template = _image_template(url)
+    db = _FakeDB(template=template, wa_conn=_wa_conn())
+    send = AsyncMock(return_value=({"messages": [{"id": "must-not-send"}]}, object()))
+    with patch("services.whatsapp_platform.service.provider_send_message", send):
+        with patch("services.customer_intelligence.normalize_phone", lambda value: value):
+            result = _run(send_test_message(
+                db, tenant_id=7, template_db_id=template.id, to_phone="+966500000000",
+            ))
+
+    assert result["sent"] is False
+    assert result["error_code"] == "invalid_template_image"
+    assert result["error_message"] == MISSING_IMAGE
+    send.assert_not_called()
