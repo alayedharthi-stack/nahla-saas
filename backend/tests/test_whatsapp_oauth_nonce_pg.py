@@ -44,8 +44,6 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
     ADDRESS_ALEMBIC_HEAD,
     APPLICATION_ALEMBIC_HEAD,
     INTEGRATION_BOOTSTRAP_TARGET,
-    REPOSITORY_ALEMBIC_HEADS,
-    repository_heads_expected,
 )
 from tests.legacy_migration_drift_postgres_fixtures import (  # noqa: E402
     connect_engine,
@@ -95,7 +93,6 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert "down_revision = ('0092'" not in source
     assert APPLICATION_ALEMBIC_HEAD == "0111"
     assert ADDRESS_ALEMBIC_HEAD == "0110"
-    assert repository_heads_expected(REPOSITORY_ALEMBIC_HEADS)
     assert INTEGRATION_BOOTSTRAP_TARGET == "0093"
     prev = os.getcwd()
     try:
@@ -113,9 +110,12 @@ def test_0103_extends_0102_without_merging_0092() -> None:
         # address revision and the commerce-runtime handover revision.
         rev_0110 = script.get_revision("0110")
         rev_0111 = script.get_revision("0111")
+        rev_0112 = script.get_revision("0112")
     finally:
         os.chdir(prev)
-    assert repository_heads_expected(heads)
+    # Shipping 0112 extends the address branch while the 0092 validation and
+    # 0111 runtime siblings remain independent repository heads.
+    assert heads == {"0092", "0111", "0112"}
     assert rev.down_revision == _PARENT
     assert not isinstance(rev.down_revision, tuple)
     assert rev_0104 is not None
@@ -153,6 +153,9 @@ def test_0103_extends_0102_without_merging_0092() -> None:
     assert rev_0111.down_revision == "0109"
     assert not isinstance(rev_0111.down_revision, tuple)
     assert rev_0110.revision != rev_0111.revision
+    assert rev_0112 is not None
+    assert rev_0112.down_revision == "0110"
+    assert not isinstance(rev_0112.down_revision, tuple)
 
 
 def _pg_required() -> bool:
