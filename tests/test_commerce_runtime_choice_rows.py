@@ -1,11 +1,10 @@
 """A selector's rows are told apart by the merchant's own facts, or not shown.
 
-Tenant 1's five dresses are all titled «فستان». WhatsApp refuses an interactive
-payload whose visible titles repeat, so a selector built from titles alone
-would collapse to one row. The platform composes the label from what the
-merchant's records carry — the price it sells at, the option values it is in
-stock in — and drops a product that no fact tells apart rather than inventing
-one.
+Tenant 1's five dresses are all titled «فستان», and two rows the customer reads
+as one title are not a usable selector. The platform composes the label from
+what the merchant's records carry — the price it sells at, the option values it
+is in stock in — and, when those cannot separate a group, numbers the whole
+group by its position in the list. Nothing real is dropped for looking alike.
 
 Offline, and merchant-agnostic: the same rules run on identical dress titles,
 on a generic mixed catalogue and on a merchant with no variants at all.

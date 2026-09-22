@@ -1,9 +1,15 @@
 """Selectable rows for a set of products, labelled from the merchant's facts.
 
-WhatsApp rejects an interactive payload whose visible titles repeat (HTTP 400,
-``Duplicate button title``), and Tenant 1's catalogue makes that immediate: its
-five dresses are all titled «فستان». A selector built from titles alone would
-collapse to one row, or be refused outright.
+The platform treats two rows the customer would read as one title as unusable,
+and Tenant 1's catalogue makes that immediate: its five dresses are all titled
+«فستان». A selector built from titles alone would collapse to one row.
+
+(The recorded provider rejection — HTTP 400 ``Duplicate button title`` — is for
+reply **buttons**. Whether list **rows** are refused the same way is being
+established against the provider itself by
+``scripts/operators/whatsapp_duplicate_row_title_probe.py``; either way two
+rows the customer cannot tell apart are not a usable selector, which is what
+this module fixes.)
 
 So a row's label is composed by the platform from values the merchant's own
 records carry — the price it sells at, the option values its variants are in
@@ -71,11 +77,11 @@ class ChoiceRows:
     def complete(self) -> bool:
         """Whether every product asked for became a row.
 
-        False when anything was left out — an indistinguishable pair, or a
-        product with no usable identity or title. A caller offering a selector
-        checks this: an incomplete set is sent as the model's text alone, so a
-        real option never disappears from the customer's answer because of a
-        display limit.
+        Looking alike no longer costs a product its row — such a group is
+        numbered. What remains is a product with no usable identity or title.
+        A caller offering a selector checks this: an incomplete set is sent as
+        the model's text alone, so a real option never disappears from the
+        customer's answer because of a display limit.
         """
         return len(self.rows) == int(self.offered)
 
