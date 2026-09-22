@@ -432,6 +432,9 @@ export default function Conversations() {
         !signal.aborted
       ) {
         const supplemental = await fetchOutlineForPhoneMaybe(requestedPhone, signal).catch(() => null)
+        // The deep search adds an await after the first-page generation check.
+        // Do not let an aborted or superseded deep link write stale inbox state.
+        if (gen !== listReqGen.current || signal.aborted) return
         if (
           supplemental &&
           gen === listReqGen.current &&
