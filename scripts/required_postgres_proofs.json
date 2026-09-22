@@ -549,6 +549,21 @@
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_let_a_stale_refresh_win",
         "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_from_a_retained_session"
       ]
+    },
+    {
+      "id": "salla_shipment_tracking",
+      "kind": "proof",
+      "module": "backend/tests/test_salla_shipment_tracking_pg.py",
+      "origin": "Salla shipment-tracking integration — revision 0112 fail-closed foundation preflight, migration-before-ORM compatibility, tenant/source/external-shipment identity and PostgreSQL transaction conflict proof",
+      "required_env": {
+        "LEGACY_MIG_PG_TEST_DATABASE_URL": null
+      },
+      "nodeids": [
+        "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_requires_migration_before_current_orm_tracking_query",
+        "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_enforces_salla_shipment_identity_per_tenant",
+        "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_rejects_absent_order_shipments_without_alembic_stamp",
+        "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_rejects_missing_or_wrong_preexisting_foundation_without_stamp"
+      ]
     }
   ]
 }
