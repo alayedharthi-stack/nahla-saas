@@ -18,9 +18,12 @@ loggers. That is worse than a visible failure. A test written to prove a secret
 never reaches the log reads an empty capture and passes — it stops testing
 anything while still reporting success.
 
-So this pins both halves, and in that order: the record must **arrive**, and it
-must be **clean**. A guard that only checked cleanliness would itself pass
-vacuously, which is the defect it is meant to catch.
+So this pins the half that makes the other half mean anything: the record must
+**arrive**. It deliberately claims no more. Nothing here injects a secret into a
+logging or redaction path, so this file is not evidence that redaction works —
+that belongs to the privacy suites that exercise that path, and their negative
+assertions only mean something while capture is alive, which is what this
+guards.
 """
 from __future__ import annotations
 
@@ -49,9 +52,6 @@ from legacy_migration_drift_postgres_fixtures import (  # noqa: E402
 # The migration only has to *run*; the damage is done when ``env.py`` is
 # imported, not by any particular revision.
 _UPGRADE_TARGET = "0001"
-
-# Synthetic, never real. Shaped like the values the redaction filter exists for.
-_CANARY = "notreal-notreal-notreal-notreal-guard-canary"
 
 
 def _admin_or_skip():
@@ -112,18 +112,15 @@ def test_an_application_record_survives_an_in_process_migration(caplog) -> None:
     assert "stage=coupon_promotion_loader" in captured
     assert "RuntimeError" in captured
 
-    # And it is clean — an assertion that means something only because the
-    # capture above is known to be non-empty.
-    assert _CANARY not in captured
-
 
 def test_the_guard_reports_capture_death_rather_than_a_clean_log(caplog) -> None:
     """The failure mode this guard exists to distinguish.
 
-    Disabling the logger by hand reproduces exactly what the migration did. The
-    canary check still passes — that is the point — while the arrival check
-    fails. Without the arrival check the suite would report success over a log
-    nobody was writing to.
+    Disabling the logger by hand reproduces exactly what the migration did.
+    Every ``not in`` assertion a privacy test could make still holds — that is
+    the point, and it is why absence is worthless on its own — while the
+    arrival check fails. Without an arrival check, a suite reports success over
+    a log nobody was writing to.
     """
     from modules.ai.brain.truth_surface.trusted_context import (  # noqa: PLC0415
         logger as application_logger,
@@ -135,7 +132,8 @@ def test_the_guard_reports_capture_death_rather_than_a_clean_log(caplog) -> None
         with caplog.at_level(logging.WARNING, logger=application_logger.name):
             application_logger.warning("[TRUSTED_CONTEXT_SHADOW] build_failed stage=%s", "x")
         captured = caplog.text
-        assert _CANARY not in captured          # vacuously true …
-        assert "stage=" not in captured         # … because nothing was captured
+        # Both hold, and neither means anything: nothing was captured at all.
+        assert "secret-value" not in captured
+        assert "stage=" not in captured
     finally:
         application_logger.disabled = previously
