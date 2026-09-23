@@ -45,8 +45,13 @@ simply not auto-assigned to one customer — and the platform was not reading it
 
 It reads it now, and still only as a positive act. `merchant_authored` is
 `is_dashboard_authored_coupon(source_type, metadata)`: `source_type` `manual`
-**and** the `source: "dashboard"` marker the create endpoint stamps, which no
-other writer produces. A coupon whose metadata records nothing is still
+**and** exactly the `source: "dashboard"` marker the create endpoint stamps,
+which no other writer produces. Deliberately narrower than the
+`_DASHBOARD_MANUAL_SOURCES` taxonomy set beside it, which also carries the
+legacy `"manual"` value: no writer in this tree stamps `source: "manual"`, so
+accepting it would let a row nobody can account for pass as a deliberate act of
+publication. Provenance taxonomy and publication are different questions, and
+this gate answers only the second. A coupon whose metadata records nothing is still
 withheld; so is one the merchant placed on `campaign` or `autopilot`, because a
 channel the merchant did choose is a placement somewhere that is not this
 conversation. Those two channels are refused twice over — the resolver drops
@@ -131,32 +136,54 @@ nothing.
 
 ## What is still missing
 
-1. **The welcome's numbers reach the resolution, not yet the coupon.**
-   `resolve_coupon_level_for_order_count` now returns the merchant's own
-   `discount_value`, `validity_days`, `max_uses` and `min_order_amount`
-   instead of bronze's, and says so in `economics_source`. The issuance half
-   applies the welcome's `min_order_amount`, `max_uses` and
-   `per_customer_usage`.
+1. **The welcome shapes nothing yet, and must shape the coupon or nothing.**
+   The `first_purchase` rule persists a discount, validity, usage cap and
+   minimum order; `resolve_coupon_level_for_order_count` reads only `enabled`
+   and returns the bronze rung's economics.
 
-   What it does **not** yet shape is the coupon itself. Issuance obtains a code
-   through `CouponGeneratorService.pick_coupon_for_level(resolved_level, …)`,
-   and the generator builds and prices pool coupons from the *level* config
-   (`coupon_generator.py:487,493`: `level_cfg["discount_default"]`,
-   `level_cfg["validity_hours"]`). So a welcome still arrives as a bronze pool
-   coupon at bronze's discount and expiry. Closing that means teaching the
-   generator to build from `resolution.economics_source ==
-   "first_purchase_rule"` — a change inside `backend/services/coupon_generator.py`,
-   which is outside the commerce-runtime scope and needs the platform owner.
+   An attempt to fix that in the resolution alone was withdrawn, and the reason
+   is worth keeping. Issuance obtains its code through
+   `CouponGeneratorService.pick_coupon_for_level`, and every selector still
+   picks by rung; the generator prices pool coupons from the *level* config
+   (`coupon_generator.py:487,493`). Feeding the rule's numbers into the result
+   while the code still carried the row's produced a **mixed contract** — a
+   reply grounded in a minimum the coupon does not honour, which is worse than
+   promising nothing, because the customer acts on it at checkout. A reviewer's
+   A/B replay proved it: the same scenario passed on the deployed base and
+   failed on that head.
 
-2. **A way to mark a coupon as the welcome.** There is no such marking. A
+   So the welcome is completed in one piece or not at all: reuse, regular pool,
+   native pool and on-demand, with the actual persisted terms, including a
+   merchant changing their settings after a code was already assigned. That
+   work needs `backend/services/coupon_generator.py`, which the scope guard
+   protects, so it follows a separate authorization PR.
+
+2. **The usage cap in a result is the rung's, not the row's.**
+   `restrictions["max_uses"]` is read from the merchant's level configuration
+   and never from the issued coupon's own `usage_limit`. Where they disagree
+   the result describes the rung. This reads identically on the deployed base,
+   so it is not a regression — but it is the same class of gap, and it closes
+   with the issuance-matching work above, where every selector is in scope.
+
+3. **A way to mark a coupon as the welcome.** There is no such marking. A
    first-purchase customer resolves to bronze and sees the bronze rung's
    codes, indistinguishable from an ordinary bronze reward. Whether the
    welcome should be its own kind of coupon, or bronze with different
    economics, is a product decision rather than a defect.
 
-3. **Issuance.** `CUSTOMER_COUPON_LIVE_ISSUANCE` is `False`; nothing is
+4. **Issuance.** `CUSTOMER_COUPON_LIVE_ISSUANCE` is `False`; nothing is
    generated for a first purchase today. A merchant relying on the welcome
    must have a bronze coupon already in the pool.
+
+5. **A standing above every rung the merchant shares.** `allowed_levels` is an
+   allow-list. A customer whose single rung is not on it receives nothing,
+   while a customer on a lower rung that *is* listed receives that rung's
+   codes. Reading that as a "cap" — and handing the higher customer the
+   highest listed rung below them — assumes a cumulative entitlement the
+   contract does not have, and the one-rung rule exists precisely to refuse
+   that assumption. It is an open contract question, not a proven defect, and
+   it needs its own proposal covering disabled rungs, gaps, non-increasing
+   discounts, and non-entitlement.
 
 ## Tracing one real customer
 

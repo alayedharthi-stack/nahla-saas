@@ -150,3 +150,18 @@ def test_the_pool_and_the_store_platform_are_not_the_merchants_dashboard() -> No
     # And a marker on the wrong source type does not promote it.
     assert fact_of(Row(source_type="system",
                        extra_metadata={"source": "dashboard"}))["merchant_authored"] is False
+
+
+def test_the_legacy_manual_marker_is_not_a_publication_act() -> None:
+    """``_DASHBOARD_MANUAL_SOURCES`` carries "manual" as well, for source
+    *taxonomy*. No writer in this tree stamps ``source: "manual"``, so accepting
+    it here would let a row nobody can account for pass as a merchant's
+    deliberate act of publication. Taxonomy and publication are different
+    questions; this gate answers only the second."""
+    assert fact_of(Row(source_type="manual",
+                       extra_metadata={"source": "manual"}))["merchant_authored"] is False
+    # The broader provenance helper keeps its own, wider, answer.
+    from services.coupon_sync_visibility import resolve_coupon_source_type  # noqa: PLC0415
+
+    assert resolve_coupon_source_type(
+        column_source_type="manual", meta={"source": "manual"}, origin="") == "manual"

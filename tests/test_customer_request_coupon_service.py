@@ -1201,3 +1201,82 @@ def test_native_pool_all_invalid_terminates_pool_empty() -> None:
         db.refresh(row)
         assert (row.extra_metadata or {}).get("customer_id") is None
 
+
+
+# ── The result never describes terms the coupon does not carry ───────────────
+
+
+def _bronze_levels_like(*, max_uses: int):
+    """The merchant's ladder with bronze's cap set explicitly, AI-reachable."""
+    rows = _levels(include_ai_for=("bronze",))
+    for row in rows:
+        if row["id"] == "bronze":
+            row["max_uses"] = max_uses
+    return rows
+
+
+def test_the_result_reports_the_terms_the_issued_coupon_actually_has() -> None:
+    """The reviewer's replay, kept as a test on the head it caught.
+
+    An earlier attempt at the merchant's first-purchase welcome fed the rule's
+    minimum into the issuance result while the *code* handed to the customer
+    still carried the pool row's. The reply would then have been grounded in a
+    minimum the coupon does not honour — worse than promising nothing, because
+    the customer acts on it at checkout. Whatever the welcome eventually
+    shapes, it shapes the coupon or it shapes nothing.
+
+    The scenario is the reviewer's: bronze capped at 50 uses, store minimum
+    100, a saved first-purchase rule offering 15% / one day / one use /
+    minimum 0, and an ordinary bronze pool row carrying the store's terms.
+    """
+    db, tenant_id, _engine = _make_db(
+        first_purchase=True,
+        levels=_bronze_levels_like(max_uses=50),
+        global_defaults={"min_order_amount": 100},
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    coupon = _add_pool_coupon(
+        db, tenant_id, "NHBRZ", "bronze",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        extra={"min_order_amount": 100, "usage_limit": 50},
+    )
+
+    issued = _issue(db, tenant_id, customer.id)
+    assert issued.issued is True and issued.code == "NHBRZ"
+    db.refresh(coupon)
+
+    stored_minimum = float(coupon.extra_metadata["min_order_amount"])
+    assert issued.min_order_amount == stored_minimum, (
+        "the result must not advertise a minimum the code does not carry")
+    assert issued.restrictions["max_uses"] == 50
+    # The discount and expiry are read from that same row, so all of them agree.
+    assert issued.discount_value == str(coupon.discount_value)
+
+    # The second turn reuses the same assignment, and must describe it the same.
+    again = _issue(db, tenant_id, customer.id)
+    assert again.reason_code == "reused_existing_assignment" and again.code == "NHBRZ"
+    assert again.min_order_amount == stored_minimum
+    assert again.restrictions["max_uses"] == 50
+
+
+def test_the_usage_cap_in_the_result_is_the_rungs_not_the_rows() -> None:
+    """A pre-existing divergence, pinned rather than quietly inherited.
+
+    ``restrictions["max_uses"]`` has always been read from the merchant's level
+    configuration, never from the issued row's own ``usage_limit``. Where the
+    two disagree the result describes the rung, not the code. This is not a
+    regression — it reads identically on the deployed base — and closing it
+    belongs with the issuance-matching work, where every selector is in scope.
+    """
+    db, tenant_id, _engine = _make_db(levels=_bronze_levels_like(max_uses=1))
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    coupon = _add_pool_coupon(db, tenant_id, "NHBRZ", "bronze",
+                              extra={"usage_limit": 50})
+
+    issued = _issue(db, tenant_id, customer.id)
+    assert issued.issued is True
+    db.refresh(coupon)
+    assert int(coupon.extra_metadata["usage_limit"]) == 50
+    assert issued.restrictions["max_uses"] == 1     # the rung's, not the row's

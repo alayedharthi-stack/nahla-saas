@@ -7,7 +7,6 @@ This module is independent of MerchantBrain and of CRM status mapping.
 """
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -24,18 +23,6 @@ REASON_NO_LEVEL = "no_level"
 REASON_FIRST_PURCHASE_AUTHORIZED = "first_purchase_authorized"
 REASON_HIGHEST_ENABLED_MATCH = "highest_enabled_min_orders"
 
-# Whose numbers a resolution carries. A first-purchase welcome runs on the
-# merchant's own rule where they configured it, and only falls back to the rung
-# for what the rule has no field for.
-ECONOMICS_FROM_LEVEL = "level"
-ECONOMICS_FROM_FIRST_PURCHASE_RULE = "first_purchase_rule"
-
-# ``first_purchase`` rule field -> what it configures. The dashboard persists
-# all five on every save (``_normalise_rule``), so a saved rule is complete.
-FIRST_PURCHASE_RULE_FIELDS = (
-    "discount_type", "discount_value", "validity_days", "min_order_amount", "max_uses",
-)
-
 
 @dataclass(frozen=True)
 class CouponLevelResolution:
@@ -51,12 +38,6 @@ class CouponLevelResolution:
     per_customer_usage: Optional[int]
     allowed_channels: tuple[str, ...]
     resolution_reason: str
-    # What the merchant configured for the welcome, where they configured it.
-    # ``discount_type`` and ``min_order_amount`` exist on the first-purchase
-    # rule and on no rung, so they are ``None`` for an ordinary resolution.
-    discount_type: Optional[str] = None
-    min_order_amount: Optional[float] = None
-    economics_source: str = ECONOMICS_FROM_LEVEL
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -67,14 +48,11 @@ class CouponLevelResolution:
             "discount_default": self.discount_default,
             "discount_min": self.discount_min,
             "discount_max": self.discount_max,
-            "discount_type": self.discount_type,
             "validity_hours": self.validity_hours,
             "max_uses": self.max_uses,
-            "min_order_amount": self.min_order_amount,
             "per_customer_usage": self.per_customer_usage,
             "allowed_channels": list(self.allowed_channels),
             "resolution_reason": self.resolution_reason,
-            "economics_source": self.economics_source,
         }
 
 
@@ -179,15 +157,7 @@ def resolve_coupon_level_for_order_count(
         if first_purchase_rule_enabled(first_purchase_rule):
             bronze = by_id.get("bronze") or {"id": "bronze", "enabled": True}
             if bool(bronze.get("enabled", True)):
-                # The rung says *which* level a welcome runs at. What the
-                # welcome *is* — its discount, how long it lives, how often it
-                # may be used, what it needs to be spent on — the merchant
-                # configured on the rule itself, and returning the rung's
-                # numbers here silently replaced all four.
-                return _with_first_purchase_economics(
-                    _from_entry(bronze, reason=REASON_FIRST_PURCHASE_AUTHORIZED),
-                    first_purchase_rule,
-                )
+                return _from_entry(bronze, reason=REASON_FIRST_PURCHASE_AUTHORIZED)
         return _empty(reason=REASON_NO_LEVEL)
 
     matches: List[Dict[str, Any]] = []
@@ -204,47 +174,6 @@ def resolve_coupon_level_for_order_count(
 
     chosen = max(matches, key=lambda item: min_orders_for_level(str(item.get("id")), item))
     return _from_entry(chosen, reason=REASON_HIGHEST_ENABLED_MATCH)
-
-
-def _with_first_purchase_economics(
-    resolution: CouponLevelResolution,
-    first_purchase_rule: Any,
-) -> CouponLevelResolution:
-    """Overlay the merchant's saved first-purchase rule onto the rung.
-
-    Field by field: a value the merchant set on the rule wins; a field the rule
-    does not carry keeps the rung's. A bare ``True`` rule configures nothing and
-    changes nothing, so an older store that only ever switched the welcome on
-    behaves exactly as before.
-
-    ``economics_source`` says whose numbers these are, so a caller never has to
-    guess whether it is looking at the welcome or at bronze.
-    """
-    if not isinstance(first_purchase_rule, Mapping):
-        return resolution
-
-    discount = _opt_float(first_purchase_rule.get("discount_value"))
-    validity_days = _opt_int(first_purchase_rule.get("validity_days"))
-    max_uses = _opt_int(first_purchase_rule.get("max_uses"))
-    min_order = _opt_float(first_purchase_rule.get("min_order_amount"))
-    discount_type = str(first_purchase_rule.get("discount_type") or "").strip().lower() or None
-
-    configured = [discount, validity_days, max_uses, min_order, discount_type]
-    if all(value is None for value in configured):
-        return resolution
-
-    return dataclasses.replace(
-        resolution,
-        discount_default=resolution.discount_default if discount is None else discount,
-        # Days on the rule, hours on the rung: one day is twenty-four hours, and
-        # a rule saved as zero days is not a welcome that never expires.
-        validity_hours=(resolution.validity_hours if validity_days is None
-                        else max(1, validity_days) * 24),
-        max_uses=resolution.max_uses if max_uses is None else max_uses,
-        min_order_amount=min_order,
-        discount_type=discount_type,
-        economics_source=ECONOMICS_FROM_FIRST_PURCHASE_RULE,
-    )
 
 
 def _opt_float(value: Any) -> Optional[float]:
