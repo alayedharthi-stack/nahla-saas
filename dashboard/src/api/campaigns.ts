@@ -55,6 +55,12 @@ export type CampaignLifecycle =
    *  current dispatcher (legacy / hand-edited data). */
   | 'unknown_status'
   | 'completed_empty'
+  /** Status says active but no worker holds the campaign's lease —
+   *  the run stopped mid-way (crash, redeploy). Not "sending". */
+  | 'stalled'
+  /** Stopped on purpose (merchant stop, shared Meta limit, Meta
+   *  throttling, unknown send outcomes). See ``pause_reason``. */
+  | 'paused'
   | 'unknown'
 
 /** Canonical per-campaign analytics derived from ``CampaignSendLog``.
@@ -93,6 +99,47 @@ export interface CampaignStats {
   read_rate_of_accepted: number | null
   /** ``read / delivered``. Null when delivered == 0. */
   read_rate_of_delivered: number | null
+  /** Same as ``failed`` — named explicitly. */
+  failed_before_accept?: number
+  /** Rejected before acceptance + failed after acceptance (recipients). */
+  failed_total?: number
+  /** Accepted, no delivered/read/failed report yet. */
+  pending_delivery?: number
+  /** Recipients whose send outcome is unknown (may have arrived). */
+  uncertain?: number
+  /** Subset of ``queued`` currently being sent. */
+  in_flight?: number
+  /** Message-scope counts from the attempt ledger (one per request). */
+  messages_attempted?: number
+  messages_accepted?: number
+  messages_delivered?: number
+  messages_read?: number
+  messages_failed_after_accept?: number
+  messages_rejected?: number
+  messages_uncertain?: number
+  /** Recipients with more than one accepted copy. */
+  recipients_delivered_multiple?: number
+  recipients_accepted_multiple_unproven?: number
+  /** Failure reasons counted from the same rows as the counters. */
+  error_breakdown?: CampaignErrorBreakdownEntry[]
+}
+
+export interface CampaignErrorBreakdownEntry {
+  phase: 'before_accept' | 'after_accept' | 'uncertain'
+  key: string
+  label_ar: string
+  raw_code: string | null
+  count: number
+  retryable: boolean
+}
+
+export interface CampaignExecution {
+  worker_running: boolean
+  heartbeat_at?: string | null
+  stop_requested?: boolean
+  pause_reason?: string | null
+  pause_detail?: string | null
+  paused_at?: string | null
 }
 
 export interface CampaignRecord {
@@ -136,6 +183,9 @@ export interface CampaignRecord {
    *  flat ``*_count`` fields above are kept for backwards-compat
    *  only and point at the same canonical aggregates. */
   stats?: CampaignStats
+  /** Lease-backed: is a worker really sending this campaign now? */
+  execution?: CampaignExecution
+  pause_reason?: string | null
   created_at: string | null
   launched_at: string | null
   /** Wave/Batch — `immediate` for legacy / small campaigns,
@@ -817,8 +867,10 @@ export const campaignsApi = {
    *  would exceed our 25s HTTP timeout for any sizeable audience),
    *  so this endpoint returns immediately with ``kicked: true``.
    *  The merchant watches progress via the standard /campaigns list
-   *  refresh + /campaigns/{id}/debug. Idempotent — rows already in
-   *  ``status='sent'`` are NOT re-sent. */
+   *  refresh + /campaigns/{id}/debug. Refused with
+   *  ``reason='already_running'`` while a worker holds the campaign
+   *  lease; recipients already sent or with an unknown outcome are
+   *  never re-sent. */
   dispatchNow: (
     id: number,
     opts?: { bypassFrequencyCap?: boolean },
@@ -838,6 +890,8 @@ export const campaignsApi = {
       rescheduled_failed?: number
       /** Number of zombie ``sending`` rows the watchdog revived. */
       revived_zombies?: number
+      /** Present with ``reason='already_running'``. */
+      execution?: CampaignExecution
     }>(
       `/campaigns/${id}/dispatch-now${
         opts?.bypassFrequencyCap === true ? '?bypass_frequency_cap=true' : ''

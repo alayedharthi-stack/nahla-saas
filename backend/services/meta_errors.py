@@ -369,6 +369,39 @@ ERRORS: Dict[str, ClassifiedError] = {
         retryable=True,
         advice_ar="حاول الإرسال مجدداً — إن تكرر الخطأ تواصل مع الدعم.",
     ),
+    # Ledger outcomes (Sept 2026): a request that may or may not have
+    # been accepted, and one proven never to have left the process.
+    "send_outcome_unknown": ClassifiedError(
+        key="send_outcome_unknown",
+        label_ar="نتيجة الإرسال غير محسومة — قد تكون الرسالة وصلت",
+        severity="major",
+        is_recoverable=True,
+        # Never automatic: a retry could deliver a second copy.
+        retryable=False,
+        quality_tier="harmless",
+        advice_ar=(
+            "لا تُعد الإرسال لهذا العميل قبل مطابقة الحالة مع تقارير Meta — "
+            "قد تكون الرسالة الأولى قد وصلت."
+        ),
+    ),
+    "transport_not_sent": ClassifiedError(
+        key="transport_not_sent",
+        label_ar="تعذّر الاتصال بـ Meta — لم تُرسل الرسالة",
+        severity="major",
+        is_recoverable=True,
+        retryable=True,
+        quality_tier="harmless",
+        advice_ar="أعد المحاولة لاحقاً — لم يصل أي طلب إلى Meta.",
+    ),
+    "internal_error": ClassifiedError(
+        key="internal_error",
+        label_ar="تعذّر تجهيز الرسالة داخلياً — لم تُرسل",
+        severity="major",
+        is_recoverable=True,
+        retryable=True,
+        quality_tier="harmless",
+        advice_ar="راجع إعداد القالب والكوبون ثم أعد المحاولة.",
+    ),
     "unknown": ClassifiedError(
         key="unknown",
         label_ar="خطأ غير معروف من Meta",
@@ -573,8 +606,11 @@ _TEXT_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"opted.?out|opt[\-\s]?out|do not contact", re.I), "user_not_opted_in"),
     (re.compile(r"opted.?in|opt[\-\s]?in.*required", re.I), "user_not_opted_in"),
     (re.compile(r"24[\-\s]?hour|service window|re-?engagement", re.I), "out_of_24h_window"),
-    (re.compile(r"rate[\-\s]?limit|too many|throttl", re.I), "rate_limit"),
+    # "Spam Rate limit hit" (131048) must not fall into the generic,
+    # retryable rate_limit bucket — spam first.
     (re.compile(r"spam", re.I),                          "spam_rate_limit"),
+    (re.compile(r"healthy ecosystem|ecosystem engagement", re.I), "marketing_blocked"),
+    (re.compile(r"rate[\-\s]?limit|too many|throttl", re.I), "rate_limit"),
     (re.compile(r"template.*paus", re.I),                "template_paused"),
     (re.compile(r"template.*disabl|template.*reject", re.I), "template_disabled"),
     (re.compile(r"template.*not.*found|missing.*template", re.I), "template_not_found"),
