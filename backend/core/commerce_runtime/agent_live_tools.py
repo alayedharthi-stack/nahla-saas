@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -512,11 +514,10 @@ def _customer_addresses(binding: LiveToolBinding) -> at.ToolFunction:
                                    for f in list(facts.get("prior_order_addresses") or ())[:MAX_ADDRESSES])
                  if view is not None]
         selected = _address_view(facts.get("selected_delivery_address"))
-        return at.ToolResult(
-            # ``unavailable`` is said as itself. A reader that could not run is
-            # not a customer without an address, and collapsing the two is how
-            # an outage becomes "you have no address saved with us".
-            result={"status": "ok" if status == "available" else "unresolved",
+        # ``unavailable`` is said as itself. A reader that could not run is
+        # not a customer without an address, and collapsing the two is how
+        # an outage becomes "you have no address saved with us".
+        payload = {"status": "ok" if status == "available" else "unresolved",
                     "address_read_status": status,
                     "address_read_reason": _text(facts.get("address_read_reason"), 64),
                     "address_resolution": _text(facts.get("address_resolution"), 64),
@@ -527,9 +528,23 @@ def _customer_addresses(binding: LiveToolBinding) -> at.ToolFunction:
                     "selected_delivery_address": selected,
                     "prior_order_addresses": prior,
                     "requires_explicit_selection": bool(facts.get("requires_explicit_selection")),
-                    "found": bool(saved or selected)},
-            evidence_refs=(),
-        )
+                    "found": bool(saved or selected)}
+        # This observation is the loop's evidence store. Bind its receipt to
+        # the trusted identity and the exact read result, without exposing the
+        # identity or address-control identifiers in the reference. A failed
+        # read supports only its outcome, never an empty address inventory.
+        material = {"tenant_id": int(context.tenant_id),
+                    "customer_id": getattr(context, "customer_id", None),
+                    "namespace": binding.link.namespace,
+                    "conversation_id": binding.link.runtime_conversation_id,
+                    "result": payload}
+        digest = hashlib.sha256(json.dumps(
+            material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()[:32]
+        prefix = "customer_addresses" if status == "available" else "customer_address_read"
+        evidence_ref = f"{prefix}:{digest}"
+        payload["evidence_ref"] = evidence_ref
+        return at.ToolResult(result=payload, evidence_refs=(evidence_ref,))
 
     return _guarded(binding, body)
 

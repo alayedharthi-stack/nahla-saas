@@ -505,11 +505,10 @@ def _shipment_snapshot(
     event_status = _event_field(latest_event, _EVENT_STATUS_KEYS)
     event_note = _event_field(latest_event, _EVENT_NOTE_KEYS)
     event_location = _event_field(latest_event, _EVENT_LOCATION_KEYS)
-    # The carrier's own time for the scan wins; the row's ``source_event_at`` is
-    # the same instant as the platform stored it. Verification time is neither.
-    event_at = (_event_field(latest_event, _EVENT_TIME_KEYS)
-                or _iso_or_empty(getattr(shipment, "source_event_at", None)
-                                 if shipment is not None else None))
+    # Only an explicit timestamp on this scan proves when it happened.
+    # ``source_event_at`` also stores shipment-record update/creation times
+    # when a carrier supplies no timed scan, so it cannot fill this field.
+    event_at = _event_field(latest_event, _EVENT_TIME_KEYS)
     verified_at = _iso_or_empty(getattr(shipment, "last_verified_at", None)
                                 if shipment is not None else None)
     data_source = str((getattr(shipment, "tracking_data_source", "")

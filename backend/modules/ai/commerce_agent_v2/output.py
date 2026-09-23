@@ -50,6 +50,12 @@ FactKind = Literal[
     "carrier",
     "tracking_number",
     "tracking_url",
+    "shipment_latest_event_status",
+    "shipment_latest_event_note",
+    "shipment_latest_event_location",
+    "shipment_latest_event_at",
+    "shipment_last_verified_at",
+    "shipment_data_source",
 ]
 CanonicalFactValue: TypeAlias = str | float | int | bool
 _HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
