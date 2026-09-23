@@ -1010,12 +1010,14 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
     proven_delivery = 0
     aggregate_only = 0
     incomplete_history = 0
+    unknown_attempts = 0
     per = []
     for phone, r in recipients.items():
         cat = classify(r, delivery_evidence=delivery_evidence)
         counts[cat] += 1
         hist = attempt_history(r)
         incomplete_history += 0 if hist.complete else 1
+        unknown_attempts += hist.unknown_attempts
         delivered_copies = r.delivered_copies()
         proven = r.has_proven_delivery()
         if proven:
@@ -1069,6 +1071,7 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
         "recipients_with_proven_delivery": proven_delivery,
         "recipients_with_aggregate_only_delivery": aggregate_only,
         "recipients_with_incomplete_history": incomplete_history,
+        "unknown_attempts_total": unknown_attempts,
         "resend_proposal": proposals,
         "recipients_by_accepted_copies": dict(sorted(accepted_hist.items())),
         "messages": messages,

@@ -415,6 +415,7 @@ def test_db_summary_and_ledger_rows_of_one_attempt_are_not_two_attempts(pgdb, tm
     dup = _by_suffix(rep, "0011")
     assert dup["category"] == "uncertain" and dup["resend_proposal"] == "excluded_unresolved"
     assert dup["history_complete"] is False and dup["unknown_attempts"] == 1
+    assert rep["unknown_attempts_total"] == 1
     ctl = _by_suffix(rep, "0012")
     assert ctl["category"] == "all_failed" and ctl["resend_proposal"] == "retry_review_candidate"
 
