@@ -95,6 +95,29 @@ def first_purchase_rule_enabled(first_purchase_rule: Any) -> bool:
     return bool(first_purchase_rule)
 
 
+def highest_allowed_at_or_below(level_id: str, allowed: Sequence[str]) -> Optional[str]:
+    """The best rung a store will let the assistant hand out for this customer.
+
+    A customer who earned gold in a store whose assistant may only offer bronze
+    and silver is not a customer with nothing: they are a silver customer as far
+    as this channel is concerned. This walks **down** the canonical ladder from
+    what they earned and returns the first rung the store allows.
+
+    It never walks up. A bronze customer in a store that allows only gold still
+    gets nothing here — serving above what the order history earned would be
+    inventing an entitlement, which is the opposite of the problem this solves.
+    """
+    key = str(level_id or "").strip().lower()
+    if key not in CANONICAL_COUPON_LEVEL_IDS:
+        return None
+    permitted = {str(x).strip().lower() for x in (allowed or ())}
+    ladder = CANONICAL_COUPON_LEVEL_IDS[:CANONICAL_COUPON_LEVEL_IDS.index(key) + 1]
+    for candidate in reversed(ladder):
+        if candidate in permitted:
+            return candidate
+    return None
+
+
 def resolve_coupon_level_for_order_count(
     levels: Any,
     countable_orders: int,

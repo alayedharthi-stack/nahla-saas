@@ -16748,7 +16748,16 @@ async def _send_cta_url(
     *,
     header_image_url: Optional[str] = None,
     keep_textual_url: bool = False,
+    _result_sink: Optional[Dict[str, Any]] = None,
 ) -> bool:
+    """Send a URL-button card, optionally reporting what the provider answered.
+
+    ``_result_sink`` is the same out-parameter ``_send_list_reply`` takes, and
+    exists for the same reason: a caller that must *prove* delivery cannot work
+    from a bare ``True``. Without it an accepted send is indistinguishable from
+    one whose receipt was never seen, and a ledger reading that has no choice
+    but to call an accepted card unknown.
+    """
     try:
         from core.wa_link_buttons import prepare_cta_body_text  # noqa: PLC0415
 
@@ -16768,7 +16777,8 @@ async def _send_cta_url(
     )
     if not payload:
         return False
-    return await _post_wa(phone_id, payload, _tenant_id=_tenant_id, _db=_db)
+    return await _post_wa(phone_id, payload, _tenant_id=_tenant_id, _db=_db,
+                          _result_sink=_result_sink)
 
 
 # ── Staff-call contact card sender ───────────────────────────────────────────

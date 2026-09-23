@@ -11,7 +11,9 @@ for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 
 from backend.routers.coupons import DEFAULT_COUPON_LEVELS, _normalise_levels
 from backend.services.coupon_level_contract import (
+    CANONICAL_COUPON_LEVEL_IDS,
     CANONICAL_LEVEL_MIN_ORDERS,
+    highest_allowed_at_or_below,
     min_orders_for_level,
     resolve_coupon_level_for_order_count,
 )
@@ -113,3 +115,31 @@ def test_crm_status_ladder_is_not_the_coupon_level() -> None:
     assert _segment_to_level("vip") == "gold"
     assert resolve_coupon_level_for_order_count(DEFAULT_COUPON_LEVELS, 15).level_id == "vip"
 
+
+
+def test_highest_allowed_walks_down_the_ladder_only() -> None:
+    """Down to the best permitted rung, never up past what was earned."""
+    assert highest_allowed_at_or_below("gold", ["bronze", "silver"]) == "silver"
+    assert highest_allowed_at_or_below("gold", ["bronze"]) == "bronze"
+    assert highest_allowed_at_or_below("vip", ["bronze", "gold"]) == "gold"
+    # Permitted itself: nothing to walk.
+    assert highest_allowed_at_or_below("gold", ["gold", "silver"]) == "gold"
+    # A rung above the one earned is not an entitlement to hand out.
+    assert highest_allowed_at_or_below("bronze", ["gold", "vip"]) is None
+    assert highest_allowed_at_or_below("silver", ["gold"]) is None
+
+
+def test_highest_allowed_refuses_what_is_not_a_rung() -> None:
+    """Unknown, empty and absent inputs resolve nothing rather than guessing."""
+    assert highest_allowed_at_or_below("", ["bronze"]) is None
+    assert highest_allowed_at_or_below("platinum", ["bronze", "silver"]) is None
+    assert highest_allowed_at_or_below("gold", []) is None
+    assert highest_allowed_at_or_below("gold", ["platinum"]) is None
+    # Case and padding come from stored merchant config, not from a caller.
+    assert highest_allowed_at_or_below(" Gold ", [" Silver ", "BRONZE"]) == "silver"
+
+
+def test_highest_allowed_covers_every_canonical_rung() -> None:
+    """Each rung permitted on its own resolves to itself, top to bottom."""
+    for rung in CANONICAL_COUPON_LEVEL_IDS:
+        assert highest_allowed_at_or_below(rung, [rung]) == rung
