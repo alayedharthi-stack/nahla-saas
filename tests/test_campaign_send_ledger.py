@@ -724,6 +724,64 @@ def test_pre_ledger_sends_in_the_window_count_against_the_limit(dbf, fake_meta):
     assert ctx.pause_reason == ledger.PAUSE_MESSAGING_LIMIT
 
 
+def _race_two_campaigns(dbf, fake_meta, monkeypatch, *, lock_enabled):
+    """Two campaigns (two tenants, two numbers, one business portfolio) start
+    at the same instant with ONE slot left in the portfolio's budget. A delay
+    between counting usage and reserving widens the race window."""
+    import time as _time
+    budget = 250 * ledger.CAMPAIGN_BUDGET_PERCENT // 100
+    first = _seed(dbf, phones=[f"+96651000{n:04d}" for n in range(3)], campaign_name="حملة أ")
+    second = _seed(dbf, phones=[f"+96652000{n:04d}" for n in range(3)], campaign_name="حملة ب")
+    _seed_scope_usage(dbf, first, "bm:BM-GENERIC-1", budget - 1)
+    real_budget = ledger.messaging_budget
+
+    def slow_budget(*a, **k):
+        b = real_budget(*a, **k)
+        _time.sleep(0.3)
+        return b
+
+    monkeypatch.setattr(ledger, "messaging_budget", slow_budget)
+    if not lock_enabled:
+        monkeypatch.setattr(ledger, "lock_messaging_scope", lambda *a, **k: None)
+    meta = fake_meta(FakeMeta())
+    barrier = threading.Barrier(2)
+    ctxs = {}
+
+    def worker(ids, number):
+        ctx = disp.DispatchRunContext(f"w-{ids.campaign_id}")
+        ctxs[ids.campaign_id] = ctx
+        s = dbf()
+        assert ledger.acquire_lease(s, campaign_id=ids.campaign_id,
+                                    tenant_id=ids.tenant_id, owner=ctx.owner).acquired
+        s.close()
+        barrier.wait()
+        asyncio.run(_run(dbf, ids, _conn(phone_number_id=number, meta_messaging_limit="TIER_250"),
+                         ctx=ctx))
+
+    threads = [threading.Thread(target=worker, args=(first, "PN-A")),
+               threading.Thread(target=worker, args=(second, "PN-B"))]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    return meta, ctxs, budget
+
+
+def test_shared_limit_holds_under_truly_concurrent_campaigns(dbf, fake_meta, monkeypatch):
+    meta, ctxs, _ = _race_two_campaigns(dbf, fake_meta, monkeypatch, lock_enabled=True)
+    assert len(meta.calls) == 1                 # exactly the one remaining slot
+    assert all(c.pause_reason == ledger.PAUSE_MESSAGING_LIMIT for c in ctxs.values())
+
+
+def test_shared_limit_race_is_detected_without_the_scope_lock(dbf, fake_meta, monkeypatch, request):
+    """Negative control: with the scope lock removed, the same race
+    overshoots the budget on PostgreSQL — proving the test above would
+    catch a regression. (SQLite serialises every writer, so it cannot show
+    the race.)"""
+    if request.node.callspec.params.get("dbf") != "postgres":
+        pytest.skip("needs PostgreSQL row-level concurrency")
+    meta, _, _ = _race_two_campaigns(dbf, fake_meta, monkeypatch, lock_enabled=False)
+    assert len(meta.calls) > 1
+
+
 def test_stale_or_missing_limit_falls_back_to_starting_tier(dbf):
     db = dbf()
     stale = _conn(meta_tier_updated_at=datetime(2020, 1, 1))
@@ -822,6 +880,138 @@ def test_campaign_list_says_stalled_when_no_worker_is_alive(dbf, fake_meta):
     assert out["stats"]["uncertain"] == 1
     assert out["stats"]["meta_accepted"] == 2
     db.close()
+
+
+# ── 10. Deploy path: boot-time create_all and a missing ledger ──────────
+
+
+def _schema_snapshot(engine, schema=None):
+    from sqlalchemy import inspect as _inspect
+    insp = _inspect(engine)
+    snap = {}
+    for t in insp.get_table_names(schema=schema):
+        snap[t] = {
+            "columns": sorted((c["name"], str(c["type"]), bool(c["nullable"]))
+                              for c in insp.get_columns(t, schema=schema)),
+            "indexes": sorted((i["name"], tuple(i["column_names"]), bool(i["unique"]))
+                              for i in insp.get_indexes(t, schema=schema)),
+            "fks": sorted((tuple(f["constrained_columns"]), f["referred_table"])
+                          for f in insp.get_foreign_keys(t, schema=schema)),
+        }
+    return snap
+
+
+def _boot_proof(engine, schema=None):
+    """Pre-PR schema → the boot's ``Base.metadata.create_all`` → only the
+    ledger tables (with their indexes) appear; nothing else changes; a
+    second boot is a no-op."""
+    pre_tables = [t for t in Base.metadata.sorted_tables if t.name not in ledger.LEDGER_TABLES]
+    Base.metadata.create_all(engine, tables=pre_tables)
+    before = _schema_snapshot(engine, schema)
+    Base.metadata.create_all(engine)          # what backend/main.py does at boot
+    after = _schema_snapshot(engine, schema)
+    assert set(after) - set(before) == set(ledger.LEDGER_TABLES)
+    assert {t: after[t] for t in before} == before   # existing tables untouched
+    idx = {name: (cols, uniq) for name, cols, uniq in after["campaign_send_attempts"]["indexes"]}
+    assert idx["uq_campaign_send_attempt_wamid"] == (("provider_message_id",), True)
+    assert idx["uq_campaign_send_attempt_log_no"] == (("send_log_id", "attempt_no"), True)
+    inbox = {n: u for n, _, u in after["campaign_status_event_inbox"]["indexes"]}
+    assert inbox["uq_campaign_status_event_wamid_status"] is True
+    Base.metadata.create_all(engine)
+    assert _schema_snapshot(engine, schema) == after
+
+
+def test_boot_create_all_adds_only_the_ledger_tables(request):
+    if not PG_DSN:
+        pytest.skip("set NAHLA_CAMPAIGN_LEDGER_PG_DSN to run on PostgreSQL")
+    import uuid as _uuid
+    from sqlalchemy import text
+    schema = f"boot_{_uuid.uuid4().hex[:8]}"
+    admin = create_engine(PG_DSN)
+    with admin.begin() as c:
+        c.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_engine(PG_DSN, connect_args={"options": f"-csearch_path={schema}"})
+    try:
+        _boot_proof(engine, schema)
+    finally:
+        engine.dispose()
+        with admin.begin() as c:
+            c.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+PRODLIKE_DSN = os.environ.get("NAHLA_CAMPAIGN_LEDGER_PRODLIKE_DSN")
+
+
+@pytest.mark.skipif(not PRODLIKE_DSN, reason="set NAHLA_CAMPAIGN_LEDGER_PRODLIKE_DSN "
+                    "to a DISPOSABLE database migrated with `alembic upgrade 0093`")
+def test_boot_create_all_on_a_production_like_database():
+    """Same proof on a database built the way production is: the pinned
+    bootstrap chain (``alembic upgrade 0093``) plus the pre-PR create_all."""
+    from sqlalchemy import inspect as _inspect
+    engine = create_engine(PRODLIKE_DSN)
+    if set(ledger.LEDGER_TABLES) & set(_inspect(engine).get_table_names()):
+        engine.dispose()
+        pytest.skip("ledger tables already exist — point this at a freshly migrated database")
+    try:
+        _boot_proof(engine)
+    finally:
+        engine.dispose()
+
+
+def _drop_ledger(Session):
+    from sqlalchemy import text
+    engine = Session.kw["bind"]
+    with engine.begin() as c:
+        for t in ledger.LEDGER_TABLES:
+            c.execute(text(f"DROP TABLE IF EXISTS {t}"))
+
+
+def test_missing_ledger_tables_fail_closed(dbf, fake_meta, monkeypatch, request):
+    """Boot has not created (or failed to create) the ledger tables: nothing
+    is sent, the campaign is not falsely marked failed, and read paths keep
+    working. The next tick after the tables exist proceeds normally."""
+    import routers.campaigns as rc
+    import core.billing as billing
+    ids = _seed(dbf, phones=PHONES[:2])
+    _drop_ledger(dbf)
+    meta = fake_meta(FakeMeta())
+    monkeypatch.setattr(billing, "has_billing_access", lambda *a, **k: True)
+
+    assert asyncio.run(_run(dbf, ids, _conn()))[2] == ["dispatch_skipped:ledger_unavailable"]
+    db = dbf()
+    out = asyncio.run(disp.dispatch_campaign(db, ids.campaign_id))
+    assert out["status"] == "ledger_unavailable"
+    db.close()
+    spawned = []
+    monkeypatch.setattr(rc, "resolve_tenant_id", lambda request: ids.tenant_id)
+    monkeypatch.setattr(rc, "_spawn_dispatch_in_background", lambda cid: spawned.append(cid))
+    db = dbf()
+    now = asyncio.run(rc.dispatch_campaign_now(ids.campaign_id, request=None, db=db,
+                                               bypass_frequency_cap=False))
+    assert now["reason"] == "ledger_unavailable" and spawned == []
+    payload = rc._campaigns_payload(db, [db.get(Campaign, ids.campaign_id)])[0]
+    assert payload["stats"]["queued"] == 2 and payload["execution"]["worker_running"] is False
+    paused = asyncio.run(rc.update_campaign_status(
+        ids.campaign_id, rc.UpdateCampaignStatusIn(status="paused"), request=None, db=db))
+    assert paused["status"] == "paused"
+    db.close()
+    assert meta.calls == []
+    # Tables appear (boot create_all finished): the same campaign proceeds.
+    engine = dbf.kw["bind"]
+    tables = [t for t in Base.metadata.sorted_tables if t.name in ledger.LEDGER_TABLES]
+    saved = []
+    if engine.dialect.name == "sqlite":
+        for t in tables:
+            for col in t.columns:
+                if isinstance(col.type, JSONB):
+                    saved.append((col, col.type))
+                    col.type = JSON()
+    Base.metadata.create_all(engine, tables=tables)
+    for col, orig in saved:
+        col.type = orig
+    asyncio.run(_run(dbf, ids, _conn()))
+    assert sorted(meta.calls) == sorted(PHONES[:2])
 
 
 # ── 9. The real status webhook handler (PostgreSQL: JSONB lookups) ─────

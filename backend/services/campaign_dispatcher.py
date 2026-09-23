@@ -385,6 +385,15 @@ async def dispatch_campaign(
     # alive returns here without touching a single recipient.
     from services import campaign_send_ledger as ledger  # noqa: PLC0415
 
+    if not ledger.ledger_available(db):
+        # Boot has not created the ledger tables yet (or failed to). Refuse
+        # without touching the campaign: nothing is sent and its status is
+        # not falsely marked failed; the next tick / click retries.
+        result = _empty_result(error="ledger_unavailable")
+        result["campaign_id"] = campaign_id
+        result["status"] = "ledger_unavailable"
+        return result
+
     ctx = DispatchRunContext(ledger.new_worker_id())
     got = ledger.acquire_lease(
         db, campaign_id=campaign_id, tenant_id=campaign.tenant_id, owner=ctx.owner,
@@ -1980,6 +1989,8 @@ async def _dispatch_queued_rows(
     if ctx is None:
         # Direct callers (tests, legacy paths) get a lease of their own.
         ctx = DispatchRunContext(ledger.new_worker_id())
+        if not ledger.ledger_available(db):
+            return 0, 0, ["dispatch_skipped:ledger_unavailable"]
         got = ledger.acquire_lease(
             db, campaign_id=campaign.id, tenant_id=campaign.tenant_id, owner=ctx.owner,
         )
@@ -2108,8 +2119,22 @@ async def _dispatch_queued_rows(
                 claim = ledger.claim_recipient(
                     db, log_id=log_id, campaign=campaign, owner=ctx.owner,
                     scope_key=scope_key, phone_number_id=phone_number_id,
+                    wa_conn=wa_conn,
                 )
                 if claim.attempt is None:
+                    if claim.reason == "budget_exhausted":
+                        b = claim.budget
+                        ctx.pause(
+                            ledger.PAUSE_MESSAGING_LIMIT,
+                            f"used={b.used} budget={b.budget} limit={b.limit} "
+                            f"source={b.limit_source} scope={b.scope_key}" if b else "",
+                        )
+                        logger.warning(
+                            "[campaign_dispatcher] campaign=%d paused at claim: shared "
+                            "messaging budget exhausted %s",
+                            campaign_id, b.to_dict() if b else {},
+                        )
+                        break
                     if claim.reason == "lease_lost":
                         ctx.lease_lost = True
                         logger.error(

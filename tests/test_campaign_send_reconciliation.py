@@ -61,3 +61,30 @@ def test_log_parsing_pairs_each_failure_with_its_own_copy(tmp_path):
 def test_phone_is_recovered_from_cloud_api_wamid():
     assert rec._phone_from_wamid(
         "wamid.HBgMOTY2NTAyNjIwMDI4FQIAERgUQ0VGMzc2M0MxQzgzODdDNzM0QkMA") == "+966502620028"
+
+
+def test_missing_accept_line_is_inferred_from_its_failure_webhook(tmp_path):
+    """A failure webhook proves Meta accepted that wamid. With the accept line
+    missing from the export, the copy is counted only with the explicit flag,
+    only when the webhook ties it to this campaign, and reported separately."""
+    fail = ("2026-09-23 11:12:40,{ms} INFO [PAYMENT_MEDIA_DIAG] status_failed wamid={w} "
+            "status=failed recipient_id=966500001111 timestamp=1 tenant_id=5 "
+            "message_event=matched campaign_send_log={flag} "
+            "errors=[{{'code': 'REDACTED', 'title': 'Spam Rate limit hit', 'message': 'x'}}]")
+    lines = [fail.format(ms=100, w="wamid.X", flag="matched"),
+             fail.format(ms=200, w="wamid.Y", flag="orphan"),
+             fail.replace("966500001111", "966500002222").format(ms=300, w="wamid.Z", flag="orphan")]
+    f = tmp_path / "logs.json"
+    f.write_text(json.dumps({"deploy": [{"timestamp": str(i), "message": m} for i, m in enumerate(lines)]}))
+
+    plain = {}
+    meta = rec.apply_logs(plain, campaign_id=9, tenant_id=5, log_paths=[str(f)], failed_tsv=[])
+    assert plain == {} and meta["failed_events_unmatched_wamid"] == 3
+
+    inferred = {}
+    meta = rec.apply_logs(inferred, campaign_id=9, tenant_id=5, log_paths=[str(f)],
+                          failed_tsv=[], infer_from_failures=True)
+    assert set(inferred) == {"+966500001111"}          # the orphan-only phone is not claimed
+    assert len(inferred["+966500001111"].copies) == 2
+    assert meta["accepted_inferred_from_failure"] == 2
+    assert meta["failed_events_unmatched_wamid"] == 1

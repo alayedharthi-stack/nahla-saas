@@ -2210,6 +2210,22 @@ class CampaignDispatchLease(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class CampaignMessagingScope(Base):
+    """One row per shared Meta messaging-limit scope (business portfolio,
+    else WABA, else phone number).
+
+    Its only job is to be locked: a claim that draws on a finite budget
+    takes this row's lock (``UPDATE … SET updated_at``) before counting the
+    scope's 24h usage and reserving the recipient, so two campaigns — on
+    any process or replica — sharing one portfolio cannot both read the
+    same remaining budget and overshoot it.
+    """
+    __tablename__ = 'campaign_messaging_scopes'
+
+    scope_key = Column(String(160), primary_key=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 class CampaignSendAttempt(Base):
     """One row per request we started (or were about to start) to Meta
     for a campaign recipient.

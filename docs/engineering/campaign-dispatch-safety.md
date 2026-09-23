@@ -13,8 +13,8 @@ Evidence below comes from the runtime logs of deployment `8350f841`
 | Time (UTC) | Evidence |
 | --- | --- |
 | 10:21:05 | first accepted message |
-| 10:34:05 | first post-accept failure `Spam Rate limit hit` (Meta 131048, the number-level spam limit) |
-| ≈10:40 → end | almost every accepted message is later reported failed (131048 or 131049 "healthy ecosystem engagement") |
+| 10:34:05 | first post-accept failure titled `Spam Rate limit hit` |
+| ≈10:40 → end | almost every accepted message is later reported failed ("Spam Rate limit hit" or "…healthy ecosystem engagement") |
 | 10:56:17 | first recipient accepted twice (two wamids ~0.1–0.2 s apart) |
 | 11:15:28.840 | last accepted message (both copies) |
 | 11:14:55 → 11:16:07 | deploy of `bbc2e4d`; old container removed — this is what stopped the workers |
@@ -46,6 +46,8 @@ the error panel read a capped 10-entry list unrelated to the counters.
 `failed/watchdog_timeout` (retryable) or `queued`, so a later dispatch-now could
 re-send to someone whose first request had been accepted. A timeout, a 2xx
 without wamid, or any exception around the Meta call was a retryable failure.
+
+Raw Meta error codes are `REDACTED` in these logs; failures are identified by Meta's error *title* only. The classifier maps these titles to `spam_rate_limit` / `marketing_blocked`; the numeric codes (131048 / 131049 in Meta's catalogue) are not asserted for these events.
 
 **Hypothesis, not proven:** why Meta's overview showed 253 of 250. The logs are
 consistent with ~253–257 recipients having a copy that Meta never reported as
@@ -79,6 +81,13 @@ failed, but delivery receipts are not in the logs (see §5).
   Meta tier only when fresh (≤24 h); unknown/stale → Meta's starting limit (250),
   never "unlimited". Campaigns may use 90 % (`NAHLA_CAMPAIGN_LIMIT_BUDGET_PERCENT`).
   When spent the campaign is **paused** (`messaging_limit_reached`), queue intact.
+* **Atomic shared budget**: the budget check and the recipient reservation
+  run in one transaction under a lock on the scope's row
+  (`campaign_messaging_scopes`), and reservations that have not started yet
+  already count. Two campaigns (any process/replica) on one portfolio cannot
+  both take the last slot — proven by a truly concurrent two-thread test on
+  PostgreSQL with a widened race window, whose negative control (scope lock
+  removed) overshoots.
 * **Breakers**: post-accept `spam_rate_limit` ×5, `rate_limit` ×10,
   `marketing_blocked` ×25 in 15 min in the scope; synchronous `spam_rate_limit`
   ×5; 3 consecutive uncertain outcomes → pause with a reason.
@@ -105,10 +114,29 @@ Meta references: messaging limits are applied per business portfolio since
 field; switching it is a follow-up (it writes connection rows, so it is not
 changed in this PR).
 
-Schema: three **new** tables, created by the boot-time `create_all`
+Schema: four **new** tables (`campaign_dispatch_leases`,
+`campaign_send_attempts`, `campaign_status_event_inbox`,
+`campaign_messaging_scopes`), created by the boot-time `create_all`
 (`backend/main.py`). No existing table is altered. No Alembic revision is added
 in this PR because the repository's bootstrap migration contract pins the
 accepted heads; a parity revision should follow in a governance PR.
+
+Proven on a production-like PostgreSQL 16 database (`alembic upgrade 0093` —
+the pinned bootstrap target — then the pre-PR `create_all`, then this PR's
+`create_all`): exactly the four tables appear with their unique indexes
+(`uq_campaign_send_attempt_wamid`, `uq_campaign_send_attempt_log_no`,
+`uq_campaign_status_event_wamid_status`, …); every pre-existing table's
+columns, indexes and foreign keys are identical before and after; a second
+boot changes nothing (`test_boot_create_all_on_a_production_like_database`).
+
+If the tables are late or missing (boot `create_all` still running or
+failed): every send path checks `ledger_available()` first and refuses —
+`dispatch_campaign` returns `ledger_unavailable` without touching the campaign
+(it is not marked failed), `dispatch-now` answers `reason=ledger_unavailable`,
+wave ticks put the wave back to pending, nothing reaches Meta. Read paths
+(campaign list, stats, pause) keep working through savepoints; the status
+webhook falls back to its pre-ledger path. Once the tables exist the next
+tick/click proceeds (`test_missing_ledger_tables_fail_closed`).
 
 ## 4. Tests
 
@@ -126,34 +154,48 @@ webhook handler (PG only), and an 8-thread race for lease and claim.
 
 ## 5. Reconciliation of the incident campaign (read-only, logs)
 
-`scripts/operators/campaign_send_reconciliation.py --no-database` over every
-`campaign=<id>` log line of the old deployment (10:15–11:20 UTC, pages of
-<500 lines, overlapping pages de-duplicated) and every `status_failed` line
-for the tenant on both deployments:
+`scripts/operators/campaign_send_reconciliation.py --no-database
+--infer-accepted-from-failures` over every `campaign=<id>` log line of the old
+deployment (10:15–11:20 UTC, pages of <500 lines, overlapping pages
+de-duplicated) and every `status_failed` line for the tenant on both
+deployments:
 
 | Messages (wamids) | count |
 | --- | --- |
-| accepted by Meta | 1,926 |
-| reported failed after acceptance | 1,667 (131048 spam limit 1,033 · 131049 ecosystem 490 · undeliverable 108 · experiment 36) |
+| accepted by Meta — accept line in the logs | 1,926 |
+| accepted by Meta — accept line missing, proven by its failure webhook | 6 |
+| **accepted, total** | **1,932** |
+| reported failed after acceptance | 1,673 — by Meta's error title: "Spam Rate limit hit" 1,037 · "…healthy ecosystem engagement" 492 · "Message undeliverable" 108 · "User's number is part of an experiment" 36 |
 | no failure report (delivered, read or pending — logs cannot tell) | 259 |
 
 | Recipients | count |
 | --- | --- |
-| accepted at least once | 1,481 (1,036 once, **445 twice**) |
-| every copy failed (after acceptance) | 1,224 |
+| accepted at least once | **1,483** (1,034 once, **449 twice**) |
+| every copy failed (after acceptance) | 1,226 |
 | rejected before acceptance only | 6 |
-| one copy, no failure report (candidates for "delivered once") | 253 |
-| two copies, at least one without failure report | 4 |
+| one copy, no failure report | 252 |
+| two copies, at least one without failure report | 5 |
 | excluded before sending (manual exclusion, snapshot 10:55:41) | 55 |
-| no attempt started | ≈7,315 (8,857 − 55 − 1,481 − 6; exact figure from the DB run) |
+| no attempt started | ≈7,313 (8,857 − 55 − 1,483 − 6; exact figure from the DB run) |
+
+How 1,481 became 1,483 (evidence, not an estimate): the 6 failure webhooks
+whose wamid had no accept line all arrived 11:12:38–11:12:47 UTC. Two of them
+are for recipients with no accept line at all (…0004 and …6780); each has one
+`campaign_send_log=matched` and one `orphan` event — i.e. a sent recipient row
+of this campaign plus the duplicate copy. The other four are the missing
+second copies of two recipients already counted. So ~6 accept lines are
+absent from the Railway export around 11:12:3x (that window returned 214 lines,
+below the 500 cap — not pagination). Cross-check: the export counts **925**
+unique accepted recipients before the 10:55:41 snapshot, which also says
+`sent: 925`.
 
 Coverage and gaps:
 * Delivery/read receipts are logged with a truncated wamid, so **delivered vs.
   pending is not derivable from logs**; the two "delivered" categories need the
-  database run below. No recipient is claimed delivered here.
-* 6 failure events carry wamids absent from the accept lines (other sends or
-  a dropped log line). UI "sent 1,483" vs 1,481 unique accepted recipients in
-  logs: a 2-row gap consistent with rows whose final state was never logged.
+  database run below. No recipient is claimed delivered here, and the 259
+  messages without a failure report are *not* "delivered".
+* The inferred copies rely on the webhook's own `campaign_send_log=matched`
+  flag; a DB run replaces this inference with the rows themselves.
 * Late failure webhooks may still arrive.
 
 Authoritative run (read-only transaction; reads `campaign_send_logs`,
@@ -170,7 +212,9 @@ DATABASE_URL=<read-only credentials> python scripts/operators/campaign_send_reco
 1. **Before deploy**: nobody presses "إرسال يدوي الآن" or "استئناف" on the
    affected campaign. On the current code that re-queues watchdog rows and could
    re-send.
-2. Deploy this PR. Boot creates the three tables; existing rows are untouched.
+2. Deploy this PR. Boot creates the four tables; existing rows are untouched.
+   Verify after boot: `SELECT to_regclass('campaign_send_attempts')` (and the
+   other three) is not null before allowing any campaign action.
    The campaign is not resumed automatically (rescue only targets campaigns with
    zero send-log rows; wave/scheduler paths respect `paused`).
 3. Run the read-only reconciliation (§5) and review it.
@@ -183,7 +227,7 @@ DATABASE_URL=<read-only credentials> python scripts/operators/campaign_send_reco
      copies. Not required for safety; changes reporting only.
    * no change to `sent`/`failed` classification of historical rows.
 5. Resume decision (merchant + support): the portfolio limit was exhausted and
-   Meta flagged the number (131048). Do **not** resume until the 24 h window has
+   Meta reported "Spam Rate limit hit" for this number. Do **not** resume until the 24 h window has
    rolled and Meta shows the limit/quality recovered. The new dispatcher then
    sends at most the remaining budget, pauses itself at the limit or on renewed
    throttling, never re-sends to anyone accepted or uncertain, and the frequency

@@ -232,10 +232,14 @@ def _campaign_canonical_stats(
     # ``messages_*`` / ``recipients_*`` so they are never mixed.
     try:
         from services.campaign_send_ledger import ledger_stats  # noqa: PLC0415
-        for cid, extra in ledger_stats(db, list(out)).items():
+        # Savepoint: a missing ledger table must not abort the request's
+        # transaction for the queries that follow.
+        with db.begin_nested():
+            extras = ledger_stats(db, list(out))
+        for cid, extra in extras.items():
             out[cid].update(extra)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[campaigns] ledger stats failed: %s", exc)
+        logger.warning("[campaigns] ledger stats failed: %s", str(exc).splitlines()[0][:200])
     try:
         for cid, breakdown in _campaign_error_breakdown(db, list(out)).items():
             out[cid]["error_breakdown"] = breakdown
@@ -339,9 +343,11 @@ def _campaign_executions(db: Session, campaign_ids: List[int]) -> Dict[int, Dict
         from models import CampaignDispatchLease  # noqa: PLC0415
         from services.campaign_send_ledger import lease_is_live, utcnow  # noqa: PLC0415
         now = utcnow()
-        for lease in db.query(CampaignDispatchLease).filter(
-            CampaignDispatchLease.campaign_id.in_(campaign_ids),
-        ):
+        with db.begin_nested():
+            leases = db.query(CampaignDispatchLease).filter(
+                CampaignDispatchLease.campaign_id.in_(campaign_ids),
+            ).all()
+        for lease in leases:
             live = lease_is_live(lease, now=now)
             out[int(lease.campaign_id)] = {
                 "worker_running": live,
@@ -352,7 +358,7 @@ def _campaign_executions(db: Session, campaign_ids: List[int]) -> Dict[int, Dict
                 "paused_at": lease.paused_at.isoformat() if lease.paused_at else None,
             }
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[campaigns] execution lookup failed: %s", exc)
+        logger.warning("[campaigns] execution lookup failed: %s", str(exc).splitlines()[0][:200])
     return out
 
 
@@ -924,12 +930,15 @@ async def update_campaign_status(
 
     was_not_active = campaign.status != "active"
     from services import campaign_send_ledger as _ledger  # noqa: PLC0415
-    if body.status == "paused":
-        # Safe stop: the live worker (if any) finishes its in-flight
-        # request and starts no new one.
-        _ledger.request_stop(db, campaign_id=campaign.id, tenant_id=tenant_id)
-    elif body.status == "active":
-        _ledger.clear_stop(db, campaign_id=campaign.id)
+    # Without the ledger tables no worker can run at all, so a pause needs
+    # nothing more than the status change below.
+    if _ledger.ledger_available(db):
+        if body.status == "paused":
+            # Safe stop: the live worker (if any) finishes its in-flight
+            # request and starts no new one.
+            _ledger.request_stop(db, campaign_id=campaign.id, tenant_id=tenant_id)
+        elif body.status == "active":
+            _ledger.clear_stop(db, campaign_id=campaign.id)
     campaign.status = body.status
     if body.status == "active" and not campaign.launched_at:
         campaign.launched_at = datetime.now(timezone.utc)
@@ -2730,6 +2739,17 @@ async def dispatch_campaign_now(
     # that re-sent to the same queued recipients. The lease is the
     # source of truth for "a worker is running" — across processes.
     from services import campaign_send_ledger as _ledger  # noqa: PLC0415
+    if not _ledger.ledger_available(db):
+        return {
+            "campaign_id": campaign_id,
+            "ok":          False,
+            "kicked":      False,
+            "reason":      "ledger_unavailable",
+            "message":     (
+                "تعذّر بدء الإرسال: سجل تنفيذ الحملات غير جاهز بعد على الخادم. "
+                "لم تُرسل أي رسالة — أعد المحاولة بعد دقائق."
+            ),
+        }
     _lease = _ledger.get_lease(db, campaign_id)
     if _ledger.lease_is_live(_lease):
         logger.warning(
@@ -2851,7 +2871,9 @@ async def stop_campaign(
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
     from services import campaign_send_ledger as _ledger  # noqa: PLC0415
-    _ledger.request_stop(db, campaign_id=campaign_id, tenant_id=tenant_id)
+    ledger_ready = _ledger.ledger_available(db)
+    if ledger_ready:
+        _ledger.request_stop(db, campaign_id=campaign_id, tenant_id=tenant_id)
     if (campaign.status or "").lower() in ("active", "scheduled"):
         campaign.status = "paused"
         campaign.updated_at = datetime.now(timezone.utc)
@@ -2861,7 +2883,7 @@ async def stop_campaign(
         "campaign_id": campaign_id,
         "ok": True,
         "status": campaign.status,
-        "execution": _ledger.execution_snapshot(db, campaign_id),
+        "execution": _ledger.execution_snapshot(db, campaign_id) if ledger_ready else None,
         "message": "تم طلب الإيقاف — لن تُبدأ أي رسالة جديدة لهذه الحملة.",
     }
 

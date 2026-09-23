@@ -149,7 +149,7 @@ _META_ERR_RE = re.compile(r"campaign=(\d+) Meta error key=(\S+) .*? phone=(\+?\d
 _EXC_RE = re.compile(r"campaign=(\d+) exception sending to (\+?\d+)")
 _FAILED_RE = re.compile(
     r"status_failed wamid=(\S+) status=failed recipient_id=(\d+) .*?tenant_id=(\d+)"
-    r".*?errors=\[\{.*?'title': ['\"](.*?)['\"],"
+    r".*?campaign_send_log=(\w+).*?errors=\[\{.*?'title': ['\"](.*?)['\"],"
 )
 _TS_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3})")
 
@@ -170,7 +170,8 @@ def iter_log_messages(paths: Iterable[str]) -> Iterable[str]:
 
 
 def apply_logs(recipients: Dict[str, Recipient], *, campaign_id: int, tenant_id: int,
-               log_paths: List[str], failed_tsv: List[str]) -> Dict[str, Any]:
+               log_paths: List[str], failed_tsv: List[str],
+               infer_from_failures: bool = False) -> Dict[str, Any]:
     meta = {"accepted_lines": 0, "failed_events": 0, "pre_accept_errors": 0,
             "exceptions": 0, "first_accept": None, "last_accept": None,
             "failed_events_unmatched_wamid": 0}
@@ -202,24 +203,40 @@ def apply_logs(recipients: Dict[str, Recipient], *, campaign_id: int, tenant_id:
             continue
         m = _FAILED_RE.search(msg)
         if m and int(m.group(3)) == tenant_id:
-            failed_events.append((m.group(1), norm_phone(m.group(2)), m.group(4)))
+            failed_events.append((m.group(1), norm_phone(m.group(2)), m.group(5), m.group(4)))
     for path in failed_tsv:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
                 parts = line.rstrip("\n").split("\t")
                 if len(parts) >= 4:
-                    failed_events.append((parts[2], norm_phone(parts[1]), parts[3]))
+                    failed_events.append((parts[2], norm_phone(parts[1]), parts[3],
+                                          parts[4] if len(parts) > 4 else ""))
     seen = set()
-    for wamid, phone, reason in failed_events:
+    # A failure webhook proves Meta accepted that wamid. When the accept
+    # line itself is missing from the export, the copy is still counted if
+    # the event ties it to this campaign's recipients: the webhook matched a
+    # campaign send-log row, or the wamid's sibling event for the same
+    # recipient did. Such copies are reported separately as "inferred".
+    matched_phones = {phone for _, phone, _, flag in failed_events if flag == "matched"}
+    meta["accepted_inferred_from_failure"] = 0
+    meta["recipients_inferred_from_failure"] = 0
+    for wamid, phone, reason, flag in failed_events:
         if wamid in seen:
             continue
         seen.add(wamid)
         r = recipients.get(phone)
         if r is None or wamid not in r.copies:
-            # A failure for a wamid this campaign's accept lines never
-            # showed (another campaign/automation, or outside the export).
-            meta["failed_events_unmatched_wamid"] += 1
-            continue
+            belongs = (r is not None) or (infer_from_failures and phone in matched_phones)
+            if not (infer_from_failures and belongs):
+                # A failure for a wamid this campaign's accept lines never
+                # showed (another send, or outside the export).
+                meta["failed_events_unmatched_wamid"] += 1
+                continue
+            if r is None:
+                r = recipients[phone] = Recipient(phone)
+                meta["recipients_inferred_from_failure"] += 1
+            r.copy(wamid)
+            meta["accepted_inferred_from_failure"] += 1
         c = r.copies[wamid]
         c.failed = True
         c.failed_reason = reason
@@ -375,6 +392,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--no-database", action="store_true")
     ap.add_argument("--log-json", nargs="*", default=[])
     ap.add_argument("--failed-tsv", nargs="*", default=[])
+    ap.add_argument("--infer-accepted-from-failures", action="store_true",
+                    help="count copies whose accept line is missing but whose failure "
+                         "webhook ties them to this campaign (reported separately)")
     ap.add_argument("--emit-recipients", action="store_true",
                     help="include a masked per-recipient list")
     ap.add_argument("--out")
@@ -392,6 +412,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         sources["logs"] = apply_logs(
             recipients, campaign_id=args.campaign_id, tenant_id=args.tenant_id,
             log_paths=args.log_json, failed_tsv=args.failed_tsv,
+            infer_from_failures=args.infer_accepted_from_failures,
         )
     if not sources:
         ap.error("give --database-url/DATABASE_URL or --log-json files")

@@ -59,6 +59,7 @@ from sqlalchemy.orm import Session
 from models import (
     Campaign,
     CampaignDispatchLease,
+    CampaignMessagingScope,
     CampaignSendAttempt,
     CampaignSendLog,
     CampaignStatusEventInbox,
@@ -85,6 +86,10 @@ IN_FLIGHT_STATES = frozenset({ATTEMPT_CLAIMED, ATTEMPT_REQUEST_STARTED})
 POSSIBLY_SENT_STATES = frozenset({
     ATTEMPT_REQUEST_STARTED, ATTEMPT_ACCEPTED, ATTEMPT_UNCERTAIN,
 })
+# States that hold a slot of the shared messaging budget: everything that
+# may produce a message, plus reservations that have not started yet (so a
+# concurrent claim sees them). Abandoned / rejected / not_sent free it.
+BUDGET_STATES = POSSIBLY_SENT_STATES | frozenset({ATTEMPT_CLAIMED})
 # States that prove no message left for this attempt.
 DEFINITELY_NOT_SENT_STATES = frozenset({
     ATTEMPT_REJECTED, ATTEMPT_NOT_SENT, ATTEMPT_ABANDONED,
@@ -169,6 +174,32 @@ class LeaseResult:
     owner: Optional[str] = None
     expires_at: Optional[datetime] = None
     reason: str = ""
+
+
+LEDGER_TABLES = (
+    "campaign_dispatch_leases", "campaign_send_attempts",
+    "campaign_status_event_inbox", "campaign_messaging_scopes",
+)
+
+
+def ledger_available(db: Session) -> bool:
+    """True when every ledger table can be read.
+
+    The tables are created by the boot-time ``create_all``; until that has
+    run (or if it failed) nothing may be sent, because none of the
+    guarantees above could be enforced. Runs inside a savepoint so a
+    missing table never aborts the caller's transaction.
+    """
+    from sqlalchemy import text  # noqa: PLC0415
+    try:
+        with db.begin_nested():
+            for t in LEDGER_TABLES:
+                db.execute(text(f"SELECT 1 FROM {t} LIMIT 1"))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[campaign_ledger] ledger tables unavailable — sends refused: %s",
+                     str(exc).splitlines()[0][:200])
+        return False
 
 
 def lease_is_live(lease: Optional[CampaignDispatchLease], *, now: Optional[datetime] = None) -> bool:
@@ -351,7 +382,29 @@ def execution_snapshot(db: Session, campaign_id: int) -> Dict[str, Any]:
 @dataclass
 class ClaimResult:
     attempt: Optional[CampaignSendAttempt]
-    reason: str  # claimed | not_queued | lease_lost | stop_requested | conflict
+    reason: str  # claimed | not_queued | lease_lost | stop_requested | conflict | budget_exhausted
+    budget: Optional["MessagingBudget"] = None
+
+
+def lock_messaging_scope(db: Session, scope_key: str) -> None:
+    """Take the scope row's lock for the rest of the transaction (creating
+    the row on first use). Serialises budget check + reservation across
+    campaigns, processes and replicas sharing one Meta messaging limit."""
+    now = utcnow()
+    stmt = (
+        update(CampaignMessagingScope)
+        .where(CampaignMessagingScope.scope_key == scope_key)
+        .values(updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if db.execute(stmt).rowcount == 1:
+        return
+    try:
+        with db.begin_nested():
+            db.add(CampaignMessagingScope(scope_key=scope_key, updated_at=now))
+    except IntegrityError:
+        pass  # noqa: silent-ok — a concurrent claim created it; lock it below
+    db.execute(stmt)
 
 
 def claim_recipient(
@@ -362,6 +415,7 @@ def claim_recipient(
     owner: str,
     scope_key: Optional[str],
     phone_number_id: Optional[str],
+    wa_conn: Any = None,
 ) -> ClaimResult:
     """Atomically reserve one queued recipient and record the attempt.
 
@@ -370,6 +424,13 @@ def claim_recipient(
     the predicate after the row lock is released). Commits, together with
     a lease heartbeat, before returning — the reservation is durable
     before anything is sent.
+
+    With ``wa_conn`` the claim also draws on the shared messaging budget
+    atomically: the scope row is locked, usage (including other workers'
+    committed reservations) is counted under that lock, and the attempt —
+    itself a reservation — is committed before the lock is released.
+    Lock order is lease row → scope row → recipient row, the same for
+    every worker.
     """
     now = utcnow()
     campaign_id = int(campaign.id)
@@ -381,6 +442,22 @@ def claim_recipient(
     if hb.stop_requested:
         db.rollback()
         return ClaimResult(None, "stop_requested")
+    budget: Optional[MessagingBudget] = None
+    if wa_conn is not None and scope_key:
+        budget = messaging_budget(db, wa_conn)
+        if budget.budget is not None:
+            lock_messaging_scope(db, scope_key)
+            # Recount under the lock: every reservation committed before we
+            # got it is visible now.
+            budget = messaging_budget(db, wa_conn)
+            phone_now = (
+                db.query(CampaignSendLog.customer_phone_e164)
+                .filter(CampaignSendLog.id == log_id)
+                .scalar()
+            )
+            if not budget.allows(phone_now or ""):
+                db.rollback()
+                return ClaimResult(None, "budget_exhausted", budget)
     res = db.execute(
         update(CampaignSendLog)
         .where(CampaignSendLog.id == log_id, CampaignSendLog.status == "queued")
@@ -428,7 +505,7 @@ def claim_recipient(
     cached = db.get(CampaignSendLog, log_id)
     if cached is not None:
         db.refresh(cached)
-    return ClaimResult(attempt, "claimed")
+    return ClaimResult(attempt, "claimed", budget)
 
 
 def mark_request_started(db: Session, attempt: CampaignSendAttempt) -> None:
@@ -1190,8 +1267,9 @@ def messaging_budget(db: Session, conn: Any, *, now: Optional[datetime] = None) 
                 db.query(CampaignSendAttempt.customer_phone_e164)
                 .filter(
                     CampaignSendAttempt.messaging_scope_key == scope,
-                    CampaignSendAttempt.state.in_(tuple(POSSIBLY_SENT_STATES)),
-                    CampaignSendAttempt.request_started_at >= since,
+                    CampaignSendAttempt.state.in_(tuple(BUDGET_STATES)),
+                    func.coalesce(CampaignSendAttempt.request_started_at,
+                                  CampaignSendAttempt.claimed_at) >= since,
                 )
                 .distinct()
                 .all()

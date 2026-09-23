@@ -616,6 +616,7 @@ async def _dispatch_due_waves() -> None:
                 )
                 if result.get("status") in (
                     "already_running", "paused", "stop_requested", "lease_lost",
+                    "ledger_unavailable",
                 ):
                     # The wave's rows are still queued: put it back so it
                     # runs once the campaign can proceed.
