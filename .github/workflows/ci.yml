@@ -532,6 +532,56 @@ jobs:
               raise SystemExit("A1 JUnit contained no cart-recovery postgres cases")
           PY
 
+      # The guard that keeps every later log assertion in this repository
+      # meaningful. `run_alembic` upgrades in-process, so Alembic's fileConfig
+      # runs here and reconfigures logging globally: it disables existing
+      # loggers, replaces the root handlers (pytest's capture among them) and
+      # resets the root level. A test written to prove a secret never reaches
+      # the log then passes over an empty capture — succeeding while testing
+      # nothing. Nothing in CI ran this guard, so the protection it provides
+      # could be deleted as silently as the defect arrived.
+      #
+      # This job already supplies what it needs: PostgreSQL 16 on 5433 and
+      # LEGACY_MIG_PG_INTEGRATION_REQUIRED=1, which turns an unreachable
+      # database into a failure instead of a skip. The explicit URL is named
+      # anyway so the target cannot be a fallback, and the JUnit report is read
+      # back so "ran and passed" is proven rather than assumed — a guard that
+      # silently skipped would be no guard at all.
+      - name: In-process migration keeps the application's logging
+        env:
+          LEGACY_MIG_PG_TEST_DATABASE_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/nahla_saas
+        run: |
+          set -o pipefail
+          python -m pytest \
+            backend/tests/test_alembic_in_process_logging_isolation.py \
+            -v --tb=short --maxfail=1 \
+            --junitxml=/tmp/alembic-logging-isolation.xml
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          xml_path = Path("/tmp/alembic-logging-isolation.xml")
+          if not xml_path.exists():
+              raise SystemExit("missing JUnit file; cannot prove the guard executed")
+          root = ET.parse(xml_path).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+          totals = {k: 0 for k in ("tests", "failures", "errors", "skipped")}
+          for suite in suites:
+              for k in totals:
+                  totals[k] += int(suite.get(k) or 0)
+          print("alembic logging guard:", totals)
+          for tc in root.iter("testcase"):
+              state = "PASSED"
+              for tag in ("failure", "error", "skipped"):
+                  if tc.find(tag) is not None:
+                      state = tag.upper()
+              print(f"  {state} {tc.get('classname')}::{tc.get('name')}")
+          if totals["tests"] < 2:
+              raise SystemExit(f"expected both guard cases to run, got {totals}")
+          if totals["failures"] or totals["errors"] or totals["skipped"]:
+              raise SystemExit(f"the guard did not run clean: {totals}")
+          PY
+
       # Dedicated PG16 proof for lifecycle CAS claims. Uses a fresh database so
       # migration_0094_required stays on 0093 while CAS races upgrade to 0094.
       # Any skip (missing PG / fixtures / env) fails this step.
