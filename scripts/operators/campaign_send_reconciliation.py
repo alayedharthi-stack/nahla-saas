@@ -33,6 +33,18 @@ Categories (per recipient; every message count is reported separately)
   not_started                 no attempt was ever made
   excluded                    skipped before sending (cap, opt-out, manual exclusion…)
 
+Per-copy vs recipient-level evidence. A copy's receipts come only from
+sources tied to its own wamid or attempt: ``campaign_send_attempts``,
+``message_events``, ``message_delivery_events`` and the status inbox. The
+summary row's ``delivered_at`` / ``read_at`` / ``failed_at`` are recipient-
+level: with the ledger they are aggregates over every accepted attempt, and
+before it the webhook set them for whichever wamid the row held at the time
+(later overwritten by a second copy). They prove "at least one copy reached
+this recipient" — enough to exclude the recipient from a resend — but they
+never add a delivered copy, a read or a failure to the anchor wamid, except
+for a legacy-only row whose complete history has that anchor as its only
+copy (``row_evidence_is_per_copy``).
+
 "Read" counts as delivered even without a separate delivered receipt. The
 absence of a receipt never counts as "not delivered". Log-only runs cannot see
 delivery receipts, so they report ``delivery_evidence: unavailable`` and never
@@ -148,6 +160,15 @@ class Recipient:
     log_attempts: int = 0
     log_error_code: Optional[str] = None
     log_failed_at: bool = False
+    # The row's anchor wamid and its delivery columns. These columns are
+    # RECIPIENT-LEVEL evidence: with the ledger they are aggregates over
+    # every accepted attempt; before it, the webhook set them for whatever
+    # wamid the row held when the receipt arrived (later overwritten by a
+    # second copy). They are tied to the anchor copy only when that copy is
+    # provably the recipient's only one (``row_evidence_is_per_copy``).
+    log_wamid: Optional[str] = None
+    agg_delivered: bool = False
+    agg_read: bool = False
     ledger: Dict[int, LedgerAttempt] = field(default_factory=dict)
     # Observations without an attempt identity (exported log lines). They
     # are shown, never counted as proof: they may describe an attempt the
@@ -166,6 +187,14 @@ class Recipient:
 
     def ledger_counted(self) -> bool:
         return any(a.state not in LEDGER_NOT_COUNTED_STATES for a in self.ledger.values())
+
+    def delivered_copies(self) -> int:
+        return sum(1 for c in self.copies.values() if c.has_delivery)
+
+    def has_proven_delivery(self) -> bool:
+        """At least one copy reached this recipient — per-copy evidence, or
+        the row's recipient-level delivered/read columns."""
+        return self.delivered_copies() > 0 or self.agg_delivered or self.agg_read
 
 
 # Positive rejection evidence: canonical ``meta_errors`` keys that the
@@ -275,6 +304,30 @@ def classify(r: Recipient, *, delivery_evidence: bool) -> str:
     return "all_failed"
 
 
+def row_evidence_is_per_copy(r: Recipient) -> bool:
+    """May the summary row's delivered/read/failed columns be read as the
+    receipts of its anchor wamid?
+
+    Only for a legacy-only row (no ledger attempt — the ledger rewrites the
+    columns as aggregates) whose attempt history is complete and whose only
+    accepted copy is the anchor: then no other wamid was ever on the row, so
+    every receipt that set the columns was the anchor's own."""
+    if r.ledger or not r.log_wamid:
+        return False
+    if set(r.copies) != {r.log_wamid}:
+        return False
+    return attempt_history(r).complete
+
+
+def _apply_row_columns(r: Recipient) -> None:
+    c = r.copies[r.log_wamid]
+    c.read |= r.agg_read
+    c.delivered |= r.agg_delivered or r.agg_read
+    if r.log_failed_at and not (r.agg_delivered or r.agg_read):
+        c.failed = True
+        c.failed_reason = c.failed_reason or (r.log_error_code or "")[:120] or None
+
+
 def _load_meta_errors():
     try:
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -305,7 +358,7 @@ def _retryable_rejection(code: str) -> bool:
 def resend_proposal(r: Recipient, category: str) -> str:
     """Proposed treatment in a resend decision — input for a person, never
     an authorisation. Proven delivery wins over every other signal."""
-    if any(c.has_delivery for c in r.copies.values()):
+    if r.has_proven_delivery():
         return "excluded_proven_delivery"
     if category == "excluded":
         return "excluded_before_send"
@@ -676,13 +729,11 @@ def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: i
                 r.log_attempts = int(attempts or 0)
                 r.log_error_code = (err or "").strip() or None
                 r.log_failed_at = fl is not None
-                if wamid and claim(wamid, p):
-                    c = r.copies[wamid]
-                    c.read |= rd is not None
-                    c.delivered |= dl is not None or rd is not None
-                    if fl is not None and dl is None and rd is None:
-                        c.failed = True
-                        c.failed_reason = c.failed_reason or (err or "")[:120] or None
+                r.log_wamid = wamid or None
+                r.agg_delivered = dl is not None
+                r.agg_read = rd is not None
+                if wamid:
+                    claim(wamid, p)       # a copy exists; its receipts come later
             src[current].update(status="complete", rows=len(rows))
             campaign_phones = set(log_phone.values())
 
@@ -865,6 +916,16 @@ def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: i
                 src[name]["status"] = "complete"
             current = None
 
+            # Every copy is known now: tie the row's columns to the anchor
+            # only where that is provably per-copy evidence.
+            per_copy_rows = 0
+            for p in campaign_phones:
+                r = recipients[p]
+                if row_evidence_is_per_copy(r):
+                    _apply_row_columns(r)
+                    per_copy_rows += 1
+            meta["row_columns_as_per_copy_evidence"] = per_copy_rows
+
             attribution["campaign_events_unattributed"] = len(unattributed)
             attribution["campaign_events_unattributed_with_receipts"] = sum(
                 1 for c in unattributed.values() if c.has_delivery or c.failed)
@@ -916,6 +977,7 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
     messages = {"accepted": 0, "delivered_or_read": 0, "read": 0,
                 "failed_after_accept": 0, "no_receipt": 0}
     proven_delivery = 0
+    aggregate_only = 0
     incomplete_history = 0
     per = []
     for phone, r in recipients.items():
@@ -923,9 +985,12 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
         counts[cat] += 1
         hist = attempt_history(r)
         incomplete_history += 0 if hist.complete else 1
-        delivered_copies = sum(1 for c in r.copies.values() if c.has_delivery)
-        if delivered_copies:
+        delivered_copies = r.delivered_copies()
+        proven = r.has_proven_delivery()
+        if proven:
             proven_delivery += 1
+            if not delivered_copies:
+                aggregate_only += 1
         proposal = resend_proposal(r, cat)
         proposals[proposal] += 1
         for c in r.copies.values():
@@ -941,8 +1006,10 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
         if emit_recipients:
             per.append({
                 "recipient": mask(phone), "category": cat,
-                "has_proven_delivery": bool(delivered_copies),
+                "has_proven_delivery": proven,
                 "delivered_copies": delivered_copies,
+                "delivery_evidence_scope": ("per_copy" if delivered_copies else
+                                            "recipient_aggregate" if proven else None),
                 "copies": len(r.copies),
                 "resend_proposal": proposal,
                 "failed_reasons": sorted({c.failed_reason for c in r.copies.values()
@@ -969,6 +1036,7 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
         "recipients_total": len(recipients),
         "recipients_by_category": counts,
         "recipients_with_proven_delivery": proven_delivery,
+        "recipients_with_aggregate_only_delivery": aggregate_only,
         "recipients_with_incomplete_history": incomplete_history,
         "resend_proposal": proposals,
         "recipients_by_accepted_copies": dict(sorted(accepted_hist.items())),

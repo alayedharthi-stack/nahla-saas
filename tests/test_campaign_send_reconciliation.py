@@ -516,6 +516,100 @@ def test_unapplied_inbox_receipt_keeps_the_recipient_unresolved(pgdb, tmp_path):
     assert rep["sources"]["database"]["attribution"]["recipients_with_pending_inbox_candidates"] == 1
 
 
+# ── Row columns are recipient-level, not the anchor wamid's receipts ────
+
+
+def _ledger_attempt_with_times(c, log_id, phone, no, wamid, delivered=False, read=False,
+                               failed=False):
+    return _sql(c, "INSERT INTO campaign_send_attempts (tenant_id, campaign_id, send_log_id, "
+                   "customer_phone_e164, attempt_no, state, provider_message_id, accepted_at, "
+                   "delivered_at, read_at, failed_at, post_accept_error_code, "
+                   f"claimed_at, created_at, updated_at) VALUES (5, 9, :l, :p, :n, 'accepted', :w, "
+                   f"{NOW}, CASE WHEN :dl THEN {NOW} END, CASE WHEN :rd THEN {NOW} END, "
+                   f"CASE WHEN :fl THEN {NOW} END, CASE WHEN :fl THEN 'spam_rate_limit' END, "
+                   f"{NOW}, {NOW}, {NOW}) RETURNING id",
+                l=log_id, p=phone, n=no, w=wamid, dl=delivered, rd=read, fl=failed).scalar()
+
+
+@pg
+def test_aggregate_delivery_is_not_the_anchor_copys_receipt(pgdb, tmp_path):
+    """Attempt 1 → A accepted, no receipt; attempt 2 → B accepted and
+    delivered (61) or read (62). The row keeps A and its delivered/read
+    columns are populated because of B. Only B is a delivered copy."""
+    url, engine, _ = pgdb
+    with engine.begin() as c:
+        _base(c)
+        for i, (phone, read) in enumerate((("+966500000061", False), ("+966500000062", True)), 1):
+            _log_row(c, i, phone, "sent", 2, wamid=f"w.{i}A", dl=True, rd=read)
+            _ledger_attempt_with_times(c, i, phone, 1, f"w.{i}A")
+            _ledger_attempt_with_times(c, i, phone, 2, f"w.{i}B", delivered=not read, read=read)
+    rc, rep = _run(url, tmp_path, "--check-schema")
+    assert rc == 0 and rep["decision_eligible"] is True, rep["ineligible_reasons"]
+    for suffix in ("0061", "0062"):
+        r = _by_suffix(rep, suffix)
+        assert r["copies"] == 2 and r["delivered_copies"] == 1, r
+        assert r["category"] != "delivered_multiple"
+        assert r["category"] == "accepted_multiple_unproven"     # A has no receipt
+        assert r["has_proven_delivery"] and r["resend_proposal"] == "excluded_proven_delivery"
+    assert rep["recipients_by_category"]["delivered_multiple"] == 0
+    assert rep["messages"]["delivered_or_read"] == 2          # B of each, never A
+    assert rep["messages"]["read"] == 1                       # 62's B only; A is not read
+    assert rep["messages"]["no_receipt"] == 2
+
+
+@pg
+def test_aggregate_failure_does_not_fail_the_anchor(pgdb, tmp_path):
+    """Mixed legacy + ledger: attempt 1 was a legacy send (copy L, only in
+    message_events, no receipt); attempt 2 is a ledger copy B that failed.
+    The refresh set the row's failed_at because every *ledger* attempt
+    failed — that says nothing about L."""
+    url, engine, _ = pgdb
+    with engine.begin() as c:
+        _base(c)
+        conv = _customer_conversation(c, 5, "+966500000071")
+        _log_row(c, 1, "+966500000071", "sent", 2, wamid="w.71L", err="spam_rate_limit", fl=True)
+        _campaign_event(c, "w.71L", conv)
+        _ledger_attempt_with_times(c, 1, "+966500000071", 1, "w.71B", failed=True)
+    rc, rep = _run(url, tmp_path, "--check-schema")
+    assert rc == 0, rep
+    r = _by_suffix(rep, "0071")
+    assert r["copies"] == 2
+    assert r["category"] == "accepted_multiple_unproven"    # not all_failed
+    assert r["resend_proposal"] == "excluded_unresolved"
+    assert rep["messages"]["failed_after_accept"] == 1      # B only
+    assert rep["messages"]["no_receipt"] == 1               # L
+
+
+@pg
+def test_legacy_row_columns_are_per_copy_only_for_a_sole_copy(pgdb, tmp_path):
+    """81: legacy-only row, one attempt, one copy — the columns can only be
+    that copy's receipts. 82: legacy row whose first copy (X) was
+    overwritten by Y; the delivered column may be X's — recipient-level
+    proof, no delivered copy. 83: legacy sole copy, failed column."""
+    url, engine, _ = pgdb
+    with engine.begin() as c:
+        _base(c)
+        _log_row(c, 1, "+966500000081", "sent", 1, wamid="w.81", dl=True)
+        conv = _customer_conversation(c, 5, "+966500000082")
+        _log_row(c, 2, "+966500000082", "sent", 2, wamid="w.82Y", dl=True)
+        _campaign_event(c, "w.82X", conv)
+        _log_row(c, 3, "+966500000083", "sent", 1, wamid="w.83", err="131048", fl=True)
+    rc, rep = _run(url, tmp_path, "--check-schema")
+    assert rc == 0 and rep["decision_eligible"] is True, rep["ineligible_reasons"]
+    sole = _by_suffix(rep, "0081")
+    assert sole["category"] == "delivered_once" and sole["delivered_copies"] == 1
+    assert sole["delivery_evidence_scope"] == "per_copy"
+    dup = _by_suffix(rep, "0082")
+    assert dup["delivered_copies"] == 0 and dup["has_proven_delivery"] is True
+    assert dup["delivery_evidence_scope"] == "recipient_aggregate"
+    assert dup["resend_proposal"] == "excluded_proven_delivery"
+    assert dup["category"] == "accepted_multiple_unproven"
+    failed = _by_suffix(rep, "0083")
+    assert failed["category"] == "all_failed"
+    assert rep["recipients_with_aggregate_only_delivery"] == 1
+    assert rep["sources"]["database"]["row_columns_as_per_copy_evidence"] == 2
+
+
 @pg
 def test_missing_ledger_table_fails_loudly_unless_explicitly_allowed(pgdb, tmp_path):
     from sqlalchemy import text

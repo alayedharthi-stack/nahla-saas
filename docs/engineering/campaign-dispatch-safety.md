@@ -232,6 +232,16 @@ Evidence rules the tool enforces:
   wamid addressed to a recipient keeps that recipient `uncertain`.
   `decision_eligible` needs complete sources, complete attribution and a
   passed `--check-schema`.
+* **Row columns are recipient-level evidence.** After the ledger,
+  `campaign_send_logs.provider_message_id` keeps the first accepted wamid while
+  `delivered_at` / `read_at` / `failed_at` are aggregates over every accepted
+  attempt; before it, they were set for whichever wamid the row held when the
+  receipt arrived. They count towards `has_proven_delivery` (so the recipient
+  is excluded from a resend) but never become a delivered, read or failed copy
+  of the anchor wamid, never raise `delivered_copies` and never make
+  `delivered_multiple`. The single exception is a legacy-only row (no ledger
+  attempt) whose complete history has the anchor as its only copy. Such
+  recipients are reported with `delivery_evidence_scope=recipient_aggregate`.
 * **Every counted attempt is accounted for once.** `all_failed` and
   `delivered_once` need the whole attempt history the send-log row counted.
   A ledger row is identified by `attempt_no`; an accepted copy by its wamid;
