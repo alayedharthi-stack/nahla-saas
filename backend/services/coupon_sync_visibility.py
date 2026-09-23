@@ -152,6 +152,33 @@ def should_mark_imported_source_type(
     return not is_nahla_origin_coupon(existing_source_type, existing_meta)
 
 
+# The one marker the coupon create endpoint stamps. Deliberately narrower than
+# ``_DASHBOARD_MANUAL_SOURCES``, which also carries the legacy "manual" value
+# for source *taxonomy*: no writer in this tree stamps ``source: "manual"``, so
+# accepting it here would let a row nobody can account for pass as a merchant's
+# deliberate act of publication. Taxonomy and publication are different
+# questions and this answers only the second.
+DASHBOARD_AUTHORSHIP_MARKER = "dashboard"
+
+
+def is_dashboard_authored_coupon(
+    source_type: Optional[str],
+    meta: Optional[Dict[str, Any]],
+) -> bool:
+    """True only when the merchant created this coupon in Nahla's own dashboard.
+
+    Both halves are positive evidence. ``source_type`` must be ``manual`` — the
+    pool writes ``system`` and a store-platform sync writes ``imported`` — and
+    the metadata must carry the exact marker the create endpoint stamps, which
+    no other writer produces. A row that simply says nothing is not a merchant
+    act, which is the whole distinction this exists to keep.
+    """
+    if str(source_type or "").strip().lower() != "manual":
+        return False
+    src = str((meta or {}).get("source") or "").strip().lower()
+    return src == DASHBOARD_AUTHORSHIP_MARKER
+
+
 def resolve_coupon_source_type(
     *,
     column_source_type: Optional[str],

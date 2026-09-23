@@ -1201,3 +1201,130 @@ def test_native_pool_all_invalid_terminates_pool_empty() -> None:
         db.refresh(row)
         assert (row.extra_metadata or {}).get("customer_id") is None
 
+
+
+# ── The result never describes terms the coupon does not carry ───────────────
+
+
+WELCOME_RULE = {
+    "id": "first_purchase", "enabled": True, "discount_type": "percentage",
+    "discount_value": 15, "validity_days": 1, "max_uses": 1, "min_order_amount": 0,
+}
+
+
+def _welcome_store(db_kwargs: Optional[dict] = None):
+    """The reviewer's scenario, persisted rather than implied.
+
+    Bronze explicitly 5% / 720h / 50 uses, store minimum 100, and the complete
+    welcome rule saved as the dashboard saves it — all five fields, not an
+    ``enabled`` flag. The distinction that makes this a regression at all is
+    **zero countable orders plus the saved rule**: that is the one path the
+    withdrawn overlay ran on, and a test that resolves a rung by standing never
+    reaches it.
+    """
+    levels = _levels(include_ai_for=("bronze",))
+    for row in levels:
+        if row["id"] == "bronze":
+            row.update({"discount_default": 5, "validity_hours": 720, "max_uses": 50})
+    engine_kwargs = {
+        "levels": levels,
+        "global_defaults": {"min_order_amount": 100},
+        **(db_kwargs or {}),
+    }
+    db, tenant_id, engine = _make_db(**engine_kwargs)
+    # ``_make_db``'s ``first_purchase`` flag saves only {id, enabled}; the rule
+    # has to carry its economics or the overlay under test never fires.
+    settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).one()
+    meta = dict(settings.extra_metadata or {})
+    dash = dict(meta.get("coupons_dashboard") or {})
+    dash["rules"] = [dict(WELCOME_RULE)]
+    meta["coupons_dashboard"] = dash
+    settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
+    db.commit()
+    return db, tenant_id, engine
+
+
+def _welcome_pool_row(db, tenant_id: int):
+    """The code a new customer actually receives: the store's terms, not the
+    welcome's. 5% for 30 days, minimum 100, fifty uses."""
+    coupon = _add_pool_coupon(
+        db, tenant_id, "NHWEL", "bronze",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        extra={"min_order_amount": 100, "usage_limit": 50},
+    )
+    coupon.discount_value = "5"
+    db.commit()
+    db.refresh(coupon)
+    return coupon
+
+
+def test_a_welcome_result_reports_the_terms_the_issued_coupon_actually_has() -> None:
+    """The reviewer's replay, as a permanent regression that can actually fail.
+
+    A customer with a searchable phone and **zero** countable orders, a merchant
+    whose saved welcome rule offers 15% / one day / one use / minimum 0, and a
+    bronze pool row carrying the store's 5% / 30 days / minimum 100 / fifty uses.
+
+    The withdrawn overlay fed the rule's minimum into the result while that row
+    was what the customer received, so the reply would have been grounded in a
+    minimum the code does not honour — worse than promising nothing, because
+    the customer acts on it at checkout. Whatever the welcome eventually shapes,
+    it shapes the coupon or it shapes nothing.
+
+    Verified to FAIL against the withdrawn implementation (`a75d4088`) and pass
+    here; the earlier version of this test passed on both and so proved nothing.
+    """
+    db, tenant_id, _engine = _welcome_store()
+    customer = _add_customer(db, tenant_id, PHONE_A)          # searchable, no orders
+    coupon = _welcome_pool_row(db, tenant_id)
+
+    issued = _issue(db, tenant_id, customer.id)
+    assert issued.issued is True and issued.code == "NHWEL"
+    assert issued.countable_orders == 0                        # the welcome branch ran
+    assert issued.resolved_level == "bronze"
+    db.refresh(coupon)
+
+    stored_minimum = float(coupon.extra_metadata["min_order_amount"])
+
+    def _instant(raw):
+        """The row and the result may differ in tzinfo after a SQLite round
+        trip; what must agree is the moment, not its spelling."""
+        value = datetime.fromisoformat(raw) if isinstance(raw, str) else raw
+        return None if value is None else (
+            value if value.tzinfo else value.replace(tzinfo=timezone.utc))
+
+    expected_expiry = _instant(coupon.expires_at)
+    for label, result in (("first allocation", issued),
+                          ("reuse", _issue(db, tenant_id, customer.id))):
+        assert result.min_order_amount == stored_minimum, f"{label}: minimum"
+        assert result.discount_value == str(coupon.discount_value), f"{label}: discount"
+        assert _instant(result.expires_at) == expected_expiry, f"{label}: expiry"
+        assert result.restrictions["max_uses"] == 50, f"{label}: cap"
+        assert result.code == "NHWEL", label
+    assert _issue(db, tenant_id, customer.id).reason_code == "reused_existing_assignment"
+
+
+def test_the_usage_cap_in_the_result_is_the_rungs_not_the_rows() -> None:
+    """A pre-existing divergence, pinned rather than quietly inherited.
+
+    ``restrictions["max_uses"]`` has always been read from the merchant's level
+    configuration, never from the issued row's own ``usage_limit``. Where the
+    two disagree the result describes the rung, not the code. This is not a
+    regression — it reads identically on the deployed base — and closing it
+    belongs with the issuance-matching work, where every selector is in scope.
+    """
+    levels = _levels(include_ai_for=("bronze",))
+    for row in levels:
+        if row["id"] == "bronze":
+            row["max_uses"] = 1
+    db, tenant_id, _engine = _make_db(levels=levels)
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    coupon = _add_pool_coupon(db, tenant_id, "NHBRZ", "bronze", extra={"usage_limit": 50})
+
+    issued = _issue(db, tenant_id, customer.id)
+    assert issued.issued is True
+    db.refresh(coupon)
+    assert int(coupon.extra_metadata["usage_limit"]) == 50
+    assert issued.restrictions["max_uses"] == 1     # the rung's, not the row's

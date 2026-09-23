@@ -42,6 +42,7 @@ policy. The commerce runtime's loop passes the trusted context directly.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -60,6 +61,8 @@ from modules.ai.commerce_agent_v2.output import (
 from services.coupon_entitlement_read import LevelEntitlement, resolve_level_entitlement
 from services.native_ai_coupon_eligibility import NATIVE_AI_CHANNELS
 
+logger = logging.getLogger(__name__)
+
 MAX_PROMOTIONS = 8            # per kind: at most this many coupons and this many offers
 MAX_CONDITION_IDS = 20        # ids kept per product/category condition; the rest become a count
 _MAX_TEXT = 300
@@ -75,6 +78,17 @@ GENERAL_AUTHORIZED = "merchant_authorized_general"   # no rung, and the merchant
 # one, and only the pool generator defaults it to "shared", which is why
 # "shared" on its own proves nothing. Both together are a deliberate placement.
 MERCHANT_AUTHORED_SOURCE_TYPES = frozenset({"manual"})
+
+# Why a currently valid promotion did not reach this customer. An empty list is
+# an answer, and these say which answer it is: without them "no codes for you"
+# and "this store has no codes" and "we could not work out who you are" arrive
+# identically, and the difference is the whole question a merchant asks first.
+WITHHELD_UNUSABLE_RECORD = "unusable_record"
+WITHHELD_PERSONAL_TO_ANOTHER = "personal_to_another_customer"
+WITHHELD_LEVEL_NOT_ALLOWED = "level_not_allowed_by_store_policy"
+WITHHELD_LEVEL_NOT_EARNED = "level_not_earned_by_customer"
+WITHHELD_NOT_PUBLISHED = "not_published_for_general_use"
+WITHHELD_EXPIRING_TOO_SOON = "expiring_before_store_minimum"
 # The conditions a projection carries but has not evaluated. Named rather than
 # summarised, so a reader can see exactly what is still open.
 _UNEVALUATED = "conditions_not_fully_evaluated"
@@ -120,45 +134,75 @@ def _merchant_published_generally(fact: Dict[str, Any]) -> bool:
     """Whether the merchant themselves put this unleveled coupon where the
     assistant can reach it.
 
-    Two acts, both positive, neither inferred from an absence: the coupon was
-    created in the merchant's own dashboard (``source_type`` "manual", the only
-    path that writes the AI fields), and the merchant chose an AI-reachable
-    allocation channel. The warm pool writes "system" and always stamps a rung;
-    a Salla import expresses no Nahla AI intent; and an unset channel stays
-    empty, which is exactly why a defaulted "shared" cannot stand in for a
-    decision nobody made.
+    Always a positive act, never an absence. The coupon must first have been
+    created in the merchant's own dashboard — ``source_type`` "manual", the one
+    path that writes the AI fields; the warm pool writes "system" and always
+    stamps a rung, and a store-platform import expresses no Nahla intent. Then
+    one of two things the merchant did:
+
+    * they chose an AI-reachable allocation channel, or
+    * they created it as a general promotional coupon, which the dashboard
+      describes to them as a code that «يبقى مشتركاً» — it stays shared, and is
+      simply not auto-assigned to one customer. That is the merchant declaring
+      a public code, and it reaches the assistant on the strength of the
+      declaration rather than of the missing rung.
+
+    A channel the merchant did choose is honoured either way: ``campaign`` and
+    ``autopilot`` are placements on surfaces that are not this one, so a coupon
+    sent there stays there. And ``merchant_authored`` is the create endpoint's
+    own marker, which nothing else writes — a row that merely says nothing is
+    still not a merchant act, which is the distinction this gate exists to keep.
     """
     source_type = _text(fact.get("source_type"), 32).lower()
     if source_type not in MERCHANT_AUTHORED_SOURCE_TYPES:
         return False
-    return _text(fact.get("allocation_channel"), 32).lower() in NATIVE_AI_CHANNELS
+    channel = _text(fact.get("allocation_channel"), 32).lower()
+    if channel:
+        return channel in NATIVE_AI_CHANNELS
+    return bool(fact.get("merchant_authored"))
 
 
 def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
-             allowed_levels: Optional[List[str]],
-             entitlement: LevelEntitlement) -> Optional[Tuple[PromotionSnapshot, EvidenceRecord]]:
+             allowed_levels: Optional[List[str]], entitlement: LevelEntitlement,
+             withheld: Optional[Dict[str, int]] = None,
+             ) -> Optional[Tuple[PromotionSnapshot, EvidenceRecord]]:
     """One resolver fact as a snapshot plus its evidence record, or ``None``
     when the fact cannot be cited here: no id, an unknown kind, a coupon
     without a code, a personal code that is someone else's, a level the
-    merchant's policy keeps from the AI, or a level this customer has not
-    earned. An offer never carries a code, and is never level-conditioned."""
+    merchant's policy keeps from the AI, a level this customer has not earned,
+    or no rung and no merchant publication. An offer never carries a code, and
+    is never level-conditioned.
+
+    Every refusal is counted into ``withheld`` under the reason that caused it.
+    A caller that only sees ``None`` cannot tell a store with nothing to give
+    from a customer who earned nothing from a customer nobody could place, and
+    those are three different conversations.
+    """
+    def _refuse(reason: str) -> None:
+        if withheld is not None:
+            withheld[reason] = withheld.get(reason, 0) + 1
     kind = str(fact.get("record_kind") or "")
     try:
         promotion_id = int(fact.get("id"))
     except (TypeError, ValueError):
+        _refuse(WITHHELD_UNUSABLE_RECORD)
         return None
     if promotion_id <= 0 or kind not in _RECORD_KINDS:
+        _refuse(WITHHELD_UNUSABLE_RECORD)
         return None
     code = _text(fact.get("code"), 64) if kind == "coupon" else ""
     if kind == "coupon" and not code:
+        _refuse(WITHHELD_UNUSABLE_RECORD)
         return None
     bound_customer = fact.get("bound_customer_id")
     if bool(fact.get("customer_bound")) or bound_customer not in (None, "", 0):
         try:
             bound_customer = int(bound_customer)
         except (TypeError, ValueError):
+            _refuse(WITHHELD_UNUSABLE_RECORD)
             return None
         if customer_id is None or int(customer_id) != bound_customer:
+            _refuse(WITHHELD_PERSONAL_TO_ANOTHER)
             return None
         bound_to_this_customer = True
     else:
@@ -174,8 +218,10 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
         # entitlement says whether this is the rung *this* customer stands on.
         # A store that allows gold does not make every conversation gold.
         if allowed_levels is not None and level not in allowed_levels:
+            _refuse(WITHHELD_LEVEL_NOT_ALLOWED)
             return None
         if not entitlement.entitles(level):
+            _refuse(WITHHELD_LEVEL_NOT_EARNED)
             return None
         level_eligibility = LEVEL_ENTITLED
     elif _merchant_published_generally(fact):
@@ -187,6 +233,7 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
         # No rung and no authorisation. The absence of a level says only that
         # the record does not name one — never that the merchant meant this for
         # everyone — so it is withheld rather than guessed into a public offer.
+        _refuse(WITHHELD_NOT_PUBLISHED)
         return None
     ref = f"promotion:{kind}:{promotion_id}"
     conditions = _bounded_conditions(fact.get("conditions"))
@@ -346,15 +393,19 @@ async def list_shareable_promotions_impl(
     cutoff = _now() + timedelta(hours=min_hours) if min_hours > 0 else None
     snapshots: List[PromotionSnapshot] = []
     evidence: List[EvidenceRecord] = []
+    withheld: Dict[str, int] = {}
+    considered = 0
     for facts in (list(getattr(truth, "shareable", None) or ()), list(getattr(truth, "offers", None) or ())):
         kept = 0
         for fact in facts:
             if not isinstance(fact, dict):
                 continue
+            considered += 1
             if cutoff is not None and fact.get("record_kind") == "coupon" and _expires_before(fact, cutoff):
+                withheld[WITHHELD_EXPIRING_TOO_SOON] = withheld.get(WITHHELD_EXPIRING_TOO_SOON, 0) + 1
                 continue
             projected = _project(fact, customer_id=customer_id, allowed_levels=allowed_levels,
-                                 entitlement=entitlement)
+                                 entitlement=entitlement, withheld=withheld)
             if projected is None:
                 continue
             snapshot, record = projected
@@ -366,18 +417,34 @@ async def list_shareable_promotions_impl(
     outcome = str(getattr(truth, "query_outcome", "") or "")
     partial = outcome == PROMOTION_PARTIAL_FAILURE
     entitlement_view = entitlement.as_dict()
+    # One line that answers "why did nothing reach me?" without a person having
+    # to reconstruct it from a transcript. The merchant's records said how many
+    # promotions were live; this says how many survived each gate and which
+    # gate took the rest. No code, no customer identifier, no secret.
+    logger.info(
+        "[PROMOTION_PROJECTION] tenant=%s customer=%s considered=%d kept=%d "
+        "withheld=%s standing=%s level=%s determined=%s",
+        int(context.tenant_id), "yes" if customer_id is not None else "none",
+        considered, len(snapshots),
+        ",".join(f"{reason}:{count}" for reason, count in sorted(withheld.items())) or "none",
+        entitlement.reason, entitlement.resolved_level or "none", entitlement.determined,
+    )
     if not snapshots:
         if bool(getattr(truth, "query_failed", False)) or outcome == PROMOTION_QUERY_FAILED:
             return PromotionListResult(status="error", query_outcome=outcome or PROMOTION_QUERY_FAILED,
                                        partial=partial, failure_reason="promotion_query_failed",
-                                       entitlement=entitlement_view)
+                                       entitlement=entitlement_view, withheld=dict(withheld))
         return PromotionListResult(status="not_found", query_outcome=outcome or NO_VALID_PROMOTIONS,
                                    partial=partial, failure_reason="no_valid_shareable_promotions",
-                                   entitlement=entitlement_view)
+                                   entitlement=entitlement_view, withheld=dict(withheld))
     context.register_evidence(evidence)
     return PromotionListResult(status="ok", promotions=snapshots, evidence=evidence,
-                               query_outcome=outcome, partial=partial, entitlement=entitlement_view)
+                               query_outcome=outcome, partial=partial, entitlement=entitlement_view,
+                               withheld=dict(withheld))
 
 
 __all__ = ["GENERAL_AUTHORIZED", "LEVEL_ENTITLED", "MAX_CONDITION_IDS", "MAX_PROMOTIONS",
-           "MERCHANT_AUTHORED_SOURCE_TYPES", "list_shareable_promotions_impl"]
+           "MERCHANT_AUTHORED_SOURCE_TYPES", "WITHHELD_EXPIRING_TOO_SOON",
+           "WITHHELD_LEVEL_NOT_ALLOWED", "WITHHELD_LEVEL_NOT_EARNED", "WITHHELD_NOT_PUBLISHED",
+           "WITHHELD_PERSONAL_TO_ANOTHER", "WITHHELD_UNUSABLE_RECORD",
+           "list_shareable_promotions_impl"]

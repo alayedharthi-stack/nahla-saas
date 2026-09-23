@@ -112,3 +112,4 @@ def test_crm_status_ladder_is_not_the_coupon_level() -> None:
     assert resolve_coupon_level_for_order_count(DEFAULT_COUPON_LEVELS, 7).level_id == "gold"
     assert _segment_to_level("vip") == "gold"
     assert resolve_coupon_level_for_order_count(DEFAULT_COUPON_LEVELS, 15).level_id == "vip"
+

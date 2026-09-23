@@ -2688,3 +2688,42 @@ def test_another_conversations_list_is_never_tappable_in_this_one(pilot):
     assert here.offered_as_rows == () and here.offered_by_message == {}
     assert there.offered_as_rows == (pilot.product_id,)
     assert "customer_tapped" not in context_block
+
+
+def test_the_general_coupon_the_merchant_declared_reaches_a_real_customer(pilot):
+    """«أوصل نيته المحفوظة إلى بوابة العرض». On PostgreSQL, through the pilot's
+    own entry: the merchant made this code in their dashboard as a general
+    promotional coupon — the row records the act and names neither a rung nor a
+    channel, because a general coupon has neither — and it is now citable.
+
+    The row beside it is the same row minus the act, and it still is not: what
+    changed is that a declaration is read, not that an absence is."""
+    with _coupons(pilot, ((pilot.tenant_a, "EID20", None),),
+                  metadata={"source": "dashboard", "ai_allocatable": False}) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([accepted("wamid.EID20")])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("كود EID20 متاح للجميع", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟",
+        )
+    assert report.tools_called == ("list_shareable_promotions",)
+    assert ref in report.evidence_refs
+    assert report.dispatch_status == dd.SENT_ACCEPTED and len(transport.sent) == 1
+
+
+def test_a_code_recording_no_declaration_is_still_refused_on_postgres(pilot):
+    """The control, on the same table: identical row, metadata that records no
+    creation act, and the citing reply is refused before anything is sent."""
+    with _coupons(pilot, ((pilot.tenant_a, "UNDECLARED", None),),
+                  metadata={"category": "standard"}) as ids:
+        ref = f"promotion:coupon:{ids[0]}"
+        transport = Transport([])
+        report = pilot.run(
+            answers=[step([tool_use("p1", "list_shareable_promotions")]),
+                     step([reply("خذ هذا الكود", refs=(ref,), commerce=True)])],
+            transport=transport, question="عندكم كود خصم؟", budget=_two_step_budget(),
+        )
+    assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
+    assert "unknown_evidence" in dict(report.stop_detail)["problems"]
+    assert transport.sent == [] and report.processing_outcome == c.ProcessingOutcome.FAILED.value

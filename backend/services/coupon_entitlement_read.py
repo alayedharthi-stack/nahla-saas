@@ -39,10 +39,18 @@ to mention a coupon at all, when, and in what words.
 
 **Not knowing is its own answer.** A customer whose identity was never
 established in this conversation, one whose record cannot be found for this
-tenant, and a known customer who simply has not bought yet are three different
-states, and the reason code says which. Only the third is a determination; the
-first two are failures to determine, and they entitle nothing — while leaving
-untouched every coupon that was not conditioned on a level in the first place.
+tenant, one whose record exists but carries nothing the order index can be
+searched by, and a known customer who simply has not bought yet are four
+different states, and the reason code says which. Only the last is a
+determination; the rest are failures to determine, and they entitle nothing —
+while leaving untouched every coupon that was not conditioned on a level in the
+first place.
+
+The third is the one that hides. The order count comes back as a plain zero
+whether the history was searched and found empty or never searched at all, and
+a zero read as "new customer" is how a first-purchase welcome reaches someone
+with years of orders. ``CustomerOrderCount.history_established`` is what tells
+them apart, and this module refuses to resolve a level without it.
 """
 from __future__ import annotations
 
@@ -67,6 +75,10 @@ REASON_NO_ENTITLED_LEVEL = "no_entitled_level"
 REASON_IDENTITY_NOT_ESTABLISHED = "identity_not_established"
 REASON_CUSTOMER_RECORD_UNAVAILABLE = "customer_record_unavailable"
 REASON_ORDER_HISTORY_UNREADABLE = "order_history_unreadable"
+# The record exists but carries nothing the order index can be searched by, so
+# the history was never read. The platform's own counters would say "zero", and
+# zero here would be a claim the platform cannot support.
+REASON_ORDER_HISTORY_NOT_SEARCHABLE = "order_history_not_searchable"
 REASON_LEVEL_POLICY_UNREADABLE = "level_policy_unreadable"
 
 DETERMINED_REASONS: Tuple[str, ...] = (REASON_ENTITLED, REASON_FIRST_PURCHASE, REASON_NO_ENTITLED_LEVEL)
@@ -87,6 +99,12 @@ class LevelEntitlement:
     entitled_levels: Tuple[str, ...]         # that answer, as a list; empty when there is none
     reason: str
     first_purchase_applied: bool = False
+    # Everything the index returned for this customer, and how many of those
+    # the countability policy set aside (cancelled, refunded, abandoned, …).
+    # "Six orders, none of them countable" and "no orders at all" both resolve
+    # to no rung, and a merchant asked why will want the difference.
+    raw_orders: Optional[int] = None
+    excluded_orders: Optional[int] = None
 
     @property
     def determined(self) -> bool:
@@ -108,7 +126,19 @@ class LevelEntitlement:
             "reason": self.reason,
             "determined": self.determined,
             "first_purchase_applied": self.first_purchase_applied,
+            "raw_orders": self.raw_orders,
+            "excluded_orders": self.excluded_orders,
         }
+
+
+def _opt_count(value: Any) -> Optional[int]:
+    """A counter the source actually reported, or ``None`` when it did not."""
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _undetermined(customer_id: Optional[int], reason: str) -> LevelEntitlement:
@@ -154,6 +184,15 @@ def resolve_level_entitlement(db: Any, tenant_id: int, customer_id: Optional[int
         # That is not "a customer with no orders": nothing about this person's
         # history was established, so nothing about it may be acted on.
         return _undetermined(cid, REASON_CUSTOMER_RECORD_UNAVAILABLE)
+    if not bool(getattr(count, "history_established", True)):
+        # The record was found and its history was not read — no phone the
+        # order index could be searched by. Its zero counters describe the
+        # search, not the customer, and reading them as "no purchases" is how
+        # a customer with years of orders is welcomed as a new one.
+        logger.info("[COUPON_ENTITLEMENT] tenant=%s outcome=%s source=%s",
+                    tid, REASON_ORDER_HISTORY_NOT_SEARCHABLE,
+                    str(getattr(count, "count_source", "") or ""))
+        return _undetermined(cid, REASON_ORDER_HISTORY_NOT_SEARCHABLE)
 
     try:
         from services.coupon_generator import _get_coupon_dashboard_block  # noqa: PLC0415
@@ -165,6 +204,8 @@ def resolve_level_entitlement(db: Any, tenant_id: int, customer_id: Optional[int
         return _undetermined(cid, REASON_LEVEL_POLICY_UNREADABLE)
 
     countable = int(getattr(count, "countable_orders", 0) or 0)
+    seen = _opt_count(getattr(count, "raw_orders", None))
+    set_aside = _opt_count(getattr(count, "excluded_orders", None))
     levels = block.get("levels")
     # The merchant's own first-purchase rule, exactly as saved. It is read, not
     # enabled: a merchant who left it off gets a customer with no purchases
@@ -177,7 +218,8 @@ def resolve_level_entitlement(db: Any, tenant_id: int, customer_id: Optional[int
         # at all, first-purchase rule included. When it says none, none is the
         # answer here too — the set below is never allowed to disagree with it.
         return LevelEntitlement(customer_id=cid, countable_orders=countable, resolved_level=None,
-                                entitled_levels=(), reason=REASON_NO_ENTITLED_LEVEL)
+                                entitled_levels=(), reason=REASON_NO_ENTITLED_LEVEL,
+                                raw_orders=seen, excluded_orders=set_aside)
 
     if resolution.resolution_reason == REASON_FIRST_PURCHASE_AUTHORIZED:
         # The merchant chose to welcome a first purchase. That authorizes the
@@ -186,7 +228,8 @@ def resolve_level_entitlement(db: Any, tenant_id: int, customer_id: Optional[int
         return LevelEntitlement(customer_id=cid, countable_orders=countable,
                                 resolved_level=resolution.level_id,
                                 entitled_levels=(resolution.level_id,),
-                                reason=REASON_FIRST_PURCHASE, first_purchase_applied=True)
+                                reason=REASON_FIRST_PURCHASE, first_purchase_applied=True,
+                                raw_orders=seen, excluded_orders=set_aside)
 
     # The contract's one answer, and nothing beside it. A rung the customer has
     # passed but outgrown is not theirs to be offered: they have a standing,
@@ -194,11 +237,12 @@ def resolve_level_entitlement(db: Any, tenant_id: int, customer_id: Optional[int
     return LevelEntitlement(customer_id=cid, countable_orders=countable,
                             resolved_level=resolution.level_id,
                             entitled_levels=(resolution.level_id,),
-                            reason=REASON_ENTITLED)
+                            reason=REASON_ENTITLED, raw_orders=seen, excluded_orders=set_aside)
 
 
 __all__ = [
     "CANONICAL_COUPON_LEVEL_IDS", "DETERMINED_REASONS", "LevelEntitlement", "REASON_CUSTOMER_RECORD_UNAVAILABLE", "REASON_ENTITLED",
     "REASON_FIRST_PURCHASE", "REASON_IDENTITY_NOT_ESTABLISHED", "REASON_LEVEL_POLICY_UNREADABLE",
-    "REASON_NO_ENTITLED_LEVEL", "REASON_ORDER_HISTORY_UNREADABLE", "resolve_level_entitlement",
+    "REASON_NO_ENTITLED_LEVEL", "REASON_ORDER_HISTORY_NOT_SEARCHABLE",
+    "REASON_ORDER_HISTORY_UNREADABLE", "resolve_level_entitlement",
 ]

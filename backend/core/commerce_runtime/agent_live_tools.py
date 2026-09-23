@@ -488,15 +488,39 @@ def _entitlement_view(entitlement: Any) -> Mapping[str, Any]:
     if not isinstance(entitlement, Mapping):
         return {}
     levels = entitlement.get("entitled_levels")
-    orders = entitlement.get("countable_orders")
+
+    def _count(key: str) -> Any:
+        value = entitlement.get(key)
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
     return {
         "resolved_level": _text(entitlement.get("resolved_level"), 32),
         "entitled_levels": [_text(level, 32) for level in list(levels or ())[:8]],
-        "countable_orders": int(orders) if isinstance(orders, int) else None,
+        "countable_orders": _count("countable_orders"),
+        # How many orders the index returned at all, and how many the
+        # countability policy set aside. "Six orders, none countable" and "no
+        # orders" both resolve to no rung, and the difference is what a person
+        # asking "but I have ordered before" is actually asking about.
+        "orders_seen": _count("raw_orders"),
+        "orders_not_counted": _count("excluded_orders"),
         "reason": _text(entitlement.get("reason"), 64),
         "determined": bool(entitlement.get("determined")),
         "first_purchase_applied": bool(entitlement.get("first_purchase_applied")),
     }
+
+
+def _withheld_view(withheld: Any) -> Mapping[str, int]:
+    """``reason -> count`` for what the merchant held but this customer did not
+    get. Reasons only — never a code, never another customer's identifier."""
+    if not isinstance(withheld, Mapping):
+        return {}
+    counted: Dict[str, int] = {}
+    for reason, count in list(withheld.items())[:12]:
+        try:
+            counted[_text(reason, 64)] = int(count)
+        except (TypeError, ValueError):
+            continue
+    return counted
 
 
 def _shareable_promotions(binding: LiveToolBinding) -> at.ToolFunction:
@@ -505,8 +529,15 @@ def _shareable_promotions(binding: LiveToolBinding) -> at.ToolFunction:
     def body(arguments: Mapping[str, Any]) -> at.ToolResult:
         result = _run(list_shareable_promotions_impl(binding.context, limit=MAX_PROMOTIONS))
         if getattr(result, "status", "") != "ok":
+            # An empty list still has to say *why*. Without the standing and the
+            # withheld counts, "no rung earned", "we could not place you" and
+            # "this store is sharing nothing" arrived as one indistinguishable
+            # answer, and the model could neither explain itself nor decide
+            # whether asking the customer something would help.
             return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None),
-                               query_outcome=str(getattr(result, "query_outcome", "") or ""))
+                               query_outcome=str(getattr(result, "query_outcome", "") or ""),
+                               entitlement=_entitlement_view(getattr(result, "entitlement", None)),
+                               withheld=_withheld_view(getattr(result, "withheld", None)))
         promotions = [_promotion_view(p) for p in (getattr(result, "promotions", None) or ())]
         return at.ToolResult(
             # ``partial`` is said out loud: a source that could not be read means
@@ -516,6 +547,7 @@ def _shareable_promotions(binding: LiveToolBinding) -> at.ToolFunction:
                     # against, so an empty or short list can be told apart from
                     # a classification that could not be made.
                     "entitlement": _entitlement_view(getattr(result, "entitlement", None)),
+                    "withheld": _withheld_view(getattr(result, "withheld", None)),
                     "query_outcome": str(getattr(result, "query_outcome", "") or ""),
                     "partial": bool(getattr(result, "partial", False))},
             evidence_refs=_refs(getattr(result, "evidence", None) or ()),

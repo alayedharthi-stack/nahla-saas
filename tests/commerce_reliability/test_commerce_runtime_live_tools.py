@@ -260,7 +260,10 @@ def test_the_view_carries_the_reading_of_the_customer_the_list_was_built_against
     observation = run(binding, "list_shareable_promotions", {})
     assert observation.result["entitlement"] == {
         "resolved_level": "silver", "entitled_levels": ["bronze", "silver"], "countable_orders": 4,
-        "reason": "entitled_by_order_count", "determined": True, "first_purchase_applied": False}
+        "reason": "entitled_by_order_count", "determined": True, "first_purchase_applied": False,
+        # Absent from this double, and absent rather than zero in the view:
+        # a source that reported no totals has not reported "none seen".
+        "orders_seen": None, "orders_not_counted": None}
     first = observation.result["promotions"][0]
     assert first["coupon_level"] == "silver" and first["customer_level"] == "silver"
     assert first["level_eligibility"] == "entitled"
@@ -304,8 +307,89 @@ def test_no_shareable_promotion_is_an_honest_empty_answer_with_no_evidence(bindi
     assert observation.ok is True
     assert observation.result == {"status": "not_found", "found": False,
                                   "reason": "no_valid_shareable_promotions",
-                                  "query_outcome": "NO_VALID_PROMOTIONS"}
+                                  "query_outcome": "NO_VALID_PROMOTIONS",
+                                  "entitlement": {}, "withheld": {}}
     assert observation.evidence_refs == ()
+
+
+def test_an_empty_list_carries_the_standing_it_was_built_against(binding, monkeypatch):
+    """The defect this pins: an empty result used to drop the entitlement and
+    the withheld counts on the floor, so "you have earned no rung", "we could
+    not place you" and "this store publishes nothing" reached the model as one
+    identical answer. An empty list is an answer; it has to say which one."""
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("not_found", failure_reason="no_valid_shareable_promotions",
+                                      query_outcome="NO_VALID_PROMOTIONS", entitlement=STANDING,
+                                      withheld={"level_not_earned_by_customer": 6,
+                                                "not_published_for_general_use": 2})))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["found"] is False
+    assert observation.result["entitlement"]["resolved_level"] == "silver"
+    assert observation.result["entitlement"]["determined"] is True
+    assert observation.result["withheld"] == {"level_not_earned_by_customer": 6,
+                                              "not_published_for_general_use": 2}
+
+
+def test_the_three_causes_of_an_empty_list_reach_the_model_distinguishably(binding, monkeypatch):
+    """Same visible outcome — no codes — three different truths. A merchant's
+    first question is which of them happened, and the observation now answers
+    it without anyone reading a transcript."""
+    def observe(entitlement: Dict[str, Any], withheld: Dict[str, int]) -> Dict[str, Any]:
+        patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+                   async_returning(result("not_found", failure_reason="no_valid_shareable_promotions",
+                                          query_outcome="NO_VALID_PROMOTIONS",
+                                          entitlement=entitlement, withheld=withheld)))
+        return run(binding, "list_shareable_promotions", {}).result
+
+    earned_nothing = observe({"customer_id": 41, "countable_orders": 0, "resolved_level": "",
+                              "entitled_levels": [], "reason": "no_entitled_level",
+                              "determined": True, "first_purchase_applied": False},
+                             {"level_not_earned_by_customer": 8})
+    unreadable_history = observe({"customer_id": 41, "countable_orders": None, "resolved_level": "",
+                                  "entitled_levels": [], "reason": "order_history_unreadable",
+                                  "determined": False, "first_purchase_applied": False},
+                                 {"level_not_earned_by_customer": 8})
+    store_publishes_nothing = observe(STANDING, {"not_published_for_general_use": 8})
+
+    # Verified to have earned no rung is not the same as never having been read.
+    assert earned_nothing["entitlement"]["determined"] is True
+    assert earned_nothing["entitlement"]["countable_orders"] == 0
+    assert unreadable_history["entitlement"]["determined"] is False
+    assert unreadable_history["entitlement"]["countable_orders"] is None
+    assert earned_nothing["entitlement"]["reason"] != unreadable_history["entitlement"]["reason"]
+    # And neither is the same as a store that simply published nothing to the AI.
+    assert store_publishes_nothing["entitlement"]["determined"] is True
+    assert store_publishes_nothing["withheld"] == {"not_published_for_general_use": 8}
+    assert earned_nothing["withheld"] != store_publishes_nothing["withheld"]
+
+
+def test_an_unreadable_source_still_says_what_it_managed_to_settle(binding, monkeypatch):
+    """``error`` is about the records, not the customer. What was settled before
+    the read failed still travels, so a partial picture is not thrown away."""
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("error", failure_reason="promotion_query_failed",
+                                      query_outcome="PROMOTION_QUERY_FAILED", entitlement=STANDING,
+                                      withheld={"expiring_before_store_minimum": 3})))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["status"] == "error" and observation.result["found"] is False
+    assert observation.result["entitlement"]["resolved_level"] == "silver"
+    assert observation.result["withheld"] == {"expiring_before_store_minimum": 3}
+
+
+def test_withheld_counts_never_carry_a_code_or_another_customers_identifier(binding, monkeypatch):
+    """Reasons and counts only. The withheld view exists to explain a refusal,
+    never to leak what was refused — a code held back is still a code."""
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("not_found", failure_reason="no_valid_shareable_promotions",
+                                      query_outcome="NO_VALID_PROMOTIONS", entitlement=STANDING,
+                                      withheld={"personal_to_another_customer": "4",
+                                                "level_not_earned_by_customer": None,
+                                                "unusable_record": 1})))
+    observation = run(binding, "list_shareable_promotions", {})
+    withheld = observation.result["withheld"]
+    assert withheld == {"personal_to_another_customer": 4, "unusable_record": 1}
+    assert all(isinstance(count, int) for count in withheld.values())
+    assert "VIP50" not in repr(observation.result)
 
 
 def test_an_unreadable_promotion_source_says_so_rather_than_reporting_none(binding, monkeypatch):
@@ -611,3 +695,17 @@ def test_the_product_view_bounds_the_variant_options_it_forwards(binding, monkey
                                       evidence=[Record("catalog:product:1")], knowledge_sections=[])))
     forwarded = run(binding, "search_products", {"query": "فستان"}).result["products"][0]["variant_options"]
     assert len(forwarded) == 6 and all(len(values) == 12 for values in forwarded.values())
+
+
+def test_the_view_carries_what_was_seen_beside_what_was_counted(binding, monkeypatch):
+    """«كم طلبًا احتُسب، ولماذا استُبعد الباقي». Six orders seen and six set
+    aside resolves to the same rung as no orders at all, and the customer
+    asking "but I have ordered before" is asking about exactly that gap."""
+    standing = {**STANDING, "countable_orders": 0, "resolved_level": "", "entitled_levels": [],
+                "reason": "no_entitled_level", "raw_orders": 6, "excluded_orders": 6}
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("not_found", failure_reason="no_valid_shareable_promotions",
+                                      query_outcome="NO_VALID_PROMOTIONS", entitlement=standing)))
+    view = run(binding, "list_shareable_promotions", {}).result["entitlement"]
+    assert view["countable_orders"] == 0 and view["determined"] is True
+    assert view["orders_seen"] == 6 and view["orders_not_counted"] == 6

@@ -32,13 +32,20 @@ CUSTOMER = 41
 
 
 class Count:
-    """What ``count_customer_orders`` returns: a countable-order total."""
+    """What ``count_customer_orders`` returns: a countable-order total.
 
-    def __init__(self, countable: int, customer_id: int = CUSTOMER) -> None:
+    ``history_established`` is the honest bit — ``False`` means no search ran,
+    so the zeros describe the lookup and not the customer.
+    """
+
+    def __init__(self, countable: int, customer_id: int = CUSTOMER, *,
+                 raw: int | None = None, excluded: int | None = None,
+                 history_established: bool = True) -> None:
         self.customer_id = customer_id
         self.countable_orders = countable
-        self.raw_orders = countable
-        self.excluded_orders = 0
+        self.raw_orders = countable if raw is None else raw
+        self.excluded_orders = (0 if excluded is None else excluded)
+        self.history_established = history_established
 
 
 def ladder(**overrides: Any) -> List[Dict[str, Any]]:
@@ -229,7 +236,8 @@ def test_the_view_hands_out_a_plain_readable_answer(monkeypatch) -> None:
     view = resolve(monkeypatch, count=4).as_dict()
     assert view == {"customer_id": CUSTOMER, "countable_orders": 4, "resolved_level": "silver",
                     "entitled_levels": ["silver"], "reason": cer.REASON_ENTITLED,
-                    "determined": True, "first_purchase_applied": False}
+                    "determined": True, "first_purchase_applied": False,
+                    "raw_orders": 4, "excluded_orders": 0}
 
 
 # ── Read only, and provably so ───────────────────────────────────────────────
@@ -276,3 +284,89 @@ def test_the_module_reaches_no_issuance_path() -> None:
     # It reads through the platform's own authorities and nothing else.
     assert {"count_customer_orders", "resolve_coupon_level_for_order_count",
             "_get_coupon_dashboard_block", "_first_purchase_rule_from_dashboard"} <= names
+
+
+# ── A zero that was never searched for ───────────────────────────────────────
+
+
+def test_a_record_with_nothing_to_search_by_is_not_a_customer_with_no_orders(monkeypatch) -> None:
+    """The defect this pins. The order index is keyed by phone; a customer
+    record carrying none produces a plain zero, and zero read as "new" is how a
+    customer with years of orders is welcomed as a first-time buyer. The
+    platform never searched, so it claims nothing."""
+    entitlement = resolve(monkeypatch, count=Count(0, history_established=False))
+    assert entitlement.reason == cer.REASON_ORDER_HISTORY_NOT_SEARCHABLE
+    assert entitlement.determined is False
+    assert entitlement.countable_orders is None
+    assert entitlement.resolved_level is None and entitlement.entitled_levels == ()
+
+
+def test_an_unsearched_history_never_takes_the_merchants_welcome(monkeypatch) -> None:
+    """The first-purchase rule is the merchant's welcome for a *new* customer.
+    Handing it to someone whose history was never read spends the merchant's
+    discount on a guess — and tells a long-standing customer they are new."""
+    block = {"levels": ladder(), "rules": [{"id": "first_purchase", "enabled": True}]}
+    welcomed = resolve(monkeypatch, count=Count(0), block=block)
+    assert welcomed.first_purchase_applied is True and welcomed.resolved_level == "bronze"
+
+    unsearched = resolve(monkeypatch, count=Count(0, history_established=False), block=block)
+    assert unsearched.first_purchase_applied is False
+    assert unsearched.resolved_level is None
+    assert unsearched.reason == cer.REASON_ORDER_HISTORY_NOT_SEARCHABLE
+
+
+def test_the_four_ways_of_not_knowing_are_four_different_answers(monkeypatch) -> None:
+    """Never identified, no such record, a record nothing can be searched by,
+    and a history the read threw on — each entitles nothing, and each says
+    which. Only the fifth, a customer verified to have bought nothing, is a
+    determination."""
+    reasons = {
+        "anonymous": resolve(monkeypatch, customer_id=None).reason,
+        "no_record": resolve(monkeypatch, count=None).reason,
+        "no_key": resolve(monkeypatch, count=Count(0, history_established=False)).reason,
+        "unreadable": resolve(monkeypatch, count_raises=RuntimeError("boom")).reason,
+    }
+    assert len(set(reasons.values())) == 4, reasons
+    assert all(not cer.LevelEntitlement(
+        customer_id=CUSTOMER, countable_orders=None, resolved_level=None,
+        entitled_levels=(), reason=reason).determined for reason in reasons.values())
+    verified_none = resolve(monkeypatch, count=Count(0))
+    assert verified_none.determined is True and verified_none.countable_orders == 0
+    assert verified_none.reason not in set(reasons.values())
+
+
+def test_orders_that_were_seen_but_not_counted_are_reported_as_such(monkeypatch) -> None:
+    """"I have ordered before" and "you have no countable orders" are both true
+    when every order was cancelled or refunded. The counters carry the
+    difference so the answer can be about what actually happened."""
+    all_set_aside = resolve(monkeypatch, count=Count(0, raw=6, excluded=6))
+    assert all_set_aside.determined is True
+    assert all_set_aside.countable_orders == 0
+    assert all_set_aside.raw_orders == 6 and all_set_aside.excluded_orders == 6
+
+    never_ordered = resolve(monkeypatch, count=Count(0, raw=0, excluded=0))
+    assert never_ordered.raw_orders == 0 and never_ordered.excluded_orders == 0
+    assert all_set_aside.reason == never_ordered.reason  # same rung, different story
+
+
+def test_the_counters_travel_with_an_earned_standing_too(monkeypatch) -> None:
+    """A merchant reading "silver" wants to know it was three countable orders
+    out of five, not to re-derive it."""
+    entitlement = resolve(monkeypatch, count=Count(3, raw=5, excluded=2))
+    assert entitlement.resolved_level == "silver" and entitlement.reason == cer.REASON_ENTITLED
+    view = entitlement.as_dict()
+    assert view["countable_orders"] == 3
+    assert view["raw_orders"] == 5 and view["excluded_orders"] == 2
+
+
+def test_a_source_that_reports_no_counters_says_none_rather_than_zero(monkeypatch) -> None:
+    """An older count object that carries neither total must not be read as
+    "no orders seen" — absent is absent."""
+    class Bare:
+        customer_id = CUSTOMER
+        countable_orders = 4
+        history_established = True
+
+    entitlement = resolve(monkeypatch, count=Bare())
+    assert entitlement.countable_orders == 4
+    assert entitlement.raw_orders is None and entitlement.excluded_orders is None

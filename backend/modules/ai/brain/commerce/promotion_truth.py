@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
+from services.coupon_sync_visibility import is_dashboard_authored_coupon
+
 logger = logging.getLogger("nahla.brain.promotion_truth")
 
 
@@ -340,6 +342,10 @@ def _row_to_coupon_fact(row: Any) -> Dict[str, Any]:
         "description": str(getattr(row, "description", "") or ""),
         "expires_at": expires.isoformat() if hasattr(expires, "isoformat") else (str(expires) if expires else ""),
         "source_type": source_type,
+        # The merchant's own creation act, as the create endpoint recorded it.
+        # A reader deciding whether a code was published for everyone needs the
+        # act, not the absence of a rung — see the promotions tool's gate.
+        "merchant_authored": is_dashboard_authored_coupon(source_type, _meta_dict(row)),
         "allocation_channel": str(getattr(row, "allocation_channel", "") or ""),
         "coupon_level": str(getattr(row, "coupon_level", "") or "").lower(),
         "conditions": conditions,
