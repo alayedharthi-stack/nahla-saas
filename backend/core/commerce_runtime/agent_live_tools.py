@@ -596,6 +596,13 @@ def _entitlement_view(entitlement: Any) -> Mapping[str, Any]:
 
     return {
         "resolved_level": _text(entitlement.get("resolved_level"), 32),
+        # The one rung this store would actually serve them, which is at or
+        # below what they earned. It differs from ``resolved_level`` exactly
+        # when the merchant's own settings capped this customer, and the model
+        # needs the difference: a list holding one silver code for a gold
+        # customer is complete, not a mistake to apologise for. The rung, not
+        # the reasoning — which gate closed which rung stays merchant-private.
+        "served_level": _text(entitlement.get("served_level"), 32),
         "entitled_levels": [_text(level, 32) for level in list(levels or ())[:8]],
         "countable_orders": _count("countable_orders"),
         # How many orders the index returned at all, and how many the

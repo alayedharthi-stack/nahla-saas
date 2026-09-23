@@ -126,6 +126,14 @@ class TurnReport:
     # is checked against. Empty when the list was withheld or refused: a row
     # nobody was sent is a row nobody can have tapped.
     choice_row_ids: Tuple[str, ...] = ()
+    # Why the reply carried the shape it did. ``choice_rows=0`` on its own
+    # cannot tell a model that never asked for a selector from one that asked
+    # and had it withheld — for an unobserved product, a missing photo, a
+    # plain-http link — and those are opposite problems. The loop already
+    # decides both and records them; without them here a text-only turn is
+    # unreadable without a transcript.
+    choices_outcome: Optional[str] = None     # reply_choices: offered, or the reason withheld
+    card_outcome: Optional[str] = None        # reply_card: offered, or the reason withheld
     recovery_status: Optional[str] = None     # the bounded rich-to-text attempt, when one was made
     provider_message_id: Optional[str] = None
     processing_outcome: Optional[str] = None
@@ -666,6 +674,11 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
     turn_id = int(report_base["turn_id"])
     tools_called = tuple(event.detail.get("tool", "") for event in outcome.events
                          if event.kind == "tool_observation")
+    # The loop's own account of the reply it accepted, so a text-only turn says
+    # why it was text-only rather than leaving it to be guessed.
+    accepted = next((event for event in reversed(outcome.events)
+                     if event.kind == "reply_accepted"), None)
+    accepted_detail = dict(getattr(accepted, "detail", None) or {})
     evidence = tuple(str(ref) for ref in (outcome.detail.get("evidence_refs") or ()))
     usage_model = next((u.model for u in reversed(reasoner.usage) if u.model), None)
     stop_detail = _stop_detail(outcome)
@@ -679,6 +692,8 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         steps_used=outcome.steps_used,
         tool_calls_used=outcome.tool_calls_used,
         tools_called=tools_called,
+        choices_outcome=str(accepted_detail.get("choices") or "") or None,
+        card_outcome=str(accepted_detail.get("card") or "") or None,
         evidence_refs=evidence,
         input_tokens=reasoner.total_input_tokens,
         output_tokens=reasoner.total_output_tokens,
