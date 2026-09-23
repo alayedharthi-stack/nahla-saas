@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+from collections.abc import Mapping
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -424,6 +425,39 @@ async def get_order_details_impl(
     )
 
 
+_EVENT_LOCATION_KEYS = ("city", "station", "location", "hub", "branch")
+_EVENT_STATUS_KEYS = ("status", "state", "code")
+_EVENT_NOTE_KEYS = ("note", "description", "message", "detail")
+_EVENT_TIME_KEYS = ("occurred_at", "event_at", "timestamp", "created_at", "date")
+
+
+def _event_field(event: Any, keys: tuple[str, ...]) -> str:
+    """One explicitly supplied field of the carrier's last scan, or ``""``.
+
+    Only what the carrier actually sent. A location the payload does not carry
+    is absent, never the order's address or the merchant's city standing in for
+    it: "last seen in Riyadh" invented from a delivery address is a claim about
+    a shipment nobody made.
+    """
+    if not isinstance(event, Mapping):
+        return ""
+    for key in keys:
+        value = event.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return str(value).strip()[:200]
+    return ""
+
+
+def _iso_or_empty(value: Any) -> str:
+    """A timestamp as ISO-8601, or ``""`` — never today's date as a stand-in."""
+    if value is None:
+        return ""
+    if hasattr(value, "isoformat"):
+        return str(value.isoformat())
+    text = str(value).strip()
+    return text[:64] if text else ""
+
+
 def _shipment_snapshot(
     order: Any,
     shipment: Any,
@@ -465,7 +499,22 @@ def _shipment_snapshot(
         tracking_url = _absolute_http_url(getattr(shipment, "label_url", ""))
     tracking_url = tracking_url or order_meta_facts["tracking_url"] or ""
     reference = snapshot.display_reference or None
-    if not any((raw_status, carrier, tracking_number, tracking_url)):
+    # The carrier's own last scan. Read from the shipment row only: an order's
+    # metadata never carries a verified carrier event.
+    latest_event = getattr(shipment, "latest_event", None) if shipment is not None else None
+    event_status = _event_field(latest_event, _EVENT_STATUS_KEYS)
+    event_note = _event_field(latest_event, _EVENT_NOTE_KEYS)
+    event_location = _event_field(latest_event, _EVENT_LOCATION_KEYS)
+    # Only an explicit timestamp on this scan proves when it happened.
+    # ``source_event_at`` also stores shipment-record update/creation times
+    # when a carrier supplies no timed scan, so it cannot fill this field.
+    event_at = _event_field(latest_event, _EVENT_TIME_KEYS)
+    verified_at = _iso_or_empty(getattr(shipment, "last_verified_at", None)
+                                if shipment is not None else None)
+    data_source = str((getattr(shipment, "tracking_data_source", "")
+                       if shipment is not None else "") or "").strip()[:64]
+    if not any((raw_status, carrier, tracking_number, tracking_url,
+                event_status, event_note, event_location)):
         return None
 
     status_label = order_status_label_ar(raw_status, source=snapshot.source) if raw_status else ""
@@ -485,6 +534,12 @@ def _shipment_snapshot(
         ("carrier", carrier),
         ("tracking_number", tracking_number),
         ("tracking_url", tracking_url),
+        ("shipment_latest_event_status", event_status),
+        ("shipment_latest_event_note", event_note),
+        ("shipment_latest_event_location", event_location),
+        ("shipment_latest_event_at", event_at),
+        ("shipment_last_verified_at", verified_at),
+        ("shipment_data_source", data_source),
     ):
         if value:
             facts.append(
@@ -527,6 +582,12 @@ def _shipment_snapshot(
             carrier=carrier or None,
             tracking_number=tracking_number or None,
             tracking_url=tracking_url or None,
+            data_source=data_source or None,
+            latest_event_status=event_status or None,
+            latest_event_note=event_note or None,
+            latest_event_location=event_location or None,
+            latest_event_at=event_at or None,
+            last_verified_at=verified_at or None,
             evidence_ref=evidence_ref,
         ),
         evidence,
