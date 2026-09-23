@@ -34,6 +34,7 @@ from backend.services.customer_request_coupon_service import (
     ISSUED_REASON_CUSTOMER_REQUEST,
     REASON_AI_POLICY_DISABLED,
     REASON_IDENTITY_UNAVAILABLE,
+    REASON_CHANNEL_NOT_ALLOWED,
     REASON_LEVEL_NOT_ALLOWED_FOR_AI,
     REASON_LIVE_ISSUANCE_DISABLED,
     REASON_NO_LEVEL,
@@ -359,26 +360,35 @@ def test_live_issuance_disabled_does_not_consume_pool() -> None:
     assert (coupon.extra_metadata or {}).get("customer_id") is None
 
 
-def test_no_downgrade_when_ai_blocks_gold() -> None:
+def test_policy_list_block_serves_the_best_allowed_rung_below() -> None:
+    """A rung the store keeps from the assistant sends us down, not home.
+
+    The customer earned gold; this store's assistant policy lists only bronze
+    and silver. They are a silver customer on this channel — the gold coupon
+    stays untouched and the silver one is what they get.
+    """
     db, tenant_id, _engine = _make_db(
+        levels=_levels(include_ai_for=("gold",)),
         ai_policy={
             "enabled": True,
             "allowed_levels": ["bronze", "silver"],
             "min_remaining_hours": 3,
             "pool_mode": "pool_first",
-        }
+        },
     )
     customer = _add_customer(db, tenant_id, PHONE_A)
     _add_orders(db, tenant_id, PHONE_A, countable=7)
     silver = _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
     gold = _add_pool_coupon(db, tenant_id, "NHGLD", "gold")
     result = _issue(db, tenant_id, customer.id)
-    assert result.issued is False
-    assert result.resolved_level == "gold"
-    assert result.reason_code == REASON_LEVEL_NOT_ALLOWED_FOR_AI
+    assert result.issued is True
+    assert result.coupon_id == silver.id
+    assert result.resolved_level == "silver"
+    assert result.entitled_level == "gold"
+    assert result.reason_code == "issued"
     db.refresh(silver)
     db.refresh(gold)
-    assert (silver.extra_metadata or {}).get("customer_id") is None
+    assert int((silver.extra_metadata or {}).get("customer_id")) == customer.id
     assert (gold.extra_metadata or {}).get("customer_id") is None
 
 
@@ -401,12 +411,117 @@ def test_ai_policy_disabled() -> None:
 
 
 def test_gold_channel_block_is_not_silent_silver() -> None:
-    levels = _levels()
+    """The channel block on a rung sends us down too — and never silently.
+
+    ``allowed_channels`` without ``ai`` is how the shipped level defaults keep
+    gold away from the assistant, so this is the ordinary merchant shape. The
+    served rung is silver, and the result says in the same breath that gold is
+    what the order history earned: a reader can never mistake this for a
+    customer whose seven orders resolved to silver.
+    """
     db, tenant_id, _engine = _make_db(
-        levels=levels,
+        levels=_levels(),
         ai_policy={
             "enabled": True,
             "allowed_levels": ["bronze", "silver", "gold"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        },
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=7)
+    silver = _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == silver.id
+    assert result.resolved_level == "silver"
+    assert result.entitled_level == "gold"
+    assert result.reason_code == "issued"
+    assert result.as_dict()["entitled_level"] == "gold"
+    assert result.as_dict()["resolved_level"] == "silver"
+
+
+def _levels_shaped(**overrides: dict) -> list:
+    """The shipped ladder with named rungs overridden.
+
+    Written for the tests below, which need to say things like "gold is off" or
+    "silver is not for the assistant" without restating every field a merchant
+    configures.
+    """
+    rows = []
+    for row in _normalise_levels(DEFAULT_COUPON_LEVELS):
+        item = dict(row)
+        patch = overrides.get(item["id"])
+        if patch:
+            item.update(patch)
+        rows.append(item)
+    return rows
+
+
+def test_served_rung_advertises_its_own_terms_not_the_earned_rung() -> None:
+    """The limits quoted beside the coupon belong to the coupon.
+
+    This is the trap in serving a rung below: the code resolved gold, so gold's
+    caps are already in hand when silver is what gets handed over. Quoting them
+    would tell the customer about a cap their coupon never had.
+    """
+    db, tenant_id, _engine = _make_db(
+        levels=_levels_shaped(
+            gold={"allowed_channels": ["ai", "campaign"], "max_uses": 9, "per_customer_usage": 4},
+            silver={"allowed_channels": ["ai", "campaign"], "max_uses": 1, "per_customer_usage": 1},
+        ),
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        },
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=7)
+    _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.resolved_level == "silver"
+    assert result.entitled_level == "gold"
+    assert result.restrictions["max_uses"] == 1
+    assert result.restrictions["per_customer_usage"] == 1
+
+
+def test_ladder_never_walks_up_to_a_rung_the_history_did_not_earn() -> None:
+    """A store that allows only gold does not make a one-order customer gold.
+
+    Walking down serves less than was earned; walking up would invent an
+    entitlement, which is the failure this whole path exists to avoid.
+    """
+    db, tenant_id, _engine = _make_db(
+        levels=_levels(include_ai_for=("gold",)),
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["gold"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        },
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    gold = _add_pool_coupon(db, tenant_id, "NHGLD", "gold")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.resolved_level == "bronze"
+    assert result.entitled_level is None
+    assert result.reason_code == REASON_LEVEL_NOT_ALLOWED_FOR_AI
+    db.refresh(gold)
+    assert (gold.extra_metadata or {}).get("customer_id") is None
+
+
+def test_nothing_allowed_at_or_below_keeps_the_original_refusal() -> None:
+    """No rung to fall back to leaves the refusal exactly as it was."""
+    db, tenant_id, _engine = _make_db(
+        levels=_levels(include_ai_for=("gold", "vip")),
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["vip"],
             "min_remaining_hours": 3,
             "pool_mode": "pool_first",
         },
@@ -417,7 +532,191 @@ def test_gold_channel_block_is_not_silent_silver() -> None:
     result = _issue(db, tenant_id, customer.id)
     assert result.issued is False
     assert result.resolved_level == "gold"
+    assert result.entitled_level is None
     assert result.reason_code == REASON_LEVEL_NOT_ALLOWED_FOR_AI
+
+
+def test_disabled_rung_is_resolved_past_upstream_of_this_gate() -> None:
+    """A rung switched off never reaches the ladder walk at all.
+
+    ``resolve_coupon_level_for_order_count`` already skips a disabled rung, so
+    seven orders in a store with gold off resolve to silver outright. Nothing
+    was downgraded here — the order history simply resolved silver — and the
+    result says so by leaving ``entitled_level`` unset. Pinned because the walk
+    below must not start claiming an entitlement the resolver never granted.
+    """
+    db, tenant_id, _engine = _make_db(
+        levels=_levels_shaped(
+            gold={"enabled": False, "allowed_channels": ["ai", "campaign"]},
+            silver={"allowed_channels": ["ai", "campaign"]},
+        ),
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver", "gold"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        },
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=7)
+    silver = _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == silver.id
+    assert result.resolved_level == "silver"
+    assert result.entitled_level is None
+    assert result.reason_code == "issued"
+
+
+def test_disabled_bottom_rung_resolves_no_level() -> None:
+    """With the only rung off there is no rung to resolve, let alone serve."""
+    db, tenant_id, _engine = _make_db(
+        levels=_levels_shaped(bronze={"enabled": False}),
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver", "gold", "vip"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        },
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    _add_pool_coupon(db, tenant_id, "NHAAA", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_NO_LEVEL
+    assert result.entitled_level is None
+
+
+def test_a_closed_rung_below_is_skipped_for_the_next_one_down() -> None:
+    """The fallback is the best *allowed* rung, not simply the next one.
+
+    Silver is closed to the assistant here, so a walk that only stepped once
+    would serve a rung this merchant shut. It keeps going to bronze.
+    """
+    db, tenant_id, _engine = _make_db(
+        levels=_levels_shaped(
+            gold={"allowed_channels": ["ai", "campaign"]},
+            silver={"allowed_channels": ["campaign"]},
+            bronze={"allowed_channels": ["ai", "campaign"]},
+        ),
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        },
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=7)
+    bronze = _add_pool_coupon(db, tenant_id, "NHBRZ", "bronze")
+    silver = _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == bronze.id
+    assert result.resolved_level == "bronze"
+    assert result.entitled_level == "gold"
+    db.refresh(silver)
+    assert (silver.extra_metadata or {}).get("customer_id") is None
+
+
+def test_campaign_channel_never_walks_the_ladder_down() -> None:
+    """A campaign addresses one rung on purpose; a closed rung stays closed."""
+    db, tenant_id, _engine = _make_db(
+        levels=_levels_shaped(
+            gold={"allowed_channels": ["autopilot"]},
+            silver={"allowed_channels": ["campaign"]},
+        ),
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=7)
+    silver = _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
+    result = _issue(db, tenant_id, customer.id, for_channel="campaign")
+    assert result.issued is False
+    assert result.resolved_level == "gold"
+    assert result.entitled_level is None
+    assert result.reason_code == REASON_CHANNEL_NOT_ALLOWED
+    db.refresh(silver)
+    assert (silver.extra_metadata or {}).get("customer_id") is None
+
+
+def test_refusal_after_a_downgrade_still_reports_what_was_earned() -> None:
+    """Walking down and then finding nothing to give is still a downgrade.
+
+    The store keeps gold from the assistant and has no silver coupon to hand
+    over. Reporting ``resolved_level='silver'`` alone would read as a customer
+    whose orders resolved silver; the earned rung has to survive the refusal.
+    """
+    db, tenant_id, _engine = _make_db(
+        levels=_levels(include_ai_for=("gold",)),
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_only",
+        },
+    )
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=7)
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == REASON_POOL_EMPTY
+    assert result.resolved_level == "silver"
+    assert result.entitled_level == "gold"
+
+
+def test_generic_merchant_two_rung_store_serves_below_entitlement() -> None:
+    """A plain catalogue store, nothing like the ladder the defaults ship.
+
+    ``متجر تجريبي عام`` runs two rungs and keeps the upper one for its own
+    campaigns. A long-standing customer asking the assistant still leaves with
+    the best coupon that store lets the assistant give.
+    """
+    levels = [
+        {
+            "id": "bronze",
+            "label": "عميل جديد",
+            "discount_default": 5,
+            "validity_hours": 24,
+            "max_uses": 1,
+            "per_customer_usage": 1,
+            "allowed_channels": ["ai", "campaign"],
+            "enabled": True,
+            "min_orders": 1,
+        },
+        {
+            "id": "silver",
+            "label": "عميل دائم",
+            "discount_default": 12,
+            "validity_hours": 48,
+            "max_uses": 3,
+            "per_customer_usage": 2,
+            "allowed_channels": ["campaign"],
+            "enabled": True,
+            "min_orders": 3,
+        },
+    ]
+    db, tenant_id, _engine = _make_db(
+        levels=_normalise_levels(levels),
+        ai_policy={
+            "enabled": True,
+            "allowed_levels": ["bronze", "silver"],
+            "min_remaining_hours": 3,
+            "pool_mode": "pool_first",
+        },
+    )
+    customer = _add_customer(db, tenant_id, PHONE_B, name="نورة عبدالله")
+    _add_orders(db, tenant_id, PHONE_B, countable=5)
+    bronze = _add_pool_coupon(db, tenant_id, "NHGEN", "bronze")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True
+    assert result.coupon_id == bronze.id
+    assert result.resolved_level == "bronze"
+    assert result.entitled_level == "silver"
+    assert result.reason_code == "issued"
+    # The bottom rung's own cap, not the rung the five orders earned.
+    assert result.restrictions["max_uses"] == 1
+    assert result.restrictions["per_customer_usage"] == 1
 
 
 def test_issues_assigned_gold_when_ai_allows() -> None:

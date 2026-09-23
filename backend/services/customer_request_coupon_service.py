@@ -11,7 +11,7 @@ from __future__ import annotations
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -29,7 +29,11 @@ from services.coupon_salla_provider_state import (
     SALLA_NOT_CONFIGURED,
     classify_salla_coupon_provider_state,
 )
-from services.coupon_level_contract import resolve_coupon_level_for_order_count
+from services.coupon_level_contract import (
+    CANONICAL_COUPON_LEVEL_IDS,
+    highest_allowed_at_or_below,
+    resolve_coupon_level_for_order_count,
+)
 from services.customer_intelligence import CustomerIntelligenceService
 from services.order_countability_policy import is_countable_order
 
@@ -143,6 +147,14 @@ class CustomerCouponIssuanceResult:
     count_source: Optional[str] = None
     raw_orders: Optional[int] = None
     excluded_orders: Optional[int] = None
+    # What the order history earned, when the merchant keeps that rung away
+    # from the assistant and allows a lower one. ``resolved_level`` is always
+    # the rung the coupon actually carries, so the two disagree exactly when a
+    # downgrade happened — and never silently. Audit surface only: it is not
+    # projected into the facts the customer's reply is composed from, because
+    # which rungs a merchant opens to the assistant is their business, not the
+    # customer's.
+    entitled_level: Optional[str] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -159,6 +171,7 @@ class CustomerCouponIssuanceResult:
             "min_order_amount": self.min_order_amount,
             "restrictions": dict(self.restrictions or {}),
             "reason_code": self.reason_code,
+            "entitled_level": self.entitled_level,
             "count_source": self.count_source,
             "raw_orders": self.raw_orders,
             "excluded_orders": self.excluded_orders,
@@ -212,6 +225,15 @@ def _first_purchase_rule_from_dashboard(block: Mapping[str, Any]) -> Any:
     return block.get("first_purchase_rule") or block.get("first_purchase")
 
 
+def _positive_int(value: Any) -> Optional[int]:
+    """An unset or unusable cap is absent, never a cap of zero."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _level_entry(block: Mapping[str, Any], level_id: str) -> Dict[str, Any]:
     raw = block.get("levels") or []
     if isinstance(raw, Mapping):
@@ -222,6 +244,39 @@ def _level_entry(block: Mapping[str, Any], level_id: str) -> Dict[str, Any]:
             if isinstance(entry, Mapping) and str(entry.get("id") or "").lower() == level_id:
                 return dict(entry)
     return {"id": level_id}
+
+
+def _servable_levels(
+    block: Mapping[str, Any],
+    *,
+    channel: str,
+    policy_levels: Sequence[str],
+) -> List[str]:
+    """Every rung this merchant will let this channel hand out, ladder order.
+
+    Each candidate is read on its own terms — its own switch, its own channel
+    list, and for the assistant the store's policy list. Nothing is inherited
+    from the rung the order history resolved, because a rung that was just
+    refused must not lend its permissions to the one served in its place.
+    """
+    permitted = {str(x).strip().lower() for x in (policy_levels or ())}
+    out: List[str] = []
+    for candidate in CANONICAL_COUPON_LEVEL_IDS:
+        entry = _level_entry(block, candidate)
+        # ``_level_entry`` answers with a bare ``{"id": ...}`` placeholder for a
+        # rung the merchant never configured. That is an absence, not a rung
+        # with default permissions, so it is not servable.
+        if not (set(entry) - {"id"}):
+            continue
+        if not bool(entry.get("enabled", True)):
+            continue
+        channels = [str(c).lower() for c in (entry.get("allowed_channels") or []) if c]
+        if channels and channel not in channels:
+            continue
+        if channel == "ai" and permitted and candidate not in permitted:
+            continue
+        out.append(candidate)
+    return out
 
 
 def _global_defaults(block: Mapping[str, Any]) -> Dict[str, Any]:
@@ -394,6 +449,7 @@ def _empty_result(
     reason_code: str,
     policy_allowed: bool = False,
     count: Optional[CustomerOrderCount] = None,
+    entitled_level: Optional[str] = None,
 ) -> CustomerCouponIssuanceResult:
     return CustomerCouponIssuanceResult(
         customer_id=customer_id,
@@ -412,6 +468,7 @@ def _empty_result(
         count_source=None if count is None else count.count_source,
         raw_orders=None if count is None else count.raw_orders,
         excluded_orders=None if count is None else count.excluded_orders,
+        entitled_level=entitled_level,
     )
 
 
@@ -423,6 +480,7 @@ def _result_from_coupon(
     reason_code: str,
     min_order_amount: Optional[float],
     restrictions: Dict[str, Any],
+    entitled_level: Optional[str] = None,
 ) -> CustomerCouponIssuanceResult:
     exp = _as_aware(coupon.expires_at)
     return CustomerCouponIssuanceResult(
@@ -442,6 +500,7 @@ def _result_from_coupon(
         count_source=count.count_source,
         raw_orders=count.raw_orders,
         excluded_orders=count.excluded_orders,
+        entitled_level=entitled_level,
     )
 
 
@@ -513,50 +572,92 @@ async def issue_customer_coupon(
         )
 
     level_cfg = _level_entry(block, resolved_level)
-    if not bool(level_cfg.get("enabled", True)):
-        return _empty_result(
-            customer_id=count.customer_id,
-            countable_orders=count.countable_orders,
-            resolved_level=resolved_level,
-            reason_code=REASON_LEVEL_DISABLED,
-            count=count,
-        )
-
     channel = str(for_channel or "ai").lower()
-    allowed_channels = [
-        str(c).lower()
-        for c in (level_cfg.get("allowed_channels") or resolution.allowed_channels or [])
-        if c
-    ]
-    if allowed_channels and channel not in allowed_channels:
-        return _empty_result(
-            customer_id=count.customer_id,
-            countable_orders=count.countable_orders,
-            resolved_level=resolved_level,
-            reason_code=REASON_CHANNEL_NOT_ALLOWED
-            if channel != "ai"
-            else REASON_LEVEL_NOT_ALLOWED_FOR_AI,
-            count=count,
-        )
 
+    # Why the rung the order history earned cannot be served on this channel,
+    # or ``None`` when it can. Read exactly as before; what changed is that a
+    # block no longer ends the request on its own. A merchant who keeps gold
+    # away from the assistant but allows silver has a silver customer here, not
+    # a customer with nothing — so a block sends us down the ladder, and the
+    # refusal it carries is used only if nothing below is servable.
+    earned_block: Optional[str] = None
+    if not bool(level_cfg.get("enabled", True)):
+        earned_block = REASON_LEVEL_DISABLED
+    else:
+        allowed_channels = [
+            str(c).lower()
+            for c in (level_cfg.get("allowed_channels") or resolution.allowed_channels or [])
+            if c
+        ]
+        if allowed_channels and channel not in allowed_channels:
+            earned_block = (
+                REASON_CHANNEL_NOT_ALLOWED
+                if channel != "ai"
+                else REASON_LEVEL_NOT_ALLOWED_FOR_AI
+            )
+
+    policy_levels: List[str] = []
     if channel == "ai":
         if not bool(policy.get("enabled", True)):
+            # A rung that was already blocked keeps its own reason, as it did
+            # before this path existed; the disabled policy answers only for a
+            # rung that was otherwise fine. Either way nothing is served.
             return _empty_result(
                 customer_id=count.customer_id,
                 countable_orders=count.countable_orders,
                 resolved_level=resolved_level,
-                reason_code=REASON_AI_POLICY_DISABLED,
+                reason_code=earned_block or REASON_AI_POLICY_DISABLED,
                 count=count,
             )
-        allowed_levels = [str(x).lower() for x in (policy.get("allowed_levels") or [])]
-        if allowed_levels and resolved_level not in allowed_levels:
+        policy_levels = [str(x).lower() for x in (policy.get("allowed_levels") or [])]
+        if earned_block is None and policy_levels and resolved_level not in policy_levels:
+            earned_block = REASON_LEVEL_NOT_ALLOWED_FOR_AI
+
+    # Set on the one path that walks the ladder down, so a result only ever
+    # reports a downgrade that happened. It is deliberately a field of its own
+    # rather than a reason code: ``reason_code`` already answers "issued or
+    # reused, and if not, why not", and two consumers read it that way — the
+    # ``reused_assignment`` fact and the closed reason the customer's reply is
+    # composed from. Whether the merchant's policy capped this customer is
+    # neither of those questions.
+    entitled_level: Optional[str] = None
+
+    if earned_block is not None:
+        served: Optional[str] = None
+        # Only the assistant walks the ladder down. A campaign or autopilot run
+        # is the merchant addressing one rung deliberately, so a rung they
+        # closed there stays closed rather than quietly becoming a lower one.
+        if channel == "ai":
+            # Strictly below: the earned rung was just refused, and a candidate
+            # read that disagreed with that refusal would serve the very rung
+            # the merchant closed.
+            servable = [
+                candidate
+                for candidate in _servable_levels(
+                    block, channel=channel, policy_levels=policy_levels
+                )
+                if candidate != resolved_level
+            ]
+            served = highest_allowed_at_or_below(resolved_level, servable)
+        if served is None:
             return _empty_result(
                 customer_id=count.customer_id,
                 countable_orders=count.countable_orders,
                 resolved_level=resolved_level,
-                reason_code=REASON_LEVEL_NOT_ALLOWED_FOR_AI,
+                reason_code=earned_block,
                 count=count,
             )
+        # The coupon will carry the served rung's economics, so the terms
+        # advertised beside it must be that rung's too. Carrying the earned
+        # rung's cap across is exactly how a result comes to quote limits the
+        # issued coupon never had.
+        entitled_level, resolved_level = resolved_level, served
+        served_entry = _level_entry(block, served)
+        restrictions = dict(restrictions)
+        restrictions["max_uses"] = _positive_int(served_entry.get("max_uses"))
+        restrictions["per_customer_usage"] = _positive_int(
+            served_entry.get("per_customer_usage")
+        )
 
     if not allow_issuance:
         return _empty_result(
@@ -566,6 +667,7 @@ async def issue_customer_coupon(
             policy_allowed=True,
             reason_code=REASON_LIVE_ISSUANCE_DISABLED,
             count=count,
+            entitled_level=entitled_level,
         )
 
     min_remaining_hours = int(policy.get("min_remaining_hours") or 0) if channel == "ai" else 0
@@ -592,6 +694,7 @@ async def issue_customer_coupon(
                 reason_code=REASON_REUSED,
                 min_order_amount=min_order_amount,
                 restrictions=restrictions,
+                entitled_level=entitled_level,
             )
 
         pool_mode = str(policy.get("pool_mode") or POOL_MODE_POOL_FIRST).lower()
@@ -622,6 +725,7 @@ async def issue_customer_coupon(
                 policy_allowed=True,
                 reason_code=REASON_POOL_EMPTY,
                 count=count,
+                entitled_level=entitled_level,
             )
 
         if coupon is None:
@@ -634,6 +738,7 @@ async def issue_customer_coupon(
                     policy_allowed=True,
                     reason_code=REASON_POOL_EMPTY,
                     count=count,
+                    entitled_level=entitled_level,
                 )
             if provider_state == SALLA_CONFIGURED_BUT_UNAVAILABLE:
                 return _empty_result(
@@ -643,6 +748,7 @@ async def issue_customer_coupon(
                     policy_allowed=True,
                     reason_code=REASON_SALLA_UNAVAILABLE,
                     count=count,
+                    entitled_level=entitled_level,
                 )
             if provider_state != SALLA_ADAPTER_AVAILABLE:
                 return _empty_result(
@@ -652,6 +758,7 @@ async def issue_customer_coupon(
                     policy_allowed=True,
                     reason_code=REASON_POOL_EMPTY,
                     count=count,
+                    entitled_level=entitled_level,
                 )
             coupon = await generator.create_on_demand_for_level(
                 resolved_level,
@@ -666,6 +773,7 @@ async def issue_customer_coupon(
                     policy_allowed=True,
                     reason_code=REASON_POOL_EMPTY,
                     count=count,
+                    entitled_level=entitled_level,
                 )
 
         return _result_from_coupon(
@@ -675,6 +783,7 @@ async def issue_customer_coupon(
             reason_code=REASON_ISSUED,
             min_order_amount=min_order_amount,
             restrictions=restrictions,
+            entitled_level=entitled_level,
         )
     finally:
         lock.release()
