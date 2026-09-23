@@ -240,16 +240,29 @@ Evidence rules the tool enforces:
   is excluded from a resend) but never become a delivered, read or failed copy
   of the anchor wamid, never raise `delivered_copies` and never make
   `delivered_multiple`. The single exception is a legacy-only row (no ledger
-  attempt) whose complete history has the anchor as its only copy. Such
-  recipients are reported with `delivery_evidence_scope=recipient_aggregate`.
+  attempt) whose complete history has the anchor as its only known copy, and
+  even then only delivered/read are used: the pre-ledger attempt counter was a
+  read-then-write that concurrent workers could lose, so "only copy" can hide
+  one copy, and a failed column may be that hidden copy's failure. Recipients
+  proven only at recipient level are reported with
+  `delivery_evidence_scope=recipient_aggregate`, and are never `all_failed`.
+* **Identity conflicts are not merged.** Two send-log rows of the campaign
+  that normalise to one phone are an attribution conflict (report ineligible,
+  recipient `uncertain`); ledger attempts are keyed by
+  `(send_log_id, attempt_no)`. A failure receipt in `--log-json` for a wamid
+  the database does not know, addressed to a campaign recipient, keeps that
+  recipient `uncertain`.
 * **Every counted attempt is accounted for once.** `all_failed` and
   `delivered_once` need the whole attempt history the send-log row counted.
   A ledger row is identified by `attempt_no`; an accepted copy by its wamid;
   the summary row stands for the last attempt only, and is the ledger's last
   attempt again whenever the ledger has one (it copies its code onto the row).
   `abandoned` claims are not counted attempts. An attempt is proven unsent only
-  by a ledger `rejected`/`not_sent` state or a positive rejection code from
-  `PROVEN_REJECTION_CODES`. `watchdog_timeout`, `exception`, `no_message_id`,
+  by a ledger `not_sent` state, or by a rejection (ledger `rejected` or a
+  legacy row) whose code is in `PROVEN_REJECTION_CODES` — a ledger `rejected`
+  with `unknown` / `service_unavailable` / `internal_error` stays unknown.
+  Legacy histories rest on the legacy attempt counter; the database run
+  cannot see a copy that left no row anywhere. `watchdog_timeout`, `exception`, `no_message_id`,
   `unknown`, `retry_exhausted`, empty or unrecognised codes prove nothing.
   Earlier legacy attempts whose outcome was overwritten stay unknown, with or
   without copies, and exported log lines never add proof.

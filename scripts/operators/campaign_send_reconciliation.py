@@ -57,8 +57,8 @@ row is ``(send_log_id, attempt_no)``; an accepted copy is its wamid; the
 summary row stands for the LAST attempt only — and when the ledger has an
 attempt, the summary is that ledger attempt again (the ledger copies its
 code onto the row), never a second one. An attempt is proven unsent only by
-a ledger ``rejected`` / ``not_sent`` state or, for a legacy row, by a
-positive rejection code from ``PROVEN_REJECTION_CODES`` — a code merely
+a ledger ``not_sent`` state or by a rejection (ledger ``rejected`` or a
+legacy row) carrying a positive code from ``PROVEN_REJECTION_CODES`` — a code merely
 absent from a list of ambiguous ones proves nothing. Earlier legacy
 attempts whose outcome was overwritten stay unknown, with or without
 copies. Exported log lines carry no attempt identity and never add proof.
@@ -169,7 +169,8 @@ class Recipient:
     log_wamid: Optional[str] = None
     agg_delivered: bool = False
     agg_read: bool = False
-    ledger: Dict[int, LedgerAttempt] = field(default_factory=dict)
+    # Keyed by ``(send_log_id, attempt_no)``.
+    ledger: Dict[Any, LedgerAttempt] = field(default_factory=dict)
     # Observations without an attempt identity (exported log lines). They
     # are shown, never counted as proof: they may describe an attempt the
     # summary row or the ledger already describes.
@@ -251,8 +252,12 @@ def attempt_history(r: Recipient) -> History:
     counted = [a for _, a in sorted(r.ledger.items())
                if a.state not in LEDGER_NOT_COUNTED_STATES]
     for a in counted:
-        if a.state in LEDGER_UNSENT_STATES:
-            unsent.append(a.error_code or a.state)
+        if a.state == "not_sent":
+            unsent.append(a.error_code or a.state)    # nothing reached Meta
+        elif a.state == "rejected" and is_proven_rejection_code(a.error_code):
+            unsent.append((a.error_code or "").strip().lower())
+        elif a.state == "rejected":
+            unknown += 1                      # an error body we cannot classify
         elif not (a.state == "accepted" and a.wamid and a.wamid in r.copies):
             unknown += 1                      # claimed / request_started / uncertain
     legacy_n = int(r.log_attempts or 0) - len(counted)
@@ -301,6 +306,8 @@ def classify(r: Recipient, *, delivery_evidence: bool) -> str:
         return "accepted_multiple_unproven" if len(copies) >= 2 else "uncertain"
     if delivered:
         return "delivered_once"               # every other attempt proven failed
+    if r.has_proven_delivery():
+        return "uncertain"                    # a delivery we cannot place on a copy
     return "all_failed"
 
 
@@ -310,8 +317,8 @@ def row_evidence_is_per_copy(r: Recipient) -> bool:
 
     Only for a legacy-only row (no ledger attempt — the ledger rewrites the
     columns as aggregates) whose attempt history is complete and whose only
-    accepted copy is the anchor: then no other wamid was ever on the row, so
-    every receipt that set the columns was the anchor's own."""
+    known accepted copy is the anchor. Even then only delivered/read are
+    used (``_apply_row_columns``)."""
     if r.ledger or not r.log_wamid:
         return False
     if set(r.copies) != {r.log_wamid}:
@@ -320,12 +327,14 @@ def row_evidence_is_per_copy(r: Recipient) -> bool:
 
 
 def _apply_row_columns(r: Recipient) -> None:
+    """Delivered/read only. The legacy attempt counter was a read-then-
+    write that concurrent workers could lose, so "sole copy" can be wrong
+    by one hidden copy: a delivered/read column still proves a delivery to
+    this recipient (the safe direction), but a failed column may be the
+    hidden copy's failure and is never pinned on the anchor."""
     c = r.copies[r.log_wamid]
     c.read |= r.agg_read
     c.delivered |= r.agg_delivered or r.agg_read
-    if r.log_failed_at and not (r.agg_delivered or r.agg_read):
-        c.failed = True
-        c.failed_reason = c.failed_reason or (r.log_error_code or "")[:120] or None
 
 
 def _load_meta_errors():
@@ -430,7 +439,8 @@ def apply_logs(recipients: Dict[str, Recipient], *, campaign_id: int, tenant_id:
                infer_from_failures: bool = False) -> Dict[str, Any]:
     meta = {"accepted_lines": 0, "failed_events": 0, "pre_accept_errors": 0,
             "exceptions": 0, "first_accept": None, "last_accept": None,
-            "failed_events_unmatched_wamid": 0}
+            "failed_events_unmatched_wamid": 0,
+            "failed_events_unknown_wamid_for_recipient": 0}
     failed_events: List[tuple] = []
     for msg in iter_log_messages(log_paths):
         ts = (_TS_RE.match(msg) or [None, None])[1]
@@ -488,6 +498,12 @@ def apply_logs(recipients: Dict[str, Recipient], *, campaign_id: int, tenant_id:
                 # A failure for a wamid this campaign's accept lines never
                 # showed (another send, or outside the export).
                 meta["failed_events_unmatched_wamid"] += 1
+                if r is not None and r.has_log_row:
+                    # Database mode: a failure receipt for a copy the database
+                    # does not know, addressed to this recipient. It may be a
+                    # copy of this campaign the database lost.
+                    r.unresolved_evidence.append("failure receipt for an unknown wamid")
+                    meta["failed_events_unknown_wamid_for_recipient"] += 1
                 continue
             if r is None:
                 r = recipients[phone] = Recipient(phone)
@@ -724,6 +740,16 @@ def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: i
                 p = norm_phone(phone)
                 log_phone[int(log_id)] = p
                 r = recipients.setdefault(p, Recipient(p))
+                if r.has_log_row:
+                    # Two rows of this campaign normalise to one phone: their
+                    # summaries cannot both describe one recipient.
+                    attribution["attribution_conflicts"] += 1
+                    r.unresolved_evidence.append("two send-log rows for one phone")
+                    r.agg_delivered |= dl is not None
+                    r.agg_read |= rd is not None
+                    if wamid:
+                        claim(wamid, p)
+                    continue
                 r.has_log_row = True
                 r.log_status = status
                 r.log_attempts = int(attempts or 0)
@@ -753,7 +779,7 @@ def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: i
                         attribution["attribution_conflicts"] += 1
                         continue
                     r = recipients[p]
-                    r.ledger[int(no)] = LedgerAttempt(int(no), state, wamid, err)
+                    r.ledger[(int(log_id), int(no))] = LedgerAttempt(int(no), state, wamid, err)
                     if wamid and claim(wamid, p):
                         c = r.copies[wamid]
                         c.read |= rd is not None
@@ -812,20 +838,21 @@ def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: i
             #    linked when its receipt matched the row at the time).
             current = "message_delivery_events"
             seen_mde: set = set()
-            for chunk in _chunks(sorted(log_phone)):
-                for mde_id, wamid, status, raw_code, err, log_id in _read(conn,
-                        "SELECT id, wamid, status, raw_code, error_code, campaign_send_log_id "
-                        "FROM message_delivery_events WHERE tenant_id = :t "
-                        "AND campaign_send_log_id = ANY(:ids)", {"t": tenant_id, "ids": chunk}):
-                    seen_mde.add(int(mde_id))
-                    if (wamid or "").startswith("synth:"):
-                        attribution["synthetic_failure_events"] += 1
-                        recipients[log_phone[int(log_id)]].uncertain_observations += 1
-                        continue
-                    if claim(wamid, log_phone[int(log_id)]):
-                        _apply_status(recipients[wamid_owner[wamid]].copies[wamid],
-                                      status, raw_code or err)
-                    src[current]["rows"] += 1
+            for mde_id, wamid, status, raw_code, err, log_id in _read(conn,
+                    "SELECT id, wamid, status, raw_code, error_code, campaign_send_log_id "
+                    "FROM message_delivery_events WHERE tenant_id = :t "
+                    "AND campaign_send_log_id IN (SELECT id FROM campaign_send_logs "
+                    "WHERE tenant_id = :t AND campaign_id = :c)",
+                    {"t": tenant_id, "c": campaign_id}):
+                seen_mde.add(int(mde_id))
+                if (wamid or "").startswith("synth:"):
+                    attribution["synthetic_failure_events"] += 1
+                    recipients[log_phone[int(log_id)]].uncertain_observations += 1
+                    continue
+                if claim(wamid, log_phone[int(log_id)]):
+                    _apply_status(recipients[wamid_owner[wamid]].copies[wamid],
+                                  status, raw_code or err)
+                src[current]["rows"] += 1
 
             # 6. Receipts for the complete wamid set, until it stops growing.
             read_wamids: set = set()
@@ -861,7 +888,11 @@ def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: i
                         wamid = _event_wamid(md or {})
                         c = (recipients[wamid_owner[wamid]].copies[wamid] if wamid in wamid_owner
                              else unattributed.get(wamid))
-                        if c is not None:
+                        if c is None:
+                            # Matched one key, carries another wamid: evidence
+                            # we cannot place.
+                            attribution["attribution_conflicts"] += 1
+                        else:
                             _apply_event_flags(c, md or {})
                     if has_inbox:
                         current = "campaign_status_event_inbox"

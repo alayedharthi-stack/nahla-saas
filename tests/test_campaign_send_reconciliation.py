@@ -184,6 +184,13 @@ def test_complete_history_controls():
     assert rec.resend_proposal(mixed, "all_failed") == "excluded_meta_restriction"
 
 
+def test_recipient_level_delivery_is_never_all_failed():
+    r = _r({"failed": True}, {"failed": True}, attempts=2)
+    r.agg_delivered = True
+    assert rec.classify(r, delivery_evidence=True) == "uncertain"
+    assert rec.resend_proposal(r, "uncertain") == "excluded_proven_delivery"
+
+
 def test_unresolved_evidence_keeps_the_recipient_unresolved():
     r = _r(status="failed", code="rate_limit")
     r.unresolved_evidence.append("unapplied inbox receipt for an unknown wamid")
@@ -420,6 +427,7 @@ def test_db_known_failed_copy_with_an_unrecovered_attempt(pgdb, tmp_path):
         _log_row(c, 1, "+966500000021", "sent", 2, wamid="w.21", err="131048", fl=True)
         _log_row(c, 2, "+966500000022", "failed", 1, err="131099_new_meta_code")
         _log_row(c, 3, "+966500000023", "sent", 1, wamid="w.23", err="131048", fl=True)
+        _mde(c, "w.23", "failed")                 # the copy's own failure receipt
     rc, rep = _run(url, tmp_path, "--check-schema")
     assert rc == 0
     assert _by_suffix(rep, "0021")["category"] == "uncertain"
@@ -585,7 +593,9 @@ def test_legacy_row_columns_are_per_copy_only_for_a_sole_copy(pgdb, tmp_path):
     """81: legacy-only row, one attempt, one copy — the columns can only be
     that copy's receipts. 82: legacy row whose first copy (X) was
     overwritten by Y; the delivered column may be X's — recipient-level
-    proof, no delivered copy. 83: legacy sole copy, failed column."""
+    proof, no delivered copy. 83: legacy sole copy with only the failed
+    column — never pinned on the copy (the legacy counter can hide one
+    copy); 84: the same with the copy's own failure receipt."""
     url, engine, _ = pgdb
     with engine.begin() as c:
         _base(c)
@@ -594,6 +604,8 @@ def test_legacy_row_columns_are_per_copy_only_for_a_sole_copy(pgdb, tmp_path):
         _log_row(c, 2, "+966500000082", "sent", 2, wamid="w.82Y", dl=True)
         _campaign_event(c, "w.82X", conv)
         _log_row(c, 3, "+966500000083", "sent", 1, wamid="w.83", err="131048", fl=True)
+        _log_row(c, 4, "+966500000084", "sent", 1, wamid="w.84", err="131048", fl=True)
+        _mde(c, "w.84", "failed")
     rc, rep = _run(url, tmp_path, "--check-schema")
     assert rc == 0 and rep["decision_eligible"] is True, rep["ineligible_reasons"]
     sole = _by_suffix(rep, "0081")
@@ -604,10 +616,71 @@ def test_legacy_row_columns_are_per_copy_only_for_a_sole_copy(pgdb, tmp_path):
     assert dup["delivery_evidence_scope"] == "recipient_aggregate"
     assert dup["resend_proposal"] == "excluded_proven_delivery"
     assert dup["category"] == "accepted_multiple_unproven"
-    failed = _by_suffix(rep, "0083")
-    assert failed["category"] == "all_failed"
+    column_only = _by_suffix(rep, "0083")
+    assert column_only["category"] == "uncertain"
+    assert column_only["resend_proposal"] == "excluded_unresolved"
+    assert _by_suffix(rep, "0084")["category"] == "all_failed"
     assert rep["recipients_with_aggregate_only_delivery"] == 1
-    assert rep["sources"]["database"]["row_columns_as_per_copy_evidence"] == 2
+    assert rep["sources"]["database"]["row_columns_as_per_copy_evidence"] == 3
+
+
+# ── Second review: identities, codes and unknown receipts ───────────────
+
+
+@pg
+def test_two_rows_for_one_phone_are_a_conflict_not_a_merge(pgdb, tmp_path):
+    """Rows X (+966…) and Y (966…) of one campaign normalise to the same
+    phone. X's attempt is uncertain, Y's rejected: Y must not overwrite X."""
+    url, engine, _ = pgdb
+    with engine.begin() as c:
+        _base(c)
+        _log_row(c, 1, "+966500000091", "uncertain", 1)
+        _attempt(c, 1, "+966500000091", 1, "uncertain")
+        _log_row(c, 2, "966500000091", "failed", 1, err="rate_limit")
+        _attempt(c, 2, "966500000091", 1, "rejected", err="rate_limit")
+    rc, rep = _run(url, tmp_path, "--check-schema")
+    assert rc == 0
+    assert rep["decision_eligible"] is False
+    r = _by_suffix(rep, "0091")
+    assert r["category"] == "uncertain" and r["resend_proposal"] == "excluded_unresolved"
+    assert rep["sources"]["database"]["attribution"]["attribution_conflicts"] >= 1
+
+
+@pg
+def test_ledger_rejection_needs_a_positive_code(pgdb, tmp_path):
+    url, engine, _ = pgdb
+    with engine.begin() as c:
+        _base(c)
+        for i, code in enumerate(("service_unavailable", "unknown", "internal_error"), 1):
+            ph = f"+96650000010{i}"
+            _log_row(c, i, ph, "failed", 1, err=code)
+            _attempt(c, i, ph, 1, "rejected", err=code)
+        _log_row(c, 4, "+966500000104", "failed", 1, err="not_on_whatsapp")
+        _attempt(c, 4, "+966500000104", 1, "rejected", err="not_on_whatsapp")
+    rc, rep = _run(url, tmp_path, "--check-schema")
+    assert rc == 0
+    for s in ("0101", "0102", "0103"):
+        assert _by_suffix(rep, s)["category"] == "uncertain", s
+    assert _by_suffix(rep, "0104")["category"] == "all_failed"      # control
+
+
+@pg
+def test_failure_receipt_for_an_unknown_wamid_keeps_the_recipient_unresolved(pgdb, tmp_path):
+    url, engine, _ = pgdb
+    with engine.begin() as c:
+        _base(c)
+        _log_row(c, 1, "+966500000111", "failed", 1, err="rate_limit")
+    logs = tmp_path / "logs.json"
+    logs.write_text(json.dumps({"deploy": [{"timestamp": "1", "message":
+        "2026-09-23 11:12:40,100 INFO [PAYMENT_MEDIA_DIAG] status_failed wamid=w.hidden "
+        "status=failed recipient_id=966500000111 timestamp=1 tenant_id=5 "
+        "message_event=orphan campaign_send_log=matched "
+        "errors=[{'code': 'REDACTED', 'title': 'Spam Rate limit hit', 'message': 'x'}]"}]}))
+    rc, rep = _run(url, tmp_path, "--check-schema", "--log-json", str(logs))
+    assert rc == 0
+    r = _by_suffix(rep, "0111")
+    assert r["category"] == "uncertain" and r["resend_proposal"] == "excluded_unresolved"
+    assert rep["sources"]["logs"]["failed_events_unknown_wamid_for_recipient"] == 1
 
 
 @pg
