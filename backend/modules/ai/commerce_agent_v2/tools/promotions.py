@@ -501,13 +501,17 @@ async def list_shareable_promotions_impl(
     except Exception as exc:  # noqa: BLE001 - an unreadable ladder serves nothing
         level_policy_unreadable = type(exc).__name__
     else:
-        broken_rungs = unreadable_rungs(merchant_levels)
         if not ladder_is_readable(merchant_levels):
             # The read succeeded and returned something that is not a ladder.
             # Indistinguishable, for our purposes, from not having read it:
             # neither tells us what the merchant permits.
             level_policy_unreadable = "not_a_ladder"
         else:
+            # Rungs the merchant did configure but whose permission fields are
+            # not permission fields. ``servable_levels`` already refuses them;
+            # naming them is what stops a list they shortened from being
+            # reported as the store's own answer.
+            broken_rungs = unreadable_rungs(merchant_levels)
             served_level = policy_served_level(
                 merchant_levels, entitlement.resolved_level,
                 channel="ai", policy_levels=allowed_levels or ())
