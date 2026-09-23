@@ -130,6 +130,16 @@ class ClassifiedError:
 # ``unknown``, which surfaces as "خطأ من Meta — راجع الدعم" so the
 # merchant doesn't see raw English jargon.
 ERRORS: Dict[str, ClassifiedError] = {
+    # Local policy refusal: no request reached Meta and retrying cannot fix it.
+    "automation_blocked": ClassifiedError(
+        key="automation_blocked",
+        label_ar="منع الإرسال بسبب إعدادات الحماية في نحلة",
+        severity="major",
+        is_recoverable=True,
+        advice_ar="راجع سبب المنع وإعدادات الحظر والإيقاف الخاصة بالمحادثة.",
+        retryable=False,
+        quality_tier="harmless",
+    ),
     "not_on_whatsapp": ClassifiedError(
         key="not_on_whatsapp",
         label_ar="الرقم لا يملك حساب واتساب",
@@ -637,6 +647,11 @@ def classify_meta_error(
     falling back to the ``unknown`` entry as a last resort, so callers
     don't need to defend against ``None``.
     """
+    # This is a local wire refusal, never a Meta policy/availability error.
+    # Its authoritative code must win over free-text words in the reason.
+    if str(code or "").strip().lower() == "automation_blocked":
+        return ERRORS["automation_blocked"]
+
     # 1. Numeric code is the most reliable signal.
     try:
         code_int = int(code) if code is not None and str(code).strip() else None
