@@ -605,11 +605,150 @@ def _branch_diff_paths(base: str = _SCOPE_DIFF_BASE) -> set:
     }
 
 
+SCOPE_EXCEPTIONS_REL = "backend/modules/ai/governance/agent_scope_exceptions.json"
+
+
+class ScopeExceptionRegistryMalformed(AssertionError):
+    """The registry exists on BASE and cannot be read as exceptions.
+
+    An unreadable grant is not a grant, and it is not an absence either: it is
+    a governance record nobody can audit. The guard fails rather than pick an
+    interpretation, for the same reason ``ScopeDiffUnavailable`` exists.
+    """
+
+
+def _scope_exceptions_on_base(base: str = _SCOPE_DIFF_BASE) -> dict:
+    """``exact path -> exception`` as the registry stands **on BASE**.
+
+    Read with ``git show {base}:{path}``, never from the working tree, so a
+    branch cannot grant itself the exception it wants: an owner exception has
+    to be reviewed and merged on its own before any branch can rely on it.
+    That is the rule the intelligence scanner's registry beside this one
+    already follows (``lint_intelligence_non_interference.EXCEPTIONS_REL``),
+    and ``AGENTS.md`` states it: owner exceptions cannot be created in the same
+    PR as the runtime change.
+
+    A registry absent from BASE means no exceptions, which is the strict
+    direction. A registry present but unreadable, or an entry missing what
+    makes it auditable, raises.
+    """
+    import hashlib  # noqa: PLC0415
+    import json  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    from datetime import date, datetime  # noqa: PLC0415
+
+    repo = os.path.abspath(os.path.join(_HERE, "../.."))
+
+    def _expiry(raw: object, index: int) -> str:
+        """An ISO date, parsed — never a string compared for sort order.
+
+        Comparing ``str(expires_at)`` against today lexicographically made
+        ``"not-a-date"`` sort after every real date, so a malformed expiry
+        read as "not expired" and became a permanent grant. A date the guard
+        cannot parse is a date it will not honour.
+        """
+        if not isinstance(raw, str):
+            raise ScopeExceptionRegistryMalformed(
+                f"exceptions[{index}] expires_at must be a string, got {type(raw).__name__}")
+        try:
+            return datetime.strptime(raw.strip(), "%Y-%m-%d").date().isoformat()
+        except ValueError as exc:
+            raise ScopeExceptionRegistryMalformed(
+                f"exceptions[{index}] expires_at is not an ISO date: {raw!r}") from exc
+
+    def _content_digest(ref: str, path: str) -> str:
+        """Hash the committed blob, matching the committed diff under review."""
+        blob = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=repo, capture_output=True,
+        )
+        return hashlib.sha256(blob.stdout).hexdigest() if blob.returncode == 0 else ""
+
+    def _validated_digest(raw: object, field: str, index: int) -> str:
+        if (not isinstance(raw, str) or len(raw) != 64
+                or any(c not in "0123456789abcdef" for c in raw)):
+            raise ScopeExceptionRegistryMalformed(
+                f"exceptions[{index}] {field} must be a lowercase sha256")
+        return raw
+    proc = subprocess.run(
+        ["git", "show", f"{base}:{SCOPE_EXCEPTIONS_REL}"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return {}
+
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ScopeExceptionRegistryMalformed(
+            f"{SCOPE_EXCEPTIONS_REL} on {base} is not valid JSON: {exc}") from exc
+
+    rows = payload.get("exceptions") if isinstance(payload, dict) else payload
+    if rows is None:
+        return {}
+    if not isinstance(rows, list):
+        raise ScopeExceptionRegistryMalformed("exceptions must be a list")
+
+    today = date.today().isoformat()
+    granted: dict = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ScopeExceptionRegistryMalformed(f"exceptions[{index}] is not an object")
+        # Each field is what lets a reader audit the grant afterwards: which
+        # grant, for what work, approved where, and when it stops applying.
+        for field in ("exception_id", "task_scope", "owner_approval_ref", "expires_at"):
+            if not isinstance(row.get(field), str) or not row[field].strip():
+                raise ScopeExceptionRegistryMalformed(
+                    f"exceptions[{index}] missing {field}")
+        scope = row.get("exact_file_scope")
+        if isinstance(scope, str):
+            scope = [scope]
+        if not isinstance(scope, list) or len(scope) != 1:
+            raise ScopeExceptionRegistryMalformed(
+                f"exceptions[{index}] must name exactly one file")
+        # The change the owner approved, named by the content the file must
+        # have once it is made. Without it the grant is a month-long licence to
+        # edit that file for any reason, which is not what anybody approved:
+        # BASE-only reading stops a branch writing itself a new grant, and does
+        # nothing to stop a branch reusing an existing one for other work.
+        digests = row.get("authorized_content_sha256")
+        if isinstance(digests, str):
+            digests = [digests]
+        if not isinstance(digests, list) or len(digests) != 1:
+            raise ScopeExceptionRegistryMalformed(
+                f"exceptions[{index}] must name exactly one authorized content digest")
+        approved = _validated_digest(digests[0], "authorized_content_sha256", index)
+        approved_base = _validated_digest(row.get("base_content_sha256"), "base_content_sha256", index)
+        if _expiry(row["expires_at"], index) < today:
+            continue                      # lapsed: the path is protected again
+        for path in scope:
+            if (not isinstance(path, str) or not path or path != path.strip()
+                    or path.startswith("/") or "\\" in path
+                    or any(part in ("", ".", "..") for part in path.split("/"))
+                    or any(char in path for char in "*?[]")):
+                raise ScopeExceptionRegistryMalformed(
+                    f"exceptions[{index}] must name an exact repository-relative file")
+            # The same target blob must not authorize a rollback after BASE
+            # acquired an independent change. Bind both ends of the edit.
+            if (_content_digest(base, path) == approved_base
+                    and _content_digest("HEAD", path) == approved):
+                granted[path] = row
+    return granted
+
+
 def test_branch_diff_excludes_other_agent_scope_paths() -> None:
-    """Branch diff must not touch lifecycle/templates/coupon-order agent-owned paths."""
+    """Branch diff must not touch lifecycle/templates/coupon-order agent-owned paths.
+
+    A path is excused only when an owner exception **on BASE** names it *and*
+    the file's content matches a digest that exception authorised. The exact
+    path keeps the marker scan protecting every sibling; the digest keeps the
+    grant attached to the change it was approved for, so a different edit to
+    the same file does not inherit it.
+    """
     import subprocess
 
     files = _branch_diff_paths()
+    excused = _scope_exceptions_on_base()
 
     forbidden_exact = {
         "backend/routers/coupons.py",
@@ -635,8 +774,13 @@ def test_branch_diff_excludes_other_agent_scope_paths() -> None:
         "store_knowledge.py",
     )
 
-    assert not files.intersection(forbidden_exact)
+    assert not (files.intersection(forbidden_exact) - set(excused))
     for path in files:
+        if path in excused:
+            # Excused by exact path only. A marker match on any *other* file —
+            # a sibling module, a test, a script — is still a scope violation,
+            # which is why the grant lists paths and never patterns.
+            continue
         lowered = path.lower()
         assert not any(marker in lowered for marker in forbidden_scope_markers), path
 
