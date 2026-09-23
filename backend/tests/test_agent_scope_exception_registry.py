@@ -14,6 +14,7 @@ runtime change.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -45,6 +46,7 @@ def _valid_entry(**overrides: Any) -> Dict[str, Any]:
         "owner_approval_ref": "https://example.test/approval",
         "expires_at": "2099-01-01",
         "authorized_content_sha256": ["0" * 64],
+        "base_content_sha256": hashlib.sha256(b"# original\nVALUE = 0\n").hexdigest(),
     }
     entry.update(overrides)
     return entry
@@ -103,7 +105,7 @@ def test_an_exception_on_base_excuses_its_path_only_for_the_approved_content(rep
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(body, encoding="utf-8")
     _write_registry(root, {"exceptions": [
-        _valid_entry(authorized_content_sha256=[digest])]})
+        _valid_entry(authorized_content_sha256=[digest], base_content_sha256=digest)]})
     run("git", "add", "-A")
     run("git", "commit", "-qm", "owner exception")
 
@@ -112,7 +114,10 @@ def test_an_exception_on_base_excuses_its_path_only_for_the_approved_content(rep
     assert granted[GUARDED_PATH]["exception_id"] == "EX-TEST"
 
     # Change the file to anything else and the same grant stops applying.
+    run("git", "checkout", "-qb", "feature")
     target.write_text("# a different edit\nVALUE = 2\n", encoding="utf-8")
+    run("git", "add", "-A")
+    run("git", "commit", "-qm", "different committed edit")
     assert _read(root) == {}
 
 
@@ -243,9 +248,6 @@ def test_the_guard_still_protects_every_path_no_exception_names() -> None:
 # repository with a real base and a real feature branch, and assert what a
 # reviewer actually cares about: does the guard pass, or does it fail.
 
-
-import hashlib  # noqa: E402
-import textwrap  # noqa: E402
 
 import tests.test_trusted_context_shadow_wireup as guard  # noqa: E402
 
@@ -419,3 +421,50 @@ def test_guard_still_fails_when_the_base_diff_cannot_be_read(tmp_path: Path) -> 
     _edit_guarded_file(tmp_path, run, AUTHORISED_BODY)
     with pytest.raises(guard.ScopeDiffUnavailable):
         _run_guard(tmp_path, base="origin/no-such-base")
+
+
+def test_uncommitted_approved_content_cannot_hide_unapproved_head(tmp_path: Path) -> None:
+    run = _guarded_repo(tmp_path, {"exceptions": [_valid_entry(
+        base_content_sha256=_sha256("# original\nVALUE = 0\n"),
+        authorized_content_sha256=[_sha256(AUTHORISED_BODY)])]})
+    _edit_guarded_file(tmp_path, run, DIFFERENT_BODY)
+    # The tested delta is committed. A later local write must not change the verdict.
+    (tmp_path / GUARDED_PATH).write_text(AUTHORISED_BODY, encoding="utf-8")
+    with pytest.raises(AssertionError):
+        _run_guard(tmp_path)
+
+
+def test_grant_does_not_authorize_reverting_a_changed_base(tmp_path: Path) -> None:
+    run = _guarded_repo(tmp_path, {"exceptions": [_valid_entry(
+        base_content_sha256=_sha256("# original\nVALUE = 0\n"),
+        authorized_content_sha256=[_sha256(AUTHORISED_BODY)])]})
+    run("git", "checkout", "-q", "base")
+    _edit_guarded_file(tmp_path, run, "# later independent base change\nVALUE = 3\n")
+    run("git", "checkout", "-qb", "later-feature")
+    _edit_guarded_file(tmp_path, run, AUTHORISED_BODY)
+    with pytest.raises(AssertionError):
+        _run_guard(tmp_path)
+
+
+@pytest.mark.parametrize("overrides", [
+    {"base_content_sha256": None},
+    {"base_content_sha256": "bad"},
+    {"authorized_content_sha256": ["0" * 64, "1" * 64]},
+    {"exact_file_scope": [GUARDED_PATH, "backend/services/promotion_engine.py"]},
+    {"exact_file_scope": ["../coupon_generator.py"]},
+])
+def test_guard_requires_one_exact_before_after_pair(tmp_path: Path, overrides: dict) -> None:
+    entry = _valid_entry(authorized_content_sha256=[_sha256(AUTHORISED_BODY)])
+    entry.update(overrides)
+    run = _guarded_repo(tmp_path, {"exceptions": [entry]})
+    _edit_guarded_file(tmp_path, run, AUTHORISED_BODY)
+    with pytest.raises(ScopeExceptionRegistryMalformed):
+        _run_guard(tmp_path)
+
+
+def test_committed_approved_head_does_not_depend_on_working_tree(tmp_path: Path) -> None:
+    run = _guarded_repo(tmp_path, {"exceptions": [_valid_entry(
+        authorized_content_sha256=[_sha256(AUTHORISED_BODY)])]})
+    _edit_guarded_file(tmp_path, run, AUTHORISED_BODY)
+    (tmp_path / GUARDED_PATH).write_text(DIFFERENT_BODY, encoding="utf-8")
+    _run_guard(tmp_path)

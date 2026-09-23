@@ -656,13 +656,20 @@ def _scope_exceptions_on_base(base: str = _SCOPE_DIFF_BASE) -> dict:
             raise ScopeExceptionRegistryMalformed(
                 f"exceptions[{index}] expires_at is not an ISO date: {raw!r}") from exc
 
-    def _content_digest(path: str) -> str:
-        """sha256 of the file as HEAD leaves it, read from disk."""
-        target = os.path.join(repo, path)
-        if not os.path.isfile(target):
-            return ""
-        with open(target, "rb") as handle:
-            return hashlib.sha256(handle.read()).hexdigest()
+    def _content_digest(ref: str, path: str) -> str:
+        """Hash the committed blob, matching the committed diff under review."""
+        blob = subprocess.run(
+            ["git", "show", f"{ref}:{path}"],
+            cwd=repo, capture_output=True,
+        )
+        return hashlib.sha256(blob.stdout).hexdigest() if blob.returncode == 0 else ""
+
+    def _validated_digest(raw: object, field: str, index: int) -> str:
+        if (not isinstance(raw, str) or len(raw) != 64
+                or any(c not in "0123456789abcdef" for c in raw)):
+            raise ScopeExceptionRegistryMalformed(
+                f"exceptions[{index}] {field} must be a lowercase sha256")
+        return raw
     proc = subprocess.run(
         ["git", "show", f"{base}:{SCOPE_EXCEPTIONS_REL}"],
         cwd=repo, capture_output=True, text=True,
@@ -696,9 +703,9 @@ def _scope_exceptions_on_base(base: str = _SCOPE_DIFF_BASE) -> dict:
         scope = row.get("exact_file_scope")
         if isinstance(scope, str):
             scope = [scope]
-        if not isinstance(scope, list) or not scope:
+        if not isinstance(scope, list) or len(scope) != 1:
             raise ScopeExceptionRegistryMalformed(
-                f"exceptions[{index}] missing exact_file_scope")
+                f"exceptions[{index}] must name exactly one file")
         # The change the owner approved, named by the content the file must
         # have once it is made. Without it the grant is a month-long licence to
         # edit that file for any reason, which is not what anybody approved:
@@ -707,25 +714,25 @@ def _scope_exceptions_on_base(base: str = _SCOPE_DIFF_BASE) -> dict:
         digests = row.get("authorized_content_sha256")
         if isinstance(digests, str):
             digests = [digests]
-        if not isinstance(digests, list) or not digests:
+        if not isinstance(digests, list) or len(digests) != 1:
             raise ScopeExceptionRegistryMalformed(
-                f"exceptions[{index}] missing authorized_content_sha256")
-        approved = set()
-        for digest in digests:
-            cleaned_digest = str(digest or "").strip().lower()
-            if len(cleaned_digest) != 64 or not all(c in "0123456789abcdef" for c in cleaned_digest):
-                raise ScopeExceptionRegistryMalformed(
-                    f"exceptions[{index}] authorized_content_sha256 is not a sha256: {digest!r}")
-            approved.add(cleaned_digest)
+                f"exceptions[{index}] must name exactly one authorized content digest")
+        approved = _validated_digest(digests[0], "authorized_content_sha256", index)
+        approved_base = _validated_digest(row.get("base_content_sha256"), "base_content_sha256", index)
         if _expiry(row["expires_at"], index) < today:
             continue                      # lapsed: the path is protected again
         for path in scope:
-            cleaned = str(path or "").strip().replace("\\", "/")
-            if not cleaned:
+            if (not isinstance(path, str) or not path or path != path.strip()
+                    or path.startswith("/") or "\\" in path
+                    or any(part in ("", ".", "..") for part in path.split("/"))
+                    or any(char in path for char in "*?[]")):
                 raise ScopeExceptionRegistryMalformed(
-                    f"exceptions[{index}] has a blank path")
-            if _content_digest(cleaned) in approved:
-                granted[cleaned] = row
+                    f"exceptions[{index}] must name an exact repository-relative file")
+            # The same target blob must not authorize a rollback after BASE
+            # acquired an independent change. Bind both ends of the edit.
+            if (_content_digest(base, path) == approved_base
+                    and _content_digest("HEAD", path) == approved):
+                granted[path] = row
     return granted
 
 

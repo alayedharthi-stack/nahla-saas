@@ -3,8 +3,9 @@
   "_comment": "Owner-approved exceptions to the agent file-ownership scope guard in backend/tests/test_trusted_context_shadow_wireup.py. Read from BASE only, and only for content the grant names: a branch can neither write itself a grant nor reuse an existing one for a different change. Same conventions as intelligence_exceptions.json beside it. This registry does not replace or relax the intelligence_exceptions / GOV-002 requirements; both apply.",
   "_entry_shape": {
     "exception_id": "stable id, referenced by the PR that uses it",
-    "exact_file_scope": ["exact repository paths; never patterns"],
-    "authorized_content_sha256": ["sha256 of each path's content AFTER the approved change"],
+    "exact_file_scope": ["one exact repository path per entry; never patterns"],
+    "base_content_sha256": "sha256 of the committed BASE blob BEFORE the approved change",
+    "authorized_content_sha256": ["one sha256 of the committed HEAD blob AFTER the approved change"],
     "task_scope": "what the change is for, in prose, for a human reader",
     "owner_approval_ref": "https link to the owner's approval",
     "expires_at": "YYYY-MM-DD; a date the guard cannot parse is refused"
