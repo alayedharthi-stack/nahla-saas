@@ -605,11 +605,96 @@ def _branch_diff_paths(base: str = _SCOPE_DIFF_BASE) -> set:
     }
 
 
+SCOPE_EXCEPTIONS_REL = "backend/modules/ai/governance/agent_scope_exceptions.json"
+
+
+class ScopeExceptionRegistryMalformed(AssertionError):
+    """The registry exists on BASE and cannot be read as exceptions.
+
+    An unreadable grant is not a grant, and it is not an absence either: it is
+    a governance record nobody can audit. The guard fails rather than pick an
+    interpretation, for the same reason ``ScopeDiffUnavailable`` exists.
+    """
+
+
+def _scope_exceptions_on_base(base: str = _SCOPE_DIFF_BASE) -> dict:
+    """``exact path -> exception`` as the registry stands **on BASE**.
+
+    Read with ``git show {base}:{path}``, never from the working tree, so a
+    branch cannot grant itself the exception it wants: an owner exception has
+    to be reviewed and merged on its own before any branch can rely on it.
+    That is the rule the intelligence scanner's registry beside this one
+    already follows (``lint_intelligence_non_interference.EXCEPTIONS_REL``),
+    and ``AGENTS.md`` states it: owner exceptions cannot be created in the same
+    PR as the runtime change.
+
+    A registry absent from BASE means no exceptions, which is the strict
+    direction. A registry present but unreadable, or an entry missing what
+    makes it auditable, raises.
+    """
+    import json  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    from datetime import date  # noqa: PLC0415
+
+    repo = os.path.abspath(os.path.join(_HERE, "../.."))
+    proc = subprocess.run(
+        ["git", "show", f"{base}:{SCOPE_EXCEPTIONS_REL}"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return {}
+
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ScopeExceptionRegistryMalformed(
+            f"{SCOPE_EXCEPTIONS_REL} on {base} is not valid JSON: {exc}") from exc
+
+    rows = payload.get("exceptions") if isinstance(payload, dict) else payload
+    if rows is None:
+        return {}
+    if not isinstance(rows, list):
+        raise ScopeExceptionRegistryMalformed("exceptions must be a list")
+
+    today = date.today().isoformat()
+    granted: dict = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ScopeExceptionRegistryMalformed(f"exceptions[{index}] is not an object")
+        # Each field is what lets a reader audit the grant afterwards: which
+        # grant, for what work, approved where, and when it stops applying.
+        for field in ("exception_id", "task_scope", "owner_approval_ref", "expires_at"):
+            if not str(row.get(field) or "").strip():
+                raise ScopeExceptionRegistryMalformed(
+                    f"exceptions[{index}] missing {field}")
+        scope = row.get("exact_file_scope")
+        if isinstance(scope, str):
+            scope = [scope]
+        if not isinstance(scope, list) or not scope:
+            raise ScopeExceptionRegistryMalformed(
+                f"exceptions[{index}] missing exact_file_scope")
+        if str(row["expires_at"]).strip() < today:
+            continue                      # lapsed: the path is protected again
+        for path in scope:
+            cleaned = str(path or "").strip().replace("\\", "/")
+            if not cleaned:
+                raise ScopeExceptionRegistryMalformed(
+                    f"exceptions[{index}] has a blank path")
+            granted[cleaned] = row
+    return granted
+
+
 def test_branch_diff_excludes_other_agent_scope_paths() -> None:
-    """Branch diff must not touch lifecycle/templates/coupon-order agent-owned paths."""
+    """Branch diff must not touch lifecycle/templates/coupon-order agent-owned paths.
+
+    A path named by an owner exception **on BASE** is excused, and nothing else
+    is: the exception has to name the exact file, so the marker scan below
+    still protects every sibling a marker would otherwise match.
+    """
     import subprocess
 
     files = _branch_diff_paths()
+    excused = _scope_exceptions_on_base()
 
     forbidden_exact = {
         "backend/routers/coupons.py",
@@ -635,8 +720,13 @@ def test_branch_diff_excludes_other_agent_scope_paths() -> None:
         "store_knowledge.py",
     )
 
-    assert not files.intersection(forbidden_exact)
+    assert not (files.intersection(forbidden_exact) - set(excused))
     for path in files:
+        if path in excused:
+            # Excused by exact path only. A marker match on any *other* file —
+            # a sibling module, a test, a script — is still a scope violation,
+            # which is why the grant lists paths and never patterns.
+            continue
         lowered = path.lower()
         assert not any(marker in lowered for marker in forbidden_scope_markers), path
 

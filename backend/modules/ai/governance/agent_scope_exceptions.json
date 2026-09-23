@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "_comment": "Owner-approved exceptions to the agent file-ownership scope guard in backend/tests/test_trusted_context_shadow_wireup.py. Read from BASE only: a branch cannot grant itself one. Same conventions as intelligence_exceptions.json beside it.",
+  "exceptions": [
+    {
+      "exception_id": "EX-SCOPE-WELCOME-COUPON-ECONOMICS-MATCHING-1119",
+      "exact_file_scope": [
+        "backend/services/coupon_generator.py"
+      ],
+      "task_scope": "Make an issued first-purchase welcome coupon actually carry the merchant's saved economics (discount, validity, usage cap, minimum order) across reuse, regular pool, native pool and on-demand selection, so the issuance result never describes terms the code does not honour.",
+      "created_at": "2026-09-23",
+      "expires_at": "2026-10-23",
+      "owner_approval_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1115#issuecomment-5785545775",
+      "decision_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1115#issuecomment-5791097043",
+      "exact_reason": "The welcome is configured on the merchant's first_purchase rule but every selector picks by rung alone and the generator prices pool coupons from the level config, so the rule's four settings reach nothing. Fixing it in the resolution alone produced a mixed contract (proved by A/B replay on PR #1119) and was withdrawn. Completing it requires the generator, which this guard protects."
+    }
+  ]
+}
