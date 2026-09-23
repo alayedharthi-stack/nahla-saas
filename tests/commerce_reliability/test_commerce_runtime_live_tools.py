@@ -218,7 +218,7 @@ def test_merchant_knowledge_keeps_the_section_body_and_its_reference(binding, mo
 STANDING: Dict[str, Any] = {
     "customer_id": 41, "countable_orders": 4, "resolved_level": "silver",
     "entitled_levels": ["bronze", "silver"], "reason": "entitled_by_order_count",
-    "determined": True, "first_purchase_applied": False,
+    "determined": True, "first_purchase_applied": False, "served_level": "silver",
 }
 
 
@@ -263,7 +263,8 @@ def test_the_view_carries_the_reading_of_the_customer_the_list_was_built_against
                    evidence=[Record("promotion:coupon:5")], query_outcome="ok", entitlement=STANDING)))
     observation = run(binding, "list_shareable_promotions", {})
     assert observation.result["entitlement"] == {
-        "resolved_level": "silver", "entitled_levels": ["bronze", "silver"], "countable_orders": 4,
+        "resolved_level": "silver", "served_level": "silver",
+        "entitled_levels": ["bronze", "silver"], "countable_orders": 4,
         "reason": "entitled_by_order_count", "determined": True, "first_purchase_applied": False,
         # Absent from this double, and absent rather than zero in the view:
         # a source that reported no totals has not reported "none seen".
@@ -1041,3 +1042,41 @@ def test_the_address_tool_declares_itself_read_only(binding):
                       if d.name == "get_customer_addresses")
     assert definition.read_only is True
     assert definition.input_schema["properties"] == {}
+
+
+def test_the_rung_the_store_would_actually_serve_reaches_the_observation(binding, monkeypatch):
+    """The fact the whole coupon fix turns on, at the boundary the model reads.
+
+    A gold customer in a store that keeps gold from the assistant is served
+    silver, and the two facts travel together: without the served rung in the
+    observation, a list holding one silver code for a gold customer looks like
+    a mistake to apologise for instead of the complete answer it is. The rung
+    only — which of the merchant's gates closed which rung stays private.
+    """
+    capped = {**STANDING, "resolved_level": "gold", "entitled_levels": ["gold"],
+              "countable_orders": 7, "served_level": "silver"}
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("ok", promotions=[promotion(5, coupon_level="silver")],
+                                      evidence=[Record("promotion:coupon:5")], query_outcome="ok",
+                                      entitlement=capped)))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["entitlement"]["resolved_level"] == "gold"
+    assert observation.result["entitlement"]["served_level"] == "silver"
+
+
+def test_an_empty_list_from_an_unreadable_ladder_says_so_and_names_no_rung(binding, monkeypatch):
+    """The read tool could not reach an answer, so the observation carries the
+    failure rather than an empty store. ``served_level`` is empty because none
+    was selected — not because the customer has none."""
+    patch_impl(monkeypatch, "promotions", "list_shareable_promotions_impl",
+               async_returning(result("error", failure_reason="coupon_level_policy_unreadable:OSError",
+                                      query_outcome="NO_VALID_PROMOTIONS",
+                                      entitlement={**STANDING, "resolved_level": "gold",
+                                                   "served_level": ""},
+                                      withheld={"level_policy_unreadable": 2})))
+    observation = run(binding, "list_shareable_promotions", {})
+    assert observation.result["status"] == "error"
+    assert observation.result["reason"] == "coupon_level_policy_unreadable:OSError"
+    assert observation.result["withheld"] == {"level_policy_unreadable": 2}
+    assert observation.result["entitlement"]["resolved_level"] == "gold"
+    assert observation.result["entitlement"]["served_level"] == ""

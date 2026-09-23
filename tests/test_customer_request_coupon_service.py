@@ -1627,3 +1627,169 @@ def test_the_usage_cap_in_the_result_is_the_rungs_not_the_rows() -> None:
     db.refresh(coupon)
     assert int(coupon.extra_metadata["usage_limit"]) == 50
     assert issued.restrictions["max_uses"] == 1     # the rung's, not the row's
+
+
+# ── Reading and issuing choose the same rung ─────────────────────────────────
+#
+# The incident behind these: the issuance service walked down to the best rung
+# a merchant allows, and the read tool the assistant actually calls did not, so
+# the assistant said "nothing for you" about a code the platform would have
+# handed over. Both now select through one contract, and this proves it against
+# the same merchant row, the same customer and the same order history — the two
+# real implementations, not the contract twice.
+
+
+_SELECTION_BLOCKED = frozenset({
+    coupon_request_mod.REASON_LEVEL_DISABLED,
+    coupon_request_mod.REASON_CHANNEL_NOT_ALLOWED,
+    coupon_request_mod.REASON_LEVEL_NOT_ALLOWED_FOR_AI,
+    coupon_request_mod.REASON_AI_POLICY_DISABLED,
+    coupon_request_mod.REASON_LEVEL_POLICY_UNREADABLE,
+    coupon_request_mod.REASON_NO_LEVEL,
+})
+
+
+def _issuance_serves(db, tenant_id: int, customer_id: int) -> Optional[str]:
+    """The rung the issuance service selects, with nothing written.
+
+    ``allow_issuance=False`` returns after the selection and before the lock,
+    the pool and the provider, so this is the real selection path with the
+    write and provider boundaries simply never reached.
+    """
+    result = _issue(db, tenant_id, customer_id, allow_issuance=False)
+    assert result.issued is False
+    if result.reason_code in _SELECTION_BLOCKED:
+        return None
+    assert result.reason_code == coupon_request_mod.REASON_LIVE_ISSUANCE_DISABLED
+    return result.resolved_level
+
+
+def _read_serves(db, tenant_id: int, customer_id: int) -> Optional[str]:
+    """The rung the read tool the assistant calls selects, off the same row.
+
+    Only the promotion resolver is doubled — the merchant policy, the saved
+    ladder and the customer's order history are all read from this database.
+    """
+    import asyncio as _asyncio
+
+    from modules.ai.brain.commerce import promotion_truth as pt
+    from modules.ai.commerce_agent_v2.tools import promotions as tool
+
+    class _Context:
+        def __init__(self) -> None:
+            self.tenant_id = tenant_id
+            self.customer_id = customer_id
+            self.db = db
+
+        def assert_scope(self) -> None:
+            pass
+
+        def register_evidence(self, records) -> None:
+            pass
+
+    empty = pt.PromotionTruthResult(tenant_id=tenant_id, query_run=True, candidate_count=0,
+                                    query_outcome=pt.QUERY_OK)
+    with patch.object(tool, "resolve_shareable_promotions", lambda *a, **k: empty):
+        result = _asyncio.run(tool.list_shareable_promotions_impl(_Context()))
+    return result.entitlement.get("served_level") or None
+
+
+def _set_ladder(db, tenant_id: int, levels: Any) -> None:
+    """Replace the merchant's saved ladder in place, leaving the rest of the
+    block as it was. ``levels=None`` removes the key entirely — a merchant who
+    never opened the coupon settings."""
+    row = db.query(TenantSettings).filter_by(tenant_id=tenant_id).first()
+    meta = dict(row.extra_metadata or {})
+    dash = dict(meta.get("coupons_dashboard") or {})
+    if levels is None:
+        dash.pop("levels", None)
+    else:
+        dash["levels"] = levels
+    meta["coupons_dashboard"] = dash
+    row.extra_metadata = meta
+    flag_modified(row, "extra_metadata")
+    db.commit()
+
+
+def test_reading_and_issuing_select_the_same_rung_across_merchant_shapes() -> None:
+    """Both real paths, one merchant row at a time. What the assistant may
+    mention and what the platform would hand over cannot drift apart."""
+    bronze_open = {"id": "bronze", "enabled": True, "allowed_channels": ["ai"],
+                   "discount_default": 5, "min_orders": 1}
+    silver_open = {"id": "silver", "enabled": True, "allowed_channels": ["ai"],
+                   "discount_default": 10, "min_orders": 3}
+    gold_campaign_only = {"id": "gold", "enabled": True, "allowed_channels": ["campaign"],
+                          "discount_default": 20, "min_orders": 7}
+    all_levels = ["bronze", "silver", "gold", "vip"]
+
+    cases = [
+        # The production incident: the earned rung closed by its own channel
+        # gate while the store policy still lists it.
+        ("gold closed by its own channel gate",
+         [bronze_open, silver_open, gold_campaign_only], all_levels, "silver"),
+        # The same store, closing gold through the AI policy list instead.
+        ("gold closed by the store policy list",
+         [bronze_open, silver_open, {**gold_campaign_only, "allowed_channels": ["ai"]}],
+         ["bronze", "silver"], "silver"),
+        # A disabled rung in the middle is stepped over, not stopped at.
+        ("silver disabled, bronze open",
+         [bronze_open, {**silver_open, "enabled": False}, gold_campaign_only],
+         all_levels, "bronze"),
+        # Nothing configured below the closed rung: nothing is served, and the
+        # bare rows are not read as rungs with default permissions.
+        ("nothing configured below gold",
+         [{"id": "bronze"}, {"id": "silver"}, gold_campaign_only], all_levels, None),
+        # A merchant who never saved a ladder has closed nothing, so the rung
+        # the customer earned is still theirs on both paths.
+        ("no ladder saved at all", None, all_levels, "gold"),
+        # And a partly configured ladder leaves the unconfigured earned rung open.
+        ("only silver configured", [silver_open], all_levels, "gold"),
+        # A settings row nobody can read closes the rung on both paths.
+        ("ladder unreadable", "not-a-ladder", all_levels, None),
+    ]
+    for label, levels, allowed, expected in cases:
+        db, tenant_id, _engine = _make_db(ai_policy={
+            "enabled": True, "allowed_levels": allowed,
+            "min_remaining_hours": 3, "pool_mode": "pool_first"})
+        _set_ladder(db, tenant_id, levels)
+        customer = _add_customer(db, tenant_id, PHONE_A)
+        _add_orders(db, tenant_id, PHONE_A, countable=7)          # gold, by order count
+        issued = _issuance_serves(db, tenant_id, customer.id)
+        read = _read_serves(db, tenant_id, customer.id)
+        assert issued == read == expected, (label, issued, read)
+        db.close()
+
+
+def test_the_rung_both_paths_chose_is_the_rung_actually_allocated() -> None:
+    """The selection is not an opinion: the coupon that leaves the pool is the
+    one the read tool said this customer would be offered."""
+    db, tenant_id, _engine = _make_db(
+        levels=_levels(include_ai_for=("gold",)),
+        ai_policy={"enabled": True, "allowed_levels": ["bronze", "silver"],
+                   "min_remaining_hours": 3, "pool_mode": "pool_first"})
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=7)
+    silver = _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
+    gold = _add_pool_coupon(db, tenant_id, "NHGLD", "gold")
+    assert _read_serves(db, tenant_id, customer.id) == "silver"
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is True and result.coupon_id == silver.id
+    assert result.resolved_level == "silver" and result.entitled_level == "gold"
+    db.refresh(gold)
+    assert (gold.extra_metadata or {}).get("customer_id") is None
+    db.close()
+
+
+def test_a_ladder_nobody_can_read_stops_issuance_with_its_own_reason() -> None:
+    """Fail closed, and say which failure it was. A settings row that is not a
+    ladder is not a merchant decision and must not be reported as one."""
+    db, tenant_id, _engine = _make_db()
+    _set_ladder(db, tenant_id, 7)
+    customer = _add_customer(db, tenant_id, PHONE_A)
+    _add_orders(db, tenant_id, PHONE_A, countable=7)
+    _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
+    result = _issue(db, tenant_id, customer.id)
+    assert result.issued is False
+    assert result.reason_code == coupon_request_mod.REASON_LEVEL_POLICY_UNREADABLE
+    assert result.entitled_level is None
+    db.close()
