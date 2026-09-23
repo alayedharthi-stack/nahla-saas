@@ -589,6 +589,14 @@ async def _dispatch_due_waves() -> None:
         for wave in due_waves:
             campaign_id = int(wave.campaign_id)
             wave_id = int(wave.id)
+            # A paused campaign (merchant stop, shared Meta limit,
+            # throttling, unknown outcomes) keeps its waves pending until
+            # an explicit resume re-activates it.
+            parent_status = (
+                db.query(Campaign.status).filter(Campaign.id == campaign_id).scalar()
+            )
+            if (parent_status or "").lower() == "paused":
+                continue
             # Re-check status under our own transaction — another
             # tick might have grabbed it (defensive even in
             # single-worker mode).
@@ -606,6 +614,16 @@ async def _dispatch_due_waves() -> None:
                 result = await dispatch_campaign(
                     db, campaign_id, only_wave_id=wave_id,
                 )
+                if result.get("status") in (
+                    "already_running", "paused", "stop_requested", "lease_lost",
+                    "ledger_unavailable",
+                ):
+                    # The wave's rows are still queued: put it back so it
+                    # runs once the campaign can proceed.
+                    wave.status = ws.WAVE_PENDING
+                    wave.started_at = None
+                    db.commit()
+                    continue
                 sent = int(result.get("sent") or 0)
                 failed = int(result.get("failed") or 0)
                 ws.complete_wave(

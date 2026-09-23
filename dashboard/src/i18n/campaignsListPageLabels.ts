@@ -56,7 +56,21 @@ export interface CampaignsListLabels {
     completed_empty: string
     failed: string
     failed_all: string
+    stalled: string
+    paused: string
     unknown: string
+  }
+  sendHealth: {
+    failedSplit: string
+    uncertain: string
+    duplicates: string
+    alreadyRunning: string
+    errorPhase: {
+      before_accept: string
+      after_accept: string
+      uncertain: string
+    }
+    pauseReasons: Record<string, string>
   }
   types: {
     broadcast: string
@@ -692,7 +706,26 @@ export const campaignsListEn: CampaignsListLabels = {
     completed_empty: 'Completed with no recipients',
     failed: 'Send failed',
     failed_all: 'Failed for everyone',
+    stalled: 'Stopped mid-send (no active worker)',
+    paused: 'Paused',
     unknown: 'Unknown',
+  },
+  sendHealth: {
+    failedSplit: 'Rejected before acceptance: {before} · failed after acceptance: {after}',
+    uncertain: '{count} with unknown outcome (not resent)',
+    duplicates: '{count} recipients got more than one accepted copy',
+    alreadyRunning: 'Sending is already running for this campaign — a second run was not started.',
+    errorPhase: {
+      before_accept: 'Rejected before acceptance',
+      after_accept: 'Failed after Meta accepted',
+      uncertain: 'Unknown outcome',
+    },
+    pauseReasons: {
+      merchant_stop: 'Stopped by merchant',
+      messaging_limit_reached: 'Meta daily messaging limit reached (shared by the business account)',
+      provider_throttling: 'Meta is throttling this number — sending stopped',
+      uncertain_sends: 'Several sends had an unknown outcome — stopped for review',
+    },
   },
   types: {
     broadcast: 'Broadcast',
@@ -915,7 +948,26 @@ export const campaignsListAr: CampaignsListLabels = {
     completed_empty: 'اكتملت بلا مستلمين',
     failed: 'فشل الإرسال',
     failed_all: 'فشل الإرسال للجميع',
+    stalled: 'توقف أثناء الإرسال (لا يوجد عامل نشط)',
+    paused: 'متوقفة مؤقتاً',
     unknown: 'غير معروفة',
+  },
+  sendHealth: {
+    failedSplit: 'رُفضت قبل القبول: {before} · فشلت بعد قبول Meta: {after}',
+    uncertain: '{count} نتيجتها غير محسومة (لن يُعاد إرسالها تلقائياً)',
+    duplicates: '{count} عميل استلم أكثر من نسخة مقبولة',
+    alreadyRunning: 'الإرسال قيد التنفيذ بالفعل لهذه الحملة — لم يُبدأ تشغيل ثانٍ.',
+    errorPhase: {
+      before_accept: 'رُفضت قبل القبول',
+      after_accept: 'فشلت بعد قبول Meta',
+      uncertain: 'نتيجة غير محسومة',
+    },
+    pauseReasons: {
+      merchant_stop: 'أوقفها التاجر',
+      messaging_limit_reached: 'بلغت حد Meta اليومي للمراسلة (مشترك على حساب الأعمال)',
+      provider_throttling: 'Meta تقيّد الإرسال من هذا الرقم — توقف الإرسال',
+      uncertain_sends: 'نتيجة عدة رسائل غير محسومة — توقف للمراجعة',
+    },
   },
   types: {
     broadcast: 'بث جماعي',

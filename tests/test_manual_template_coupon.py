@@ -230,12 +230,30 @@ def _run_one_send(
     row.customer_phone_e164 = customer.normalized_phone
 
     db = MagicMock()
-    # The dispatcher's queue query is `.filter(...).order_by(...).limit().all()` —
-    # we return the row exactly once.
-    batches = iter([[row], []])
+    # The dispatcher's queue query is `.filter(...).order_by(...).limit().all()`
+    # and yields ``(id, phone)`` pairs — we return the row exactly once.
+    batches = iter([[(row.id, row.customer_phone_e164)], []])
     db.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all = (
         lambda: next(batches)
     )
+    db.get.return_value = row
+
+    # The execution ledger (lease, atomic claim, attempt rows, shared
+    # messaging budget) needs a real database; this test is only about
+    # which coupon reaches the payload, so the ledger is stubbed open.
+    from services import campaign_send_ledger as ledger  # noqa: PLC0415
+    monkeypatch.setattr(ledger, "acquire_lease",
+                        lambda *a, **kw: ledger.LeaseResult(True, "test"))
+    monkeypatch.setattr(ledger, "release_lease", lambda *a, **kw: None)
+    monkeypatch.setattr(ledger, "apply_pending_events_for_campaign", lambda *a, **kw: 0)
+    monkeypatch.setattr(ledger, "messaging_budget",
+                        lambda *a, **kw: ledger.MessagingBudget(None, None, "unlimited", None))
+    monkeypatch.setattr(ledger, "post_accept_throttle", lambda *a, **kw: None)
+    monkeypatch.setattr(ledger, "claim_recipient",
+                        lambda *a, **kw: ledger.ClaimResult(MagicMock(), "claimed"))
+    monkeypatch.setattr(ledger, "mark_request_started", lambda *a, **kw: None)
+    monkeypatch.setattr(ledger, "record_accepted", lambda *a, **kw: row)
+    monkeypatch.setattr(ledger, "apply_pending_events_for", lambda *a, **kw: False)
 
     wa_conn = MagicMock()
     wa_conn.phone_number_id = "1061057720431678"

@@ -2175,6 +2175,157 @@ class CampaignSendLog(Base):
     )
 
 
+class CampaignDispatchLease(Base):
+    """One durable execution lease per campaign.
+
+    Only the worker holding a live lease (``owner`` set and
+    ``expires_at`` in the future) may claim recipients for the campaign.
+    Acquisition is a single conditional UPDATE (or the first INSERT), so
+    it holds across threads, processes and replicas — an in-memory lock
+    cannot. The holder renews ``expires_at`` on every recipient; a worker
+    that dies simply stops renewing and the lease lapses.
+
+    ``stop_requested_at`` is the safe-stop switch: a live worker checks
+    it before every new claim and exits without starting another send.
+    ``pause_reason`` records why the dispatcher itself stopped (shared
+    messaging limit, Meta throttling, uncertain sends) so the campaign
+    status can say so instead of a generic failure.
+    """
+    __tablename__ = 'campaign_dispatch_leases'
+
+    campaign_id = Column(
+        Integer, ForeignKey('campaigns.id', ondelete='CASCADE'), primary_key=True,
+    )
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    owner = Column(String(128), nullable=True)
+    acquired_at = Column(DateTime, nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    released_at = Column(DateTime, nullable=True)
+    stop_requested_at = Column(DateTime, nullable=True)
+    stop_reason = Column(String(64), nullable=True)
+    pause_reason = Column(String(64), nullable=True)
+    pause_detail = Column(Text, nullable=True)
+    paused_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CampaignMessagingScope(Base):
+    """One row per shared Meta messaging-limit scope (business portfolio,
+    else WABA, else phone number).
+
+    Its only job is to be locked: a claim that draws on a finite budget
+    takes this row's lock (``UPDATE … SET updated_at``) before counting the
+    scope's 24h usage and reserving the recipient, so two campaigns — on
+    any process or replica — sharing one portfolio cannot both read the
+    same remaining budget and overshoot it.
+    """
+    __tablename__ = 'campaign_messaging_scopes'
+
+    scope_key = Column(String(160), primary_key=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class CampaignSendAttempt(Base):
+    """One row per request we started (or were about to start) to Meta
+    for a campaign recipient.
+
+    ``CampaignSendLog`` is the per-recipient anchor (one row per campaign
+    + phone). It can only hold one ``provider_message_id``, so it cannot
+    describe a recipient who was sent to twice. This table keeps every
+    attempt, its own wamid and its own outcome, and the webhook resolves
+    events against it.
+
+    ``state`` is what we know about the request itself:
+
+      claimed          the recipient is reserved; nothing has left the process
+      request_started  the request may have reached Meta
+      accepted         Meta returned a wamid
+      rejected         Meta returned an explicit error — not accepted
+      not_sent         the transport failed before a connection existed
+      uncertain        the request may or may not have been accepted
+                       (timeout after send, 5xx, crash after start)
+      abandoned        reclaimed before the request started (safe to retry)
+
+    ``delivery_state`` is what Meta later reported for an accepted
+    attempt: ``delivered``, ``read`` or ``failed`` (failed after accept).
+    ``read`` is evidence of delivery even when no ``delivered`` event
+    arrived; the absence of either proves nothing.
+    """
+    __tablename__ = 'campaign_send_attempts'
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    campaign_id = Column(Integer, ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False)
+    send_log_id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey('campaign_send_logs.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    customer_phone_e164 = Column(String, nullable=False)
+    attempt_no = Column(Integer, nullable=False)
+    worker_id = Column(String(128), nullable=True)
+    # Shared Meta messaging-limit scope (business portfolio, else WABA,
+    # else phone number). All attempts with the same key draw from one
+    # 24h budget, across campaigns and tenants.
+    messaging_scope_key = Column(String(160), nullable=True)
+    phone_number_id = Column(String, nullable=True)
+    state = Column(String(24), nullable=False, default='claimed')
+    delivery_state = Column(String(16), nullable=True)
+    provider_message_id = Column(String, nullable=True)
+    http_status = Column(Integer, nullable=True)
+    error_code = Column(String(64), nullable=True)
+    raw_error_code = Column(String(32), nullable=True)
+    error_message = Column(Text, nullable=True)
+    post_accept_error_code = Column(String(64), nullable=True)
+    post_accept_raw_error_code = Column(String(32), nullable=True)
+    post_accept_error_message = Column(Text, nullable=True)
+    claimed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    request_started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    accepted_at = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+    read_at = Column(DateTime, nullable=True)
+    failed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index('uq_campaign_send_attempt_log_no', 'send_log_id', 'attempt_no', unique=True),
+        Index('uq_campaign_send_attempt_wamid', 'provider_message_id', unique=True),
+        Index('ix_campaign_send_attempt_campaign_state', 'campaign_id', 'state'),
+        Index('ix_campaign_send_attempt_scope_started', 'messaging_scope_key', 'request_started_at'),
+    )
+
+
+class CampaignStatusEventInbox(Base):
+    """Durable, de-duplicated record of Meta status events for campaign
+    sends, including events that arrive before the attempt that owns the
+    wamid has been committed.
+
+    One row per ``(provider_message_id, status)``: a redelivered webhook
+    hits the unique index and is recognised as a duplicate. Rows with
+    ``applied_at`` NULL are waiting for their attempt; the dispatcher
+    applies them right after it commits the accepted wamid.
+    """
+    __tablename__ = 'campaign_status_event_inbox'
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    provider_message_id = Column(String, nullable=False)
+    status = Column(String(16), nullable=False)
+    provider_timestamp = Column(BigInteger().with_variant(Integer, "sqlite"), nullable=True)
+    recipient_id = Column(String, nullable=True)
+    errors = Column(JSONB, nullable=True)
+    attempt_id = Column(BigInteger().with_variant(Integer, "sqlite"), nullable=True)
+    received_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    applied_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index('uq_campaign_status_event_wamid_status', 'provider_message_id', 'status', unique=True),
+        Index('ix_campaign_status_event_pending', 'applied_at', 'received_at'),
+    )
+
+
 class CustomerSegmentManual(Base):
     """Merchant-curated link between a Customer and a *Nahla official*
     marketing cohort (vip, new, unsubscribed, …).

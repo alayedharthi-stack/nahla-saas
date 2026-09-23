@@ -365,12 +365,8 @@ async def dispatch_campaign(
     if not campaign:
         return _empty_result(error="Campaign not found")
 
+    # Billing first: a tenant without outbound access never takes a lease.
     tenant_id = campaign.tenant_id
-    logger.info(
-        "[campaign_dispatcher] starting campaign=%d tenant=%d template_id=%s audience=%s",
-        campaign_id, tenant_id, campaign.template_id, campaign.audience_type,
-    )
-
     from core.billing import has_billing_access  # noqa: PLC0415
     if not has_billing_access(db, tenant_id):
         err = "billing_access_denied"
@@ -382,6 +378,72 @@ async def dispatch_campaign(
         _persist_dispatch_result(campaign, 0, 0, 0, [err])
         db.commit()
         return _empty_result(error=err)
+
+    # ── One live worker per campaign ─────────────────────────────────
+    # The lease is a DB row, so it holds across threads, processes and
+    # replicas. A second dispatch-now / scheduler tick while a worker is
+    # alive returns here without touching a single recipient.
+    from services import campaign_send_ledger as ledger  # noqa: PLC0415
+
+    if not ledger.ledger_available(db):
+        # Boot has not created the ledger tables yet (or failed to). Refuse
+        # without touching the campaign: nothing is sent and its status is
+        # not falsely marked failed; the next tick / click retries.
+        result = _empty_result(error="ledger_unavailable")
+        result["campaign_id"] = campaign_id
+        result["status"] = "ledger_unavailable"
+        return result
+
+    ctx = DispatchRunContext(ledger.new_worker_id())
+    got = ledger.acquire_lease(
+        db, campaign_id=campaign_id, tenant_id=campaign.tenant_id, owner=ctx.owner,
+    )
+    if not got.acquired:
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d dispatch skipped: %s (holder=%s until %s)",
+            campaign_id, got.reason, got.owner, got.expires_at,
+        )
+        result = _empty_result(error=got.reason)
+        result["campaign_id"] = campaign_id
+        result["status"] = "already_running" if got.reason == "held_by_other_worker" else got.reason
+        return result
+    try:
+        return await _dispatch_campaign_with_lease(
+            db, campaign_id, ctx, only_wave_id=only_wave_id,
+        )
+    finally:
+        try:
+            db.rollback()
+            ledger.release_lease(
+                db, campaign_id=campaign_id, owner=ctx.owner,
+                pause_reason=ctx.pause_reason, pause_detail=ctx.pause_detail,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("[campaign_dispatcher] campaign=%d lease release failed", campaign_id)
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def _dispatch_campaign_with_lease(
+    db: Session,
+    campaign_id: int,
+    ctx: "DispatchRunContext",
+    *,
+    only_wave_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Body of :func:`dispatch_campaign`; runs only while ``ctx.owner``
+    holds the campaign lease."""
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+    if not campaign:
+        return _empty_result(error="Campaign not found")
+
+    tenant_id = campaign.tenant_id
+    logger.info(
+        "[campaign_dispatcher] starting campaign=%d tenant=%d template_id=%s audience=%s",
+        campaign_id, tenant_id, campaign.template_id, campaign.audience_type,
+    )
 
     from core.wa_usage import check_limit  # noqa: PLC0415
 
@@ -475,6 +537,7 @@ async def dispatch_campaign(
             manual_coupon=manual_coupon,
             customers_by_phone=customers_by_phone,
             only_wave_id=only_wave_id,
+            ctx=ctx,
         )
 
         counts = _count_log_statuses(db, campaign_id)
@@ -483,11 +546,14 @@ async def dispatch_campaign(
         # We only persist incremental counters.
         campaign.sent_count = counts.get("sent", 0)
         campaign.updated_at = datetime.now(timezone.utc)
+        if ctx.pause_reason and not ctx.lease_lost:
+            campaign.status = "paused"
         db.commit()
         return {
             "campaign_id":   campaign_id,
             "wave_id":       only_wave_id,
-            "status":        "wave_completed",
+            "status":        "paused" if ctx.pause_reason else "wave_completed",
+            "pause_reason":  ctx.pause_reason,
             "sent":          sent,
             "failed":        failed,
             "errors":        errors[:5],
@@ -703,14 +769,32 @@ async def dispatch_campaign(
         customers_by_phone={
             (c.normalized_phone or ""): c for c in customers if c.normalized_phone
         },
+        ctx=ctx,
     )
 
     # ── 4. Final counters & campaign status ─────────────────────────────
     counts = _count_log_statuses(db, campaign_id)
-    final_status = (
-        "completed" if counts.get("sent", 0) > 0
-        else ("failed" if counts.get("failed", 0) > 0 else "completed")
-    )
+    if ctx.lease_lost:
+        # Another worker owns the campaign now; its run decides status.
+        return {
+            "campaign_id": campaign_id, "status": "lease_lost",
+            "sent": sent, "failed": failed, "errors": errors,
+        }
+    from services.campaign_send_ledger import LOG_UNCERTAIN  # noqa: PLC0415
+    if ctx.pause_reason:
+        # Stopped on purpose (merchant stop, shared limit, Meta
+        # throttling, unknown outcomes): the queue is intact and the
+        # reason is on the lease — not a failure, not completion.
+        final_status = "paused"
+    elif counts.get("sent", 0) > 0:
+        final_status = "completed"
+    elif counts.get(LOG_UNCERTAIN, 0) > 0:
+        final_status = "paused"
+        ctx.pause("uncertain_sends", "every started send has an unknown outcome")
+    elif counts.get("failed", 0) > 0:
+        final_status = "failed"
+    else:
+        final_status = "completed"
     campaign.sent_count = counts.get("sent", 0)
     campaign.status = final_status
     campaign.updated_at = datetime.now(timezone.utc)
@@ -1076,6 +1160,38 @@ def _revive_frequency_cap_skipped(
     return len(rows)
 
 
+def _cap_contacted_phones(
+    db: Session,
+    tenant_id: int,
+    campaign_id: Optional[int],
+    sent_rows: List[Tuple[int, str]],
+    threshold: datetime,
+) -> set:
+    """Phones that count as "already messaged" for the frequency cap.
+
+    * ``sent`` rows count, except recipients the attempt ledger proves
+      never received the message (all attempts refused, or accepted then
+      reported failed with no delivered/read evidence). Pre-ledger rows
+      keep counting — their single wamid column cannot prove that.
+    * ``uncertain`` rows count too: we do not know the customer did not
+      get it, and the cap exists to avoid a second copy.
+    """
+    from services.campaign_send_ledger import (  # noqa: PLC0415
+        LOG_UNCERTAIN, log_ids_proven_undelivered,
+    )
+    failed_ids = log_ids_proven_undelivered(db, [int(i) for i, _ in sent_rows])
+    phones = {p for i, p in sent_rows if int(i) not in failed_ids}
+    q = db.query(CampaignSendLog.customer_phone_e164).filter(
+        CampaignSendLog.tenant_id == tenant_id,
+        CampaignSendLog.status == LOG_UNCERTAIN,
+        CampaignSendLog.updated_at >= threshold.replace(tzinfo=None),
+    )
+    if campaign_id is not None:
+        q = q.filter(CampaignSendLog.campaign_id != campaign_id)
+    phones.update(r[0] for r in q.distinct().all())
+    return phones
+
+
 def _apply_frequency_cap(
     db: Session,
     tenant_id: int,
@@ -1145,8 +1261,8 @@ def _apply_frequency_cap(
         ),
     )
 
-    sent_phones_subq = (
-        db.query(CampaignSendLog.customer_phone_e164)
+    sent_rows = (
+        db.query(CampaignSendLog.id, CampaignSendLog.customer_phone_e164)
         .filter(
             CampaignSendLog.tenant_id == tenant_id,
             CampaignSendLog.status == LOG_SENT,
@@ -1155,9 +1271,9 @@ def _apply_frequency_cap(
             # Don't dedupe a campaign against itself (re-runs).
             CampaignSendLog.campaign_id != campaign_id,
         )
-        .distinct()
+        .all()
     )
-    sent_phones = {row[0] for row in sent_phones_subq.all()}
+    sent_phones = _cap_contacted_phones(db, tenant_id, campaign_id, sent_rows, threshold)
 
     if not sent_phones:
         return 0
@@ -1614,81 +1730,30 @@ def _revive_zombie_sending(
     campaign_id: int,
     *,
     timeout_seconds: int = SENDING_TIMEOUT_SECONDS,
+    owner: Optional[str] = None,
 ) -> int:
-    """Resurrect rows stuck in ``sending``.
+    """Resolve rows a dead worker left in ``sending``. No commit.
 
-    A row in ``status='sending'`` whose ``updated_at`` is older than
-    ``timeout_seconds`` is unambiguously a zombie — the worker that
-    flipped it died before transitioning to a terminal state.
+    A row in ``sending`` may already have been accepted by Meta — the
+    request can leave the process before the worker records the answer.
+    It is therefore never put back on the queue and never marked as a
+    retryable failure (the old ``watchdog_timeout`` → retry path is how a
+    crashed campaign re-sent to people who had already received it).
+    Delegates to :func:`campaign_send_ledger.recover_stale_attempts`:
 
-    Policy (post retry-storm fix):
+      * reserved but request never started → ``queued`` (provably unsent);
+      * request started, or a pre-ledger row with ≥1 attempt → ``uncertain``.
 
-        * Rows past ``MAX_SEND_ATTEMPTS`` go directly to ``failed``
-          with ``error_code='retry_exhausted'``.
-        * Rows BELOW the attempt ceiling that have already consumed
-          at least one full attempt also go to ``failed`` with
-          ``error_code='watchdog_timeout'`` — we explicitly do NOT
-          re-queue them automatically anymore. Auto-reviving zombies
-          is what created the original 7345-attempt storm. The
-          merchant can still re-trigger them via ``dispatch-now``,
-          which calls ``reschedule_failed_for_retry``.
-        * Rows on attempt 0 (which shouldn't really exist in
-          ``sending`` — they would have been flipped on the way in)
-          are re-queued as a safety net.
-
-    Returns the number of zombie rows touched. Safe to call repeatedly
-    (idempotent) and cheap — single UPDATE round-trip via per-row
-    sets so SQLite/Postgres behave identically.
+    Does nothing while another worker holds a live lease on the campaign.
+    Returns the number of rows resolved.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
-    zombies = (
-        db.query(CampaignSendLog)
-        .filter(
-            CampaignSendLog.campaign_id == campaign_id,
-            CampaignSendLog.status == LOG_SENDING,
-            CampaignSendLog.updated_at < cutoff,
-        )
-        .all()
-    )
-    if not zombies:
+    from services import campaign_send_ledger as ledger  # noqa: PLC0415
+
+    lease = ledger.get_lease(db, campaign_id)
+    if ledger.lease_is_live(lease) and lease.owner != owner:
         return 0
-    now = datetime.now(timezone.utc)
-    terminated = 0
-    re_queued = 0
-    for r in zombies:
-        attempts = int(r.attempt_count or 0)
-        if attempts >= MAX_SEND_ATTEMPTS:
-            r.status = LOG_FAILED
-            r.error_code = "retry_exhausted"
-            r.error_message = (
-                f"[watchdog] sending row idle > {timeout_seconds}s after "
-                f"{attempts} attempts (retry ceiling)"
-            )[:480]
-            terminated += 1
-        elif attempts >= 1:
-            # The row had its shot. Don't auto-revive — that path is
-            # exactly how we produced the 7000-attempt storm. Mark it
-            # terminal; the merchant can decide to retry explicitly.
-            r.status = LOG_FAILED
-            r.error_code = "watchdog_timeout"
-            r.error_message = (
-                f"[watchdog] sending row idle > {timeout_seconds}s after "
-                f"{attempts} attempts — flipped to failed_terminal"
-            )[:480]
-            terminated += 1
-        else:
-            # attempts == 0: the row was never actually attempted —
-            # safe to put back on the queue.
-            r.status = LOG_QUEUED
-            r.error_code = r.error_code or "watchdog_revive"
-            re_queued += 1
-        r.updated_at = now
-    logger.warning(
-        "[campaign_dispatcher] watchdog campaign=%d zombies=%d "
-        "terminated=%d re_queued=%d (idle > %ds)",
-        campaign_id, len(zombies), terminated, re_queued, timeout_seconds,
-    )
-    return len(zombies)
+    out = ledger.recover_stale_attempts(db, campaign_id, stale_seconds=timeout_seconds)
+    return sum(out.values())
 
 
 def _force_terminate_runaway(
@@ -1745,9 +1810,19 @@ _DISPATCHER_RETRYABLE_CODES = frozenset({
 # Terminal codes that ``reschedule_failed_for_retry`` must never
 # touch — these are end-states the dispatcher itself produced and
 # putting them back into ``queued`` would re-introduce storms.
+#
+# The second group are *ambiguous* legacy outcomes written by the
+# pre-ledger dispatcher: a watchdog timeout on a ``sending`` row, a
+# generic exception around the Meta call, or a success-shaped answer
+# without a wamid. Each may hide an accepted message, so an automatic
+# retry could send the customer a second copy.
 _TERMINAL_DISPATCHER_CODES = frozenset({
     "retry_exhausted",
     "retry_storm",
+    "watchdog_timeout",
+    "exception",
+    "no_message_id",
+    "send_outcome_unknown",
 })
 
 
@@ -1782,16 +1857,19 @@ def reschedule_failed_for_retry(
     db: Session,
     campaign_id: int,
 ) -> int:
-    """Promote ``failed`` rows that haven't exhausted their attempts
-    back into ``queued`` so the next dispatch run picks them up.
+    """Promote retryable ``failed`` rows back into ``queued``. No commit.
 
-    Used by ``POST /campaigns/{id}/dispatch-now`` to retry transient
-    failures explicitly. Only rows whose ``error_code`` is in the
-    retriable set are promoted — recipient-specific failures like
-    ``not_on_whatsapp`` are terminal and remain ``failed``. Rows past
-    ``MAX_SEND_ATTEMPTS`` are converted to a definitive
-    ``retry_exhausted`` so they stay out of future retries.
+    A recipient is re-queued only when *every* attempt it has is proven
+    not to have produced a message (rejected by Meta with a retryable
+    code, or never left the process). Recipients with any accepted,
+    uncertain or in-flight attempt are never re-queued — that includes
+    failures Meta reported *after* accepting (``status='sent'`` with
+    ``failed_at``), which are not in ``failed`` at all. Non-retryable
+    codes (``not_on_whatsapp``, ``spam_rate_limit``, …) stay terminal.
+    Rows past ``MAX_SEND_ATTEMPTS`` become ``retry_exhausted``.
     """
+    from services.campaign_send_ledger import log_ids_blocking_retry  # noqa: PLC0415
+
     rows = (
         db.query(CampaignSendLog)
         .filter(
@@ -1802,14 +1880,14 @@ def reschedule_failed_for_retry(
         )
         .all()
     )
+    blocked = log_ids_blocking_retry(db, [int(r.id) for r in rows])
     moved = 0
     now = datetime.now(timezone.utc)
     for r in rows:
         code = (r.error_code or "").strip().lower()
-        # ``retryable=False`` errors in the catalogue (client_payment_blocked,
-        # not_on_whatsapp, policy_violation, …) are terminal: re-queuing them
-        # produces the SAME error and burns attempts. Skip them entirely.
         if not _is_error_code_retryable(code):
+            continue
+        if int(r.id) in blocked:
             continue
         if _is_attempts_exhausted(r):
             r.error_code = "retry_exhausted"
@@ -1842,6 +1920,36 @@ def _count_log_statuses(db: Session, campaign_id: int) -> Dict[str, int]:
 # ── Batched send ─────────────────────────────────────────────────────────
 
 
+class DispatchRunContext:
+    """Per-run execution state shared by ``dispatch_campaign`` and the
+    send loop: which lease we hold and why (if at all) we stopped."""
+
+    def __init__(self, owner: str) -> None:
+        self.owner = owner
+        self.pause_reason: Optional[str] = None
+        self.pause_detail: str = ""
+        self.lease_lost = False
+
+    def pause(self, reason: str, detail: str = "") -> None:
+        if self.pause_reason is None:
+            self.pause_reason = reason
+            self.pause_detail = detail
+
+    @property
+    def stopped(self) -> bool:
+        return self.lease_lost or self.pause_reason is not None
+
+
+# Local guards inside ``provider_send_message`` answer with an error
+# envelope before anything reaches Meta.
+_LOCAL_REFUSAL_CLASSIFICATIONS = frozenset({
+    "automation_blocked", "conversation_quota_blocked", "recipient_invalid",
+})
+# Non-retryable sync rejections that still mean "stop sending from this
+# number now" rather than "this recipient is bad".
+_SYNC_THROTTLE_KEYS = {"spam_rate_limit": 5}
+
+
 async def _dispatch_queued_rows(
     db: Session,
     *,
@@ -1854,21 +1962,46 @@ async def _dispatch_queued_rows(
     customers_by_phone: Dict[str, Customer],
     manual_coupon: str = "",
     only_wave_id: Optional[int] = None,
+    ctx: Optional["DispatchRunContext"] = None,
 ) -> Tuple[int, int, List[str]]:
-    """Walk the campaign's ``queued`` and ``failed`` rows in batches and
-    send each one. Already-sent rows are filtered out by the query
-    itself, so a re-run of this function is safe.
+    """Send the campaign's ``queued`` rows, one atomic claim at a time.
 
-    When ``only_wave_id`` is set the inner SELECT is additionally
-    constrained by ``wave_id == only_wave_id`` so each call
-    dispatches exactly one wave's slice of the campaign's
-    recipients. The legacy ``None`` path is unaffected — it
-    dispatches every queued row regardless of wave membership.
+    Must run under the campaign lease (``ctx.owner``). For every
+    recipient:
 
-    Returns ``(sent_count, failed_count, error_messages)``.
+      1. check the shared messaging budget and Meta throttling signals —
+         stop (pause) instead of sending into a known refusal;
+      2. claim the row (``queued → sending`` compare-and-set) and create
+         its attempt — committed;
+      3. build the payload, mark ``request_started`` — committed;
+      4. call Meta and record exactly what we learned: accepted (wamid),
+         rejected (explicit error), not sent (pre-connect transport
+         failure) or uncertain (anything that may have been accepted).
+
+    Uncertain rows are never re-sent by this loop or by retries.
+
+    When ``only_wave_id`` is set only that wave's rows are considered.
+    Returns ``(accepted_count, failed_count, error_messages)``.
     """
     from services.whatsapp_platform.service import provider_send_message  # noqa: PLC0415
+    from services import campaign_send_ledger as ledger  # noqa: PLC0415
 
+    if ctx is None:
+        # Direct callers (tests, legacy paths) get a lease of their own.
+        ctx = DispatchRunContext(ledger.new_worker_id())
+        if not ledger.ledger_available(db):
+            return 0, 0, ["dispatch_skipped:ledger_unavailable"]
+        got = ledger.acquire_lease(
+            db, campaign_id=campaign.id, tenant_id=campaign.tenant_id, owner=ctx.owner,
+        )
+        if not got.acquired:
+            return 0, 0, [f"dispatch_skipped:{got.reason}"]
+        own_lease = True
+    else:
+        own_lease = False
+
+    campaign_id = int(campaign.id)
+    tenant_id = int(campaign.tenant_id)
     sent = 0
     failed = 0
     errors: List[str] = []
@@ -1876,438 +2009,439 @@ async def _dispatch_queued_rows(
     pause = MARKETING_CAMPAIGN_BATCH_PAUSE_SECONDS
 
     # ── Same-error-code circuit breaker ───────────────────────────────
-    # If the SAME non-retryable error_code dominates a campaign run
-    # (e.g. every recipient comes back with ``client_payment_blocked``
-    # or ``policy_violation``), keep going — each recipient is a
-    # different number — but we cap total attempts at one per row
-    # for these classes. The catch we DO want: if a *retryable*
-    # error code (rate_limit, service_unavailable) repeats more than
-    # SAME_CODE_BREAKER_THRESHOLD times in a single run, abort
-    # the dispatch so we don't keep beating on Meta while it tells
-    # us to back off.
+    # A *retryable* code (rate_limit, service_unavailable) repeating
+    # SAME_CODE_BREAKER_THRESHOLD times aborts the run so we stop
+    # hammering Meta while it asks us to back off.
     SAME_CODE_BREAKER_THRESHOLD = 25
     same_code_counts: Dict[str, int] = {}
     abort_reason: Optional[str] = None
+    consecutive_uncertain = 0
 
-    # Run the zombie watchdog up-front so any row stuck in ``sending``
-    # from a previous (crashed) run is reverted to queued before we
-    # start drawing the new batch.
-    _revive_zombie_sending(db, campaign.id)
+    # Resolve whatever a dead worker left in flight before drawing work,
+    # and apply status events that arrived before their attempts.
+    _revive_zombie_sending(db, campaign_id, owner=ctx.owner)
     db.commit()
+    ledger.apply_pending_events_for_campaign(db, campaign_id)
 
-    # Track rows we've already processed in THIS invocation so a
-    # status flip during the loop (queued → failed → queued via some
-    # other code path) can never resurrect the same row in the same
-    # call — that's exactly how production accumulated 7000+ attempts
-    # on a single phone.
+    scope_key = ledger.messaging_scope_key(wa_conn)
+    phone_number_id = getattr(wa_conn, "phone_number_id", None)
+
+    # Rows handled in THIS invocation are never drawn again by it.
     processed_ids: set = set()
-
-    # Hard ceiling on the outer loop. Even with batch_size rows per
-    # iteration, we should NEVER iterate more than the audience size
-    # plus a safety margin. This is the last line of defence against
-    # the retry-storm bug.
     safety_iterations = 0
     max_safety_iterations = max(50, (campaign.audience_count or 0) * 2)
 
-    while True:
-        safety_iterations += 1
-        if safety_iterations > max_safety_iterations:
-            logger.critical(
-                "[campaign_dispatcher] campaign_send_retry_storm campaign=%d "
-                "outer loop hit safety cap (iterations=%d) — aborting",
-                campaign.id, safety_iterations,
-            )
-            break
-
-        # Pull the next batch of work. CRITICAL: only ``LOG_QUEUED``.
-        # NEVER include ``LOG_FAILED`` here — failed rows are terminal
-        # within a single dispatch run. Operators retry failures
-        # explicitly via dispatch-now (which calls
-        # ``reschedule_failed_for_retry`` to promote them back to
-        # queued). Re-including failed rows here was the root cause of
-        # the production retry storm (attempt_count=7345).
-        batch_q = (
-            db.query(CampaignSendLog)
-            .filter(
-                CampaignSendLog.campaign_id == campaign.id,
-                CampaignSendLog.status == LOG_QUEUED,
-                ~CampaignSendLog.id.in_(processed_ids) if processed_ids else True,
-            )
-            .order_by(CampaignSendLog.id.asc())
-            .limit(batch_size)
-        )
-        # Wave-scoped dispatch: each scheduler tick only touches the
-        # slice that belongs to its wave. The composite index
-        # ``ix_campaign_send_log_wave_status`` keeps this cheap.
-        if only_wave_id is not None:
-            batch_q = batch_q.filter(CampaignSendLog.wave_id == only_wave_id)
-        batch = batch_q.all()
-        if not batch:
-            break
-
-        for row in batch:
-            # Idempotency guard: re-check status under the same row
-            # (handles the case where another worker already grabbed it).
-            if row.status == LOG_SENT:
-                processed_ids.add(int(row.id))
-                continue
-
-            # Mark this row as processed BEFORE we start sending so an
-            # exception thrown later can never resurrect it back into
-            # the loop within the same invocation.
-            processed_ids.add(int(row.id))
-
-            # Catastrophic circuit-breaker — fires if a runaway pre-
-            # existing row has > 100 attempts. We force-terminate it
-            # and continue without touching Meta.
-            if _force_terminate_runaway(row, campaign_id=campaign.id):
-                failed += 1
-                db.flush()
-                continue
-
-            # Soft retry ceiling. If a previous dispatch already
-            # consumed MAX_SEND_ATTEMPTS, mark the row terminally
-            # exhausted (no more Meta calls for this recipient).
-            if _is_attempts_exhausted(row):
-                row.status = LOG_FAILED
-                row.error_code = "retry_exhausted"
-                row.error_message = (
-                    f"Exceeded {MAX_SEND_ATTEMPTS} send retries"
+    try:
+        while not ctx.stopped and abort_reason is None:
+            safety_iterations += 1
+            if safety_iterations > max_safety_iterations:
+                logger.critical(
+                    "[campaign_dispatcher] campaign_send_retry_storm campaign=%d "
+                    "outer loop hit safety cap (iterations=%d) — aborting",
+                    campaign_id, safety_iterations,
                 )
-                row.updated_at = datetime.now(timezone.utc)
-                failed += 1
-                logger.warning(
-                    "[campaign_dispatcher] campaign=%d row=%s "
-                    "retry_exhausted attempts=%d",
-                    campaign.id, row.id, row.attempt_count or 0,
-                )
-                db.flush()
-                continue
-
-            # Mark sending — visible in the dashboard status feed. The
-            # watchdog will revive this row if we crash before
-            # reaching a terminal state.
-            row.status = LOG_SENDING
-            row.attempt_count = (row.attempt_count or 0) + 1
-            row.updated_at = datetime.now(timezone.utc)
-            db.flush()
-
-            phone = row.customer_phone_e164
-            customer = customers_by_phone.get(phone)
-            # Greeting name policy (May 2026):
-            #   * Use Customer.name verbatim — no runtime mutation.
-            #   * The merchant cleans bad names once via the bulk
-            #     "تنظيف أسماء العملاء" tool on the customers page.
-            #   * If the stored name is empty/null, fall back to
-            #     the static greeting (``عميلنا الغالي``).
-            # Anything that survives in the DB at send time is what
-            # the merchant explicitly approved — we trust it.
-            from core.customer_display import (  # noqa: PLC0415
-                display_name_passthrough_or_fallback,
-                personalization_customer_name_or_fallback,
-            )
-            customer_name = personalization_customer_name_or_fallback(
-                customer.name if customer else None
-            )
-
-            try:
-                # ── Coupon resolution rule ────────────────────────────
-                # MANUAL TEMPLATE  (auto_coupon = False)
-                #   The merchant typed the code in the campaign wizard.
-                #   It lives on `campaign.coupon_code`, was hoisted into
-                #   `manual_coupon` once at the top of `dispatch_campaign`,
-                #   and is sent VERBATIM to Meta — no coupon generator,
-                #   no AI substitution, no segment lookup. Preview code
-                #   must equal sent code, every single time.
-                #
-                # AUTO TEMPLATE    (auto_coupon = True)
-                #   The wizard requested per-customer codes. We resolve
-                #   a fresh one from CouponGeneratorService for each
-                #   recipient. This is the ONLY code path that may call
-                #   `_get_auto_coupon`.
-                if auto_coupon and discount_pct and customer:
-                    coupon_code = await _get_auto_coupon(
-                        db, campaign.tenant_id, customer, discount_pct,
-                    )
-                else:
-                    coupon_code = manual_coupon
-
-                payload = _build_send_payload(
-                    template=template,
-                    to_phone=phone,
-                    customer_name=customer_name,
-                    store_name=store_name,
-                    coupon_code=coupon_code,
-                )
-
-                # ── PRE-SEND ATTEMPT LOG ──────────────────────────
-                # Emit a single structured line per recipient BEFORE
-                # we hit Meta. This is the line support greps for
-                # "campaign_send_attempt" when an entire campaign
-                # fails with `unknown` — it shows exactly which
-                # template / language / parameter shape we shipped.
-                _log_send_attempt(
-                    campaign_id=campaign.id,
-                    template=template,
-                    recipient_phone=phone,
-                    payload=payload,
-                )
-
-                response, _ctx = await provider_send_message(
-                    db,
-                    wa_conn,
-                    tenant_id=campaign.tenant_id,
-                    operation="campaign_send",
-                    phone_id=wa_conn.phone_number_id,
-                    payload=payload,
-                )
-
-                resp = response or {}
-                meta_err = resp.get("error") if isinstance(resp, dict) else None
-                if meta_err:
-                    # Extract every signal Meta sends so we can
-                    # classify into a canonical, merchant-readable
-                    # key (services.meta_errors). The raw English
-                    # message + numeric code are kept verbatim in
-                    # ``error_message`` so support can still copy
-                    # the technical details.
-                    if isinstance(meta_err, dict):
-                        meta_msg = (
-                            meta_err.get("message")
-                            or meta_err.get("error_user_msg")
-                            or "Unknown Meta error"
-                        )
-                        meta_code = meta_err.get("code")
-                        meta_subcode = meta_err.get("error_subcode")
-                        meta_type = meta_err.get("type")
-                    else:
-                        meta_msg = str(meta_err) or "Unknown Meta error"
-                        meta_code = None
-                        meta_subcode = None
-                        meta_type = None
-                    from services.meta_errors import (  # noqa: PLC0415
-                        classify_meta_error, format_technical,
-                    )
-                    classified = classify_meta_error(
-                        code=meta_code, subcode=meta_subcode,
-                        error_type=meta_type, message=meta_msg,
-                        raw_response=resp,
-                    )
-                    row.status = LOG_FAILED
-                    # ``error_code`` becomes the canonical key (e.g.
-                    # ``not_on_whatsapp``) — the UI maps it to Arabic
-                    # via the same module without needing more state.
-                    row.error_code = classified.key[:64]
-                    # ``error_message`` keeps the raw Meta string +
-                    # numeric code so support can paste it into a
-                    # ticket without losing fidelity. The canonical
-                    # ``[code=X subcode=Y type=Z] msg`` shape is what
-                    # ``parse_technical`` consumes to surface the raw
-                    # fields separately in the UI.
-                    technical = format_technical(
-                        code=meta_code, subcode=meta_subcode,
-                        error_type=meta_type, message=meta_msg,
-                    )
-                    row.error_message = technical[:500]
-                    row.updated_at = datetime.now(timezone.utc)
-                    # Persist a bounded list of raw fingerprints on the
-                    # campaign so the debug endpoint can render the
-                    # full Meta payload for every UNKNOWN error — this
-                    # is the fingerprint-collection bucket support uses
-                    # to grow the canonical classifier.
-                    _record_raw_meta_sample(
-                        campaign=campaign,
-                        recipient_phone=phone,
-                        meta_code=meta_code,
-                        meta_subcode=meta_subcode,
-                        meta_type=meta_type,
-                        meta_message=meta_msg,
-                        request_payload=payload,
-                        response_payload=resp,
-                        classified_key=classified.key,
-                        template=template,
-                    )
-                    # Track first-ever sightings of unknown Meta codes
-                    # so structured logs include a single ``Unknown Meta
-                    # code encountered`` warning per (code, subcode)
-                    # tuple. Support uses this to extend ``_CODE_MAP``.
-                    if classified.key == "unknown":
-                        try:
-                            from services import meta_errors as _me  # noqa: PLC0415
-                            _me.note_unknown_code(
-                                code=meta_code,
-                                subcode=meta_subcode,
-                                error_type=meta_type,
-                                message=meta_msg,
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                    failed += 1
-                    if len(errors) < 10:
-                        # Friendly Arabic line for the campaign report
-                        # (replaces the old "client_side (meta_error)"
-                        # gibberish the merchant used to see).
-                        errors.append(
-                            f"{phone}: {classified.label_ar} "
-                            f"[{classified.key}]"
-                        )
-                    # WARNING for known errors, ERROR for unknown so
-                    # operators can grep production for new codes the
-                    # classifier doesn't recognise yet.
-                    log_method = (
-                        logger.error if classified.key == "unknown"
-                        else logger.warning
-                    )
-                    log_method(
-                        "[campaign_dispatcher] campaign=%d Meta error "
-                        "key=%s code=%s subcode=%s type=%s phone=%s msg=%s "
-                        "retryable=%s severity=%s",
-                        campaign.id, classified.key, meta_code,
-                        meta_subcode, meta_type, phone, meta_msg,
-                        classified.retryable, classified.severity,
-                    )
-                    # ── Same-error-code circuit breaker (retryable only) ──
-                    # If a *retryable* code (rate_limit, service_unavailable,
-                    # …) repeats above the threshold within a single run,
-                    # break out so we stop hammering Meta. Non-retryable
-                    # codes don't trip this — each recipient gets their
-                    # own classification and we just record the failure.
-                    if classified.retryable:
-                        bucket = classified.key
-                        same_code_counts[bucket] = same_code_counts.get(bucket, 0) + 1
-                        if same_code_counts[bucket] >= SAME_CODE_BREAKER_THRESHOLD:
-                            abort_reason = (
-                                f"same_code_circuit_breaker:{bucket}"
-                                f"@{same_code_counts[bucket]}"
-                            )
-                            logger.critical(
-                                "[campaign_dispatcher] campaign=%d "
-                                "same_code_circuit_breaker tripped key=%s "
-                                "count=%d threshold=%d — aborting run",
-                                campaign.id, bucket,
-                                same_code_counts[bucket],
-                                SAME_CODE_BREAKER_THRESHOLD,
-                            )
-                else:
-                    messages = resp.get("messages") if isinstance(resp, dict) else None
-                    first = messages[0] if isinstance(messages, list) and messages else None
-                    wa_msg_id = first.get("id") if isinstance(first, dict) else ""
-                    if not wa_msg_id:
-                        # No id means Meta did not actually accept the
-                        # message — treat as failure so we don't lie to
-                        # the merchant by counting it as sent.
-                        from services.meta_errors import label_for  # noqa: PLC0415
-                        row.status = LOG_FAILED
-                        row.error_code = "no_message_id"
-                        row.error_message = (
-                            "Meta accepted the request but did not "
-                            "return a wamid"
-                        )
-                        row.updated_at = datetime.now(timezone.utc)
-                        failed += 1
-                        if len(errors) < 10:
-                            errors.append(
-                                f"{phone}: {label_for('no_message_id')} "
-                                f"[no_message_id]"
-                            )
-                    else:
-                        row.status = LOG_SENT
-                        row.provider_message_id = wa_msg_id
-                        row.sent_at = datetime.now(timezone.utc)
-                        row.error_code = None
-                        row.error_message = None
-                        row.updated_at = datetime.now(timezone.utc)
-                        sent += 1
-                        if customer:
-                            rendered = _reconstruct_template_body(
-                                template, customer_name, store_name, coupon_code,
-                            )
-                            _record_campaign_message(
-                                db, campaign.tenant_id, campaign.id, customer,
-                                phone, template, rendered,
-                                wa_message_id=wa_msg_id,
-                            )
-                        # Open / refresh the 24h marketing conversation
-                        # window so the Meta-billable counter and the
-                        # ConversationLog audit log reflect this campaign
-                        # send. Without this hook the merchant ships
-                        # thousands of templates but the dashboard never
-                        # updates — they only learn the real cost from
-                        # Meta's monthly bill. The function is idempotent
-                        # against an already-open window for the same
-                        # phone (no double-counting on resends within
-                        # 24h) and runs inside the same transaction we
-                        # commit below.
-                        try:
-                            from core.wa_usage import track_conversation  # noqa: PLC0415
-                            track_conversation(
-                                db,
-                                campaign.tenant_id,
-                                phone,
-                                source="campaign",
-                                category="marketing",
-                            )
-                        except Exception as _track_exc:
-                            logger.warning(
-                                "[campaign_dispatcher] track_conversation failed "
-                                "campaign=%d phone=***%s err=%s",
-                                campaign.id, phone[-4:] if phone else "?", _track_exc,
-                            )
-                        logger.info(
-                            "[campaign_dispatcher] campaign=%d sent OK to %s wamid=%s",
-                            campaign.id, phone, wa_msg_id,
-                        )
-            except Exception as exc:
-                from services.meta_errors import label_for  # noqa: PLC0415
-                # Capture every signal we can about the failure so the
-                # debug endpoint surfaces it instead of an opaque
-                # "exception" pill. Best-effort: never let bookkeeping
-                # raise again inside the except.
-                exc_class = type(exc).__name__
-                http_status = (
-                    getattr(exc, "status_code", None)
-                    or getattr(exc, "status", None)
-                    or getattr(getattr(exc, "response", None), "status_code", None)
-                )
-                exc_msg = str(exc)[:400]
-                row.status = LOG_FAILED
-                row.error_code = "exception"
-                row.error_message = (
-                    f"[exception={exc_class} http={http_status or '—'}] "
-                    f"{exc_msg}"
-                )
-                row.updated_at = datetime.now(timezone.utc)
-                failed += 1
-                if len(errors) < 10:
-                    errors.append(
-                        f"{phone}: {label_for('exception')} [exception]"
-                    )
-                logger.error(
-                    "[campaign_dispatcher] campaign=%d exception sending to %s: %s",
-                    campaign.id, phone, exc, exc_info=True,
-                )
-
-            # Update the campaign-level counter incrementally so the
-            # dashboard's progress bar feels live.
-            campaign.sent_count = sent
-            await asyncio.sleep(INTER_MESSAGE_DELAY)
-
-            # If the same-error-code breaker tripped during this row,
-            # finish the in-flight DB writes and bail out cleanly so
-            # the rest of the audience isn't pummeled with the same
-            # transient Meta failure.
-            if abort_reason is not None:
                 break
 
-        # Flush + pause between batches so a parallel worker can pick
-        # up the new state and Meta sees a steady cadence.
-        db.commit()
-        if abort_reason is not None:
-            errors.append(f"dispatch_aborted:{abort_reason}")
-            break
-        if pause > 0:
-            await asyncio.sleep(pause)
+            # CRITICAL: only ``queued``. Failed and uncertain rows are
+            # terminal within a run; retries go through
+            # ``reschedule_failed_for_retry``.
+            batch_q = (
+                db.query(CampaignSendLog.id, CampaignSendLog.customer_phone_e164)
+                .filter(
+                    CampaignSendLog.campaign_id == campaign_id,
+                    CampaignSendLog.status == LOG_QUEUED,
+                    ~CampaignSendLog.id.in_(processed_ids) if processed_ids else True,
+                )
+                .order_by(CampaignSendLog.id.asc())
+                .limit(batch_size)
+            )
+            if only_wave_id is not None:
+                batch_q = batch_q.filter(CampaignSendLog.wave_id == only_wave_id)
+            batch = [(int(i), p) for i, p in batch_q.all()]
+            if not batch:
+                break
 
+            for log_id, phone in batch:
+                processed_ids.add(log_id)
+
+                # ── 1. Stop before sending into a known refusal ──────
+                budget = ledger.messaging_budget(db, wa_conn)
+                if not budget.allows(phone):
+                    ctx.pause(
+                        ledger.PAUSE_MESSAGING_LIMIT,
+                        f"used={budget.used} budget={budget.budget} limit={budget.limit} "
+                        f"source={budget.limit_source} scope={budget.scope_key}",
+                    )
+                    logger.warning(
+                        "[campaign_dispatcher] campaign=%d paused: shared messaging "
+                        "budget exhausted %s", campaign_id, budget.to_dict(),
+                    )
+                    break
+                throttle = ledger.post_accept_throttle(db, scope_key)
+                if throttle is not None:
+                    ctx.pause(
+                        ledger.PAUSE_PROVIDER_THROTTLING,
+                        f"post_accept {throttle[0]} x{throttle[1]} in "
+                        f"{int(ledger.POST_ACCEPT_BREAKER_WINDOW.total_seconds() // 60)}m",
+                    )
+                    logger.critical(
+                        "[campaign_dispatcher] campaign=%d paused: Meta post-accept "
+                        "throttling %s x%d scope=%s", campaign_id, throttle[0],
+                        throttle[1], scope_key,
+                    )
+                    break
+
+                # ── Legacy attempt ceilings (no Meta call) ───────────
+                row = db.get(CampaignSendLog, log_id)
+                if row is None:
+                    continue
+                db.refresh(row)
+                if row.status != LOG_QUEUED:
+                    continue
+                if _force_terminate_runaway(row, campaign_id=campaign_id):
+                    failed += 1
+                    db.commit()
+                    continue
+                if _is_attempts_exhausted(row):
+                    row.status = LOG_FAILED
+                    row.error_code = "retry_exhausted"
+                    row.error_message = f"Exceeded {MAX_SEND_ATTEMPTS} send retries"
+                    row.updated_at = datetime.now(timezone.utc)
+                    failed += 1
+                    logger.warning(
+                        "[campaign_dispatcher] campaign=%d row=%s retry_exhausted attempts=%d",
+                        campaign_id, log_id, row.attempt_count or 0,
+                    )
+                    db.commit()
+                    continue
+
+                # ── 2. Atomic claim ──────────────────────────────────
+                claim = ledger.claim_recipient(
+                    db, log_id=log_id, campaign=campaign, owner=ctx.owner,
+                    scope_key=scope_key, phone_number_id=phone_number_id,
+                    wa_conn=wa_conn,
+                )
+                if claim.attempt is None:
+                    if claim.reason == "budget_exhausted":
+                        b = claim.budget
+                        ctx.pause(
+                            ledger.PAUSE_MESSAGING_LIMIT,
+                            f"used={b.used} budget={b.budget} limit={b.limit} "
+                            f"source={b.limit_source} scope={b.scope_key}" if b else "",
+                        )
+                        logger.warning(
+                            "[campaign_dispatcher] campaign=%d paused at claim: shared "
+                            "messaging budget exhausted %s",
+                            campaign_id, b.to_dict() if b else {},
+                        )
+                        break
+                    if claim.reason == "lease_lost":
+                        ctx.lease_lost = True
+                        logger.error(
+                            "[campaign_dispatcher] campaign=%d lease lost by %s — "
+                            "stopping without further sends", campaign_id, ctx.owner,
+                        )
+                        break
+                    if claim.reason == "stop_requested":
+                        ctx.pause(ledger.PAUSE_MERCHANT_STOP, "stop requested")
+                        break
+                    continue
+                attempt = claim.attempt
+
+                customer = customers_by_phone.get(phone)
+                from core.customer_display import (  # noqa: PLC0415
+                    personalization_customer_name_or_fallback,
+                )
+                customer_name = personalization_customer_name_or_fallback(
+                    customer.name if customer else None
+                )
+
+                # ── 3. Build the request (nothing sent yet) ──────────
+                try:
+                    # MANUAL template: merchant's code verbatim. AUTO
+                    # template: one generated code per recipient — the
+                    # only path that may call ``_get_auto_coupon``.
+                    if auto_coupon and discount_pct and customer:
+                        coupon_code = await _get_auto_coupon(
+                            db, tenant_id, customer, discount_pct,
+                        )
+                    else:
+                        coupon_code = manual_coupon
+                    payload = _build_send_payload(
+                        template=template,
+                        to_phone=phone,
+                        customer_name=customer_name,
+                        store_name=store_name,
+                        coupon_code=coupon_code,
+                    )
+                    _log_send_attempt(
+                        campaign_id=campaign_id,
+                        template=template,
+                        recipient_phone=phone,
+                        payload=payload,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    db.rollback()
+                    from services.meta_errors import label_for  # noqa: PLC0415
+                    ledger.record_not_sent(
+                        db, attempt, error_code="internal_error",
+                        technical=f"[payload_build {type(exc).__name__}] {str(exc)[:300]}",
+                    )
+                    db.commit()
+                    failed += 1
+                    if len(errors) < 10:
+                        errors.append(f"{phone}: {label_for('internal_error')} [internal_error]")
+                    logger.error(
+                        "[campaign_dispatcher] campaign=%d payload build failed for %s: %s",
+                        campaign_id, phone, exc, exc_info=True,
+                    )
+                    continue
+
+                ledger.mark_request_started(db, attempt)
+
+                # ── 4. Send and record exactly what we learned ───────
+                try:
+                    response, _ctx = await provider_send_message(
+                        db,
+                        wa_conn,
+                        tenant_id=tenant_id,
+                        operation="campaign_send",
+                        phone_id=wa_conn.phone_number_id,
+                        payload=payload,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        db.rollback()
+                    except Exception:  # noqa: silent-ok — the send outcome is recorded just below
+                        pass
+                    exc_class = type(exc).__name__
+                    http_status = (
+                        getattr(exc, "status_code", None)
+                        or getattr(getattr(exc, "response", None), "status_code", None)
+                    )
+                    technical = f"[exception={exc_class} http={http_status or '—'}] {str(exc)[:400]}"
+                    if ledger.exception_proves_not_sent(exc):
+                        ledger.record_not_sent(db, attempt, technical=technical)
+                        failed += 1
+                        consecutive_uncertain = 0
+                        err_key = "transport_not_sent"
+                    else:
+                        # Timeout/protocol error after the request left:
+                        # Meta may have accepted it. Never retried blindly.
+                        ledger.record_uncertain(
+                            db, attempt, reason="transport_error_after_send", technical=technical,
+                        )
+                        consecutive_uncertain += 1
+                        err_key = "send_outcome_unknown"
+                    db.commit()
+                    if len(errors) < 10:
+                        from services.meta_errors import label_for  # noqa: PLC0415
+                        errors.append(f"{phone}: {label_for(err_key)} [{err_key}]")
+                    logger.error(
+                        "[campaign_dispatcher] campaign=%d exception sending to %s "
+                        "(attempt=%s outcome=%s): %s",
+                        campaign_id, phone, attempt.id, err_key, exc,
+                    )
+                else:
+                    resp = response or {}
+                    meta_err = resp.get("error") if isinstance(resp, dict) else None
+                    if meta_err:
+                        if isinstance(meta_err, dict):
+                            meta_msg = (
+                                meta_err.get("message")
+                                or meta_err.get("error_user_msg")
+                                or "Unknown Meta error"
+                            )
+                            meta_code = meta_err.get("code")
+                            meta_subcode = meta_err.get("error_subcode")
+                            meta_type = meta_err.get("type")
+                        else:
+                            meta_msg = str(meta_err) or "Unknown Meta error"
+                            meta_code = meta_subcode = meta_type = None
+                        from services.meta_errors import (  # noqa: PLC0415
+                            classify_meta_error, format_technical,
+                        )
+                        technical = format_technical(
+                            code=meta_code, subcode=meta_subcode,
+                            error_type=meta_type, message=meta_msg,
+                        )
+                        if meta_type == "non_json_response":
+                            # Gateway / HTML error page: we cannot tell
+                            # whether Meta processed the request.
+                            ledger.record_uncertain(
+                                db, attempt, reason="provider_non_json_response",
+                                technical=technical,
+                            )
+                            consecutive_uncertain += 1
+                            db.commit()
+                            if len(errors) < 10:
+                                from services.meta_errors import label_for  # noqa: PLC0415
+                                errors.append(
+                                    f"{phone}: {label_for('send_outcome_unknown')} "
+                                    f"[send_outcome_unknown]"
+                                )
+                        else:
+                            consecutive_uncertain = 0
+                            classified = classify_meta_error(
+                                code=meta_code, subcode=meta_subcode,
+                                error_type=meta_type, message=meta_msg,
+                                raw_response=resp,
+                            )
+                            ledger.record_rejected(
+                                db, attempt, error_key=classified.key,
+                                raw_code=meta_code, technical=technical,
+                            )
+                            _record_raw_meta_sample(
+                                campaign=campaign,
+                                recipient_phone=phone,
+                                meta_code=meta_code,
+                                meta_subcode=meta_subcode,
+                                meta_type=meta_type,
+                                meta_message=meta_msg,
+                                request_payload=payload,
+                                response_payload=resp,
+                                classified_key=classified.key,
+                                template=template,
+                            )
+                            if classified.key == "unknown":
+                                try:
+                                    from services import meta_errors as _me  # noqa: PLC0415
+                                    _me.note_unknown_code(
+                                        code=meta_code, subcode=meta_subcode,
+                                        error_type=meta_type, message=meta_msg,
+                                    )
+                                except Exception:  # noqa: silent-ok — fingerprint registry is best-effort
+                                    pass
+                            db.commit()
+                            failed += 1
+                            if len(errors) < 10:
+                                errors.append(
+                                    f"{phone}: {classified.label_ar} [{classified.key}]"
+                                )
+                            log_method = (
+                                logger.error if classified.key == "unknown"
+                                else logger.warning
+                            )
+                            log_method(
+                                "[campaign_dispatcher] campaign=%d Meta error "
+                                "key=%s code=%s subcode=%s type=%s phone=%s msg=%s "
+                                "retryable=%s severity=%s",
+                                campaign_id, classified.key, meta_code,
+                                meta_subcode, meta_type, phone, meta_msg,
+                                classified.retryable, classified.severity,
+                            )
+                            bucket = classified.key
+                            local_refusal = (
+                                isinstance(resp, dict)
+                                and resp.get("_nahla_classification") in _LOCAL_REFUSAL_CLASSIFICATIONS
+                            )
+                            if (classified.retryable or bucket in _SYNC_THROTTLE_KEYS) and not local_refusal:
+                                same_code_counts[bucket] = same_code_counts.get(bucket, 0) + 1
+                                limit = _SYNC_THROTTLE_KEYS.get(bucket, SAME_CODE_BREAKER_THRESHOLD)
+                                if same_code_counts[bucket] >= limit:
+                                    abort_reason = (
+                                        f"same_code_circuit_breaker:{bucket}"
+                                        f"@{same_code_counts[bucket]}"
+                                    )
+                                    if bucket in _SYNC_THROTTLE_KEYS:
+                                        ctx.pause(ledger.PAUSE_PROVIDER_THROTTLING, abort_reason)
+                                    logger.critical(
+                                        "[campaign_dispatcher] campaign=%d "
+                                        "same_code_circuit_breaker tripped key=%s "
+                                        "count=%d threshold=%d — aborting run",
+                                        campaign_id, bucket, same_code_counts[bucket], limit,
+                                    )
+                    else:
+                        messages = resp.get("messages") if isinstance(resp, dict) else None
+                        first = messages[0] if isinstance(messages, list) and messages else None
+                        wa_msg_id = first.get("id") if isinstance(first, dict) else ""
+                        if not wa_msg_id:
+                            # A success-shaped answer without a wamid may
+                            # still be an accepted message — not provably
+                            # failed, so not retried.
+                            ledger.record_uncertain(
+                                db, attempt, reason="accepted_without_wamid",
+                                technical="Meta returned success without messages[0].id",
+                            )
+                            consecutive_uncertain += 1
+                            db.commit()
+                            if len(errors) < 10:
+                                from services.meta_errors import label_for  # noqa: PLC0415
+                                errors.append(
+                                    f"{phone}: {label_for('no_message_id')} [no_message_id]"
+                                )
+                        else:
+                            consecutive_uncertain = 0
+                            ledger.record_accepted(db, attempt, wamid=wa_msg_id)
+                            sent += 1
+                            if customer:
+                                rendered = _reconstruct_template_body(
+                                    template, customer_name, store_name, coupon_code,
+                                )
+                                _record_campaign_message(
+                                    db, tenant_id, campaign_id, customer,
+                                    phone, template, rendered,
+                                    wa_message_id=wa_msg_id,
+                                )
+                            # Opens / refreshes the 24h marketing window so
+                            # usage counters reflect this send; idempotent
+                            # for an already-open window.
+                            try:
+                                from core.wa_usage import track_conversation  # noqa: PLC0415
+                                track_conversation(
+                                    db, tenant_id, phone,
+                                    source="campaign", category="marketing",
+                                )
+                            except Exception as _track_exc:  # noqa: BLE001
+                                logger.warning(
+                                    "[campaign_dispatcher] track_conversation failed "
+                                    "campaign=%d phone=***%s err=%s",
+                                    campaign_id, phone[-4:] if phone else "?", _track_exc,
+                                )
+                            db.commit()
+                            # Status events that beat this commit.
+                            ledger.apply_pending_events_for(db, attempt)
+                            logger.info(
+                                "[campaign_dispatcher] campaign=%d sent OK to %s wamid=%s "
+                                "attempt=%s attempt_no=%s",
+                                campaign_id, phone, wa_msg_id, attempt.id, attempt.attempt_no,
+                            )
+
+                if consecutive_uncertain >= ledger.UNCERTAIN_BREAKER_THRESHOLD:
+                    ctx.pause(
+                        ledger.PAUSE_UNCERTAIN,
+                        f"{consecutive_uncertain} consecutive sends with unknown outcome",
+                    )
+                    logger.critical(
+                        "[campaign_dispatcher] campaign=%d paused after %d consecutive "
+                        "uncertain sends", campaign_id, consecutive_uncertain,
+                    )
+                    break
+                if abort_reason is not None:
+                    break
+                await asyncio.sleep(INTER_MESSAGE_DELAY)
+
+            campaign.sent_count = _count_log_statuses(db, campaign_id).get(LOG_SENT, 0)
+            db.commit()
+            if abort_reason is not None:
+                errors.append(f"dispatch_aborted:{abort_reason}")
+                break
+            if ctx.stopped:
+                break
+            if pause > 0:
+                await asyncio.sleep(pause)
+    finally:
+        if own_lease:
+            try:
+                ledger.release_lease(
+                    db, campaign_id=campaign_id, owner=ctx.owner,
+                    pause_reason=ctx.pause_reason, pause_detail=ctx.pause_detail,
+                )
+            except Exception:  # noqa: BLE001
+                db.rollback()
+
+    if ctx.pause_reason:
+        errors.append(f"dispatch_paused:{ctx.pause_reason}")
     return sent, failed, errors
 
 
