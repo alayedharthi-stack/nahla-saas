@@ -1,9 +1,11 @@
 """PostgreSQL fixtures for legacy 0020–0024 migration drift recovery tests."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -259,12 +261,73 @@ def alembic_config(engine: Engine) -> Config:
         os.chdir(prev_cwd)
 
 
+@contextmanager
+def _preserved_logging_configuration() -> Iterator[None]:
+    """Keep Alembic's logging configuration from outliving the migration.
+
+    ``database/migrations/env.py`` calls ``logging.config.fileConfig``, and
+    ``alembic.ini`` declares a root logger. Run in *this* process — which is
+    what ``command.upgrade`` below does — that reconfigures logging globally and
+    in three separate ways, every one of which outlives the call:
+
+    * ``disable_existing_loggers`` defaults to True, so every logger object that
+      already exists and is not named in ``alembic.ini`` gets ``disabled = True``;
+    * ``[logger_root] handlers = console`` **replaces** the root handlers, which
+      during a test run means pytest's own capture handler is removed;
+    * ``[logger_root] level = WARN`` resets the root level.
+
+    Loggers and their handlers are process-global singletons, so without this
+    the next test inherits all three. The visible cost is a log assertion that
+    fails; the quiet one is a test written to prove a secret never reaches the
+    log, reading an empty capture and passing. Clearing only the ``disabled``
+    flags is not enough — the record is emitted but goes to Alembic's console
+    handler instead of the capture, which is why all three are restored here.
+
+    Every in-process Alembic entry point in this repository was enumerated
+    rather than assuming the boot path is the only one:
+
+    * ``backend/main.py`` runs its bootstrap upgrade through ``subprocess.run``
+      — a separate process, so ``fileConfig`` there cannot reach these loggers;
+    * ``scripts/operators/commerce_runtime_synthetic_probe.py`` builds its
+      ``Config()`` in code with no file, so ``env.py``'s
+      ``if config.config_file_name is not None`` is false and ``fileConfig`` is
+      never called. Its docstring names this same hazard;
+    * this helper was the remaining caller, and the only one left unprotected.
+
+    Those are the three; the claim is bounded to them, and a new in-process
+    caller would need its own check.
+    """
+    root = logging.getLogger()
+    manager = logging.Logger.manager
+    saved_root_handlers = list(root.handlers)
+    saved_root_level = root.level
+    saved_loggers = {
+        name: (obj.disabled, obj.level, list(obj.handlers))
+        for name, obj in list(manager.loggerDict.items())
+        if isinstance(obj, logging.Logger)
+    }
+    saved_disable = manager.disable
+    try:
+        yield
+    finally:
+        root.handlers[:] = saved_root_handlers
+        root.setLevel(saved_root_level)
+        manager.disable = saved_disable
+        for name, (was_disabled, level, handlers) in saved_loggers.items():
+            obj = manager.loggerDict.get(name)
+            if isinstance(obj, logging.Logger):
+                obj.disabled = was_disabled
+                obj.setLevel(level)
+                obj.handlers[:] = handlers
+
+
 def run_alembic(engine: Engine, revision: str) -> None:
     cfg = alembic_config(engine)
     prev_cwd = os.getcwd()
     try:
         os.chdir(_DATABASE)
-        command.upgrade(cfg, revision)
+        with _preserved_logging_configuration():
+            command.upgrade(cfg, revision)
     finally:
         os.chdir(prev_cwd)
 
@@ -274,7 +337,8 @@ def downgrade_alembic(engine: Engine, revision: str) -> None:
     prev_cwd = os.getcwd()
     try:
         os.chdir(_DATABASE)
-        command.downgrade(cfg, revision)
+        with _preserved_logging_configuration():
+            command.downgrade(cfg, revision)
     finally:
         os.chdir(prev_cwd)
 
