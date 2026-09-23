@@ -778,17 +778,16 @@ class TestRetryStormProtection:
         assert _is_attempts_exhausted(r) is True
 
     def test_watchdog_terminates_zombie_with_prior_attempts(self):
-        """A row that already burned an attempt does NOT get auto-revived.
+        """A row that already burned an attempt is never auto-revived and
+        never marked as a retryable failure.
 
-        Pre-fix policy was to flip it back to queued — which is exactly
-        how production grew 7000+ attempts on a single recipient.
-        New policy: any zombie with attempts >= 1 goes terminal
-        (``watchdog_timeout``); the merchant can still retry explicitly
-        via dispatch-now (``reschedule_failed_for_retry``).
+        Auto-reviving produced the 7000-attempt storm; marking it
+        ``failed/watchdog_timeout`` (retryable) let dispatch-now re-send
+        to recipients whose first request may already have been accepted.
+        The row's outcome is unknown, so it becomes ``uncertain``.
         """
-        from services.campaign_dispatcher import (
-            _revive_zombie_sending, LOG_FAILED,
-        )
+        from services.campaign_dispatcher import _revive_zombie_sending
+        from services.campaign_send_ledger import LOG_UNCERTAIN
         db, _ = _make_db()
         t = _seed_tenant(db)
         tpl = _seed_template(db, t.id)
@@ -816,8 +815,8 @@ class TestRetryStormProtection:
         db.commit()
         assert moved == 1
         db.refresh(stuck); db.refresh(fresh)
-        assert stuck.status == LOG_FAILED
-        assert stuck.error_code == "watchdog_timeout"
+        assert stuck.status == LOG_UNCERTAIN
+        assert stuck.error_code == "send_outcome_unknown"
         # Fresh row stays exactly where it is — no false-positive.
         assert fresh.status == "sending"
 
@@ -845,10 +844,13 @@ class TestRetryStormProtection:
         db.commit(); db.refresh(stuck)
         assert stuck.status == LOG_QUEUED
 
-    def test_watchdog_marks_exhausted_zombie_as_retry_exhausted(self):
+    def test_watchdog_marks_exhausted_zombie_as_uncertain(self):
+        """Even past the attempt ceiling a stuck ``sending`` row may hide an
+        accepted message — it is uncertain, not failed."""
         from services.campaign_dispatcher import (
-            _revive_zombie_sending, LOG_FAILED, MAX_SEND_ATTEMPTS,
+            _revive_zombie_sending, MAX_SEND_ATTEMPTS, reschedule_failed_for_retry,
         )
+        from services.campaign_send_ledger import LOG_UNCERTAIN
         db, _ = _make_db()
         t = _seed_tenant(db)
         tpl = _seed_template(db, t.id)
@@ -865,11 +867,8 @@ class TestRetryStormProtection:
 
         _revive_zombie_sending(db, camp.id, timeout_seconds=300)
         db.commit(); db.refresh(stuck)
-        assert stuck.status == LOG_FAILED
-        # Past MAX_SEND_ATTEMPTS → definitively retry_exhausted, not
-        # the soft ``watchdog_timeout``. The test name now matches the
-        # actual classification.
-        assert stuck.error_code == "retry_exhausted"
+        assert stuck.status == LOG_UNCERTAIN
+        assert reschedule_failed_for_retry(db, camp.id) == 0
 
     def test_reschedule_failed_promotes_recoverable_rows(self):
         from services.campaign_dispatcher import (
@@ -880,13 +879,22 @@ class TestRetryStormProtection:
         t = _seed_tenant(db)
         tpl = _seed_template(db, t.id)
         camp = _seed_campaign(db, t.id, tpl)
-        # exception / no_message_id → retriable, attempts not exhausted.
+        # A retryable explicit Meta rejection, attempts not exhausted.
         retriable = CampaignSendLog(
             tenant_id=t.id, campaign_id=camp.id,
             customer_phone_e164="+966500000010",
             template_name=tpl.name, template_language="ar",
-            status=LOG_FAILED, error_code="exception",
+            status=LOG_FAILED, error_code="rate_limit",
             attempt_count=2,
+        )
+        # A legacy exception around the Meta call is ambiguous (the
+        # request may have been accepted) → never re-queued.
+        ambiguous = CampaignSendLog(
+            tenant_id=t.id, campaign_id=camp.id,
+            customer_phone_e164="+966500000013",
+            template_name=tpl.name, template_language="ar",
+            status=LOG_FAILED, error_code="exception",
+            attempt_count=1,
         )
         # not_on_whatsapp → terminal, never retried.
         terminal = CampaignSendLog(
@@ -902,10 +910,10 @@ class TestRetryStormProtection:
             tenant_id=t.id, campaign_id=camp.id,
             customer_phone_e164="+966500000012",
             template_name=tpl.name, template_language="ar",
-            status=LOG_FAILED, error_code="exception",
+            status=LOG_FAILED, error_code="rate_limit",
             attempt_count=MAX_SEND_ATTEMPTS,
         )
-        db.add_all([retriable, terminal, exhausted]); db.commit()
+        db.add_all([retriable, terminal, exhausted, ambiguous]); db.commit()
         db.refresh(retriable); db.refresh(terminal); db.refresh(exhausted)
 
         moved = reschedule_failed_for_retry(db, camp.id)
@@ -917,6 +925,9 @@ class TestRetryStormProtection:
         assert terminal.error_code == "not_on_whatsapp"
         assert exhausted.status == LOG_FAILED
         assert exhausted.error_code == "retry_exhausted"
+        db.refresh(ambiguous)
+        assert ambiguous.status == LOG_FAILED
+        assert ambiguous.error_code == "exception"
 
     def test_reschedule_failed_leaves_retry_exhausted_and_retry_storm_alone(self):
         from services.campaign_dispatcher import (

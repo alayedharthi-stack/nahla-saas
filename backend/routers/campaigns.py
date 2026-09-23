@@ -185,6 +185,8 @@ def _campaign_canonical_stats(
             "queued":              0,
             "skipped":             0,
             "total_recipients":    0,
+            "in_flight":           0,
+            "uncertain":           0,
         })
         st = (r.st or "").lower()
         cnt = int(r.cnt or 0)
@@ -196,6 +198,11 @@ def _campaign_canonical_stats(
             s["failed_after_accept"] += int(r.failed_after_accept_cnt or 0)
         elif st in ("queued", "sending"):
             s["queued"] += cnt
+            if st == "sending":
+                s["in_flight"] += cnt
+        elif st == "uncertain":
+            # May or may not have been accepted — neither sent nor failed.
+            s["uncertain"] += cnt
         elif st == "failed":
             s["failed"] += cnt
         elif st.startswith("skipped_"):
@@ -214,6 +221,81 @@ def _campaign_canonical_stats(
             0,
             s["meta_accepted"] - s["delivered"] - s["failed_after_accept"],
         )
+        # Explicit names for the separated buckets (recipient scope).
+        s["failed_before_accept"] = s["failed"]
+        s["failed_total"] = s["failed"] + s["failed_after_accept"]
+        s["pending_delivery"] = s["not_delivered_yet"]
+
+    # Message-scope counts from the attempt ledger (one row per request
+    # we sent) and per-recipient outcomes across all attempts. These are
+    # different scopes from the recipient buckets above and are named
+    # ``messages_*`` / ``recipients_*`` so they are never mixed.
+    try:
+        from services.campaign_send_ledger import ledger_stats  # noqa: PLC0415
+        for cid, extra in ledger_stats(db, list(out)).items():
+            out[cid].update(extra)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[campaigns] ledger stats failed: %s", exc)
+    try:
+        for cid, breakdown in _campaign_error_breakdown(db, list(out)).items():
+            out[cid]["error_breakdown"] = breakdown
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[campaigns] error breakdown failed: %s", exc)
+    return out
+
+
+def _campaign_error_breakdown(
+    db: Session, campaign_ids: List[int],
+) -> Dict[int, List[Dict[str, Any]]]:
+    """Failure reasons counted from the same rows as the counters.
+
+    One entry per (phase, stored code): ``before_accept`` for recipients
+    in ``failed``, ``after_accept`` for accepted recipients Meta later
+    reported failed (and never delivered/read), ``uncertain`` for
+    unknown outcomes. Each carries the merchant label, the canonical key
+    and the raw stored code for diagnosis. Counts sum exactly to the
+    matching counters, unlike the capped ``_dispatch_errors`` list.
+    """
+    from sqlalchemy import func  # noqa: PLC0415
+    from services.meta_errors import ERRORS, classify_meta_error  # noqa: PLC0415
+
+    out: Dict[int, List[Dict[str, Any]]] = {}
+    if not campaign_ids:
+        return out
+    phases = (
+        ("before_accept", CampaignSendLog.status == "failed"),
+        ("after_accept", (CampaignSendLog.status == "sent")
+            & CampaignSendLog.failed_at.isnot(None)
+            & CampaignSendLog.delivered_at.is_(None)
+            & CampaignSendLog.read_at.is_(None)),
+        ("uncertain", CampaignSendLog.status == "uncertain"),
+    )
+    for phase, cond in phases:
+        rows = (
+            db.query(CampaignSendLog.campaign_id, CampaignSendLog.error_code,
+                     func.count(CampaignSendLog.id))
+            .filter(CampaignSendLog.campaign_id.in_(campaign_ids), cond)
+            .group_by(CampaignSendLog.campaign_id, CampaignSendLog.error_code)
+            .all()
+        )
+        for cid, code, cnt in rows:
+            raw = (code or "").strip()
+            if raw.lower() in ERRORS:
+                ce = ERRORS[raw.lower()]
+            elif phase == "uncertain":
+                ce = ERRORS["send_outcome_unknown"]
+            else:
+                ce = classify_meta_error(code=raw or None, message=raw or None)
+            out.setdefault(int(cid), []).append({
+                "phase": phase,
+                "key": ce.key,
+                "label_ar": ce.label_ar,
+                "raw_code": raw or None,
+                "count": int(cnt),
+                "retryable": bool(ce.retryable) and phase == "before_accept",
+            })
+    for lst in out.values():
+        lst.sort(key=lambda e: -e["count"])
     return out
 
 
@@ -248,10 +330,50 @@ def _stats_with_rates(stats: Dict[str, int]) -> Dict[str, Any]:
     return enriched
 
 
+def _campaign_executions(db: Session, campaign_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Whether a worker really holds each campaign's lease right now."""
+    out: Dict[int, Dict[str, Any]] = {}
+    if not campaign_ids:
+        return out
+    try:
+        from models import CampaignDispatchLease  # noqa: PLC0415
+        from services.campaign_send_ledger import lease_is_live, utcnow  # noqa: PLC0415
+        now = utcnow()
+        for lease in db.query(CampaignDispatchLease).filter(
+            CampaignDispatchLease.campaign_id.in_(campaign_ids),
+        ):
+            live = lease_is_live(lease, now=now)
+            out[int(lease.campaign_id)] = {
+                "worker_running": live,
+                "heartbeat_at": lease.heartbeat_at.isoformat() if lease.heartbeat_at else None,
+                "stop_requested": lease.stop_requested_at is not None,
+                "pause_reason": lease.pause_reason,
+                "pause_detail": lease.pause_detail,
+                "paused_at": lease.paused_at.isoformat() if lease.paused_at else None,
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[campaigns] execution lookup failed: %s", exc)
+    return out
+
+
+def _campaigns_payload(db: Session, campaigns: List[Campaign]) -> List[Dict[str, Any]]:
+    ids = [c.id for c in campaigns]
+    stats_by_id = _campaign_canonical_stats(db, ids)
+    exec_by_id = _campaign_executions(db, ids)
+    return [
+        _campaign_to_dict(
+            c, canonical_stats=stats_by_id.get(c.id),
+            execution=exec_by_id.get(c.id, {"worker_running": False}),
+        )
+        for c in campaigns
+    ]
+
+
 def _campaign_to_dict(
     c: Campaign,
     *,
     canonical_stats: Optional[Dict[str, int]] = None,
+    execution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Serialise a Campaign row for the API.
 
@@ -335,6 +457,16 @@ def _campaign_to_dict(
             lifecycle = "pending_dispatch"
         else:
             lifecycle = "sending"
+        # "Sending" is a claim about a live worker: only make it when a
+        # worker holds the lease. Otherwise the run died mid-way.
+        if (
+            execution is not None
+            and not execution.get("worker_running")
+            and lifecycle == "sending"
+        ):
+            lifecycle = "stalled"
+    elif raw_status == "paused":
+        lifecycle = "paused"
     elif raw_status == "draft":
         lifecycle = "draft"
     else:
@@ -378,10 +510,11 @@ def _campaign_to_dict(
             if canonical_stats is not None else c.sent_count
         ),
         "failed_count": (
-            # Surface the canonical "failed" bucket (pre-accept) when
-            # available; fall back to the legacy template_variables
+            # Every recipient whose message did not arrive: rejected
+            # before acceptance AND reported failed after acceptance
+            # (the split lives in ``stats``). Legacy template_variables
             # counter for campaigns that never wrote send-log rows.
-            int(canonical_stats.get("failed", 0) or 0)
+            int(canonical_stats.get("failed_total", canonical_stats.get("failed", 0)) or 0)
             if canonical_stats is not None and canonical_stats.get("total_recipients", 0) > 0
             else failed_count
         ),
@@ -427,6 +560,9 @@ def _campaign_to_dict(
                 "total_recipients":    (c.sent_count or 0) + failed_count + skipped_count,
             })
         ),
+        # Is a worker really running? (lease-backed, not the status column)
+        "execution": execution,
+        "pause_reason": (execution or {}).get("pause_reason") if raw_status == "paused" else None,
         "clicked_count": c.clicked_count,
         "converted_count": c.converted_count,
         "created_at": c.created_at.isoformat() if c.created_at else None,
@@ -472,13 +608,7 @@ async def list_campaigns(request: Request, db: Session = Depends(get_db)):
     # (``CampaignSendLog``). The legacy Campaign.{sent,delivered,read}
     # _count columns can drift after a dispatcher restart in wave
     # mode; the merchant-visible stats must never lie because of that.
-    stats_by_id = _campaign_canonical_stats(db, [c.id for c in campaigns])
-    return {
-        "campaigns": [
-            _campaign_to_dict(c, canonical_stats=stats_by_id.get(c.id))
-            for c in campaigns
-        ],
-    }
+    return {"campaigns": _campaigns_payload(db, campaigns)}
 
 
 @router.post("/campaigns")
@@ -793,6 +923,13 @@ async def update_campaign_status(
         raise HTTPException(status_code=404, detail="Campaign not found")
 
     was_not_active = campaign.status != "active"
+    from services import campaign_send_ledger as _ledger  # noqa: PLC0415
+    if body.status == "paused":
+        # Safe stop: the live worker (if any) finishes its in-flight
+        # request and starts no new one.
+        _ledger.request_stop(db, campaign_id=campaign.id, tenant_id=tenant_id)
+    elif body.status == "active":
+        _ledger.clear_stop(db, campaign_id=campaign.id)
     campaign.status = body.status
     if body.status == "active" and not campaign.launched_at:
         campaign.launched_at = datetime.now(timezone.utc)
@@ -803,10 +940,7 @@ async def update_campaign_status(
     if body.status == "active" and was_not_active:
         _spawn_dispatch_in_background(campaign.id)
 
-    return _campaign_to_dict(
-        campaign,
-        canonical_stats=_campaign_canonical_stats(db, [campaign.id]).get(campaign.id),
-    )
+    return _campaigns_payload(db, [campaign])[0]
 
 
 @router.delete("/campaigns/{campaign_id}")
@@ -2562,9 +2696,10 @@ async def dispatch_campaign_now(
       4. Return 202-style ``{ok: true, kicked: true}`` so the
          frontend can refresh and watch counters tick up.
 
-    The dispatch_campaign function is itself idempotent (sent rows are
-    never re-sent), so a curious merchant double-clicking the button
-    cannot duplicate-send.
+    A live campaign lease refuses the request outright
+    (``reason='already_running'``), and each recipient is claimed with an
+    atomic compare-and-set, so a double click cannot start a second
+    sender or re-send to anyone.
     """
     tenant_id = resolve_tenant_id(request)
     campaign = db.query(Campaign).filter(
@@ -2589,6 +2724,31 @@ async def dispatch_campaign_now(
             ),
         }
 
+    # ── Never start a second worker ──────────────────────────────
+    # A double click, a retry from another tab, or a click while the
+    # first thread is still sending used to start a second dispatcher
+    # that re-sent to the same queued recipients. The lease is the
+    # source of truth for "a worker is running" — across processes.
+    from services import campaign_send_ledger as _ledger  # noqa: PLC0415
+    _lease = _ledger.get_lease(db, campaign_id)
+    if _ledger.lease_is_live(_lease):
+        logger.warning(
+            "[campaigns.dispatch-now] tenant=%d campaign=%d refused: worker %s "
+            "holds the lease until %s",
+            tenant_id, campaign_id, _lease.owner, _lease.expires_at,
+        )
+        return {
+            "campaign_id":  campaign_id,
+            "ok":           False,
+            "kicked":       False,
+            "reason":       "already_running",
+            "execution":    _ledger.execution_snapshot(db, campaign_id),
+            "message":      (
+                "الإرسال قيد التنفيذ بالفعل لهذه الحملة — لن يُبدأ تشغيل ثانٍ. "
+                "حدّث الصفحة لمتابعة التقدّم."
+            ),
+        }
+
     # Pre-flip status so the merchant sees "جاري الإرسال" on the next
     # /campaigns refresh (≤2s away), instead of "ينتظر بدء الإرسال"
     # while we silently wait for the dispatcher to update it.
@@ -2599,22 +2759,20 @@ async def dispatch_campaign_now(
         from services.campaign_dispatcher import (  # noqa: PLC0415
             reschedule_failed_for_retry, _revive_zombie_sending,
         )
+        # Explicit merchant resume lifts a pending stop / pause.
+        _ledger.clear_stop(db, campaign_id=campaign_id)
         if bypass_frequency_cap:
             tv = dict(campaign.template_variables or {})
             tv["_bypass_frequency_cap"] = "true"
             campaign.template_variables = tv
             flag_modified(campaign, "template_variables")
-        # Resurrect zombie ``sending`` rows from a crashed prior run so
-        # the dispatcher doesn't trip over them. The watchdog also
-        # runs at the top of the dispatcher itself, but doing it here
-        # gives the merchant immediate visibility (the row flips to
-        # ``queued`` before the next /debug refresh).
+        # Resolve ``sending`` rows a crashed prior run left behind:
+        # provably-unsent ones go back to the queue, possibly-sent ones
+        # become ``uncertain`` (never re-sent automatically).
         revived_zombies = _revive_zombie_sending(db, campaign_id)
-        # Promote retriable ``failed`` rows back to ``queued`` so this
-        # dispatch run picks them up. Recipient-specific failures
-        # (e.g. ``not_on_whatsapp``) stay terminal; only transient
-        # error codes are retried, and only while ``attempt_count``
-        # remains below ``MAX_SEND_ATTEMPTS``.
+        # Promote retriable ``failed`` rows back to ``queued``: only
+        # recipients whose every attempt provably produced no message,
+        # with a transient code, below ``MAX_SEND_ATTEMPTS``.
         rescheduled_count = reschedule_failed_for_retry(db, campaign_id)
         if (campaign.status or "").lower() != "active":
             campaign.status = "active"
@@ -2674,6 +2832,37 @@ async def dispatch_campaign_now(
         "rescheduled_failed": rescheduled_count,
         "revived_zombies":    revived_zombies,
         "message":     msg,
+    }
+
+
+@router.post("/campaigns/{campaign_id}/stop")
+async def stop_campaign(
+    campaign_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Safe stop: the running worker (on any instance) finishes the
+    request already in flight and starts no new one. Queued recipients
+    stay queued; "إرسال يدوي الآن" resumes explicitly."""
+    tenant_id = resolve_tenant_id(request)
+    campaign = db.query(Campaign).filter(
+        Campaign.id == campaign_id, Campaign.tenant_id == tenant_id,
+    ).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    from services import campaign_send_ledger as _ledger  # noqa: PLC0415
+    _ledger.request_stop(db, campaign_id=campaign_id, tenant_id=tenant_id)
+    if (campaign.status or "").lower() in ("active", "scheduled"):
+        campaign.status = "paused"
+        campaign.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    logger.info("[campaigns.stop] tenant=%d campaign=%d stop requested", tenant_id, campaign_id)
+    return {
+        "campaign_id": campaign_id,
+        "ok": True,
+        "status": campaign.status,
+        "execution": _ledger.execution_snapshot(db, campaign_id),
+        "message": "تم طلب الإيقاف — لن تُبدأ أي رسالة جديدة لهذه الحملة.",
     }
 
 

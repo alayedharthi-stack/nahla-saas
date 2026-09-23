@@ -1324,11 +1324,41 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
         from models import CampaignSendLog, Campaign  # noqa: PLC0415
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
 
-        log_row = (
-            db.query(CampaignSendLog)
-            .filter(CampaignSendLog.provider_message_id == wamid)
-            .first()
-        )
+        # ── Layer 0: per-attempt ledger (every wamid we were issued) ──
+        # Resolves the event against the attempt that owns this wamid —
+        # not the recipient row, which only holds one wamid — and is
+        # idempotent for redelivered webhooks. Delivery columns on the
+        # recipient row are derived from all of its attempts.
+        from services import campaign_send_ledger as _ledger  # noqa: PLC0415
+
+        ledger_res = None
+        try:
+            ledger_res = _ledger.apply_status_event(
+                db,
+                wamid=wamid,
+                status=st,
+                provider_timestamp=status.get("timestamp"),
+                recipient_id=status.get("recipient_id"),
+                errors=status.get("errors"),
+                store_if_unmatched=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[StatusWebhook] ledger apply failed wamid=%s: %s", wamid[:20], exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            ledger_res = None
+        ledger_matched = bool(ledger_res and ledger_res.matched)
+
+        if ledger_matched:
+            log_row = db.get(CampaignSendLog, ledger_res.send_log_id)
+        else:
+            log_row = (
+                db.query(CampaignSendLog)
+                .filter(CampaignSendLog.provider_message_id == wamid)
+                .first()
+            )
 
         # ── Resolve tenant_id BEFORE calling the quality recorder ──
         # message_delivery_events.tenant_id is NOT NULL. Three resolution
@@ -1369,7 +1399,7 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
             logger.info(
                 "[PAYMENT_MEDIA_DIAG] status_failed wamid=%s status=%s "
                 "recipient_id=%s timestamp=%s tenant_id=%s "
-                "message_event=%s campaign_send_log=%s errors=%s",
+                "message_event=%s campaign_send_log=%s campaign_attempt=%s errors=%s",
                 wamid,
                 st,
                 status.get("recipient_id"),
@@ -1377,6 +1407,7 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
                 resolved_tenant_id,
                 "matched" if evt_row else "orphan",
                 "matched" if log_row else "orphan",
+                "matched" if ledger_matched else "orphan",
                 _sanitize_status_webhook_errors(status.get("errors")),
             )
 
@@ -1393,7 +1424,7 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
                 tenant_id=resolved_tenant_id,
                 wamid=wamid,
                 status=st,
-                phone_e164=(log_row.phone_e164 if log_row else None),
+                phone_e164=(log_row.customer_phone_e164 if log_row else None),
                 errors_payload=status.get("errors"),
                 campaign_send_log_id=(log_row.id if log_row else None),
                 source="meta",
@@ -1407,9 +1438,32 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
                 db.rollback()
             except Exception:
                 pass
-        log_touched = False
+        # A campaign event that beat its attempt's commit: keep it in the
+        # inbox; the dispatcher applies it right after committing the wamid.
+        if not ledger_matched and log_row is None and evt_row is None:
+            try:
+                _ledger.apply_status_event(
+                    db,
+                    wamid=wamid,
+                    status=st,
+                    provider_timestamp=status.get("timestamp"),
+                    recipient_id=status.get("recipient_id"),
+                    errors=status.get("errors"),
+                    store_if_unmatched=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[StatusWebhook] inbox store failed wamid=%s: %s", wamid[:20], exc)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+        log_touched = bool(ledger_res and ledger_res.changed)
         log_campaign_id: Optional[int] = None
-        if log_row:
+        if log_row and ledger_matched:
+            # Ledger already derived delivered/read/failed for this row.
+            log_campaign_id = log_row.campaign_id
+        elif log_row:
             log_campaign_id = log_row.campaign_id
             if st == "delivered" and log_row.delivered_at is None:
                 log_row.delivered_at = now
