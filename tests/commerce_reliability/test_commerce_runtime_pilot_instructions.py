@@ -75,7 +75,11 @@ def test_every_tool_the_instructions_name_is_declared_and_nothing_else_is_unacco
     read of shareable promotions), never an accidental exposure."""
     assert set(pi.INSTRUCTION_TOOL_NAMES) <= set(alt.LIVE_TOOL_NAMES)
     assert set(alt.LIVE_TOOL_NAMES) - set(pi.INSTRUCTION_TOOL_NAMES) == set(alt.PILOT_ONLY_TOOL_NAMES)
-    assert alt.PILOT_ONLY_TOOL_NAMES == ("list_shareable_promotions",)
+    # Reads the owner approved and the instructions deliberately never name, so
+    # when to use them stays the model's call rather than a step it is ordered
+    # through.
+    assert alt.PILOT_ONLY_TOOL_NAMES == ("get_customer_addresses",
+                                         "list_shareable_promotions")
 
 
 def test_the_reply_channel_is_both_declared_and_described():
