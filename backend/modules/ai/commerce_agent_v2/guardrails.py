@@ -173,6 +173,12 @@ _ORDER_BOUND_KINDS = frozenset(
         "carrier",
         "tracking_number",
         "tracking_url",
+        "shipment_latest_event_status",
+        "shipment_latest_event_note",
+        "shipment_latest_event_location",
+        "shipment_latest_event_at",
+        "shipment_last_verified_at",
+        "shipment_data_source",
     }
 )
 _ORDER_EVIDENCE_SOURCES = frozenset(
@@ -371,6 +377,12 @@ def _expected_evidence_sources(kind: str) -> frozenset[str]:
         "carrier": frozenset({"order_shipment"}),
         "tracking_number": frozenset({"order_shipment"}),
         "tracking_url": frozenset({"order_shipment"}),
+        "shipment_latest_event_status": frozenset({"order_shipment"}),
+        "shipment_latest_event_note": frozenset({"order_shipment"}),
+        "shipment_latest_event_location": frozenset({"order_shipment"}),
+        "shipment_latest_event_at": frozenset({"order_shipment"}),
+        "shipment_last_verified_at": frozenset({"order_shipment"}),
+        "shipment_data_source": frozenset({"order_shipment"}),
     }.get(kind, frozenset({"catalog_product"}))
 
 

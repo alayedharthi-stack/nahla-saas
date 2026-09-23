@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy import JSON, create_engine, event
+from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -24,12 +26,24 @@ from services.salla_shipment_tracking import (  # noqa: E402
 )
 
 
-@event.listens_for(Base.metadata, "before_create")
-def _sqlite_jsonb(target, connection, **kw):
-    for table in target.sorted_tables:
-        for column in table.columns:
-            if isinstance(column.type, JSONB):
-                column.type = JSON()
+@compiles(JSONB, "sqlite")
+def _sqlite_jsonb(type_, compiler, **kw):
+    """SQLite has no JSONB, so render it as JSON when SQLite emits the DDL.
+
+    This used to be a ``before_create`` listener on ``Base.metadata`` that
+    rewrote ``column.type`` in place. Two things made that reach far outside
+    this module: the listener is registered at import, so merely collecting
+    this file arms it for the whole session, and it fired for every engine
+    rather than only SQLite — with no restore. After one in-memory database
+    was built, ``Coupon.metadata`` and every other JSONB column stayed
+    ``JSON()`` for the rest of the process, so any PostgreSQL database another
+    suite created afterwards silently lost ``jsonb``: ``?``, ``@>`` and GIN
+    indexes stopped existing on it.
+
+    Compiling the type for one dialect touches no shared column object, so a
+    PostgreSQL ``create_all`` in the same process still gets ``jsonb``.
+    """
+    return "JSON"
 
 
 class _SallaTrackingAdapter:
@@ -213,3 +227,27 @@ def test_tenant_or_customer_mismatch_cannot_read_or_refresh_tracking():
     finally:
         db.close()
         engine.dispose()
+
+
+def test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql():
+    """Collecting this module must not cost another suite its ``jsonb``.
+
+    The SQLite shim lives on a type shared by every model in the process. When
+    it rewrote ``column.type`` in place, the first in-memory database built
+    here turned every JSONB column into ``JSON`` for good — so a PostgreSQL
+    database another suite created later came up with ``json`` columns, and
+    ``metadata ? 'key'`` stopped existing on it. That surfaced as five
+    unrelated failures in the coupon eligibility trace, which is the only
+    suite that asks for a jsonb-only operator.
+
+    Asserting on the shared column after a SQLite ``create_all`` is what holds
+    the shim inside SQLite.
+    """
+    from models import Coupon
+
+    _db()
+
+    assert isinstance(Coupon.__table__.c["metadata"].type, JSONB)
+    rendered = Coupon.__table__.c["metadata"].type.compile(
+        dialect=postgresql.dialect())
+    assert rendered.upper() == "JSONB"
