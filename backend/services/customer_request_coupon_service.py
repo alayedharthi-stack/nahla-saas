@@ -11,7 +11,7 @@ from __future__ import annotations
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -30,9 +30,14 @@ from services.coupon_salla_provider_state import (
     classify_salla_coupon_provider_state,
 )
 from services.coupon_level_contract import (
-    highest_allowed_at_or_below,
+    BLOCK_CHANNEL_NOT_ALLOWED,
+    BLOCK_LADDER_UNREADABLE,
+    BLOCK_LEVEL_DISABLED,
+    BLOCK_NOT_IN_AI_POLICY,
+    earned_level_block,
+    level_entry,
+    policy_served_level,
     resolve_coupon_level_for_order_count,
-    servable_levels,
 )
 from services.customer_intelligence import CustomerIntelligenceService
 from services.order_countability_policy import is_countable_order
@@ -61,6 +66,10 @@ REASON_LEVEL_DISABLED = "level_disabled"
 REASON_LEVEL_NOT_ALLOWED_FOR_AI = "level_not_allowed_for_ai"
 REASON_AI_POLICY_DISABLED = "ai_policy_disabled"
 REASON_CHANNEL_NOT_ALLOWED = "channel_not_allowed"
+# The merchant's saved ladder could not be read, so no rung can be shown to
+# honour the gates they set on it. Distinct from every reason above: those are
+# answers about this store and this customer, this one is about us.
+REASON_LEVEL_POLICY_UNREADABLE = "level_policy_unreadable"
 REASON_POOL_EMPTY = "pool_empty"
 REASON_GENERATION_NOT_AUTHORIZED = "generation_not_authorized"
 REASON_SALLA_UNAVAILABLE = "salla_unavailable"
@@ -234,32 +243,15 @@ def _positive_int(value: Any) -> Optional[int]:
     return number if number > 0 else None
 
 
-def _level_entry(block: Mapping[str, Any], level_id: str) -> Dict[str, Any]:
-    raw = block.get("levels") or []
-    if isinstance(raw, Mapping):
-        entry = raw.get(level_id)
-        return dict(entry) if isinstance(entry, Mapping) else {"id": level_id}
-    if isinstance(raw, list):
-        for entry in raw:
-            if isinstance(entry, Mapping) and str(entry.get("id") or "").lower() == level_id:
-                return dict(entry)
-    return {"id": level_id}
-
-
-def _servable_levels(
-    block: Mapping[str, Any],
-    *,
-    channel: str,
-    policy_levels: Sequence[str],
-) -> List[str]:
-    """Every rung this merchant will let this channel hand out, ladder order.
-
-    Delegates to the platform's one selection contract so issuing and the
-    read-only promotions tool cannot disagree about which rung a customer is
-    served. Reading and issuing must answer to the same rule, or the assistant
-    offers one code and the platform hands over another.
-    """
-    return servable_levels(block.get("levels"), channel=channel, policy_levels=policy_levels)
+# The contract names which gate closed a rung; this result contract has its own
+# names for the same three facts, and they are part of what callers read. One
+# map, so the rule lives in the contract and only its wording lives here.
+_BLOCK_REASONS: Dict[str, str] = {
+    BLOCK_LEVEL_DISABLED: REASON_LEVEL_DISABLED,
+    BLOCK_CHANNEL_NOT_ALLOWED: REASON_CHANNEL_NOT_ALLOWED,
+    BLOCK_NOT_IN_AI_POLICY: REASON_LEVEL_NOT_ALLOWED_FOR_AI,
+    BLOCK_LADDER_UNREADABLE: REASON_LEVEL_POLICY_UNREADABLE,
+}
 
 
 def _global_defaults(block: Mapping[str, Any]) -> Dict[str, Any]:
@@ -554,30 +546,23 @@ async def issue_customer_coupon(
             count=count,
         )
 
-    level_cfg = _level_entry(block, resolved_level)
     channel = str(for_channel or "ai").lower()
 
     # Why the rung the order history earned cannot be served on this channel,
-    # or ``None`` when it can. Read exactly as before; what changed is that a
-    # block no longer ends the request on its own. A merchant who keeps gold
-    # away from the assistant but allows silver has a silver customer here, not
-    # a customer with nothing — so a block sends us down the ladder, and the
-    # refusal it carries is used only if nothing below is servable.
-    earned_block: Optional[str] = None
-    if not bool(level_cfg.get("enabled", True)):
-        earned_block = REASON_LEVEL_DISABLED
-    else:
-        allowed_channels = [
-            str(c).lower()
-            for c in (level_cfg.get("allowed_channels") or resolution.allowed_channels or [])
-            if c
-        ]
-        if allowed_channels and channel not in allowed_channels:
-            earned_block = (
-                REASON_CHANNEL_NOT_ALLOWED
-                if channel != "ai"
-                else REASON_LEVEL_NOT_ALLOWED_FOR_AI
-            )
+    # or ``None`` when it can — the contract's own reading of the rung's saved
+    # switch and channel list, in this result's wording. A block no longer ends
+    # the request on its own: a merchant who keeps gold away from the assistant
+    # but allows silver has a silver customer here, not a customer with
+    # nothing, so a block sends us down the ladder and the refusal it carries
+    # is used only if nothing below is servable.
+    #
+    # The store's AI policy list is a gate of its own and is applied below,
+    # after that policy's own switch has had its say: a disabled policy answers
+    # for the whole channel, not for one rung.
+    earned_block: Optional[str] = _BLOCK_REASONS.get(
+        earned_level_block(block.get("levels"), resolved_level,
+                           channel=channel, policy_levels=()) or ""
+    )
 
     policy_levels: List[str] = []
     if channel == "ai":
@@ -605,37 +590,32 @@ async def issue_customer_coupon(
     # neither of those questions.
     entitled_level: Optional[str] = None
 
-    if earned_block is not None:
-        served: Optional[str] = None
-        # Only the assistant walks the ladder down. A campaign or autopilot run
-        # is the merchant addressing one rung deliberately, so a rung they
-        # closed there stays closed rather than quietly becoming a lower one.
-        if channel == "ai":
-            # Strictly below: the earned rung was just refused, and a candidate
-            # read that disagreed with that refusal would serve the very rung
-            # the merchant closed.
-            servable = [
-                candidate
-                for candidate in _servable_levels(
-                    block, channel=channel, policy_levels=policy_levels
-                )
-                if candidate != resolved_level
-            ]
-            served = highest_allowed_at_or_below(resolved_level, servable)
-        if served is None:
-            return _empty_result(
-                customer_id=count.customer_id,
-                countable_orders=count.countable_orders,
-                resolved_level=resolved_level,
-                reason_code=earned_block,
-                count=count,
-            )
+    # The one rung this store serves this customer, from the platform's single
+    # selection contract: what they earned while the merchant leaves it open,
+    # and otherwise — for the assistant only — the highest rung the merchant
+    # configured and permits below it. The read-only promotions tool selects
+    # through the same call, so what the assistant may mention and what this
+    # service would hand over cannot drift apart.
+    served = policy_served_level(block.get("levels"), resolved_level,
+                                 channel=channel, policy_levels=policy_levels)
+    if served is None:
+        # Nothing at or below the earned rung is servable here. ``earned_block``
+        # is necessarily set: the contract returns the earned rung itself
+        # whenever no gate closed it.
+        return _empty_result(
+            customer_id=count.customer_id,
+            countable_orders=count.countable_orders,
+            resolved_level=resolved_level,
+            reason_code=earned_block or REASON_LEVEL_NOT_ALLOWED_FOR_AI,
+            count=count,
+        )
+    if served != resolved_level:
         # The coupon will carry the served rung's economics, so the terms
         # advertised beside it must be that rung's too. Carrying the earned
         # rung's cap across is exactly how a result comes to quote limits the
         # issued coupon never had.
         entitled_level, resolved_level = resolved_level, served
-        served_entry = _level_entry(block, served)
+        served_entry = level_entry(block.get("levels"), served)
         restrictions = dict(restrictions)
         restrictions["max_uses"] = _positive_int(served_entry.get("max_uses"))
         restrictions["per_customer_usage"] = _positive_int(

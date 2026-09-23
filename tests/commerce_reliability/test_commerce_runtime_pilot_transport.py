@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import threading
 import time
+import types
 from typing import Any, List, Optional, Tuple
 
 import pytest
@@ -722,26 +723,98 @@ def test_a_deduplicated_card_is_still_an_identified_acceptance():
 # is self-diagnosing instead of needing a transcript.
 
 
-def _report_for(events):
-    """A TurnReport built the way `_after_loop` builds one, from loop events."""
-    import dataclasses
+class _Ledgers:
+    """The ledger surface ``_after_loop`` drives, in memory.
 
-    from core.commerce_runtime import agent_contracts as ac
+    Only what the turn boundary reads: the reserved sequence it loads back, one
+    dispatch reservation, a receipt sink and the turn's terminal. The ledger's
+    own rules — what a reservation refuses, what a receipt establishes — are
+    proved against real PostgreSQL in ``test_commerce_runtime_pilot_pg.py``.
+    What is under test here is the report the boundary builds, so everything
+    outside this process is stubbed and everything inside it is real.
+    """
 
-    made = [ac.LoopEvent(step_no=i, kind=kind, detail=detail)
-            for i, (kind, detail) in enumerate(events, start=1)]
-    accepted = next((e for e in reversed(made) if e.kind == "reply_accepted"), None)
-    detail = dict(getattr(accepted, "detail", None) or {})
-    return dataclasses.replace(
-        entry.TurnReport(reason="handled", tenant_id=1, conversation_id=9),
-        choices_outcome=str(detail.get("choices") or "") or None,
-        card_outcome=str(detail.get("card") or "") or None,
-    )
+    def __init__(self, *, payload: Optional[dict] = None, kind: str = "text") -> None:
+        self.sequence = types.SimpleNamespace(intent_payload=dict(payload or {"text": "مرحبا"}),
+                                              intent_kind=kind)
+        self.receipts: List[Any] = []
+        self.finalized: List[Any] = []
+
+    def get_delivery_sequence(self, **kwargs: Any) -> Any:
+        return self.sequence
+
+    def reserve_delivery_dispatch(self, **kwargs: Any) -> Any:
+        return types.SimpleNamespace(attempt_id=1, payload=dict(self.sequence.intent_payload))
+
+    def record_delivery_receipt(self, **kwargs: Any) -> None:
+        self.receipts.append(kwargs)
+
+    def list_delivery_receipts(self, **kwargs: Any) -> List[Any]:
+        return []
+
+    def finalize_turn(self, *, tenant_id: int, namespace: Any, turn_id: int, token: Any,
+                      processing_outcome: str, details: dict) -> Any:
+        from core.commerce_runtime import contracts as c_
+
+        self.finalized.append((processing_outcome, dict(details)))
+        record = c_.TerminalRecord(
+            turn_id=turn_id, conversation_id=1, tenant_id=tenant_id, namespace=str(namespace),
+            processing_outcome=processing_outcome,
+            transport_outcome="accepted" if self.receipts else "none",
+            customer_reach="reached" if self.receipts else "not_reached",
+            recorded_fence=1, recorded_epoch=1, recorded_by="test", details=dict(details),
+            recorded_at=datetime.datetime.now(datetime.timezone.utc))
+        return record
+
+
+class _Reasoner:
+    """The usage surface the report reads off the provider. No network."""
+
+    usage: tuple = ()
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+
+def _run_turn_boundary(events, *, status: Optional[str] = None,
+                       payload: Optional[dict] = None, kind: str = "text"):
+    """Drive the real ``_after_loop`` over a loop outcome and return its report.
+
+    This is the production boundary: the same call ``run_commerce_runtime_turn``
+    makes once the loop has stopped, with the ledger and the transport — the two
+    things outside this process — stubbed. Nothing about the report is
+    assembled by the test.
+    """
+    from core.commerce_runtime import agent_contracts as ac_
+    from core.commerce_runtime import contracts as c_
+
+    made = tuple(ac_.LoopEvent(step_no=i, kind=k, detail=d)
+                 for i, (k, d) in enumerate(events, start=1))
+    delivered = status == ac_.LoopStatus.PENDING_DELIVERY.value
+    outcome = ac_.LoopOutcome(
+        status=status or ac_.LoopStatus.STOPPED.value,
+        stop_reason=None if delivered else ac_.StopReason.BUDGET_EXHAUSTED.value,
+        turn_id=6, delivery_sequence_id=1 if delivered else None, reused_delivery=False,
+        state_revision=None, steps_used=len(made), tool_calls_used=0, events=made, detail={})
+    ledgers = _Ledgers(payload=payload, kind=kind)
+    token = c_.OwnershipToken(owner_id="o", fence=1, epoch=1, tenant_id=1,
+                              namespace="live", conversation_id=1)
+    return entry._after_loop(
+        ledgers=ledgers, outcome=outcome, tenant_id=1, runtime_conversation_id=1, token=token,
+        transport=lambda payload: lc.SendResponse(http_status=200,
+                                                  body={"messages": [{"id": "wamid.X"}]}),
+        owner_id="o", report_base={"tenant_id": 1, "conversation_id": 9, "turn_id": 6},
+        reasoner=_Reasoner())
+
+
+def _accepted(**detail: Any):
+    from core.commerce_runtime import agent_contracts as ac_
+
+    return _run_turn_boundary([("reply_accepted", {"kind": "text", **detail})],
+                              status=ac_.LoopStatus.PENDING_DELIVERY.value)
 
 
 def test_a_text_only_turn_says_the_model_never_asked_for_either_shape():
-    report = _report_for([("reply_accepted", {"kind": "text", "choices": "not_requested",
-                                              "card": "not_requested"})])
+    report = _accepted(choices="not_requested", card="not_requested")
     assert report.choices_outcome == "not_requested"
     assert report.card_outcome == "not_requested"
     fields = report.as_log_fields()
@@ -752,10 +825,8 @@ def test_a_withheld_card_is_told_apart_from_a_card_never_asked_for():
     """The distinction the production summaries could not make."""
     from core.commerce_runtime import reply_card as rcard
 
-    asked_and_withheld = _report_for([("reply_accepted", {"kind": "text", "choices": "not_requested",
-                                                          "card": rcard.NO_IMAGE})])
-    never_asked = _report_for([("reply_accepted", {"kind": "text", "choices": "not_requested",
-                                                   "card": rcard.NOT_REQUESTED})])
+    asked_and_withheld = _accepted(choices="not_requested", card=rcard.NO_IMAGE)
+    never_asked = _accepted(choices="not_requested", card=rcard.NOT_REQUESTED)
     assert asked_and_withheld.choice_rows == never_asked.choice_rows == 0
     assert asked_and_withheld.card_outcome == rcard.NO_IMAGE
     assert never_asked.card_outcome == rcard.NOT_REQUESTED
@@ -767,13 +838,74 @@ def test_each_card_withhold_reason_survives_to_the_log_line():
 
     for reason in (rcard.NOT_OBSERVED, rcard.NO_IMAGE, rcard.NO_LINK,
                    rcard.INSECURE_LINK, rcard.NO_LABEL, rcard.SELECTOR_PREFERRED):
-        report = _report_for([("reply_accepted", {"kind": "text", "choices": "not_requested",
-                                                  "card": reason})])
+        report = _accepted(choices="not_requested", card=reason)
         assert report.as_log_fields()["card_outcome"] == reason
+
+
+def test_a_turn_that_offered_both_shapes_reports_what_it_offered():
+    """Not every turn is a withhold. A list that really was sent reports the
+    loop's own word for it beside the rows that went out, so "offered" and
+    "asked for and refused" are never read off the same field."""
+    from core.commerce_runtime import agent_contracts as ac_
+
+    report = _run_turn_boundary(
+        [("reply_accepted", {"kind": "rich", "choices": "offered", "card": "offered"})],
+        status=ac_.LoopStatus.PENDING_DELIVERY.value, kind="rich",
+        payload={"text": "اختر منتجاً",
+                 "choices": {"button": "اختر", "rows": [
+                     {"id": "nahla:choice:22", "title": "حذاء رياضي أبيض"},
+                     {"id": "nahla:choice:23", "title": "قميص قطني أزرق"}]}})
+    assert report.choices_outcome == "offered" and report.card_outcome == "offered"
+    # Read back off the ledger's stored intent by the boundary itself, not
+    # supplied here: what was reserved is what is reported.
+    assert report.choice_rows == 2
+    assert report.choice_row_ids == ("nahla:choice:22", "nahla:choice:23")
+    assert report.reply_text == "اختر منتجاً" and report.dispatch_status == "accepted"
 
 
 def test_a_turn_with_no_accepted_reply_claims_no_reason_at_all():
     """A loop that never accepted a reply has nothing to say about its shape,
     and says nothing rather than reporting a reason it did not reach."""
-    report = _report_for([("verification_failed", {"problems": ["card_without_evidence"]})])
+    report = _run_turn_boundary([("verification_failed", {"problems": ["card_without_evidence"]})])
     assert report.choices_outcome is None and report.card_outcome is None
+    assert report.reason == entry.HANDLED and report.dispatch_status is None
+
+
+def test_only_the_reply_the_loop_actually_accepted_is_reported():
+    """A turn that tried, was refused and tried again reports the accepted
+    attempt — the one whose shape reached the customer — not the first."""
+    from core.commerce_runtime import agent_contracts as ac_
+
+    report = _run_turn_boundary(
+        [("reply_accepted", {"kind": "rich", "choices": "offered", "card": "offered"}),
+         ("verification_failed", {"problems": ["card_without_evidence"]}),
+         ("reply_accepted", {"kind": "text", "choices": "not_requested", "card": "no_image"})],
+        status=ac_.LoopStatus.PENDING_DELIVERY.value)
+    assert report.choices_outcome == "not_requested" and report.card_outcome == "no_image"
+
+
+def test_the_reasons_come_from_the_loop_and_are_not_rebuilt_by_the_report():
+    """The negative control for all of the above.
+
+    With the two assignments removed from ``_after_loop`` — the production
+    forwarding these cases exist to protect — a report built from the same loop
+    outcome carries neither reason. Nothing else in the boundary supplies them,
+    so a test that passed without them would be proving only that a dataclass
+    holds what it is given.
+    """
+    import dataclasses
+
+    original = entry._after_loop
+
+    def without_forwarding(**kwargs: Any):
+        report = original(**kwargs)
+        return dataclasses.replace(report, choices_outcome=None, card_outcome=None)
+
+    entry._after_loop = without_forwarding
+    try:
+        report = _accepted(choices="not_requested", card="no_image")
+    finally:
+        entry._after_loop = original
+    assert report.choices_outcome is None and report.card_outcome is None
+    # And with the real boundary back, the same outcome carries them again.
+    assert _accepted(choices="not_requested", card="no_image").card_outcome == "no_image"

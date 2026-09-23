@@ -34,6 +34,10 @@ from services import coupon_entitlement_read as cer  # noqa: E402
 DEFAULT_POLICY: Dict[str, Any] = {"enabled": True, "allowed_levels": ["bronze", "silver"],
                                   "min_remaining_hours": 3, "pool_mode": "pool_first"}
 
+# ``levels=None`` asks :func:`run` for the shipped ladder; this asks it for a
+# merchant who saved no ladder at all.
+NO_LADDER_SAVED = object()
+
 
 class Context:
     """The trusted context as the tool sees it: scope, session, tenant, customer, evidence."""
@@ -155,6 +159,12 @@ def run(context: Context, monkeypatch: pytest.MonkeyPatch, result: pt.PromotionT
     def read_block(db: Any, tenant_id: int) -> Dict[str, Any]:
         if isinstance(levels, BaseException):
             raise levels
+        if levels is NO_LADDER_SAVED:
+            # A merchant who never opened the coupon settings: the block exists
+            # and simply has no ``levels`` key, which is what the accessor
+            # returns for them. Distinct from ``None``, which asks this harness
+            # for the shipped defaults.
+            return {}
         return {"levels": _normalised_levels() if levels is None else levels}
 
     monkeypatch.setattr(tool, "resolve_level_entitlement", read_entitlement)
@@ -782,11 +792,22 @@ def test_a_kept_result_still_reports_what_was_held_back_beside_it(monkeypatch) -
 
 
 def test_the_production_incident_a_gold_customer_and_a_store_that_closed_gold(monkeypatch) -> None:
-    """The shape that reached the customer: considered many, kept none.
+    """The failure mechanism behind the production line, reproduced offline.
 
-    Two gold codes the store keeps from the assistant, six silver ones it
-    allows. Standing is gold, so under exact-rung matching the silver codes are
-    "not earned" — by a customer who has earned more than silver.
+    Turn 26 logged ``considered=8 kept=0`` with
+    ``level_not_allowed_by_store_policy:2, level_not_earned_by_customer:6`` for
+    a customer whose standing was gold. This fixture builds a store that
+    produces that shape — two codes on a rung the policy excludes and six on a
+    rung the customer had earned past — and shows the rule that emptied the
+    list: under exact-rung matching, a rung *below* the standing reads as "not
+    earned" by a customer who earned more than it.
+
+    **What this is not.** The withheld counts are aggregates. They do not
+    identify the eight production records, do not establish that the six were
+    silver rather than some other rung this customer had passed, do not say the
+    two were gold, and do not establish that any of them was otherwise usable.
+    Naming those rows would take a read-only query against the production
+    database, which this fixture is not and does not stand in for.
     """
     facts = [coupon_fact(promotion_id=100 + i, code=f"GOLD{i}", coupon_level="gold") for i in range(2)]
     facts += [coupon_fact(promotion_id=110 + i, code=f"SILVER{i}", coupon_level="silver") for i in range(6)]
@@ -1083,3 +1104,207 @@ def test_a_generic_store_declares_its_general_coupon_the_same_way(monkeypatch) -
         result, _ = run(Context(), monkeypatch, truth(shareable=[declared]),
                         entitlement=entitled("bronze"))
         assert [p.code for p in result.promotions] == [code]
+
+
+# ── When the ladder itself cannot be read ────────────────────────────────────
+#
+# The merchant's saved rungs are an authority like the policy above them. The
+# rule for all of these: a standing is not evidence that this channel may hand
+# that rung over, so a read we could not make withholds the rung rather than
+# falling back to the one earned — and says so, instead of answering for the
+# store.
+
+
+def _closed_gold_ladder(**silver: Any) -> List[Dict[str, Any]]:
+    """Gold closed by its own channel gate while still in the store's AI policy.
+
+    The shape the review named: the policy list alone would let gold through,
+    and only the rung's own ``allowed_channels`` closes it. Silver is whatever
+    the case needs it to be.
+    """
+    return [{"id": "bronze", "enabled": True, "allowed_channels": ["ai"], "discount_default": 5},
+            {"id": "silver", "enabled": True, "allowed_channels": ["ai"],
+             "discount_default": 10, **silver},
+            {"id": "gold", "enabled": True, "allowed_channels": ["campaign"],
+             "discount_default": 20}]
+
+
+def test_an_unreadable_ladder_withholds_the_rung_it_cannot_judge(monkeypatch) -> None:
+    """The regression: a read failure must not promote the earned rung.
+
+    Gold is in the store's AI policy and closed by its own channel gate, so the
+    healthy selection is silver. When the ladder cannot be read, the earlier
+    fallback made the selection gold — past a gate that had refused it — and
+    both level gates then let a gold code through. Now nothing rung-conditioned
+    is projected at all.
+    """
+    facts = [coupon_fact(promotion_id=300, code="GOLD50", coupon_level="gold"),
+             coupon_fact(promotion_id=301, code="SILVER20", coupon_level="silver")]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["silver", "gold"]},
+                    entitlement=entitled("gold", orders=7),
+                    levels=RuntimeError("ladder read failed"))
+    assert result.promotions == [], "no rung is served on a standing alone"
+    assert result.withheld == {tool.WITHHELD_LEVEL_POLICY_UNREADABLE: 2}
+    # And the empty list is not reported as the store having nothing.
+    assert result.status == "error"
+    assert result.failure_reason == "coupon_level_policy_unreadable:RuntimeError"
+    assert result.partial is True
+    # The standing is still read and still reported; only the selection failed.
+    assert result.entitlement["resolved_level"] == "gold"
+    assert result.entitlement["served_level"] == ""
+
+
+def test_what_the_merchant_published_to_everyone_survives_an_unreadable_ladder(monkeypatch) -> None:
+    """A general coupon and an offer never depended on a rung, so they are not
+    withheld for one. The list is returned, and marked short."""
+    facts = [coupon_fact(promotion_id=310, code="OPEN10", coupon_level=""),
+             coupon_fact(promotion_id=311, code="GOLD50", coupon_level="gold")]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts, offers=[offer_fact()]),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["silver", "gold"]},
+                    entitlement=entitled("gold", orders=7),
+                    levels=OSError("connection lost"))
+    assert [p.code for p in result.promotions] == ["OPEN10", ""]
+    assert result.status == "ok"
+    assert result.withheld == {tool.WITHHELD_LEVEL_POLICY_UNREADABLE: 1}
+    # Short, and it says why — a code this customer's rung may hold is missing.
+    assert result.partial is True
+    assert result.failure_reason == "coupon_level_policy_unreadable:OSError"
+
+
+def test_an_unreadable_ladder_that_cost_nothing_is_not_reported_as_a_failure(monkeypatch) -> None:
+    """Honesty runs both ways. No record here was conditioned on a rung, so the
+    list is exactly as complete as it would have been, and calling it partial
+    would be inventing a loss."""
+    result, _ = run(Context(), monkeypatch,
+                    truth(shareable=[coupon_fact(promotion_id=320, code="OPEN10", coupon_level="")]),
+                    entitlement=entitled("gold", orders=7),
+                    levels=RuntimeError("ladder read failed"))
+    assert [p.code for p in result.promotions] == ["OPEN10"]
+    assert result.status == "ok" and result.partial is False
+    assert result.failure_reason is None and result.withheld == {}
+
+
+def test_an_unreadable_ladder_and_an_empty_store_stay_an_honest_empty_answer(monkeypatch) -> None:
+    """Nothing to withhold, nothing lost: ``not_found`` is still the truth."""
+    result, _ = run(Context(), monkeypatch, truth(shareable=[]),
+                    entitlement=entitled("gold", orders=7),
+                    levels=RuntimeError("ladder read failed"))
+    assert result.status == "not_found" and result.partial is False
+    assert result.failure_reason == "no_valid_shareable_promotions"
+
+
+def test_a_malformed_rung_narrows_the_walk_instead_of_raising(monkeypatch) -> None:
+    """The second half of the same failure: settings that are not a list.
+
+    ``silver.allowed_channels = 7`` used to raise inside the selection and land
+    in the same fallback, promoting the rung gold's own gate had refused. Now
+    the unreadable rung is simply not servable, the walk continues past it, and
+    what it reaches is a rung the merchant genuinely configured.
+    """
+    facts = [coupon_fact(promotion_id=330, code="GOLD50", coupon_level="gold"),
+             coupon_fact(promotion_id=331, code="SILVER20", coupon_level="silver"),
+             coupon_fact(promotion_id=332, code="BRONZE5", coupon_level="bronze")]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver", "gold"]},
+                    entitlement=entitled("gold", orders=7),
+                    levels=_closed_gold_ladder(allowed_channels=7))
+    assert [p.code for p in result.promotions] == ["BRONZE5"]
+    assert result.entitlement["served_level"] == "bronze"
+    # Gold and silver are refused by the selection, not by a read failure: the
+    # ladder was read, and it did not permit either of them here.
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_SERVED: 2}
+    # The list is real and is returned, and it still says that one rung's
+    # settings were not settings — a shortened list is never passed off as the
+    # merchant's own answer.
+    assert result.status == "ok" and result.partial is True
+    assert result.failure_reason == "coupon_level_settings_unreadable:silver"
+
+
+def test_a_malformed_rung_with_nothing_configured_below_it_serves_nothing(monkeypatch) -> None:
+    """And when the walk reaches the bottom without a configured rung, it ends
+    with nothing rather than with the rung it started from."""
+    ladder = [{"id": "silver", "enabled": True, "allowed_channels": 7},
+              {"id": "gold", "enabled": True, "allowed_channels": ["campaign"]}]
+    result, _ = run(Context(), monkeypatch,
+                    truth(shareable=[coupon_fact(promotion_id=340, code="GOLD50",
+                                                 coupon_level="gold")]),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["silver", "gold"]},
+                    entitlement=entitled("gold", orders=7), levels=ladder)
+    assert result.promotions == [] and result.entitlement["served_level"] == ""
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_SERVED: 1}
+    # Empty, and not an empty store: silver's own settings were unreadable, so
+    # whether it could have stood in for gold was never actually decided.
+    assert result.status == "error" and result.partial is True
+    assert result.failure_reason == "coupon_level_settings_unreadable:silver"
+
+
+def test_a_rung_the_merchant_never_configured_does_not_stand_in_for_a_closed_one(monkeypatch) -> None:
+    """Through the tool, the bare-entry rule the shared helper lost: a silver
+    row carrying nothing but its own name is a rung nobody set up, and it does
+    not become the rung served in gold's place."""
+    bare = [{"id": "silver"}, {"id": "gold", "enabled": True, "allowed_channels": ["campaign"]}]
+    facts = [coupon_fact(promotion_id=350, code="SILVER20", coupon_level="silver")]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["silver", "gold"]},
+                    entitlement=entitled("gold", orders=7), levels=bare)
+    assert result.promotions == [] and result.entitlement["served_level"] == ""
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_SERVED: 1}
+    # The same ladder with silver genuinely configured does serve it.
+    served, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["silver", "gold"]},
+                    entitlement=entitled("gold", orders=7),
+                    levels=_closed_gold_ladder())
+    assert [p.code for p in served.promotions] == ["SILVER20"]
+    assert served.entitlement["served_level"] == "silver"
+
+
+def test_a_merchant_who_never_opened_the_coupon_settings_closed_nothing(monkeypatch) -> None:
+    """The other half of the same rule, and the one a too-strict reading breaks.
+
+    An absent ladder is not a ladder that refused anything. The rung this
+    customer earned is still theirs, exactly as the issuance service reads it —
+    otherwise every store that never saved the coupon dashboard would advertise
+    nothing while the platform happily issued.
+    """
+    for absent in (NO_LADDER_SAVED, [], {}):
+        result, _ = run(Context(), monkeypatch,
+                        truth(shareable=[coupon_fact(promotion_id=360, code="GOLD50",
+                                                     coupon_level="gold")]),
+                        policy={**DEFAULT_POLICY,
+                                "allowed_levels": ["bronze", "silver", "gold", "vip"]},
+                        entitlement=entitled("gold", orders=7), levels=absent)
+        assert [p.code for p in result.promotions] == ["GOLD50"], absent
+        assert result.entitlement["served_level"] == "gold", absent
+
+
+def test_a_settings_row_that_is_not_a_ladder_reads_like_no_read_at_all(monkeypatch) -> None:
+    """A successful read that returns something which is not a ladder tells us
+    exactly as much as a failed one: nothing about what the merchant permits.
+    It is reported as the failure it is, not as the store's answer."""
+    for not_a_ladder in (7, "levels", 3.5):
+        result, _ = run(Context(), monkeypatch,
+                        truth(shareable=[coupon_fact(promotion_id=370, code="GOLD50",
+                                                     coupon_level="gold")]),
+                        policy={**DEFAULT_POLICY, "allowed_levels": ["silver", "gold"]},
+                        entitlement=entitled("gold", orders=7), levels=not_a_ladder)
+        assert result.promotions == [], not_a_ladder
+        assert result.status == "error", not_a_ladder
+        assert result.failure_reason == "coupon_level_policy_unreadable:not_a_ladder"
+        assert result.withheld == {tool.WITHHELD_LEVEL_POLICY_UNREADABLE: 1}, not_a_ladder
+
+
+def test_a_rung_conditioned_code_refused_before_the_ladder_does_not_make_the_list_short(monkeypatch) -> None:
+    """Precision about our own failure. A silver code personal to another
+    customer is refused on ownership, long before the ladder is consulted, so
+    an unreadable ladder cost this list nothing and it is not called short."""
+    facts = [coupon_fact(promotion_id=380, code="HERS", coupon_level="silver",
+                         customer_bound=True, bound_customer_id=99),
+             coupon_fact(promotion_id=381, code="OPEN10", coupon_level="")]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["silver", "gold"]},
+                    entitlement=entitled("gold", orders=7),
+                    levels=RuntimeError("ladder read failed"))
+    assert [p.code for p in result.promotions] == ["OPEN10"]
+    assert result.withheld == {tool.WITHHELD_PERSONAL_TO_ANOTHER: 1}
+    assert result.status == "ok" and result.partial is False and result.failure_reason is None

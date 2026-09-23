@@ -59,7 +59,12 @@ from modules.ai.commerce_agent_v2.output import (
     PromotionSnapshot,
 )
 from services.coupon_entitlement_read import LevelEntitlement, resolve_level_entitlement
-from services.coupon_level_contract import CANONICAL_COUPON_LEVEL_IDS, policy_served_level
+from services.coupon_level_contract import (
+    CANONICAL_COUPON_LEVEL_IDS,
+    ladder_is_readable,
+    policy_served_level,
+    unreadable_rungs,
+)
 from services.native_ai_coupon_eligibility import NATIVE_AI_CHANNELS
 
 logger = logging.getLogger(__name__)
@@ -91,11 +96,20 @@ WITHHELD_LEVEL_NOT_EARNED = "level_not_earned_by_customer"
 # Permitted by the store and not above this customer's standing, but not the
 # one rung being served. A gold customer served silver still sees one rung.
 WITHHELD_LEVEL_NOT_SERVED = "level_not_served_for_customer"
+# The merchant's ladder could not be read at all, so no rung can be shown to
+# honour the gates they set on it. Counted separately because it is the one
+# reason here that is a failure of ours rather than an answer about the
+# customer or the store: an empty list carrying this is not an empty store.
+WITHHELD_LEVEL_POLICY_UNREADABLE = "level_policy_unreadable"
 WITHHELD_NOT_PUBLISHED = "not_published_for_general_use"
 WITHHELD_EXPIRING_TOO_SOON = "expiring_before_store_minimum"
 # The conditions a projection carries but has not evaluated. Named rather than
 # summarised, so a reader can see exactly what is still open.
 _UNEVALUATED = "conditions_not_fully_evaluated"
+# Records that actually put the level question to the merchant's ladder. Zero
+# of them means an unreadable ladder cost this customer nothing, and a list
+# that lost nothing is never reported as short.
+LEVEL_CONDITIONED = "level_conditioned"
 
 
 def _text(value: Any, limit: int = _MAX_TEXT) -> str:
@@ -183,7 +197,9 @@ def _is_above_standing(level: str, entitlement: LevelEntitlement) -> bool:
 def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
              allowed_levels: Optional[List[str]], entitlement: LevelEntitlement,
              served_level: Optional[str] = None,
+             level_policy_readable: bool = True,
              withheld: Optional[Dict[str, int]] = None,
+             reached: Optional[Dict[str, int]] = None,
              ) -> Optional[Tuple[PromotionSnapshot, EvidenceRecord]]:
     """One resolver fact as a snapshot plus its evidence record, or ``None``
     when the fact cannot be cited here: no id, an unknown kind, a coupon
@@ -232,12 +248,26 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
         # Being active *is* the authorisation, and it carries no code.
         level_eligibility = GENERAL_AUTHORIZED
     elif level:
+        # This record asked the ladder a question. Counted here rather than by
+        # the caller so that a rung-conditioned code refused *before* this point
+        # — unusable, or personal to someone else — is not counted as one the
+        # ladder was consulted about.
+        if reached is not None:
+            reached[LEVEL_CONDITIONED] = reached.get(LEVEL_CONDITIONED, 0) + 1
         # Two separate gates, and both must open. The merchant's AI policy says
         # which rungs the assistant may ever mention in this store; the
         # entitlement says whether this is the rung *this* customer stands on.
         # A store that allows gold does not make every conversation gold.
         if allowed_levels is not None and level not in allowed_levels:
             _refuse(WITHHELD_LEVEL_NOT_ALLOWED)
+            return None
+        if not level_policy_readable:
+            # The rung the merchant would serve could not be worked out, and a
+            # rung is never shown on the strength of a standing alone: what a
+            # customer earned is not evidence that this channel may hand it
+            # over. Withheld under its own reason, so the caller can say the
+            # list is short because of us rather than answer for the store.
+            _refuse(WITHHELD_LEVEL_POLICY_UNREADABLE)
             return None
         if level != (served_level or ""):
             # One rung reaches a conversation, and it is the rung the platform
@@ -370,6 +400,20 @@ def _merchant_policy(context: CommerceAgentContext) -> Dict[str, Any]:
     return _get_ai_policy(context.db, int(context.tenant_id))
 
 
+def _unreadable_reason(ladder_failure: str, broken_rungs: List[str]) -> Optional[str]:
+    """Why this list may be short, or ``None`` when nothing was unreadable.
+
+    Two different failures, named apart: the whole ladder could not be read, or
+    particular rungs carry permission fields that are not permission fields.
+    Neither is a merchant decision, and neither may be reported as one.
+    """
+    if ladder_failure:
+        return f"coupon_level_policy_unreadable:{ladder_failure}"
+    if broken_rungs:
+        return f"coupon_level_settings_unreadable:{','.join(broken_rungs)}"
+    return None
+
+
 def _merchant_levels(context: CommerceAgentContext) -> Any:
     """The merchant's saved coupon ladder, through the platform's own accessor.
 
@@ -405,6 +449,14 @@ async def list_shareable_promotions_impl(
     a customer whose level could not be resolved still receives everything the
     records did not condition on one, and ``not_found`` after that is a real
     empty answer rather than a classification failure in disguise.
+
+    The merchant's ladder is the same kind of authority as the policy above it:
+    when it cannot be read, no rung is served, every level-conditioned coupon is
+    withheld under ``level_policy_unreadable``, and what the merchant published
+    to everyone is unaffected because it never depended on a rung. A list
+    shortened that way is returned ``partial``; one emptied that way is returned
+    ``error``, never ``not_found`` — the store was not asked and cannot be
+    reported as having nothing.
     """
     context.assert_scope()
     try:
@@ -434,18 +486,34 @@ async def list_shareable_promotions_impl(
     # Their standing is untouched by it. A gold customer in a store that keeps
     # gold from the assistant is still gold; silver is only what this channel
     # may offer them today.
+    #
+    # ``policy_served_level`` is total: malformed settings narrow what is
+    # servable and never raise, so only the read itself can fail here. When it
+    # does there is no rung to serve and every level-conditioned coupon is
+    # withheld — a standing is not evidence that this channel may hand that
+    # rung over, and falling back to the earned rung would serve the very one
+    # the merchant may have closed.
+    level_policy_unreadable = ""
+    broken_rungs: List[str] = []
+    served_level: Optional[str] = None
     try:
-        served_level = policy_served_level(
-            _merchant_levels(context), entitlement.resolved_level,
-            channel="ai", policy_levels=allowed_levels or ())
-    except Exception as exc:  # noqa: BLE001 - an unreadable ladder narrows, never widens
-        # Without the ladder the per-rung gates cannot be honoured, so the
-        # selection falls back to the rung actually earned. That withholds more
-        # than the walk would, never less: a read failure must not hand out a
-        # rung the merchant may have closed.
+        merchant_levels = _merchant_levels(context)
+    except Exception as exc:  # noqa: BLE001 - an unreadable ladder serves nothing
+        level_policy_unreadable = type(exc).__name__
+    else:
+        broken_rungs = unreadable_rungs(merchant_levels)
+        if not ladder_is_readable(merchant_levels):
+            # The read succeeded and returned something that is not a ladder.
+            # Indistinguishable, for our purposes, from not having read it:
+            # neither tells us what the merchant permits.
+            level_policy_unreadable = "not_a_ladder"
+        else:
+            served_level = policy_served_level(
+                merchant_levels, entitlement.resolved_level,
+                channel="ai", policy_levels=allowed_levels or ())
+    if level_policy_unreadable:
         logger.info("[PROMOTION_PROJECTION] tenant=%s level_ladder_unreadable=%s",
-                    int(context.tenant_id), type(exc).__name__)
-        served_level = entitlement.resolved_level
+                    int(context.tenant_id), level_policy_unreadable)
     truth = resolve_shareable_promotions(context.db, int(context.tenant_id), limit=bounded,
                                          customer_id=customer_id)
     min_hours = _min_remaining_hours(policy)
@@ -454,6 +522,7 @@ async def list_shareable_promotions_impl(
     evidence: List[EvidenceRecord] = []
     withheld: Dict[str, int] = {}
     considered = 0
+    reached: Dict[str, int] = {}
     for facts in (list(getattr(truth, "shareable", None) or ()), list(getattr(truth, "offers", None) or ())):
         kept = 0
         for fact in facts:
@@ -465,7 +534,8 @@ async def list_shareable_promotions_impl(
                 continue
             projected = _project(fact, customer_id=customer_id, allowed_levels=allowed_levels,
                                  entitlement=entitlement, served_level=served_level,
-                                 withheld=withheld)
+                                 level_policy_readable=not level_policy_unreadable,
+                                 withheld=withheld, reached=reached)
             if projected is None:
                 continue
             snapshot, record = projected
@@ -475,7 +545,15 @@ async def list_shareable_promotions_impl(
             if kept >= bounded:
                 break
     outcome = str(getattr(truth, "query_outcome", "") or "")
-    partial = outcome == PROMOTION_PARTIAL_FAILURE
+    # What could not be read, and only when it was actually asked. A rung whose
+    # own permission fields are unreadable is refused rather than served — the
+    # safe answer — but it is still a rung this list was judged against without
+    # knowing what the merchant meant by it, and that makes the list incomplete
+    # in a way the customer cannot see. When nothing here was conditioned on a
+    # rung, neither failure cost anything and neither is claimed.
+    unreadable = (_unreadable_reason(level_policy_unreadable, broken_rungs)
+                  if reached.get(LEVEL_CONDITIONED, 0) > 0 else None)
+    partial = outcome == PROMOTION_PARTIAL_FAILURE or unreadable is not None
     # The standing and the rung served are reported side by side: they differ
     # exactly when the store's policy capped this customer, and never silently.
     entitlement_view = {**entitlement.as_dict(), "served_level": served_level or ""}
@@ -485,30 +563,46 @@ async def list_shareable_promotions_impl(
     # gate took the rest. No code, no customer identifier, no secret.
     logger.info(
         "[PROMOTION_PROJECTION] tenant=%s customer=%s considered=%d kept=%d "
-        "withheld=%s standing=%s level=%s served=%s determined=%s",
+        "withheld=%s standing=%s level=%s served=%s determined=%s ladder_unreadable=%s "
+        "unreadable_rungs=%s",
         int(context.tenant_id), "yes" if customer_id is not None else "none",
         considered, len(snapshots),
         ",".join(f"{reason}:{count}" for reason, count in sorted(withheld.items())) or "none",
         entitlement.reason, entitlement.resolved_level or "none", served_level or "none",
-        entitlement.determined,
+        entitlement.determined, level_policy_unreadable or "no",
+        ",".join(broken_rungs) or "none",
     )
     if not snapshots:
         if bool(getattr(truth, "query_failed", False)) or outcome == PROMOTION_QUERY_FAILED:
             return PromotionListResult(status="error", query_outcome=outcome or PROMOTION_QUERY_FAILED,
                                        partial=partial, failure_reason="promotion_query_failed",
                                        entitlement=entitlement_view, withheld=dict(withheld))
+        if unreadable is not None:
+            # The store held codes conditioned on a rung and we could not read
+            # the settings that say whether they may be shared. "This store has
+            # nothing for you" would be an answer we did not reach, so the
+            # failure is reported as the failure it is.
+            return PromotionListResult(
+                status="error", query_outcome=outcome or NO_VALID_PROMOTIONS, partial=True,
+                failure_reason=unreadable, entitlement=entitlement_view, withheld=dict(withheld))
         return PromotionListResult(status="not_found", query_outcome=outcome or NO_VALID_PROMOTIONS,
                                    partial=partial, failure_reason="no_valid_shareable_promotions",
                                    entitlement=entitlement_view, withheld=dict(withheld))
     context.register_evidence(evidence)
     return PromotionListResult(status="ok", promotions=snapshots, evidence=evidence,
                                query_outcome=outcome, partial=partial, entitlement=entitlement_view,
-                               withheld=dict(withheld))
+                               withheld=dict(withheld),
+                               # An offer the merchant published is still theirs to
+                               # share; the rung-conditioned codes beside it are the
+                               # ones we could not judge, and the list says so.
+                               failure_reason=unreadable)
 
 
-__all__ = ["GENERAL_AUTHORIZED", "LEVEL_ENTITLED", "MAX_CONDITION_IDS", "MAX_PROMOTIONS",
+__all__ = ["GENERAL_AUTHORIZED", "LEVEL_CONDITIONED", "LEVEL_ENTITLED", "MAX_CONDITION_IDS",
+           "MAX_PROMOTIONS",
            "MERCHANT_AUTHORED_SOURCE_TYPES", "WITHHELD_EXPIRING_TOO_SOON",
            "WITHHELD_LEVEL_NOT_ALLOWED", "WITHHELD_LEVEL_NOT_EARNED",
-           "WITHHELD_LEVEL_NOT_SERVED", "WITHHELD_NOT_PUBLISHED",
+           "WITHHELD_LEVEL_NOT_SERVED", "WITHHELD_LEVEL_POLICY_UNREADABLE",
+           "WITHHELD_NOT_PUBLISHED",
            "WITHHELD_PERSONAL_TO_ANOTHER", "WITHHELD_UNUSABLE_RECORD",
            "list_shareable_promotions_impl"]
