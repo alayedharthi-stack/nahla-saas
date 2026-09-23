@@ -128,6 +128,8 @@ const LIFECYCLE_VARIANT: Record<string, CampaignBadgeVariant> = {
   completed_empty: 'slate',
   failed: 'red',
   failed_all: 'red',
+  stalled: 'amber',
+  paused: 'amber',
   unknown: 'slate',
 }
 
@@ -3047,12 +3049,20 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
   // instead of "—" while the campaign is sending. The legacy
   // sent_count/read_count fields are now also canonical aggregates
   // (backend override), so the fallback path stays correct too.
+  // Read rate is ``read / delivered`` only: dividing by accepted would
+  // silently count undelivered messages as "not read". Read implies
+  // delivered (the backend backfills it), so delivered ≥ read.
   const _statsCanonical = campaign.stats
-  const _denom = _statsCanonical
-    ? (_statsCanonical.delivered > 0 ? _statsCanonical.delivered : _statsCanonical.meta_accepted)
-    : campaign.sent_count
+  const _denom = _statsCanonical ? _statsCanonical.delivered : campaign.delivered_count
   const _readNum = _statsCanonical ? _statsCanonical.read : campaign.read_count
-  const openRate = _denom > 0 ? Math.round((_readNum / _denom) * 100) : 0
+  const openRate = _denom > 0 ? Math.round((_readNum / _denom) * 100) : null
+  const health = list.sendHealth
+  const uncertainCount = _statsCanonical?.uncertain ?? 0
+  const duplicateCount =
+    (_statsCanonical?.recipients_delivered_multiple ?? 0)
+    + (_statsCanonical?.recipients_accepted_multiple_unproven ?? 0)
+  const pauseReason = campaign.pause_reason || campaign.execution?.pause_reason || null
+  const errorBreakdown = _statsCanonical?.error_breakdown ?? []
   const convRate = campaign.sent_count > 0 ? Math.round((campaign.converted_count / campaign.sent_count) * 100) : 0
   const [showErrors, setShowErrors] = useState(false)
   const [diagnosing, setDiagnosing] = useState(false)
@@ -3117,7 +3127,8 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     lifecycleKey === 'pending_dispatch'
     || lifecycleKey === 'orphaned_materialized_rows'
     || lifecycleKey === 'unknown_status'
-  const hasErrors = (campaign.dispatch_errors?.length ?? 0) > 0
+    || lifecycleKey === 'stalled'
+  const hasErrors = (campaign.dispatch_errors?.length ?? 0) > 0 || errorBreakdown.length > 0
   const failedCount = campaign.failed_count ?? 0
   // Provider-side billing/account block: when detected we MUST hide
   // the dispatch CTA (auto-retry is pointless — the recipient/WABA
@@ -3212,6 +3223,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       })
       if (res.skipped) {
         setDiagnostic(res.message || dr.dispatchSkipped)
+        return
+      }
+      if (res.ok === false && res.reason === 'already_running') {
+        setDiagnostic(res.message || health.alreadyRunning)
         return
       }
       if (res.ok === false) {
@@ -3353,6 +3368,21 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               )}
             </div>
           )}
+          {lifecycleKey === 'paused' && pauseReason && (
+            <p className="text-[10px] text-amber-600 mt-1 max-w-[200px]" title={campaign.execution?.pause_detail || ''}>
+              {health.pauseReasons[pauseReason] || pauseReason}
+            </p>
+          )}
+          {uncertainCount > 0 && (
+            <p className="text-[10px] text-amber-600 mt-1 max-w-[200px]">
+              {health.uncertain.replace('{count}', String(uncertainCount))}
+            </p>
+          )}
+          {duplicateCount > 0 && (
+            <p className="text-[10px] text-red-500 mt-1 max-w-[200px]">
+              {health.duplicates.replace('{count}', String(duplicateCount))}
+            </p>
+          )}
           {isFailed && hasErrors && (
             <button
               onClick={() => setShowErrors(v => !v)}
@@ -3376,14 +3406,21 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         <td className="px-5 py-3.5">
           <span className="text-xs text-slate-700">{fmtCount(campaign.sent_count, lang)}</span>
           {failedCount > 0 && (
-            <span className="text-[10px] text-red-500 block mt-0.5">
+            <span
+              className="text-[10px] text-red-500 block mt-0.5"
+              title={_statsCanonical ? health.failedSplit
+                .replace('{before}', String(_statsCanonical.failed_before_accept ?? _statsCanonical.failed))
+                .replace('{after}', String(_statsCanonical.failed_after_accept)) : ''}
+            >
               {rowLabels.failedCount.replace('{count}', String(failedCount))}
             </span>
           )}
         </td>
         <td className="px-5 py-3.5">
           <span className="text-xs text-slate-700">
-            {campaign.sent_count > 0 ? `${campaign.read_count} (${openRate}%)` : '—'}
+            {campaign.sent_count > 0
+              ? (openRate === null ? `${_readNum}` : `${_readNum} (${openRate}%)`)
+              : '—'}
           </span>
         </td>
         <td className="px-5 py-3.5">
@@ -3528,13 +3565,28 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                   .replace('{failed}', String(failedCount))
                   .replace('{total}', String(campaign.audience_count))}
               </p>
-              <ul className="space-y-1">
-                {campaign.dispatch_errors.map((err, i) => (
-                  <li key={i} className="text-[11px] text-red-600 font-mono leading-relaxed">
-                    • {err}
-                  </li>
-                ))}
-              </ul>
+              {errorBreakdown.length > 0 ? (
+                // Counted from the same rows as the counters above, so the
+                // entries add up to the totals (the old capped list did not).
+                <ul className="space-y-1">
+                  {errorBreakdown.map((e, i) => (
+                    <li key={i} className="text-[11px] text-red-600 leading-relaxed">
+                      • {health.errorPhase[e.phase]}: {e.label_ar} — {fmtCount(e.count, lang)}
+                      <span className="font-mono text-red-400">
+                        {' '}[{e.key}{e.raw_code && e.raw_code !== e.key ? ` · ${e.raw_code}` : ''}]
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <ul className="space-y-1">
+                  {campaign.dispatch_errors.map((err, i) => (
+                    <li key={i} className="text-[11px] text-red-600 font-mono leading-relaxed">
+                      • {err}
+                    </li>
+                  ))}
+                </ul>
+              )}
               {campaign.template_id && (
                 <DebugTemplateLink templateId={campaign.template_id} />
               )}
