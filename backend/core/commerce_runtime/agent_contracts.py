@@ -855,6 +855,13 @@ def verify_reply_draft(draft: ReplyDraft, observations: Sequence[ToolObservation
         problems.append(VerificationProblem(
             "choice_without_evidence",
             f"product {product_id} is offered as a choice but was not looked up and cited in this turn"))
+    from core.commerce_runtime import reply_card as _rcard  # noqa: PLC0415
+
+    unobserved = _rcard.unobserved_card(draft, observations)
+    if unobserved is not None:
+        problems.append(VerificationProblem(
+            "card_without_evidence",
+            f"product {unobserved} is shown as a card but was not looked up and cited in this turn"))
     return tuple(problems)
 
 
