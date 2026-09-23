@@ -556,7 +556,7 @@ async def create_campaign(
     except EntitlementError as exc:
         entitlement_http_error(exc)
 
-    # Monthly campaign limit (Starter capped, Growth/Scale unlimited)
+    # Enforce the campaign limit from the resolved plan definition.
     from datetime import datetime as _dt2, timezone as _tz2  # noqa: PLC0415
     _month_start = _dt2.now(_tz2.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     _camp_this_month = (
@@ -572,13 +572,9 @@ async def create_campaign(
     except EntitlementError as exc:
         entitlement_http_error(exc)
 
-    # Advanced coupons inside campaigns require advanced_coupon_types (Growth+).
-    # Abandoned-cart basic coupon is allowed for all plans via abandoned_cart_basic_coupon.
-    if body.auto_coupon and body.campaign_type not in ("abandoned_cart", "cart_recovery"):
-        try:
-            require_feature(ent, "advanced_coupon_types")
-        except EntitlementError as exc:
-            entitlement_http_error(exc)
+    # Optional campaign coupons are part of Starter+ campaign access above.
+    # advanced_coupon_types gates separate coupon automation rules, not a
+    # merchant's campaign launch with a chosen discount.
 
     # AI campaign optimization requires campaign_ai_optimization (Growth+)
     if getattr(body, "ai_optimized", False):
