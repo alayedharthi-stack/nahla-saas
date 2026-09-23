@@ -634,47 +634,23 @@ async def _dispatch_campaign_with_lease(
     db.commit()
 
     # ── 2. Frequency-cap dedupe ─────────────────────────────────────────
-    # Honour the per-campaign bypass toggle (set via the dispatch-now
-    # button or directly on template_variables._bypass_frequency_cap).
-    # Used in QA / re-test workflows where the merchant explicitly
-    # wants to re-send to the same customers without waiting for the
-    # global cap window to expire.
-    bypass_cap_raw = (campaign.template_variables or {}).get(
-        "_bypass_frequency_cap"
-    )
-    bypass_cap = str(bypass_cap_raw).strip().lower() in (
-        "true", "1", "yes",
-    ) if bypass_cap_raw is not None else False
-    # When the merchant flips on bypass for a campaign that ALREADY had
-    # rows flipped to ``skipped_duplicate`` on a previous dispatch run,
-    # the cap step alone is not enough: ``_apply_frequency_cap`` only
-    # operates on rows currently in ``queued``. Skipped rows from the
-    # prior run would stay frozen and the dispatch would do nothing
-    # ("sent=0, queued=0, skipped_duplicate=3"). Revive those rows back
-    # to ``queued`` first — but ONLY rows that were skipped by the
-    # frequency cap (``skip_reason`` starts with ``REASON_FREQ_CAP``),
-    # so manual exclusions / opt-outs / invalid phones remain skipped.
-    revived_cap = 0
-    if bypass_cap:
-        revived_cap = _revive_frequency_cap_skipped(db, campaign_id)
-        if revived_cap:
-            logger.info(
-                "[campaign_dispatcher] campaign=%d frequency_cap BYPASS "
-                "revived %d previously skipped_duplicate row(s) back to queued",
-                campaign_id, revived_cap,
-            )
-    cap_skipped = _apply_frequency_cap(
-        db, tenant_id, campaign_id, bypass=bypass_cap,
-    )
-    # One-shot bypass — remove the flag immediately after the cap
-    # decision so the NEXT dispatch (scheduled or manual) runs normal
-    # protection again. Merchants opt in per click via dispatch-now.
-    if bypass_cap:
+    # Mandatory for every merchant dispatch. A ``_bypass_frequency_cap``
+    # flag left on an older campaign by the removed dispatch-now toggle is
+    # ignored and cleared — it neither skips the cap nor re-queues rows the
+    # cap skipped before.
+    tv_now = campaign.template_variables or {}
+    if "_bypass_frequency_cap" in tv_now:
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d ignoring legacy _bypass_frequency_cap=%r "
+            "(the bypass was removed; the frequency cap applies)",
+            campaign_id, tv_now.get("_bypass_frequency_cap"),
+        )
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
-        tv_after = dict(campaign.template_variables or {})
-        tv_after.pop("_bypass_frequency_cap", None)
-        campaign.template_variables = tv_after
+        tv_clean = dict(tv_now)
+        tv_clean.pop("_bypass_frequency_cap", None)
+        campaign.template_variables = tv_clean
         flag_modified(campaign, "template_variables")
+    cap_skipped = _apply_frequency_cap(db, tenant_id, campaign_id)
     db.commit()
 
     campaign.status = "active"
@@ -708,17 +684,6 @@ async def _dispatch_campaign_with_lease(
             "skipped_at_snapshot":    int(skipped_at_snapshot),
             # 6. Frequency-cap dedupes (sent within last N days to same phone)
             "frequency_cap_skipped":  int(cap_skipped),
-            # 7. Rows revived from a prior skipped_duplicate state by the
-            #    per-campaign bypass toggle. Distinct from
-            #    ``frequency_cap_skipped`` so the audit shows both halves
-            #    of the round-trip: "rows that the cap had blocked
-            #    earlier were re-queued this run". 0 on the normal path.
-            "frequency_cap_revived":  int(revived_cap),
-            # 8. Was the bypass toggle in effect for this run? Surfaced
-            #    so /debug can render an explicit "تم تجاوز حد التكرار
-            #    لهذه الجولة" banner instead of leaving the merchant to
-            #    infer from the counters.
-            "frequency_cap_bypass":   bool(bypass_cap),
         }
         tpl_vars_now = dict(campaign.template_variables or {})
         # Persist as JSON-encoded string because the column is
@@ -1096,70 +1061,6 @@ def _snapshot_recipients(
     }
 
 
-def _revive_frequency_cap_skipped(
-    db: Session,
-    campaign_id: int,
-) -> int:
-    """Re-queue rows that ``_apply_frequency_cap`` previously flipped to
-    ``skipped_duplicate`` for this campaign.
-
-    Why it exists
-    -------------
-    ``dispatch-now?bypass_frequency_cap=true`` is a QA / re-test escape
-    hatch. On the FIRST dispatch the cap step may have already moved
-    rows out of ``queued`` into ``skipped_duplicate``. The next call to
-    ``dispatch_campaign`` then sees:
-
-      * ``_snapshot_recipients`` is a no-op (rows already exist, unique
-        index ``(tenant_id, campaign_id, phone)`` blocks re-insert).
-      * ``_apply_frequency_cap(bypass=True)`` early-returns 0, but it
-        also ONLY ever updates rows currently in ``queued``.
-
-    Result without this revive step: a campaign that has been cap-skipped
-    once is permanently stuck — even with the bypass toggle ON — until
-    a merchant manually edits the DB. Production reproduction:
-    ``skipped_duplicate=3, queued=0, sent=0`` after toggling bypass.
-
-    Scope of the revive
-    -------------------
-    We ONLY flip rows where ``skip_reason`` is the frequency-cap
-    marker (``REASON_FREQ_CAP``). Manual exclusions, opt-outs, invalid
-    phones, and unreachable rows stay skipped — bypass is for frequency
-    cap, not for overriding merchant- or customer-driven exclusions.
-
-    The revive is idempotent: a follow-up dispatch on the same campaign
-    is a no-op if no cap-skipped rows remain. ``attempts``/``last_error``
-    are cleared so the row enters the dispatch loop as if fresh.
-
-    Returns:
-        Number of rows revived from ``skipped_duplicate`` → ``queued``.
-    """
-    cap_marker = f"{REASON_FREQ_CAP}"
-    rows = (
-        db.query(CampaignSendLog)
-        .filter(
-            CampaignSendLog.campaign_id == campaign_id,
-            CampaignSendLog.status == LOG_SKIPPED_DUPLICATE,
-            CampaignSendLog.skip_reason.like(f"{cap_marker}%"),
-        )
-        .all()
-    )
-    if not rows:
-        return 0
-    now = datetime.now(timezone.utc)
-    for row in rows:
-        row.status = LOG_QUEUED
-        row.skip_reason = None
-        # The cap step doesn't write error_code/error_message, but if a
-        # prior failed-then-cap-skipped chain left a stale value, clear
-        # it so the dispatch UI doesn't show a misleading error on a
-        # row that's actively being re-sent.
-        row.error_code = None
-        row.error_message = None
-        row.updated_at = now
-    return len(rows)
-
-
 def _cap_contacted_phones(
     db: Session,
     tenant_id: int,
@@ -1196,8 +1097,6 @@ def _apply_frequency_cap(
     db: Session,
     tenant_id: int,
     campaign_id: int,
-    *,
-    bypass: bool = False,
 ) -> int:
     """Mark ``status='queued'`` rows whose phone received another
     *successfully delivered* marketing campaign within the cap window
@@ -1220,24 +1119,11 @@ def _apply_frequency_cap(
     campaign". This protects merchants from being silently blocked by
     legacy/synthetic data or by failed-but-status-flipped rows.
 
-    Args:
-        bypass: If True, skip the cap check entirely and return 0.
-            Used by the "تجاهل حد التكرار" toggle on dispatch-now for
-            QA / re-test workflows. Always logged.
-
     Returns:
         Number of rows updated to ``skipped_duplicate``. A cap value
         of 0 also disables the check entirely (admin escape hatch —
         should never be 0 in prod).
     """
-    if bypass:
-        logger.info(
-            "[campaign_dispatcher] campaign=%d frequency_cap BYPASSED "
-            "(merchant requested via _bypass_frequency_cap)",
-            campaign_id,
-        )
-        return 0
-
     cap_days = MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS
     if cap_days <= 0:
         return 0

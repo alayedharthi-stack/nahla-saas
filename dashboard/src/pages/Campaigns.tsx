@@ -3115,8 +3115,6 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
    *  النسخ" affordance back to the merchant. */
   const [supportBundleStatus, setSupportBundleStatus] =
     useState<'idle' | 'loading' | 'copied' | 'error'>('idle')
-  /** QA escape hatch — POST dispatch-now with ``bypass_frequency_cap``. */
-  const [ignoreFreqCapForDispatch, setIgnoreFreqCapForDispatch] = useState(false)
 
   // Treat both ``failed`` and ``failed_all`` as red. Note we
   // explicitly do NOT include ``partial_minor`` or
@@ -3210,17 +3208,12 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
    * refreshes on focus + manually whenever the parent reloads it.
    */
   const handleDispatchNow = async () => {
-    let msg = dr.dispatchConfirm.replace('{name}', campaign.name)
-    if (ignoreFreqCapForDispatch) {
-      msg += dr.dispatchConfirmFreqCap
-    }
+    const msg = dr.dispatchConfirm.replace('{name}', campaign.name)
     if (!confirm(msg)) return
     setDispatching(true)
     setDiagnostic(dr.dispatchStarted)
     try {
-      const res = await campaignsApi.dispatchNow(campaign.id, {
-        bypassFrequencyCap: ignoreFreqCapForDispatch,
-      })
+      const res = await campaignsApi.dispatchNow(campaign.id)
       if (res.skipped) {
         setDiagnostic(res.message || dr.dispatchSkipped)
         return
@@ -3298,7 +3291,6 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
       setDiagnostic(dr.dispatchFailed.replace('{msg}', String(err?.message || err)))
     } finally {
       setDispatching(false)
-      setIgnoreFreqCapForDispatch(false)
     }
   }
 
@@ -3474,15 +3466,6 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 instead, surfaced by ProviderBlockBanner below. */}
             {!providerBlocked && (isStuck || isFailed || lifecycleKey === 'partial' || lifecycleKey === 'completed_empty' || lifecycleKey === 'excluded_before_send') && (
               <div className="flex flex-col items-end gap-1" dir={dir}>
-                <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-slate-600 max-w-[155px] leading-snug text-start">
-                  <input
-                    type="checkbox"
-                    className="rounded border-slate-300 text-amber-600 shrink-0"
-                    checked={ignoreFreqCapForDispatch}
-                    onChange={e => setIgnoreFreqCapForDispatch(e.target.checked)}
-                  />
-                  <span>{rowLabels.ignoreFreqCap}</span>
-                </label>
                 <button
                   onClick={handleDispatchNow}
                   disabled={dispatching}
