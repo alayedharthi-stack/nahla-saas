@@ -800,17 +800,24 @@ async def provider_send_message(
             try:
                 from core.automation_send_guard import (  # noqa: PLC0415
                     evaluate_automation_send,
+                    evaluate_campaign_send,
                 )
 
                 _msg_type = str(send_payload.get("type") or "text").strip().lower()
-                _block = evaluate_automation_send(
-                    db,
-                    tenant_id=tenant_id,
-                    customer_phone=formatted_to,
-                    message_type=_msg_type,
-                    blocked_path=blocked_path or operation,
-                    allow_manual=allow_manual,
-                )
+                if operation == "campaign_send" and _msg_type == "template" and not allow_manual:
+                    _block = evaluate_campaign_send(
+                        db, tenant_id=int(tenant_id), customer_phone=formatted_to,
+                        blocked_path=blocked_path or operation,
+                    )
+                else:
+                    _block = evaluate_automation_send(
+                        db,
+                        tenant_id=tenant_id,
+                        customer_phone=formatted_to,
+                        message_type=_msg_type,
+                        blocked_path=blocked_path or operation,
+                        allow_manual=allow_manual,
+                    )
                 if _block.block:
                     return (
                         {
@@ -818,8 +825,8 @@ async def provider_send_message(
                                 "code": "automation_blocked",
                                 "type": "AutomationBlocked",
                                 "message": (
-                                    "Outbound send blocked: conversation under "
-                                    "human supervision or AI disabled"
+                                    "Outbound send blocked by Nahla safety policy: "
+                                    f"{_block.reason}"
                                 ),
                             },
                             "_nahla_classification": "automation_blocked",

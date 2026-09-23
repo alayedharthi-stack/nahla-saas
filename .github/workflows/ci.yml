@@ -9,7 +9,9 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Full unit + strict PostgreSQL + boundary suites exceed 15 minutes
+    # on standard runners; retain every proof and allow them to finish.
+    timeout-minutes: 20
 
     # Disposable PostgreSQL 16 for the "Required PostgreSQL proofs" step below.
     # Nothing else in this job reads it: no job-level DSN environment is set,
