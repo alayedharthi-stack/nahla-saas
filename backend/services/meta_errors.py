@@ -647,6 +647,11 @@ def classify_meta_error(
     falling back to the ``unknown`` entry as a last resort, so callers
     don't need to defend against ``None``.
     """
+    # This is a local wire refusal, never a Meta policy/availability error.
+    # Its authoritative code must win over free-text words in the reason.
+    if str(code or "").strip().lower() == "automation_blocked":
+        return ERRORS["automation_blocked"]
+
     # 1. Numeric code is the most reliable signal.
     try:
         code_int = int(code) if code is not None and str(code).strip() else None

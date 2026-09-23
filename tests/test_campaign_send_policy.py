@@ -113,8 +113,14 @@ def test_campaign_safety_lookup_failure_does_not_send(wire, failing_reader):
     wire.post.assert_not_awaited()
 
 
-def test_internal_guard_error_is_not_unknown_meta_or_automatically_retryable():
-    error = classify_meta_error(code="automation_blocked", error_type="AutomationBlocked")
+@pytest.mark.parametrize("message", [
+    "Outbound send blocked: conversation under human supervision or AI disabled",
+    "Outbound send blocked by Nahla safety policy: ai_disabled",
+    "Outbound send blocked by Nahla safety policy: campaign_safety_unavailable",
+])
+def test_internal_guard_error_is_not_unknown_meta_or_automatically_retryable(message):
+    error = classify_meta_error(code="automation_blocked", error_type="AutomationBlocked",
+                                message=message)
     assert error.key == "automation_blocked"
     assert not error.retryable
     assert error.quality_tier == "harmless"
