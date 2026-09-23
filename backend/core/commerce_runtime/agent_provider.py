@@ -47,14 +47,30 @@ REPLY_TOOL_NAME = "submit_reply"
 # The reply channel's declaration. Operational, not conversational: it tells the
 # model how to hand a finished answer to the platform, and says nothing about
 # tone, greeting or wording, which stay with the instructions and the model.
+#
+# It is also the **only** place the model learns that the selector and the card
+# exist: the pilot instructions never mention either. That makes this text a
+# capability declaration rather than decoration, and an inaccuracy in it is a
+# capability defect. One such inaccuracy was corrected here after the Tenant 1
+# live round: this declaration named only the selector, and both shapes carried
+# "Omit this whenever the text answers on its own" — a condition the platform
+# guarantees is *always* true, since ``reply_card`` states that the answer
+# "already stood on its own prose, which is why a card is an affordance over it
+# rather than a part of it". A model reading that literally omits the shape
+# every time, which is what turns 27 and 28 recorded. What is stated here is
+# what the tool accepts and how each shape relates to the text; when to reach
+# for either remains the model's own judgement and is deliberately unstated.
 REPLY_TOOL_DESCRIPTION = (
     "Submit the final answer for this customer turn. Call this exactly once, "
     "on its own, when no further lookup is needed. Every commerce fact in the "
     "text must come from a tool result observed in this turn, and every "
-    "evidence reference listed must be one those results returned. Optionally "
-    "offer the customer a tappable selector over products you looked up this "
-    "turn; the text stands on its own either way, and the customer may always "
-    "answer by typing instead."
+    "evidence reference listed must be one those results returned. The text "
+    "carries the answer by itself. Two optional structured shapes may accompany "
+    "it, each built by the platform from the merchant's own records, for products "
+    "you looked up this turn: a tappable selector, or a single product card with "
+    "its photo and a button to its page. Each is an addition over the text, never a "
+    "replacement for it; neither is required, and the customer may always answer "
+    "by typing."
 )
 
 REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
@@ -85,9 +101,10 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
                 "Optional. Offer these products as a tappable selector beside the text. "
                 "Name products only; their titles, prices and options are taken from the "
                 "merchant's own records as this turn read them. Two to ten products, each "
-                "looked up in this turn and cited in evidence_refs. Omit this whenever the "
-                "text answers on its own \u2014 the selector is never required, and the "
-                "customer can always reply by typing."
+                "looked up in this turn and cited in evidence_refs. The selector is an "
+                "addition over the text, never a replacement for it, and is never "
+                "required; the customer can always reply by typing. It is not sent "
+                "together with card."
             ),
             "properties": {
                 "product_ids": {
@@ -114,8 +131,9 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
                 "and a button that opens its page. Name the product only \u2014 the photo "
                 "and the link are taken from the merchant's own records as this turn read "
                 "them. The product must have been looked up in this turn and cited in "
-                "evidence_refs. Omit this whenever the text answers on its own, and when "
-                "offering a selector instead."
+                "evidence_refs. The card is an addition over the text, never a "
+                "replacement for it, and is never required. A card is not sent when a "
+                "selector is offered in the same reply."
             ),
             "properties": {
                 "product_id": {
