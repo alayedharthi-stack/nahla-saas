@@ -2641,14 +2641,23 @@ async def debug_campaign(
     }
 
 
-def _requests_frequency_cap_bypass(value: object) -> bool:
-    """True when a (stale) client asks to bypass the frequency cap. Only
-    plain strings/booleans count: the ``Query`` default seen by direct
-    calls is not a request."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes", "on")
+_FALSE_QUERY_VALUES = ("", "false", "0", "no", "off")
+
+
+def _requests_frequency_cap_bypass(value: object, request: Optional[Request] = None) -> bool:
+    """True when a (stale) client sends ``bypass_frequency_cap`` with any
+    value that is not a clear "false" — every repeated occurrence counts.
+    The ``Query`` default seen by direct calls is not a request."""
+    values: List[object] = [value]
+    params = getattr(request, "query_params", None)
+    if params is not None:
+        values += list(params.getlist("bypass_frequency_cap"))
+    for v in values:
+        if isinstance(v, bool):
+            if v:
+                return True
+        elif isinstance(v, str) and v.strip().lower() not in _FALSE_QUERY_VALUES:
+            return True
     return False
 
 
@@ -2711,7 +2720,7 @@ async def dispatch_campaign_now(
 
     # The frequency cap is mandatory for every merchant dispatch. A request
     # asking to bypass it is refused before anything changes.
-    if _requests_frequency_cap_bypass(bypass_frequency_cap):
+    if _requests_frequency_cap_bypass(bypass_frequency_cap, request):
         logger.warning(
             "[campaigns.dispatch-now] tenant=%d campaign=%d refused: "
             "bypass_frequency_cap is no longer supported",

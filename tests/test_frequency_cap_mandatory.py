@@ -111,7 +111,7 @@ def _dispatch_now(Session, ids, monkeypatch, **query):
 # ── 1. stale request ────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("value", ["true", "1", "yes", "TRUE", True])
+@pytest.mark.parametrize("value", ["true", "1", "yes", "TRUE", " true ", "on", "t", True])
 def test_stale_bypass_request_is_refused_before_anything_changes(dbf, monkeypatch, value):
     ids = _seed(dbf, phones=PHONES[:2])
     _cap_skip(dbf, ids.campaign_id, PHONES[0])
@@ -154,9 +154,11 @@ def test_stale_bypass_query_is_refused_over_http(dbf, monkeypatch):
             db.close()
     app.dependency_overrides[get_db] = _db
     client = TestClient(app)
-    r = client.post(f"/campaigns/{ids.campaign_id}/dispatch-now?bypass_frequency_cap=true")
-    assert r.status_code == 400, r.text
-    assert r.json()["detail"]["error"] == "frequency_cap_bypass_removed"
+    for qs in ("bypass_frequency_cap=true", "bypass_frequency_cap=on",
+               "bypass_frequency_cap=true&bypass_frequency_cap=false"):
+        r = client.post(f"/campaigns/{ids.campaign_id}/dispatch-now?{qs}")
+        assert r.status_code == 400, (qs, r.text)
+        assert r.json()["detail"]["error"] == "frequency_cap_bypass_removed"
     assert spawned == []
     # Without the parameter the same route kicks one dispatch.
     r = client.post(f"/campaigns/{ids.campaign_id}/dispatch-now")
@@ -232,8 +234,9 @@ def test_second_click_while_a_worker_runs_is_still_refused(dbf, monkeypatch):
     db.close()
     out, spawned = _dispatch_now(dbf, ids, monkeypatch)
     assert out["ok"] is False and out["reason"] == "already_running" and spawned == []
-    with pytest.raises(HTTPException):
+    with pytest.raises(HTTPException) as exc:
         _dispatch_now(dbf, ids, monkeypatch, bypass_frequency_cap="true")
+    assert exc.value.status_code == 400
 
 
 # ── 6. legitimate retry is the ledger's business ────────────────────────
@@ -251,3 +254,38 @@ def test_provably_unsent_recipient_is_retried_by_ledger_rules(dbf, fake_meta, fu
     full_dispatch(dbf, ids.campaign_id)
     assert meta.calls == [PHONES[0], PHONES[0]]
     assert _logs(dbf, ids.campaign_id)[PHONES[0]][0] == "sent"
+
+
+def test_retry_is_still_capped_when_another_campaign_reached_the_customer(
+        dbf, fake_meta, full_dispatch):
+    """A retry is not a way around the cap: if another campaign reached the
+    customer between the rejection and the retry, the retry is skipped."""
+    ids = _seed(dbf, phones=PHONES[:1])
+    meta = fake_meta(FakeMeta({PHONES[0]: ["reject:130429:Rate limit hit"]}))
+    full_dispatch(dbf, ids.campaign_id)
+    db = dbf()
+    assert disp.reschedule_failed_for_retry(db, ids.campaign_id) == 1
+    db.commit()
+    db.close()
+    _sent_recently(dbf, ids, PHONES[0])
+    full_dispatch(dbf, ids.campaign_id)
+    assert meta.calls == [PHONES[0]]                       # the rejection only
+    assert _logs(dbf, ids.campaign_id)[PHONES[0]][0] == "skipped_duplicate"
+
+
+def test_resume_through_the_status_endpoint_keeps_the_cap(dbf, fake_meta, full_dispatch,
+                                                         monkeypatch):
+    import routers.campaigns as rc
+    ids = _seed(dbf, phones=PHONES[:2])
+    _cap_skip(dbf, ids.campaign_id, PHONES[0])
+    _set_legacy_flag(dbf, ids.campaign_id, status="paused")
+    monkeypatch.setattr(rc, "resolve_tenant_id", lambda request, db=None: ids.tenant_id)
+    monkeypatch.setattr(rc, "_spawn_dispatch_in_background", lambda cid: None)
+    db = dbf()
+    asyncio.run(rc.update_campaign_status(
+        ids.campaign_id, rc.UpdateCampaignStatusIn(status="active"), request=None, db=db))
+    db.close()
+    meta = fake_meta(FakeMeta())
+    full_dispatch(dbf, ids.campaign_id)
+    assert _logs(dbf, ids.campaign_id)[PHONES[0]][0] == "skipped_duplicate"
+    assert meta.calls == [PHONES[1]]
