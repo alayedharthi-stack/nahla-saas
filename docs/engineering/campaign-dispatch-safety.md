@@ -198,14 +198,37 @@ Coverage and gaps:
   flag; a DB run replaces this inference with the rows themselves.
 * Late failure webhooks may still arrive.
 
-Authoritative run (read-only transaction; reads `campaign_send_logs`,
-`message_events` — which keeps one row per accepted copy with its receipt
-flags — and `campaign_send_attempts` if present):
+Authoritative run — one `REPEATABLE READ, READ ONLY` transaction that reads
+`campaign_send_logs`, `message_events` (one row per accepted copy with its
+receipt flags), `message_delivery_events`, `campaign_send_attempts` and
+`campaign_status_event_inbox`:
 
 ```bash
 DATABASE_URL=<read-only credentials> python scripts/operators/campaign_send_reconciliation.py \
-  --tenant-id <T> --campaign-id <C> --emit-recipients --out reconciliation.json
+  --tenant-id <T> --campaign-id <C> --check-schema --emit-recipients --out reconciliation.json
 ```
+
+Evidence rules the tool enforces:
+
+* **Sources must be complete.** A required table that is missing, a permission
+  error, a failing query or a failure part-way through the reads aborts the run
+  (exit 2) with `decision_eligible=false` and the failing source named. A
+  missing ledger table is reported as `absent` only when
+  `--allow-missing-ledger` is passed, and the report is then not
+  decision-eligible. A report is `decision_eligible` only when every source was
+  read completely and `--check-schema` found the four tables and their
+  required indexes. Log-only (`--no-database`) runs are never eligible.
+* **Legacy ambiguous failures stay uncertain.** A row with no accepted copy is
+  `all_failed` only when its full attempt history proves no request reached
+  Meta: either ledger `rejected`/`not_sent`/`abandoned` attempts for every attempt, or a
+  non-ambiguous pre-accept code per attempt. `watchdog_timeout`, `exception`,
+  `no_message_id`, empty codes and similar stay `uncertain`.
+* **Proven delivery excludes the recipient.** Each recipient carries
+  `has_proven_delivery` and `delivered_copies`; any delivered/read copy makes
+  `resend_proposal=excluded_proven_delivery`, whatever happened to the other
+  copies. Post-accept failures are `excluded_meta_restriction`; only retryable
+  pre-accept rejections are `retry_review_candidate`. These are proposals for a
+  person to review, not an authorisation to resend.
 
 ## 6. Production remediation plan (separate from the code fix; needs approval)
 
