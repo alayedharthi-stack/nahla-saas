@@ -38,6 +38,7 @@ from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
 from core.commerce_runtime import recent_products as rp
+from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime.agent_loop import AgentLoop
 from core.commerce_runtime.ledgers import LedgerRepository
@@ -849,7 +850,8 @@ def _release(foundation: Any, tenant_id: int, conversation_id: int, token: c.Own
         logger.info("[COMMERCE_RUNTIME] lease release skipped reason=%s", type(exc).__name__)
 
 
-def whatsapp_reply_transport(send: Any, send_list: Any, *, recipient: str) -> dd.Transport:
+def whatsapp_reply_transport(send: Any, send_list: Any, *, recipient: str,
+                             send_card: Any = None) -> dd.Transport:
     """One transport for both shapes of the same reply.
 
     The stored payload says which it is: a reply that carries verified
@@ -866,20 +868,36 @@ def whatsapp_reply_transport(send: Any, send_list: Any, *, recipient: str) -> dd
     text_only = whatsapp_text_transport(send, recipient=recipient)
 
     def transport(payload: Mapping[str, Any]) -> lc.SendResponse:
+        card = rcard.payload_card(payload)
+        if card is not None and send_card is not None:
+            classification, wamid, http_status = send_card(
+                recipient, str(payload.get("text") or ""),
+                card["image_url"], card["button_url"], card["button_label"])
+            return _sent(classification, wamid, http_status)
         rows, button = rc.payload_rows(payload)
         if not rows or send_list is None:
             return text_only(payload)
         classification, wamid, http_status = send_list(
             recipient, str(payload.get("text") or ""), rows, button)
-        if classification == "ok" and wamid:
-            return lc.SendResponse(http_status=int(http_status or 200),
-                                   body={"messages": [{"id": str(wamid)}]})
-        if http_status is not None:
-            return lc.SendResponse(http_status=int(http_status),
-                                   body={"error": {"code": str(classification or "unknown")}})
-        return lc.SendResponse(http_status=None, body={}, timed_out=True)
+        return _sent(classification, wamid, http_status)
 
     return transport
+
+
+def _sent(classification: Any, wamid: Any, http_status: Any) -> lc.SendResponse:
+    """One provider answer, read the same way whatever shape was sent.
+
+    Only ``ok`` with a provider message id is an accepted send; a status
+    without one is a rejection carrying its reason, and no status at all is
+    unknown — never a proven rejection.
+    """
+    if classification == "ok" and wamid:
+        return lc.SendResponse(http_status=int(http_status or 200),
+                               body={"messages": [{"id": str(wamid)}]})
+    if http_status is not None:
+        return lc.SendResponse(http_status=int(http_status),
+                               body={"error": {"code": str(classification or "unknown")}})
+    return lc.SendResponse(http_status=None, body={}, timed_out=True)
 
 
 def whatsapp_text_transport(send: Any, *, recipient: str) -> dd.Transport:

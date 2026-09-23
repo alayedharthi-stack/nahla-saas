@@ -543,3 +543,169 @@ def test_the_loser_is_never_blocked_by_a_winner_that_hangs():
         released.set()
         winner.join(10.0)
     assert not winner.is_alive()
+
+
+# ── The card sender's receipt ────────────────────────────────────────────────
+#
+# A sender that cannot report *what the provider said* is not the same sender
+# as the two beside it, whatever it shares with them. `_send_cta_url` took no
+# result sink and forwarded none to `_post_wa`, so the card factory's own sink
+# stayed empty however the send went: an accepted card came back as
+# ("ok", None, None) and the ledger, correctly refusing to invent a receipt it
+# never saw, recorded a delivery Meta had already taken as unknown. These run
+# the real `_send_cta_url` — stubbing it would prove nothing about the seam
+# that was broken — and only the provider call underneath it.
+
+
+import asyncio  # noqa: E402
+import contextlib  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
+
+@contextlib.contextmanager
+def _loop_on_another_thread():
+    """The pilot schedules its sends onto a loop it does not run on."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+
+def _card_answer(post_wa):
+    """Drive the real factory the way the pilot does, with one send underneath."""
+    from routers import whatsapp_webhook as wh
+    from services import commerce_runtime_pilot as pilot
+
+    wire = pilot.WireObservation()
+    with _loop_on_another_thread() as loop, patch.object(wh, "_post_wa", post_wa):
+        send_card = pilot._send_card_factory("PHONE_ID", 1, None, loop, wire)
+        return send_card(
+            "+966500000001",
+            "القميص القطني الأزرق متوفر بمقاس L.",
+            "https://cdn.example.com/shirt.jpg",
+            "https://shop.example.com/products/shirt",
+            "اطلبه الآن",
+        )
+
+
+def _accepting_provider(wamid: str = "wamid.CARD", status: int = 200):
+    calls = []
+
+    async def post_wa(phone_id, payload, _tenant_id=None, _db=None, _result_sink=None,
+                      **kwargs):
+        calls.append(payload)
+        if _result_sink is not None:
+            _result_sink.update({
+                "classification": "ok",
+                "wamid": wamid,
+                "http_status": status,
+                "duplicate_suppressed": False,
+                "response_body": {"messages": [{"id": wamid}]},
+            })
+        return True
+
+    return post_wa, calls
+
+
+def test_an_accepted_card_carries_the_provider_receipt_back_to_the_pilot():
+    post_wa, calls = _accepting_provider()
+    assert _card_answer(post_wa) == ("ok", "wamid.CARD", 200)
+    # The one send really was the card, not a text fallback beside it.
+    assert len(calls) == 1
+    assert calls[0]["interactive"]["type"] == "cta_url"
+    assert calls[0]["interactive"]["header"]["image"]["link"].startswith("https://")
+
+
+def test_the_runtime_records_an_accepted_card_as_accepted_not_unknown():
+    """The seam end to end: provider 200 + wamid must reach the ledger as ACCEPTED."""
+    post_wa, _calls = _accepting_provider()
+    answer = _card_answer(post_wa)
+
+    transport = entry.whatsapp_reply_transport(
+        lambda recipient, text: ("ok", "wamid.TEXT", 200),
+        lambda recipient, text, rows, button: ("ok", "wamid.LIST", 200),
+        recipient="+966500000001",
+        send_card=lambda recipient, text, image_url, button_url, button_label: answer,
+    )
+    response = transport({
+        "text": "القميص القطني الأزرق متوفر بمقاس L.",
+        "card": {
+            "image_url": "https://cdn.example.com/shirt.jpg",
+            "button_url": "https://shop.example.com/products/shirt",
+            "button_label": "اطلبه الآن",
+        },
+    })
+    kind, pmid = lc.classify_send_response(response)
+    assert kind == lc.ReceiptKind.ACCEPTED and pmid == "wamid.CARD"
+    assert response.timed_out is False
+
+
+def test_a_dead_connection_on_a_card_stays_unknown_and_is_never_a_rejection():
+    """The provider may have taken it before the socket died: never auto-resend."""
+    async def post_wa(phone_id, payload, _tenant_id=None, _db=None, _result_sink=None,
+                      **kwargs):
+        if _result_sink is not None:
+            _result_sink.update({
+                "classification": "exception",
+                "wamid": None,
+                "http_status": None,
+                "duplicate_suppressed": False,
+                "error_text": "ReadTimeout: provider did not answer",
+            })
+        return False
+
+    classification, wamid, status = _card_answer(post_wa)
+    assert (classification, wamid, status) == ("exception", None, None)
+    kind, pmid = lc.classify_send_response(entry._sent(classification, wamid, status))
+    assert kind == lc.ReceiptKind.UNKNOWN and pmid is None
+
+
+def test_a_card_send_that_reports_nothing_at_all_is_unknown_not_accepted():
+    """No receipt is no proof. The old behaviour on *every* card, now only here."""
+    async def post_wa(phone_id, payload, _tenant_id=None, _db=None, _result_sink=None,
+                      **kwargs):
+        return True
+
+    classification, wamid, status = _card_answer(post_wa)
+    assert (classification, wamid, status) == ("ok", None, None)
+    kind, pmid = lc.classify_send_response(entry._sent(classification, wamid, status))
+    assert kind == lc.ReceiptKind.UNKNOWN and pmid is None
+
+
+def test_a_refused_card_keeps_the_status_the_provider_gave_it():
+    async def post_wa(phone_id, payload, _tenant_id=None, _db=None, _result_sink=None,
+                      **kwargs):
+        if _result_sink is not None:
+            _result_sink.update({
+                "classification": "non_2xx",
+                "wamid": None,
+                "http_status": 400,
+                "duplicate_suppressed": False,
+            })
+        return False
+
+    classification, wamid, status = _card_answer(post_wa)
+    assert (classification, wamid, status) == ("non_2xx", None, 400)
+    kind, _pmid = lc.classify_send_response(entry._sent(classification, wamid, status))
+    assert kind == lc.ReceiptKind.REJECTED
+
+
+def test_a_deduplicated_card_is_still_an_identified_acceptance():
+    """The send path answers a repeat with the prior wamid; that is a receipt."""
+    async def post_wa(phone_id, payload, _tenant_id=None, _db=None, _result_sink=None,
+                      **kwargs):
+        if _result_sink is not None:
+            _result_sink.update({
+                "classification": "ok",
+                "wamid": "wamid.PRIOR",
+                "http_status": 200,
+                "duplicate_suppressed": True,
+            })
+        return True
+
+    assert _card_answer(post_wa) == ("ok", "wamid.PRIOR", 200)

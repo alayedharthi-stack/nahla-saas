@@ -53,6 +53,7 @@ from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_tools as at
 from core.commerce_runtime import contracts as c
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime.ledgers import LedgerRepository
 
@@ -155,9 +156,15 @@ class AgentLoop:
                     # model's. The text is carried through untouched, and a
                     # selector that cannot be offered whole simply is not.
                     draft, choices = rc.finalize(draft, session.observations)
+                    # A card is the same split for the shape that follows a
+                    # choice rather than offering one. The selector wins when
+                    # both were asked for: a customer who still has to choose
+                    # is not helped by one product's photo.
+                    draft, card = rcard.finalize(draft, session.observations,
+                                                 selector_offered=choices == rc.OFFERED)
                     session.record("reply_accepted",
                                    {"evidence_refs": list(draft.evidence_refs), "kind": draft.kind,
-                                    "choices": choices})
+                                    "choices": choices, "card": card})
                     return draft
                 session.record("verification_failed", {"problems": [p.code for p in problems]})
                 if not session.steps_left():

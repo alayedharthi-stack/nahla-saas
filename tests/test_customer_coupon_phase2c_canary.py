@@ -593,12 +593,21 @@ def test_handler_outside_canary_does_not_call_service(monkeypatch) -> None:
     assert result.data["service_called"] is False
 
 
-def test_gold_not_downgraded_when_policy_blocks(monkeypatch) -> None:
+def test_blocked_rung_reaches_compose_as_the_rung_actually_served(monkeypatch) -> None:
+    """The facts describe the coupon in hand, and only that.
+
+    Seven orders earn gold; this store keeps gold away from the assistant and
+    allows silver. The customer leaves with the silver coupon, so the level the
+    facts carry is silver — the coupon's own rung, not the one the history
+    earned. That the merchant capped this customer is internal policy: it stays
+    off the surface the reply is composed from, so no wording can offer, hint
+    at, or apologise for a gold coupon that was never issued.
+    """
     db, tenant_id, _engine = _make_db()
     customer = _add_customer(db, tenant_id, PHONE_A)
     _add_orders(db, tenant_id, PHONE_A, countable=7)
     _add_pool_coupon(db, tenant_id, "NHSLV", "silver")
-    _add_pool_coupon(db, tenant_id, "NHGLD", "gold")
+    gold = _add_pool_coupon(db, tenant_id, "NHGLD", "gold")
     _enable_canary(monkeypatch, tenant_id)
     result = asyncio.run(
         CustomerCouponRequestHandler().handle(
@@ -607,10 +616,14 @@ def test_gold_not_downgraded_when_policy_blocks(monkeypatch) -> None:
         )
     )
     facts = result.data["customer_request_coupon_facts"]
-    assert facts["issued"] is False
-    assert facts["coupon_level"] == "gold"
-    assert facts["reason"] == REASON_LEVEL_NOT_ALLOWED_FOR_AI
-    assert "coupon_code" not in facts
+    assert facts["issued"] is True
+    assert facts["coupon_level"] == "silver"
+    assert facts["coupon_code"] == "NHSLV"
+    assert facts["reason"] == "issued"
+    assert "gold" not in str(facts).lower()
+    assert "entitled_level" not in facts
+    db.refresh(gold)
+    assert (gold.extra_metadata or {}).get("customer_id") is None
 
 
 def test_zero_orders_truthful_when_first_purchase_disabled(monkeypatch) -> None:

@@ -37,6 +37,7 @@ import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from core.commerce_runtime import agent_contracts as ac
+from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
 
 logger = logging.getLogger("nahla.commerce_runtime.agent_provider")
@@ -106,11 +107,62 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
             },
             "required": ["product_ids"],
         },
+        "card": {
+            "type": "object",
+            "description": (
+                "Optional. Show this one product as a card beside the text: its photo, "
+                "and a button that opens its page. Name the product only \u2014 the photo "
+                "and the link are taken from the merchant's own records as this turn read "
+                "them. The product must have been looked up in this turn and cited in "
+                "evidence_refs. Omit this whenever the text answers on its own, and when "
+                "offering a selector instead."
+            ),
+            "properties": {
+                "product_id": {
+                    "type": "integer",
+                    "description": "The product to show.",
+                },
+                "button_label": {
+                    "type": "string",
+                    "description": (
+                        "The word on the button that opens the product page, in the "
+                        "customer's language, at most 20 characters."
+                    ),
+                },
+            },
+            "required": ["product_id", "button_label"],
+        },
     },
     "required": ["text", "claims_commerce_facts"],
 }
 
 _INVALID_CHOICES: Dict[str, Any] = {"__invalid__": True}
+_INVALID_CARD: Dict[str, Any] = {"__invalid__": True}
+
+
+def _requested_card(raw: Any) -> Dict[str, Any]:
+    """What the model asked to show, carried as a request and nothing more.
+
+    Only the id and the button word survive translation. Whether a card may be
+    shown at all, and what photo and link it opens, are established later
+    against this turn's observations — never from anything the model wrote.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        return _INVALID_CARD
+    product_id = raw.get("product_id")
+    if product_id is None:
+        return {}
+    try:
+        product_id = int(product_id)
+    except (TypeError, ValueError):
+        return _INVALID_CARD
+    request: Dict[str, Any] = {"product_id": product_id}
+    label = raw.get("button_label")
+    if isinstance(label, str) and label.strip():
+        request["button_label"] = label.strip()[:rcard.MAX_BUTTON_LABEL]
+    return {rcard.REQUESTED_KEY: request}
 
 
 def _requested_choices(raw: Any) -> Dict[str, Any]:
@@ -370,6 +422,10 @@ class AnthropicReasoningProvider:
         payload = _requested_choices(raw.get("choices"))
         if payload is _INVALID_CHOICES:
             return ac.ProviderInvalid("reply_choices_not_an_object")
+        requested_card = _requested_card(raw.get("card"))
+        if requested_card is _INVALID_CARD:
+            return ac.ProviderInvalid("reply_card_not_an_object")
+        payload = {**payload, **requested_card}
         return ac.ProviderReply(ac.ReplyDraft(
             text=text.strip(),
             evidence_refs=tuple(str(r) for r in refs),

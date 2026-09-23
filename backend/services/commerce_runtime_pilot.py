@@ -352,6 +352,59 @@ def _awaited(observed_send: Any, loop: Any, sink: Dict[str, Any]) -> Tuple[str, 
     return classification, (str(wamid) if wamid else None), (int(status) if status is not None else None)
 
 
+def _send_card_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
+                       observation: WireObservation) -> Any:
+    """The same established sender, for a reply that carries one product card.
+
+    Identical in every guarantee to the two senders beside it — the same
+    ``_post_wa``, so the same sanitiser, AI-disabled gate, burst throttle and
+    outbound dedup — and the same wire observation over the body text the model
+    wrote. The photo and the link are the platform's structured payload,
+    composed from this turn's observations and verified before they reach here.
+
+    WhatsApp's ``cta_url`` message carries the image header, the body and the
+    button as **one** message, so this is one send: the loop still reserves one
+    delivery intent for the turn and the ledger still records one receipt.
+
+    ``keep_textual_url=True`` because the link must remain readable in the body
+    as well: a customer whose client does not render the button still has the
+    address, and removing it would be the platform deciding the answer is
+    poorer than the model wrote it.
+    """
+    def send_card(recipient: str, text: str, image_url: str, button_url: str,
+                  button_label: str) -> Tuple[str, Optional[str], Optional[int]]:
+        from core.outbound_wire_audit import (  # noqa: PLC0415
+            bind_wire_observation,
+            observed_wire_text,
+            reset_wire_audit,
+        )
+        from routers.whatsapp_webhook import _send_cta_url  # noqa: PLC0415
+
+        sink: Dict[str, Any] = {}
+
+        async def _observed_send() -> bool:
+            token = bind_wire_observation(int(tenant_id), recipient, text)
+            try:
+                return bool(await _send_cta_url(
+                    phone_id, recipient, text,
+                    button_label, button_url,
+                    int(tenant_id), db,
+                    header_image_url=image_url,
+                    keep_textual_url=True,
+                    _result_sink=sink,
+                ))
+            finally:
+                seen = observed_wire_text(int(tenant_id), recipient)
+                if seen is not None:
+                    observation.record(seen[0], seen[1],
+                                       duplicate_suppressed=bool(sink.get("duplicate_suppressed")))
+                reset_wire_audit(token)
+
+        return _awaited(_observed_send, loop, sink)
+
+    return send_card
+
+
 def _send_list_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
                        observation: WireObservation) -> Any:
     """The same established sender, for a reply that carries selectable rows.
@@ -931,6 +984,7 @@ async def _own_turn(
     wire = WireObservation()
     send = _send_factory(phone_id, int(tenant_id), db, loop, wire)
     send_list = _send_list_factory(phone_id, int(tenant_id), db, loop, wire)
+    send_card = _send_card_factory(phone_id, int(tenant_id), db, loop, wire)
 
     def admission_barrier(conn: Any) -> bool:
         """Read the shared barrier on the admission transaction's own connection.
@@ -971,7 +1025,8 @@ async def _own_turn(
             inbound_text=text,
             inbound_metadata=inbound_metadata,
             transport=entry.whatsapp_reply_transport(send, send_list,
-                                                     recipient=str(decision.recipient)),
+                                                     recipient=str(decision.recipient),
+                                                     send_card=send_card),
             instructions=_instructions(),
             model=str(decision.model or ""),
             admission_barrier=admission_barrier,
